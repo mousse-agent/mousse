@@ -149,7 +149,7 @@ export class SettingsStore {
       typeof settings.appearance?.acrylic !== 'boolean' ||
       typeof settings.appearance?.acrylicIntensity !== 'number' ||
       typeof settings.appearance?.renderMath !== 'boolean' ||
-      typeof settings.appearance?.threadProjectColors !== 'boolean'
+      settings.appearance?.threadProjectColors !== normalized.appearance.threadProjectColors
     if (needsAppearanceMigrate) {
       this.config.applySettingsPatch({ appearance: normalized.appearance })
       this.shouldPersistUsername = true

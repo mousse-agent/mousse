@@ -234,7 +234,7 @@ export async function executeBashInNewTerminal(action: QuickAction, profileId: s
   if (!command) throw new Error('Empty command.')
   const store = requireActiveProfile(profileId)
   const tabId = store.addProjectTerminalTab(store.activeThreadId)
-  store.updateProjectTerminalTab(tabId, { title: action.label.slice(0, 40) || 'Terminal' })
+  store.updateProjectTerminalTab(tabId, { title: action.label.slice(0, 40) || 'Terminal', ...(action.label.trim() ? { quickAction: action.label.trim().slice(0, 60) } : {}) })
   store.openSurfaceKind('terminal')
 
   const deadline = Date.now() + TERMINAL_SPAWN_TIMEOUT_MS

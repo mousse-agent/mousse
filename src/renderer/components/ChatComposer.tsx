@@ -163,8 +163,8 @@ export interface ChatComposerProps {
   /** Buttons of the caller's own in the footer, left of Attach (see `ComposerFooter`). */
   extraActions?: ReactNode
   /**
-   * The thread whose send mode (Queue or Steer, `lib/sendMode.ts`) Enter follows while a reply runs; the mode
-   * button left of send shows and switches it. Absent (a bot's chat, which never steers): Enter queues and there is
+   * The thread whose composer Enter follows the profile's send mode in (Queue or Steer, `lib/sendMode.ts`) while a
+   * reply runs; the mode button left of send shows and switches it for every thread. Absent (a bot's chat, which never steers): Enter queues and there is
    * no button.
    */
   sendModeThreadId?: string

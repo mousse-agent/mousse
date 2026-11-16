@@ -121,7 +121,7 @@ export function ToolRowBase({
       )}
     >
       <div
-        className={cn("flex gap-2 min-w-0 text-base leading-[22px] text-muted-foreground", liveText ? "items-start" : "items-center")}
+        className={cn("flex gap-2 min-w-0 text-[14px] leading-[22px] text-an-foreground-muted", liveText ? "items-start" : "items-center")}
         // One sweep period for the label's shimmer.
         style={{ "--an-shimmer-duration": `${SHIMMER_DURATION_S}s` } as CSSProperties}
       >
@@ -142,7 +142,7 @@ export function ToolRowBase({
         <span
           title={labelTitle}
           className={cn(
-            "font-[450] whitespace-nowrap",
+            "font-normal whitespace-nowrap",
             loudFailure && "text-[var(--danger)]",
             // A label with nothing after it (a thought) keeps to one line.
             detail || trailingContent ? "shrink-0" : "min-w-0 truncate",

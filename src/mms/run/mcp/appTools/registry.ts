@@ -7,7 +7,7 @@ import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botAppToolRefusal, botBrowserNotAllowed, botBrowserWithheld } from '../../../../shared/bots/personal/walls'
-import { botMayBeOffered, isBotProfilerTool, isBotThemeTool, isBotThreadTool } from '../../../../shared/bots/personal/manifest'
+import { botMayBeOffered, isBotThreadTool, isBotTurnHeldTool } from '../../../../shared/bots/personal/manifest'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -265,9 +265,10 @@ export class ToolRegistry {
       // those its turn holds now are listed (none without the permission, with the switch off, or in a turn that only
       // reads), and every call is held to it again. A consult never has them. The profiler's tools likewise follow "use
       // the profiler": listed only when the turn holds them (and, as for anyone, while Labs lets agents read it). So do
-      // the theme tools, under "change how Mousse looks".
-      const botThreadTool = listing.botRole !== undefined && (isBotThreadTool(tool.name) || isBotProfilerTool(tool.name) || isBotThemeTool(tool.name))
-      if (botThreadTool && (listing.botRole !== 'activation' || !listing.botTurnTools?.has(tool.name))) return false
+      // the theme tools, under "change how Mousse looks", scheduled jobs, secrets, quick actions and the task list. A
+      // subagent holds only what a thread's subagent may use (`compileBotThread`), and a consult none of them.
+      const botHeldTool = listing.botRole !== undefined && isBotTurnHeldTool(tool.name)
+      if (botHeldTool && (listing.botRole === 'context' || !listing.botTurnTools?.has(tool.name))) return false
       // A bot's thread lists only what a bot can hold: the model is never shown delegation, queues or tools it can't use.
       if (listing.botRole && !botMayBeOffered(tool.name)) return false
       return tool.listed?.(listing) ?? true
@@ -296,7 +297,9 @@ export class ToolRegistry {
       ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools } : {})
     })
     // A bot's thread reads each tool as a bot uses it.
-    return bot.botRole ? listed.map((tool) => (tool.botDescription ? { ...tool, description: tool.botDescription } : tool)) : listed
+    return bot.botRole
+      ? listed.map((tool) => (tool.botDescription || tool.botInputSchema ? { ...tool, ...(tool.botDescription ? { description: tool.botDescription } : {}), ...(tool.botInputSchema ? { inputSchema: tool.botInputSchema } : {}) } : tool))
+      : listed
   }
 
   /**

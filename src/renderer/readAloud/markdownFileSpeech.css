@@ -1,0 +1,4 @@
+.markdown-file-speech { display: inline-flex; align-items: center; gap: 4px; flex: none; padding-right: 4px; color: var(--text-secondary); }
+.markdown-file-speech-button { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+.markdown-file-speech-button:hover, .markdown-file-speech-button:focus-visible { background: var(--bg-hover); color: var(--text-primary); }
+.markdown-file-speech .speech-wave { width: 28px; height: 16px; }

@@ -21,11 +21,13 @@ import { BotEmojiButton } from './BotEmoji'
 import { BotAskReplies } from './BotAskReplies'
 import { BotReminderReplies } from './BotReminderReplies'
 import { BotQuestionReplies } from './BotQuestionReplies'
+import { BotSecretRequests } from './BotSecretRequests'
 import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
 import { BotAboutPanel, RUNS_ON_ID } from './BotAboutPanel'
+import { centerWithin } from '../../lib/shellScroll'
 import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
@@ -707,10 +709,15 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     // Sign in opens the card of the owner's provider entry the bot would run on; Set up opens the list.
     if (action.kind === 'sign_in' && action.instanceId) openProvider(action.instanceId)
     else if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
-    // A picked model that can't run (#673): About opens at Runs on.
+    // A picked model that can't run (#673): About opens at Runs on. Only the panel scrolls: scrollIntoView also moved
+    // every box around it, the app's own included.
     else if (action.kind === 'pick_model') {
       useBotsStore.setState({ aboutOpen: true })
-      window.requestAnimationFrame(() => document.getElementById(RUNS_ON_ID)?.scrollIntoView({ block: 'center' }))
+      window.requestAnimationFrame(() => {
+        const runsOn = document.getElementById(RUNS_ON_ID)
+        const panel = runsOn?.closest('.bot-about')
+        if (runsOn && panel) centerWithin(panel, runsOn)
+      })
     } else void store().resume(bot.id)
   }, [bot.id, store])
   // Reply on a message: its quote goes above the composer, which takes the focus.
@@ -811,6 +818,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       <div className="chat-input-area bot-input-area" data-applet-composer>
         {(unseen || away) && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />{unseen ? 'New message' : 'Go to latest'}</button>}
         {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
+        {/* A secret the bot asked for: typed into its private card, never into the chat. */}
+        <BotSecretRequests homeThreadId={bot.homeThreadId} />
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
           <ComposerNoticeSlot />

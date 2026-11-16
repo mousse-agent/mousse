@@ -19,7 +19,7 @@ import { resolveModelChoice } from "../../../lib/modelChoice";
 import { modelLabel, reasoningChange } from "../../../../shared/modelChoice";
 import type { TurnEnd } from "../../../../shared/types";
 
-import { agentSenderOf, UserMessage } from "./user-message";
+import { agentOriginOfMessage, UserMessage } from "./user-message";
 import { CopyButton } from "./copy-button";
 import { AfterTurnsLayoutProvider, type AfterTurnsLayout } from "./after-turns";
 import { ImageGalleryProvider } from "./image-gallery";
@@ -2313,8 +2313,8 @@ const TurnRow = memo(function TurnRow({
           const showUserToolbar = true;
           // Edit and versions act on the prompt's turn; a fork's copies of its source name none.
           const promptTurnId = (turn.userMsg as { turnId?: string }).turnId;
-          // An agent's message is not the person's to edit or repeat: it offers Copy of its words.
-          const fromAgent = agentSenderOf(turn.userMsg) !== undefined;
+          // An agent's or a bot's message is not the person's to edit or repeat: it offers Copy of its words.
+          const fromAgent = agentOriginOfMessage(turn.userMsg) !== undefined;
           const editPrompt = fromAgent ? undefined : turnActionsForEdit?.editPrompt;
           return (
             <div
@@ -2565,6 +2565,8 @@ const TurnRow = memo(function TurnRow({
             const liveThought = isLastTurn && isStreaming && isLiveThoughtItem(items[items.length - 1]) ? items[items.length - 1]! : undefined;
             const grouped = liveThought ? items.slice(0, -1) : items;
             const iconType = workGroupIconType(grouped);
+            // A group titled by a thought shows the thinking icon: the line is the agent's words, not a tool's.
+            const heading = workGroupHeading(grouped);
             const unrecovered = grouped.filter((item) => isUnrecoveredFailure(item.part)).length;
             // One finished call left beside the live thought is its own row: it says more than "Read 1 file".
             const single = grouped.length === 1 && !isRunningCall(grouped[0]!.part) ? grouped[0]! : undefined;
@@ -2575,7 +2577,7 @@ const TurnRow = memo(function TurnRow({
                 rowKeys={grouped.map((item, k) => itemKey(item, k))}
                 count={grouped.length}
                 icon={
-                  iconType === "tool-Thinking" ? (
+                  heading.thought || iconType === "tool-Thinking" ? (
                     <ThinkingIcon size={18} />
                   ) : iconType ? (
                     <ToolIcon type={iconType} state="done" />
@@ -2583,7 +2585,8 @@ const TurnRow = memo(function TurnRow({
                     <RowTools size={18} />
                   )
                 }
-                {...workGroupHeading(grouped)}
+                title={heading.title}
+                summary={heading.summary}
                 // Only failures the agent did not get past are named on the group line.
                 failed={unrecovered}
                 live={isLastTurn && isStreaming}

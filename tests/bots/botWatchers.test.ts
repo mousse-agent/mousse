@@ -28,6 +28,7 @@ beforeAll(() => {
 const [mode, pidFile] = process.argv.slice(2)
 require('fs').writeFileSync(pidFile, String(process.pid))
 if (mode === 'exit') { console.log('compiling'); console.error('warning: slow disk'); console.log('done'); process.exit(3) }
+if (mode === 'long') { console.log('FATAL: config file missing'); for (let i = 1; i <= 400; i++) console.log('step ' + i + ' of 400'); process.exit(2) }
 if (mode === 'match') { console.log('step 1'); setTimeout(() => console.log('build passed in 12s'), 50) }
 setInterval(() => {}, 1000)
 `)
@@ -107,6 +108,20 @@ describe('a watcher ends and wakes the bot once', () => {
     expect(prompt).toContain('Tell them how the build went.')
     expect(chatOf(f, botId).find((message) => message.id === `bm_wake_${watcherId}`)?.text).toBe('Following up · "Nightly build" exited with code 3')
     expect(f.bots.tools.watchers!.list(botId)).toEqual([])
+  })
+
+  it('when its output is longer than the wake carries: the bot reads all of it by the command\'s id, after it ended', async () => {
+    const { watcherId } = await watch('long')
+    const prompt = await woken(watcherId)
+    // The wake carries the end only; the first line is not in it, and the prompt says how to read the rest.
+    expect(prompt).not.toContain('FATAL: config file missing')
+    expect(prompt).toContain(`call watch_list with watcherId "${watcherId}"`)
+    const kept = f.bots.tools.watchers!.output!(botId, watcherId)!
+    expect(kept.end).toEqual({ kind: 'exit', code: 2 })
+    expect(kept.output).toContain('FATAL: config file missing')
+    expect(kept.output).toContain('step 400 of 400')
+    // Another bot's id reads nothing.
+    expect(f.bots.tools.watchers!.output!('bot_other', watcherId)).toBeUndefined()
   })
 
   it('when a line matches: with that line, and the command is stopped', async () => {

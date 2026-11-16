@@ -1,7 +1,7 @@
 import type { BotAuthority, BotCheck, BotCheckDenied, NormalisedCall, WallReason } from './authority'
 import { neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../harness/tools'
 import { BROWSER_AUTOMATION_TOOLS } from '../../browser/automation'
-import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from './manifest'
+import { BOT_SCHEDULE_ACT_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from './manifest'
 
 /** Walls in plain words, and the built-in check a runtime's gate makes (PR 6 §4). Browser-safe. */
 
@@ -75,6 +75,9 @@ export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | '
   // asked. A turn of a bot without the permission falls through to the check below, which asks for it.
   if (THREAD_ACT.has(name) && bot.appTools && !bot.appTools.has(name) && BOT_THREAD_READ_TOOLS.some((tool) => bot.appTools!.has(tool)))
     return BOT_THREADS_NOT_OWNER_TEXT
+  // Making and changing scheduled jobs likewise: such a turn lists them only.
+  if (SCHEDULE_ACT.has(name) && bot.appTools && !bot.appTools.has(name) && bot.appTools.has('schedule_list'))
+    return BOT_SCHEDULES_NOT_OWNER_TEXT
   if (SKILL_TOOLS.has(name)) {
     // The skill tools come with granted skills. Which skill loads is held by the turn itself: a
     // bot turn's skills are only its granted ones (by id), whether `load_skill` names one by id or name.
@@ -90,6 +93,10 @@ export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | '
 
 const BROWSER_TOOL_NAMES: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
 const THREAD_ACT: ReadonlySet<string> = new Set(BOT_THREAD_ACT_TOOLS)
+const SCHEDULE_ACT: ReadonlySet<string> = new Set(BOT_SCHEDULE_ACT_TOOLS)
+
+/** What such a turn is told when it tries to make, change, pause or run a scheduled job. */
+export const BOT_SCHEDULES_NOT_OWNER_TEXT = "Not on this turn: it did not start with a message from your owner, and you make or change their scheduled jobs only when their own message asks for it. You may list the jobs you made now. Say what you would do, and do it once your owner replies."
 
 /**
  * What a chat turn that no message of the owner started (the bot's first message) is told when it tries

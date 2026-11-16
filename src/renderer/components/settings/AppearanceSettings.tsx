@@ -276,11 +276,16 @@ export function AppearanceSettings({
         <SettingsRow
           title="Project colors on threads"
           anchor="appearance-project-colors"
-          description="Tint threads with their project's color."
           control={
-            <Switch
-              label="Project colors on threads"
-              checked={appearance.threadProjectColors}
+            <Select
+              ariaLabel="Project colors on threads"
+              value={appearance.threadProjectColors}
+              options={[
+                { value: 'off', label: 'Off' },
+                { value: 'outline', label: 'Outline' },
+                { value: 'fill', label: 'Fill' },
+                { value: 'gradient', label: 'Gradient' }
+              ]}
               onChange={(threadProjectColors) => void onUpdate({ appearance: { ...appearance, threadProjectColors } })}
             />
           }

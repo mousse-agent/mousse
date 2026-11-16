@@ -19,7 +19,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { join } from 'node:path'
-import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
+import { askCallNote, askNoticeText, askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
@@ -44,7 +44,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -138,9 +138,9 @@ export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its
 
 // Unknown tools are deliberately effects: only these recorded calls can leave an unsent draft.
 const DRAFT_READ_ONLY_TOOLS = new Set([
-  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'memory_list', 'memory_search', 'memory_read',
+  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'memory_list', 'memory_search', 'memory_read',
   'read', 'list', 'search', 'ls', 'find', 'grep', 'Read', 'Glob', 'Grep',
-  'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list',
+  'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list', 'running_list',
   'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
 ])
 /** A reply can carry a picture as Markdown or as a path, without calling a tool.
@@ -516,6 +516,13 @@ interface LiveDispatch {
   /** What its deadline does: a budget wall, or a wait for the internet when it made no progress. */
   fire: () => void
 }
+
+/**
+ * What a subagent of a bot's work is compiled with: what a thread's subagent may use of the bot's tools, within the grant
+ * (`subagentManifest`). Its work is a run, which may act on the owner's threads, so the subagent may too; the profiler and
+ * its own task list. Nothing that asks the owner, and none of the bot's own tools.
+ */
+const SUBAGENT_BOT_TOOLS = { escalate: false, consult: false, subagent: true, threads: 'all', profiler: true, tasks: true } as const
 
 /** What a compiled turn started with that a runtime opens once for the whole turn (`LiveDispatch.powers`). */
 function powersOf(permissions: BotPermissions): { shell: boolean } {
@@ -2598,8 +2605,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // The owner's threads: reading in every lane; starting, messaging, stopping and archiving in a turn `threadsActOf`
       // allows (never the bot's first message or a turn another bot's message started). The profiler: in both lanes
-      // (the chat without its minutes-long watch). Mousse's look: in both lanes.
-      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: threadsActOf(row) ? 'all' : 'read', profiler: true, themes: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      // (the chat without its minutes-long watch). Mousse's look: in both lanes. The owner's scheduled jobs, secrets and
+      // quick actions (`owner`): in both lanes, making and changing jobs only where it may act on threads. Its task list.
+      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: threadsActOf(row) ? 'all' : 'read', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -3358,11 +3366,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const held = heldNow(permission)
       if (held) return { ok: false, refused: { text: held, askId: '' } }
       if (firstMessage) return { ok: false, refused: { text: BOT_ASK_NOT_YET_TEXT, askId: '' } }
+      const note = call.kind === 'app' ? askCallNote(call.tool, call.args) : undefined
       if (row.lane === 'run') {
         this.refused(row.id, permission)
-        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall))
+        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall), undefined, note)
       }
-      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall) }) }
+      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall), ...(note ? { note } : {}) }) }
     }
     const readOnly = threadsReadOnlyOf(row)
     const authority: BotAuthority = {
@@ -3739,7 +3748,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * consults stop with it). Asks never expire. The sixth wall of an activation ends it `blocked`
    * instead. The returned wall is what the refused call tells the model.
    */
-  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): WallReason {
+  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): WallReason {
     const current = this.store.activation(activationId)
     if (current && this.removedExecutingSchedule(current)) return this.endRemovedScheduleAtWall(current)
     if (current?.lane === 'run' && input.kind === 'budget') return this.budgetEnd(current, input)
@@ -4142,13 +4151,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
-  private askCardText(row: BotActivationRow, permission: BotAskRequest): { title: string; note: string } {
+  private askCardText(row: BotActivationRow, permission: BotAskRequest, callNote?: string): { title: string; note: string } {
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
-    return askText(permission, budget ? { budget } : {})
+    const text = askText(permission, budget ? { budget } : {})
+    // What the refused call would have done ("It would set: …") says more than the permission's own line.
+    return callNote ? { title: text.title, note: callNote } : text
   }
 
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
-  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
+  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): BotEscalationRow {
     const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
     const fingerprint = this.fingerprintOf(row.id, input.kind, input.permission)
     const open = this.store.openAsk(row.botId, fingerprint)
@@ -4156,7 +4167,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (open.activationId !== row.id || open.mode !== 'wall') this.store.moveAskToWall(open.id, row.id, input.dispatchN)
       return this.store.escalation(open.id)!
     }
-    const text = this.askCardText(row, input.permission)
+    const text = this.askCardText(row, input.permission, asked.note)
     const escalation = {
       id: `esc_${randomUUID()}`,
       botId: row.botId,
@@ -4178,7 +4189,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.store.escalation(escalation.id)!
   }
 
-  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
+  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return { kind: 'none' }
     if (this.store.countEscalations(activationId) >= MAX_BOT_WALLS) {
@@ -4238,7 +4249,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * owner said Not now to it in the last 24 hours: then no card is made, and the bot is told the owner
    * said not now (never that it asked). The bot is told it asked only when a card is there.
    */
-  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
+  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string, note?: string): BotCheck {
     const permission = this.limitAsk(row.botId, asked)
     const fingerprint = this.fingerprintOf(row.id, kind, permission)
     let raised: { askId: string; created: boolean } | { refused: string }
@@ -4252,7 +4263,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (this.store.countNewAsks(row.botId, { activationId: row.id }) >= MAX_RUN_ASKS ||
           this.store.countNewAsks(row.botId, { since: new Date(this.now() - 24 * 60 * 60_000).toISOString() }) >= MAX_BOT_ASKS_PER_DAY)
           return { refused: BOT_ASK_ENOUGH_TEXT }
-        const text = this.askCardText(row, permission)
+        const text = this.askCardText(row, permission, note)
         const id = `esc_${randomUUID()}`
         this.store.insertEscalation({
           id, botId: row.botId, activationId: row.id, dispatchN, toolCallId: toolCallId ?? null, kind, permission, reason: reason.slice(0, 2000),
@@ -5895,7 +5906,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const definition = this.host.definitions.revision(row.botId, row.revision)
     const grant = this.store.activeGrant(row.botId)
     if (!models || !definition || !grant) return { refused: `${name} can't run a subagent here. ${SUBAGENT_NOTHING_STARTED}` }
-    const compiled = this.compileNeutral(definition.main, this.subagentManifestOf(row, definition, grant.manifest), { escalate: false, consult: false, subagent: true }, row.botId)
+    const compiled = this.compileNeutral(definition.main, this.subagentManifestOf(row, definition, grant.manifest), SUBAGENT_BOT_TOOLS, row.botId)
     if (!compiled.ok) return { refused: `${compiled.error.reason ?? compiled.error.message} ${SUBAGENT_NOTHING_STARTED}` }
     let resolved: BotModelResolution
     try {
@@ -6029,7 +6040,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       nativeNames: (tools) => this.nativeNames(selection.instanceId, tools),
       remaining: { ...limitsOf(effective), deadlineMs: Math.max(1, deadline - this.now()) },
       filesFolder: this.filesFolder(row.botId),
-      botTools: { escalate: false, consult: false, subagent: true }
+      botTools: SUBAGENT_BOT_TOOLS
     })
     if (!compiled.ok) return { refused: `A subagent can't run there: ${compiled.error.reason ?? compiled.error.message} ${SUBAGENT_NOTHING_STARTED}` }
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -7195,6 +7206,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { botId, name: this.ownerOf(threadId) ?? botId }
   }
 
+  /** The chat thread of the bot `threadId` belongs to (`BotThreads.homeOf`). Never throws. */
+  homeOf(threadId: string): string | undefined {
+    const bot = this.botOf(threadId)
+    if (!bot) return undefined
+    try {
+      return this.store.registry(bot.botId)?.homeThreadId ?? undefined
+    } catch {
+      return undefined
+    }
+  }
+
   /**
    * "Use your threads" was removed or switched off (About), or the bot was deleted: the bot's
    * messages still waiting in its owner's threads are withdrawn (`BotEngineHost.threadsWithdrawn`). A bot with no chat
@@ -7577,7 +7599,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     watchers: {
       start: (botId, from, input) => this.startWatcher(botId, from, input),
       list: (botId) => this.listWatchers(botId).map(({ botId: _bot, ...view }) => view),
-      stop: (botId, watcherId) => this.stopWatcher(botId, watcherId)
+      stop: (botId, watcherId) => this.stopWatcher(botId, watcherId),
+      output: (botId, watcherId) => this.watchers.output(botId, watcherId)
     },
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
@@ -8245,6 +8268,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { watcherId, until: new Date(this.now() + limitMs).toISOString() }
   }
 
+  /** Every bot's background commands running now, with their processes: the running list (`RunningRegistry`). */
+  runningWatchers(): ReturnType<BotWatchers['processes']> {
+    return this.watchers.processes()
+  }
+
+  /** A bot's name as its owner set it, for the running list; undefined when it is gone. */
+  botName(botId: string): string | undefined {
+    const row = this.store.registry(botId)
+    return row?.revision ? this.host.definitions.revision(row.botId, row.revision)?.name : undefined
+  }
+
   /** The bot's background commands running now (`watch_list`, the chat's Background work). */
   listWatchers(botId: string): WatcherView[] {
     return this.watchers.list(botId)
@@ -8785,7 +8819,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // The owner sees the original label; titles and command errors remain outside data in memory.
     const external = Boolean((fired?.kind === 'thread' || fired?.kind === 'pr') && fired.title
       || fired?.kind === 'watcher' && fired.message)
-    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), work: Boolean(wake.workId), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
+    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), work: Boolean(wake.workId), clock: clockTime, wakeId: wake.id, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
     if (wake.workId) {
       const resumed = this.store.db.transaction(() => this.deliverWorkWaitInTx(wake))
       if (resumed) { this.changed({ botId: wake.botId, activationId: wake.workId }); this.pumpLater(wake.botId) }
@@ -9678,10 +9712,14 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
     // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
     if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool) || authority.appTools.has(asked.tool)
     // The browser is held as its tools, the owner's threads as theirs (reading them, in every lane that has them), and the
-    // profiler as its overview and Mousse's look as theme_read (in both lanes).
+    // profiler as its overview, Mousse's look as theme_read, scheduled jobs as their list, secrets as secret_request and
+    // quick actions as create_quick_action (in both lanes).
     if (asked.tool === BOT_BROWSER_PERMISSION) return authority.appTools.has('browser_open')
     if (asked.tool === BOT_PROFILER_PERMISSION) return authority.appTools.has('profiler_overview')
     if (asked.tool === BOT_THEMES_PERMISSION) return authority.appTools.has('theme_read')
+    if (asked.tool === BOT_SCHEDULES_PERMISSION) return authority.appTools.has('schedule_list')
+    if (asked.tool === BOT_SECRETS_PERMISSION) return authority.appTools.has('secret_request')
+    if (asked.tool === BOT_QUICK_ACTIONS_PERMISSION) return authority.appTools.has('create_quick_action')
     return asked.tool === BOT_THREADS_PERMISSION ? authority.appTools.has('thread_list') : authority.appTools.has(asked.tool)
   }
   if ('skill' in asked) return authority.skills.has(asked.skill)

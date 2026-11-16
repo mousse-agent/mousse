@@ -53,9 +53,18 @@ export async function selectOrSettle(threadId: string): Promise<void> {
   }
 }
 
-/** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. A private draft is never reused for it. */
+/**
+ * Opens the newest empty draft thread, or creates one, and selects it, in the project last picked for a new thread
+ * (`lastNewThreadProjectId`) while it is still listed. The sidebar stays on its tab. A private draft is never reused for it.
+ */
 export async function createAndSelectThread(): Promise<void> {
   const store = useAppStore.getState()
+  // The project last picked for a new thread, while this computer still lists it.
+  const remembered = store.lastNewThreadProjectId
+  if (remembered && store.projects.some((project) => project.id === remembered && !project.node)) {
+    await createAndSelectProjectThread(remembered)
+    return
+  }
   const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
   await selectThread(thread.id)
@@ -123,6 +132,7 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   // Decided from the store as it is now, with nothing awaited first.
   const store = useAppStore.getState()
   const profileId = store.profileId
+  store.setLastNewThreadProjectId(projectId)
   // A project just added (Add project) may not be listed in this window yet when the create answers.
   const listedBefore = store.projects.some((project) => project.id === projectId)
   const empty = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId)
