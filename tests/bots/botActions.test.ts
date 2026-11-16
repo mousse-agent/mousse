@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { remoteBotMethods } from '../../src/mms/bridge/remote/RemoteBots'
 import { setDiagSink } from '../../src/mms/log/diag'
 import { McpManager } from '../../src/mms/integrations/mcp/McpManager'
 import { settingsStore, testServerConfig } from '../fixtures/agent-platform/integrations/helpers'
@@ -495,4 +496,20 @@ it('S5 reconciliation never settles a call started in this process during refres
   releaseCall()
   await sending
   expect(f.bots.actions.forWork(t.workId)?.status).toBe('done')
+})
+it('S6 a Plan device cannot Send but may choose Not now', async () => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const method = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'plan' }).find(m => m.method === 'bots.actions.answer')!
+  const context = { caller: { node: 'phone', user: 'owner' } } as never
+  const call = (answer: string) => {
+    const params = method.validate!({ botId: t.botId, actionId: a.id, digest: a.args_digest, answer })
+    method.authorize?.(params, context)
+    method.authorizeNew?.(params, context)
+    return method.handle(params, context)
+  }
+  await expect(call('send')).rejects.toThrow(/Plan/)
+  expect(t.calls).toEqual([])
+  expect(await call('not_now')).toMatchObject({ status: 'declined' })
 })
