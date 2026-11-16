@@ -383,6 +383,43 @@ ALTER TABLE bot_messages ADD COLUMN told_at TEXT;
 CREATE INDEX bot_messages_tell_due ON bot_messages(bot_id, tell_at) WHERE tell IS NOT NULL AND told_at IS NULL;
 ALTER TABLE bot_registry ADD COLUMN tell_json TEXT;
 `
+  },
+  {
+    // Storage for always-on bots phases 2 and 3; later items supply the writers.
+    version: 11,
+    sql: `
+CREATE TABLE bot_actions(
+  id TEXT PRIMARY KEY,
+  call_key TEXT NOT NULL UNIQUE,
+  bot_id TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  lane TEXT NOT NULL CHECK(lane IN ('chat','run')),
+  kind TEXT NOT NULL CHECK(kind IN ('mcp','secret_fetch')),
+  target_json TEXT NOT NULL,
+  exec_args TEXT CHECK(exec_args IS NULL OR status IN ('open','approved','running')),
+  args_json TEXT NOT NULL,
+  args_digest TEXT NOT NULL,
+  binding_json TEXT NOT NULL,
+  place_json TEXT,
+  card_json TEXT,
+  bot_note TEXT,
+  status TEXT NOT NULL CHECK(status IN ('open','approved','declined','expired','withdrawn','running','done','failed','uncertain')),
+  result_json TEXT,
+  message_id TEXT,
+  next_at TEXT,
+  nudges INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT,
+  answered_at TEXT,
+  answered_device TEXT,
+  created_at TEXT NOT NULL,
+  ran_at TEXT,
+  CHECK(status <> 'open' OR expires_at IS NOT NULL)
+) STRICT;
+CREATE INDEX bot_actions_due ON bot_actions(status, next_at);
+CREATE INDEX bot_actions_bot ON bot_actions(bot_id, status);
+CREATE INDEX bot_actions_activation ON bot_actions(activation_id);
+ALTER TABLE bot_reminders ADD COLUMN work_id TEXT;
+`
   }
 ]
 
@@ -603,6 +640,8 @@ export interface BotReminderRow {
   snoozedFrom?: string | null
   /** Whether the owner's message or tap started the turn that set it (v10); null preserves pre-v10 behavior. */
   ownerSet?: boolean | null
+  /** The work this timer wakes (v11); existing writers leave it null. */
+  workId?: string | null
 }
 
 function jsonOf<T>(value: unknown): T | null {
@@ -633,6 +672,7 @@ function reminderOf(row: Row): BotReminderRow {
     event: jsonOf<BotWakeEvent>(row.event_json),
     fired: jsonOf<BotWakeFired>(row.fired_json),
     chain: num(row.chain) ?? 0,
+    workId: str(row.work_id),
     snoozedFrom: str(row.snoozed_from),
     ownerSet: num(row.owner_set) === null ? null : num(row.owner_set) === 1
   }
@@ -1717,6 +1757,7 @@ export class BotStore {
     this.run('DELETE FROM bot_reminders WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_work_notes WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_questions WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_actions WHERE bot_id = ?', botId)
     this.run('UPDATE bot_registry SET model_json = NULL, error_json = NULL WHERE bot_id = ?', botId)
   }
 
@@ -1924,7 +1965,7 @@ export class BotStore {
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------
 
-  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain' | 'ownerSet' | 'snoozedFrom'>>): void {
+  insertReminder(row: Omit<BotReminderRow, 'workId' | 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain' | 'ownerSet' | 'snoozedFrom'>>): void {
     this.run(
       "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain, owner_set, snoozed_from) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?)",
       row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt,

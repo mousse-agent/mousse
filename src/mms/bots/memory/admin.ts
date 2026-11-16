@@ -98,6 +98,8 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
       // The questions it asked, with their answers (issue #1123), when it asked any.
       const questions = store.questions(botId)
       if (questions.length) files.push(['questions.jsonl', `${questions.map((row) => JSON.stringify(row)).join('\n')}\n`])
+      const actions = store.actions(botId)
+      if (actions.length) files.push(['actions.jsonl', `${actions.map((row) => JSON.stringify(row)).join('\n')}\n`])
       const definition = options.definition?.(botId)
       if (definition !== undefined) files.push(['definition.json', `${JSON.stringify(definition, null, 2)}\n`])
       const written: string[] = []

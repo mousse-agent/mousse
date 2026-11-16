@@ -283,7 +283,7 @@ export interface BotsPersonalV2Api {
    * an older one is refused), with the guard and caps a save has. A run note the owner edits becomes a note.
    */
   'bots.memory.edit': { params: { botId: string; id: string; text: string }; result: { entry: BotMemoryEntry } }
-  /** Writes `memory.md`, `memory.jsonl`, `journal.jsonl`, `questions.jsonl` (when it asked any) and the definition into `dir`. */
+  /** Writes `memory.md`, `memory.jsonl`, `journal.jsonl`, `questions.jsonl` (when it asked any), `actions.jsonl` (when it has any calls) and the definition into `dir`. */
   'bots.memory.export': { params: { botId: string; dir: string }; result: { files: string[] } }
 }
 

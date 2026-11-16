@@ -325,16 +325,18 @@ Said plainly, because a card that seems to cover everything is worse than none.
 
 ## Data model
 
-`bots.db` is at v10, and phase 1 now writes its columns. Older builds already refuse a newer one, so each phase that needs a migration starts with one small PR that carries all of it.
+`bots.db` is at v11. Phase 1 writes its columns; v11 reserves storage for phases 2 and 3 without new behavior. Older builds already refuse a newer one, so each phase that needs a migration starts with one small PR that carries all of it.
 
 | Version | Phase | Change |
 |---|---|---|
 | none | 0, and all of memory | `bot_memory_state` keys (`progress:<scheduleId>`, `draft:<activationId>`, cap counters, the create request's key); values in existing columns (`external`, `superseded`); `missed` inside `trigger_json` |
 | v10 | 1 | `bot_reminders.snoozed_from`, nullable `bot_reminders.owner_set` (no default; NULL means set before v10 and preserves existing reminder behavior); `bot_messages.tell`, `tell_at`, `told_at` with a partial index on `(bot_id, tell_at)`; `bot_registry.tell_json` |
-| v11 | 2 | table `bot_actions`; `bot_reminders.work_id` |
+| v11 | 2 and 3 | STRICT table `bot_actions` (below); nullable text `bot_reminders.work_id`, NULL for existing rows and current writers. No masked search index; that is deferred beyond v11. |
 | v12 | 4 | tables `bot_telling_devices` and `bot_events`; `bot_reminders.local_at`, `zone` |
 
 `bot_actions`: `id`, `call_key` (unique: activation, dispatch, tool call id), `bot_id`, `activation_id`, `lane`, `kind` (`mcp`, `secret_fetch`), `target_json`, `exec_args` (exact; cleared when settled), `args_json` (masked, for the card and the journal), `args_digest`, `binding_json` (the server as installed, the tool's schema digest, the grant revision, the schedule's revision, the device limit), `place_json`, `card_json`, `bot_note`, `status` (`open`, `approved`, `declined`, `expired`, `withdrawn`, `running`, `done`, `failed`, `uncertain`), `result_json`, `message_id`, `next_at`, `nudges`, `expires_at`, `answered_at`, `answered_device`, `created_at`, `ran_at`; indexed by `(status, next_at)`, `(bot_id, status)` and `(activation_id)`.
+
+All `bot_actions` columns are TEXT except `nudges` (INTEGER, NOT NULL, default 0). `id` is the primary key. `call_key`, `bot_id`, `activation_id`, `lane`, `kind`, `target_json`, `args_json`, `args_digest`, `binding_json`, `status` and `created_at` are NOT NULL: each call needs its identity, target, masked arguments, approval binding, state and creation time. `lane` is checked as `chat` or `run`; `kind` and `status` are checked against the sets above. Checks require `exec_args` to be NULL outside `open`, `approved` and `running`, and an `open` card to have `expires_at`. Other fields are nullable: exact arguments are cleared on settlement; place, card and bot note need not exist for counted calls; result, message, follow-up, expiry, answer and execution fields exist only when applicable. There are no foreign keys. Only the 30-day purge deletes actions; withdrawal when their work or cards end is defined by the later approval implementation. Memory export includes a masked `actions.jsonl`, excluding `exec_args`; whole-database migration copies include the table automatically. Every column except `exec_args` holds only masked text, ids and digests, with one deliberate exception: `place_json` holds exact values for phase 3 comparisons and is exported as such; `binding_json` holds the server’s id and a digest of its configuration, never the configuration itself.
 
 Outside `bots.db`: `ScheduledJob.bot` gains `ownerAsked` and `say`, and in phase 3 `onlyIfChanged` (its state is in `bots.db`); the grant gains the asks-first level and, in phase 3, an automation's exception (automation, tool, place); a secret's record gains the bots that use it and its binding (a request for one is an ordinary escalation row whose permission names the secret, so `bots.db` needs nothing for it); the profile's settings gain `notifications.quietHours`.
 

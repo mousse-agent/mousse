@@ -687,13 +687,15 @@ The owner's slash commands in the bot's chat, on the computer only (not in `REMO
 
 ## Database versions
 
-`bots.db` is at v10. This version supplies the columns for always-on bots phase 1:
+`bots.db` is at v11. It adds unused storage for always-on bots phases 2 and 3: the STRICT `bot_actions` table for held or counted calls and nullable text `bot_reminders.work_id`. Existing reminder writers leave `work_id` NULL. No bot behavior changes yet. Actions are deleted only by the 30-day purge; memory exports include masked `actions.jsonl` without exact executable arguments. The schema and nullability are in the plan's [Data model](plans/bot-always-on.md#data-model). The masked search index is not part of v11.
+
+Version 10 supplied the columns for always-on bots phase 1:
 
 - `bot_reminders.snoozed_from` (nullable text) and `owner_set` (0, 1, or NULL; no default).
 - `bot_messages.tell` (`now`, `soon`, `later`, or NULL for never told), `tell_at` and `told_at` (nullable text). `tell` requires a non-NULL `tell_at`. A partial index on `(bot_id, tell_at)` covers rows with `tell IS NOT NULL AND told_at IS NULL`.
 - `bot_registry.tell_json` (nullable text), beside `model_json`, for the bot's telling wishes.
 
-NULL `owner_set` means set before v10 (or by an older writer) and preserves today's behavior: text reminders ring at their time, while wakes follow the existing wake rules. New reminders store 0 or 1 for known ownership. Message posts now write the telling class and due time; release writes the told time. The telling wishes column stores the bot’s Tell me and can-wake choices. Existing rows are kept intact. Before upgrading an older database, the store writes `bots.db.pre-v10` and keeps the newest two migration copies. Older builds refuse a newer database; returning to one needs its pre-migration copy. Earlier versions added replies and reminders (v6), reactions (v7), questions and cards (v8), and wakes (v9).
+NULL `owner_set` means set before v10 (or by an older writer) and preserves today's behavior: text reminders ring at their time, while wakes follow the existing wake rules. New reminders store 0 or 1 for known ownership. Message posts now write the telling class and due time; release writes the told time. The telling wishes column stores the bot’s Tell me and can-wake choices. Existing rows are kept intact. Before upgrading an older database, the store writes `bots.db.pre-v11` and keeps the newest two migration copies. Older builds refuse a newer database; returning to one needs its pre-migration copy. Earlier versions added replies and reminders (v6), reactions (v7), questions and cards (v8), and wakes (v9).
 
 ## Where the code lives
 
