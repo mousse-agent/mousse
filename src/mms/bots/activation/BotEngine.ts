@@ -1566,9 +1566,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.closed) return
     this.retryCompletedScheduleRemovals()
     if (this.removedScheduleSweepPending) this.tryDropRemovedScheduleRuns()
+    let endedSchedules: ReturnType<BotScheduleBook['ended']> = []
+    try { endedSchedules = this.host.schedules?.ended?.() ?? [] } catch (error) {
+      console.warn('ended bot schedules could not be checked', error)
+    }
     for (const botId of this.host.definitions.ids()) {
       try {
-        for (const ended of this.host.schedules?.ended?.(botId) ?? []) {
+        for (const ended of endedSchedules.filter(schedule => schedule.botId === botId)) {
           if (this.store.registry(botId)?.deletedAt) continue
           const endedKey = `schedule-ended:${ended.jobId}`
           if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, endedKey)) continue
@@ -1585,6 +1589,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, key, 'posted')
           })
         }
+      } catch (error) {
+        console.warn('ended bot schedule lines could not be posted', { botId, error })
+      }
+      try {
         this.endUsagePauseIfDue(botId, now)
       } catch (error) {
         console.warn('a bot\'s usage pause could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
