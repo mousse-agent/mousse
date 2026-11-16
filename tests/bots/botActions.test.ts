@@ -1627,3 +1627,52 @@ it('R2-3 revoking a grant withdraws its held pair in the same transaction', asyn
   f.store.revoke(t.botId)
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
 })
+
+it.each([9, 11])('R3-1 accepted Send recovers at %s minutes only within its tap window', async minutes => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const deadline = f.clock.now + 10 * 60_000
+  expect(f.bots.nextDueAt(t.botId)).toBe(new Date(deadline).toISOString())
+  expect(f.bots.isIdle(t.botId)).toBe(false)
+  expect(f.store.message(a.message_id)?.text).toBe('Waiting for Mail…')
+  f.clock.now += minutes * 60_000
+  if (minutes === 11) { f.timers.at(-1)!.fn(); await flush() }
+  t.server.tools.push(t.descriptor); t.server.failing = false
+  f.bots.fillMcpAsks(); await flush()
+  if (minutes === 9) { expect(t.calls).toEqual([t.args]); expect(f.bots.actions.get(a.id)?.status).toBe('done'); return }
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'failed', exec_args: null })
+  expect(f.store.message(a.message_id)?.text).toBe("Mail couldn't be reached, so nothing was sent.")
+  expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain("Mail couldn't be reached")
+  expect(f.store.unreadWorkActions(t.workId).map(a => a.id)).toEqual([a.id])
+  const next = await start(f, t.workId, 2)
+  ;(next.prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+  expect(await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'after-send-timeout', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(2)
+})
+
+it.each(['inside two restarts', 'outside two restarts', 'sleep', 'card deadline'] as const)('R3-1 tap deadline survives %s', async path => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  if (path === 'card deadline') f.clock.now = Date.parse(a.expires_at) - 1000
+  const tapped = f.clock.now
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(f.bots.nextDueAt(t.botId)).toBe(new Date(tapped + 600_000).toISOString())
+  if (path.includes('restarts')) {
+    for (const elapsed of [240_000, path.startsWith('inside') ? 540_000 : 660_000]) {
+      f.clock.now = tapped + elapsed
+      f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup()
+    }
+  } else { f.clock.now = tapped + (path === 'sleep' ? 660_000 : 540_000); f.timers.at(-1)!.fn(); await flush() }
+  t.server.tools.push(t.descriptor); t.server.failing = false
+  f.bots.fillMcpAsks(); await flush()
+  const sent = path === 'inside two restarts' || path === 'card deadline'
+  expect(t.calls).toEqual(sent ? [t.args] : [])
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: sent ? 'done' : 'failed', exec_args: null })
+})
