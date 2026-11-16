@@ -5422,16 +5422,21 @@ export class OrchestratorService extends EventEmitter {
   private async archiveOwnThreadNow(threadId: string, actor: AgentActor): Promise<void> {
     const engine = this.runEngine
     const store = this.threadStore
-    const thread = store?.getThread(threadId)
-    if (!engine || !store || !thread || thread.settledAt || this.lifecycle.stopping) return
+    if (!engine || !store || !store.getThread(threadId)) return
+    // The one wait: the computers the thread's launches run on. Everything after it, up to the archive, runs without
+    // yielding, so no turn or message can start between the last check and the archive (an archived thread takes none).
+    const remoteWorking = await this.remoteLaunchesWorking([threadId, ...subagentDescendants(threadId, store.listAllThreads())])
+    const thread = store.getThread(threadId)
+    if (!thread || thread.settledAt || this.lifecycle.stopping) return
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
     if (session?.deleted) return
     if (session) this.refreshSessionQueueFromDisk(session)
-    if (await this.archiveOwnThreadKept(threadId, actor.runId, session)) {
+    if (remoteWorking || this.archiveOwnThreadKept(threadId, actor.runId, session)) {
       const target = session ?? this.getOrCreateSession(threadId)
       this.sessionAls.run(target, () => this.addSystemMessage(ARCHIVE_AFTER_TURN_KEPT))
       return
     }
+    // `settleThread` marks the thread archived before its first wait.
     await this.settleThread(threadId, true)
     engine.store.appendEvent({
       threadId,
@@ -5441,19 +5446,34 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
+  /** Whether any of these threads launched a thread on another computer that is still working there (`launchedThreadsWorking`). */
+  private async remoteLaunchesWorking(launcherThreadIds: readonly string[]): Promise<boolean> {
+    const remote = this.remoteThreads
+    if (!remote) return false
+    for (const id of launcherThreadIds) {
+      if ((await remote.working(id)) > 0) return true
+    }
+    return false
+  }
+
   /**
-   * Whether a thread its agent asked to archive still has work an Archive would end (`settleThread` is a Stop, and a Stop
-   * reaches all of it): a queued message, a run starting, running, waiting or paused, provider background work (a
+   * Whether a thread its agent asked to archive still has local work an Archive would end (`settleThread` is a Stop, and
+   * a Stop reaches all of it): a queued message, a run starting, running, waiting or paused, provider background work (a
    * command it left running), or a question to the person, in the thread or a subagent below it; or a thread one of
-   * them launched that is still working, here or on another computer. The turn that asked (`askedRunId`) is not counted.
+   * them launched here that is still working (`remoteLaunchesWorking` asks the other computers). The turn that asked
+   * (`askedRunId`) is not counted. Synchronous, so the archive can follow it with nothing starting in between.
    */
-  private async archiveOwnThreadKept(threadId: string, askedRunId: string, session: ThreadSession | undefined): Promise<boolean> {
+  private archiveOwnThreadKept(threadId: string, askedRunId: string, session: ThreadSession | undefined): boolean {
     const engine = this.requireRunEngine()
     const store = this.threadStore
     if (!store) return true
     if (session?.isTurnRunning() || session?.turnAdmitted) return true
-    const subtree = new Set([threadId, ...subagentDescendants(threadId, store.listAllThreads())])
-    if (engine.store.listNonTerminalRuns().some((run) => subtree.has(run.threadId) && run.runId !== askedRunId)) return true
+    const threads = store.listAllThreads()
+    const subtree = new Set([threadId, ...subagentDescendants(threadId, threads)])
+    const runs = engine.store.listNonTerminalRuns()
+    if (runs.some((run) => subtree.has(run.threadId) && run.runId !== askedRunId)) return true
+    const busy = new Set(runs.map((run) => run.threadId))
+    if (threads.some((thread) => thread.createdByThreadId !== undefined && subtree.has(thread.createdByThreadId) && busy.has(thread.id))) return true
     for (const id of subtree) {
       if (this.providerBackground.has(id) || this.questions.listPendingForThread(id).length > 0) return true
       const live = id === threadId ? session : this.boundSession.threadId === id ? this.boundSession : this.sessions.get(id)
@@ -5463,7 +5483,6 @@ export class OrchestratorService extends EventEmitter {
       } catch {
         return true
       }
-      if ((await this.launchedThreadsWorking(id)) > 0) return true
     }
     return false
   }
