@@ -222,7 +222,7 @@ export class BotActions {
   }
   expireDue(): void {
     if (!this.host.enabled()) return
-    for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved') AND expires_at <= ?", this.host.store.now())) {
+    for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'open' AND expires_at <= ?", this.host.store.now())) {
       if (this.transition(String(a.id), String(a.status), 'expired', { text: 'This call expired. Carry on without it; do not try the same call again without a new reason.' })) this.finish(a as unknown as ActionRow)
     }
   }
@@ -313,7 +313,7 @@ export class BotActions {
 
   private valid(action: ActionRow): BotActivationRow | undefined {
     const row = this.host.store.activation(action.activation_id)
-    if (!row || !action.exec_args || action.exec_args.length > ACTION_MAX_ARGUMENT_CHARS || Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) return undefined
+    if (!row || !action.exec_args || action.exec_args.length > ACTION_MAX_ARGUMENT_CHARS || (action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now()))) return undefined
     try {
       const args: unknown = JSON.parse(action.exec_args)
       if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
@@ -333,7 +333,7 @@ export class BotActions {
     if (!this.host.enabled()) throw new BotActionChanged('Asks first is not available while its switch is off.')
     await this.host.refresh()
     const action = this.get(input.actionId)
-    if (action && ['open', 'approved'].includes(action.status) && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
+    if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
       this.expireDue()
       throw new BotActionChanged('This call expired. Nothing was sent.')
     }

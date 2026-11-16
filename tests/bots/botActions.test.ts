@@ -183,7 +183,7 @@ it('reload and internet-back continuations cannot pass an open card', async () =
   expect(f.store.lastMainDispatch(t.workId)?.n).toBe(1)
   expect(t.calls).toEqual([])
 })
-it.each(['approved', 'running'] as const)('restart clears arguments from an expired %s row', async state => {
+it.each(['approved', 'running'] as const)('restart preserves timely approval and settles a %s row', async state => {
   const t = await setup(true)
   await t.call()
   await finish(f, t.work.payload)
@@ -192,8 +192,8 @@ it.each(['approved', 'running'] as const)('restart clears arguments from an expi
   if (state === 'running') f.bots.actions.transition(a.id, 'approved', 'running')
   f.clock.now += 48 * 3600_000 + 1000
   await f.bots.actions.reconcile()
-  expect(t.calls).toEqual([])
-  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: state === 'approved' ? 'expired' : 'uncertain', exec_args: null })
+  expect(t.calls).toEqual(state === 'approved' ? [t.args] : [])
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: state === 'approved' ? 'done' : 'uncertain', exec_args: null })
 })
 it('an expired Send is refused', async () => {
   const t = await setup(true)

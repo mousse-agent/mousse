@@ -8619,7 +8619,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const sources: Array<() => number | undefined> = [
       () => {
         if (!botAsksFirst(this.host.settings?.get())) return undefined
-        const row = this.store.get("SELECT MIN(expires_at) AS at FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)
+        const row = this.store.get("SELECT MIN(expires_at) AS at FROM bot_actions WHERE status = 'open' AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)
         return row?.at ? Date.parse(String(row.at)) : undefined
       },
       () => this.tellings.next(botId),
