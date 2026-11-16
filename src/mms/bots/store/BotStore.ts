@@ -396,7 +396,7 @@ CREATE TABLE bot_actions(
   lane TEXT NOT NULL CHECK(lane IN ('chat','run')),
   kind TEXT NOT NULL CHECK(kind IN ('mcp','secret_fetch')),
   target_json TEXT NOT NULL,
-  exec_args TEXT,
+  exec_args TEXT CHECK(exec_args IS NULL OR status IN ('open','approved','running')),
   args_json TEXT NOT NULL,
   args_digest TEXT NOT NULL,
   binding_json TEXT NOT NULL,
@@ -412,7 +412,8 @@ CREATE TABLE bot_actions(
   answered_at TEXT,
   answered_device TEXT,
   created_at TEXT NOT NULL,
-  ran_at TEXT
+  ran_at TEXT,
+  CHECK(status <> 'open' OR expires_at IS NOT NULL)
 ) STRICT;
 CREATE INDEX bot_actions_due ON bot_actions(status, next_at);
 CREATE INDEX bot_actions_bot ON bot_actions(bot_id, status);
