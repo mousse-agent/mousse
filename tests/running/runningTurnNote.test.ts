@@ -31,10 +31,11 @@ const MINUTE = 60_000
 class FixedComputer {
   rows: ProcessRow[] = [{ pid: SELF, ppid: 1, pgid: SELF, tpgid: 0, command: 'mousse service' }]
   ports: ListeningPort[] = []
+  folders = new Map<number, string>()
   readonly system: RunningSystem = {
     processes: async () => this.rows,
     listeners: async () => this.ports,
-    workingFolders: async () => new Map(),
+    workingFolders: async (pids) => new Map(pids.filter((pid) => this.folders.has(pid)).map((pid) => [pid, this.folders.get(pid)!])),
     selfPid: SELF,
     now: () => Date.now(),
     platform: 'darwin'
@@ -156,6 +157,26 @@ describe('the turn preamble', () => {
   })
 })
 
+describe('who started an agent\'s background command', () => {
+  it('two threads of different projects that run the same command at once each get the process in their own folder', async () => {
+    const other = join(base, 'other')
+    mkdirSync(other, { recursive: true })
+    const started = Date.now()
+    // Listed in pid order: the first thread's server comes first, and both started inside both calls' time.
+    computer.rows.push(
+      { pid: 610, ppid: SELF, pgid: 610, tpgid: 0, startedAt: started, command: '/bin/zsh -c npm run dev' },
+      { pid: 620, ppid: SELF, pgid: 620, tpgid: 0, startedAt: started, command: '/bin/zsh -c npm run dev' }
+    )
+    computer.folders.set(610, project).set(620, other)
+    registry.noteCommand({ threadId: 't-a', callId: 'a', command: 'npm run dev', folder: project, ended: true })
+    // The second thread's call comes a moment later.
+    await new Promise((done) => setTimeout(done, 20))
+    registry.noteCommand({ threadId: 't-b', callId: 'b', command: 'npm run dev', folder: other, ended: true })
+    expect((await registry.list({ threadId: 't-a', folders: [project] })).map((entry) => [entry.pid, entry.startedBy])).toEqual([[610, { kind: 'thread', threadId: 't-a' }]])
+    expect((await registry.list({ threadId: 't-b', folders: [other] })).map((entry) => [entry.pid, entry.startedBy])).toEqual([[620, { kind: 'thread', threadId: 't-b' }]])
+  })
+})
+
 describe('running_list', () => {
   let fx: DelegationFixture | undefined
   afterEach(() => {
@@ -176,6 +197,23 @@ describe('running_list', () => {
     turns.register(appTurn({ threadId: 't1-child', runId: child.runId, subagent: true }))
     expect(await tools.call('running_list', {}, request({ threadId: 't1-child', runId: child.runId }))).toMatchObject({ text: 'LIST-7781' })
     expect(seen).toEqual(['t1', 't1-child'])
+  })
+
+  it('a bot\'s subagent and consult hold it too', () => {
+    const profile = join(base, 'profile')
+    const scratch = join(profile, 'bots', 'scratch', 'act-2')
+    mkdirSync(scratch, { recursive: true })
+    const grant = botStarterManifest()
+    for (const botTools of [{ subagent: true }, undefined]) {
+      const compiled = compileBotThread({
+        grant, digest: botManifestDigest(grant), thread: {}, scratch, profileHome: profile, filesFolder: files,
+        nativeNames: (names) => ({ ok: true, names: [...names] }), remaining: { deadlineMs: 600_000 },
+        ...(botTools ? { botTools } : {})
+      })
+      if (!compiled.ok) throw new Error(compiled.error.message)
+      expect(compiled.permissions.appTools).toContain('running_list')
+      expect(compiled.policy.tools!.allow).toContain('running_list')
+    }
   })
 
   it.each([

@@ -90,7 +90,7 @@ describe('compileBotThread', () => {
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.policy).toEqual({
       // Granted skills bring the skill tools.
-      tools: { allow: ['edit', 'find', 'grep', 'list_skills', 'load_skill', 'ls', 'read', 'web_search', 'write'] },
+      tools: { allow: ['edit', 'find', 'grep', 'list_skills', 'load_skill', 'ls', 'read', 'running_list', 'web_search', 'write'] },
       approvals: 'grants',
       approve: 'host',
       budget: { maxWallMs: 600_000, maxTurns: 40 },
@@ -141,8 +141,8 @@ describe('compileBotThread', () => {
     const revision = manifest({ tools: ['read'], appTools: [], budget: { maxActiveMs: 5 * 60_000, maxTurns: 10 } })
     const compiled = compile({ grant, revision })
     if (!compiled.ok) throw new Error(compiled.error.message)
-    expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read'] })
-    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill'] })
+    expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read', 'running_list'] })
+    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill', 'running_list'] })
     // A revision can never name more than the grant: what the grant lacks is dropped.
     const wider = compile({ grant: manifest({ tools: ['read'], appTools: [] }), revision: manifest({ tools: ['read', 'edit'] }) })
     if (!wider.ok) throw new Error(wider.error.message)

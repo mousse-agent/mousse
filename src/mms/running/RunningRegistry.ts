@@ -182,28 +182,46 @@ export class RunningRegistry {
     const claim = (root: number): void => {
       for (const pid of tree.subtree(root)) claimed.add(pid)
     }
+    const now = this.system.now()
+    const ours = new Set(tree.subtree(this.system.selfPid))
 
-    // Terminals: the command in the foreground of each one's shell.
+    // What each candidate is, before any folder is read.
     const terminals = this.sources.terminals()
-    for (const terminal of terminals) if (terminal.pid) claim(terminal.pid)
-    for (const terminal of terminals) {
-      if (!terminal.pid) continue
-      const job = foregroundJob(tree, terminal.pid, this.system.platform)
-      if (!job) continue
+    const terminalJobs = terminals.flatMap((terminal) => terminal.pid ? terminalJobsOf(tree, terminal.pid, this.system.platform, snapshot.listeners).map((job) => ({ terminal, job })) : [])
+    // A terminal's shell and its prompt's helpers are never anything else's: an agent's command or a listener.
+    for (const terminal of terminals) if (terminal.pid) claimed.add(terminal.pid)
+    for (const { job } of terminalJobs) claim(job.pid)
+    const watchers = this.sources.watchers()
+    for (const watcher of watchers) if (watcher.pid) claim(watcher.pid)
+    const noted = [...this.noted.entries()].sort(([, a], [, b]) => b.notedAt - a.notedAt)
+    const commandCandidates = new Map(noted.map(([key, command]) => [key, command.endedAt === undefined ? [] : commandCandidatesOf(tree, this.system.selfPid, command, ours, claimed)]))
+    const listening = snapshot.listeners
+      ? [...new Set(snapshot.listeners.map((listener) => listener.pid))].filter((pid) => pid !== this.system.selfPid && tree.row(pid) && !tree.isAncestorOf(pid, this.system.selfPid))
+      : []
+    // Where each one really works, read once for all of them (macOS and Linux; Windows does not tell).
+    const cwds = await this.system.workingFolders([...new Set([
+      ...terminalJobs.map(({ job }) => job.pid),
+      ...[...commandCandidates.values()].flat().map((row) => row.pid),
+      ...listening
+    ])])
+
+    // Terminals: the command in the foreground of each one's shell, and any other job in it that listens on a port. Its
+    // folder is where it runs now (a shell may have changed folder since it opened), else where the terminal opened.
+    for (const { terminal, job } of terminalJobs) {
+      const folder = cwds.get(job.pid)
       const owner = terminal.threadId === '__unbound__' ? undefined : terminal.threadId
-      if (!(owner ? threadInScope(owner, terminal.cwd) : inFolders(terminal.cwd))) continue
+      const inScope = folder !== undefined ? inFolders(folder) || (owner === scope.threadId && owner !== undefined) : owner ? threadInScope(owner, terminal.cwd) : inFolders(terminal.cwd)
+      if (!inScope) continue
       entries.push(this.entry(snapshot, tree, job, {
-        id: `terminal:${terminal.ptyId}`,
+        id: job.pid === terminalJobs.find((entry) => entry.terminal === terminal)?.job.pid ? `terminal:${terminal.ptyId}` : `terminal:${terminal.ptyId}:${job.pid}`,
         ...(terminal.label ? { label: terminal.label } : {}),
         startedBy: { kind: 'person', via: terminal.label ? 'quick_action' : 'terminal' },
-        folder: terminal.cwd,
+        folder: folder ?? terminal.cwd,
         output: () => this.sources.terminalOutput(terminal.ptyId)
       }))
     }
 
     // Bots' background commands.
-    const watchers = this.sources.watchers()
-    for (const watcher of watchers) if (watcher.pid) claim(watcher.pid)
     for (const watcher of watchers) {
       if (!watcher.pid || !tree.row(watcher.pid)) continue
       if (watcher.botId !== scope.botId && !inFolders(watcher.cwd)) continue
@@ -218,34 +236,38 @@ export class RunningRegistry {
       }))
     }
 
-    // Commands agents left running: a process under this service, started while the call ran, that runs the command.
-    const now = this.system.now()
-    const ours = new Set(tree.subtree(this.system.selfPid))
-    const noted = [...this.noted.entries()].sort(([, a], [, b]) => b.notedAt - a.notedAt)
+    // Commands agents left running: a process under this service that runs the command, started while its call ran,
+    // and working in the call's folder where that can be read. The newest call takes the newest such process, so two
+    // threads that run the same command each get their own.
     for (const [key, command] of noted) {
-      const found = command.endedAt === undefined ? undefined : findCommand(tree, this.system.selfPid, command, ours, claimed)
+      const found = (commandCandidates.get(key) ?? [])
+        .filter((row) => !claimed.has(row.pid))
+        .filter((row) => {
+          const folder = cwds.get(row.pid)
+          return !folder || !command.folder || isInside(canonical(command.folder), canonical(folder))
+        })
+        .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0]
       if (!found) {
         if (command.endedAt !== undefined && now - command.endedAt > COMMAND_GRACE_MS) this.noted.delete(key)
         continue
       }
       claim(found.pid)
-      if (!threadInScope(command.threadId, command.folder)) continue
+      const folder = cwds.get(found.pid) ?? command.folder
+      if (!threadInScope(command.threadId, folder)) continue
       entries.push(this.entry(snapshot, tree, found, {
         id: `command:${key}`,
         command: command.command,
         startedBy: { kind: 'thread', threadId: command.threadId },
-        ...(command.folder ? { folder: command.folder } : {})
+        ...(folder ? { folder } : {})
       }))
     }
 
     // Anything else that listens on a port and works in one of the folders.
-    if (snapshot.listeners && folders.length) {
-      const listening = [...new Set(snapshot.listeners.map((listener) => listener.pid))]
-        .filter((pid) => !claimed.has(pid) && pid !== this.system.selfPid && tree.row(pid) && !tree.isAncestorOf(pid, this.system.selfPid))
-      const cwds = await this.system.workingFolders(listening)
+    if (folders.length) {
+      const unclaimed = listening.filter((pid) => !claimed.has(pid))
       // One entry per tree: a listening process whose parent also listens belongs to that parent.
-      const listeningSet = new Set(listening)
-      for (const pid of listening) {
+      const listeningSet = new Set(unclaimed)
+      for (const pid of unclaimed) {
         if (tree.ancestors(pid).some((ancestor) => listeningSet.has(ancestor) && inFolders(cwds.get(ancestor)))) continue
         const folder = cwds.get(pid)
         if (!inFolders(folder)) continue
@@ -368,15 +390,44 @@ export function foregroundJob(tree: ProcessTree, shellPid: number, platform: Nod
 }
 
 /**
- * The process that runs `command` under this service: the topmost one whose command line holds the command's script,
- * started while its call ran, and not already told as something else.
+ * What runs in a terminal: its foreground command, then each other job of its shell that listens on a port (started
+ * with `&`), the topmost process of each. A prompt's helpers run in groups of their own but listen on nothing.
  */
-function findCommand(tree: ProcessTree, selfPid: number, command: NotedCommand, ours: Set<number>, claimed: Set<number>): ProcessRow | undefined {
+export function terminalJobsOf(tree: ProcessTree, shellPid: number, platform: NodeJS.Platform, listeners: readonly ListeningPort[] | undefined): ProcessRow[] {
+  const jobs: ProcessRow[] = []
+  const foreground = foregroundJob(tree, shellPid, platform)
+  if (foreground) jobs.push(foreground)
+  const shell = tree.row(shellPid)
+  if (!shell || platform === 'win32' || !listeners?.length) return jobs
+  const listening = new Set(listeners.map((listener) => listener.pid))
+  const rows = tree.subtree(shellPid).map((pid) => tree.row(pid)!).filter((row) => row.pid !== shellPid)
+  const groups = new Map<number, ProcessRow[]>()
+  for (const row of rows) {
+    if (row.pgid === undefined || row.pgid === shell.pgid || row.pgid === foreground?.pgid) continue
+    const group = groups.get(row.pgid) ?? []
+    group.push(row)
+    groups.set(row.pgid, group)
+  }
+  for (const group of groups.values()) {
+    if (!group.some((row) => listening.has(row.pid))) continue
+    const inGroup = new Set(group.map((row) => row.pid))
+    const top = group.find((row) => !inGroup.has(row.ppid))
+    if (top) jobs.push(top)
+  }
+  return jobs
+}
+
+/**
+ * The processes that may run `command` under this service: the topmost of each branch whose command line holds the
+ * command's script and that started while its call ran, and that is not already told as something else.
+ */
+function commandCandidatesOf(tree: ProcessTree, selfPid: number, command: NotedCommand, ours: Set<number>, claimed: Set<number>): ProcessRow[] {
   const script = comparable(commandScript(command.command))
   const from = command.notedAt - START_SLACK_MS
   const until = (command.endedAt ?? Number.POSITIVE_INFINITY) + START_SLACK_MS
   const queue = tree.children(selfPid).map((row) => row.pid)
   const seen = new Set<number>()
+  const found: ProcessRow[] = []
   while (queue.length) {
     const pid = queue.shift()!
     if (seen.has(pid) || claimed.has(pid) || !ours.has(pid)) continue
@@ -384,10 +435,13 @@ function findCommand(tree: ProcessTree, selfPid: number, command: NotedCommand, 
     const row = tree.row(pid)
     if (!row) continue
     const started = row.startedAt
-    if (comparable(row.command).includes(script) && started !== undefined && started >= from && started <= until) return row
+    if (comparable(row.command).includes(script) && started !== undefined && started >= from && started <= until) {
+      found.push(row)
+      continue
+    }
     for (const child of tree.children(pid)) queue.push(child.pid)
   }
-  return undefined
+  return found
 }
 
 // ------------------------------------------------------------------ addresses

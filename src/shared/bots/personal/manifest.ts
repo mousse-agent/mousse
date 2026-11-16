@@ -64,8 +64,8 @@ export const BOT_MCP_LIST_TOOL = 'mcp_servers'
 
 /**
  * What runs now for the bot's folders (`running_list`): its background commands, and servers and commands there, with
- * their addresses. It reads and starts nothing, so like memory it is always on and never grantable, in both lanes, as a
- * thread's agent has it on every turn.
+ * their addresses. It reads and starts nothing, so it is never grantable and every bot turn has it (chat, work, consults
+ * and subagents), as a thread's agent has it on every turn.
  */
 export const BOT_RUNNING_TOOL = 'running_list'
 

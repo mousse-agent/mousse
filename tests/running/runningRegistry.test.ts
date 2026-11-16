@@ -5,7 +5,7 @@
  * macOS or `ss` on Linux). Windows' listings are covered by the parser rows below, from recorded output shapes.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -182,6 +182,26 @@ describe.skipIf(!posix)('the running list on this computer', () => {
     // Once it ends, it leaves the list.
     process.kill(server.pid!, 'SIGKILL')
     await until(async () => (await registry.list({ threadId: 't-agent', folders: [project], projectId: 'p1' })).length === 0)
+  })
+
+  it('a server started with & in a terminal is listed; one in a folder the shell moved to belongs to that folder', async () => {
+    const shell = terminal('t-other')
+    await until(() => pty.getScrollback(shell).length > 0)
+    pty.write(shell, `"${NODE}" server.cjs &\n`)
+    await until(() => /Local:\s+http/.test(pty.getScrollback(shell)))
+    let entries = await new RunningRegistry(sources()).list({ threadId: 't-agent', folders: [project], projectId: 'p1' })
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ startedBy: { kind: 'person', via: 'terminal' } })
+    expect(entries[0]!.addresses[0]).toMatch(/^http:\/\/localhost:\d+\/$/)
+    // Stopped; then the same terminal moves to another project's folder and starts its server there.
+    pty.write(shell, 'kill %1\n')
+    await until(async () => (await new RunningRegistry(sources()).list({ threadId: 't-agent', folders: [project], projectId: 'p1' })).length === 0)
+    pty.write(shell, `cd "${elsewhere}" && "${NODE}" server.cjs\n`)
+    await until(async () => (await new RunningRegistry(sources()).list({ threadId: 't-far', folders: [elsewhere], projectId: 'p2' })).length === 1)
+    entries = await new RunningRegistry(sources()).list({ threadId: 't-far', folders: [elsewhere], projectId: 'p2' })
+    expect(entries[0]!.folder).toBe(realpathSync(elsewhere))
+    // The project the terminal opened in is not told of it.
+    expect(await new RunningRegistry(sources()).list({ threadId: 't-agent', folders: [project], projectId: 'p1' })).toEqual([])
   })
 
   it('a server started outside Mousse that works in the folder is listed; one in another folder is not', async () => {

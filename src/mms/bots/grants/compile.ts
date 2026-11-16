@@ -215,9 +215,11 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.consult ? ['consult'] : []),
     ...(own?.workWaiting ? ['work_wait'] : []),
     ...(own?.scheduled ? ['schedule_done'] : []),
-    // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one, and what runs
-    // in its folders, so it reuses a running server instead of starting another.
-    ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL] : []),
+    // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
+    ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
+    // What runs in its folders, on every turn (chat, work, consults and subagents alike), so it reuses a running server
+    // instead of starting another: it only reads.
+    BOT_RUNNING_TOOL,
     ...(own?.frontDesk ? BOT_WORK_TOOLS.filter((tool) => tool !== 'watch_start' || own.watcherStart === true) : []),
     ...(own?.images ? [BOT_IMAGE_TOOL] : []),
     ...(own?.applets ? [BOT_APPLET_TOOL] : []),
