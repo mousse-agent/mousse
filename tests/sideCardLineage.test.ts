@@ -10,6 +10,7 @@ import {
   formatAgo,
   groupLineageSubagents,
   lineageModelLabel,
+  nativeSubagentLabel,
   lineageStatusLabel,
   lineageSubagentName,
   lineageTitle,
@@ -19,6 +20,7 @@ import {
 } from '../src/renderer/components/sideCard/lineageLogic'
 import { selectSubagents } from '../src/renderer/hooks/useSubagents'
 import { useAppStore } from '../src/renderer/stores/appStore'
+import { useProviderSnapshotsStore } from '../src/renderer/lib/providerSnapshots'
 import { isRunningSubagent, type SubagentState, type SubagentSummary } from '../src/shared/subagents'
 
 const NOW = Date.parse('2026-10-24T12:00:00.000Z')
@@ -66,12 +68,12 @@ describe('lineageTitle', () => {
   it('counts the subagents still running', () => {
     const rows = [subagent('a'), subagent('b', { state: 'waiting' }), subagent('c', { state: 'done' })]
     expect(countRunningSubagents(rows)).toBe(2)
-    expect(lineageTitle(rows)).toBe('Lineage · 2 running')
+    expect(lineageTitle(rows)).toBe('Nest · 2 running')
   })
 
   it('is a plain heading when nothing is running', () => {
-    expect(lineageTitle([subagent('a', { state: 'done' })])).toBe('Lineage')
-    expect(lineageTitle([])).toBe('Lineage')
+    expect(lineageTitle([subagent('a', { state: 'done' })])).toBe('Nest')
+    expect(lineageTitle([])).toBe('Nest')
   })
 })
 
@@ -200,12 +202,47 @@ describe('lineageSubagentName and lineageModelLabel', () => {
     expect(lineageSubagentName({ title: '   ' })).toBe('Subagent')
   })
 
-  it('names provider and model, or nothing when the subagent inherited its parent’s', () => {
-    expect(lineageModelLabel({ provider: 'claude-code', model: 'opus' })).toBe('claude-code · Claude Opus')
+  // The provider's icon stands beside the label, so the label is the model's name alone: never the provider's id.
+  it.each([
+    ['codex:chatgpt-subscription', 'gpt-6.1-sol', 'GPT-6.1 Sol'],
+    ['claude-code', 'opus', 'Opus'],
+    ['claude-code', 'claude-opus-5-5', 'Opus 5.5'],
     // A level an agent chose is named, never shown as the stored `model:level` id.
-    expect(lineageModelLabel({ provider: 'pi:openai', model: 'gpt-5:high' })).toBe('pi:openai · GPT-5 · High')
-    expect(lineageModelLabel({ provider: null, model: 'gpt-5' })).toBe('GPT-5')
-    expect(lineageModelLabel({ provider: null, model: null })).toBeNull()
+    ['pi:openai', 'gpt-5:high', 'GPT-5 · High'],
+    [null, 'gpt-5', 'GPT-5'],
+    // Inherited from the parent: nothing to add.
+    ['codex:chatgpt-subscription', null, null],
+    [null, null, null]
+  ])('names the model of %s / %s as %s', (provider, model, label) => {
+    expect(lineageModelLabel({ provider, model })).toBe(label)
+  })
+
+  it('uses the name the provider lists for the model, as the model picker does', () => {
+    const subagentModel = { provider: 'codex:chatgpt-subscription', model: 'house-model' }
+    useProviderSnapshotsStore.setState({ scopes: { device: { loading: false, snapshots: [{ instanceId: 'codex:chatgpt-subscription', driver: 'codex', builtIn: false, models: { entries: [], source: 'none', names: { 'house-model': 'House Model 2' } } } as never] } } })
+    try {
+      expect(lineageModelLabel(subagentModel)).toBe('House Model 2')
+    } finally {
+      useProviderSnapshotsStore.setState({ scopes: {} })
+    }
+    expect(lineageModelLabel(subagentModel)).toBe('House Model')
+  })
+
+  // Claude Code's kinds of agent read as what they do; Codex names a helper by its model instead.
+  it.each([
+    [{ agentType: 'Explore' }, 'Searching code'],
+    [{ agentType: 'general-purpose' }, 'Helper'],
+    [{ agentType: 'Plan' }, 'Planning'],
+    // A kind whose name looks like a model's ("claude…") is still a kind.
+    [{ agentType: 'claude-code-guide' }, 'Claude Code help'],
+    [{ agentType: 'Explore', model: 'sonnet' }, 'Searching code · Sonnet'],
+    [{ agentType: 'general-purpose', model: 'claude-opus-5-5' }, 'Helper · Opus 5.5'],
+    [{ agentType: 'code-reviewer' }, 'Code reviewer'],
+    [{ agentType: 'gpt-6.1-sol' }, 'GPT-6.1 Sol'],
+    [{ agentType: null, model: 'haiku' }, 'Haiku'],
+    [{ agentType: null }, null]
+  ])('labels a native subagent %o as %s', (native, label) => {
+    expect(nativeSubagentLabel({ model: null, ...native })).toBe(label)
   })
 })
 
@@ -288,10 +325,11 @@ describe('LineageList rendering', () => {
 
   it('shows the provider and model a subagent was given, and what it waits on', () => {
     const html = render([
-      subagent('a', { provider: 'claude-code', model: 'opus' }),
+      subagent('a', { provider: 'codex:chatgpt-subscription', model: 'gpt-6.1-sol' }),
       subagent('b', { state: 'waiting', waitingOn: [{ title: 'Helper', state: 'working' }] })
     ])
-    expect(html).toContain('claude-code · Claude Opus')
+    expect(html).toContain('lineage-model">GPT-6.1 Sol<')
+    expect(html).not.toContain('codex:chatgpt-subscription')
     expect(html).toContain('Waiting on 1 subagent')
     expect(html.match(/lineage-model/g)).toHaveLength(1)
   })
@@ -361,7 +399,7 @@ describe('LineageSection rendering', () => {
     const html = renderToStaticMarkup(createElement(LineageSection, { threadId: 't1', projectId: null }))
     expect(html).toContain('No subagents started yet')
     expect(html).not.toContain('side-card-section-title')
-    expect(html).not.toContain('Lineage')
+    expect(html).not.toContain('Nest')
     expect(html).not.toContain('<ul')
     expect(html).toContain('data-thread-id="t1"')
   })
@@ -369,7 +407,7 @@ describe('LineageSection rendering', () => {
   it('reads the subagents the daemon reported for this thread, with the running count in its heading', () => {
     withStore({ subagentsByParent: { t1: [subagent('one'), subagent('two', { state: 'done' })], other: [subagent('x', { title: 'Elsewhere' })] } }, () => {
       const html = renderToStaticMarkup(createElement(LineageSection, { threadId: 't1', projectId: null }))
-      expect(html).toContain('side-card-section-name">Lineage · 1 running<')
+      expect(html).toContain('side-card-section-name">Nest · 1 running<')
       expect(html).toContain('Task one')
       expect(html).toContain('1 finished')
       expect(html).not.toContain('Task two')
@@ -383,7 +421,7 @@ describe('LineageSection rendering', () => {
     withStore({ subagentsByParent: { t1: [subagent('one'), subagent('two', { state: 'done' })] } }, () => {
       const html = render()
       expect(html).toContain('class="side-card-section-head"')
-      expect(html).toMatch(/side-card-section-name">Lineage · 1 running<\/span>.*?<\/h3><button[^>]*class="lineage-stop-all"[^>]*>Stop all<\/button>/)
+      expect(html).toMatch(/side-card-section-name">Nest · 1 running<\/span>.*?<\/h3><button[^>]*class="lineage-stop-all"[^>]*>Stop all<\/button>/)
       expect(html).toContain('aria-label="Stop all subagents"')
     })
     // A waiting subagent still runs; a finished one does not.

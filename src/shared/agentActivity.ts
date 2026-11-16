@@ -75,6 +75,8 @@ export type AgentActivityItem = ActivityBase &
     | {
         kind: 'subagent'
         agentType?: string
+        /** The model the call asked the subagent to run on ("sonnet"), when it named one. */
+        model?: string
         description?: string
         nativeId?: string
         background?: boolean
@@ -641,10 +643,12 @@ function typedDraft(
     case 'Task': {
       const agentType = str(input.subagent_type)
       const description = str(input.description)
+      const model = str(input.model)
       return {
         ...base,
         kind: 'subagent',
         ...(agentType ? { agentType } : {}),
+        ...(model ? { model } : {}),
         ...(description ? { description: clip(description.replace(/\s+/g, ' ').trim(), ACTIVITY_DESCRIPTION_CHARS) } : {}),
         ...(input.run_in_background === true ? { background: true } : {})
       }
