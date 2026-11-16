@@ -631,7 +631,7 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-action-arguments { overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
 .bot-action-arguments:has(details[open]) { max-height: 360px; }
 .bot-action-arguments dl { margin: 8px 0; }
-.bot-action-arguments dt { font-family: var(--font-mono, monospace); font-size: 12px; font-weight: 400; white-space: pre-wrap; }
+.bot-action-arguments dt { font-family: inherit; color: var(--text-secondary); font-size: 12px; font-weight: 400; white-space: pre-wrap; }
 .bot-action-arguments dd { margin: 4px 0 12px; }
 .bot-action-arguments ol { margin: 4px 0; padding-left: 0; list-style-position: inside; }
 .bot-action-arguments summary { cursor: pointer; }
