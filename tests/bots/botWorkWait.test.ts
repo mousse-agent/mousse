@@ -412,7 +412,7 @@ it.each(['allow', 'not_now'] as const)('carries a permission wall %s and its wai
   expect(following).toContain('Read the release notes next.')
 })
 
-it('keeps notes and question answers unread until the wait continuation produces output', async () => {
+it('keeps notes and question answers unread until the wait continuation starts', async () => {
   const { workId, turn, chat } = await work()
   f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
   const questionId = f.store.workQuestion(workId)!.id
@@ -434,7 +434,6 @@ it('keeps notes and question answers unread until the wait continuation produces
   expect(f.store.pendingWorkNotes(workId)).toHaveLength(1)
   expect(f.store.question(questionId)?.readAt).toBeNull()
   const next = await start(f, workId, 2)
-  ;(next.prepared as any).modelOutput?.()
   expect(f.store.pendingWorkNotes(workId)).toEqual([])
   expect(f.store.question(questionId)?.readAt).not.toBeNull()
   f.bots.tools.work.note(botId, workId, 'Now check the changelog.', chat.id)
