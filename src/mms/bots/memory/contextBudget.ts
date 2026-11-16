@@ -80,10 +80,11 @@ export interface BotChatEpoch {
 }
 
 /**
- * Why a new epoch starts: none yet, an earlier one ended (`failed`, `stopped`, `reload`, `cleared`, `compacted`), the
- * model changed, the conversation is full (`full`), or the cache expired with the conversation past the mid mark (`cold`).
+ * Why a new epoch starts: none yet, an earlier one ended (`failed`, `stopped`, `reload`, `cleared`, `compacted`, or
+ * `resume_lost`: the runtime ran a turn in a new conversation instead of the epoch's), the model changed, the conversation
+ * is full (`full`), or the cache expired with the conversation past the mid mark (`cold`).
  */
-export type BotChatEpochEnd = 'none' | 'failed' | 'stopped' | 'reload' | 'cleared' | 'compacted' | 'model' | 'full' | 'cold'
+export type BotChatEpochEnd = 'none' | 'failed' | 'stopped' | 'reload' | 'cleared' | 'compacted' | 'resume_lost' | 'model' | 'full' | 'cold'
 
 /**
  * The digest of the next fold: `ready` (prepared, and what it summarised is still the start of the chat), `coming` (one

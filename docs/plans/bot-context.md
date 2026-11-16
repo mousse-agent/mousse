@@ -407,6 +407,9 @@ the prompt sizes the runtime reports.
 **When an epoch ends** (the next turn starts a new one, `chatEpochEnd`):
 
 - a model or entry change; a failed, stopped or reloaded turn; `/clear`; a forget; a runtime compaction;
+- a lost resume: the runtime ran the turn in a new conversation instead of the epoch's (Claude Code wrote under another
+  session id, or Codex opened another thread or none). The turn reports `resumeLost`, and Codex puts the history in the
+  prompt for that turn;
 - full: what the epoch's turns added reaches 48k tokens (the high mark) and a digest is ready or none is coming, it
   reaches 64k (the hard mark) whatever the digest, or the whole prompt reaches the cap (40% of the model's window,
   never past 90% of the owner's compaction point);
@@ -442,9 +445,11 @@ not its update.
 **Where.** Only runtimes that resume a thread's conversation: Claude Code and Codex (`chatResumes`). Pi starts a fresh
 process each bot turn and keeps today's cleared context.
 
+**Measured** (Windows, a "hi" to a bot with a 20k-token chat): later turns of an epoch read 98% of their prompt from the
+cache on both Claude Code and Codex, also after 7 minutes idle on Codex.
+
 **What waits.**
 
-- A live check that Claude Code and Codex actually read the resumed conversation from the cache. A runtime that silently starts a new session instead of resuming is not detected yet.
 - The marks (48k, 64k, 24k, 6k) are starting values: the phase 0 numbers replace them. The "hello" ceiling is set in §15.
 - Digest quality on real chats: whether the five sections keep what later turns ask about.
 - Pi epochs, which need its session kept between bot turns.

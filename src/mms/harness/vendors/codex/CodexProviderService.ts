@@ -523,6 +523,8 @@ function steerInput(entries: readonly DrainedSteer[]): UserInput[] {
 export interface CodexChatResult {
   text: string
   codexThreadId: string
+  /** The saved thread could not be resumed and the turn ran in a new one (`ProviderMetrics.resumeLost`). */
+  resumeLost?: true
   turnId: string
   /** The model Codex ran (resolves `default`). */
   model: string
@@ -2844,7 +2846,7 @@ export class CodexProviderService {
     conn: CodexConnection,
     input: CodexChatInput,
     signal: AbortSignal
-  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean; botSandbox?: CodexBotSandbox }> {
+  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean; botSandbox?: CodexBotSandbox; resumeLost?: true }> {
     const cwd = resolve(input.cwd)
     const instructionsHash = input.developerInstructions ? historyKey(input.developerInstructions).slice(0, 32) : undefined
     const saved = this.settings.threads?.[input.threadId]
@@ -2956,6 +2958,11 @@ export class CodexProviderService {
       try {
         const resumed = pinnedProvider(this.modelProvider, await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.set(resumed.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
+        // A resume answered with another thread holds none of the conversation: the history goes in the prompt.
+        if (resumed.thread.id !== saved.codexThreadId) {
+          console.warn('[codex] Codex was asked to resume a thread and opened another one', { threadId: input.threadId })
+          return { codexThreadId: resumed.thread.id, model: resumed.model, continued: false, botSandbox, resumeLost: true }
+        }
         return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true, botSandbox }
       } catch (error) {
         signal.throwIfAborted()
@@ -2963,7 +2970,7 @@ export class CodexProviderService {
         if (!(error instanceof CodexRpcError)) throw error
         const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
         this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
-        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
+        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox, resumeLost: true }
       }
     }
     const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
@@ -3266,7 +3273,9 @@ export class CodexProviderService {
           // process lists it, the helpers seen in the items of the thread and its helpers otherwise. Stop interrupts
           // them and ends the wait; a steer that arrives meanwhile starts a turn; helpers silent for
           // too long are abandoned.
-          const treeMode = this.app?.conn === conn && this.app.tree === 'on'
+          // A bot's turn runs with Codex's subagents off (`CODEX_BOT_FEATURES_OFF`): it has no helper tree to wait for, and
+          // its reply is not held for the tree's quiet check (two reads a quarter of a second apart).
+          const treeMode = this.app?.conn === conn && this.app.tree === 'on' && !input.bot
           if ((treeMode || current.helpers.running().length) && !abandoned) {
             pinnedSince ??= Date.now()
             const held = await this.holdChat(current, input, conn, aborted, new Promise<void>((wake) => (steerWake = wake)), pinnedSince)
@@ -3306,7 +3315,8 @@ export class CodexProviderService {
         codexThreadId,
         turnId: lastTurn.id,
         model: thread.model ?? baseId,
-        usage: current.usage()
+        usage: current.usage(),
+        ...(thread.resumeLost ? { resumeLost: true as const } : {})
       }
     } catch (error) {
       handBack()

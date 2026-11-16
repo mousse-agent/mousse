@@ -263,6 +263,12 @@ export interface ProviderMetrics {
    * runtime reports none (Pi, an API key).
    */
   quota?: PlanWindowUse[]
+  /**
+   * The turn was to continue the runtime's saved conversation, and the runtime ran it in a new one instead (Claude Code
+   * answered a resume with another session, Codex's resume gave another thread or failed). What the conversation held
+   * is not in the new one, unless the turn's prompt carried the history.
+   */
+  resumeLost?: true
 }
 
 /** How much of one plan usage window is used (`ProviderMetrics.quota`). */

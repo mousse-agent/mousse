@@ -2813,7 +2813,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.confirmWorkDelivery(row.id, dispatch.n, 'output')
       },
       usage: meter.usage,
-      metrics: meter.metrics,
+      metrics: (metrics) => {
+        meter.metrics(metrics)
+        // The runtime ran this chat turn in a new conversation instead of the epoch's: the next turn starts a new epoch
+        // from the journal, rather than adding to a conversation the runtime no longer holds.
+        if (metrics.resumeLost && row.lane === 'chat') {
+          try { this.host.context?.endChatEpoch?.(row.botId, 'resume_lost') } catch { /* the next turn's checks still run */ }
+        }
+      },
       prompt,
       ...told,
       selection: { ...selection },

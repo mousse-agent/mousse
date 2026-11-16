@@ -11,7 +11,7 @@ import { BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TEXT, BOT_FOLD_LINE_TITLE } from '.
  * thread's conversation, a bot's chat turn after the first of its epoch is not cleared and runs
  * on the thread's history, with the same system text and tool list, so what the runtime already sent stays byte for
  * byte the start of its next request. A failed turn, /clear, a forget, a model change, a full conversation and a cold
- * one past the mid mark each start the next turn from a cleared context. The pack's side is in
+ * one past the mid mark, and a resume the runtime lost each start the next turn from a cleared context. The pack's side is in
  * tests/bots/memory/botChatEpochPack.test.ts.
  */
 
@@ -82,6 +82,10 @@ describe('a bot chat on epochs', () => {
     }],
     ['a full conversation', async (turn: Awaited<ReturnType<typeof chatTurn>>) => {
       turn.prepared.metrics!({ totalResponseTimeMs: 1, context: { input: 2_000, cacheRead: 18_000 + 48_000, cacheWrite: 0, contextWindow: 400_000 } })
+      await finish(f, turn.payload, 'completed', { text: 'OK.' })
+    }],
+    ['a resume the runtime lost (it ran the turn in a new conversation)', async (turn: Awaited<ReturnType<typeof chatTurn>>) => {
+      turn.prepared.metrics!({ totalResponseTimeMs: 1, resumeLost: true })
       await finish(f, turn.payload, 'completed', { text: 'OK.' })
     }],
     ['a cold conversation past the mid mark', async (turn: Awaited<ReturnType<typeof chatTurn>>) => {

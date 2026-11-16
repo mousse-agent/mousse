@@ -27,6 +27,7 @@ import { ACTIVITY_DIFF_CAP_BYTES, diffSides, ACTIVITY_OUTPUT_CAP_BYTES, type Age
 import type { ChatMessage } from '../src/shared/types'
 import type { StreamingLlmToolEvent } from '../src/mms/harness/turnEvents'
 import { CODEX_CAPS } from '../src/mms/harness/drivers/codex'
+import { CODEX_BOT_CHECKED_VERSIONS } from '../src/mms/harness/vendors/codex/childPolicy'
 import { holdControl } from './support/steerHoldControl'
 
 const item = (value: Record<string, unknown>): ThreadItem => value as unknown as ThreadItem
@@ -453,7 +454,7 @@ describe('Codex activity against a scripted app-server', () => {
       })
       return process as unknown as CodexProcess
     }
-    return { launch: launch as (spec: CodexLaunch) => CodexProcess, emit: (value: unknown) => latest?.write(JSON.stringify(value) + '\n') }
+    return { launch: launch as (spec: CodexLaunch) => CodexProcess, emit: (value: unknown) => latest?.write(JSON.stringify(value) + '\n'), messages }
   }
 
   function create(s: ReturnType<typeof server>, dependencies: Record<string, unknown> = {}): CodexProviderService {
@@ -478,6 +479,25 @@ describe('Codex activity against a scripted app-server', () => {
   const interruptReply = (send: (value: unknown) => void, params: Record<string, unknown>) => send(turnDone(params.threadId as string, params.threadId === HELPER ? 'h-turn-1' : 'turn-1', 'interrupted'))
   const completeOf = (events: ProviderToolEvent[], callId: string) => events.find((event) => event.callId === callId && event.phase === 'complete')
   const phases = (events: ProviderToolEvent[], callId: string) => events.filter((event) => event.callId === callId).map((event) => event.phase)
+
+  it.each([
+    ["a person's turn waits for the tree to be quiet", false, true],
+    ["a bot's turn (subagents off) is not held for it", true, false]
+  ] as const)('the process lists helper trees: %s', async (_name, bot, reads) => {
+    const s = server({
+      // A process that lists helper trees, a Codex version a bot's turn runs on, and an owner config with nothing in it.
+      respond: (message) =>
+        message.method === 'thread/list' && (message.params as Record<string, unknown>).parentThreadId ? { error: { code: -32602, message: 'parentThreadId and ancestorThreadId are mutually exclusive' } }
+        : message.method === 'initialize' ? { result: { userAgent: `codex_cli_rs/${CODEX_BOT_CHECKED_VERSIONS[0]}`, codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
+        : message.method === 'config/read' ? { result: { config: { mcp_servers: {}, features: {} }, layers: [] } }
+        : undefined,
+      onTurnStart: (send) => setImmediate(() => send(turnDone(PARENT, 'turn-1')))
+    })
+    await chat(create(s), [], bot ? { bot: { check: () => ({ ok: true }) } as unknown as CodexChatInput['bot'] } : {})
+    // The tree's reads after the turn started are the quiet check's (the listing before it is the probe for tree mode).
+    const methods = s.messages.map((message) => message.method)
+    expect(methods.slice(methods.indexOf('turn/start')).some((method) => method === 'thread/read' || method === 'thread/list')).toBe(reads)
+  })
 
   it('output arrives in order, once: a late chunk and a chunk for a call that never started are dropped', async () => {
     const events: ProviderToolEvent[] = []

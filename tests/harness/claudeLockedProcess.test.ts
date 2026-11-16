@@ -104,6 +104,16 @@ interface LockedRun {
   text: string
 }
 
+/** Whether a process is still running. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 describe('locked Claude Code against the real pinned CLI', () => {
   const cleanups: Array<() => Promise<void> | void> = []
   afterEach(async () => {
@@ -183,6 +193,10 @@ describe('locked Claude Code against the real pinned CLI', () => {
       time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
     })
     const pids: number[] = []
+    // A one-shot turn returns at its result and its process exits behind it: the folders are removed once it has.
+    cleanups.push(async () => {
+      for (const until = Date.now() + 15_000; pids.some(alive) && Date.now() < until; ) await new Promise((resolve) => setTimeout(resolve, 50))
+    })
     const environs: LockedRun['environs'] = []
     const onProcess = (pid: number) => {
       pids.push(pid)
