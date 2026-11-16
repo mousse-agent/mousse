@@ -106,6 +106,16 @@ export function secretMask(name: string): string {
   return `[secret ${name} hidden]`
 }
 
+/** The first sentence of a `secret_request` result that stored or reused a secret: it names it, never the value. */
+export function secretGivenSentence(name: string, kept: string): string {
+  return `The user gave the secret. Mousse keeps it as ${name} (${kept}), out of the chat.`
+}
+
+/** The name a `secret_request` result says the secret is kept under, in its current wording or the one before. */
+export function secretNameInResult(text: string): string | undefined {
+  return /(?:Mousse keeps it as|kept by Mousse as) ([A-Z][A-Z0-9_]{0,63})\b/.exec(text)?.[1]
+}
+
 /** The card's one line on where the value is kept and for how long. */
 export function secretKeepLine(keep: SecretKeep): string {
   switch (keep) {
