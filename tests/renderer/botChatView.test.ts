@@ -2229,3 +2229,23 @@ it('gives an earlier repeated action its calendar day as well as its time', asyn
   expect(warning.textContent).toContain('2020')
   expect(warning.textContent).toContain('Feb')
 })
+
+it.each([
+  ['bot_action_changed', 'The service changed. Ask your bot to prepare this again.', 'open'],
+  ['bot_action_paused', 'Resume this bot before sending.', 'open'],
+  ['bot_action_expired', 'This action has expired and was not sent.', 'expired'],
+  ['bot_action_closed', 'This action can no longer be sent.', 'withdrawn']
+])('shows the service refusal for %s and refreshes the actual row', async (code, text, status) => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: vi.fn(async () => { fake.chats.inbox = [held({ status })]; throw Object.assign(new Error(text), { code }) }) })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain(text)
+  expect(button('Send', card) !== undefined).toBe(status === 'open')
+  expect(button('Not now', card) !== undefined).toBe(status === 'open')
+  const { botsClient } = await import('../../src/renderer/stores/botsStore')
+  const result = await useBotsStore.getState().answerAction('inbox', 'held-1', 'shown-digest', 'send')
+  expect(result).toEqual({ reason: code, text })
+  expect(botsClient().messages).toHaveBeenCalled()
+})
