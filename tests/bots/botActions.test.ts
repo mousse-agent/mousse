@@ -1,3 +1,4 @@
+import { BOT_SCHEDULE_ACT_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -23,7 +24,7 @@ import { botFixture, createBot, finish, flush, start, type BotFixture } from './
 let f: BotFixture
 const connections: McpManager[] = []
 afterEach(async () => { f?.close(); await Promise.all(connections.splice(0).map(m => m.shutdown())) })
-async function setup(on: boolean, realServer = false, secondTool = false, threads = false) {
+async function setup(on: boolean, realServer = false, secondTool = false, threads = false, ownerTools = false) {
   f = botFixture()
   const settings = getDefaultSettings()
   settings.experimental.botAsksFirst = on
@@ -71,6 +72,13 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
     askingThreads.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To help in threads' })
     await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
     await finish(f, askingThreads.payload)
+  }
+  if (ownerTools) for (const tool of ['secrets', 'schedules', 'quick_actions', 'shell']) {
+    const request = await f.bots.activate({ botId, input: `Allow ${tool}`, clientRequestId: `permission-${tool}` })
+    const asking = await start(f, request.id)
+    asking.prepared.authority.escalate!({ permission: { tool }, reason: 'To help with this work' })
+    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+    await finish(f, asking.payload)
   }
   const grant = f.store.activeGrant(botId)!
   const manifest = { ...grant.manifest, mcp: server.tools.map(d => ({ serverId: 'mail', tool: d.toolName, ...(on ? { level: 'asks_first' as const } : {}) })) }
@@ -962,14 +970,13 @@ it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, ca
   const child = await start(f, t.workId, d.n)
   const authorities = [t.work.prepared.authority, child.prepared.authority]
   for (const bot of authorities) for (const name of ['thread_create', 'thread_send', 'thread_archive']) {
-    if (bot === t.work.prepared.authority) expect(botAppToolRefusal(bot, name, {})).toBeUndefined()
-    else expect(botAppToolRefusal(bot, name, {})).toBeTruthy()
+    expect(botAppToolRefusal(bot, name, {})).toBeUndefined()
   }
   if (caller === 'work') await t.call()
   else await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-mail', signal: new AbortController().signal })
   for (const bot of authorities) for (const name of ['thread_create', 'thread_send', 'thread_archive']) {
     const refused = botAppToolRefusal(bot, name, {})
-    if (on || bot === child.prepared.authority) expect(refused).toBeTruthy()
+    if (on) expect(refused).toBeTruthy()
     else expect(refused).toBeUndefined()
   }
   expect(t.calls).toEqual(on ? [] : [t.args])
@@ -1837,4 +1844,41 @@ it.each(['done', 'declined', 'tool_error', 'uncertain'] as const)('R4-1 forgetti
   expect(prompt).not.toContain('private tool answer')
   expect(prompt).not.toContain('Exact text')
   expect(prompt).not.toContain('Your owner removed this request')
+})
+
+
+it.each(['secrets', 'schedules', 'quick_actions'] as const)('R4-3 allowing %s from chat leaves the open card sendable once', async tool => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Allow this permission for my work', clientRequestId: `allow-${tool}-with-card` })
+  const chat = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const asking = await start(f, chat.id)
+  asking.prepared.authority.escalate!({ permission: { tool }, reason: 'To help with this work' })
+  await finish(f, asking.payload, 'completed', { text: 'May I use this permission?' })
+  await f.bots.service.answer(t.botId, f.store.openAsks(t.botId)[0].id, 'allow')
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_settled' })
+  expect(t.calls).toEqual([t.args])
+})
+
+it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, caller }))))('R4-3 new app-tool gates after $caller holds, switch=$on', async ({ on, caller }) => {
+  const t = await setup(on, false, false, true, true)
+  await t.work.prepared.authority.subagents!.start({ title: 'Helper', brief: 'Help with mail', toolCallId: 'helper' })
+  const d = f.store.dispatches(t.workId).find(d => d.kind === 'subagent')!
+  const child = await start(f, t.workId, d.n)
+  const tools = ['secret_request', 'secret_run', 'schedule_list', ...BOT_SCHEDULE_ACT_TOOLS, 'create_quick_action', 'approval_respond']
+  const authorities = [t.work.prepared.authority, child.prepared.authority]
+  const before = authorities.map(bot => tools.map(name => botAppToolRefusal(bot, name, {})))
+  expect(before[0]).toEqual(tools.map(() => undefined))
+  expect(before[1][tools.indexOf('approval_respond')]).toBeUndefined()
+  if (caller === 'work') await t.call()
+  else await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-mail', signal: new AbortController().signal })
+  for (const [i, bot] of authorities.entries()) for (const [j, name] of tools.entries()) {
+    const refused = botAppToolRefusal(bot, name, {})
+    if (on) expect(refused, name).toMatch(i === 0 ? /held for your owner/ : /ended/)
+    else expect(refused, name).toBe(before[i][j])
+  }
+  expect(t.calls).toEqual(on ? [] : [t.args])
 })
