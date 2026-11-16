@@ -31,16 +31,21 @@ function Field({ name, value, literal }: { name: string; value: unknown; literal
     ? <details><summary>Read {actionText(name)}</summary><Value value={value} literal={literal} /></details>
     : <Value value={value} literal={literal} />
 }
-export function actionStatus(card: BotActionCardData): string {
+function outcome(card: BotActionCardData): string {
   switch (card.status) {
     case 'open': return ''
     case 'approved': case 'running': return 'Sending…'
-    case 'done': return `Sent${card.at ? ` · ${botGroupTime(card.at)}` : ''}`
+    case 'done': return 'Sent'
     case 'failed': return card.result?.toolReportedError ? 'The tool reported an error' : 'Not sent'
     case 'uncertain': return "Couldn't tell if it went through"
     case 'expired': return 'Expired · not sent'
     default: return 'Not sent'
   }
+}
+
+export function actionStatus(card: BotActionCardData): string {
+  const status = outcome(card)
+  return status && card.at ? `${status} · ${botGroupTime(card.at)}` : status
 }
 
 export function BotActionCard({ card, botId, botName, messageId }: { card: BotActionCardData; botId: string; botName: string; messageId: string }) {
@@ -59,12 +64,14 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
     } finally { setSending(false) }
   }
   const previous = card.previous
-  return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
-    <p className="bot-action-title">{actionText(card.title)}</p>
-    <p className="bot-action-server">{actionText(card.serverName)}</p>
+  const argumentsView = <>
     <div className="bot-action-arguments" role="region" tabIndex={0} aria-label="Complete arguments"><Value value={card.args} /></div>
     {card.note && <blockquote className="bot-action-note" aria-label="Bot note">{actionText(botName).replace(/\s+/g, " ")} says: <span>{actionText(card.note).replace(/\s+/g, " ")}</span></blockquote>}
-    {card.result && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
+  </>
+  return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
+    <p className="bot-action-title" aria-label="Action summary">{actionText(card.title)} · <span className="bot-action-server">{actionText(card.serverName)}</span></p>
+    {card.status === 'open' ? argumentsView : <details aria-label="Action arguments"><summary>Review arguments</summary>{argumentsView}</details>}
+    {card.result && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
     {actionStatus(card) && <p role="status" className="bot-question-settled" data-find-text data-message-id={messageId} data-part-index="0">{actionStatus(card)}</p>}
     {card.status === 'open' && <>
       {previous && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {botGroupTime(previous.at)}</p>}
