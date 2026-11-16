@@ -2,7 +2,7 @@
 
 A bot that works while its owner is away needs five things that a chat assistant does not: nothing that starts it may be lost, its timers must survive a closed laptop, its memory must stay small and true, it must be able to act without holding keys or acting unasked, and it must not ring at 3 AM. This plan says how personal bots get all five while the bot chat stays what it is: a messenger with bubbles, quick replies and one About panel.
 
-**Status:** design, not built. Written against `origin/master` at `0bfd7f476` (15 Nov 2026), where the line numbers below point, and checked again for substance at `2e8a5b9ca` by an independent review, which this version takes in (see How this was decided). Paths are relative to the repository. Terms are the [glossary](../GLOSSARY.md)'s; how bots work today is in [`docs/bots.md`](../bots.md) and [`docs/bot-memory.md`](../bot-memory.md).
+**Status:** phases 0 and 1 are built and merged (issues #1288 and #1312; see [What phases 0 and 1 built](#what-phases-0-and-1-built) for where they differ from the text below). Phases 2 to 4 are design. Written against `origin/master` at `0bfd7f476` (15 Nov 2026), where the line numbers below point, and checked again for substance at `2e8a5b9ca` by an independent review, which this version takes in (see How this was decided). The line numbers have not been kept up as the code changed: find things by name. Paths are relative to the repository. Terms are the [glossary](../GLOSSARY.md)'s; how bots work today is in [`docs/bots.md`](../bots.md) and [`docs/bot-memory.md`](../bot-memory.md).
 
 ## The request, and the short answer
 
@@ -325,7 +325,7 @@ Said plainly, because a card that seems to cover everything is worse than none.
 
 ## Data model
 
-`bots.db` is at v10 (the unused phase 1 columns are in place). Older builds already refuse a newer one, so each phase that needs a migration starts with one small PR that carries all of it.
+`bots.db` is at v10, and phase 1 now writes its columns. Older builds already refuse a newer one, so each phase that needs a migration starts with one small PR that carries all of it.
 
 | Version | Phase | Change |
 |---|---|---|
@@ -380,6 +380,34 @@ Each phase ships on its own and leaves bots working. The order is: what is unsaf
 - Masked variables for Claude Code commands.
 - Reminders that follow the owner's zone; timers that move with a bot (#778).
 
+## What phases 0 and 1 built
+
+Both phases are on `master`. Each item was one pull request, reviewed on its own, and phase 1 was then checked as a whole. The sections above still describe the design; where the code ended up different, this section is right.
+
+**Phase 0** (issue #1288). Built as planned except:
+
+- **A bot's clean environment** (#1294) keeps variables by family, not by an exact list: Claude Code's own configuration, and the cloud variables of the six routes it can sign in through. Google's and Azure's are narrowed to the exact sign-in names. Exact lists kept missing variables that a sign-in needs.
+- **`work_start`'s stable key** (#1296) is the chat activation plus a digest of the request, since the runtime's tool call id turned out to be random on one route. Starting the same work again after it failed or was stopped gets a new attempt.
+- **Held-back secrets in search** (#1292) are classified in SQL before results are sorted and cut, so a hidden word cannot decide which rows are returned. A hidden word can still weigh on the order of two ordinary results that nearly tie; closing that needs a second search index (open question 8).
+- **The owner's zone and wake from sleep** (#1303) is narrower than planned: "at 9" was already read in the zone the bot is shown, so only a test was added, plus the watchdog that notices a wake from sleep.
+- **A schedule in the skipped hour of a clock change** (#1301) is written and reviewed but not merged. It reverses a behaviour the configuration docs describe as deliberate (a skipped time does not run), so it waits for the owner's decision.
+
+**Phase 1** (issue #1312). Built as planned except:
+
+- **Quiet hours are off until the owner sets them.** An unrequested 22:00 to 08:00 hold was removed before the phase began, and nothing holds a message at night for an owner who never asked.
+- **A person's own automation that ends in quiet hours is not held.** Its banner is shown without sound and is not counted in the morning banner. The runs ledger records when a run ended, not whether it was announced, so a morning count could repeat after a restart; no new stored state was added for it.
+- **An exception to quiet hours changes only when a message is told, never its class.** A message let through (the owner is active, or the bot or automation can wake them) still folds with its neighbours and is under the sound caps.
+- **"Is this bot idle?" is not "nothing waits on the owner".** A bot whose only open thing is a chat question is idle. Code that must not act behind the owner's back checks both; memory tidying does.
+- **Forget and combined memory entries** (#1315, after five review rounds). Forget takes the entry, the entries that absorbed it at any version, and absorbed entries that are still put away. An entry the owner had put back is left alone. Forget follows entries and exact copies; words a bot typed again into another entry are that entry's.
+- **Tidying** (#1330) keeps, among exact copies, the entry of the highest kind (about the owner, then a note, then a run note), then one the owner edited, then the oldest. A later call that names a copy is refused and pointed at the kept entry.
+- **One reply for joined messages** (#1319): a turn that pauses while it holds the first answer keeps it unsent until the owner presses Continue or Stop.
+- **On Pi, a stale file change is refused** (#1323), with two rules the plan did not have: a file read in pages counts as read whole when the pages cover it unchanged from start to end, and a file over 2 MiB is versioned by its metadata. Neither Claude Code nor Codex refuses a stale overwrite; the plan had assumed Claude Code did.
+- **Removing a schedule** withdraws its waiting runs; a run already executing ends with its report at its next wall, with no card (#1318, #1329). The plan had not said what happens to runs of a removed schedule.
+- **Older app windows** on a newer service announce a bot's messages as before, one banner each. An old and a new app attached to one service at once announce a message twice.
+- **Added by the end-of-phase check** (#1333): the markers that stop a schedule's ending line and its fixed line repeating survive "forget history" and go with their schedule; the changelog and the instructions no longer tell a bot there are no quiet hours, or to save "don't ping me at night" as memory.
+
+**Not verified in either phase:** real sleep and wake; process isolation of the sandbox; macOS and Windows; live models and GitHub; how desktop banners look, sound and respond to a click; the phone app and other computers through the bridge.
+
 ## Open questions
 
 1. **Commands where no sandbox holds them** (Pi, Windows, Linux without bubblewrap). A bot with "run commands" there can do anything the owner's account can, in a run nobody is watching too, and no card can hold it. The review behind this version would switch commands off in runs nobody started on those computers. That would end every scheduled bot that runs a script on Windows. Recommended: keep them, since the owner allowed it for that bot and can switch it off for the whole computer; refuse secrets to such a bot; and make the "run commands" ask say, on those computers, that it is the owner's whole account.
@@ -388,6 +416,8 @@ Each phase ships on its own and leaves bots working. The order is: what is unsaf
 4. **The owner's threads stay outside asks first**, as today. A card on every thread a bot starts would undo the hidden quick threads the product just gained. Recommended: leave it, and keep the computer's switch.
 5. **Quiet hours for threads too?** Bots and automations follow them from phase 1. Recommended: threads when asked for.
 6. **How long a card is good for:** 48 hours for work; for a schedule, one gap and at least an hour, which slows a faster schedule to about once an hour while its card waits. Both are constants.
+7. **A fixed line every hour rings in quiet hours.** A schedule's fixed line and a reminder the owner set are told at once, at any hour, because the owner asked for that time. A fixed line set for every hour therefore rings all night, and the way out is to change when it runs. Recommended: keep it; the alternative is that a repeating fixed line waits like other messages and only a one-off reminder rings.
+8. **A search index over masked text.** It would stop a held-back word weighing on the order of two ordinary search results that nearly tie (#1292's review found no case where it changed the order in 36 layouts). It needs every journal row of every bot indexed again. Left out of v11. Recommended: not until there is a case.
 
 ## What this plan leaves out
 
