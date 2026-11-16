@@ -28,13 +28,20 @@ export function maskedActionData(value: unknown, limit = 32_000): unknown {
 export function removeHiddenArguments(result: ToolOutcome, args: unknown, schema: unknown): ToolOutcome {
   const hidden = new Set<string>()
   const collect = (original: unknown): void => {
-    if (typeof original === 'string') { if (original.length >= 4) hidden.add(original); return }
+    if (typeof original === 'string' || typeof original === 'number') {
+      const value = String(original)
+      if (value.length >= 4) {
+        hidden.add(value)
+        if (typeof original === 'string') hidden.add(JSON.stringify(original).slice(1, -1))
+      }
+      return
+    }
     if (Array.isArray(original)) { original.forEach(collect); return }
     if (original && typeof original === 'object') Object.values(original).forEach(collect)
   }
   reviewArguments(args, schema).hiddenValues.forEach(collect)
-  let text = result.text
-  for (const value of [...hidden].sort((a, b) => b.length - a.length)) text = text.split(value).join('[held back: looks like a secret]')
+  const pattern = [...hidden].sort((a, b) => b.length - a.length).map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  const text = pattern ? result.text.replace(new RegExp(pattern, 'g'), () => '[held back: looks like a secret]') : result.text
   return { ...result, text }
 }
 /** The continuation is text. Images are omitted explicitly, never truncated into invalid base64. */
