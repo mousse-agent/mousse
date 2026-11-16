@@ -100,7 +100,7 @@ jobs:
       - name: Install browser test prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends xvfb xauth dbus-x11 unzip libnss3 libgbm1 libgtk-3-0t64 libasound2t64
+          sudo apt-get install --yes --no-install-recommends xvfb xauth dbus-x11 unzip bubblewrap libnss3 libgbm1 libgtk-3-0t64 libasound2t64
           node scripts/check-browser-worker-install.mjs
       - name: Configure Linux browser sandboxes
         run: |
