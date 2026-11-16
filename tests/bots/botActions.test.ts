@@ -1580,3 +1580,17 @@ it.each(['stop', 'complete', 'purge'] as const)('R2-7 action cursors stay out of
   else { const runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n); (runtime.prepared as any).modelOutput?.(); await finish(f, runtime.payload) }
   expect(f.store.all('SELECT key FROM bot_memory_state WHERE key IN (?, ?)', ...keys)).toEqual([])
 })
+
+it.each(['paused', 'expired', 'withdrawn', 'binding'] as const)('R2-8 Send reports its specific %s refusal code and sentence', async reason => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  if (reason === 'paused') f.bots.pauseBot(t.botId)
+  if (reason === 'expired') f.clock.now = Date.parse(a.expires_at) + 1000
+  if (reason === 'withdrawn') await f.bots.stopWork(t.botId, t.workId)
+  if (reason === 'binding') t.server.configDigest = 'changed'
+  const code = reason === 'binding' ? 'bot_action_changed' : `bot_action_${reason}`
+  const sentence = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : reason === 'expired' ? 'This call expired. Nothing was sent.' : reason === 'withdrawn' ? 'This call was withdrawn. Nothing was sent.' : 'This changed since you saw it. Review it again.'
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code, message: sentence })
+  expect(t.calls).toEqual([])
+})
