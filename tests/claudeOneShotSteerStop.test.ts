@@ -1,5 +1,5 @@
 /**
- * Issue #920: a steer into a Claude Code turn that runs as one query, as a person's turn does past the live-process cap.
+ * Issue #920: a steer into a Claude Code turn that runs as one query, as a person's turn does with live queries turned off.
  * The steer interrupts the query and goes in as the prompt of a query that restarts the turn. A Stop must not let that
  * query's process go on to send the steer to the model while Mousse hands it back to be sent again: the process is sent
  * SIGTERM at once, and what it wrote before it died decides whether the steer was read (accepted) or not (handed back).
@@ -46,7 +46,7 @@ async function firstMessage(prompt: AsyncIterable<SDKUserMessage>): Promise<SDKU
 }
 
 /**
- * A person's turn past the live-process cap (no slot, so one query per run of the turn), each query from `scripts`
+ * A person's turn with no live session (live queries turned off, so one query per run of the turn), each query from `scripts`
  * in order. `beforeStart(n)` runs as query `n` is being started, before the turn has it.
  */
 function cappedTurn(scripts: Script[], steersQueued: { text: string; token: string }[], beforeStart?: (index: number) => void, mcp?: { url: string; token: string }) {
@@ -102,7 +102,7 @@ function cappedTurn(scripts: Script[], steersQueued: { text: string; token: stri
     launchConfig: () => ({ binaryPath: binary }),
     query,
     reap,
-    // Every live slot is taken: the turn runs as one query, as a person's turn past the cap does.
+    // No live session is allowed: the turn runs as one query.
     live: { maxSessions: 0 },
     runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
   })

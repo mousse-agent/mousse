@@ -2310,13 +2310,16 @@ export class ClaudeSubscriptionProviderService {
     this.live.clear()
     this.liveCommits.clear()
   }
+  /** Live processes that are idle with no background work: the only ones Mousse closes early. A busy or pinned one never is. */
+  private idleLive(): LiveSession<TurnContext>[] {
+    return [...this.live.values()].filter(
+      (live) => !live.dead && !live.busy && live.pendingRuns === 0 && live.obligations.size === 0 && !this.activeThreads.has(live.threadId)
+    )
+  }
   /** Closes the least recently used idle process with no background work; false when every one is needed. */
   private evictIdleLive(): boolean {
     let victim: LiveSession<TurnContext> | undefined
-    for (const live of this.live.values()) {
-      if (live.dead || live.busy || live.pendingRuns > 0 || live.obligations.size > 0 || this.activeThreads.has(live.threadId)) continue
-      if (!victim || live.lastUsed < victim.lastUsed) victim = live
-    }
+    for (const live of this.idleLive()) if (!victim || live.lastUsed < victim.lastUsed) victim = live
     if (!victim) return false
     victim.close('idle')
     this.live.delete(victim.threadId)
@@ -2340,8 +2343,8 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * The thread's live query for this turn: the open one when it is still the right one, a new one
-   * otherwise, or undefined when the turn has to run as a one-shot query (live queries are at their
-   * cap). The open one switches to the turn's model and effort in place (issue #359), and takes a Mousse credential
+   * otherwise, or undefined when the turn has to run as a one-shot query (live queries are off, or at
+   * a cap set for tests). The open one switches to the turn's model and effort in place (issue #359), and takes a Mousse credential
    * renewed for the same tools in place (#358); one that cannot is replaced. A new one has its MCP servers before it is
    * returned (`launch`). A query that has background work is never replaced silently: a change that needs a new
    * process is refused, naming the change, because it would end that work.
@@ -2424,6 +2427,9 @@ export class ClaudeSubscriptionProviderService {
       this.live.delete(threadId)
     }
     if (this.live.size >= timings.maxSessions && !this.evictIdleLive()) return undefined
+    // No cap on busy or pinned processes; only idle ones past a generous count close early, oldest first.
+    let excess = this.idleLive().length - timings.maxIdleSessions
+    while (excess-- > 0) this.evictIdleLive()
     const created = new LiveSession<TurnContext>(
       threadId,
       {
@@ -2977,7 +2983,7 @@ export class ClaudeSubscriptionProviderService {
     const withTurn = (sessionId: string): SessionTurn[] =>
       [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
     /**
-     * A one-shot query's steers (no live session: a turn past the live-process cap, or a bot's turn, which takes its
+     * A one-shot query's steers (no live session: live queries turned off, or a bot's turn, which takes its
      * owner's notes and its pack after a compaction this way; nobody else steers a bot's thread), collected and waiting
      * to go in as the prompt of the query that restarts the turn. Taken, not accepted: Claude Code has not seen them.
      */
