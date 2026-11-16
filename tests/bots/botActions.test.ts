@@ -304,6 +304,54 @@ it('with asks first off a scheduled call sends directly, writes no card and fini
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(f.store.activation(t.id)?.status).toBe('done')
 })
+it.each([1, 60, 180])('a schedule card lives for one gap with an hour minimum: %s minutes', async minutes => {
+  const t = await scheduledCall(true, minutes)
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  expect(Date.parse(a.expires_at) - f.clock.now).toBe(Math.max(60, minutes) * 60_000)
+  f.clock.now = Date.parse(a.expires_at)
+  await f.bots.actions.reconcile()
+  await flush()
+  const next = await start(f, t.id, 2)
+  expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('This call expired')
+  await finish(f, next.payload, 'completed', { text: 'Nothing sent.' })
+  f.clock.now += minutes * 60_000
+  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toHaveLength(1)
+})
+it('editing a schedule refuses Send without sending its old call', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { prompt: 'A different email' })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow(/changed/)
+  expect(t.calls).toEqual([])
+})
+it('removing a parked schedule withdraws its card in the ending transaction', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
+  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(f.store.activation(t.id)?.status).toBe('cancelled')
+})
+it('Not now refuses the identical call in the next occurrence until the owner writes', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  await flush()
+  const next = await start(f, t.id, 2)
+  await finish(f, next.payload)
+  f.clock.now += 5 * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const run = await start(f, due.inserted[0]!)
+  const outcome = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'new-occurrence', signal: new AbortController().signal })
+  expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Do not ask again') })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+})
 it('a subagent holds its call on its work and uses its own dispatch in the call key', async () => {
   const t = await setup(true)
   await t.work.prepared.authority.subagents!.start({ title: 'Sender', brief: 'Send mail', toolCallId: 'start-sender' })
