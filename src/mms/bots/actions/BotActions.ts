@@ -34,7 +34,8 @@ interface Host {
   execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>): Promise<ToolOutcome>
 }
 const pending = new Set(['open', 'approved', 'running'])
-const changed = () => new Error('This changed since you saw it. Redraw the action.')
+export class BotActionChanged extends Error {}
+const changed = () => new BotActionChanged('This changed since you saw it. Redraw the action.')
 export class BotActions {
   constructor(private readonly host: Host) {}
   get(id: string): ActionRow | undefined { return this.host.store.get('SELECT * FROM bot_actions WHERE id = ?', id) as unknown as ActionRow | undefined }
@@ -108,7 +109,7 @@ export class BotActions {
     try {
       const result = await this.host.execute(row, JSON.parse(action.target_json), JSON.parse(action.exec_args))
       // A transport failure can have happened after the server acted. Never promise that retrying is safe.
-      this.transition(id, 'running', result.isError ? 'uncertain' : 'done', result)
+      this.transition(id, 'running', result.isError ? 'uncertain' : 'done', result.isError ? { ...result, text: `It could not be confirmed whether this went through: check before trying again.\n${result.text}` } : result)
     } catch {
       this.transition(id, 'running', 'uncertain', { text: 'It could not be confirmed whether this went through: check before trying again.' })
     }

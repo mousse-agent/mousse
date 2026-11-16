@@ -610,7 +610,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const revision = this.store.get('SELECT grant_id FROM bot_grants WHERE bot_id = ? AND revoked_at IS NULL ORDER BY grant_id DESC LIMIT 1', row.botId)?.grant_id
       return { ...server, grantRevision: revision, grantDigest: actionDigest(grant.manifest), deviceLimit: limit }
     },
-    post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
+    post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
     settled: (row) => { this.chat.republish(this.actions.forWork(row.id)!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
     execute: async (row, target, args) => {
       const mcp = this.host.mcp
@@ -3170,6 +3170,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     counters: CounterScope
     spend: SpendScope | null
     contexts: Array<{ key: string; title: string }>
+    callDispatchId?: string
     dispatchId: string
     /** What the turn's activation was allowed when the turn started (before a chat turn's front-desk narrowing). */
     startedWith: BotManifest
@@ -3298,12 +3299,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           const pair = this.store.activeGrant(row.botId)?.manifest.mcp.find(p => p.serverId === tool.server && p.tool === tool.tool)
           if (pair?.level !== 'asks_first') return undefined
           if (row.trigger.kind !== 'work') return { text: 'This tool needs your owner to approve each call. A scheduled run cannot wait for that yet; carry on without it.', isError: true }
-          const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.dispatchId, toolCallId]))
+          const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]))
           if (!existing) {
             const allowed = base.check({ kind: 'mcp', server: tool.server, tool: tool.tool, args })
             if (!allowed.ok) return { text: checkMessage(allowed), isError: true }
           }
-          const outcome = this.actions.hold(row, input.dispatchId, tool, args, toolCallId)
+          const outcome = this.actions.hold(row, input.callDispatchId ?? input.dispatchId, tool, args, toolCallId)
           if (!outcome.isError) { this.askedIn.set(row.id, input.mainN); this.releaseParked(this.store.activation(row.id) ?? row, 'approval') }
           return outcome
         }
@@ -5425,10 +5426,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.status !== 'paused' && row.status !== 'blocked') throw new BotEngineError('bot_not_paused', 'Only a paused or blocked activation can be continued.')
     // Work that waits to go on goes on by its own way: its ask's answer, or the usage limit's reset (or Resume).
     if (workWaits(row)) {
-      if (workWaitRule(row) === WORK_WAIT_RULES.approval) {
-        if (main?.endedAt) { this.askedIn.delete(row.id); this.releaseParked(row, 'approval') }
-        return
-      }
       throw new BotEngineError('bot_work_waiting', workWaitRule(row)!.continueRefusal(row))
     }
     if (!row.threadId || !this.store.lastMainDispatch(row.id)) throw new BotEngineError('bot_not_started', 'This activation never started; run the bot again.')
@@ -6006,7 +6003,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       row, mainN: main.n, role: 'subagent', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
       // Its calls are chips of the work's message.
-      dispatchId: main.dispatchId,
+      dispatchId: main.dispatchId, callDispatchId: dispatch.clientRequestId,
       mcpTools: this.offeredMcp(compiled.permissions.mcp)
     })
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, main.controller.signal) : undefined

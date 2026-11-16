@@ -1,3 +1,4 @@
+import { BotActionChanged } from '../actions/BotActions'
 import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -401,7 +402,10 @@ export class BotChatService {
   async answerAction(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId?: string }): Promise<{ status: string }> {
     const action = this.engine.actions.get(input.actionId)
     if (input.botId && action?.bot_id !== input.botId) throw new BotEngineError('not_found', 'No held action here.')
-    return this.engine.actions.answer(input)
+    try { return await this.engine.actions.answer(input) } catch (error) {
+      if (error instanceof BotActionChanged) throw new BotEngineError('bot_action_changed', error.message)
+      throw error
+    }
   }
 
   async answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }> {

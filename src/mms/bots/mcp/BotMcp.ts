@@ -353,6 +353,7 @@ export class BotMcp implements BotMcpHost {
       installationId: installationOf(tool.server), toolName: tool.tool, configRevision: descriptor.configRevision,
       schemaDigest: shortHash(canonicalJson(descriptor.inputSchema ?? {}), 64), assertExecutionActive: options.assertExecutionActive
     } : undefined
+    if (options.heldAction && !pin) return { text: 'This tool has no installed revision to bind the approved call to. Nothing was sent.', isError: true }
     const callMs = this.deps.callMs ?? BOT_MCP_CALL_MS
     // The manager times the call out itself; this timer is the floor under it, so nothing a server does holds the run.
     const timeout = new AbortController()
