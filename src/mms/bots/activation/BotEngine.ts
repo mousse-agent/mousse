@@ -2136,7 +2136,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** The only transition that parks work and releases its run slot; called in the source's transaction. */
   private park(row: BotActivationRow, reason: WorkWaitReason, from: readonly BotActivationRow['status'][] = [row.status], marker: string = reason): boolean {
-    if (!WORK_WAIT_RULES[reason].allows(row)) return false
+    if (!WORK_WAIT_RULES[reason].allows(row)) throw new Error(`Cannot park ${row.id} (${row.lane}/${row.trigger.kind}) for ${reason}`)
     return this.store.moveActivation(row.id, from, 'blocked', { endReason: marker })
   }
 
@@ -4690,7 +4690,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // The chat turn asked (`escalate`): it waits for the owner with every card on its message.
           this.store.moveActivation(row.id, ['running'], 'waiting_grant', { endReason: 'wall', ...(text !== undefined ? { result: text } : {}) })
         } else if (question) {
-          this.park(row, 'question', ['running'], question.status === 'open' ? 'question' : 'question_answered')
+          if (!this.park(row, 'question', ['running'], question.status === 'open' ? 'question' : 'question_answered')) return undefined
         } else if (forgotten) {
           this.endWaitingInTx(row, 'question_gone', questionGoneText(this.workTitle(row)), ['running'])
         } else if (noted) {
@@ -5118,8 +5118,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // more room or the internet back): it waits for the answer instead, holding no run slot.
       const question = current.lane === 'run' && !input.usageRetry ? this.store.workQuestion(row.id) : undefined
       if (question?.status === 'open') {
-        this.park(current, 'question')
-        return { kind: 'question' }
+        return { kind: this.park(current, 'question') ? 'question' : 'none' }
       }
       // Its question was forgotten before it carried on with the answer: it has nothing to go on with, and ends saying so.
       if (current.lane === 'run' && !input.usageRetry && this.store.forgottenWorkQuestion(row.id)) {
@@ -5145,7 +5144,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // Work that waited for room and still has none (its grant narrowed meanwhile) waits for the next answer; work
         // that waited for a usage limit's reset with no time left ends at its limit with its ask.
         if (input.moreRoom) {
-          this.park(current, 'budget_exhausted')
+          const parked = this.park(current, 'budget_exhausted')
+          if (!parked) return { kind: 'none' }
           return { kind: 'none' }
         }
         // Work answered with no time left ends at its limit with its ask, as above; the answer waits, unread, for the
