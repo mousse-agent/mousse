@@ -291,7 +291,7 @@ export class BotActions {
   transition(id: string, from: string, to: string, result?: BotMcpCallOutcome): boolean {
     return this.host.store.db.transaction(() => {
       const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
-        result_json = ?, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
+        result_json = CASE WHEN args_json = '"[forgotten]"' THEN '{"text":"[forgotten]"}' ELSE ? END, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
         ran_at = CASE WHEN ? IN ('running', 'done') THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
       to, pending.has(to) ? 1 : 0, result ? JSON.stringify(boundedActionResult(result)) : null,
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
@@ -303,7 +303,7 @@ export class BotActions {
       if (moved && !pending.has(to)) {
         const action = this.get(id)!
         const row = this.host.store.activation(action.activation_id)
-        this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
+        if (action.args_json !== '"[forgotten]"') this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
         if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
         this.host.store.db.afterCommit(() => this.host.publish(action.message_id))
       }
