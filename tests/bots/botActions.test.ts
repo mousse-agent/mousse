@@ -2105,3 +2105,55 @@ it('C4 integration nudge ids project the same stored review and follow settlemen
   f.host.settings!.get().experimental.botAsksFirst = false
   for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toBeUndefined()
 })
+
+it.each(['done', 'tool_error'] as const)('C4 integration actual forget removes %s from repeat lookup', async outcome => {
+  const t = await setup(true)
+  if (outcome === 'tool_error') vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ isError: true, content: [{ type: 'text', text: 'old answer' }] } as never)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'settled card' })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  const work = await start(f, t.workId, 2)
+  await callForBot({ bot: work.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'same-after-forget', signal: new AbortController().signal })
+  const next = f.bots.actions.forWork(t.workId)!
+  expect(next.args_digest).not.toBe('[forgotten]')
+  expect(f.bots.service.actionMessage(t.botId, next.id).action?.previous).toBeUndefined()
+  const reads = vi.spyOn(f.store, 'all')
+  f.bots.service.actionMessage(t.botId, a.id)
+  expect(reads.mock.calls.filter(([sql]) => sql.includes('args_digest'))).toHaveLength(0)
+})
+
+const c4Refusals = [
+  ['changed', 'This changed since you saw it. Check it again before sending.'],
+  ['paused', ''], ['expired', 'This expired, so nothing was sent.'],
+  ['withdrawn', 'No longer needed, so nothing was sent.'], ['settled', 'This was already answered.'],
+  ['gone', "This can't be sent any more."], ['unreachable', "Mail couldn't be reached, so nothing was sent."]
+] as const
+it.each(c4Refusals)('C4 integration protocol preserves the exact %s refusal and projected row status', async (reason, storedSentence) => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const params = { actionId: a.id, digest: a.args_digest, answer: 'send' }
+  if (reason === 'changed') params.digest = 'stale'
+  if (reason === 'paused') f.bots.pauseBot(t.botId)
+  if (reason === 'expired') f.clock.now = Date.parse(a.expires_at) + 1000
+  if (reason === 'withdrawn') await f.bots.stopWork(t.botId, t.workId)
+  if (reason === 'settled') await f.bots.service.answerAction({ ...params, answer: 'not_now' })
+  if (reason === 'gone') f.store.run('DELETE FROM bot_actions WHERE id = ?', a.id)
+  if (reason === 'unreachable') {
+    vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+    await f.bots.service.answerAction({ ...params, answer: 'send' })
+    f.clock.now += 11 * 60_000; await f.bots.deliverDueReminders(); await flush()
+  }
+  const domains = new DomainHandlerRegistry()
+  registerPersonalBotMethods(domains, () => f.bots.service)
+  const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as never
+  const text = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : storedSentence
+  await expect(domains.dispatch(context, 'bots.actions.answer', params)).rejects.toMatchObject({ code: `bot_action_${reason}`, message: text })
+  const projected = f.bots.service.chatList(t.botId).messages.find(message => message.id === a.message_id)?.action
+  if (reason === 'gone') expect(projected).toBeUndefined()
+  else expect(projected?.status === 'open').toBe(['changed', 'paused'].includes(reason))
+  expect(t.calls).toEqual([])
+})
