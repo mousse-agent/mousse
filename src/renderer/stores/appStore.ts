@@ -342,6 +342,9 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
+  /** The project last picked for a new thread here (none: no project), so New thread opens in it again. */
+  lastNewThreadProjectId: string | null
+  setLastNewThreadProjectId: (projectId: string | null) => void
   /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
   privateThreadExpiry: ExpiryPreset | 'never'
   /** Where a new thread in a project with no remembered checkout starts (`runs.newThreadWorktree`). */
@@ -602,7 +605,7 @@ const personalWorkspaceKeys = [
   'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'lastThreadListView', 'threadFeedOrder',
-  'reviewIgnoreWhitespace', 'queueEditDrafts'
+  'reviewIgnoreWhitespace', 'queueEditDrafts', 'lastNewThreadProjectId'
 ] as const
 let profileActivated = false
 
@@ -754,6 +757,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   threadFeedOrder: [],
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   composerWorkspaceDrafts: {},
+  lastNewThreadProjectId: null,
+  setLastNewThreadProjectId: (lastNewThreadProjectId) => set({ lastNewThreadProjectId }),
   privateThreadExpiry: 'never',
   newThreadWorktree: true,
   setRunDefaults: ({ privateThreadExpiry, newThreadWorktree }) => set({ privateThreadExpiry, newThreadWorktree }),
@@ -1139,6 +1144,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       lastThreadListView: 'projects' as ThreadListTab,
       threadFeedOrder: [] as string[],
       composerWorkspaceDrafts: {},
+      lastNewThreadProjectId: null as string | null,
       composerDrafts: {},
       composerReferences: {},
       queueEditDrafts: {} as Record<string, QueueEditDraft>,
@@ -1158,6 +1164,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
         const raw = window.localStorage.getItem(`mousse-profile-${profileId}-workspace`)
         if (raw) next = sanitizeSavedWorkspace({ ...next, ...JSON.parse(raw) })
         if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
+        if (typeof next.lastNewThreadProjectId !== 'string') next.lastNewThreadProjectId = null
         next.queueEditDrafts = queueEditDraftsFromStorage(next.queueEditDrafts)
       } catch { /* malformed profile-local state is discarded */ }
     }
