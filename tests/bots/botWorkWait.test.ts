@@ -76,7 +76,7 @@ it('refuses a second wait, chat waits and times outside five minutes to a week',
   await f.bots.service.workStop(botId, workId)
   expect(f.store.workWait(workId)?.status).toBe('cancelled')
 })
-it.each(['stop', 'pause', 'delete', 'finish', 'fail'] as const)('%s leaves no open work timer', async action => {
+it.each(['stop', 'delete', 'finish', 'fail'] as const)('%s leaves no open work timer', async action => {
   const { workId, turn } = await work()
   const set = await wait(workId)
   if (action === 'finish' || action === 'fail') {
@@ -85,7 +85,6 @@ it.each(['stop', 'pause', 'delete', 'finish', 'fail'] as const)('%s leaves no op
   } else {
     await finish(f, turn.payload, 'completed', { text: '' })
     if (action === 'stop') await f.bots.service.workStop(botId, workId)
-    if (action === 'pause') f.bots.pauseBot(botId)
     if (action === 'delete') await f.bots.service.delete(botId)
   }
   expect(f.store.reminder(set.wakeId)?.status).toBe('cancelled')
@@ -162,4 +161,19 @@ it.each(['event already happened', 'turn still running', 'permission wall', 'unk
   expect(f.store.dispatches(workId)).toHaveLength(2)
   await f.bots.deliverDueReminders()
   expect(f.store.dispatches(workId)).toHaveLength(2)
+})
+
+it('Pause preserves a wait and treats its due work like an answered question', async () => {
+  const { workId, turn } = await work()
+  const set = await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.bots.pauseBot(botId)
+  expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'waiting' })
+  expect(f.store.reminder(set.wakeId)?.status).toBe('waiting')
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  expect(f.store.reminder(set.wakeId)?.status).toBe('delivered')
+  expect(f.store.dispatches(workId)).toHaveLength(2)
+  expect(f.store.registry(botId)?.pausedReason).toBe('owner')
 })
