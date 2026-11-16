@@ -454,3 +454,10 @@ it.each([{ password: 'hunter2' }, { token: 'ordinary-secret' }, { body: `sk-proj
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(t.calls).toEqual([])
 })
+it('S2 refuses arguments that would be cut from the review', async () => {
+  const t = await setup(true)
+  t.args.body = 'x'.repeat(32_001)
+  expect(await t.call()).toMatchObject({ isError: true, text: expect.stringMatching(/long|cut/i) })
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(t.calls).toEqual([])
+})
