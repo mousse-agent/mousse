@@ -3440,10 +3440,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
       refuseOtherComputersJob(id)
-      const watched = ctx.mms.scheduled.getJob(id)?.trigger?.threadEvent?.threadId
-      const ok = ctx.mms.scheduled.deleteJob(id)
-      // The pull request's watch stops with the last automation that needed it, unless it is a Notify watch.
-      if (ok && watched) ctx.mms.syncThreadEventWatch(watched)
+      const ok = ctx.mms.deleteScheduledJob(id)
       return { ok, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.pause': {
