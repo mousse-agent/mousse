@@ -7946,7 +7946,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (due > this.now() + MAX_EVENT_WAKE_HOURS * HOUR_MS) throw new BotEngineError('invalid_params', `A wake-up is at most ${MAX_EVENT_WAKE_HOURS / 24} days ahead. For later, use remind or a schedule.`)
       dueAt = new Date(Math.max(due, this.now())).toISOString()
     }
-    this.refuseWakeLoop(botId, brief, event)
+    this.refuseWakeLoop(botId, brief, event, workWait ? from : undefined)
     const wakeId = `rem_${randomUUID()}`
     this.store.db.transaction(() => {
       if (workWait && (this.store.activation(from)?.status !== 'running' || this.store.workWait(from)?.status === 'waiting')) throw new BotEngineError('invalid_params', 'This work already waits or has ended. End your turn.')
@@ -7976,13 +7976,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Loop detection, the one limit on wakes: since the owner last wrote, the bot has set this same wake (the same brief,
-   * waiting on the same thing: `wakeLoopKey`) `MAX_SAME_WAKES` times already, so one more is a loop with no progress.
+   * Loop detection, the one limit on wakes: since the owner last wrote, the bot's chat (or, for a work wait, that piece of
+   * work: `workId`) has set this same wake (the same brief, waiting on the same thing: `wakeLoopKey`) `MAX_SAME_WAKES`
+   * times already, so one more is a loop with no progress. Separate pieces of work never count against each other.
    * Cancelled ones count, so cancelling and setting it again is no way round it. Throws, in words for the bot.
    */
-  private refuseWakeLoop(botId: string, brief: string, event: BotWakeEvent | null): void {
+  private refuseWakeLoop(botId: string, brief: string, event: BotWakeEvent | null, workId?: string): void {
     const key = wakeLoopKey(brief, event)
-    const same = this.store.wakesSetSince(botId, this.store.ownerLastWroteAt(botId)).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
+    const same = this.store.wakesSetSince(botId, this.store.ownerLastWroteAt(botId), workId).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
     if (same >= MAX_SAME_WAKES)
       throw new BotEngineError('wake_loop', `You have set this same wake-up ${same} times since your owner last wrote, with nothing new in it: that is a loop. Don't set it again: tell your owner where things stand and what you are waiting on, and carry on when they write. If something did change, say what in the brief.`)
   }

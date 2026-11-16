@@ -858,7 +858,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
     if (args.mode !== undefined && args.firstMessage === undefined) throw new Error('mode is the mode of firstMessage: give a firstMessage, or leave mode out.')
     if (args.hidden !== undefined) throw new Error('hidden is for personal bots: a thread an agent starts always shows in the sidebar.')
-    const notify = notifyArg(args, ctx)
+    const notify = notifyArg(args)
     if (notify && args.firstMessage === undefined) throw new Error('notify tells you when the work of firstMessage settles: give a firstMessage, or leave notify out.')
     if (notify && !host.watchSettle) return notAvailable('thread_create with notify')
     const actor = actorOf(ctx)
@@ -964,7 +964,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
     if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
     const mode = (args.mode as 'agent' | 'plan' | undefined) ?? 'agent'
-    const notify = notifyArg(args, ctx)
+    const notify = notifyArg(args)
     if (notify && !host.watchSettle) return notAvailable('thread_send with notify')
     if (mode === 'agent' && ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only send plan turns.')
     if (args.content.length > ROUTED_AGENT_BODY_MAX)

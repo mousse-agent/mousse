@@ -1980,9 +1980,12 @@ export class BotStore {
     return str(this.get("SELECT MAX(at) AS at FROM bot_messages WHERE bot_id = ? AND author = 'owner'", botId)?.at) ?? ''
   }
 
-  /** The wakes a bot set at or after `since`, cancelled ones too, with their briefs and events (loop detection). */
-  wakesSetSince(botId: string, since: string): Array<Pick<BotReminderRow, 'text' | 'event'>> {
-    return this.all('SELECT * FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at >= ?', botId, since).map(reminderOf).map(({ text, event }) => ({ text, event }))
+  /**
+   * The wakes a bot set at or after `since`, cancelled ones too, with their briefs and events (loop detection): its chat's
+   * own (`workId` undefined), or the waits of one piece of work.
+   */
+  wakesSetSince(botId: string, since: string, workId?: string): Array<Pick<BotReminderRow, 'text' | 'event'>> {
+    return this.all('SELECT * FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at >= ? AND work_id IS ?', botId, since, workId ?? null).map(reminderOf).map(({ text, event }) => ({ text, event }))
   }
 
   /**

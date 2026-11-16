@@ -65,11 +65,11 @@ it.each(['10m', '1h', 'tomorrow'] as const)('snoozes %s once without a turn, the
   expect(chatOf(f, botId).find(m => m.id === `bm_${rows[0]!.id}`)?.reminder).toMatchObject({ expiresAt: expect.any(String) })
 })
 
-it('refuses the cap and leaves the original available', async () => {
+it('has no cap: snoozes with 50 reminders already waiting', async () => {
   const { bubble } = await said()
   for (let i = 0; i < 50; i++) f.store.insertReminder({ id: `r${i}`, botId, dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Tea', work: null, replyTo: null, createdAt: f.store.now() })
-  expect(() => f.bots.service.reminderSnooze(botId, bubble.id, '10m')).toThrow('Cancel one first')
-  expect(chatOf(f, botId).find(m => m.id === bubble.id)?.reminder).toMatchObject({ expiresAt: expect.any(String) })
+  f.bots.service.reminderSnooze(botId, bubble.id, '10m')
+  expect(f.store.waitingReminders(botId)).toHaveLength(51)
 })
 
 it('Forget cancels a snoozed copy of the forgotten request', async () => {
