@@ -39,7 +39,7 @@ describe('bots.db v9 → v10', () => {
   it('preserves every old field, defaults new columns, and leaves a second open unchanged', () => {
     const before = buildV9()
     store = new BotStore({ profileHome: profile })
-    expect(store.db.userVersion()).toBe(10)
+    expect(store.db.userVersion()).toBe(11)
     for (const table of tables) {
       const rows = store.all(`SELECT * FROM ${table}`)
       expect(rows).toHaveLength(1)
@@ -52,11 +52,11 @@ describe('bots.db v9 → v10', () => {
     expect(store.message('m')).toMatchObject({ tell: null, tellAt: null, toldAt: null, ownerReaction: { emoji: '❤️', at: T } })
     expect(store.registry('b')).toMatchObject({ tellJson: null })
     const rows = tables.map((table) => store!.all(`SELECT * FROM ${table}`))
-    const copy = readFileSync(join(profile, 'bots', 'bots.db.pre-v10'))
+    const copy = readFileSync(join(profile, 'bots', 'bots.db.pre-v11'))
     store.close()
     store = new BotStore({ profileHome: profile })
     expect(tables.map((table) => store!.all(`SELECT * FROM ${table}`))).toEqual(rows)
-    expect(readFileSync(join(profile, 'bots', 'bots.db.pre-v10'))).toEqual(copy)
+    expect(readFileSync(join(profile, 'bots', 'bots.db.pre-v11'))).toEqual(copy)
   })
 
   it('backs up v9 before altering it and keeps only the newest two copies', () => {
@@ -65,7 +65,7 @@ describe('bots.db v9 → v10', () => {
     writeFileSync(join(dir, 'bots.db.pre-v8'), 'old')
     writeFileSync(join(dir, 'bots.db.pre-v9'), 'previous')
     store = new BotStore({ profileHome: profile })
-    const copy = new DatabaseSync(join(dir, 'bots.db.pre-v10'), { readOnly: true })
+    const copy = new DatabaseSync(join(dir, 'bots.db.pre-v11'), { readOnly: true })
     try {
       expect(copy.prepare('PRAGMA user_version').get()).toEqual({ user_version: 9 })
       for (const table of tables) expect(copy.prepare(`SELECT * FROM ${table}`).all()).toEqual(before[table])
@@ -78,12 +78,12 @@ describe('bots.db v9 → v10', () => {
   it('refuses a newer database with the existing code and words', () => {
     buildV9()
     const db = new DatabaseSync(join(profile, 'bots', 'bots.db'))
-    db.exec('PRAGMA user_version = 11')
+    db.exec('PRAGMA user_version = 12')
     db.close()
     expect(() => new BotStore({ profileHome: profile })).toThrowError(expect.objectContaining({
-      code: 'downgrade_unsupported', message: 'Profile database schema 11 is newer than this build (10).'
+      code: 'downgrade_unsupported', message: 'Profile database schema 12 is newer than this build (11).'
     }))
-    expect(existsSync(join(profile, 'bots', 'bots.db.pre-v10'))).toBe(false)
+    expect(existsSync(join(profile, 'bots', 'bots.db.pre-v11'))).toBe(false)
   })
 
   it('reads reserved fields but existing writers leave them at their defaults', () => {
