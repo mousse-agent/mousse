@@ -7562,6 +7562,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const unreadDefault = question.status === 'defaulted' && question.readAt === null && !question.answer?.late
     if (question.status !== 'open' && !unreadDefault) return false
     if (!this.store.answerQuestion(questionId, answer, messageId, [question.status])) return false
+    if (answer.by !== 'default') this.resetWorkWaitChain(question.activationId)
     this.store.wakeWork(question.activationId)
     return true
   }
@@ -7576,6 +7577,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const question = this.store.question(questionId)
     if (!question || question.lane !== 'run' || question.status !== 'defaulted' || question.readAt === null || question.answer?.late) return false
     if (!this.store.lateAnswer(questionId, late, messageId)) return false
+    this.resetWorkWaitChain(question.activationId)
     this.store.addWorkNote(question.activationId, question.botId, lateWorkNote((late.choice ?? late.text ?? '').slice(0, MAX_WORK_NOTE_CHARS)), messageId)
     return true
   }
@@ -7765,6 +7767,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Only work that will take it: waiting, running, or waiting to go on. Other paused or blocked work may never continue.
       if (!['queued', 'running', 'waiting_grant'].includes(current.status) && !workWaits(current)) return 'held' as const
       // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
+      if (from && this.store.activation(from) && ownerChatTurn(this.store.activation(from)!)) this.resetWorkWaitChain(workId)
       this.store.addWorkNote(workId, botId, text, from ? this.ownerMessageOf(from) : undefined)
       return 'noted' as const
     })
@@ -7931,10 +7934,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * a chat turn only, at most `MAX_WAKE_CHAIN` in a row with no owner's message between them, `MAX_WAKES_PER_DAY` in any
    * 24 hours, and the waiting reminders' cap. Throws, in words for the bot, when not.
    */
+  private resetWorkWaitChain(workId: string): void {
+    const last = this.store.workWait(workId)
+    if (last) this.store.run('UPDATE bot_reminders SET chain = 0 WHERE id = ?', last.id)
+  }
+
   private wakeAllowance(botId: string, from: string, workWait = false): number {
     const setting = this.store.activation(from)
     if (!setting || setting.botId !== botId || (setting.lane !== 'chat' && !workWait)) throw new BotEngineError('invalid_params', 'Only your chat sets wake-ups.')
-    const chain = workWait ? Math.max(this.unownedChainOf(setting), this.store.workWait(from)?.chain ?? 0) + 1 : this.wakeChainOf(setting) + 1
+    const chain = workWait ? (this.store.workWait(from)?.chain ?? this.unownedChainOf(setting)) + 1 : this.wakeChainOf(setting) + 1
     if (chain > MAX_WAKE_CHAIN)
       throw new BotEngineError('wake_chain', `You have already followed up ${MAX_WAKE_CHAIN} times in a row without your owner. Don't set another: tell your owner where things stand, and carry on when they write.`)
     if (this.store.wakesSince(botId, new Date(this.now() - 24 * HOUR_MS).toISOString()) >= MAX_WAKES_PER_DAY)
