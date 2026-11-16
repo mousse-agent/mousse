@@ -91,6 +91,12 @@ export class SecretVault {
   private readonly known = new Map<string, Array<{ name: string; value: string }>>()
   /** Values removed or changed while a thread's turn ran: they mask it, and its running subagents, until each settles. */
   private readonly retired = new Map<string, RetiredSecrets>()
+  /**
+   * The threads whose agents may have readable copies: those whose turns run on a runtime that hides secrets in its own
+   * tools' results before it keeps them (Claude Code). Other runtimes keep those results as they are, so their threads
+   * get no copy and use secret_run. Kept in memory: after a restart no thread has copies until its next turn starts.
+   */
+  private readonly copyThreads = new Set<string>()
   private readonly values: ReturnType<typeof createProfileSecretAdapter>
 
   constructor(private readonly options: SecretVaultOptions) {
@@ -158,6 +164,18 @@ export class SecretVault {
   usableIn(name: string, threadId: string): boolean {
     if (!this.has(name)) return false
     return this.readMeta()[name]?.threads.includes(threadId) ?? false
+  }
+
+  /**
+   * Whether the thread's agents may have readable copies, as each of its turns starts: yes on a runtime that hides
+   * secrets in its own tools' results, no on any other, whose turn then starts with the copies already removed.
+   */
+  allowCopies(threadId: string, allowed: boolean): void {
+    const had = this.copyThreads.has(threadId)
+    if (allowed) this.copyThreads.add(threadId)
+    else this.copyThreads.delete(threadId)
+    // Removing is checked every time: a copy left by an earlier daemon is gone before the turn runs.
+    if (!allowed || !had) this.syncFiles()
   }
 
   /** The private file that holds the secret for the thread's agents to read; undefined when the thread may not use it. */
@@ -348,7 +366,7 @@ export class SecretVault {
     try {
       const wanted = new Map<string, Map<string, string>>()
       for (const [name, entry] of Object.entries(this.readMeta())) {
-        const threads = entry.threads.filter((threadId) => FOLDER_ID.test(threadId) && this.options.threadAlive(threadId))
+        const threads = entry.threads.filter((threadId) => FOLDER_ID.test(threadId) && this.copyThreads.has(threadId) && this.options.threadAlive(threadId))
         const value = threads.length ? this.value(name) : undefined
         if (!value) continue
         for (const threadId of threads) {

@@ -2,7 +2,7 @@
 // else. The thread's messages (as windows get them and as they are saved), the agent's tool results, the protocol's
 // replies and events, and anything written to the console or to a file under the profile hold only its name. The one
 // place besides the store that holds it is the thread's private copy, which the agent is told to read and use.
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -19,7 +19,7 @@ import { registerSecretMethods } from '../../src/mms/secrets/registerMethods'
 import { SecretRequests } from '../../src/mms/secrets/SecretRequests'
 import { SecretVault } from '../../src/mms/secrets/SecretVault'
 import { createSecretToolHost } from '../../src/mms/secrets/secretToolHost'
-import { createOrchestrator, phase6Daemon, piAdapter, waitFor, type Phase6Daemon, type ScriptedAdapter } from '../run/phase6Fixture'
+import { CLAUDE, PI, claudeAdapter, createOrchestrator, phase6Daemon, piAdapter, waitFor, type Phase6Daemon, type ScriptedAdapter } from '../run/phase6Fixture'
 
 const VALUE = 'hf_Secr3tValue-that-must-never-leak'
 
@@ -71,7 +71,7 @@ describe('a secret given through the card', () => {
       store.saveThreadData(threadId, { messages: orch.liveMessagesForSave(threadId) as never, agents: existing.agents, tasks: existing.tasks, llmContext: orch.getNativeContext(threadId) })
     })
     const host = createSecretToolHost({ vault, requests, scratchRoot: join(home, 'secrets', 'run') })
-    orch.setSecrets({ tools: host, masker: (threadId) => vault.maskerFor(threadId) })
+    orch.setSecrets({ tools: host, masker: (threadId) => vault.maskerFor(threadId), allowCopies: (threadId, allowed) => vault.allowCopies(threadId, allowed) })
     for (const name of ['thread-message', 'thread-message-updated', 'thread-messages'] as const) {
       orch.on(name, (payload: unknown) => events.push(JSON.stringify(payload)))
     }
@@ -174,14 +174,13 @@ describe('a secret given through the card', () => {
     expect(vault.value('HF_TOKEN')).toBe(VALUE)
     const messages = JSON.stringify(orch.getMessages(threadId))
     expect(messages).toContain('[secret HF_TOKEN hidden]')
-    // The agent's tool result names it and its private file, and never holds the value; the file does, for the agent.
-    const copy = join(home, 'secrets', 'threads', threadId, 'HF_TOKEN')
+    // The agent's tool result names it and never holds the value. This turn runs on Pi, which keeps its own tools' results
+    // as they are: it gets no file and is pointed to secret_run (a Claude Code turn's is in the test below).
     expect(agentToolResult?.text).toContain('keeps it as HF_TOKEN')
-    expect(agentToolResult?.text).toContain(`use directly with your own tools: ${copy}.`)
-    // It leads with passing the file inside a command, so the value does not come back as a tool's output.
-    expect(agentToolResult?.text).toContain(`gh auth login --with-token < "${copy}"`)
+    expect(agentToolResult?.text).toContain('Use it with secret_run')
+    expect(agentToolResult?.text).not.toContain(join(home, 'secrets', 'threads'))
     expect(agentToolResult?.text).not.toContain(VALUE)
-    expect(readFileSync(copy, 'utf8')).toBe(VALUE)
+    expect(existsSync(join(home, 'secrets', 'threads', threadId, 'HF_TOKEN'))).toBe(false)
     expect(messages).not.toContain(VALUE)
     expect(messages).not.toContain(Buffer.from(VALUE).toString('base64'))
     expect(JSON.stringify(orch.getNativeContext(threadId))).not.toContain(VALUE)
@@ -300,6 +299,8 @@ describe('a secret given through the card', () => {
     let copy = ''
     setUp(fileReadingAgent(() => copy))
     const parent = store.createThread('Release').id
+    // The thread asked on Claude Code, whose turns get copies.
+    vault.allowCopies(parent, true)
     const asked = tool({ label: 'GitHub token', reason: 'To publish.', name: 'GH_TOKEN' }, parent)
     await waitFor(() => requests.list(parent).length === 1, 'the card')
     await dispatch(gui, 'secrets.requests.answer', { threadId: parent, requestId: requests.list(parent)[0].requestId, value: VALUE, keep: 'day' })
@@ -313,6 +314,8 @@ describe('a secret given through the card', () => {
     await waitFor(() => orch.getMessages(threadId).some((message) => message.role === 'assistant' && message.content.includes('The file holds')), 'the reply')
     await waitFor(() => !orch.activeTurnThreadIds().includes(threadId), 'the turn to end')
 
+    // This turn ran on Pi, which keeps its tools' results: it started with the copies of its thread and the parent removed.
+    expect(existsSync(copy)).toBe(false)
     const messages = JSON.stringify(orch.getMessages(threadId))
     expect(messages).toContain('[secret GH_TOKEN hidden]')
     expect(messages).not.toContain(VALUE)
@@ -321,4 +324,31 @@ describe('a secret given through the card', () => {
     for (const line of console_) expect(line).not.toContain(VALUE)
     for (const file of filesUnder(home)) expect({ path: file.path, leaked: file.text.includes(VALUE) }).toEqual({ path: file.path, leaked: false })
   })
+
+  // Which runtime a turn runs on decides, as each turn starts, whether its thread has a readable copy.
+  it("keeps a copy for a Claude Code turn, and removes it before a turn on another runtime runs", async () => {
+    const seen: boolean[] = []
+    let threadId = ''
+    const copy = () => join(home, 'secrets', 'threads', threadId, 'API_TOKEN')
+    const claude = claudeAdapter(() => { seen.push(existsSync(copy())); return 'Claude here.' })
+    const pi = piAdapter(() => { seen.push(existsSync(copy())); return 'Pi here.' })
+    process.env.MOUSSE_HOME = home
+    orch = createOrchestrator(home, store, [pi, claude])
+    const host = createSecretToolHost({ vault, requests, scratchRoot: join(home, 'secrets', 'run') })
+    orch.setSecrets({ tools: host, masker: (id) => vault.maskerFor(id), allowCopies: (id, allowed) => vault.allowCopies(id, allowed) })
+    threadId = store.createThread('Deploy').id
+    orch.setThreadModelOverride(threadId, CLAUDE)
+    await orch.send('Start', false, { threadId })
+    // Given while the thread runs on Claude Code: it gets a copy.
+    const asked = requests.request(threadId, { label: 'API token', reason: 'x', name: 'API_TOKEN' })
+    requests.answer(threadId, requests.list(threadId)[0].requestId, VALUE, 'day')
+    expect((await asked)).toMatchObject({ kind: 'stored', file: copy() })
+    await orch.send('Use it', false, { threadId })
+    orch.setThreadModelOverride(threadId, PI)
+    await orch.send('Now on Pi', false, { threadId })
+    expect(seen).toEqual([false, true, false])
+    expect(existsSync(copy())).toBe(false)
+    expect(vault.value('API_TOKEN')).toBe(VALUE)
+  })
+
 })

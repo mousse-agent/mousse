@@ -28,6 +28,9 @@ describe('the secrets a thread asked for', () => {
     busy = new Set()
     vault = new SecretVault({ profileRoot: home, threadAlive: (id) => alive.has(id), ancestorsOf: (id) => (roots.has(id) ? [roots.get(id)!] : []), threadBusy: (id) => busy.has(id), now: () => now })
     requests = new SecretRequests(vault, () => now)
+    // Both threads run on a runtime that masks its own tool results (Claude Code), so they get copies.
+    vault.allowCopies('t1', true)
+    vault.allowCopies('t2', true)
   })
   afterEach(() => {
     requests.dispose()
@@ -150,6 +153,7 @@ describe('the secrets a thread asked for', () => {
 
   it('gives no copy to a thread id that cannot name a folder, and writes nothing outside the folder', async () => {
     alive.add('../escape')
+    vault.allowCopies('../escape', true)
     expect(await give('../escape', 'day')).toEqual({ kind: 'stored', name: 'API_TOKEN', keep: 'day' })
     expect(vault.fileFor('API_TOKEN', '../escape')).toBeUndefined()
     expect(existsSync(join(home, 'secrets', 'escape'))).toBe(false)

@@ -1277,10 +1277,35 @@ export class OrchestratorService extends EventEmitter {
    * thread had that were removed or changed while it ran.
    */
   private storeMasker?: (threadId: string) => SecretMasker | undefined
-  setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined; storeMasker?(threadId: string): SecretMasker | undefined } | undefined): void {
+  setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined; storeMasker?(threadId: string): SecretMasker | undefined; allowCopies?(threadId: string, allowed: boolean): void } | undefined): void {
     this.secretTools = secrets?.tools
     this.secretMaskerFor = secrets ? (threadId) => this.threadSecretMasker(secrets, threadId) : undefined
     this.storeMasker = secrets?.storeMasker ? (threadId) => secrets.storeMasker!(threadId) : undefined
+    this.secretCopies = secrets?.allowCopies ? (threadId, allowed) => secrets.allowCopies!(threadId, allowed) : undefined
+  }
+
+  private secretCopies?: (threadId: string, allowed: boolean) => void
+  /**
+   * As a turn starts: its thread's agents get readable copies of their secrets only on Claude Code, whose tool results
+   * Mousse masks before Claude Code keeps them (`PostToolUse`). Any other runtime keeps its own tools' results as they
+   * are, so its turn starts with the copies of its thread, and of the threads above it (whose agents may have handed it
+   * a path), removed; its agent uses secret_run.
+   */
+  private secretCopiesForTurn(threadId: string, driver: string | undefined): void {
+    if (!this.secretCopies) return
+    try {
+      if (driver === 'claude') {
+        this.secretCopies(threadId, true)
+        return
+      }
+      const seen = new Set<string>()
+      for (let id: string | undefined = threadId; id && !seen.has(id) && seen.size < 32; id = this.threadStore?.getThread(id)?.lineage?.parentThreadId) {
+        seen.add(id)
+        this.secretCopies(id, false)
+      }
+    } catch {
+      // The vault reports its own failures; a turn never fails over a copy.
+    }
   }
 
   /**
@@ -1739,6 +1764,7 @@ export class OrchestratorService extends EventEmitter {
       const allowed = new Set(tools?.allow ?? [])
       const requiredTools = this.mcpToolRegistry().listForTurn(threadId, runId)
         .filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation').map((tool) => tool.name)
+      this.secretCopiesForTurn(threadId, binding.driver)
       handle = this.harness.startTurn({
         binding,
         attemptOrdinal: 1,
@@ -13655,6 +13681,7 @@ export class OrchestratorService extends EventEmitter {
       }
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
+      this.secretCopiesForTurn(session.threadId, binding.driver)
       const result = await this.harness.startTurn({
         binding,
         ...(previous ? { previous } : {}),
