@@ -1375,3 +1375,23 @@ it('B6 removal then re-grant of the pair cannot revive its old card', async () =
   expect(f.bots.actions.get(a.id)?.status).toBe('withdrawn')
   expect(t.calls).toEqual([])
 })
+
+it('restart never executes a previously approved call while its owner has paused the bot', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.bots.actions.transition(a.id, 'open', 'approved')
+  f.bots.pauseBot(t.botId)
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(f.store.message(a.message_id)?.text).toBe('Not sent')
+  expect(f.store.unreadWorkActions(t.workId).map(a => a.id)).toEqual([a.id])
+  await f.bots.resumeBot(t.botId); await flush()
+  expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('paused')
+  const next = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+  ;(next.prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+  expect(t.calls).toEqual([])
+})
