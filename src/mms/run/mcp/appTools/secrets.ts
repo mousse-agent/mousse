@@ -31,7 +31,7 @@ const REQUEST_DEFINITION: Tool = {
     'Never ask for a secret in a message: the value would sit in the conversation. The user types it into the card;',
     'Mousse keeps it out of the chat and gives you its name and a private file holding it. Use it directly (commands, config',
     'files, API calls, logins) by passing the file inside the command, e.g. gh auth login --with-token < file, so the value',
-    'never comes back as output; open the file to look at its contents only when you need the value itself. secret_run and',
+    'never comes back as output. Never open the file to look at it: a tool\'s result stays in your session\'s history. secret_run and',
     '${secret:NAME} in an MCP server\'s settings work too. Never print or echo the value into the chat.',
     'Blocks until the user answers (at most one hour) or your turn ends.'
   ].join(' '),
