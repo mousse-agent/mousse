@@ -2276,3 +2276,18 @@ it('updates the more-arguments cue when a nested fold opens without scrolling', 
   await act(async () => { fold.open = true; fold.dispatchEvent(new Event('toggle')) })
   expect(host.textContent).toContain('More arguments below')
 })
+
+it.each([
+  ['done', false, 'What it sent'], ['failed', true, 'What it sent'],
+  ['uncertain', false, 'What it tried to send'], ['approved', false, 'What it is sending'],
+  ['running', false, 'What it is sending'], ['declined', false, 'What it would have sent'],
+  ['expired', false, 'What it would have sent'], ['withdrawn', false, 'What it would have sent'],
+  ['failed', false, 'What it would have sent']
+])('names the %s review by what happened, tool error=%s', async (status, toolReportedError, label) => {
+  fake.chats.inbox = [held({ status, at: AT, result: toolReportedError ? { text: 'Service error', toolReportedError } : undefined })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('details > summary')?.textContent).toBe(label)
+  expect(card.querySelector('[role="region"]')?.getAttribute('aria-label')).toBe('Everything it will send')
+  expect(card.textContent).not.toContain('arguments')
+})
