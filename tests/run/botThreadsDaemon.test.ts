@@ -138,10 +138,10 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
 
   // A bot's thread that may not start, message, stop or archive threads, whatever let the call get this far.
   const refusals: Array<[string, Parameters<typeof world>[0], (() => void) | undefined, RegExp]> = [
-    ['a turn that may only read threads (work, a schedule, a reminder)', { held: BOT_THREAD_READ_TOOLS }, undefined, /only in its chat/],
-    ['a turn that holds none of them', { held: [] }, undefined, /only in its chat/],
-    ['a consult\'s thread', { role: 'context' }, undefined, /only in its chat/],
-    ['a turn its records say no message of the owner\'s started', { owner: null }, undefined, /only in its chat/]
+    ['a turn that may only read threads (the bot\'s first message, another bot\'s message)', { held: BOT_THREAD_READ_TOOLS }, undefined, /only in its own turns/],
+    ['a turn that holds none of them', { held: [] }, undefined, /only in its own turns/],
+    ['a consult\'s thread', { role: 'context' }, undefined, /only in its own turns/],
+    ['a turn its records say may not act on threads', { owner: null }, undefined, /only in its own turns/]
   ]
   it.each(refusals)('%s starts, messages, stops and archives nothing', async (_name, options) => {
     const w = world(options)
@@ -362,7 +362,8 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.d.store.getThread(owners.id)!.hidden).toBeUndefined()
     unwatch()
 
-    // A turn that may only read threads (work, a schedule, a reminder) hides nothing, even a thread the bot started.
+    // A turn that may only read threads (the bot's first message, another bot's message) hides nothing, even a thread
+    // the bot started.
     const reading = world({ held: BOT_THREAD_READ_TOOLS })
     const started = reading.d.store.createThread('Started earlier', reading.project.id, undefined, { createdByThreadId: reading.chat.id, startedByBot: { botId: 'b1', name: 'alpha' } })
     expect(refusal(() => reading.hide(started.id))).toBe('mousse_scope_denied')

@@ -195,7 +195,7 @@ describe('a default', () => {
     expect(mainDispatches(workId).at(-1)!.prompt.text).toBe(`[Mousse] ${defaultWorkLine(FLATS.question, 'Flat A', 30 * MIN)} Carry on where you left off.`)
     const resumed = await start(f, workId, mainDispatches(workId).at(-1)!.n)
     expect(resumed.prepared.policy.tools?.allow).toEqual(work.prepared.policy.tools?.allow)
-    expect(resumed.prepared.authority.threadsReadOnly).toBe('work')
+    expect(resumed.prepared.authority.threadsReadOnly).toBe(work.prepared.authority.threadsReadOnly)
     await finish(f, resumed.payload, 'completed', { text: 'No answer, so I went with Flat A and booked Saturday.' })
     expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'No answer, so I went with Flat A and booked Saturday.' })
   })

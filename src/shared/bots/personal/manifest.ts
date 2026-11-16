@@ -131,7 +131,7 @@ export const BOT_AUTOMATION_APP_TOOLS: readonly string[] = ['automation_draft_sa
 /**
  * "Use your threads": one permission, asked for once, for the owner's ordinary threads in this profile. The grant names
  * it alone; `compileBotThread` turns it into the thread tools a turn may use (`BOT_THREAD_READ_TOOLS` in every lane but a
- * consult, `BOT_THREAD_ACT_TOOLS` only in a chat turn the owner's own message started). A thread the bot starts runs in
+ * consult, `BOT_THREAD_ACT_TOOLS` in a run and a chat turn the owner's message or tapped answer started). A thread the bot starts runs in
  * Full access, and a message it sends runs in that thread's own mode, so the card says so (`askText`).
  */
 export const BOT_THREADS_PERMISSION = 'threads'
@@ -141,8 +141,8 @@ export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_
 
 /**
  * What changes threads: start one, message one, stop one's turn, archive or unarchive one, hide one it started from the
- * owner's sidebar or show it again. Only a chat turn the owner's own message started gets them, so nothing a bot read in
- * its work, a reminder or a schedule starts or steers a thread.
+ * owner's sidebar or show it again. A run (work, a reminder, a wake, a schedule) and a chat turn the owner's message or
+ * tapped answer started get them; the bot's first message and a turn another bot's message started do not.
  */
 export const BOT_THREAD_ACT_TOOLS: readonly string[] = ['thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide']
 

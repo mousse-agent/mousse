@@ -2502,10 +2502,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
-      // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
-      // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message. The profiler:
-      // in both lanes (the chat without its minutes-long watch).
-      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      // The owner's threads: reading in every lane; starting, messaging, stopping and archiving in a turn `threadsActOf`
+      // allows (never the bot's first message or a turn another bot's message started). The profiler: in both lanes
+      // (the chat without its minutes-long watch).
+      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: threadsActOf(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -7030,8 +7030,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The chat turn `activationId` when its owner's own message started it (`BotThreads.ownerTurn`), with the
-   * limit of the other device that message came from; undefined for any other turn, or when it can't be read.
+   * The turn `activationId` when it may act on the owner's threads (`threadsActOf`, `BotThreads.ownerTurn`), with the
+   * limit of the other device its owner's message came from; undefined for any other turn, or when it can't be read.
    */
   ownerTurn(activationId: string): { limit?: PermissionMode } | undefined {
     let row: BotActivationRow | undefined
@@ -7040,7 +7040,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       return undefined
     }
-    if (!row || !ownerChatTurn(row)) return undefined
+    if (!row || !threadsActOf(row)) return undefined
     const limit = row.trigger.kind === 'manual' ? row.trigger.owner?.limit : undefined
     return limit ? { limit } : {}
   }
@@ -9504,9 +9504,8 @@ export function asksOwner(row: Pick<BotActivationRow, 'lane' | 'trigger'>): bool
 }
 
 /**
- * Whether the activation is a chat turn its owner's own message started (`bots.chat.send`, keyed `chat:`): the only
- * turn that may start, message or stop the owner's threads. The bot's first message (`create:`) is not one; it never
- * waits at a wall the owner's reply continues (it asks for nothing, and at a limit the reply starts a turn of its own).
+ * Whether the activation is a chat turn its owner's own message started (`bots.chat.send`, keyed `chat:`). The bot's
+ * first message (`create:`) is not one; it never waits at a wall the owner's reply continues (it asks for nothing, and at a limit the reply starts a turn of its own).
  * Nor is a turn an answer the owner tapped started (`answer:`): the label is the bot's words, not theirs.
  */
 export function ownerChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
@@ -9520,10 +9519,18 @@ export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKe
   return ownerChatTurn(row) || (row.lane === 'chat' && row.idempotencyKey.startsWith('answer:')) ? 'chat' : 'run'
 }
 
+/**
+ * Whether the activation may start, message, stop, archive or hide the owner's threads ("use your threads"): a chat
+ * turn its owner's message or tapped answer started (`chat:`, `answer:`), and every run (work, a reminder's work, a
+ * wake, a schedule). Not the bot's first message (`create:`) nor a chat turn no person started (`botmsg:`).
+ */
+export function threadsActOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
+  return row.lane === 'run' || memoryLaneOf(row) === 'chat'
+}
+
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */
-export function threadsReadOnlyOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): 'work' | 'not_owner' | undefined {
-  if (ownerChatTurn(row)) return undefined
-  return row.lane === 'chat' ? 'not_owner' : 'work'
+export function threadsReadOnlyOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): 'not_owner' | undefined {
+  return threadsActOf(row) ? undefined : 'not_owner'
 }
 
 /** What a gate refusal asks the owner for. */

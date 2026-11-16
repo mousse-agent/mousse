@@ -112,13 +112,13 @@ describe('a question in the chat', () => {
     expect(next.trigger.kind === 'manual' && next.trigger.input).toBe('(Answering your question: "Which flat should I book a viewing for?")\n\nFlat B')
   })
 
-  it('a tapped answer is not the owner’s own words: its turn reads threads only and cannot switch models; a typed one can', async () => {
+  it('a tapped answer is not the owner’s own words: its turn may use threads but cannot switch models; a typed one can', async () => {
     const { bubble } = await asked({ question: 'Which model should I use?', choices: ['Opus 4.6', 'Something cheaper'] })
     await tap(bubble.question!.questionId, 'Opus 4.6')
     const tapped = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const tappedTurn = await start(f, tapped.id)
     expect(f.bots.ownerWords(botId, tapped.id)).toBe('')
-    expect(tappedTurn.prepared.authority.threadsReadOnly).toBe('not_owner')
+    expect(tappedTurn.prepared.authority.threadsReadOnly).toBeUndefined()
     const refused = JSON.parse((await tool('use_model', tappedTurn.prepared, tappedTurn.payload.threadId, { model: 'Opus 4.6', scope: 'now' })).text)
     expect(refused).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
     await finish(f, tappedTurn.payload, 'completed', { text: 'OK.' })
@@ -128,7 +128,7 @@ describe('a question in the chat', () => {
     expect(JSON.parse((await tool('use_model', typed.prepared, typed.payload.threadId, { model: 'Opus 4.6', scope: 'now' })).text)).toMatchObject({ ok: true })
   })
 
-  it('with "use your threads", a tapped answer’s turn is told in its preamble that it only reads threads, and why; its system text is a typed turn’s', async () => {
+  it('with "use your threads", a tapped answer’s turn may start, message and archive threads as a typed one does, with the same system text', async () => {
     f.host.instructions = (bot) => botInstructions(bot)
     const granting = await chatTurn('Send the build to my design thread.', 'grant')
     granting.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked me to message a thread.' })
@@ -140,9 +140,10 @@ describe('a question in the chat', () => {
     const { bubble } = await asked({ question: 'Which colour should I send?', choices: ['Gold', 'Grey'] })
     await tap(bubble.question!.questionId, 'Gold')
     const tapped = await start(f, f.store.laneActivations(botId, 'chat', ['running'])[0]!.id)
-    expect(sends(tapped.prepared)).toBe(false)
-    expect(tapped.prepared.preamble).toContain(BOT_THREADS_READ_ONLY_TURN_NOTE)
-    await finish(f, tapped.payload, 'completed', { text: 'I’ll send Gold when you reply.' })
+    expect(sends(tapped.prepared)).toBe(true)
+    expect(tapped.prepared.policy.tools!.allow).toContain('thread_archive')
+    expect(tapped.prepared.preamble ?? '').not.toContain(BOT_THREADS_READ_ONLY_TURN_NOTE)
+    await finish(f, tapped.payload, 'completed', { text: 'Sent Gold.' })
 
     const typed = await chatTurn('Send Gold.', 'typed-gold')
     expect(sends(typed.prepared)).toBe(true)
