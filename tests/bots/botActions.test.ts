@@ -1050,7 +1050,7 @@ it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (['failed', 'limits', 'week'].includes(path)) f.store.moveActivation(t.workId, ['blocked'], 'failed', { endReason: path })
   if (path === 'allowed') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) }))
-  if (path === 'server') { vi.spyOn(t.mcp, 'binding').mockReturnValue(undefined); f.bots.fillMcpAsks() }
+  if (path === 'server') { vi.spyOn(t.mcp, 'where').mockReturnValue({ state: 'gone' }); f.bots.fillMcpAsks() }
   if (path === 'card' || path === 'request') {
     const id = path === 'card' ? a.message_id : String(f.store.all("SELECT id FROM bot_messages WHERE bot_id = ? AND author = 'owner' ORDER BY seq DESC", t.botId)[0].id)
     const memory = new BotMemoryStore({ db: f.store.db })
@@ -1203,7 +1203,7 @@ it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget
   else if (path === 'allowed') change = () => f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) }))
   else if (path === 'tool' || path === 'server') change = () => {
     if (path === 'tool') t.server.tools.splice(0)
-    else vi.spyOn(t.mcp, 'binding').mockReturnValue(undefined)
+    else vi.spyOn(t.mcp, 'where').mockReturnValue({ state: 'gone' })
     f.bots.fillMcpAsks()
   }
   else if (path === 'clear') change = () => f.bots.clearChat(t.botId)
@@ -1262,4 +1262,22 @@ it('switch off refuses card answers without resetting repeated-wait detection', 
   for (const answer of ['send', 'not_now'] as const)
     await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })).rejects.toThrow('switch is off')
   expect(f.store.all("SELECT * FROM bot_memory_state WHERE key LIKE 'cursor:action-owner:%'")).toEqual([])
+})
+
+it.each(['failing', 'starting', 'cold restart'] as const)('B1 keeps a live card through a %s listing and sends once after recovery', async state => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const tools = t.server.tools.splice(0)
+  if (state === 'failing') t.server.failing = true
+  if (state === 'starting') Object.assign(t.server, { starting: true })
+  const listing = state === 'cold restart' ? vi.spyOn(t.mcp, 'where').mockReturnValue(undefined) : undefined
+  if (state === 'cold restart') { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
+  else f.bots.fillMcpAsks()
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
+  t.server.tools.push(...tools); t.server.failing = false; Object.assign(t.server, { starting: false }); listing?.mockRestore()
+  f.bots.fillMcpAsks()
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
 })
