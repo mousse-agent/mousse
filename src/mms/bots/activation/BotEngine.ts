@@ -599,6 +599,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     refresh: async () => { await this.host.mcp?.warm() },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
     enabled: () => botAsksFirst(this.host.settings?.get()),
+    ownerAnswered: row => {
+      this.resetWorkWaitChain(row.id)
+      const last = this.store.get('SELECT MAX(rowid) AS n FROM bot_reminders WHERE work_id = ?', row.id)
+      this.store.db.statement(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value`).run(row.botId, `cursor:action-owner:${row.id}`, String(last?.n ?? 0))
+    },
+    held: () => { this.watchMcp(); this.armDue() },
     schema: (tool) => this.host.mcp?.inputSchema?.(tool),
     binding: (row, tool) => {
       const grant = this.store.activeGrant(row.botId)
@@ -2222,7 +2228,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private readonly workWaitFacts: WorkWaitFacts = {
     approvalReady: (row) => this.store.lastMainDispatch(row.id)?.endedAt !== null && !this.live.has(row.id),
-    approvalExists: (row) => Boolean(this.actions.forWork(row.id)),
+    approvalExists: (row) => { const action = this.actions.forWork(row.id); return Boolean(action && (row.endReason === 'approval_answered' || ['open', 'approved', 'running'].includes(action.status))) },
     timerExists: (row) => { const wait = this.store.workWait(row.id); return Boolean(wait && wait.status !== 'cancelled') },
     usageResumable: (row) => this.usageResumable(row),
     questionExists: (row) => Boolean(this.store.workQuestion(row.id)),
@@ -3108,6 +3114,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   fillMcpAsks(): void {
     const mcp = this.host.mcp
     if (!mcp || this.closed) return
+    this.actions.withdrawChanged()
     const waiting = this.store.escalations({ status: 'open' }).filter((row) => waitsForTools(row.permission))
     if (!waiting.length) return
     let servers: BotMcpServer[]
@@ -4653,6 +4660,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.db.transaction(() => {
       this.store.setPublished(botId, revision.revision!)
       this.store.approve(botId, digest, granted)
+      this.actions.withdrawChanged()
       if (switching) this.store.regrant(botId, grant.digest, digest, revision.revision!)
       for (const row of this.store.activationsIn(botId, ['queued', 'blocked'])) {
         if (row.status === 'blocked' && !workWaits(row)) continue
@@ -7401,6 +7409,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     await this.endAll([...this.store.laneActivations(botId, 'chat', [...NOT_ENDED]), ...waiting], 'stopped', () => {
       this.store.withdrawAsks(botId)
       this.store.withdrawQuestions(botId)
+      if (botAsksFirst(this.host.settings?.get())) this.store.run("DELETE FROM bot_messages WHERE bot_id = ? AND id IN (SELECT message_id FROM bot_actions WHERE bot_id = ?)", botId, botId)
     })
     // Deleted once the turns stopped, so a turn ending meanwhile adds no row to the cleared chat.
     this.store.deleteMessages(botId)
@@ -7427,7 +7436,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // The chat turn is stopped first, so it copies nothing more into the history once it is gone.
     await this.clearChat(botId)
-    const removed = memory.wipeHistory(botId)
+    const removed = this.store.db.transaction(() => {
+      const removed = memory.wipeHistory(botId)
+      if (botAsksFirst(this.host.settings?.get())) this.store.run(`UPDATE bot_actions SET args_json = ?, card_json = ?, bot_note = ?, result_json = ? WHERE bot_id = ?`,
+        '"[forgotten]"', '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId)
+      return removed
+    })
     this.changed({ botId })
     return removed
   }
@@ -8132,7 +8146,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private refuseWakeLoop(botId: string, brief: string, event: BotWakeEvent | null, workId?: string): void {
     const key = wakeLoopKey(brief, event)
-    const same = this.store.wakesSetSince(botId, this.store.ownerLastWroteAt(botId), workId).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
+    const after = workId && botAsksFirst(this.host.settings?.get()) ? Number(this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:action-owner:${workId}`)?.value ?? 0) : 0
+    const same = after ? this.store.all('SELECT text, event_json FROM bot_reminders WHERE bot_id = ? AND work_id = ? AND rowid > ? AND created_at >= ?', botId, workId!, after, this.store.ownerLastWroteAt(botId)).filter(wake => wakeLoopKey(String(wake.text), wake.event_json ? JSON.parse(String(wake.event_json)) : null) === key).length
+      : this.store.wakesSetSince(botId, this.store.ownerLastWroteAt(botId), workId).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
     if (same >= MAX_SAME_WAKES)
       throw new BotEngineError('wake_loop', `You have set this same wake-up ${same} times since your owner last wrote, with nothing new in it: that is a loop. Don't set it again: tell your owner where things stand and what you are waiting on, and carry on when they write. If something did change, say what in the brief.`)
   }
@@ -8565,6 +8581,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
+      () => {
+        if (!botAsksFirst(this.host.settings?.get())) return undefined
+        const row = this.store.get("SELECT MIN(expires_at) AS at FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)
+        return row?.at ? Date.parse(String(row.at)) : undefined
+      },
       () => this.tellings.next(botId),
       () => {
         const row = this.store.nextReminder(botId)
@@ -8629,6 +8650,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Never synchronous: the pass is held below before any of it runs, so its end always lets go of it.
       await Promise.resolve()
       try {
+        this.actions.expireDue()
         // Reminders cancelled, forgotten or purged since they failed are no longer tried.
         for (const id of this.reminderRetryAt.keys()) if (this.store.reminder(id)?.status !== 'waiting') this.reminderRetryAt.delete(id)
         for (const reminder of this.store.dueReminders(now.toISOString())) {

@@ -1,3 +1,4 @@
+import { heldCalls } from '../actions/lifecycle'
 import { requestJournalRows } from './requestFrames'
 import { createHash } from 'node:crypto'
 import type { ProfileDatabase } from '../../run/db/ProfileDatabase'
@@ -1345,6 +1346,7 @@ function redactQuestionCopies(tx: BotStoreTx, has: (table: string) => boolean, b
 }
 
 function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, text: string): void {
+  heldCalls(tx)?.forgetMessage(botId, messageId)
   const has = (table: string) => Boolean(tx.statement("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
   if (!has('bot_messages')) return
   tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, messageId, botId)

@@ -1,3 +1,4 @@
+import { heldCalls } from '../actions/lifecycle'
 import type { ActionRow } from '../actions/BotActions'
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1300,6 +1301,7 @@ export class BotStore {
       if (moved && to !== 'done') this.withdrawUnpostedQuestions(id)
       if (moved) {
         this.withdrawWorkQuestions(id)
+        heldCalls(this.db)?.endWork(id)
         this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE work_id = ? AND status = 'waiting'", this.now(), id)
       }
       return moved
