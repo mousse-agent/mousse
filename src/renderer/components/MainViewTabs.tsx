@@ -1,3 +1,4 @@
+import { MarkdownFileSpeechControls } from '../readAloud/MarkdownFileSpeechControls'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { filesEntryReference } from '../utils/fileReference'
 import { useFileWorkspaceStore } from '../stores/filesStore'
@@ -219,6 +220,7 @@ export function MainViewTabs() {
               <span className="main-view-tab-label">{item.label}{dirty ? ' •' : ''}</span>
               {item.detail && <span className="main-view-tab-detail">{item.detail}</span>}
             </button>
+            {item.view === 'files' && item.resourceId && <MarkdownFileSpeechControls scope={scope} path={item.resourceId} />}
             {item.closable && (
               <button
                 type="button"

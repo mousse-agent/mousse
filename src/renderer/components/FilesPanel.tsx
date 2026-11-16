@@ -1,3 +1,4 @@
+import { publishMarkdownPreviews } from '../readAloud/markdownFileSpeech'
 import { registerFileTabCloser, setFileTabDirtyPaths } from '../services/fileTabs'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
@@ -149,6 +150,17 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const [positions, setPositions] = useState<Record<string, { line: number; column: number }>>({})
   /** Source or preview, per Markdown file; it outlives the editor, which unmounts while the panel is hidden. */
   const [markdownViews, setMarkdownViews] = useState<Record<string, MarkdownEditorViewMode>>({})
+  useEffect(() => {
+    const previews: Record<string, string> = {}
+    for (const path of openPaths) {
+      const key = `${scope}\0${path}`
+      const file = files[key]
+      if (file?.kind === 'markdown' && !file.loading && !file.binary && !file.initialLoadFailed && !positions[key] && (markdownViews[key] ?? 'preview') === 'preview') previews[path] = file.content
+    }
+    publishMarkdownPreviews(scope, previews)
+  }, [scope, openPaths, files, markdownViews, positions])
+  useEffect(() => () => publishMarkdownPreviews(scope, {}), [scope])
+
   const [refreshKey, setRefreshKey] = useState(0)
   const [availableLanguageIds, setAvailableLanguageIds] = useState<Set<string>>(() => new Set(['plaintext']))
   const filesRef = useRef(files)
