@@ -195,8 +195,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     return unsub
   }, [settingsOpen, refreshProviderData])
 
-  // The theme can change while the page is open (an agent can set it): the theme list a save starts from is always the
-  // saved one.
+  // External theme and bot quiet-hours changes must reach the copy later saves start from.
+  // Keep the page's other notification choices while taking the saved quiet hours, including their removal.
   useEffect(() => {
     if (!settingsOpen) return
     return window.mousse.settings.onChanged?.((next) => {
@@ -204,7 +204,11 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       setSettings((current) => {
         if (!current) return current
         const { theme, userTheme, userThemes } = next.appearance!
-        return { ...current, appearance: { ...current.appearance, theme, userTheme, userThemes } }
+        return {
+          ...current,
+          appearance: { ...current.appearance, theme, userTheme, userThemes },
+          notifications: next.notifications ? { ...current.notifications, quietHours: next.notifications.quietHours } : current.notifications
+        }
       })
     })
   }, [settingsOpen])
