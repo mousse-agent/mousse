@@ -118,7 +118,7 @@ describe('the Bots section', () => {
     expect(headings()).toEqual(['Bots', 'Groups', 'Recent'])
     const rows = [...host.querySelectorAll('.chat-recent-section .chat-list-row')]
     expect(rows.map((element) => element.querySelector('.chat-list-name')?.textContent)).toEqual(['Reviewer'])
-    expect(host.querySelectorAll('.bot-face')).toHaveLength(2)
+    expect(host.querySelectorAll('.chats-sidebar-content .bot-face')).toHaveLength(2)
     expect(button('Message Inbox helper')?.title).toBe('Inbox helper: Wants to use files on this computer')
     expect(button('Message Flight deals')?.title).toBe('Flight deals: Paused')
   })
