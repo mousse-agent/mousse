@@ -1101,7 +1101,7 @@ it('forget history removes settled text and preserves the call key that prevents
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
   await f.bots.wipeMemory(t.botId, 'saved')
   const saved = f.bots.actions.get(a.id)!
-  expect(saved).toMatchObject({ call_key: a.call_key, status: 'declined', args_json: '"[forgotten]"', card_json: '"[forgotten]"', result_json: '{"text":"[forgotten]"}' })
+  expect(saved).toMatchObject({ call_key: a.call_key, status: 'declined', args_json: '"[forgotten]"', result_json: '{"text":"[forgotten]"}' })
   const result = f.bots.actions.hold(f.store.activation(t.workId)!, JSON.parse(a.call_key)[1], { server: 'mail', tool: 'send' } as never, t.args, 'runtime-call-1')
   expect(result).not.toMatchObject({ isError: true })
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)

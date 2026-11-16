@@ -7454,8 +7454,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     await this.clearChat(botId)
     const removed = this.store.db.transaction(() => {
       const removed = memory.wipeHistory(botId)
-      if (botAsksFirst(this.host.settings?.get())) this.store.run(`UPDATE bot_actions SET args_json = ?, card_json = ?, bot_note = ?, result_json = ? WHERE bot_id = ?`,
-        '"[forgotten]"', '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId)
+      this.actions.forgetText(botId)
       return removed
     })
     this.changed({ botId })

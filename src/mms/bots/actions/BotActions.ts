@@ -191,15 +191,26 @@ export class BotActions {
       forgetMessage: (botId, messageId) => {
         if (!host.enabled()) return
         const ids = host.store.all(`SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
-          WHERE a.bot_id = ? AND a.status IN ('open', 'approved') AND (a.message_id = ? OR json_extract(w.trigger_json, '$.replyTo') = ?)`, botId, messageId, messageId)
+          WHERE a.bot_id = ? AND (a.message_id = ? OR json_extract(w.trigger_json, '$.replyTo') = ?)`, botId, messageId, messageId)
         for (const action of ids) {
-          this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'The request was forgotten. Nothing was sent.' })
+          const pending = ['open', 'approved'].includes(String(action.status))
+          if (pending) this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'The request was forgotten. Nothing was sent.' })
+          this.forgetText(botId, String(action.id))
+          if (!pending) continue
           const row = host.store.activation(String(action.activation_id))
           if (row && host.store.moveActivation(row.id, ['blocked'], 'cancelled', { endReason: 'forgotten', result: 'This work ended because its request was forgotten.' }))
             host.post(row, `bm_${action.id}_forgotten`, 'This work ended because its request was forgotten.')
         }
       }
     })
+  }
+  /** Erase call content without erasing owner intervention facts or the run-once key. */
+  forgetText(botId: string, actionId?: string): void {
+    if (!this.host.enabled()) return
+    this.host.store.run(`UPDATE bot_actions SET args_json = ?,
+      card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0)),
+      bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
+    '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId, actionId ?? null, actionId ?? null)
   }
   withdrawWork(id: string): void {
     if (!this.host.enabled()) return
