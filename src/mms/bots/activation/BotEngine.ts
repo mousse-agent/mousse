@@ -601,7 +601,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     refresh: async () => { await this.host.mcp?.warm() },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
     enabled: () => botAsksFirst(this.host.settings?.get()),
-    schema: (tool) => this.host.mcp?.inputSchema(tool),
+    schema: (tool) => this.host.mcp?.inputSchema?.(tool),
     binding: (row, tool) => {
       const grant = this.store.activeGrant(row.botId)
       const current = this.store.activation(row.id)
@@ -624,7 +624,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return callForBot({ mcp: mcp as BotMcp, bot: {
         activationId: row.id, mcpTools: [tool], workspace: null, time: { signal, deadline: () => Number.MAX_SAFE_INTEGER },
         check: () => this.grantNow(row.id)?.mcp.some(p => p.serverId === target.server && p.tool === target.tool) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
-      }, name: tool.name, args, signal, heldAction: true, sanitizeResult: (result) => removeHiddenArguments(result, args, mcp.inputSchema(target)), assertDispatchActive: () => {
+      }, name: tool.name, args, signal, heldAction: true, sanitizeResult: (result) => removeHiddenArguments(result, args, mcp.inputSchema?.(target)), assertDispatchActive: () => {
         this.actions.assertRunning(actionId)
       } })
     }

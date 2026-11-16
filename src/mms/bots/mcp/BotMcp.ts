@@ -99,6 +99,7 @@ export interface BotMcpHost {
   servers(): BotMcpServer[]
   /** Whether the servers were read since Mousse started: before that, `servers()` says nothing of a server being gone. */
   listed?(): boolean
+  inputSchema?(tool: BotMcpTool): unknown
   binding?(tool: BotMcpTool): { serverId: string; tool: string; configDigest: string; schemaDigest: string } | undefined
   call?: BotMcp['call']
   /** The granted tools (`<server id>::<tool>`) of servers set up now. */
