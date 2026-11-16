@@ -4,8 +4,9 @@ import { FloatingPortal } from '../../lib/floatingLayer'
 import { useImageGallery } from '../../chat/components/agent-elements/image-gallery'
 import type { LightboxImage } from '../../chat/components/agent-elements/image-lightbox'
 import { botFileImageUrl, useFileImage } from './BotImages'
-import { fileActions, useBotFiles } from './BotFiles'
+import { fileActions, reason, useBotFiles } from './BotFiles'
 import type { ReplyImage } from './botReplyImages'
+import { copyImage } from '../../lib/copyImage'
 // The app's shared row menu, which the picture's right-click menu is.
 import '../integrations/rowMenu.css'
 
@@ -37,7 +38,7 @@ export function BotPictureActions({ image }: { image: LightboxImage }) {
 }
 
 /** Where the menu opens, and for which picture. */
-type MenuAt = { image: ReplyImage; x: number; y: number }
+type MenuAt = { image: ReplyImage; url?: string; x: number; y: number }
 
 /** The right-click menu on a picture: the app's row menu, at the pointer. */
 function PictureMenu({ at, onOpen, onClose }: { at: MenuAt; onOpen(): void; onClose(): void }) {
@@ -59,6 +60,7 @@ function PictureMenu({ at, onOpen, onClose }: { at: MenuAt; onOpen(): void; onCl
     return () => { document.removeEventListener('pointerdown', away, true); document.removeEventListener('keydown', keys, true) }
   }, [onClose])
   const path = at.image.path
+  const url = at.url
   const pick = (action: () => void) => () => { onClose(); action() }
   // A little off the pointer, and kept 8px inside the window: the menu is about 180 by 150.
   const left = Math.max(8, Math.min(at.x + 4, window.innerWidth - 188 - 8))
@@ -69,8 +71,8 @@ function PictureMenu({ at, onOpen, onClose }: { at: MenuAt; onOpen(): void; onCl
       {path && <>
         <button type="button" role="menuitem" className="row-menu-item" onClick={pick(() => fileActions.saveAs(path, host?.failed))}>Save as…</button>
         <button type="button" role="menuitem" className="row-menu-item" onClick={pick(() => fileActions.showInFolder(path, host?.failed))}>Show in folder</button>
-        <button type="button" role="menuitem" className="row-menu-item" onClick={pick(() => fileActions.copyImage(path, host?.failed))}>Copy image</button>
       </>}
+      {url && <button type="button" role="menuitem" className="row-menu-item" onClick={pick(() => { void copyImage(url).catch((error) => host?.failed?.(reason(error))) })}>Copy image</button>}
     </div>
   </FloatingPortal>
 }
@@ -89,12 +91,12 @@ function Picture({ image, images, single, onMenu }: { image: ReplyImage; images:
     const set = lightboxSet(images)
     gallery.open({ id: image.key, url, filename: image.name, ...(image.path ? { path: image.path } : {}) }, set.length ? set : undefined)
   }
-  const menu = (event: MouseEvent<HTMLElement>) => { event.preventDefault(); onMenu({ image, x: event.clientX, y: event.clientY }) }
+  const menu = (event: MouseEvent<HTMLElement>) => { event.preventDefault(); onMenu({ image, url, x: event.clientX, y: event.clientY }) }
   const keys = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
     event.preventDefault()
     const box = event.currentTarget.getBoundingClientRect()
-    onMenu({ image, x: box.left + 12, y: box.top + 12 })
+    onMenu({ image, url, x: box.left + 12, y: box.top + 12 })
   }
   if (!url && file?.failed) return null
   const className = `bot-picture${single ? ' is-single' : ''}${url ? '' : ' is-empty'}`

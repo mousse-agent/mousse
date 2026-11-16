@@ -114,6 +114,7 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   setBotsClient(null)
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
@@ -307,10 +308,35 @@ describe('the transcript', () => {
     let localFiles: Record<string, ReturnType<typeof vi.fn>>
     /** Every picture file reads as a PNG, each with its own preview address. */
     const install = () => {
-      localFiles = { showInFolder: vi.fn(async () => undefined), saveCopy: vi.fn(async () => '/home/me/Downloads/a.png'), copyImage: vi.fn(async () => undefined) }
+      localFiles = { showInFolder: vi.fn(async () => undefined), saveCopy: vi.fn(async () => '/home/me/Downloads/a.png') }
+      writeImage = vi.fn(async () => undefined)
       let made = 0
       URL.createObjectURL = vi.fn(() => `blob:picture-${++made}`)
-      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async () => ({ mimeType: 'image/png', data: [137, 80, 78, 71] })) }, localFiles })
+      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async () => ({ mimeType: 'image/png', data: [137, 80, 78, 71] })) }, localFiles, clipboard: { writeImage } })
+    }
+    let writeImage: ReturnType<typeof vi.fn>
+    /**
+     * jsdom draws nothing: a picture "loads" at 3 by 2 unless its address is `blob:broken`, and the canvas encodes
+     * PNG bytes that name the picture drawn on it, so a test can tell which picture reached the clipboard.
+     */
+    const drawing = () => {
+      const PNG = [137, 80, 78, 71, 13, 10, 26, 10]
+      class LoadingImage {
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        naturalWidth = 3
+        naturalHeight = 2
+        width = 3
+        height = 2
+        private address = ''
+        get src() { return this.address }
+        set src(value: string) { this.address = value; queueMicrotask(() => (value === 'blob:broken' ? this.onerror?.() : this.onload?.())) }
+      }
+      vi.stubGlobal('Image', LoadingImage)
+      let drawn = ''
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({ drawImage: (image: LoadingImage) => { drawn = image.src } }) as never)
+      vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((done: BlobCallback) => done(new Blob([new Uint8Array([...PNG, ...new TextEncoder().encode(drawn)])], { type: 'image/png' })))
+      return (bytes: Uint8Array) => ({ png: [...bytes.slice(0, 8)].join() === PNG.join(), picture: new TextDecoder().decode(bytes.slice(8)) })
     }
     const article = (id: string) => transcript().querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
     const contextMenu = async (target: Element) => {
@@ -430,21 +456,29 @@ describe('the transcript', () => {
 
     it('a right-click offers Open, Save as…, Show in folder and Copy image, each on that picture', async () => {
       install()
+      const copied = drawing()
       fake.chats.inbox = [message(1, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')})` })]
       await open()
       await settle()
       const second = button('Open picture: b', article('b1'))!
       const menuItems = () => [...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')]
-      for (const [label, action] of [['Save as…', 'saveCopy'], ['Show in folder', 'showInFolder'], ['Copy image', 'copyImage']] as const) {
+      for (const label of ['Save as…', 'Show in folder', 'Copy image']) {
         await contextMenu(second)
         expect(menuItems().map((item) => item.textContent)).toEqual(['Open', 'Save as…', 'Show in folder', 'Copy image'])
         // The tools beside the bubble (reactions, Read aloud, Copy, Reply) step aside while the menu is open.
         expect(article('b1').classList.contains('is-menu-open')).toBe(true)
         await click(menuItems().find((item) => item.textContent === label))
-        expect(localFiles[action]).toHaveBeenCalledWith(picture('b.png'))
+        await settle()
         expect(document.querySelector('.bot-picture-menu')).toBeNull()
         expect(article('b1').classList.contains('is-menu-open')).toBe(false)
       }
+      expect(localFiles.saveCopy).toHaveBeenCalledWith(picture('b.png'))
+      expect(localFiles.showInFolder).toHaveBeenCalledWith(picture('b.png'))
+      // Copy image puts the picture itself on the clipboard, as PNG bytes: the second picture, not its path.
+      expect(writeImage).toHaveBeenCalledTimes(1)
+      const shown = second.querySelector('img')!.getAttribute('src')!
+      expect(copied(writeImage.mock.calls[0][0] as Uint8Array)).toEqual({ png: true, picture: shown })
+      expect(composerError()).toBeNull()
       await contextMenu(second)
       await click(menuItems()[0])
       expect(document.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe('b')
@@ -453,6 +487,50 @@ describe('the transcript', () => {
       await contextMenu(second)
       await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
       expect(document.querySelector('.bot-picture-menu')).toBeNull()
+    })
+
+    // A picture with no file (a `data:` image, a GIF or WebP drawn by the window) is copied as the window shows it.
+    it('a picture with no file offers Open and Copy image, and Copy image puts that picture on the clipboard', async () => {
+      install()
+      const copied = drawing()
+      const gif = 'data:image/gif;base64,R0lGODlhAQABAAAAACw='
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![dance](${gif})` })]
+      await open()
+      await settle()
+      await contextMenu(button('Open picture: dance', article('b1'))!)
+      const items = [...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')]
+      expect(items.map((item) => item.textContent)).toEqual(['Open', 'Copy image'])
+      await click(items[1])
+      await settle()
+      expect(copied(writeImage.mock.calls[0][0] as Uint8Array)).toEqual({ png: true, picture: gif })
+      expect(localFiles.saveCopy).not.toHaveBeenCalled()
+    })
+
+    it("a picture that can't be drawn is said above the composer, and the clipboard is left alone", async () => {
+      install()
+      drawing()
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![x](${picture('unreadable.png')})` })]
+      URL.createObjectURL = vi.fn(() => 'blob:broken')
+      await open()
+      await settle()
+      await contextMenu(button('Open picture: x', article('b1'))!)
+      await click([...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')].find((item) => item.textContent === 'Copy image'))
+      await settle()
+      expect(writeImage).not.toHaveBeenCalled()
+      expect(composerError()?.textContent).toBe("This picture can't be copied.")
+    })
+
+    it('a clipboard that refuses the picture is said in its own words above the composer', async () => {
+      install()
+      drawing()
+      writeImage.mockRejectedValue(new Error("Error invoking remote method 'clipboard:writeImage': Error: This picture can't be copied."))
+      fake.chats.inbox = [message(1, { id: 'b1', text: '![y](data:image/png;base64,iVBORw0KGgo=)' })]
+      await open()
+      await settle()
+      await contextMenu(button('Open picture: y', article('b1'))!)
+      await click([...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')].find((item) => item.textContent === 'Copy image'))
+      await settle()
+      expect(composerError()?.textContent).toBe("This picture can't be copied.")
     })
   })
 

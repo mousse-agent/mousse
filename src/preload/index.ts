@@ -707,9 +707,7 @@ const api = {
     /** Shows the file or folder selected in the computer's file manager. */
     showInFolder: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:showInFolder', path),
     /** Saves a copy where the person picks; the path it was saved to, or null when they closed the dialog. */
-    saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path),
-    /** Puts a picture file on the clipboard as an image. */
-    copyImage: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:copyImage', path)
+    saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path)
   },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
@@ -1464,7 +1462,9 @@ const api = {
   },
   clipboard: {
     showCopyMenu: (x: number, y: number, text: string): Promise<void> =>
-      ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text)
+      ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text),
+    /** Puts a picture, as PNG bytes, on the clipboard as an image that other apps paste. */
+    writeImage: (png: Uint8Array): Promise<void> => ipcRenderer.invoke('clipboard:writeImage', png)
   },
   dialog: {
     /** Native open-file dialog; resolves to the chosen absolute path, or null when cancelled. */
