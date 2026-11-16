@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Shield } from '../../lib/icons'
 import { useBotsStore } from '../../stores/botsStore'
 import { botGroupTime } from './messageGroups'
@@ -20,17 +20,36 @@ function Value({ value, literal = false }: { value: unknown; literal?: boolean }
     if (!Object.keys(object).length) return <code aria-label="Object">{'{}'}</code>
     return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt>{actionText(key)}</dt><dd><Field name={key} value={child} literal={false} /></dd></div>)}</dl>
   }
-  if (Array.isArray(value)) return value.length ? <ol>{value.map((child, index) => <li key={index}><Value value={child} literal={literal} /></li>)}</ol> : <code aria-label="List">[]</code>
+  if (Array.isArray(value)) return value.length ? <ol>{value.map((child, index) => <li key={index}><Field name="item" value={child} literal={literal} /></li>)}</ol> : <code aria-label="List">[]</code>
   if (typeof value !== 'string') return <code aria-label="Non-text value">{JSON.stringify(value) ?? String(value)}</code>
   if (value === '') return <span className="bot-action-empty">(empty text)</span>
   const text = /^(?:true|false|null|[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?|\[\]|\{\})$/i.test(value.trim()) ? JSON.stringify(value) : value
   return <blockquote className="bot-action-text">{actionText(text).replaceAll("\n", "↵\n")}</blockquote>
 }
 function Field({ name, value, literal }: { name: string; value: unknown; literal: boolean }) {
-  return typeof value === 'string' && (value.length > 400 || /^(body|text|content|message)$/i.test(name))
+  return (Array.isArray(value) && value.length > 8) || typeof value === 'string' && (value.length > 160 || /^(body|text|content|message)$/i.test(name))
     ? <details><summary>Read {actionText(name)}</summary><Value value={value} literal={literal} /></details>
     : <Value value={value} literal={literal} />
 }
+function Arguments({ value }: { value: unknown }) {
+  const region = useRef<HTMLDivElement>(null)
+  const [more, setMore] = useState(false)
+  const measure = () => {
+    const element = region.current
+    setMore(Boolean(element && element.scrollTop + element.clientHeight < element.scrollHeight - 1))
+  }
+  useLayoutEffect(() => {
+    measure()
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure)
+    if (region.current) observer?.observe(region.current)
+    return () => observer?.disconnect()
+  }, [value])
+  return <>
+    <div ref={region} className="bot-action-arguments" role="region" tabIndex={0} aria-label="Complete arguments" onScroll={measure} onToggleCapture={measure}><Value value={value} /></div>
+    {more && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />More arguments below</p>}
+  </>
+}
+
 function outcome(card: BotActionCardData): string {
   switch (card.status) {
     case 'open': return ''
@@ -65,7 +84,7 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   }
   const previous = card.previous
   const argumentsView = <>
-    <div className="bot-action-arguments" role="region" tabIndex={0} aria-label="Complete arguments"><Value value={card.args} /></div>
+    <Arguments value={card.args} />
     {card.note && <blockquote className="bot-action-note" aria-label="Bot note">{actionText(botName).replace(/\s+/g, " ")} says: <span>{actionText(card.note).replace(/\s+/g, " ")}</span></blockquote>}
   </>
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">

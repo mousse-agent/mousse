@@ -631,8 +631,8 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-action-arguments { max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
 .bot-action-arguments dl { margin: 8px 0; }
 .bot-action-arguments dt { font-family: var(--font-mono, monospace); font-size: 12px; font-weight: 400; white-space: pre-wrap; }
-.bot-action-arguments dd { margin: 4px 0 12px 12px; }
-.bot-action-arguments ol { margin: 4px 0; padding-left: 24px; }
+.bot-action-arguments dd { margin: 4px 0 12px; }
+.bot-action-arguments ol { margin: 4px 0; padding-left: 0; list-style-position: inside; }
 .bot-action-arguments summary { cursor: pointer; }
 .bot-action-hidden { display: inline-block; font-style: italic; color: var(--text-secondary); border: 1px dashed var(--border); border-radius: 4px; padding: 0 4px; }
 .bot-action-card blockquote { margin: 12px 0; padding: 8px 12px; border-left: 2px solid var(--border); max-height: 240px; overflow: auto; }
