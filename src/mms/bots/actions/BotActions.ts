@@ -160,15 +160,17 @@ export interface ActionRow {
 export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'> & Partial<Pick<ActionRow, 'card_json'>>): string {
   const result = action.result_json ? JSON.parse(action.result_json) as BotMcpCallOutcome : undefined
   if (JSON.parse(action.card_json ?? '{}').ownerRemoved) return 'Your owner removed this request. Do not ask for it again unless they write.'
-  if (result?.text === '[forgotten]') return 'The saved details of this outcome were removed.'
+  const forgotten = result?.text === '[forgotten]'
+  const card = JSON.parse(action.card_json ?? '{}')
   if (result?.notSentInTime) return `${result.text} Nothing left Mousse. Decide whether a new request is needed.`
-  const line = action.status === 'done' ? 'Your owner sent it. The tool answered:'
+  const line = action.status === 'done' ? forgotten ? 'Your owner sent it.' : 'Your owner sent it. The tool answered:'
     : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
       : action.status === 'expired' ? 'This call expired. Nothing was sent; do not try the same call again without a new reason.'
       : action.status === 'withdrawn' ? 'No longer needed, so nothing was sent.'
       : action.status === 'uncertain' ? 'It could not be confirmed whether this went through: check before trying again.'
-        : result?.toolReportedError ? 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'
+        : result?.toolReportedError || card.toolReportedError ? 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'
           : 'Nothing was sent. The call failed:'
+  if (forgotten) return `${line} The saved details of this outcome were removed.`
   return `${line}${['done', 'failed', 'withdrawn', 'expired'].includes(action.status) ? `\n${result?.text ?? 'Carry on without it.'}` : ''}`
 }
 interface Host {
@@ -204,7 +206,7 @@ export class BotActions {
           const pending = ['open', 'approved'].includes(String(action.status))
           if (pending) this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'The request was forgotten. Nothing was sent.' })
           this.forgetText(botId, String(action.id))
-          if (action.message_id === messageId) this.host.store.run(`UPDATE bot_actions SET card_json = json_set(card_json,
+          if (pending && action.message_id === messageId) this.host.store.run(`UPDATE bot_actions SET card_json = json_set(card_json,
             '$.ownerRemoved', json('true'), '$.removedOwnerSeq', ?, '$.removedNoteSeq', ?) WHERE id = ?`,
           host.store.ownerLastWroteSeq(botId), Number(host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:action-note:${action.activation_id}`)?.value ?? 0), String(action.id))
           if (!pending) continue
@@ -219,6 +221,7 @@ export class BotActions {
   forgetText(botId: string, actionId?: string): void {
     this.host.store.run(`UPDATE bot_actions SET args_json = ?, args_digest = '[forgotten]',
       card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0),
+        'toolReportedError', COALESCE(json_extract(result_json, '$.toolReportedError'), json_extract(card_json, '$.toolReportedError')),
         'ownerRemoved', json_extract(card_json, '$.ownerRemoved'), 'removedOwnerSeq', json_extract(card_json, '$.removedOwnerSeq'), 'removedNoteSeq', json_extract(card_json, '$.removedNoteSeq')),
       bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
     '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId, actionId ?? null, actionId ?? null)
@@ -340,7 +343,7 @@ export class BotActions {
       if (moved && !pending.has(to)) {
         const action = this.get(id)!
         const row = this.host.store.activation(action.activation_id)
-        if (action.args_json !== '"[forgotten]"') this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', result?.notSentInTime ? result.text : to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
+        if (action.args_json !== '"[forgotten]"') this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', result?.notSentInTime ? result.text : to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError || card.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
         if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
         this.host.store.db.afterCommit(() => this.host.publish(action.message_id))
       }
