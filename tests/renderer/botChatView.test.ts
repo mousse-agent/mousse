@@ -2198,7 +2198,7 @@ it('quotes actual hidden path segments without interpreting dots or arrows and f
   const card = host.querySelector('[aria-label="Action to review"]')!
   const warning = [...card.querySelectorAll('[role="note"]')].find((item) => item.textContent?.includes('Hidden values will be sent'))!
   const path = warning.querySelector('[aria-label="Hidden field path"]')!
-  expect([...path.querySelectorAll('q')].map((item) => item.textContent)).toEqual(['a.b', 'c → d'])
+  expect([...path.querySelectorAll('[aria-label="Field name"]')].map((item) => item.textContent)).toEqual(['a.b', 'c → d'])
   const fold = warning.querySelector('details')!
   expect(fold.open).toBe(false)
   await click(fold.querySelector('summary'))

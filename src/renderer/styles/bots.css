@@ -647,7 +647,7 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-action-empty { color: var(--text-secondary); font-style: italic; }
 
 .bot-action-paths { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.bot-action-paths q { font-family: var(--font-mono, monospace); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; white-space: pre-wrap; }
+.bot-action-path-segment { font-family: inherit; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; white-space: pre-wrap; }
 .bot-action-paths details { display: inline-block; max-width: 100%; }
 
 .bot-action-alphabet { display: inline-flex; gap: 4px; align-items: baseline; color: var(--text-secondary); font-family: var(--font-ui, sans-serif); font-size: 11px; margin-left: 4px; }

@@ -67,8 +67,8 @@ function Arguments({ value }: { value: unknown }) {
 function HiddenPaths({ paths }: { paths: string[][] }) {
   return <div className="bot-action-paths">{paths.map((path, index) => <div key={index} aria-label="Hidden field path">
     {path.map((segment, part) => <Fragment key={part}>{part > 0 && ' → '}{segment.length > 80
-      ? <details><summary>Read field name</summary><q>{actionText(segment)}</q></details>
-      : <q>{actionText(segment)}</q>}</Fragment>)}
+      ? <details><summary>Read field name</summary><span className="bot-action-path-segment" aria-label="Field name">{fieldName(segment)}</span></details>
+      : <span className="bot-action-path-segment" aria-label="Field name">{fieldName(segment)}</span>}</Fragment>)}
   </div>)}</div>
 }
 
