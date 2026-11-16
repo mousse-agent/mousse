@@ -89,8 +89,10 @@ describe('an agent reads its thread\'s terminals', () => {
     await exited(failed)
     const { isError, body, text } = await read({})
     expect(isError).toBe(false)
-    expect(body.terminals).toEqual([expect.objectContaining({ terminalId: failed, title: 'Terminal', status: 'exited', exitCode: 3, cwd: home })])
-    expect(body.output).toMatchObject({ terminalId: failed, title: 'Terminal' })
+    expect(body.terminals).toEqual([expect.objectContaining({ terminalId: failed, title: 'Ended terminal', status: 'exited', exitCode: 3, cwd: home })])
+    // A normal exit names no signal.
+    expect(body.terminals[0].signal).toBeUndefined()
+    expect(body.output).toMatchObject({ terminalId: failed, title: 'Ended terminal' })
     expect(body.output.text).toContain('npm ERR! Missing script: "bild"')
     expect(body.output.text).not.toContain('\u001b')
     expect(text).not.toContain(TOKEN)
@@ -121,8 +123,8 @@ describe('an agent reads its thread\'s terminals', () => {
     expect((await read({})).body.output.terminalId).toBe(newer)
     const picked = await read({ terminalId: older })
     expect(picked.body.output.text).toContain('old build failed')
-    // Numbered as the panel numbers unnamed tabs.
-    expect(picked.body.terminals.map((terminal: { title: string }) => terminal.title).sort()).toEqual(['Terminal', 'Terminal 2'])
+    // The running one is numbered as the panel numbers its tabs; one that ended is numbered apart (its tab may run a new shell).
+    expect(picked.body.terminals.map((terminal: { terminalId: string; title: string }) => [terminal.terminalId, terminal.title])).toEqual([[newer, 'Terminal'], [older, 'Ended terminal']])
   })
 
   it('pages back through long output by line number', async () => {

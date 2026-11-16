@@ -58,6 +58,8 @@ export interface PtySession {
   cwd: string
   startedAt: number
   lastOutputAt?: number
+  /** Its width now, where long lines wrap. */
+  columns: number
 }
 
 export interface PtyCreateOptions {
@@ -93,6 +95,7 @@ interface ExitedTerminal {
   info: TerminalInfo
   scrollback: string
   droppedLines: number
+  columns: number
 }
 
 export type TerminalSendSink = (channel: string, data: unknown) => void
@@ -232,7 +235,8 @@ export class PtyManager extends EventEmitter {
       ...(command ? { command } : {}),
       shell,
       cwd: resolvedCwd,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      columns: 120
     }
     this.sessions.set(ptyId, session)
     this.scrollbacks.set(ptyId, '')
@@ -381,6 +385,7 @@ export class PtyManager extends EventEmitter {
     this.lifecycle.assertAdmits('resize')
     const session = this.sessions.get(ptyId)
     session?.pty.resize(cols, rows)
+    if (session) session.columns = cols
   }
 
   kill(ptyId: string): void {
@@ -437,12 +442,14 @@ export class PtyManager extends EventEmitter {
         ...this.describe(session),
         status: 'exited',
         exitCode,
-        signal,
+        // node-pty reports signal 0 for an exit no signal caused.
+        signal: signal === '0' ? null : signal,
         ...(this.stopping.has(session.id) ? { stopped: true as const } : {}),
         exitedAt: Date.now()
       },
       scrollback: kept,
-      droppedLines
+      droppedLines,
+      columns: session.columns
     })
     this.pruneExited()
   }
@@ -495,10 +502,11 @@ export class PtyManager extends EventEmitter {
   }
 
   /** A terminal's kept output (running, or ended and still kept) and how many lines came before it; undefined when gone. */
-  terminalOutput(ptyId: string): { scrollback: string; droppedLines: number } | undefined {
-    if (this.sessions.has(ptyId)) return { scrollback: this.scrollbacks.get(ptyId) ?? '', droppedLines: this.droppedLines.get(ptyId) ?? 0 }
+  terminalOutput(ptyId: string): { scrollback: string; droppedLines: number; columns: number } | undefined {
+    const session = this.sessions.get(ptyId)
+    if (session) return { scrollback: this.scrollbacks.get(ptyId) ?? '', droppedLines: this.droppedLines.get(ptyId) ?? 0, columns: session.columns }
     const ended = this.exited.find((entry) => entry.info.ptyId === ptyId)
-    return ended ? { scrollback: ended.scrollback, droppedLines: ended.droppedLines } : undefined
+    return ended ? { scrollback: ended.scrollback, droppedLines: ended.droppedLines, columns: ended.columns } : undefined
   }
 
   /**

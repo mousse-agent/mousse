@@ -7,7 +7,8 @@ import { TERMINAL_READ_LINE_CHARS, TERMINAL_READ_MAX_CHARS, terminalLines, termi
 
 describe('what a line reads as', () => {
   // The inputs a terminal prints that are not plain text.
-  const rows: Array<[string, string, string[]]> = [
+  // The terminal's width, where it matters, is the fourth column.
+  const rows: Array<[string, string, string[], number?]> = [
     ['colors', '\u001b[31mError:\u001b[0m boom\r\n', ['Error: boom', '']],
     ['bold and 256 colors', '\u001b[1;38;5;196mFAIL\u001b[m tests/a.test.ts\n', ['FAIL tests/a.test.ts', '']],
     ['a window title (OSC, ended by BEL)', '\u001b]0;npm run dev\u0007ready\n', ['ready', '']],
@@ -18,10 +19,16 @@ describe('what a line reads as', () => {
     ['cursor moves and mode switches', '\u001b[?25l\u001b[2Jhello\u001b[?25h\u001b=\n', ['hello', '']],
     ['a bell and other controls', 'ding\u0007\u0000\n', ['ding', '']],
     ['trailing spaces', 'prompt $   \n', ['prompt $', '']],
-    ['a partial last line', 'one\ntwo', ['one', 'two']]
+    ['a partial last line', 'one\ntwo', ['one', 'two']],
+    // zsh fills a row, prints a space to wrap, goes back to the start of the new row and redraws it.
+    ['a typed command longer than the terminal is wide', 'main % echo " \rabcdefgh"\r\n', ['main % echo "abcdefgh"', ''], 13],
+    ['a wrapped line with a progress bar on its second row', '0123456789[#  ]\r[###]\n', ['0123456789[###]', ''], 10],
+    ['a spinner erased before the output (npm)', '\u001b[1G\u001b[0K⠙\u001b[1G\u001b[0Knode:internal/loader\n', ['node:internal/loader', '']],
+    ['a tab', 'a\tb\n', ['a       b', '']],
+    ['cursor back and overwrite', 'abcdef\u001b[3Dxy\n', ['abcxyf', '']]
   ]
-  it.each(rows)('%s', (_name, raw, lines) => {
-    expect(terminalLines(raw)).toEqual(lines)
+  it.each(rows)('%s', (_name, raw, lines, columns) => {
+    expect(terminalLines(raw, columns)).toEqual(lines)
   })
 })
 

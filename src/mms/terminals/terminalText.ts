@@ -3,10 +3,11 @@
  * line the terminal ever printed, and read from the end a page at a time.
  */
 
-/** Escape sequences: CSI (colors, cursor moves), OSC (titles, links), and the two-byte and charset ones. */
-const ESCAPES = /\u001b\[[0-?]*[ -/]*[@-~]|\u009b[0-?]*[ -/]*[@-~]|\u001b\][\s\S]*?(?:\u0007|\u001b\\|$)|\u001b[P^_][\s\S]*?(?:\u001b\\|$)|\u001b[()*+][0-9A-Za-z]|\u001b[ -/]*[0-~]/g
-/** Control characters other than the line breaks, tab, backspace and carriage return handled below. */
-const CONTROLS = /[\u0000-\u0007\u000b\u000c\u000e-\u001f\u007f]/g
+/**
+ * One escape sequence or control character at a time: CSI (colors, cursor moves, erases), OSC (titles, links), DCS and
+ * the like, two-byte escapes, carriage return, backspace and tab. Anything else is text.
+ */
+const TOKENS = /\u001b\[([0-?]*)[ -/]*([@-~])|\u009b([0-?]*)[ -/]*([@-~])|\u001b\][\s\S]*?(?:\u0007|\u001b\\|$)|\u001b[P^_X][\s\S]*?(?:\u001b\\|$)|\u001b[()*+][0-9A-Za-z]|\u001b[ -/]*[0-~]?|[\r\b\t]|[\u0000-\u0007\u000b-\u001f\u007f]/g
 
 /** Lines an agent is given by default, and the most one call returns. */
 export const TERMINAL_READ_DEFAULT_LINES = 80
@@ -16,32 +17,68 @@ export const TERMINAL_READ_MAX_CHARS = 16_000
 export const TERMINAL_READ_LINE_CHARS = 1_000
 
 /**
- * One line as the screen would show it: a carriage return starts the line over (a progress bar keeps its last state),
- * a backspace takes back the character before it.
+ * One line (up to a line feed) as the screen shows it. The line is laid out in rows of `columns` characters, as the
+ * terminal wraps it: a carriage return goes back to the start of the row the cursor is on, a backspace and cursor moves
+ * move along it, an erase clears it, and text overwrites what is there. So a progress bar keeps its last state, a
+ * cleared spinner leaves nothing, and a shell that redraws the second row of a long typed command keeps the first.
  */
-function settleLine(line: string): string {
-  let text = line
-  if (text.includes('\r')) {
-    const parts = text.split('\r')
-    // The last state a redrawn line reached (a progress bar, a spinner). Programs that redraw a shorter text clear the
-    // line first, so the last non-empty part is what the screen shows.
-    text = parts.reverse().find((part) => part.length > 0) ?? ''
-  }
-  if (text.includes('\b')) {
-    const out: string[] = []
-    for (const char of text) {
-      if (char === '\b') out.pop()
-      else out.push(char)
+function screenLine(line: string, columns: number): string {
+  const rows: string[][] = [[]]
+  let row = 0
+  let col = 0
+  const put = (char: string): void => {
+    if (col >= columns) {
+      row += 1
+      col = 0
+      rows[row] ??= []
     }
-    text = out.join('')
+    const cells = rows[row]
+    while (cells.length < col) cells.push(' ')
+    cells[col] = char
+    col += 1
   }
-  return text.replace(/\s+$/, '')
+  const csi = (params: string, final: string): void => {
+    const n = Number.parseInt(params.split(';')[0] || '', 10)
+    const count = Number.isFinite(n) && n > 0 ? n : 1
+    const cells = rows[row]
+    switch (final) {
+      case 'K': {
+        const mode = Number.isFinite(n) ? n : 0
+        if (mode === 2) rows[row] = []
+        else if (mode === 1) for (let i = 0; i <= col && i < cells.length; i++) cells[i] = ' '
+        else cells.length = Math.min(cells.length, col)
+        break
+      }
+      case 'G': col = Math.max(0, count - 1); break
+      case 'C': col += count; break
+      case 'D': col = Math.max(0, col - count); break
+      case 'A': row = Math.max(0, row - count); break
+      case 'B': row += count; rows[row] ??= []; break
+      default: break
+    }
+    for (let i = 0; i <= row; i++) rows[i] ??= []
+  }
+  let last = 0
+  for (const match of line.matchAll(TOKENS)) {
+    for (const char of line.slice(last, match.index)) put(char)
+    last = match.index + match[0].length
+    const token = match[0]
+    if (token === '\r') col = 0
+    else if (token === '\b') col = Math.max(0, col - 1)
+    else if (token === '\t') { const stop = (Math.floor(col / 8) + 1) * 8; while (col < stop) put(' ') }
+    else if (match[2] !== undefined) csi(match[1], match[2])
+    else if (match[4] !== undefined) csi(match[3], match[4])
+  }
+  for (const char of line.slice(last)) put(char)
+  return rows.map((cells) => cells.join('')).join('').replace(/\s+$/, '')
 }
 
-/** Raw terminal output as plain lines (the last one may still be growing). */
-export function terminalLines(raw: string): string[] {
-  const plain = raw.replace(ESCAPES, '').replace(/\r\n/g, '\n').replace(CONTROLS, '')
-  return plain.split('\n').map(settleLine)
+/**
+ * Raw terminal output as plain lines (the last one may still be growing). `columns` is the terminal's width, where long
+ * lines wrap; without it nothing wraps.
+ */
+export function terminalLines(raw: string, columns = Number.POSITIVE_INFINITY): string[] {
+  return raw.split('\n').map((line) => screenLine(line, columns))
 }
 
 export interface TerminalPage {
@@ -59,13 +96,13 @@ export interface TerminalPage {
 
 /**
  * The page of `raw` that ends just before line `before` (or at the end), at most `lines` lines and
- * `TERMINAL_READ_MAX_CHARS` characters. `droppedLines` is how many lines the terminal printed before the start of `raw`,
+ * `TERMINAL_READ_MAX_CHARS` characters, laid out at `columns` (the terminal's width). `droppedLines` is how many lines the terminal printed before the start of `raw`,
  * so a line keeps its number while older output falls out of the buffer. Trailing blank lines (an empty prompt line) are
  * not counted as output.
  */
-export function terminalPage(raw: string, options: { lines?: number; before?: number; droppedLines?: number } = {}): TerminalPage {
+export function terminalPage(raw: string, options: { lines?: number; before?: number; droppedLines?: number; columns?: number } = {}): TerminalPage {
   const dropped = options.droppedLines ?? 0
-  const all = terminalLines(raw)
+  const all = terminalLines(raw, options.columns)
   while (all.length > 0 && all[all.length - 1] === '') all.pop()
   const lastLine = dropped + all.length
   const wanted = Math.max(1, Math.min(TERMINAL_READ_MAX_LINES, Math.floor(options.lines ?? TERMINAL_READ_DEFAULT_LINES)))

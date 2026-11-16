@@ -21,14 +21,20 @@ function boundedInt(value: unknown, name: string, min: number, max: number): num
   return value
 }
 
-/** What the panel calls each terminal: its own name, else "Terminal", "Terminal 2"... in the order they were opened. */
+/**
+ * What each terminal is called: its own name, else as the panel numbers its tabs ("Terminal", "Terminal 2"...) in the
+ * order they were opened. A tab whose shell ended may have started a new one, so an ended terminal is numbered apart
+ * ("Ended terminal", "Ended terminal 2"...) and never takes a running one's number.
+ */
 function titled(terminals: TerminalInfo[]): Array<TerminalInfo & { title: string }> {
-  let plain = 0
+  const counts = { running: 0, exited: 0 }
   const byStart = [...terminals].sort((a, b) => a.startedAt - b.startedAt)
   const names = new Map<string, string>()
   for (const terminal of byStart) {
-    if (terminal.title) names.set(terminal.ptyId, terminal.title)
-    else names.set(terminal.ptyId, plain++ === 0 ? 'Terminal' : `Terminal ${plain}`)
+    if (terminal.title) { names.set(terminal.ptyId, terminal.title); continue }
+    const base = terminal.status === 'running' ? 'Terminal' : 'Ended terminal'
+    const n = ++counts[terminal.status]
+    names.set(terminal.ptyId, n === 1 ? base : `${base} ${n}`)
   }
   return terminals.map((terminal) => ({ ...terminal, title: names.get(terminal.ptyId)! }))
 }
@@ -65,7 +71,7 @@ export function readTerminals(terminals: TerminalReadHost, threadId: string, arg
     return { text: terminals.mask(JSON.stringify({ threadId, terminals: listed.map(terminalView), error: `This thread has no terminal ${String(args.terminalId)} now: pick one from terminals.` })), isError: true }
   }
   const kept = terminals.output(chosen.ptyId)
-  const page = terminalPage(kept?.scrollback ?? '', { ...(lines ? { lines } : {}), ...(before ? { before } : {}), droppedLines: kept?.droppedLines ?? 0 })
+  const page = terminalPage(kept?.scrollback ?? '', { ...(lines ? { lines } : {}), ...(before ? { before } : {}), droppedLines: kept?.droppedLines ?? 0, ...(kept?.columns ? { columns: kept.columns } : {}) })
   const output = {
     terminalId: chosen.ptyId,
     title: chosen.title,

@@ -294,7 +294,8 @@ export interface AgentScheduleHost {
 /** What `terminal_read` reads: a thread's terminals and their kept output, from memory. */
 export interface TerminalReadHost {
   list(threadId: string): TerminalInfo[]
-  output(ptyId: string): { scrollback: string; droppedLines: number } | undefined
+  /** `columns`: its width, where its long lines wrap. */
+  output(ptyId: string): { scrollback: string; droppedLines: number; columns?: number } | undefined
   /** Masks every secret in the profile's store. */
   mask(text: string): string
 }
