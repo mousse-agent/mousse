@@ -432,7 +432,8 @@ export class BotChatProjection {
           (candidate.status !== 'failed' || JSON.parse(String(candidate.result_json ?? '{}')).toolReportedError === true)
       }) : undefined
     const previousAt = previous?.ran_at ?? previous?.answered_at ?? previous?.created_at
-    const at = row.ran_at ?? row.answered_at
+    const validAt = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value))
+    const at = [metadata.settledAt, row.ran_at, row.answered_at].find(validAt)
     return {
       actionId: row.id, digest: row.args_digest,
       title: metadata.title ?? readableActionTitle(JSON.parse(row.target_json).tool),
@@ -441,7 +442,7 @@ export class BotChatProjection {
       status: row.status as BotActionCard['status'],
       ...(previous && typeof previousAt === 'string' ? { previous: { status: previous.status as 'done' | 'uncertain' | 'failed', at: previousAt } } : {}),
       ...(at ? { at } : {}),
-      ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}) } } : {}),
+      ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}), ...(result.notSentInTime === true ? { notSentInTime: true } : {}) } } : {}),
       ...(row.bot_note ? { note: row.bot_note } : {})
     }
   }

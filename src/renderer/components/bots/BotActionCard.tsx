@@ -75,9 +75,10 @@ function HiddenPaths({ paths }: { paths: string[][] }) {
 function outcome(card: BotActionCardData): string {
   switch (card.status) {
     case 'open': return ''
-    case 'approved': case 'running': return 'Sending…'
+    case 'approved': return `Waiting for ${actionText(card.serverName)}…`
+    case 'running': return 'Sending…'
     case 'done': return 'Sent'
-    case 'failed': return card.result?.toolReportedError ? 'The tool reported an error' : 'Not sent'
+    case 'failed': return card.result?.notSentInTime ? actionText(card.result.text) : card.result?.toolReportedError ? 'The tool reported an error' : 'Not sent'
     case 'uncertain': return "Couldn't tell if it went through"
     case 'expired': return 'Expired · not sent'
     default: return 'Not sent'
@@ -89,6 +90,7 @@ export function actionTitle(card: BotActionCardData): string {
 }
 
 function reviewLabel(card: BotActionCardData): string {
+  if (card.result?.notSentInTime) return 'What it would have sent'
   if (card.status === 'done' || card.status === 'failed' && card.result?.toolReportedError) return 'What it sent'
   if (card.status === 'uncertain') return 'What it tried to send'
   if (card.status === 'approved' || card.status === 'running') return 'What it is sending'
@@ -126,7 +128,7 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
     <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span> · <span className="bot-action-server">{actionText(card.serverName)}</span></p>
     {actionStatus(card) && <p role="status" className="bot-action-outcome" data-find-text data-message-id={messageId} data-part-index="1">{actionStatus(card)}</p>}
-    {card.result && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
+    {card.result && !card.result.notSentInTime && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
     {card.status === 'open' ? argumentsView : <details aria-label={reviewLabel(card)}><summary>{reviewLabel(card)}</summary>{argumentsView}</details>}
     {refusal && <p role="status" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(refusal.text).replace(/\s+/g, ' ')}</p>}
     {card.status === 'open' && <>

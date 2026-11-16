@@ -2050,7 +2050,7 @@ it('answers only the card id, digest and choice, then redraws a changed card wit
   expect(answer).toHaveBeenLastCalledWith('held-1', 'new-digest', 'not_now')
 })
 it.each([
-  ['open', 'Send'], ['approved', 'Sending'], ['running', 'Sending'], ['done', 'Sent ·'],
+  ['open', 'Send'], ['approved', 'Waiting for Mail…'], ['running', 'Sending'], ['done', 'Sent ·'],
   ['failed', 'Not sent'], ['uncertain', "Couldn't tell if it went through"], ['declined', 'Not sent'],
   ['expired', 'Expired · not sent'], ['withdrawn', 'Not sent']
 ])('keeps the complete card readable in %s', async (status, label) => {
