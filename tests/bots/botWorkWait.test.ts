@@ -136,3 +136,30 @@ it('scheduled runs must leave their place for the next run', async () => {
   f.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ kind: 'schedule', scheduleId: 'schedule', input: 'Check', occurrenceAt: f.store.now() }), workId)
   await expect(wait(workId)).rejects.toThrow('next run carries on')
 })
+
+// A wait can become due before the provider gives up its turn, or while a gate holds it.
+it.each(['event already happened', 'turn still running', 'permission wall', 'unknown calls'] as const)('does not arm a zero timer before parking: %s', async state => {
+  let idle = false
+  f.host.wakeThread = () => ({ state: idle ? 'idle' : 'running' })
+  const { workId, turn } = await work()
+  const set = await wait(workId, state === 'event already happened' ? { kind: 'thread', threadId: 'other' } : undefined)
+  if (state === 'permission wall') f.store.moveActivation(workId, ['running'], 'waiting_grant')
+  if (state === 'unknown calls') f.store.moveActivation(workId, ['running'], 'paused', { endReason: 'unknown_calls' })
+  idle = true
+  f.clock.now += 2 * 60 * 60_000
+  if (state === 'event already happened') await f.bots.checkWakeEvents()
+  const before = f.timers.length
+  await f.bots.deliverDueReminders()
+  await f.bots.deliverDueReminders()
+  expect(f.timers.slice(before).filter(t => t.ms === 0)).toEqual([])
+  expect(f.bots.nextDueAt(botId)).toBeUndefined()
+  if (state === 'permission wall' || state === 'unknown calls') {
+    f.runs.markTerminal(turn.payload.runId, 'completed')
+    await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], {})
+  } else await finish(f, turn.payload, 'completed', { text: '' })
+  await flush()
+  expect(f.store.reminder(set.wakeId)?.status).toBe('delivered')
+  expect(f.store.dispatches(workId)).toHaveLength(2)
+  await f.bots.deliverDueReminders()
+  expect(f.store.dispatches(workId)).toHaveLength(2)
+})
