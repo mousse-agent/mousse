@@ -557,3 +557,16 @@ it.each([`sk-${'Z'.repeat(30)}`, 'eyJabcdefghijk.abcdefghijk.abcdefghijk', '----
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(t.calls).toEqual([])
 })
+it.each(['password', 'token', 'access_token', 'client_secret', 'authorization', 'api_key'])('B1-key marks hidden %s as a value that will be sent', async key => {
+  const t = await setup(true)
+  Object.assign(t.args, { [key]: 'page-cursor-42' })
+  expect(await t.call()).not.toMatchObject({ isError: true })
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(JSON.parse(a.args_json)[key]).toBe('hidden · will be sent')
+  expect(JSON.parse(a.card_json!)).toMatchObject({ hasHiddenValues: true })
+  expect(f.store.message(a.message_id)?.text).toContain('hidden · will be sent')
+  expect(f.store.message(a.message_id)?.text).not.toContain('held back')
+  expect(t.calls).toEqual([])
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
