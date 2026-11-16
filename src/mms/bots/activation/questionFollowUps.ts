@@ -25,3 +25,17 @@ export function nudgeSlot(at: number, nudges: readonly number[]): number {
   }
   return slot
 }
+
+/** A held action follows up on the question path, without inventing a question row. */
+export interface ActionNudgeFollowUp {
+  id: string
+  actionId: string
+  botId: string
+  activationId: string
+  messageId: string
+  count: number
+  at: number
+}
+export function actionNudgeId(messageId: string): string | undefined {
+  return /^bm_(action_[a-zA-Z0-9-]+)_n[12]$/.exec(messageId)?.[1]
+}

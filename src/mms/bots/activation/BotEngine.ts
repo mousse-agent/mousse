@@ -1,5 +1,5 @@
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
-import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData } from '../actions/BotActions'
+import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
@@ -84,10 +84,10 @@ import {
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { allPinned, copyPick, customSlotsOf, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
-import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
+import { defaultChatInput, defaultWorkLine, lateWorkNote, DEFAULT_NUDGE_AFTER_MINUTES, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
-import { nudgeSlot } from './questionFollowUps'
+import { nudgeSlot, actionNudgeId, type ActionNudgeFollowUp } from './questionFollowUps'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
 import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
@@ -616,7 +616,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
     name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
-    publish: id => { this.chat.republish(id) },
+    publish: id => {
+      this.chat.republish(id)
+      for (const suffix of ['_n1', '_n2']) if (this.store.message(`${id}${suffix}`)) this.chat.republish(`${id}${suffix}`)
+    },
     ownerAnswered: row => {
       this.resetWorkWaitChain(row.id)
       const last = this.store.get('SELECT MAX(rowid) AS n FROM bot_reminders WHERE work_id = ?', row.id)
@@ -776,6 +779,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       },
       tellAt: (botId, tell, at, messageId) => tell === 'soon' && !this.ownerActive() && !this.canWake(botId, messageId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
       classify: (message, input) => {
+        const actionId = actionNudgeId(message.id)
+        if (actionId && botAsksFirst(this.host.settings?.get())) return this.actions.get(actionId)?.status === 'open' ? 'soon' : null
         const activation = message.activationId ? this.store.activation(message.activationId) : undefined
         const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
         const botId = this.store.message(message.id)!.botId
@@ -8572,6 +8577,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const event = data as { botId?: unknown; message?: BotChatMessage; quiet?: unknown } | null
     if (typeof event?.botId !== 'string' || typeof event.message?.id !== 'string') return
     this.tellings.noteLegacy(event.botId, event.message, event.quiet === true)
+    if (!botAsksFirst(this.host.settings?.get())) return
+    const messageId = event.message.id
+    const id = actionNudgeId(messageId) ?? (messageId.startsWith('bm_action_') ? messageId.slice(3) : undefined)
+    if (!id || this.actions.get(id)?.status !== 'open' || !this.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', event.botId, `cursor:telling-legacy:${messageId}`)) return
+    this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT DO NOTHING', event.botId, `cursor:action-told:${messageId}`, this.store.now())
+    this.armDue()
   }
 
   private ownerActive(): boolean { return this.host.ownerActive?.() ?? false }
@@ -8656,6 +8667,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
       () => this.actions.nextDueAt(botId),
+      () => {
+        const times = this.actionNudgeFollowUps(botId).map(row => Math.max(row.at, forTimer ? this.questionRetryAt.get(row.id) ?? 0 : 0))
+        return times.length ? Math.min(...times) : undefined
+      },
       () => this.tellings.next(botId),
       () => {
         const row = this.store.nextReminder(botId)
@@ -8735,8 +8750,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           }
         }
         // Questions answered, withdrawn or purged since their follow-up failed are no longer tried.
-        for (const id of this.questionRetryAt.keys()) if (this.store.question(id)?.status !== 'open') this.questionRetryAt.delete(id)
-        for (const question of this.store.dueQuestions(now.toISOString())) {
+        for (const id of this.questionRetryAt.keys()) if (this.store.question(id)?.status !== 'open' && this.actions.get(id)?.status !== 'open') this.questionRetryAt.delete(id)
+        for (const question of [...this.store.dueQuestions(now.toISOString()), ...this.actionNudgeFollowUps().filter(row => row.at <= now.getTime())]) {
           if ((this.questionRetryAt.get(question.id) ?? 0) > now.getTime()) continue
           try {
             await this.followUpQuestion(question, now)
@@ -8856,6 +8871,41 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // survive a restart; only an open question is ever followed up, so one the owner answered or moved on from, or that
   // was withdrawn or forgotten, never is.
 
+  /** Durable nudge rows carry the count; telling receipts carry the clock, never executable arguments. */
+  private actionNudgeFollowUps(botId?: string): ActionNudgeFollowUp[] {
+    if (!botAsksFirst(this.host.settings?.get())) return []
+    const rows = this.store.all(`SELECT a.id, a.bot_id, a.activation_id, a.message_id, a.expires_at FROM bot_actions a
+      JOIN bot_registry b ON b.bot_id = a.bot_id JOIN bot_messages m ON m.id = a.message_id
+      WHERE a.status = 'open' AND a.args_digest <> '[forgotten]' AND b.deleted_at IS NULL
+      AND (? IS NULL OR a.bot_id = ?)`, botId ?? null, botId ?? null)
+    return rows.flatMap(row => {
+      const id = String(row.id), bot = String(row.bot_id), messageId = String(row.message_id)
+      if (this.store.messageForgotten(bot, messageId) || this.store.message(`bm_${id}_n2`)) return []
+      const first = this.store.message(`bm_${id}_n1`)
+      if (first && this.store.messageForgotten(bot, first.id)) return []
+      const source = first ?? this.store.message(messageId)!
+      const legacy = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', bot, `cursor:action-told:${source.id}`)
+      const toldAt = legacy?.value ?? source.toldAt
+      if (typeof toldAt !== 'string') return []
+      const at = Date.parse(toldAt) + (first ? NUDGE_AGAIN_MS : DEFAULT_NUDGE_AFTER_MINUTES * 60_000)
+      if (!Number.isFinite(at) || at >= Date.parse(String(row.expires_at))) return []
+      return [{ id, actionId: id, botId: bot, activationId: String(row.activation_id), messageId, count: first ? 2 : 1, at }]
+    })
+  }
+
+  private nudgeAction(question: ActionNudgeFollowUp, now: Date): void {
+    const live = this.actionNudgeFollowUps(question.botId).find(row => row.id === question.id)
+    if (!live || live.at > now.getTime()) return
+    this.store.db.transaction(() => {
+      const action = this.actions.get(live.actionId)
+      if (!action || action.status !== 'open') return
+      const title = JSON.parse(action.card_json ?? '{}').title ?? readableActionTitle(JSON.parse(action.target_json).tool)
+      this.chat.post({ id: `bm_${live.actionId}_n${live.count}`, botId: live.botId, author: 'bot', kind: 'notice',
+        text: `Wants to ${title[0]?.toLowerCase() ?? ''}${title.slice(1)}`, external: true, replyTo: live.messageId, activationId: live.activationId, lane: 'run' })
+    })
+    this.changed({ botId: live.botId })
+  }
+
   /** When a question's first follow-up is due, its bubble shown at `shownAt`: the time the bot gave after that. */
   private firstFollowUpAt(question: Pick<BotQuestionRow, 'follow' | 'botId'>, shownAt: string): string | null {
     if (!question.follow) return null
@@ -8866,7 +8916,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A question whose follow-up is due, at any hour: Mousse nudges the owner, or the bot goes with its default. A bot that
    * is gone, or a question with nothing to follow up, is left be.
    */
-  private async followUpQuestion(question: BotQuestionRow, now: Date): Promise<void> {
+  private async followUpQuestion(question: BotQuestionRow | ActionNudgeFollowUp, now: Date): Promise<void> {
+    if ('actionId' in question) { this.nudgeAction(question, now); return }
     const registry = this.store.registry(question.botId)
     if (!registry || registry.deletedAt || !question.follow) {
       this.store.setQuestionNext(question.id, null)

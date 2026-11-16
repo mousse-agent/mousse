@@ -1,3 +1,4 @@
+import { actionNudgeId } from '../activation/questionFollowUps'
 import type { BotChatMessage } from '../../../shared/bots/personal/chat'
 import { botNotificationContent, botNotificationKind } from '../../../shared/bots/personal/notification'
 import { randomUUID } from 'node:crypto'
@@ -66,6 +67,8 @@ export class BotTellings {
     if (this.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `cursor:telling-legacy:${row.id}`)) return false
     const live = this.store.message(row.id)
     if (!live) return false
+    const actionId = actionNudgeId(live.id)
+    if (actionId && this.chat.isActionMessage(live) && this.store.get('SELECT status FROM bot_actions WHERE id = ?', actionId)?.status !== 'open') return false
     const message = this.chat.toMessage(live)
     return (!message.action || message.action.status === 'open') && (!message.ask || message.ask.status === 'open') && (!message.question || message.question.status === 'open')
   }
@@ -163,7 +166,7 @@ export class BotTellings {
       return group.some(r => r.askId || r.questionId || r.error || actions.has(r.id)) ? `${name} needs you` : `${name} ${group.length} ${closed === 'While you were away' ? group.length === 1 ? 'update' : 'updates' : group.length === 1 ? 'message' : 'messages'}`
     }).join(' · ')
     const title = rows.length === 1 && closed !== 'While you were away' ? names[0]! : closed ? `${closed}: ${summary}` : `${names.join(', ')} · ${rows.length} messages`
-    this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: first.action || first.ask || first.question ? 'question' : 'completed', sound })
+    this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: actions.has(first.id) || first.action || first.ask || first.question ? 'question' : 'completed', sound })
     this.banners.set(id, rows)
   }
 }
