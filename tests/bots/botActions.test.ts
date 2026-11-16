@@ -1230,6 +1230,7 @@ it('a repeat refusal joins unread work updates without another action or card', 
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  await flush()
   const next = await start(f, t.workId, 2)
   ;(next.prepared as any).modelOutput?.()
   await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-refused', signal: new AbortController().signal })
