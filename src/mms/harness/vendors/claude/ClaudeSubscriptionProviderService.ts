@@ -77,6 +77,8 @@ import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type 
 import type { ChildTurnPolicy } from '../../adapter'
 import type { ContinuationInfo, OneShotSpec, ProviderTaskEnd } from '../../driver'
 import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type SessionTurn } from './sessionCuts'
+import { claudeMaskedToolOutput } from './secretOutput'
+import type { SecretMasker } from '../../../secrets/secretMasking'
 
 /**
  * How long a Claude Code process closed by Stop may take to exit by itself before its tree is killed. Claude Code ends
@@ -206,6 +208,8 @@ export type ClaudeSubscriptionChatInput = {
   threadId: string
   /** Provider instance running the turn; a saved session resumes only on the same instance. */
   instanceId?: string
+  /** The thread's secret masker, read at each tool result: Claude Code's tool results are masked before it keeps them. */
+  secretMasker?: () => SecretMasker | undefined
   cwd: string
   model: string
   prompt: string
@@ -2631,9 +2635,14 @@ export class ClaudeSubscriptionProviderService {
                 if (event.hook_event_name === 'PostToolUse') {
                   turnOf().locked?.committed(event.tool_use_id)
                   await turnOf().editCounter.success(event.tool_use_id, event.tool_response)
+                  // A secret the thread may use is hidden in the result before the model sees it and before Claude
+                  // Code saves it in its session file (a read of the secret's own file included).
+                  const masked = claudeMaskedToolOutput(event.tool_response, turnOf().input.secretMasker?.())
+                  const rewrite = masked === undefined ? {} : { updatedToolOutput: masked }
                   // A bot's file read is framed as data, like its thread and MCP results.
                   if (turnOf().locked && CLAUDE_FILE_TEXT_TOOLS.has(event.tool_name))
-                    return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: CLAUDE_BOT_FILE_DATA_NOTE } }
+                    return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: CLAUDE_BOT_FILE_DATA_NOTE, ...rewrite } }
+                  if (masked !== undefined) return { hookSpecificOutput: { hookEventName: 'PostToolUse', ...rewrite } }
                 }
                 return {}
               }

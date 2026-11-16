@@ -199,6 +199,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       continuationId: input.continuationId,
       threadId: input.threadId,
       instanceId: input.instanceId,
+      ...(host.tools.secretMasker ? { secretMasker: host.tools.secretMasker } : {}),
       cwd,
       model: input.model,
       prompt: input.prompt,

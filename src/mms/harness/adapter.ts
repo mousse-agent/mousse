@@ -363,6 +363,11 @@ export interface ToolHost {
   browser?: BrowserExecutionBinding
   /** Whether the turn's run is still its thread's active run; an app tool call after that is refused. */
   runActive?: () => boolean
+  /**
+   * What hides the secrets the thread may use (and ones removed while it runs), read at each tool result: a runtime that
+   * runs its own tools masks their results with it before its model sees them or its session file keeps them.
+   */
+  secretMasker?: () => ((text: string) => string) | undefined
 }
 
 /** One compaction of the thread's transcript: the compacted context to (re)send. */

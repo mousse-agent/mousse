@@ -2,7 +2,7 @@ import { tellMeOf } from '../shared/types'
 import { OwnerQuietHours } from './notifications/OwnerQuietHours'
 import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
-import { SecretVault } from './secrets/SecretVault'
+import { SecretVault, secretThreadBusy } from './secrets/SecretVault'
 import { SecretRequests } from './secrets/SecretRequests'
 import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
@@ -1209,13 +1209,23 @@ export class MmsProfileServices {
       profileRoot: homeDir,
       threadAlive: (threadId) => Boolean(this.threads.getThread(threadId)),
       threadTitle: (threadId) => this.threads.getThread(threadId)?.name,
+      // A subagent's thread is masked with its parents' secrets: their agents may hand it the value.
+      ancestorsOf: (threadId) => {
+        const lineage = this.threads.getThread(threadId)?.lineage
+        if (!lineage) return []
+        const ancestors = [lineage.rootThreadId]
+        for (let id: string | undefined = lineage.parentThreadId; id && !ancestors.includes(id) && ancestors.length < 32; id = this.threads.getThread(id)?.lineage?.parentThreadId) ancestors.push(id)
+        return ancestors
+      },
+      threadBusy: (threadId) => secretThreadBusy(threadId, this.orchestrator, this.runEngine),
       changed: () => this.secretsChanged.emit('changed')
     })
     this.secretRequests = new SecretRequests(this.secretVault)
     const vault = this.secretVault
     this.orchestrator.setSecrets({
       masker: (threadId) => vault.maskerFor(threadId),
-      storeMasker: () => vault.maskerForStore(),
+      storeMasker: (threadId) => vault.maskerForStore(threadId),
+      copies: { allow: (threadId) => vault.allowCopies(threadId, true), hold: (threadIds) => vault.holdCopies(threadIds) },
       tools: createSecretToolHost({ vault, requests: this.secretRequests, scratchRoot: join(homeDir, 'secrets', 'run') })
     })
     try {
