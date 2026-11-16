@@ -263,10 +263,12 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   expect(JSON.stringify([exported, captured, f.journal, f.bots.service.chatList(t.botId).messages, ledger.start.mock.calls])).not.toContain('private-call-secret')
   expect(t.calls).toEqual([])
 })
-async function scheduledCall(on = true, minutes = 5) {
+async function scheduledCall(on = true, minutes = 5, untilMinutes?: number) {
   const t = await setup(on, false, false, true)
   await finish(f, t.work.payload)
-  const schedule = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes }, prompt: 'Send the email' }, 'owner')
+  const at = untilMinutes === undefined ? undefined : new Date(f.clock.now + untilMinutes * 60_000)
+  const until = at ? `${at.getFullYear()}-${String(at.getMonth()+1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}T${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` : undefined
+  const schedule = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes }, prompt: 'Send the email', ...(until ? { until } : {}) }, 'owner')
   f.clock.now += minutes * 60_000
   const due = await f.tickSchedules(new Date(f.clock.now))
   const id = due.inserted[0]!
@@ -410,9 +412,7 @@ it('three unsent calls stop the tool across occurrences, and owner words reset i
   expect((await call()).isError).not.toBe(true)
 })
 it('a schedule ending at until withdraws a parked call and preserves its report', async () => {
-  const t = await scheduledCall()
-  const at = new Date(f.clock.now + 2 * 60_000)
-  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { until: `${at.getFullYear()}-${String(at.getMonth()+1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}T${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` })
+  const t = await scheduledCall(true, 5, 7)
   await t.call()
   await finish(f, t.run.payload, 'completed', { text: 'Draft ready.' })
   f.clock.now += 3 * 60_000
