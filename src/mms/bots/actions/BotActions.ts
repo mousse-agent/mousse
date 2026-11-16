@@ -242,7 +242,7 @@ export class BotActions {
       if (this.host.store.ownerLastWroteSeq(row.botId) <= seq && !note) {
         const text = 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.'
         // Reuse notes in the ordered update list: a lost tool reply must not lose the refusal.
-        if (!this.host.store.get('SELECT 1 FROM bot_work_notes WHERE activation_id = ? AND from_message = ? AND text = ?', row.id, refused.message_id, text))
+        if (!this.host.store.get('SELECT 1 FROM bot_work_notes WHERE activation_id = ? AND from_message = ? AND text = ?', row.id, String(refused.message_id), text))
           this.host.store.addWorkNote(row.id, row.botId, text, String(refused.message_id))
         return { text, isError: true }
       }
