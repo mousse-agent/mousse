@@ -1,4 +1,4 @@
-import type { BotActivationRow, BotStore } from '../store/BotStore'
+import type { BotActivationRow, BotStore, BotReminderRow } from '../store/BotStore'
 import { wakeInput } from '../../../shared/bots/personal/wakes'
 import type { BotWorkItem } from '../../../shared/bots/personal/chat'
 import { questionGoneText, QUESTION_WORK_WAITING_TEXT } from '../../../shared/bots/personal/questions'
@@ -43,6 +43,12 @@ interface WaitRule {
 const workOnly: WaitRule['allows'] = (row) => row.lane === 'run' && row.trigger.kind === 'work'
 const nothingToWaitFor = (title: string) => `I stopped "${title}": nothing could let it carry on any more. Ask me again if you still want it.`
 
+/** Rebuilt from the delivered row when a continuation can actually be dispatched. */
+export function workWaitInput(wait: BotReminderRow, clock: (iso: string) => string): string {
+  const late = wait.deliveredAt && Date.parse(wait.deliveredAt) - Date.parse(wait.dueAt) > 2 * 60_000 && !wait.event
+  return wakeInput({ brief: wait.text, setAt: wait.createdAt, event: wait.event, fired: wait.fired, chain: wait.chain, work: true, clock, ...(late ? { late: clock(wait.dueAt) } : {}) })
+}
+
 /** One row per reason. Wake sources keep their existing transactions, messages and stored markers. */
 export const WORK_WAIT_RULES = {
   waiting: {
@@ -53,9 +59,7 @@ export const WORK_WAIT_RULES = {
     continuation: (row, facts) => {
       const wait = facts.store().workWait(row.id)
       if (!wait) return { waited: '' }
-      const clock = facts.clock ?? ((iso: string) => iso)
-      const late = wait.deliveredAt && Date.parse(wait.deliveredAt) - Date.parse(wait.dueAt) > 2 * 60_000 && !wait.event
-      return { waited: wakeInput({ brief: wait.text, setAt: wait.createdAt, event: wait.event, fired: wait.fired, chain: wait.chain, work: true, clock, ...(late ? { late: clock(wait.dueAt) } : {}) }) }
+      return { waited: workWaitInput(wait, facts.clock ?? ((iso: string) => iso)) }
     },
     checkBeforeResume: true,
     continueRefusal: (_row) => 'This work carries on by itself when its time or event comes, or when a slot is free. Stop it if it is no longer needed.',

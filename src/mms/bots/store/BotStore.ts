@@ -787,7 +787,7 @@ export interface BotDispatchRow {
   runId: string | null
   threadId: string
   /** `subagent`: what a subagent's turn runs as, on its every dispatch (`BotSubagentSpec`). */
-  prompt: { text: string; subagent?: BotSubagentSpec }
+  prompt: { text: string; subagent?: BotSubagentSpec; workWaitIds?: string[] }
   policyDigest: string
   deadlineMs: number | null
   prepaidMs: number | null
@@ -1975,6 +1975,14 @@ export class BotStore {
   workWait(workId: string): BotReminderRow | undefined {
     const row = this.get('SELECT * FROM bot_reminders WHERE work_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', workId)
     return row ? reminderOf(row) : undefined
+  }
+
+  /** Delivery is not telling: only a dispatch that started with the wait consumes it. */
+  unreadWorkWaits(workId: string): BotReminderRow[] {
+    return this.all(`SELECT r.* FROM bot_reminders r WHERE r.work_id = ? AND r.status = 'delivered'
+      AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workWaitIds') told
+        WHERE d.activation_id = r.work_id AND d.started_at IS NOT NULL AND told.value = r.id)
+      ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
   }
 
   /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */
