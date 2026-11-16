@@ -2249,3 +2249,20 @@ it.each([
   expect(result).toEqual({ reason: code, text })
   expect(botsClient().messages).toHaveBeenCalled()
 })
+
+it.each(['open', 'done'])('finds literal title and visible status with matching paintable parts for %s', async (status) => {
+  fake.chats.inbox = [held({ title: '*Sent* <b>[Mail](https://x.test) &copy;', status, at: AT })]
+  await open()
+  const { botFindTurns } = await import('../../src/renderer/components/bots/useBotChatFind')
+  const { buildFindIndex } = await import('../../src/renderer/chat/components/agent-elements/find/find-index')
+  const { collectFindRanges } = await import('../../src/renderer/chat/components/agent-elements/find/dom-highlight')
+  const turns = botFindTurns([{ kind: 'message', message: fake.chats.inbox[0]! }] as never)
+  const row = host.querySelector('[data-turn-key]')!
+  for (const query of ['*Sent*', '[Mail]', '&copy;', 'Sent']) {
+    const indexed = buildFindIndex(turns, query)
+    const painted = collectFindRanges(row, query)
+    expect(indexed.length).toBeGreaterThan(0)
+    expect(painted.map(({ partIndex, ordinal }) => ({ partIndex, ordinal }))).toEqual(indexed.map(({ partIndex, ordinal }) => ({ partIndex, ordinal })))
+  }
+  expect(buildFindIndex(turns, 'trip.pdf')).toHaveLength(0)
+})
