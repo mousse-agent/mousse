@@ -2,14 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { useBotsStore } from '../../stores/botsStore'
 import { botGroupTime } from './messageGroups'
 
-/** Matches the shared projection supplied by the action service. */
-export interface BotActionCardData {
-  actionId: string; digest: string; title: string; serverName: string; args: unknown
-  hasHiddenValues: boolean; hiddenPaths: string[]
-  status: 'open' | 'approved' | 'running' | 'done' | 'failed' | 'uncertain' | 'declined' | 'expired' | 'withdrawn'
-  at?: string; result?: { text: string; toolReportedError?: boolean }; note?: string
-  previous?: { status: 'done' | 'uncertain' | 'failed'; at: string }; tooLarge?: boolean
-}
+import type { BotActionCard as BotActionCardData } from '../../../../shared/bots/personal/chat'
 
 // The chat guard's invisible and direction-changing characters; keep newlines, tabs and script/emoji joiners.
 export function actionText(text: string): string {
