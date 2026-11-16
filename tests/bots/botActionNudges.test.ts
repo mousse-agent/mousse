@@ -137,3 +137,81 @@ it('follows the question pause convention without a due-time spin or extra timer
   expect(t.nudges()).toHaveLength(1)
   expect(f.timers.slice(timers).some(timer => timer.ms === 0)).toBe(false)
 })
+
+it('shares nudge spacing with questions in both directions', async () => {
+  const t = await held()
+  await tellOriginal()
+  function ask(id: string, afterMs: number) {
+    f.store.insertQuestion({ id, botId: t.botId, activationId: t.workId, dispatchN: 1, lane: 'run', spec: { question: 'Which?', choices: ['A', 'B'] }, createdAt: f.store.now(), follow: { kind: 'nudge', afterMs } })
+    f.bots.chat.post({ botId: t.botId, author: 'bot', kind: 'notice', text: 'Which?', questionId: id })
+  }
+  ask('q-first', HOUR)
+  f.clock.now += HOUR
+  await f.bots.deliverDueReminders()
+  expect(f.store.question('q-first')!.nudges).toBe(1)
+  expect(t.nudges()).toHaveLength(0)
+  f.clock.now += HOUR
+  await f.bots.deliverDueReminders()
+  expect(t.nudges()).toHaveLength(1)
+  ask('q-second', HOUR / 2)
+  f.clock.now += HOUR / 2
+  await f.bots.deliverDueReminders()
+  expect(f.store.question('q-second')!.nudges).toBe(0)
+  expect(f.store.question('q-second')!.nextAt).toBe(new Date(f.clock.now + HOUR / 2).toISOString())
+})
+
+it('uses legacy telling receipts and never schedules a second nudge before the first is told', async () => {
+  const t = await held()
+  const cardBefore = t.action.card_json
+  f.clock.now += 5 * 60_000
+  f.bots.noteLegacyTelling({ botId: t.botId, message: f.bots.service.actionMessage(t.botId, t.action.id) })
+  expect(f.bots.nextDueAt(t.botId)).toBe(new Date(f.clock.now + HOUR).toISOString())
+  f.clock.now += HOUR
+  await f.bots.deliverDueReminders()
+  expect(t.nudges()).toHaveLength(1)
+  expect(f.bots.nextDueAt(t.botId)).toBe(t.action.expires_at)
+  f.clock.now += 5 * 60_000
+  const nudge = f.bots.chat.toMessage(f.store.message(`bm_${t.action.id}_n1`)!)
+  f.bots.noteLegacyTelling({ botId: t.botId, message: nudge })
+  expect(f.bots.nextDueAt(t.botId)).toBe(new Date(f.clock.now + 24 * HOUR).toISOString())
+  expect(f.bots.actions.get(t.action.id)!.card_json).toBe(cardBefore)
+})
+
+it('republishes existing nudge rows when the card changes and suppresses an untold settled nudge', async () => {
+  const t = await held()
+  await tellOriginal()
+  f.bots.markRead(t.botId, f.store.message(t.action.message_id)!.seq)
+  f.bots.setTellingWindows(0)
+  f.clock.now += HOUR
+  await f.bots.deliverDueReminders()
+  expect(t.nudges()).toHaveLength(1)
+  const messages: string[] = []
+  const tells: any[] = []
+  f.bots.events.on('message', event => messages.push(event.message.id))
+  f.bots.events.on('tell', event => { if (event.rows.length) tells.push(event) })
+  f.bots.actions.transition(t.action.id, 'open', 'declined')
+  expect(messages).toContain(`bm_${t.action.id}_n1`)
+  f.bots.setTellingWindows(1)
+  await f.bots.deliverDueReminders()
+  expect(tells).toHaveLength(0)
+})
+
+it('tells a nudge as an action name only, and backs off a failed write without spinning', async () => {
+  const t = await held()
+  await tellOriginal()
+  const events: any[] = []
+  f.bots.events.on('tell', event => events.push(event))
+  f.clock.now += HOUR
+  const post = vi.spyOn(f.bots.chat, 'post').mockImplementationOnce(() => { throw new Error('disk busy') })
+  const timers = f.timers.length
+  await f.bots.deliverDueReminders()
+  expect(t.nudges()).toHaveLength(0)
+  expect(f.timers.slice(timers).at(-1)?.ms).toBe(60_000)
+  post.mockRestore()
+  f.clock.now += 60_000
+  await f.bots.deliverDueReminders()
+  expect(t.nudges()).toHaveLength(1)
+  expect(events.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
+  expect(JSON.stringify(events)).not.toContain('private@example.test')
+  expect(JSON.stringify(events)).not.toContain('Private body')
+})
