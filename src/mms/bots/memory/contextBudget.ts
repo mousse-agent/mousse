@@ -15,7 +15,12 @@ export const BOT_CHAT_EPOCH_MARKS = Object.freeze({
   /** A turn after the cache expired folds from this size: the rebuild costs nothing extra then (the cold fold). */
   mid: 24_000,
   /** The recent chat a new epoch's base carries verbatim; older rows are in the chat summary. */
-  tail: 6_000
+  tail: 6_000,
+  /**
+   * Past the high mark the epoch waits for its digest (the model-written summary of the fold, prepared in the
+   * background) up to this size; here it folds anyway, with the deterministic summary (the chat never waits).
+   */
+  hard: 64_000
 })
 
 /** Never more than this share of the model's window: the rest is room for tools, results and the reply. */
@@ -29,6 +34,7 @@ export interface BotContextBudget {
   high: number
   mid: number
   tail: number
+  hard: number
   /** The largest whole prompt (system text, tools and conversation) an epoch may reach; Infinity when unknown. */
   cap: number
   /** How long the runtime keeps the conversation's cache. */
@@ -46,6 +52,7 @@ export function contextBudget(input: { contextWindow?: number | null; compactAt?
     high: BOT_CHAT_EPOCH_MARKS.high,
     mid: BOT_CHAT_EPOCH_MARKS.mid,
     tail: BOT_CHAT_EPOCH_MARKS.tail,
+    hard: BOT_CHAT_EPOCH_MARKS.hard,
     cap: Math.floor(Math.min(window, compaction)),
     cacheTtlMs: input.cacheTtlMs && input.cacheTtlMs > 0 ? input.cacheTtlMs : BOT_CHAT_SHORT_CACHE_MS
   }
@@ -77,10 +84,23 @@ export interface BotChatEpoch {
 export type BotChatEpochEnd = 'none' | 'failed' | 'stopped' | 'reload' | 'cleared' | 'compacted' | 'model' | 'full' | 'cold'
 
 /**
+ * The digest of the next fold: `ready` (prepared, and what it summarised is still the start of the chat), `coming` (one
+ * is being written or can be asked for now), or `none` (no model call can write one now: the fold is deterministic).
+ */
+export type BotChatDigestState = 'ready' | 'coming' | 'none'
+
+/**
+ * Whether the epoch goes on: undefined (it does), why it ends, or `due`: the conversation is past the high mark and its
+ * digest is coming, so it goes on until the digest is ready or the hard mark.
+ */
+export type BotChatEpochVerdict = BotChatEpochEnd | 'due' | undefined
+
+/**
  * Whether the bot chat's epoch goes on for the next turn: undefined, or why it ends. `turns` are the epoch's turns as
  * `bot_turn_usage` holds them, oldest first. The conversation's size is what the last turn's last request sent past what
  * the first turn's did (system text, tools, base and first message are the same for every turn of the epoch); with no
- * report, the estimate the pack kept.
+ * report, the estimate the pack kept. Past the high mark a coming digest keeps the epoch going (`due`) up to the hard
+ * mark or the cap; a ready one, or none possible, folds it.
  */
 export function chatEpochEnd(input: {
   epoch: BotChatEpoch | undefined
@@ -88,7 +108,9 @@ export function chatEpochEnd(input: {
   turns: readonly BotTurnUsageRow[]
   now: number
   budget: (last: BotTurnUsageRow | undefined) => BotContextBudget
-}): BotChatEpochEnd | undefined {
+  /** Absent: `none`, so the epoch folds at the high mark. */
+  digest?: BotChatDigestState
+}): BotChatEpochVerdict {
   const { epoch } = input
   if (!epoch) return 'none'
   if (epoch.ended) return epoch.ended
@@ -100,7 +122,8 @@ export function chatEpochEnd(input: {
   const last = measured[measured.length - 1]
   const budget = input.budget(last)
   const size = first && last ? Math.max(0, last.lastPrompt! - first.lastPrompt!) : epoch.addedTokens
-  if (size >= budget.high || (last?.lastPrompt ?? 0) >= budget.cap) return 'full'
+  const capped = (last?.lastPrompt ?? 0) >= budget.cap
+  if (size >= budget.high || capped) return input.digest === 'coming' && size < budget.hard && !capped ? 'due' : 'full'
   const lastAt = Math.max(0, ...input.turns.map((turn) => turn.lastRequestAt ?? 0))
   if (lastAt > 0 && input.now - lastAt > budget.cacheTtlMs && size >= budget.mid) return 'cold'
   return undefined

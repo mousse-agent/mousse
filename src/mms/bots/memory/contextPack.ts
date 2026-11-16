@@ -1,5 +1,6 @@
 import { dataFrame } from '../../../shared/bots/personal/dataFrames'
 import {
+  BOT_CHAT_DIGEST,
   BOT_CHAT_PACK_BUDGET,
   BOT_CHAT_WINDOW_KEEP_TOKENS,
   BOT_RUN_PACK_BUDGET,
@@ -12,11 +13,14 @@ import { saveMissedWishes, WISH_OVER_CAP_KEY } from './standingWish'
 import { BotJournalError, type BotJournalRow, type BotMemoryStore } from './BotMemoryStore'
 import { guardPackText } from './guard'
 import { availableHistoryLines } from './availableHistory'
-import { type ChatSummaryState, OUTSIDE_SPEAKER, firstLine, foldChatSummary, packText, speaker, withinBudget } from './chatSummary'
-import { agoLabel, cut, renderMemoryBlocks, timeLabel } from './render'
+import {
+  CHAT_DIGEST_KEY, DIGEST_SYSTEM, type ChatDigest, type ChatSummaryState, OUTSIDE_SPEAKER, adoptDigest, chatFingerprint, digestConstraints,
+  digestPrompt, firstLine, foldChatSummary, packText, parseDigest, replaceDigest, speaker, summaryHead, withinBudget
+} from './chatSummary'
+import { agoLabel, cut, dayLabel, renderMemoryBlocks, timeLabel } from './render'
 import { BOT_CHANGELOG_LATEST, changelogBlock, unseenChanges } from '../changelog'
 import { createHash } from 'node:crypto'
-import { BOT_CHAT_EPOCH_MARKS, type BotChatEpoch, type BotChatEpochEnd } from './contextBudget'
+import { BOT_CHAT_EPOCH_MARKS, type BotChatDigestState, type BotChatEpoch, type BotChatEpochEnd, type BotChatEpochVerdict } from './contextBudget'
 
 /**
  * The context packs (docs/plans/bot-context.md §5): Mousse builds every bot turn from `bots.db`, so
@@ -24,7 +28,8 @@ import { BOT_CHAT_EPOCH_MARKS, type BotChatEpoch, type BotChatEpochEnd } from '.
  * cache holds: the protocol, core memory, run notes, the chat summary, the verbatim window, and
  * last the situation. Each pack is built once per activation and frozen in `bot_memory_state`;
  * a memory save or forget drops the frozen packs, so the next dispatch carries the change.
- * No model call is on this path: the chat summary is a deterministic fold of dropped rows.
+ * No model call is on this path: the chat summary is a deterministic fold of dropped rows, plus the digests a model
+ * wrote in the background (`options.digest`), adopted only when a chat epoch starts.
  */
 
 /** What the pack says about the present, from outside the memory tables. Plain words only. */
@@ -75,6 +80,11 @@ export interface BotContextPackOptions {
    * it settles.
    */
   reactions?: (botId: string, since: string | undefined) => Array<{ emoji: string; at: string; text: string; fromWork?: boolean; messageId?: string }>
+  /**
+   * One model call with no tools on the bot's chat model: the digest of a fold (docs/plans/bot-context.md §14). Absent,
+   * or failing, the folds stay deterministic.
+   */
+  digest?: (input: { botId: string; selection: { instanceId: string; model: string }; system: string; prompt: string; signal: AbortSignal }) => Promise<string>
 }
 
 /** Most reactions one chat pack lists: the oldest not yet told, so the rest are the next turn's. */
@@ -134,6 +144,24 @@ export const BOT_EPOCH_PROTOCOL_LINE = "- This conversation goes on across the o
 
 /** The memory state that holds the chat's epoch (`BotChatEpoch`). */
 export const CHAT_EPOCH_KEY = 'chat_epoch'
+/** The memory state that holds the digest of the next fold while it is written and until it is adopted (`DigestPending`). */
+export const CHAT_DIGEST_PENDING_KEY = 'chat_digest_pending'
+/** Most characters of one chat row a digest call reads. */
+const DIGEST_ROW_CHARS = 2_000
+
+/** The digest of the next fold: what it summarised (its range and the hash of its rows), and its text once written. */
+interface DigestPending {
+  id: string
+  fromSeq: number
+  throughSeq: number
+  fingerprint: string
+  firstAt: string
+  lastAt: string
+  status: 'running' | 'ready'
+  at: string
+  text?: string
+  headline?: string
+}
 /** Most settled activations an epoch remembers (`BotChatEpoch.ran`). */
 const EPOCH_RAN_KEEP = 200
 
@@ -145,6 +173,8 @@ export interface BotChatContext {
   epochId: string
   /** Why the epoch before it ended, when `fresh`. */
   reason?: BotChatEpochEnd
+  /** The new epoch folded a conversation that grew too long (`full`) or went cold: the chat shows a quiet line. */
+  folded?: { digest: boolean }
 }
 
 export interface BotChatContextInput {
@@ -153,8 +183,11 @@ export interface BotChatContextInput {
   /** The activation's first dispatch: only it may start a new epoch (a continuation runs on the thread as it is). */
   start: boolean
   selection: { instanceId: string; model: string }
-  /** Whether the epoch goes on (undefined) or why it ends: the engine decides from what the turns cost (`chatEpochEnd`). */
-  keep(epoch: BotChatEpoch | undefined): BotChatEpochEnd | undefined
+  /**
+   * Whether the epoch goes on (undefined), goes on while its digest is written (`due`), or why it ends: the engine
+   * decides from what the turns cost and whether a digest is ready (`chatEpochEnd`).
+   */
+  keep(epoch: BotChatEpoch | undefined, digest: BotChatDigestState): BotChatEpochVerdict
 }
 
 export function createBotContextProvider(options: BotContextPackOptions): BotContextProvider & {
@@ -163,6 +196,8 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
   chatContext(input: BotChatContextInput): Promise<BotChatContext>
   chatPackNow(input: { botId: string; activationId: string }): string
   endChatEpoch(botId: string, reason: BotChatEpochEnd): void
+  /** The digest call running for a bot, if any (tests wait on it). */
+  digestRunning(botId: string): Promise<void> | undefined
 } {
   const { store } = options
   const zone = () => options.timeZone?.() ?? store.zone()
@@ -380,6 +415,157 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     }
   }
 
+  // -- Digests (docs/plans/bot-context.md §14) ------------------------------------------------------
+  // One model call per fold, in the background, on the bot's chat model. A digest is adopted only when an epoch starts,
+  // and only while the rows it summarised are unchanged and still follow the last digest; otherwise it is written
+  // again. Nothing on a turn's path waits for one.
+
+  /** The call running for each bot (a fold's digest, or one written again after a forget), one at a time. */
+  const running = new Map<string, Promise<void>>()
+  /** When a bot's last digest call failed: the next waits `BOT_CHAT_DIGEST.retryMs`. */
+  const failedAt = new Map<string, number>()
+
+  const pendingOf = (botId: string) => store.getState<DigestPending>(botId, CHAT_DIGEST_PENDING_KEY)
+  const newestDigest = (botId: string): ChatDigest | undefined => summary(botId)?.digests?.at(-1)
+
+  /** The pending digest still summarises the start of what no digest holds: its rows unchanged, nothing adopted since. */
+  const adoptable = (botId: string, pending: DigestPending): boolean =>
+    pending.status === 'ready' && Boolean(pending.text) && (newestDigest(botId)?.throughSeq ?? -1) < pending.fromSeq
+    && chatFingerprint(store.digestRows(botId, pending)) === pending.fingerprint
+
+  const digestState = (botId: string): BotChatDigestState => {
+    const pending = pendingOf(botId)
+    if (pending?.status === 'ready') {
+      if (adoptable(botId, pending)) return 'ready'
+      // What it summarised changed, or another digest came first: it is written again.
+      store.write(() => store.deleteState(botId, CHAT_DIGEST_PENDING_KEY))
+    }
+    if (!options.digest) return 'none'
+    const failed = failedAt.get(botId)
+    return failed !== undefined && store.clock() - failed < BOT_CHAT_DIGEST.retryMs ? 'none' : 'coming'
+  }
+
+  /** The transcript a digest call reads, newest rows first within its input budget, and the rows it covers. */
+  const transcriptOf = (rows: readonly BotJournalRow[]): { rows: BotJournalRow[]; text: string } => {
+    const lines: string[] = []
+    let used = 0
+    let first = rows.length
+    for (let index = rows.length - 1; index >= 0; index--) {
+      const row = rows[index]!
+      const line = row.redactedAt ? '' : cut(windowLine(row), DIGEST_ROW_CHARS)
+      const size = estimateTokens(line) + 1
+      if (used + size > BOT_CHAT_DIGEST.input && lines.length) break
+      if (line) lines.unshift(line)
+      used += size
+      first = index
+    }
+    return { rows: rows.slice(first), text: lines.join('\n') }
+  }
+
+  /** Runs one digest call for `botId` in the background; `done` takes the checked answer, or undefined. */
+  const call = (botId: string, selection: { instanceId: string; model: string }, prompt: string, done: (digest: { text: string; headline: string } | undefined) => void): void => {
+    const digest = options.digest!
+    const work = (async () => {
+      let parsed: { text: string; headline: string } | undefined
+      try {
+        parsed = parseDigest(await digest({ botId, selection, system: DIGEST_SYSTEM, prompt, signal: AbortSignal.timeout(BOT_CHAT_DIGEST.timeoutMs) }))
+      } catch (error) {
+        console.warn("a bot's chat digest could not be written", { botId, error: error instanceof Error ? error.message : String(error) })
+      }
+      if (parsed) failedAt.delete(botId)
+      else failedAt.set(botId, store.clock())
+      try {
+        done(parsed)
+      } catch (error) {
+        console.warn("a bot's chat digest could not be kept", { botId, error: error instanceof Error ? error.message : String(error) })
+      }
+    })().finally(() => running.delete(botId))
+    running.set(botId, work)
+  }
+
+  /** Asks for the digest of what no digest holds yet, through the newest chat row; nothing when one is running or ready. */
+  const requestDigest = (botId: string, selection: { instanceId: string; model: string }): void => {
+    if (!options.digest || running.has(botId) || digestState(botId) !== 'coming' || pendingOf(botId)?.status === 'ready') return
+    // The first digest reads the chat from its start, as far back as its input allows.
+    const newest = newestDigest(botId)
+    const all = store.windowRows(botId, newest ? newest.throughSeq + 1 : 0)
+    if (!all.length) return
+    const { rows, text } = transcriptOf(all)
+    const pending: DigestPending = {
+      id: `d${rows[0]!.seq}-${rows[rows.length - 1]!.seq}`,
+      fromSeq: rows[0]!.seq,
+      throughSeq: rows[rows.length - 1]!.seq,
+      fingerprint: chatFingerprint(rows),
+      firstAt: rows[0]!.at,
+      lastAt: rows[rows.length - 1]!.at,
+      status: 'running',
+      at: store.now()
+    }
+    store.write(() => store.setState(botId, CHAT_DIGEST_PENDING_KEY, pending))
+    const prompt = digestPrompt({ transcript: text, carried: digestConstraints(newest?.text), from: dayLabel(pending.firstAt, zone()), to: dayLabel(pending.lastAt, zone()) })
+    call(botId, selection, prompt, (parsed) => store.write(() => {
+      // Kept only if it is still the digest asked for: a forget or a wipe meanwhile dropped it.
+      if (pendingOf(botId)?.id !== pending.id) return
+      if (!parsed) store.deleteState(botId, CHAT_DIGEST_PENDING_KEY)
+      else store.setState(botId, CHAT_DIGEST_PENDING_KEY, { ...pending, status: 'ready', at: store.now(), ...parsed })
+    }))
+  }
+
+  /** Its row in the journal, so `memory_search` finds every digest. */
+  const journalDigest = (botId: string, digest: Omit<ChatDigest, 'seq'>): number | undefined =>
+    store.appendInTx(store.db, {
+      botId, kind: 'notice', lane: 'chat', who: 'bot', sourceKey: `${CHAT_DIGEST_KEY}${digest.id}:${digest.fingerprint}`,
+      text: `My digest of the chat, j${digest.fromSeq}–j${digest.throughSeq}.\nHeadline: ${digest.headline}\n${digest.text ?? ''}`,
+      json: { op: 'digest', id: digest.id, fromSeq: digest.fromSeq, throughSeq: digest.throughSeq }
+    })
+
+  /** At an epoch's start: the ready digest joins the summary. */
+  const adoptPending = (botId: string): boolean => {
+    const pending = pendingOf(botId)
+    if (!pending || !adoptable(botId, pending)) return false
+    store.write(() => {
+      const digest: Omit<ChatDigest, 'seq'> = {
+        id: pending.id, fromSeq: pending.fromSeq, throughSeq: pending.throughSeq, fingerprint: pending.fingerprint,
+        firstAt: pending.firstAt, lastAt: pending.lastAt, headline: pending.headline ?? '', text: pending.text!
+      }
+      const seq = journalDigest(botId, digest)
+      store.setState(botId, 'chat_summary', adoptDigest(summary(botId), { ...digest, ...(seq === undefined ? {} : { seq }) }, zone(), store.now()))
+      store.deleteState(botId, CHAT_DIGEST_PENDING_KEY)
+    })
+    return true
+  }
+
+  /** Chat folded out of the window that no digest holds yet, in estimated tokens. */
+  const undigested = (botId: string): number => {
+    const from = (newestDigest(botId)?.throughSeq ?? -1) + 1
+    const start = store.getState<number>(botId, 'window_start_seq') ?? 0
+    return store.windowRows(botId, from).filter((row) => row.seq < start).reduce((sum, row) => sum + estimateTokens(windowLine(row)) + 1, 0)
+  }
+
+  /** A digest a forget made stale is written again from what is left of its rows, when no other call runs. */
+  const rebuildStale = (botId: string, selection: { instanceId: string; model: string }): void => {
+    if (!options.digest || running.has(botId) || digestState(botId) === 'none') return
+    const digests = summary(botId)?.digests ?? []
+    let index = digests.length - 1
+    while (index >= 0 && !digests[index]!.stale) index--
+    if (index < 0) return
+    const target = digests[index]!
+    const rows = store.digestRows(botId, target)
+    const fingerprint = chatFingerprint(rows)
+    const { text } = transcriptOf(rows)
+    const prompt = digestPrompt({ transcript: text, carried: digestConstraints(digests[index - 1]?.text), from: dayLabel(target.firstAt, zone()), to: dayLabel(target.lastAt, zone()) })
+    call(botId, selection, prompt, (parsed) => store.write(() => {
+      const state = summary(botId)
+      const current = state?.digests?.find((digest) => digest.id === target.id)
+      // Its rows changed again meanwhile (another forget): it stays stale and is written again later.
+      if (!parsed || !state || !current?.stale || chatFingerprint(store.digestRows(botId, target)) !== fingerprint) return
+      const { stale: _stale, seq: _seq, ...rest } = current
+      const digest: Omit<ChatDigest, 'seq'> = { ...rest, fingerprint, headline: parsed.headline, text: parsed.text }
+      const seq = journalDigest(botId, digest)
+      store.setState(botId, 'chat_summary', replaceDigest(state, { ...digest, ...(seq === undefined ? {} : { seq }) }, zone(), store.now()))
+    }))
+  }
+
   const chatContext = (input: BotChatContextInput): BotChatContext => {
     const { botId, activationId } = input
     const key = `pack:${activationId}`
@@ -402,10 +588,20 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     // A continuation never starts an epoch (its thread is not cleared): it reads what is new on the running one, or,
     // when that one ended meanwhile, the whole pack, as before epochs.
     if (!input.start) return current && !current.ended ? delta(current) : freeze({ text: chatPack(botId, activationId), fresh: false, epochId: current?.id ?? activationId })
-    const reason = input.keep(current)
-    if (!reason && current) return delta(current)
-    // A new epoch: the window folds to its tail in one step, and the base carries the summary and that tail.
+    const verdict = input.keep(current, digestState(botId))
+    if (current && (!verdict || verdict === 'due')) {
+      // Past the high mark the epoch goes on while its digest is written in the background.
+      if (verdict === 'due') requestDigest(botId, input.selection)
+      else rebuildStale(botId, input.selection)
+      return delta(current)
+    }
+    const reason: BotChatEpochEnd = verdict && verdict !== 'due' ? verdict : 'none'
+    // A new epoch: a ready digest joins the summary, the window folds to its tail in one step, and the base carries the
+    // summary and that tail. A fold without a digest asks for one when enough chat is in none yet; the next fold uses it.
+    const digest = adoptPending(botId)
     foldWindow(botId, BOT_CHAT_EPOCH_MARKS.tail, BOT_CHAT_EPOCH_MARKS.tail)
+    if (!digest && undigested(botId) >= BOT_CHAT_DIGEST.minimum) requestDigest(botId, input.selection)
+    rebuildStale(botId, input.selection)
     const text = chatPack(botId, activationId, true)
     const epoch: BotChatEpoch = {
       id: `e:${activationId}`,
@@ -418,7 +614,8 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
       addedTokens: 0
     }
     store.write(() => store.setState(botId, CHAT_EPOCH_KEY, epoch))
-    return freeze({ text, fresh: true, epochId: epoch.id, reason: reason ?? 'none' })
+    const folded = reason === 'full' || reason === 'cold' ? { folded: { digest } } : {}
+    return { ...freeze({ text, fresh: true, epochId: epoch.id, reason }), ...folded }
   }
 
   const endChatEpoch = (botId: string, reason: BotChatEpochEnd): void => {
@@ -446,7 +643,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
   const runPack = (botId: string, activationId: string, scheduleId: string | undefined): string => {
     const { core, runNotes } = memoryBlocks(botId)
     const chat = summary(botId)
-    const head = chat ? withinBudget(chat.text.split('\n'), BOT_RUN_PACK_BUDGET.summaryHead).join('\n') : ''
+    const head = chat ? summaryHead(chat, BOT_RUN_PACK_BUDGET.summaryHead) : ''
     const reportRows = store.runReports(botId, { ...(scheduleId === undefined ? {} : { scheduleId }), excludeActivationId: activationId, limit: BOT_RUN_PACK_REPORTS })
     const perReport = Math.floor((BOT_RUN_PACK_BUDGET.reports * 4) / Math.max(1, reportRows.length)) - 40
     const reportLines = withinBudget(reportRows.map((row) => `[j${row.seq} · ${timeLabel(row.at, zone())}] ${row.external ? `${speaker(row)}: ` : ''}${cut(packText(row), perReport)}`), BOT_RUN_PACK_BUDGET.reports)
@@ -485,6 +682,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     // The plain pack: its window folds first, so it is no larger than a turn without epochs reads (the epoch ends anyway).
     chatPackNow: ({ botId, activationId }) => guarded(() => chatPack(botId, activationId)),
     endChatEpoch: (botId, reason) => guarded(() => endChatEpoch(botId, reason)),
+    digestRunning: (botId) => running.get(botId),
     chatPreamble: async ({ botId, activationId }) => guarded(() => frozen(botId, activationId, () => chatPack(botId, activationId))),
     runPreamble: async ({ botId, activationId, scheduleId }) => guarded(() => frozen(botId, activationId, () => runPack(botId, activationId, scheduleId))),
     afterDispatch: async (e) => {

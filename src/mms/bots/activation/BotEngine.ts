@@ -14,7 +14,7 @@ import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { startTurnMeter } from './turnUsage'
-import { chatEpochEnd, contextBudget, type BotChatEpoch, type BotChatEpochEnd } from '../memory/contextBudget'
+import { chatEpochEnd, contextBudget, type BotChatDigestState, type BotChatEpoch, type BotChatEpochVerdict } from '../memory/contextBudget'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -109,7 +109,7 @@ import { botFilesFolder, botManifestDigest, compileBotThread, subagentManifest, 
 import { shortModelName } from '../../../shared/modelNames'
 import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
-import { BOT_CHAT_TURN_END_KEY } from '../../../shared/bots/personal/memory'
+import { BOT_CHAT_TURN_END_KEY, BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TEXT } from '../../../shared/bots/personal/memory'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
 import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
@@ -2009,11 +2009,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       && Boolean(this.host.context?.chatContext) && this.host.chatResumes?.(selection!.instanceId) === true
   }
 
-  /** Whether the chat's epoch goes on for this turn, from what its turns cost (`bot_turn_usage`) and the owner's settings. */
-  private epochEnd(row: BotActivationRow, selection: { instanceId: string; model: string }, epoch: BotChatEpoch | undefined): BotChatEpochEnd | undefined {
+  /**
+   * Whether the chat's epoch goes on for this turn, from what its turns cost (`bot_turn_usage`), the owner's settings and
+   * whether the digest of its fold is ready.
+   */
+  private epochEnd(row: BotActivationRow, selection: { instanceId: string; model: string }, epoch: BotChatEpoch | undefined, digest: BotChatDigestState): BotChatEpochVerdict {
     const settings = this.host.settings?.get()
     return chatEpochEnd({
-      epoch, selection, now: this.now(),
+      epoch, selection, now: this.now(), digest,
       turns: epoch ? this.store.turnUsageOfContext(row.botId, 'chat', epoch.id) : [],
       budget: (last) => contextBudget({
         contextWindow: last?.contextWindow ?? null,
@@ -2079,10 +2082,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           const chosen = { instanceId: selection!.instanceId, model: selection!.model }
           const context = await this.host.context.chatContext!({
             botId: row.botId, activationId: row.id, start: dispatch.kind === 'start', selection: chosen,
-            keep: (epoch) => this.epochEnd(row, chosen, epoch)
+            keep: (epoch, digest) => this.epochEnd(row, chosen, epoch, digest)
           })
           this.packs.set(row.id, context.text)
           this.chatEpochs.set(row.id, { id: context.epochId, fresh: context.fresh })
+          // A fold leaves one quiet line in the chat (docs/plans/bot-context.md §14); its details are on hover.
+          if (context.folded) {
+            try {
+              this.chat.post({ id: `${BOT_FOLD_LINE_PREFIX}${row.id}`, botId: row.botId, author: 'bot', kind: 'notice', text: BOT_FOLD_LINE_TEXT, lane: 'chat' })
+            } catch (error) {
+              console.warn("a bot chat's fold line could not be posted", { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+            }
+          }
         } else {
           const pack = row.lane === 'chat'
             ? await this.host.context.chatPreamble({ botId: row.botId, activationId: row.id })

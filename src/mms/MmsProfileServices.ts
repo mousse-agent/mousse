@@ -76,6 +76,7 @@ import { botAsksFirst } from './bots/actions/BotActions'
 import { createProfileBotMemory } from './bots/memory/profileMemory'
 import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
+import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -876,7 +877,17 @@ export class MmsProfileServices {
           situation: (botId) => this.botSituation(botId),
           scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
           reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
-            .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') }))
+            .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') })),
+          // The digest of a fold (docs/plans/bot-context.md §14): one call with no tools on the bot's chat model.
+          digest: async ({ selection, system, prompt, signal }) => (await harness.oneShot({
+            selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model },
+            signal,
+            purpose: 'title',
+            task: 'chat_digest',
+            system,
+            prompt,
+            maxChars: BOT_CHAT_DIGEST.digest * 8
+          })).text
         }
       })
       botMemory = memory

@@ -3,7 +3,7 @@ import { estimateTokens } from '../../../src/shared/bots/personal/memory'
 import { createBotMemoryAdmin } from '../../../src/mms/bots/memory/admin'
 import { createBotJournal } from '../../../src/mms/bots/memory/capture'
 import { BOT_EPOCH_PROTOCOL_LINE, BOT_MEMORY_PROTOCOL, CHAT_EPOCH_KEY, createBotContextProvider } from '../../../src/mms/bots/memory/contextPack'
-import { BOT_CHAT_EPOCH_MARKS, chatEpochEnd, contextBudget, type BotChatEpoch, type BotChatEpochEnd } from '../../../src/mms/bots/memory/contextBudget'
+import { BOT_CHAT_EPOCH_MARKS, chatEpochEnd, contextBudget, type BotChatDigestState, type BotChatEpoch, type BotChatEpochEnd, type BotChatEpochVerdict } from '../../../src/mms/bots/memory/contextBudget'
 import type { BotTurnUsageRow } from '../../../src/mms/bots/store/BotStore'
 import { BOT_CHANGELOG_LATEST } from '../../../src/mms/bots/changelog'
 import { disposeFixtures, HOUR, memoryFixture, type MemoryFixture } from './memoryFixture'
@@ -155,7 +155,7 @@ describe('when the epoch ends (chatEpochEnd)', () => {
   const usage = (lastPrompt: number | null, at = T, compactions = 0) => ({ lastPrompt, lastRequestAt: at, compactions, contextWindow: 200_000, cacheTtlMs: HOUR }) as unknown as BotTurnUsageRow
   const budget = () => contextBudget({ contextWindow: 200_000, cacheTtlMs: HOUR })
   // Each input: the epoch, the turns it ran (first one 20k: system text, tools, base and first message), and when.
-  const rows: Array<[string, { epoch?: BotChatEpoch; selection?: typeof SEL; turns?: BotTurnUsageRow[]; now?: number }, BotChatEpochEnd | undefined]> = [
+  const rows: Array<[string, { epoch?: BotChatEpoch; selection?: typeof SEL; turns?: BotTurnUsageRow[]; now?: number; digest?: BotChatDigestState }, BotChatEpochVerdict]> = [
     ['no epoch yet', { epoch: undefined }, 'none'],
     ['an ended one', { epoch: { ...epoch, ended: 'failed' } }, 'failed'],
     ['another model', { selection: { ...SEL, model: 'claude-sonnet' } }, 'model'],
@@ -167,7 +167,13 @@ describe('when the epoch ends (chatEpochEnd)', () => {
     ['past the mid mark, cache expired', { turns: [usage(20_000), usage(45_000)], now: T + HOUR + 1 }, 'cold'],
     ['past the mid mark, cache warm', { turns: [usage(20_000), usage(45_000)], now: T + HOUR - 1 }, undefined],
     ['below the mid mark, cache expired', { turns: [usage(20_000), usage(30_000)], now: T + 3 * HOUR }, undefined],
-    ['no sizes reported: the pack\'s estimate', { epoch: { ...epoch, addedTokens: 50_000 }, turns: [usage(null)] }, 'full']
+    ['no sizes reported: the pack\'s estimate', { epoch: { ...epoch, addedTokens: 50_000 }, turns: [usage(null)] }, 'full'],
+    // Past the high mark the epoch waits for its digest, but never past the hard mark or the cap.
+    ['past the high mark, digest coming', { turns: [usage(20_000), usage(20_000 + 50_000)], digest: 'coming' }, 'due'],
+    ['past the high mark, digest ready', { turns: [usage(20_000), usage(20_000 + 50_000)], digest: 'ready' }, 'full'],
+    ['past the high mark, no digest', { turns: [usage(20_000), usage(20_000 + 50_000)], digest: 'none' }, 'full'],
+    ['at the hard mark, digest coming', { turns: [usage(10_000), usage(10_000 + 64_000)], digest: 'coming' }, 'full'],
+    ['past 40% of the window, digest coming', { turns: [usage(79_000), usage(81_000)], digest: 'coming' }, 'full']
   ]
   it.each(rows)('%s', (_name, input, expected) => {
     expect(chatEpochEnd({
@@ -175,7 +181,8 @@ describe('when the epoch ends (chatEpochEnd)', () => {
       selection: input.selection ?? SEL,
       turns: input.turns ?? [],
       now: input.now ?? T,
-      budget
+      budget,
+      ...(input.digest ? { digest: input.digest } : {})
     })).toBe(expected)
   })
 
