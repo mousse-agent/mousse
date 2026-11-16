@@ -324,6 +324,7 @@ it.each([1, 60, 180])('a schedule card lives for one gap with an hour minimum: %
   await f.bots.actions.reconcile()
   await flush()
   const next = await start(f, t.id, 2)
+  expect(f.bots.service.chatList(t.botId).messages.find(m => m.id === a.message_id)?.expiredActionSchedule).toBe(t.schedule.scheduleId)
   expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('This call expired')
   await finish(f, next.payload, 'completed', { text: 'Nothing sent.' })
   f.clock.now += minutes * 60_000
