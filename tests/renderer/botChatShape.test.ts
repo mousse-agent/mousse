@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { BotChatMessage, BotChip, BotLaunchedThread, BotWorkItem } from '../../src/shared/bots/personal/chat'
-import { chatRows, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
+import { botRowLine, chatRows, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
 
 const started = (title: string, text = 'started'): BotChip => ({ icon: 'think', text, highlight: title })
 const noted: BotChip = { icon: 'think', text: 'passed on your note' }
@@ -145,5 +145,26 @@ describe('presence and sticker', () => {
     for (const [shown, kind] of kinds) expect(shown).toBe(kind)
     // A task that waits shows no activity of its own.
     expect(stickerOf(presenceOf({ state: 'working', work: [item('q', 'Later', 'queued', '2026-11-13T21:55:00.000Z')] }, { typing: false, offline: false }), { icon: 'search', text: 'searching the web' })).toBe('working')
+  })
+})
+
+describe('the line under a bot in the sidebar', () => {
+  const work = (title: string, startedAt = '2026-11-13T21:50:00.000Z'): BotWorkItem => ({ id: title, title, status: 'running', startedAt })
+  type Bot = Parameters<typeof botRowLine>[0]
+  // [what, the bot, tone, words, whether its face sleeps]
+  const rows: Array<[string, Bot, ReturnType<typeof botRowLine>['tone'], string, boolean]> = [
+    ['nothing at all: idle, asleep', { state: 'idle', stateText: '' }, 'idle', 'Idle', true],
+    ['paused, even with work', { state: 'paused', stateText: 'Paused', work: [work('System check')] }, 'idle', 'Paused', false],
+    ['an ask waits on the owner', { state: 'needs_you', stateText: 'Wants to use files on this computer' }, 'needs', 'Wants to use files on this computer', false],
+    ['stuck waits on the owner', { state: 'stuck', stateText: 'Needs you: Set up a provider so I can work.' }, 'needs', 'Needs you: Set up a provider so I can work.', false],
+    ['an open question beats work', { state: 'working', stateText: 'Working…', needsOwner: true, work: [work('System check')] }, 'needs', 'Working…', false],
+    ['its work, the longest-running first', { state: 'working', stateText: 'Working…', work: [work('Review PR', '2026-11-13T21:52:00.000Z'), work('System check')] }, 'working', 'System check +1', false],
+    ['its chat turn writes', { state: 'working', stateText: 'Working…', chat: { activationId: 'a1' } }, 'working', 'Typing…', false],
+    ['waiting for the internet', { state: 'working', stateText: 'Waiting for internet', chat: { activationId: 'a1', offline: true } }, 'idle', 'Waiting for internet', false],
+    ['working with nothing listed', { state: 'working', stateText: 'Working…' }, 'working', 'Working…', false],
+    ['only a background command: awake, waiting', { state: 'idle', stateText: '', watchers: [{ id: 'w', title: 'the build', command: 'npm run build', startedAt: '2026-11-13T21:50:00.000Z', until: '2026-11-13T22:50:00.000Z' }] }, 'idle', 'Waiting on the build', false]
+  ]
+  it.each(rows)('%s', (_what, bot, tone, text, resting) => {
+    expect(botRowLine(bot)).toEqual({ tone, text, resting })
   })
 })

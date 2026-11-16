@@ -10,7 +10,8 @@ import './face.css'
  * A bot's face (Bot Phase 1 §5.12, bot-ui §4.3): its clay mouse or Mousse, whose pose shows the state.
  * `happy` is the renderer-only "done" moment. `head` shows the head (lists, header, messages: 34 to
  * 48 px); `full` the whole mouse (About, the empty page: 88 to 104 px). `still` draws the pose
- * without motion; reduced motion does the same.
+ * without motion; reduced motion does the same. `sleep` shows an idle face resting: the paused pose with its
+ * floating z, at full colour, since a resting bot is not paused.
  */
 export type BotFaceState = BotState | 'happy'
 
@@ -24,6 +25,15 @@ export interface BotFaceProps {
   /** Accessible name; without it the face is decorative. */
   label?: string
   className?: string
+  /** An idle face sleeps: eyes shut, head tipped, and its z, without the fade a paused face has. Other states ignore it. */
+  sleep?: boolean
+}
+
+/** What the live face and the flat drawing get: a sleeping idle face reads as paused, marked `resting`. */
+type DrawnFaceProps = BotFaceProps & { resting?: boolean }
+
+function drawnProps(props: BotFaceProps): DrawnFaceProps {
+  return props.sleep === true && props.state === 'idle' ? { ...props, state: 'paused', resting: true } : props
 }
 
 export const BOT_FACE_STATES: readonly BotFaceState[] = ['idle', 'working', 'needs_you', 'stuck', 'paused', 'happy']
@@ -61,7 +71,8 @@ function a11y(label: string | undefined) {
  * `BotFaceStill`, the flat drawing, at once, and goes live within `READY_POLL_MS` of the shader being
  * ready, keeping the flat drawing over its canvas until the renderer has drawn into it.
  */
-export function BotFace(props: BotFaceProps) {
+export function BotFace(input: BotFaceProps) {
+  const props = drawnProps(input)
   const status = useSyncExternalStore(subscribeSharedFaceRenderer, sharedFaceRendererStatus, () => 'unavailable' as const)
   const [broken, setBroken] = useState(false)
   // The spec whose saved picture turned out missing; its face draws flat until the renderer is live.
@@ -98,7 +109,7 @@ function specKey({ look, state, size, view }: NormalizedFaceProps): string {
   return `${look.colour}|${look.accessory}|${look.kind ?? 'mouse'}|${look.eyes ?? 'pill'}|${state}|${view}|${size}`
 }
 
-interface BotFaceLiveProps extends BotFaceProps {
+interface BotFaceLiveProps extends DrawnFaceProps {
   /** Shows the flat drawing over the canvas until the renderer first draws into it, so the switch is never blank. */
   coverUntilDrawn: boolean
   onBroken(): void
@@ -155,6 +166,7 @@ function BotFaceLive({ coverUntilDrawn, onBroken, onNoPicture, onDrawn: drawn, .
       data-kind={botKindOf(look)}
       data-eyes={botEyesOf(look)}
       data-still={still ? 'true' : undefined}
+      data-resting={props.resting ? 'true' : undefined}
       {...a11y(props.label)}
     >
       <canvas ref={canvasRef} className="bot-face-canvas" aria-hidden />
@@ -173,7 +185,8 @@ function BotFaceLive({ coverUntilDrawn, onBroken, onNoPicture, onDrawn: drawn, .
  * the look's colour with eyes, and a badge in the accessory's colour. Unknown look values draw as the
  * default.
  */
-export function BotFaceStill(props: BotFaceProps) {
+export function BotFaceStill(input: DrawnFaceProps) {
+  const props = drawnProps(input)
   const { look: known, state, size, view } = normalizeFaceProps(props)
   const body = BOT_COLOUR_HEX[known.colour]
   const accessory = BOT_ACCESSORY_HEX[known.accessory]
@@ -190,7 +203,8 @@ export function BotFaceStill(props: BotFaceProps) {
       data-colour={known.colour}
       data-accessory={known.accessory}
       data-kind={botKindOf(known)}
-      style={{ flex: 'none', opacity: asleep ? 0.6 : 1 }}
+      style={{ flex: 'none', opacity: asleep && !props.resting ? 0.6 : 1 }}
+      overflow="visible"
       {...a11y(props.label)}
     >
       {mousse ? (
@@ -218,6 +232,12 @@ export function BotFaceStill(props: BotFaceProps) {
         <circle cx="33" cy="33" r="5" fill={accessory} stroke="#ffffff" strokeWidth="1.5">
           <title>{BOT_ACCESSORY_LABELS[known.accessory]}</title>
         </circle>
+      )}
+      {/* Asleep: the live face's z, at rest (a flat face has no motion). */}
+      {asleep && (
+        <text className="bot-face-z-still" x="35" y="5" fontSize="10" fontWeight="700" style={{ fill: 'var(--bot-face-z, #b8a9f6)' }} aria-hidden>
+          z
+        </text>
       )}
     </svg>
   )

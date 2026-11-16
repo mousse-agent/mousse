@@ -3,14 +3,16 @@
 .chat-section-heading h2 { font-size: 11px; font-weight: 500; letter-spacing: .075em; color: var(--text-muted, var(--text-secondary)); margin: 0; }
 .chat-section-heading button { color: var(--text-secondary); display: grid; place-items: center; width: 23px; height: 23px; border-radius: 6px; }
 .chat-section-heading button:hover { background: rgba(var(--accent-rgb), .12); }
+/* A section's title folds it, as Archived does in Projects: the chevron turns down while the section is open. */
+.chat-section-heading h2 { display: flex; min-width: 0; }
+.app .chat-section-heading button.chat-section-toggle { display: inline-flex; align-items: center; gap: 4px; width: auto; height: 22px; margin-left: -4px; padding: 0 4px; font: inherit; letter-spacing: inherit; color: inherit; }
+.chat-section-chevron { flex: none; color: var(--text-secondary); transition: transform .15s; }
+.chat-section-toggle[aria-expanded='true'] .chat-section-chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .chat-section-chevron { transition: none; } }
 .chat-avatar { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 34px; height: 34px; border-radius: 10px; font-size: 15px; font-weight: 600; color: #151319; }
 .chat-avatar.small { width: 25px; height: 25px; border-radius: 7px; font-size: 12px; }
 .chat-avatar.group { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); border: 1px solid rgba(var(--accent-pale-rgb), .09); color: var(--text-secondary); }
 .chat-color-0 { background: #ba91ed; } .chat-color-1 { background: #52bbb6; } .chat-color-2 { background: #84b994; } .chat-color-3 { background: #d7ad72; } .chat-color-4 { background: #8699dc; }
-.chat-roster { display: flex; gap: 12px; overflow-x: auto; padding: 0 8px 8px; }
-.chat-roster button { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 40px; font-size: 10px; color: var(--text-secondary); }
-.chat-roster button:disabled { opacity: .5; cursor: default; }
-.chat-roster button span:last-child { max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-list-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 8px; border-radius: 9px; text-align: left; color: var(--text-primary); }
 .chat-list-row:hover, .chat-list-row.active { background: color-mix(in srgb, var(--text-secondary) 11%, transparent); }
 .chat-list-text { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 4px; }

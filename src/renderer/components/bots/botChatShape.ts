@@ -201,6 +201,29 @@ export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads' | 
   return { kind: 'free', text: 'free' }
 }
 
+/** How a bot's line in the sidebar reads: `working` in purple, `needs` (it waits on its owner) in amber, `idle` in grey. */
+export type BotRowTone = 'working' | 'needs' | 'idle'
+
+/**
+ * The line under a bot's name in the sidebar's Bots list, in words coloured by `tone`: what waits on the owner ("Wants to
+ * use files on this computer"), what it works on (the header's line: "System check +1", "Typing…"), or "Paused",
+ * "Waiting for internet", "Waiting on …", and "Idle" when there is nothing at all. `resting` (only for "Idle"): its face
+ * sleeps.
+ */
+export function botRowLine(bot: Pick<BotSummary, 'state' | 'stateText' | 'needsOwner' | 'waiting' | 'chat' | 'work' | 'threads' | 'watchers'>): { tone: BotRowTone; text: string; resting: boolean } {
+  const line = (tone: BotRowTone, text: string, resting = false) => ({ tone, text, resting })
+  if (bot.state === 'paused') return line('idle', 'Paused')
+  if (bot.needsOwner || bot.state === 'needs_you' || bot.state === 'stuck') return line('needs', bot.stateText || 'Needs you')
+  const offline = Boolean(bot.chat?.offline) || bot.waiting === 'internet'
+  const presence = presenceOf(bot, { typing: Boolean(bot.chat) && !offline, offline })
+  if (presence.kind === 'offline') return line('idle', 'Waiting for internet')
+  if (presence.kind === 'typing') return line('working', 'Typing…')
+  if (presence.kind === 'busy') return line('working', presence.text)
+  if (bot.state === 'working') return line('working', bot.stateText || 'Working…')
+  if (presence.text !== 'free') return line('idle', presence.text)
+  return line('idle', 'Idle', true)
+}
+
 /** How a thread the bot started looks in its list: the tint of its row (`working` blue, `waiting` amber, `done` green, `failed` red), and its label. */
 export type LaunchedTone = 'working' | 'waiting' | 'idle' | 'done' | 'failed'
 

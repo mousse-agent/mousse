@@ -517,34 +517,6 @@ html .chat-avatar.group[class*='chat-color-'] {
   color: var(--chat-hue);
 }
 
-.app .chat-roster {
-  gap: 2px;
-  padding: 2px 0;
-  scrollbar-width: none;
-}
-
-.app .chat-roster::-webkit-scrollbar {
-  display: none;
-}
-
-.app .chat-roster button {
-  gap: 5px;
-  min-width: 48px;
-  padding: 6px 4px 5px;
-  border-radius: 9px;
-  font-size: 11px;
-  transition: background 0.15s, color 0.15s;
-}
-
-.app .chat-roster button:hover:not(:disabled) {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-}
-
-.app .chat-roster button:disabled {
-  opacity: 0.4;
-}
-
 .app .chats-sidebar-content .chat-avatar {
   width: 30px;
   height: 30px;

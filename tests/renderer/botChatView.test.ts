@@ -1833,7 +1833,7 @@ describe('loading and labels', () => {
   it('opens a bot with its messages: the click marks its face, and the pane changes once they are here', async () => {
     const release = await withSlowFirstPage()
     await click(button('Message Inbox helper'))
-    expect(button('Message Inbox helper')!.className).toContain('bot-roster-active')
+    expect(button('Message Inbox helper')!.getAttribute('aria-current')).toBe('true')
     // Nothing of the bot shows without its messages: no empty chat, no Loading line.
     expect(host.querySelector('.chat-transcript')).toBeNull()
     expect(loadState()).toBeNull()
