@@ -11,6 +11,9 @@ const addressLike = (text: string) => /@|:\/\/|(?:[\p{L}\p{N}\u200c\u200d-]+\.)+
 export function actionText(text: string): string {
   return text.split(/(\s+)/u).map((token) => guardTextCharacters(token, addressLike(token) ? 'address' : 'data')).join('')
 }
+function fieldName(text: string): string {
+  return actionText(text).replace(/\r\n|\r|\n/g, '↵') || '(no name)'
+}
 function AlphabetWarning({ text, name = false }: { text: string; name?: boolean }) {
   const outsideAscii = (token: string) => /(?=[^\x00-\x7f])[\p{L}\p{N}]/u.test(token)
   const phoneLike = /^\+?[\p{N}(][\p{N}\s()+.-]{4,}$/u.test(text.trim())
@@ -26,7 +29,7 @@ function Value({ value, literal = false }: { value: unknown; literal?: boolean }
     if (!literal && object.$mousse === 'hidden' && object.text === 'hidden · will be sent')
       return <span className="bot-action-hidden" aria-label="Hidden value that will be sent">hidden · will be sent</span>
     if (!Object.keys(object).length) return <code aria-label="Object">{'{}'}</code>
-    return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt>{actionText(key)}<AlphabetWarning text={key} name /></dt><dd><Field name={key} value={child} literal={false} /></dd></div>)}</dl>
+    return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt>{fieldName(key)}<AlphabetWarning text={key} name /></dt><dd><Field name={key} value={child} literal={false} /></dd></div>)}</dl>
   }
   if (Array.isArray(value)) return value.length ? <ol>{value.map((child, index) => <li key={index}><Field name="item" value={child} literal={literal} /></li>)}</ol> : <code aria-label="List">[]</code>
   if (typeof value !== 'string') return <code aria-label="Non-text value">{JSON.stringify(value) ?? String(value)}</code>
@@ -36,7 +39,7 @@ function Value({ value, literal = false }: { value: unknown; literal?: boolean }
 }
 function Field({ name, value, literal }: { name: string; value: unknown; literal: boolean }) {
   return (Array.isArray(value) && value.length > 8) || typeof value === 'string' && (value.length > 160 || /^(body|text|content|message)$/i.test(name))
-    ? <details><summary>Read {actionText(name)}</summary><Value value={value} literal={literal} /></details>
+    ? <details><summary>Read {fieldName(name)}</summary><Value value={value} literal={literal} /></details>
     : <Value value={value} literal={literal} />
 }
 function Arguments({ value }: { value: unknown }) {
