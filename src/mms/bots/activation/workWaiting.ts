@@ -19,7 +19,6 @@ interface WaitRule {
   /** Stored end reasons, including the marker written by the wake source before a slot is free. */
   reasons: readonly string[]
   allows(row: Pick<BotActivationRow, 'lane' | 'trigger'>): boolean
-  wake: string
   ready(row: BotActivationRow, facts: WorkWaitFacts): boolean
   stranded(row: BotActivationRow, facts: WorkWaitFacts): boolean
   endReason: string
@@ -42,7 +41,6 @@ const nothingToWaitFor = (title: string) => `I stopped "${title}": nothing could
 /** One row per reason. Wake sources keep their existing transactions, messages and stored markers. */
 export const WORK_WAIT_RULES = {
   question: {
-    wake: 'tap, reply, default',
     reasons: ['question', 'question_answered'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'question_answered',
     stranded: (row, facts) => !facts.questionExists(row),
@@ -59,7 +57,6 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: false, republishQuestion: true
   },
   budget_exhausted: {
-    wake: 'Allow',
     reasons: ['budget_exhausted', 'room_allowed'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'room_allowed',
     stranded: (row, facts) => row.endReason === 'budget_exhausted' && facts.roomStranded(row),
@@ -74,7 +71,6 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: false, republishQuestion: false
   },
   usage_limit: {
-    wake: 'reset time, Resume',
     reasons: ['usage_limit'], allows: workOnly,
     ready: (row, facts) => facts.usageResumable(row),
     stranded: (row, facts) => facts.usageStranded(row),
@@ -98,9 +94,9 @@ export function workWaits(row: Pick<BotActivationRow, 'status' | 'lane' | 'trigg
 }
 
 /** The same decision serves lane admission and the continuation path, for all parked reasons. */
-export function workReadiness(row: BotActivationRow, facts: WorkWaitFacts): { ready: boolean; waitingFor?: string } {
+export function workReadiness(row: BotActivationRow, facts: WorkWaitFacts): { ready: boolean } {
   const rule = workWaitRule(row)
-  return rule?.ready(row, facts) ? { ready: true } : { ready: false, waitingFor: rule?.wake }
+  return rule?.ready(row, facts) ? { ready: true } : { ready: false }
 }
 
 /** Preserve the old projection even on a queued or paused row with a retained end reason. */
