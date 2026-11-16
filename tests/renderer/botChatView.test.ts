@@ -2301,3 +2301,12 @@ it('puts the outcome directly after the title, before the tool answer and review
   expect(status.nextElementSibling).toBe(card.querySelector('[aria-label="Tool result"]'))
   expect(status.nextElementSibling?.nextElementSibling).toBe(card.querySelector('details'))
 })
+
+it('distinguishes quoted text, backslashes and the literal empty-text label', async () => {
+  const values = ['false', '"false"', '"a\\b"', '(empty text)', '']
+  fake.chats.inbox = [held({ args: Object.fromEntries(values.map((value, index) => [String(index), value])) })]
+  await open()
+  const blocks = [...host.querySelectorAll('[aria-label="Complete arguments"] > dl > div > dd')].map(block => block.textContent)
+  expect(blocks).toEqual(['"false"', JSON.stringify('"false"'), JSON.stringify('"a\\b"'), '"(empty text)"', '(empty text)'])
+  expect(new Set(blocks).size).toBe(values.length)
+})
