@@ -8194,14 +8194,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const end = !this.ownerActive() && !this.canWake(botId) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
       this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(end ?? Math.max(now, Date.parse(String(row.at)) + 1)).toISOString(), String(row.id))
     }
-    // Settings changes also move a question that was due outside the old quiet interval.
-    for (const row of this.store.all("SELECT id, bot_id, next_at FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL")) {
-      const at = Date.parse(String(row.next_at))
-      const end = this.host.quietHoursFor?.(String(row.bot_id), at)?.end
-      if (end) {
-        const question = this.store.question(String(row.id))
-        if (question) this.moveFollowUp(question, end)
+    // Reconstruct the normal due time from the saved bubble/last nudge, so an old quiet-hours end
+    // is not mistaken for the requested time after the wish is shortened or cleared. No extra receipt is needed.
+    for (const row of this.store.all("SELECT id FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL")) {
+      const question = this.store.question(String(row.id))
+      if (!question?.nextAt || !question.follow) continue
+      const previous = Date.parse(question.nextAt)
+      let at = previous
+      if (previous > now) {
+        const source = question.nudges ? this.store.message(`bm_${question.id}_n${question.nudges}`)
+          : question.messageId ? this.store.message(question.messageId) : undefined
+        if (source) {
+          at = Math.max(now, Date.parse(source.at) + (question.nudges ? NUDGE_AGAIN_MS : question.follow.afterMs))
+          if (question.follow.kind === 'nudge') at = nudgeSlot(at,
+            this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map(time => Date.parse(time)))
+        }
       }
+      at = this.followUpTime(question.botId, at)
+      if (at !== previous) this.moveFollowUp(question, at)
     }
     this.armDue()
   }
