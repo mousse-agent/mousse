@@ -128,7 +128,7 @@ describe('a question in the chat', () => {
     expect(JSON.parse((await tool('use_model', typed.prepared, typed.payload.threadId, { model: 'Opus 4.6', scope: 'now' })).text)).toMatchObject({ ok: true })
   })
 
-  it('with "use your threads", a tapped answer’s turn is told in its preamble that it only reads threads, and why; its system text is a typed turn’s', async () => {
+  it('with "use your threads", a tapped answer’s turn may start, message and archive threads as a typed one does, with the same system text', async () => {
     f.host.instructions = (bot) => botInstructions(bot)
     const granting = await chatTurn('Send the build to my design thread.', 'grant')
     granting.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked me to message a thread.' })
@@ -140,9 +140,10 @@ describe('a question in the chat', () => {
     const { bubble } = await asked({ question: 'Which colour should I send?', choices: ['Gold', 'Grey'] })
     await tap(bubble.question!.questionId, 'Gold')
     const tapped = await start(f, f.store.laneActivations(botId, 'chat', ['running'])[0]!.id)
-    expect(sends(tapped.prepared)).toBe(false)
-    expect(tapped.prepared.preamble).toContain(BOT_THREADS_READ_ONLY_TURN_NOTE)
-    await finish(f, tapped.payload, 'completed', { text: 'I’ll send Gold when you reply.' })
+    expect(sends(tapped.prepared)).toBe(true)
+    expect(tapped.prepared.policy.tools!.allow).toContain('thread_archive')
+    expect(tapped.prepared.preamble ?? '').not.toContain(BOT_THREADS_READ_ONLY_TURN_NOTE)
+    await finish(f, tapped.payload, 'completed', { text: 'Sent Gold.' })
 
     const typed = await chatTurn('Send Gold.', 'typed-gold')
     expect(sends(typed.prepared)).toBe(true)
