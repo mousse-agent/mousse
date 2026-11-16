@@ -638,3 +638,24 @@ it.each(['credential', 'oversized'] as const)('B-recovery refuses a previously a
   expect(t.calls).toEqual([])
   expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'withdrawn', exec_args: null })
 })
+
+it('A-limit keeps the sent outcome unread through a time wall until the resumed dispatch starts', async () => {
+  const t = await setup(true)
+  f.clock.now += 60 * 60_000 - 10_000
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(f.store.activation(t.workId)?.status).toBe('waiting_grant')
+  const wall = f.store.openAsks(t.botId).find(ask => ask.activationId === t.workId)!
+  await f.bots.service.answer(t.botId, wall.id, 'allow')
+  await flush()
+  const dispatch = f.store.lastMainDispatch(t.workId)!
+  expect(dispatch.prompt.text).toContain('Your owner sent it. The tool answered:')
+  expect(dispatch.prompt.text).toContain('delivered')
+  expect((dispatch.prompt as any).workActionIds).toEqual([a.id])
+  expect(t.calls).toEqual([t.args])
+  await start(f, t.workId, dispatch.n)
+  expect((f.store as any).unreadWorkActions(t.workId)).toEqual([])
+})
