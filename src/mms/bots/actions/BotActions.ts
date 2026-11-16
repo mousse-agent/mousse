@@ -172,6 +172,7 @@ interface Host {
   park(row: BotActivationRow): void
   schema(tool: BotMcpTool): unknown
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
+  obsolete(action: ActionRow): boolean
   post(row: BotActivationRow, id: string, text: string): void
   settled(row: BotActivationRow): void
   publish(messageId: string): void
@@ -214,7 +215,7 @@ export class BotActions {
   withdrawChanged(): void {
     if (!this.host.enabled()) return
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
-      if (!this.valid(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: 'This tool or its permission changed. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
+      if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: 'This tool or its permission changed. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
     }
   }
   get(id: string): ActionRow | undefined { return this.host.store.get('SELECT * FROM bot_actions WHERE id = ?', id) as unknown as ActionRow | undefined }

@@ -618,6 +618,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const revision = this.store.get('SELECT grant_id FROM bot_grants WHERE bot_id = ? AND revoked_at IS NULL ORDER BY grant_id DESC LIMIT 1', row.botId)?.grant_id
       return { ...server, grantRevision: revision, grantDigest: actionDigest(grant.manifest), deviceLimit: limit }
     },
+    obsolete: action => {
+      const row = this.store.activation(action.activation_id)
+      const grant = this.store.activeGrant(action.bot_id)
+      const held = JSON.parse(action.binding_json)
+      const revision = this.store.get('SELECT grant_id FROM bot_grants WHERE bot_id = ? AND revoked_at IS NULL ORDER BY grant_id DESC LIMIT 1', action.bot_id)?.grant_id
+      if (!row || !grant || held.grantRevision !== revision || held.grantDigest !== actionDigest(grant.manifest)) return true
+      const tool = JSON.parse(action.target_json) as BotMcpTool
+      const where = this.host.mcp?.where?.(tool.server)
+      if (!where) return false // A cold catalogue is not evidence of removal.
+      if (where.state !== 'on') return true
+      if (where.server.failing || where.server.starting) return false
+      if (!where.server.tools.some(t => t.tool === tool.tool)) return true
+      const binding = this.host.mcp?.binding?.(tool)
+      return Boolean(binding && (binding.configDigest !== held.configDigest || binding.schemaDigest !== held.schemaDigest))
+    },
     post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
     settled: (row) => { this.chat.republish(this.actions.forWork(row.id)!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
     execute: async (row, target, args) => {
