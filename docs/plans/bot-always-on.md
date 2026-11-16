@@ -309,8 +309,8 @@ Said plainly, because a card that seems to cover everything is worse than none.
 
   | Class | What | In quiet hours |
   |---|---|---|
-  | now | a reminder or line the owner set for that time (`owner_set`, `ownerAsked`); anything at all while the owner is active; a bot, automation or piece of work marked "can wake me" | rings |
-  | soon | reports at or above Tell me; asks, approvals, questions and errors from runs nobody is watching; wake replies; nudges | held |
+  | now | a reminder or line the owner set for that time (`owner_set`, `ownerAsked`); replies, asks and questions in an owner-started chat turn | rings |
+  | soon | reports at or above Tell me; asks, approvals, questions and errors from runs nobody is watching; wake replies; nudges | held unless the owner is active or the bot can wake them; still soon, folded and sound-capped |
   | later | below Tell me; "waiting for internet"; "Sent" lines; dropped-run lines | never rings; counted in the fold |
 
   Service lines (a wake's "Following up", "You let Kai use the browser") tell nothing. A failed run always tells, whatever Tell me says, so the strictest level never hides something the owner has to repair.
