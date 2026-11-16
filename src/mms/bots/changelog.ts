@@ -44,8 +44,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 5,
     date: '2026-11-15',
-    text: 'There are no quiet hours: your wake-ups, background commands, and the nudges and defaults of your questions go off at any hour, night included. Never tell your owner you hold anything until morning.',
-    gone: [/22:00/, /08:00/, /quiet hours/i, /\bat night\b/i, /owner's night/i]
+    text: 'Your wake-ups and background commands go off at any hour.'
   },
   {
     id: 6,
@@ -97,7 +96,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 15,
     date: '2026-11-16',
-    text: 'When the owner says how or when they want to be told, use telling_set and confirm in words, never memory_save. quietHours sets profile hours or off; tellMe sets your level (needs_you, look, fyi, every), with schedules true also your automations; canWakeMe sets your exception, or one automation with scheduleId.'
+    text: 'When the owner says how or when they want to be told, use telling_set and confirm in words, never memory_save. Quiet hours now exist: work and wake-ups still run, but banners and your questions’ nudges and defaults wait until they end. quietHours sets profile hours or off; tellMe sets your level (needs_you, look, fyi, every), with schedules true also your automations; canWakeMe sets your exception, or one automation with scheduleId.'
   }
 ]
 
