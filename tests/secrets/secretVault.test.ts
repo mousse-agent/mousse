@@ -176,6 +176,10 @@ describe('the secrets a thread asked for', () => {
     expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')
     expect(masked('c1', VALUE)).toBe('[secret API_TOKEN hidden]')
     if (vault.value('API_TOKEN')) expect(masked('t1', 'tok_rotated_value')).toBe('[secret API_TOKEN hidden]')
+    // However long the turn still runs.
+    now += RETIRED_SECRET_GRACE_MS * 3
+    expect(masked('t1', `late ${VALUE}`)).toBe('late [secret API_TOKEN hidden]')
+    expect(masked('c1', `late ${VALUE}`)).toBe('late [secret API_TOKEN hidden]')
     // The turn ends: its last output may still arrive for a short while.
     busy.clear()
     expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')

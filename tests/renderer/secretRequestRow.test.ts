@@ -4,7 +4,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { SecretRequestRow } from '../../src/renderer/components/secrets/SecretRequestRow'
+import { SecretRequestRow, secretNameFromResult } from '../../src/renderer/components/secrets/SecretRequestRow'
 import { secretOutcomeText, type SecretRequestOutcome } from '../../src/mms/secrets/SecretRequests'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -33,6 +33,17 @@ const OUTCOMES: Array<[string, SecretRequestOutcome]> = [
 ]
 
 describe('a secret request in the transcript', () => {
+  it.each(OUTCOMES)('reads the name from the result of a secret %s', (_what, outcome) => {
+    expect(secretNameFromResult(secretOutcomeText(outcome).text)).toBe('GITHUB_TOKEN')
+    expect(secretNameFromResult([{ type: 'text', text: secretOutcomeText(outcome).text }])).toBe('GITHUB_TOKEN')
+  })
+
+  it('reads no name from a result that stored nothing', () => {
+    for (const outcome of [{ kind: 'declined' }, { kind: 'ended', why: 'timed_out' }, { kind: 'ended', why: 'stopped' }] as SecretRequestOutcome[]) {
+      expect(secretNameFromResult(secretOutcomeText(outcome).text)).toBeUndefined()
+    }
+  })
+
   it.each(OUTCOMES)('shows a secret %s as given, under its name', (_what, outcome) => {
     expect(show(secretOutcomeText(outcome).text, 'success')).toContain('Given. Kept out of the chat as GITHUB_TOKEN.')
   })
