@@ -1463,7 +1463,7 @@ it('R2-4 three expired cards refuse further calls without claiming the owner dec
   const memory = new BotMemoryStore({ db: f.store.db })
   const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'declined call' })!
   memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Your owner removed this request') })
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('had three cards for this tool that were not sent') })
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(3)
 })
 
