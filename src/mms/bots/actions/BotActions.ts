@@ -62,7 +62,7 @@ interface Host {
   execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>): Promise<BotMcpCallOutcome>
 }
 const pending = new Set(['open', 'approved', 'running'])
-export class BotActionChanged extends Error {}
+export class BotActionChanged extends Error { readonly code = 'bot_action_changed' }
 const changed = () => new BotActionChanged('This changed since you saw it. Redraw the action.')
 export class BotActions {
   constructor(private readonly host: Host) {}

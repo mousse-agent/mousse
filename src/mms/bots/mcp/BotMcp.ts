@@ -380,7 +380,8 @@ ${kept}` } : { ...certainty, ...framed }
     } catch (error) {
       const failure = timeout.signal.aborted && !signal.aborted ? timeout.signal.reason : error
       if (!signal.aborted && !options.heldAction) logWarn('BotMcp', `A bot's call of ${tool.tool} on "${tool.serverName}" failed: ${redactSensitiveText(failure instanceof Error ? failure.message : String(failure)).slice(0, 2000)}`)
-      return { ...(options.heldAction ? { callState: (failure as { mcpNotDispatched?: boolean })?.mcpNotDispatched ? 'failed' as const : 'uncertain' as const } : {}), text: failureText(tool.serverName, failure, signal), isError: true }
+      const bindingChanged = options.heldAction && ['stale_revision', 'bot_action_changed'].includes(String((failure as { code?: string })?.code))
+      return { ...(options.heldAction ? { callState: (failure as { mcpNotDispatched?: boolean })?.mcpNotDispatched ? 'failed' as const : 'uncertain' as const } : {}), text: bindingChanged ? 'This changed since you saw it. Nothing was sent. Ask for a fresh review before trying again.' : failureText(tool.serverName, failure, signal), isError: true }
     } finally {
       clearTimeout(timer)
     }
