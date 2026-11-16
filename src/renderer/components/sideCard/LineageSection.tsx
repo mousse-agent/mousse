@@ -198,6 +198,7 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
   return (
     <SideCardSection
       title={lineageTitle(entries)}
+      // The section was called Lineage; its saved collapse choice keeps that key.
       collapseKey="Lineage"
       threadId={threadId}
       action={

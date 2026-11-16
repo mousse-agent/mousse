@@ -92,10 +92,10 @@ export function countRunningSubagents(subagents: readonly Pick<SubagentSummary, 
   return subagents.filter(isRunningSubagent).length
 }
 
-/** Heading of the section: "Lineage · 2 running" while any subagent is going, otherwise "Lineage". */
+/** Heading of the section: "Nest · 2 running" while any subagent is going, otherwise "Nest". */
 export function lineageTitle(subagents: readonly Pick<SubagentSummary, 'state'>[]): string {
   const running = countRunningSubagents(subagents)
-  return running > 0 ? `Lineage · ${running} running` : 'Lineage'
+  return running > 0 ? `Nest · ${running} running` : 'Nest'
 }
 
 export interface LineageGroups<T> {

@@ -68,12 +68,12 @@ describe('lineageTitle', () => {
   it('counts the subagents still running', () => {
     const rows = [subagent('a'), subagent('b', { state: 'waiting' }), subagent('c', { state: 'done' })]
     expect(countRunningSubagents(rows)).toBe(2)
-    expect(lineageTitle(rows)).toBe('Lineage · 2 running')
+    expect(lineageTitle(rows)).toBe('Nest · 2 running')
   })
 
   it('is a plain heading when nothing is running', () => {
-    expect(lineageTitle([subagent('a', { state: 'done' })])).toBe('Lineage')
-    expect(lineageTitle([])).toBe('Lineage')
+    expect(lineageTitle([subagent('a', { state: 'done' })])).toBe('Nest')
+    expect(lineageTitle([])).toBe('Nest')
   })
 })
 
@@ -399,7 +399,7 @@ describe('LineageSection rendering', () => {
     const html = renderToStaticMarkup(createElement(LineageSection, { threadId: 't1', projectId: null }))
     expect(html).toContain('No subagents started yet')
     expect(html).not.toContain('side-card-section-title')
-    expect(html).not.toContain('Lineage')
+    expect(html).not.toContain('Nest')
     expect(html).not.toContain('<ul')
     expect(html).toContain('data-thread-id="t1"')
   })
@@ -407,7 +407,7 @@ describe('LineageSection rendering', () => {
   it('reads the subagents the daemon reported for this thread, with the running count in its heading', () => {
     withStore({ subagentsByParent: { t1: [subagent('one'), subagent('two', { state: 'done' })], other: [subagent('x', { title: 'Elsewhere' })] } }, () => {
       const html = renderToStaticMarkup(createElement(LineageSection, { threadId: 't1', projectId: null }))
-      expect(html).toContain('side-card-section-name">Lineage · 1 running<')
+      expect(html).toContain('side-card-section-name">Nest · 1 running<')
       expect(html).toContain('Task one')
       expect(html).toContain('1 finished')
       expect(html).not.toContain('Task two')
@@ -421,7 +421,7 @@ describe('LineageSection rendering', () => {
     withStore({ subagentsByParent: { t1: [subagent('one'), subagent('two', { state: 'done' })] } }, () => {
       const html = render()
       expect(html).toContain('class="side-card-section-head"')
-      expect(html).toMatch(/side-card-section-name">Lineage · 1 running<\/span>.*?<\/h3><button[^>]*class="lineage-stop-all"[^>]*>Stop all<\/button>/)
+      expect(html).toMatch(/side-card-section-name">Nest · 1 running<\/span>.*?<\/h3><button[^>]*class="lineage-stop-all"[^>]*>Stop all<\/button>/)
       expect(html).toContain('aria-label="Stop all subagents"')
     })
     // A waiting subagent still runs; a finished one does not.

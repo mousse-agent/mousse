@@ -217,7 +217,7 @@ describe('Lineage lists native subagents', () => {
   it('counts them, shows their kind, opens their card and offers no Stop of its own', () => {
     const cards = nativeSubagentsOfMessages([backgroundAgent('a1', 13, 'Map design language', { model: 'sonnet' } as never), backgroundAgent('a2', 20, 'Find hosting', { summary: 'Done', durationMs: 5000 })], true)
     const entries = cards.map(nativeLineageEntry)
-    expect(lineageTitle(entries)).toBe('Lineage · 1 running')
+    expect(lineageTitle(entries)).toBe('Nest · 1 running')
 
     const host = document.createElement('div')
     document.body.appendChild(host)
