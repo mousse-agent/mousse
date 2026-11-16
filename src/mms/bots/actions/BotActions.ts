@@ -73,7 +73,16 @@ function reviewArguments(value: unknown): { args: unknown; hasHiddenValues: bool
 export interface ActionRow {
   id: string; call_key: string; bot_id: string; activation_id: string; status: string
   exec_args: string | null; args_digest: string; binding_json: string; target_json: string
-  args_json: string; card_json: string | null; message_id: string; expires_at: string; result_json: string | null
+  answered_at: string | null; ran_at: string | null; args_json: string; card_json: string | null; message_id: string; expires_at: string; result_json: string | null
+}
+/** Stored outcomes are timed updates, assembled with all other work updates at dispatch. */
+export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'>): string {
+  const result = action.result_json ? JSON.parse(action.result_json) as { text?: string } : undefined
+  const line = action.status === 'done' ? 'Your owner sent it. The tool answered:'
+    : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
+      : action.status === 'uncertain' ? 'It could not be confirmed whether this went through: check before trying again.'
+        : 'Nothing was sent. The call failed:'
+  return `${line}${['done', 'failed', 'withdrawn', 'expired'].includes(action.status) ? `\n${result?.text ?? 'Carry on without it.'}` : ''}`
 }
 interface Host {
   store: BotStore

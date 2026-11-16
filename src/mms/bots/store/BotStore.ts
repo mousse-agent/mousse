@@ -1,3 +1,4 @@
+import type { ActionRow } from '../actions/BotActions'
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
@@ -792,6 +793,7 @@ export interface BotDispatchRow {
     subagent?: BotSubagentSpec
     /** A wait is told only when a dispatch carrying its id has started. */
     workWaitIds?: string[]
+    workActionIds?: string[]
     /** Work's stored additions carried here; consume them with the dispatch's start, not its intent. */
     workDelivery?: { answers: string[]; notes: number[]; question?: string }
   }
@@ -1991,6 +1993,14 @@ export class BotStore {
       AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workWaitIds') told
         WHERE d.activation_id = r.work_id AND d.started_at IS NOT NULL AND told.value = r.id)
       ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
+  }
+
+  /** Settling is not telling: only a started dispatch carrying the action consumes it. */
+  unreadWorkActions(workId: string): ActionRow[] {
+    return this.all(`SELECT a.* FROM bot_actions a WHERE a.activation_id = ? AND a.status NOT IN ('open', 'approved', 'running')
+      AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workActionIds') told
+        WHERE d.activation_id = a.activation_id AND d.started_at IS NOT NULL AND told.value = a.id)
+      ORDER BY COALESCE(a.ran_at, a.answered_at, a.created_at), a.rowid`, workId) as unknown as ActionRow[]
   }
 
   /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */

@@ -1,5 +1,5 @@
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
-import { BotActions, BotActionChanged, botAsksFirst, actionDigest, maskedActionData } from '../actions/BotActions'
+import { BotActions, BotActionChanged, actionContinuation, botAsksFirst, actionDigest, maskedActionData } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
@@ -445,7 +445,7 @@ export const BOT_OFFLINE_POLL_MAX_MS = 60_000
 /** How often a live dispatch's last working moment is written to `bots.db` at most (`checkpoint_at`). */
 export const BOT_CHECKPOINT_EVERY_MS = 1_000
 
-type WorkContinuationEvent = { at: string; text: string } | { at: string; answer: BotEscalationRow }
+type WorkContinuationEvent = { at: string; text: string; actionId?: string } | { at: string; answer: BotEscalationRow }
 
 /** What an answer to a limit ask did to the work that waited on it (`settleRoomInTx`). */
 interface RoomSettled {
@@ -5195,7 +5195,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; waitContext?: string; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     if (this.cancelRemovedScheduleRun(row)) return 'none'
@@ -5210,7 +5210,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' | 'question' | 'approval' | 'gone' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
-      const durableWork = current.trigger.kind === 'work' && Boolean(this.store.workWait(current.id))
+      const durableWork = current.trigger.kind === 'work' && Boolean(this.store.workWait(current.id) || this.actions.forWork(current.id))
       const answers = durableWork ? this.store.pendingAnswers(current.id) : input.answers ?? []
       // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`); a scheduled
       // run or a reminder's work also leaves the slot kept for the owner's work (`runSlotFree`).
@@ -5271,6 +5271,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return { kind: wall.kind === 'wall' ? 'wall' : wall.kind === 'blocked' ? 'blocked' : 'none' }
       }
       const waits = current.trigger.kind === 'work' ? this.store.unreadWorkWaits(current.id) : []
+      const actions = current.trigger.kind === 'work' ? this.store.unreadWorkActions(current.id) : []
+      const actionCaused = current.endReason === 'approval_answered' ? actions.at(-1) : undefined
       const waited = waits.length > 0
       const n = this.store.nextDispatchN(row.id)
       const neverRan = previous && previousRun && !previousRun.activeAttemptId ? previous.prompt.text : undefined
@@ -5284,6 +5286,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // (`read_at`).
       const answered = question?.status === 'answered' || question?.status === 'defaulted' ? this.workAnswerOf(question) : undefined
       const workEvents: WorkContinuationEvent[] | undefined = durableWork ? [
+        ...actions.map(action => ({ at: (action.status === 'declined' ? action.answered_at : action.ran_at) ?? action.answered_at ?? current.createdAt, text: actionContinuation(action), actionId: action.id })),
         ...waits.map(wait => ({ at: wait.dueAt, text: workWaitInput(wait, clockTime) })),
         ...answers.map(answer => ({ at: answer.answeredAt ?? answer.createdAt, answer })),
         ...(notes?.events ?? []),
@@ -5297,7 +5300,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         kind: 'continue' as const,
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
-        prompt: { ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: question!.id } : {}) } } : {}), ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}), text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, waited, answerCaused: current.status === 'waiting_grant' && answers.length > 0, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
+        prompt: { ...(actions.length ? { workActionIds: actions.map(action => action.id) } : {}), ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: question!.id } : {}) } } : {}), ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}), text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, ...(actionCaused ? { actionCaused: actionContinuation(actionCaused) } : {}), waited, answerCaused: current.status === 'waiting_grant' && answers.length > 0, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
         policyDigest: grant.digest,
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
@@ -5350,13 +5353,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; restart?: boolean; reload?: boolean; waitContext?: string; ownerText?: string; waited?: boolean; answerCaused?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
-    // A wait outcome is service context, not an owner's message. Preserve it across every continuation branch.
-    if (input.waitContext) {
-      const { waitContext, ...rest } = input
-      const continuation = this.continuationPrompt(row, rest, neverRan)
-      return `[Mousse] ${waitContext}\n\n${continuation.replace('[Mousse] The owner asked you to continue.', '[Mousse] Continue where you left off.')}`
-    }
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; actionCaused?: string; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; answerCaused?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -5376,14 +5373,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const questionInLead = !input.waited || input.questionAnswered
     const remainingEvents = input.workEvents?.filter(event => 'answer' in event
       ? !answersInLead
-      : !(questionInLead && event.text === input.answered))
+      : event.text !== input.actionCaused && !(questionInLead && event.text === input.answered))
     const ordered = remainingEvents?.length ? remainingEvents : undefined
-    const updates = ordered ? ordered.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n') : input.notes
+    const updateText = ordered ? ordered.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n') : input.notes
+    const updates = updateText && input.ownerText !== undefined && row.lane === 'run' ? `${updateText}\n\n${input.ownerText}` : updateText
     const orderedAnswers = ordered?.some(event => 'answer' in event)
     const orderedQuestion = ordered?.some(event => 'text' in event && event.text === input.answered)
     const allowed = input.allowed?.filter(title => !input.workEvents?.some(event => 'answer' in event) || !input.answers.some(answer => answer.status !== 'denied' && this.chat.card(answer).title === title))
     const depth = row.modelOverride?.depth
-    const reason = input.answers.length && !orderedAnswers
+    const reason = input.actionCaused ? input.actionCaused : input.answers.length && !orderedAnswers
       ? [...input.answers.map(answerLine), ...(input.askAgain ?? []).map(askAgainLine)].join(' ')
       : input.questionAnswered && input.answered && !orderedQuestion ? input.answered
       : input.switchCut ? 'Your owner switched off a permission while you worked. Your turn stopped; carry on without it and do not ask for it.'
@@ -5424,7 +5422,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return `[Mousse] ${lead} The owner also allowed you to ${allowed.join(' and ')}; you have it now.${interrupted}${updates ? `\n\n${updates}\n\nTake it into account as you continue.` : ''} ${carryOn ? 'Carry on where you left off' : 'Continue where you left off'}, and do what you skipped without it.`
     if (allowed?.length) {
       if (row.lane === 'chat') return `[Mousse] The owner allowed you to ${allowed.join(' and ')} while you answered; you have it now. Your reply so far was already sent.${interrupted}\n\nDo now what you skipped without it, and tell the owner what you found.`
-      const allowedLine = `${input.answered ? `${input.answered} ` : ''}The owner allowed you to ${allowed.join(' and ')} while you worked; you have it now.`
+      const allowedLine = `${input.actionCaused ? `${lead} ` : ''}${input.answered ? `${input.answered} ` : ''}The owner allowed you to ${allowed.join(' and ')} while you worked; you have it now.`
       const notes = updates ? `\n\n${updates}` : ''
       const sent = input.afterReport ? ' What you had so far was already sent to them.' : ''
       return `[Mousse] ${allowedLine}${sent}${interrupted}${notes}\n\nDo now what you skipped without it${notes ? ', and take the owner\'s notes into account' : ''}. Your last message is your updated report: lead with what changed, in plain words.`
