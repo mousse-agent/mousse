@@ -607,3 +607,21 @@ it('B3 a server error echoing a named hidden value leaves no stored copy after s
   expect(stored).not.toContain('opaque-page-cursor-42')
   expect(stored).toContain('Login failed for password')
 })
+it('B5 reconciliation skips a call already running in this process', async () => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  let release!: () => void
+  vi.spyOn(t.manager, 'callTool').mockImplementationOnce(async () => {
+    await new Promise<void>(r => { release = r })
+    return { content: [{ type: 'text', text: 'delivered' }] } as never
+  })
+  const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  await f.bots.actions.reconcile()
+  release()
+  await sending
+  expect(f.bots.actions.forWork(t.workId)?.status).toBe('done')
+  expect(f.bots.actions.forWork(t.workId)?.result_json).toContain('delivered')
+})
