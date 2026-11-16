@@ -16,14 +16,14 @@ export function actionText(text: string): string {
   return text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb\u{e0000}-\u{e007f}]/gu, '�')
 }
 
-/** Only structural markers are badges. An escaped literal's entire subtree stays ordinary data. */
+/** A literal wrapper escapes this object only; its children have their own stored markers or escapes. */
 function Value({ value, literal = false }: { value: unknown; literal?: boolean }): ReactNode {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const object = value as Record<string, unknown>
     if (!literal && object.$mousse === 'literal') return <Value value={object.value} literal />
     if (!literal && object.$mousse === 'hidden' && object.text === 'hidden · will be sent')
       return <span className="bot-action-hidden" aria-label="Hidden value that will be sent">hidden · will be sent</span>
-    return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt>{actionText(key)}</dt><dd><Field name={key} value={child} literal={literal} /></dd></div>)}</dl>
+    return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt>{actionText(key)}</dt><dd><Field name={key} value={child} literal={false} /></dd></div>)}</dl>
   }
   if (Array.isArray(value)) return value.length ? <ol>{value.map((child, index) => <li key={index}><Value value={child} literal={literal} /></li>)}</ol> : <span>[]</span>
   return <span className="bot-action-text">{actionText(typeof value === 'string' ? value : JSON.stringify(value) ?? String(value))}</span>
