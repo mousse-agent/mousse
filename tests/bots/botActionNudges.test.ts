@@ -257,3 +257,14 @@ it('holds a failed nudge delivery if quiet hours start before its retry, even wi
   await f.bots.deliverDueReminders()
   expect(tells.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
 })
+
+it('processes a due nudge when the wall clock advances after upkeep captured its time', async () => {
+  const t = await held()
+  await tellOriginal()
+  const due = f.clock.now + HOUR
+  f.clock.now = due + 5
+  await f.bots.deliverDueReminders(new Date(due))
+  expect(t.nudges()).toHaveLength(1)
+  await f.bots.deliverDueReminders()
+  expect(Date.parse(f.bots.nextDueAt(t.botId)!)).toBeGreaterThan(f.clock.now)
+})
