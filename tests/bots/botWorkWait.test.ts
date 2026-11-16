@@ -386,3 +386,29 @@ it.each([false, true])('keeps an unread wait through a time wall (restart: %s)',
   await finish(f, (await import('./botFixture')).payloadOf(f, workId, 2), 'completed', { text: 'Report.' })
   expect(f.store.activation(workId)?.status).toBe('done')
 })
+
+it.each(['allow', 'not_now'] as const)('carries a permission wall %s and its wait exactly once', async decision => {
+  const { workId, turn, chat } = await work()
+  const set = await wait(workId)
+  const wall = f.store.db.transaction(() => (f.bots as any).wallInTransaction(workId, ['running'], { dispatchN: 1, kind: 'escalate', permission: { tool: 'shell' }, reason: 'Run the release check' }))
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await f.bots.answerAsk(botId, wall.escalation.id, decision)
+  await flush()
+  const prompt = f.store.dispatch(workId, 2)!.prompt.text
+  const answer = decision === 'allow' ? 'The owner allowed: run commands' : 'The owner said not now: run commands'
+  expect(prompt).toContain(answer)
+  expect(prompt).toContain('Check again with the evidence already read.')
+  expect(prompt.indexOf('Check again with the evidence already read.')).toBeLessThan(prompt.indexOf(answer))
+  // An intent is not a started turn; its store facts are still unread.
+  expect(f.store.unreadWorkWaits(workId).map(r => r.id)).toContain(set.wakeId)
+  const next = await start(f, workId, 2)
+  expect(f.store.unreadWorkWaits(workId)).toEqual([])
+  f.bots.tools.work.note(botId, workId, 'Read the release notes next.', chat.id)
+  await finish(f, next.payload, 'completed', { text: '' })
+  const following = f.store.dispatch(workId, 3)!.prompt.text
+  expect(following).not.toContain(answer)
+  expect(following).not.toContain('Your wait is over')
+  expect(following).toContain('Read the release notes next.')
+})
