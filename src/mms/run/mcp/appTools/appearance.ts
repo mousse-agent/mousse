@@ -6,13 +6,20 @@ import {
   isThemeColorValue,
   isThemeTokenName,
   isUserThemeBase,
+  normalizeThemeWallpaper,
   normalizeUserTheme,
   themeStylingGuide,
   USER_THEME_BASES,
   USER_THEME_LIMITS,
   userThemeIdFor,
+  WALLPAPER_DEFAULT_DIM,
+  WALLPAPER_FITS,
+  WALLPAPER_MAX_DIM,
+  WALLPAPER_POSITIONS,
+  type ThemeWallpaper,
   type UserTheme
 } from '../../../../shared/themes/userThemes'
+import { WALLPAPER_REFUSED, type WallpaperImageInfo } from '../../../../shared/themes/wallpaperImage'
 import type { AppToolHost } from './host'
 import { disabledInSettings, json, type Availability, type AppToolTurn, type MousseTool, type ToolOutcome } from './types'
 
@@ -21,6 +28,11 @@ export interface AppearanceToolHost {
   get(): AppearanceSettings
   /** Saves `patch` over the appearance settings and tells every window of the profile; returns what was saved. */
   set(patch: Partial<AppearanceSettings>): AppearanceSettings
+  /**
+   * Stores the image at `path` (absolute, on this computer, never a network share) in the profile's wallpaper store and
+   * returns its id. Rejects for any file it cannot use.
+   */
+  importWallpaper?(path: string): Promise<WallpaperImageInfo & { id: string }>
 }
 
 export const THEME_READ_TOOL = 'theme_read'
@@ -42,7 +54,8 @@ function summary(theme: UserTheme, withCss: boolean): Record<string, unknown> {
     base: theme.base,
     ...(theme.accent ? { accent: theme.accent } : {}),
     colors: theme.colors,
-    ...(withCss ? { css: theme.css } : { cssLength: theme.css.length })
+    ...(withCss ? { css: theme.css } : { cssLength: theme.css.length }),
+    ...(theme.wallpaper ? { wallpaper: theme.wallpaper } : {})
   }
 }
 
@@ -59,6 +72,60 @@ function mayChangeSettings(turn: AppToolTurn): Availability {
   if (turn.subagent) return 'Only the thread\'s own agent can change the theme, not a subagent.'
   if (turn.bot) return 'A bot cannot change how Mousse looks.'
   return true
+}
+
+/** The `wallpaper` field of a theme_set call: an object, null (remove), or absent. */
+function wallpaperInput(input: Record<string, unknown>): Record<string, unknown> | null | undefined {
+  if (input.wallpaper === null) return null
+  return input.wallpaper && typeof input.wallpaper === 'object' && !Array.isArray(input.wallpaper) ? input.wallpaper as Record<string, unknown> : undefined
+}
+
+/** The image path a theme_set call would read, if any. */
+function wallpaperPath(args: Record<string, unknown>): string | undefined {
+  const theme = args.userTheme && typeof args.userTheme === 'object' ? args.userTheme as Record<string, unknown> : undefined
+  const path = theme ? wallpaperInput(theme)?.path : undefined
+  return typeof path === 'string' && path.trim() ? path.trim() : undefined
+}
+
+/**
+ * An agent's path as the approval shows it: one line, no control or direction-changing characters (which could make it
+ * read as another path), at most 200 characters with the end kept, where the file name is.
+ */
+export function shownPath(path: string): string {
+  const plain = path.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+  return plain.length > 200 ? `…${plain.slice(-199)}` : plain
+}
+
+/** What is wrong with a wallpaper's fields, or null. */
+function wallpaperFieldsError(wallpaper: Record<string, unknown>): string | null {
+  if (wallpaper.fit !== undefined && !(WALLPAPER_FITS as readonly unknown[]).includes(wallpaper.fit)) return `wallpaper.fit must be ${WALLPAPER_FITS.join(' or ')}.`
+  if (wallpaper.position !== undefined && !(WALLPAPER_POSITIONS as readonly unknown[]).includes(wallpaper.position)) return `wallpaper.position must be one of ${WALLPAPER_POSITIONS.join(', ')}.`
+  if (wallpaper.dim !== undefined && !(typeof wallpaper.dim === 'number' && wallpaper.dim >= 0 && wallpaper.dim <= WALLPAPER_MAX_DIM)) return `wallpaper.dim must be a number from 0 to ${WALLPAPER_MAX_DIM}.`
+  if (wallpaper.path !== undefined && (typeof wallpaper.path !== 'string' || !wallpaper.path.trim())) return 'wallpaper.path must be an absolute path.'
+  return null
+}
+
+/**
+ * The wallpaper a theme_set call leaves the theme with: removed (null), the new image with the given or kept display
+ * fields, the current one with changed fields, or unchanged (absent). `missing` when fields are given and no image.
+ */
+function nextWallpaper(
+  current: ThemeWallpaper | undefined,
+  input: Record<string, unknown> | null | undefined,
+  image: (WallpaperImageInfo & { id: string }) | undefined
+): ThemeWallpaper | undefined | 'missing' {
+  if (input === null) return undefined
+  if (input === undefined) return current
+  const base = image ?? current
+  if (!base) return 'missing'
+  return normalizeThemeWallpaper({
+    dim: WALLPAPER_DEFAULT_DIM,
+    ...(current ?? {}),
+    ...(image ? { id: image.id, type: image.type, width: image.width, height: image.height } : {}),
+    ...(input.fit !== undefined ? { fit: input.fit } : {}),
+    ...(input.position !== undefined ? { position: input.position } : {}),
+    ...(input.dim !== undefined ? { dim: input.dim } : {})
+  })
 }
 
 /**
@@ -117,7 +184,17 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
               base: { type: 'string', enum: [...USER_THEME_BASES], description: 'The built-in theme it starts from: dark or light, usually. Needed for a new theme.' },
               accent: { type: 'string', description: 'Accent color as #rrggbb; leave out to keep the person\'s accent.' },
               colors: { type: 'object', additionalProperties: { type: 'string' }, description: 'Color tokens by name (--surface-base: "#101418"). Plain colors only.' },
-              css: { type: 'string', description: `Extra CSS, using the stable selectors from theme_read; at most ${USER_THEME_LIMITS.css} characters. The only url() allowed is a quoted data: address.` }
+              css: { type: 'string', description: `Extra CSS, using the stable selectors from theme_read; at most ${USER_THEME_LIMITS.css} characters. The only url() allowed is a quoted data: address.` },
+              wallpaper: {
+                type: ['object', 'null'],
+                description: 'An image behind the chat; null removes it. Give path to use a new image (Mousse checks it and keeps its own copy); leave path out to change only how the current one shows.',
+                properties: {
+                  path: { type: 'string', description: 'Absolute path of a PNG, JPEG or WebP on the computer Mousse runs on (not a network share); at most 32 MB, 16,384 px a side and 40 megapixels.' },
+                  fit: { type: 'string', enum: [...WALLPAPER_FITS], description: 'cover crops the image to fill the chat (default); contain shows all of it.' },
+                  position: { type: 'string', enum: [...WALLPAPER_POSITIONS], description: 'The part that stays in view when cropped. Default center.' },
+                  dim: { type: 'number', minimum: 0, maximum: WALLPAPER_MAX_DIM, description: `How much the theme's background covers the image, in percent (default ${WALLPAPER_DEFAULT_DIM}). Mousse dims more when needed to keep text readable.` }
+                }
+              }
             },
           }
         }
@@ -125,18 +202,39 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
       access: 'changesSettings',
       permissionKey: PERMISSION_KEYS.mousseAppearance,
       class: 'mutation',
-      approvalPrompt: 'Allow this agent to change how Mousse looks?',
-      // CSS can lay anything over the window (an invisible link or control under every click): it asks unless the run is
-      // in Full access. Switching themes and colors asks like any edit.
+      approvalPrompt: (args) => {
+        const path = wallpaperPath(args)
+        return path ? `Allow this agent to use ${shownPath(path)} as the wallpaper and change how Mousse looks?` : 'Allow this agent to change how Mousse looks?'
+      },
+      // CSS can lay anything over the window (an invisible link or control under every click), and a new wallpaper makes
+      // Mousse read a file the agent named: both ask unless the run is in Full access. Switching themes, colors and how a
+      // wallpaper shows ask like any edit.
       runsWithoutAsking: (args) => {
         const css = args.userTheme && typeof args.userTheme === 'object' ? (args.userTheme as Record<string, unknown>).css : undefined
-        return typeof css === 'string' && css.trim() ? 'full' : 'edit'
+        return (typeof css === 'string' && css.trim()) || wallpaperPath(args) ? 'full' : 'edit'
       },
       listed: () => Boolean(host.appearance?.()),
       available: mayChangeSettings,
       describe: (args) => (args.userTheme ? 'Save and use a theme' : 'Switch theme'),
-      handler: (args): ToolOutcome => {
+      handler: async (args): Promise<ToolOutcome> => {
         const tools = reach()
+        // A new wallpaper image is stored first and the themes are read after it, so a change made meanwhile (another
+        // window, another agent) is not overwritten: nothing below waits.
+        const given = args.userTheme && typeof args.userTheme === 'object' ? wallpaperInput(args.userTheme as Record<string, unknown>) : undefined
+        if (given) {
+          const error = wallpaperFieldsError(given)
+          if (error) return { text: error, isError: true }
+        }
+        const path = wallpaperPath(args)
+        let image: (WallpaperImageInfo & { id: string }) | undefined
+        if (path && args.theme === undefined) {
+          if (!tools.importWallpaper) return { text: 'Wallpapers are not available in this profile.', isError: true }
+          try {
+            image = await tools.importWallpaper(path)
+          } catch {
+            return { text: WALLPAPER_REFUSED, isError: true }
+          }
+        }
         const appearance = tools.get()
         const hasTheme = typeof args.theme === 'string' && args.theme.trim() !== ''
         const hasUser = args.userTheme !== undefined
@@ -161,8 +259,10 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
         if (!existing && appearance.userThemes.length >= USER_THEME_LIMITS.themes)
           return { text: `There are already ${USER_THEME_LIMITS.themes} user themes; update one instead.`, isError: true }
         const id = existing?.id ?? userThemeIdFor(typeof input.name === 'string' ? input.name : '', appearance.userThemes.map((theme) => theme.id))
-        // An update keeps what it leaves out (its CSS, colors, accent), so a change of name or base loses nothing.
-        const theme = normalizeUserTheme({ ...(existing ?? {}), ...input, id })
+        const wallpaper = nextWallpaper(existing?.wallpaper, wallpaperInput(input), image)
+        if (wallpaper === 'missing') return { text: 'This theme has no wallpaper yet: give wallpaper.path to choose an image.', isError: true }
+        // An update keeps what it leaves out (its CSS, colors, accent, wallpaper), so a change of name or base loses nothing.
+        const theme = normalizeUserTheme({ ...(existing ?? {}), ...input, wallpaper, id })
         if (!theme) return { text: 'The theme needs a name.', isError: true }
         const userThemes = existing
           ? appearance.userThemes.map((entry) => (entry.id === theme.id ? theme : entry))

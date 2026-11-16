@@ -219,8 +219,11 @@ export interface MousseTool {
   access: ToolAccess
   /** The permission key an `editsWorkspace` or `changesSettings` tool asks under (`src/shared/permissionKeys.ts`). */
   permissionKey?: string
-  /** The question an `editsWorkspace` or `changesSettings` tool asks the person when the permission mode does not allow it. */
-  approvalPrompt?: string
+  /**
+   * The question an `editsWorkspace` or `changesSettings` tool asks the person when the permission mode does not allow it;
+   * a function when the question names what the call would do (the file a theme would use as its wallpaper).
+   */
+  approvalPrompt?: string | ((args: Record<string, unknown>) => string)
   /**
    * The permission mode a call runs in without asking: `edit` (default: any mode that allows edits) or `full` (only Full
    * access; every other mode asks).

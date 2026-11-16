@@ -27,7 +27,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  * Does not take a MousseMainService / owner lease.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMonitor, screen, session, shell } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces } from './assetPieces'
 import { browsedRootParams, browseSupport } from './browsedRoot'
@@ -295,6 +295,8 @@ export function getWindowShortcuts(senderId: number): ShortcutOverrides | undefi
  * possibly out of date. Set once handlers are registered: reads the thread in view again.
  */
 let refreshAfterUncertain: ((node: string) => void) | undefined
+/** Display changes are watched once per process, however often the handlers are registered. */
+let displaysWatched = false
 
 function noteUncertainOutcome(error: unknown): void {
   if (!error || typeof error !== 'object') return
@@ -2154,6 +2156,58 @@ export function registerGuiIpc(
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
+  // Theme wallpapers. The file dialog and the import are one step here, so the page never names a file; the daemon keeps
+  // its own copy (`WallpaperStore`). Each call carries the profile it was made for, and the daemon refuses it once the
+  // window shows another one.
+  registerHandler('appearance:chooseWallpaper', async (_e, profileId: unknown) => {
+    const expectedProfileId = typeof profileId === 'string' ? profileId : guiMms.getWindowBinding()?.profileId
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose a wallpaper',
+      properties: ['openFile'],
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    const res = await guiMms.request<{ wallpaper: unknown }>('appearance.wallpaperImport', { path: result.filePaths[0], expectedProfileId })
+    return res.wallpaper
+  })
+  registerHandler('appearance:importWallpaperBytes', async (_e, profileId: unknown, dataBase64: unknown) => {
+    const res = await guiMms.request<{ wallpaper: unknown }>('appearance.wallpaperImportBytes', {
+      dataBase64,
+      expectedProfileId: typeof profileId === 'string' ? profileId : undefined
+    })
+    return res.wallpaper
+  })
+  registerHandler('appearance:readWallpaper', async (_e, profileId: unknown, id: unknown, bucket: unknown, offset: unknown) =>
+    guiMms.request('appearance.wallpaperRead', {
+      id,
+      ...(bucket == null ? {} : { bucket }),
+      offset,
+      expectedProfileId: typeof profileId === 'string' ? profileId : undefined
+    })
+  )
+  registerHandler('appearance:saveWallpaperCopy', async (_e, profileId: unknown, id: unknown, bucket: unknown, dataBase64: unknown, replace: unknown) => {
+    const res = await guiMms.request<{ saved: boolean }>('appearance.wallpaperSaveCopy', {
+      id,
+      bucket,
+      dataBase64,
+      replace: replace === true,
+      expectedProfileId: typeof profileId === 'string' ? profileId : undefined
+    })
+    return res.saved
+  })
+  /** The longest edge of the largest display, in physical pixels: the size of the wallpaper copy windows show. */
+  registerHandler('appearance:displayLongEdge', () =>
+    Math.max(0, ...screen.getAllDisplays().map((display) => Math.round(Math.max(display.size.width, display.size.height) * display.scaleFactor)))
+  )
+  if (!displaysWatched) {
+    displaysWatched = true
+    const changed = (): void => broadcast('appearance:displaysChanged', null)
+    screen.on('display-added', changed)
+    screen.on('display-removed', changed)
+    screen.on('display-metrics-changed', changed)
+  }
   registerHandler('projects:reorder', async (_e, projectIds: string[]) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.reorder', {
       projectIds

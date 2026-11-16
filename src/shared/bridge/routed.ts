@@ -1004,6 +1004,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'A project icon is an image file on the computer itself; a project of another computer shows the folder glyph.'
   },
   {
+    methods: ['appearance.wallpaperImport', 'appearance.wallpaperImportBytes', 'appearance.wallpaperRead', 'appearance.wallpaperSaveCopy'],
+    reason: 'A theme wallpaper is an image kept in the profile of the computer itself; a window of another computer shows the theme without it.'
+  },
+  {
     methods: ['files.root', 'files.writeDirect'],
     reason:
       'They are the Files panel of a window on the computer itself: a routed call names the thread and gets the daemon search, listing and Undo-able save instead.'

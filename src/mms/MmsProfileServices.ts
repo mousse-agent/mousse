@@ -160,6 +160,7 @@ import { ThreadEventTriggers } from './automations/threadEventTriggers'
 import { buildAutomationIndex, mergeRemoteAutomations } from './automations/AutomationIndex'
 import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAutomations'
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
+import { usedWallpapers, WallpaperStore } from './appearance/WallpaperStore'
 import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
 import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
 import type { AutomationIndex, ManagerTurn } from '../shared/automations'
@@ -1105,6 +1106,7 @@ export class MmsProfileServices {
       threads: this.threads
     })
     this.agentJobAsks = new AgentJobAskStore(homeDir)
+    this.wallpapers = new WallpaperStore(homeDir, { used: () => usedWallpapers(this.settings.get().appearance.userThemes) })
     // The agents' theme tools: a change is saved like one made in Settings and reaches every window of the profile.
     this.orchestrator.setAppearanceTools({
       get: () => this.settings.get().appearance,
@@ -1112,7 +1114,9 @@ export class MmsProfileServices {
         const settings = this.settings.set({ appearance: patch } as MousseSettingsUpdate)
         this.events.emit({ channel: 'protocol:event', data: { type: 'settings.changed', data: { settings } } })
         return settings.appearance
-      }
+      },
+      // An agent's path: never a network share (signing in to a host the agent named would hand it the person's credentials).
+      importWallpaper: (path) => this.wallpapers.importFile(path, { network: false })
     })
     this.orchestrator.setScheduledJobs({
       // A thread whose first ask the person allowed; a profile that turned the old switch on lets every thread add them.
@@ -1869,6 +1873,9 @@ export class MmsProfileServices {
   /** First-creation asks of agents that add automations (`AgentJobAskStore`). */
   agentJobAsks!: AgentJobAskStore
 
+  /** The profile's wallpaper images (`<profileHome>/wallpapers`); settings name them by id only. */
+  wallpapers!: WallpaperStore
+
   /**
    * Answers an agent's first-creation ask. Allow makes the automation as the agent asked, ending after the lifetime
    * limit from now and counted against the active limit, and lets that thread add more; Not now closes the ask.
@@ -2496,6 +2503,8 @@ export class MmsProfileServices {
     this.orchestrator.residency?.start()
     // Threads still on JSON files move to thread.db in the background, one at a time.
     this.threads.startBackgroundImport()
+    // Wallpaper images no theme has used for a week go, in the background.
+    void this.wallpapers.collect(usedWallpapers(this.settings.get().appearance.userThemes)).catch(() => 0)
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()

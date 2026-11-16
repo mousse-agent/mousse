@@ -4,6 +4,7 @@ import type { UIMessage } from 'ai'
 import { expiryPresetMs } from '../../shared/threadExpiry'
 import { ChevronDown, ChevronUp } from '../lib/icons'
 import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
+import { ChatWallpaper } from './ChatWallpaper'
 import { AmbientGlow } from './AmbientGlow'
 import { EmptyThreadHeading } from './EmptyThreadHeading'
 import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
@@ -1767,6 +1768,7 @@ export function OrchestratorChat() {
 
   return (
     <div data-mousse="chat" className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      <ChatWallpaper />
       {emptyThread && <AmbientGlow />}
       <SubagentParentBar />
       <ThreadComputerBar />
