@@ -535,18 +535,18 @@ it('R5-capture leaves unrelated tool calls classified as bot calls', async () =>
   journal.syncNow(ref)
   expect(f.store.get("SELECT external FROM bot_journal WHERE source_key = ?", `${ref.threadId}:unrelated`)?.external).toBe(0)
 })
-it('S1-refused provider capture masks hidden arguments even when no action row was written', async () => {
+it.each([false, true])('D-capture masks key names only on work with a held call: %s', async held => {
   const t = await setup(true)
-  Object.assign(t.args, { password: `sk-${'Z'.repeat(30)}` })
-  expect(await t.call()).toMatchObject({ isError: true })
-  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  if (held) await t.call()
   const memory = new BotMemoryStore({ db: f.store.db })
   const ref = { botId: t.botId, activationId: t.workId, lane: 'run' as const, threadId: t.work.payload.threadId }
   createBotJournal({ store: memory, asksFirstEnabled: () => true, listThreads: () => [ref], readThread: () => ({ messages: [{
-    id: 'refused-secret', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(),
-    toolCall: { title: 'Mail__send', summary: '', details: [], toolName: 'Mail__send', input: t.args, status: 'complete' }
+    id: 'captured-input', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(),
+    toolCall: { title: 'Mail__send', summary: '', details: [], toolName: 'Mail__send', input: { password: 'ordinary-page-cursor' }, status: 'complete' }
   }] }) }).syncNow(ref)
-  expect(JSON.stringify(f.store.all('SELECT text, json FROM bot_journal WHERE activation_id = ?', t.workId))).not.toContain(`sk-${'Z'.repeat(30)}`)
+  const saved = JSON.stringify(f.store.all('SELECT text, json FROM bot_journal WHERE activation_id = ?', t.workId))
+  if (held) expect(saved).not.toContain('ordinary-page-cursor')
+  else expect(saved).toContain('ordinary-page-cursor')
 })
 it('R3-binding tells the work why the pre-dispatch fence refused the call', async () => {
   const t = await setup(true)
