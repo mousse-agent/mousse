@@ -75,18 +75,57 @@ function containsCredential(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(containsCredential)
   return Boolean(value && typeof value === 'object' && Object.entries(value).some(([key, item]) => containsCredential(key) || containsCredential(item)))
 }
-/** The review hides named sensitive values without claiming they are withheld from the call. */
+/** The review follows declared properties through local references and every composition branch. */
 function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasHiddenValues: boolean; hiddenValues: unknown[] } {
   const hiddenValues: unknown[] = []
   const record = (item: unknown): Record<string, unknown> | undefined => item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : undefined
-  const visit = (item: unknown, schemaNode: unknown): unknown => {
-    const shape = record(schemaNode)
-    const properties = record(shape?.properties)
-    if (Array.isArray(item)) return item.map((entry, i) => visit(entry, Array.isArray(shape?.items) ? shape.items[i] : shape?.items))
+  const localRef = (ref: string): unknown => {
+    if (!ref.startsWith('#')) return undefined
+    try {
+      const pointer = decodeURIComponent(ref.slice(1))
+      if (!pointer) return schema
+      if (!pointer.startsWith('/')) return undefined
+      let node: unknown = schema
+      for (const part of pointer.slice(1).split('/')) {
+        const key = part.replace(/~1/g, '/').replace(/~0/g, '~')
+        const object = record(node)
+        if (!object || !Object.hasOwn(object, key)) return undefined
+        node = object[key]
+      }
+      return node
+    } catch { return undefined }
+  }
+  const expand = (schemas: unknown[], inheritedUnknown: boolean): { nodes: Record<string, unknown>[]; unresolved: boolean } => {
+    const nodes: Record<string, unknown>[] = []
+    const seen = new Set<unknown>()
+    let unresolved = inheritedUnknown
+    const follow = (part: unknown, depth: number): void => {
+      if (depth > 32) { unresolved = true; return }
+      const node = record(part)
+      if (!node || seen.has(node)) return
+      seen.add(node)
+      nodes.push(node)
+      if (Object.hasOwn(node, '$ref')) {
+        const target = typeof node.$ref === 'string' ? localRef(node.$ref) : undefined
+        if (target === undefined) unresolved = true
+        else follow(target, depth + 1)
+      }
+      for (const kind of ['allOf', 'anyOf', 'oneOf']) {
+        const branches = node[kind]
+        if (Array.isArray(branches)) for (const branch of branches) follow(branch, depth + 1)
+      }
+    }
+    schemas.forEach(part => follow(part, 0))
+    return { nodes, unresolved }
+  }
+  const visit = (item: unknown, schemas: unknown[], inheritedUnknown = false): unknown => {
+    const { nodes, unresolved } = expand(schemas, inheritedUnknown)
+    if (Array.isArray(item)) return item.map((entry, i) => visit(entry, nodes.map(node => Array.isArray(node.items) ? node.items[i] : node.items), unresolved))
     if (item && typeof item === 'object') {
       const entries = Object.entries(item).map(([key, entry]) => {
-        if (properties && Object.hasOwn(properties, key) && hiddenKey(key)) { hiddenValues.push(entry); return [key, ACTION_HIDDEN_VALUE] }
-        return [key, visit(entry, properties && Object.hasOwn(properties, key) ? properties[key] : undefined)]
+        const declarations = nodes.map(node => record(node.properties)).filter(properties => properties && Object.hasOwn(properties, key))
+        if ((declarations.length || unresolved) && hiddenKey(key)) { hiddenValues.push(entry); return [key, ACTION_HIDDEN_VALUE] }
+        return [key, visit(entry, declarations.map(properties => properties![key]), unresolved)]
       })
       const value = Object.fromEntries(entries)
       // Escape every object in the reserved namespace, including an attempted literal wrapper.
@@ -94,7 +133,7 @@ function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasH
     }
     return item
   }
-  const args = visit(value, schema)
+  const args = visit(value, [schema])
   return { args, hasHiddenValues: hiddenValues.length > 0, hiddenValues }
 }
 export interface ActionRow {
