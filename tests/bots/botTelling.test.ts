@@ -434,7 +434,8 @@ it.each(['day', 'active at night', 'can wake at night'] as const)('folds five so
   expect(classes).toEqual(['soon', 'soon', 'soon', 'soon', 'soon'])
 })
 
-it('C4 folded telling projects each row once per announcement', () => {
+it.each([false, true])('C4 folded telling preserves the single projection cost without action rows, switch=%s', (on) => {
+  f.host.settings!.get().experimental.botAsksFirst = on
   const rows = Array.from({ length: 8 }, (_, i) => {
     const message = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: `Update ${i}` })
     return f.store.message(message.id)!
@@ -445,6 +446,5 @@ it('C4 folded telling projects each row once per announcement', () => {
   f.bots.tellings.releaseBacklog(rows, f.clock.now)
   expect(events).toHaveLength(1)
   expect(events[0].rows).toHaveLength(rows.length)
-  expect(projection).toHaveBeenCalledTimes(rows.length)
-  expect(new Set(projection.mock.calls.map(([row]) => row.id)).size).toBe(rows.length)
+  expect(projection).toHaveBeenCalledTimes(1)
 })
