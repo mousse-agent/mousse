@@ -892,6 +892,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       this.store.withdrawAsks(botId)
       this.store.revoke(botId)
+      this.store.deleteActions(botId)
       this.store.markDeleted(botId)
       // A deleted bot says nothing more: its reminders are cancelled with it, and its questions no longer wait for an answer.
       this.watchers.stopBot(botId)
@@ -7253,6 +7254,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const limited = Object.values(this.store.registry(botId)?.model?.limits ?? {}).map((limit) => limit.instanceId)
     this.store.db.transaction(() => {
       this.store.deleteMessages(botId)
+      this.store.deleteActions(botId)
       this.store.setPaused(botId, null)
       this.store.setError(botId, null)
       if (limited.length) this.updateModelStateInTx(botId, (state) => ({ ...state, limits: {} }))
