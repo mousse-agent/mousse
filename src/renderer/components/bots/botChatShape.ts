@@ -114,7 +114,20 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
   const rows: BotChatRow[] = []
   const marks = new Map<string, OwnerMarks>()
   let lastOwner: string | undefined
+  let expired: { schedule: string; count: number; row: Extract<BotChatRow, { kind: 'system' }> } | undefined
   for (const message of messages) {
+    if (message.expiredActionSchedule) {
+      if (expired?.schedule === message.expiredActionSchedule) {
+        expired.count++
+        expired.row.text = `${expired.count} expired · not sent`
+      } else {
+        const line: Extract<BotChatRow, { kind: 'system' }> = { kind: 'system', id: message.id, at: message.at, text: 'Expired · not sent', of: message.id }
+        expired = { schedule: message.expiredActionSchedule, count: 1, row: line }
+        rows.push(line)
+      }
+      continue
+    }
+    expired = undefined
     if (message.author === 'owner') lastOwner = message.id
     // A tapped answer is the bot's own label, so it reads as a quiet line, as an answered ask does.
     if (message.author === 'owner' && message.answers?.tapped) {

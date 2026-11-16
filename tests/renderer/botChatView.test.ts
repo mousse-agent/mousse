@@ -2019,8 +2019,8 @@ it('R5-time formats a sent action in the client clock', async () => {
 
 it('six adjacent expired schedule cards fold to one quiet line, keeping the waiting row', async () => {
   fake.chats[inbox.id] = [
-    ...Array.from({ length: 6 }, (_, n) => message('expired-' + n, { seq: n + 1, kind: 'notice', text: 'Expired · not sent', expiredActionSchedule: 'mail' })),
-    message('waiting', { seq: 7, text: 'Waiting for your answer' })
+    ...Array.from({ length: 6 }, (_, n) => message(n + 1, { id: 'expired-' + n, kind: 'notice', text: 'Expired · not sent', expiredActionSchedule: 'mail' })),
+    message(7, { id: 'waiting', text: 'Waiting for your answer' })
   ]
   await open()
   expect(transcript().textContent).toContain('6 expired · not sent')
