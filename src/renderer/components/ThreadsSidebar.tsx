@@ -1165,7 +1165,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const group = groupId ? groupById.get(groupId) : undefined
     // Only the Threads tab's cards carry the project's tint, unless Appearance turns it off; a thread without a
     // project has none.
-    const hue = layout === 'card' && threadProjectColors && group ? hueByGroup.get(group.id) : undefined
+    const hue = layout === 'card' && threadProjectColors !== 'off' && group ? hueByGroup.get(group.id) : undefined
     const menuTarget: ThreadsContextMenuTarget = {
       type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived,
       ...(thread.node ? { node: thread.node, computerName: nameOfComputer(thread.node) } : {}),
@@ -1217,7 +1217,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           isActive ? ' active' : openSubagentParentId === thread.id ? ' has-open-subagent' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${hue ? ' project-tinted' : ''}`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
 
         style={hue ? ({ '--project-tint': projectHueColor(hue) } as CSSProperties) : undefined}
 

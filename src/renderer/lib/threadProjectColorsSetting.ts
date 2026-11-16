@@ -1,13 +1,14 @@
 import { useSyncExternalStore } from 'react'
+import type { ThreadProjectColorStyle } from '../../shared/settings'
 
 // Mirrors Settings > Appearance > Project colors on threads so the sidebar can read it without loading settings.
-// useTheme feeds it from the open profile's settings. It stays on, the default, until they load.
-let enabled = true
+// useTheme feeds it from the open profile's settings. It keeps the default fill until they load.
+let style: ThreadProjectColorStyle = 'fill'
 const listeners = new Set<() => void>()
 
-export function setThreadProjectColors(next: boolean): void {
-  if (next === enabled) return
-  enabled = next
+export function setThreadProjectColors(next: ThreadProjectColorStyle): void {
+  if (next === style) return
+  style = next
   for (const listener of listeners) listener()
 }
 
@@ -16,11 +17,11 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener)
 }
 
-function snapshot(): boolean {
-  return enabled
+function snapshot(): ThreadProjectColorStyle {
+  return style
 }
 
-/** Whether Threads tab cards carry their project's tint. */
-export function useThreadProjectColors(): boolean {
+/** How Threads tab cards carry their project's color. */
+export function useThreadProjectColors(): ThreadProjectColorStyle {
   return useSyncExternalStore(subscribe, snapshot, snapshot)
 }
