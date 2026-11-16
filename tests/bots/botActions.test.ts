@@ -304,7 +304,7 @@ it('provider transcript capture never journals executable secrets from a held ca
   await t.call()
   const memory = new BotMemoryStore({ db: f.store.db })
   const ref = { botId: t.botId, activationId: t.workId, lane: 'run' as const, threadId: t.work.payload.threadId }
-  const journal = createBotJournal({ store: memory, listThreads: () => [ref], readThread: () => ({ messages: [{
+  const journal = createBotJournal({ store: memory, asksFirstEnabled: () => true, listThreads: () => [ref], readThread: () => ({ messages: [{
     id: 'provider-call', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(),
     toolCall: { title: 'Mail__send', summary: '', details: [], toolName: 'Mail__send', input: t.args, status: 'complete', response: 'held' }
   }] }) })

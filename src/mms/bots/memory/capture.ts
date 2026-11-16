@@ -30,6 +30,7 @@ export interface BotJournalCaptureOptions {
   listThreads: () => BotThreadRef[]
   /** Whether a bot thread is one of its work's subagents' (`BotStore.threadRole`): its rows are marked as theirs. */
   isSubagentThread?: (threadId: string) => boolean
+  asksFirstEnabled?: () => boolean
   log?: (message: string, error?: unknown) => void
 }
 
@@ -208,12 +209,13 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       let start = saved && saved.n <= messages.length && (saved.n === 0 || messages[saved.n - 1]?.id === saved.lastId) ? saved.n : 0
       let settledPrefix = true
       let written = 0
+      const maskArguments = options.asksFirstEnabled?.() === true && Boolean(ref.activationId
+        && store.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")
+        && store.get('SELECT 1 FROM bot_actions WHERE activation_id = ? LIMIT 1', ref.activationId))
       for (let index = start; index < messages.length; index++) {
         const message = messages[index]!
         const partial = unsettled(message)
-        for (const row of capturedRows(message, ref, subagent, Boolean(ref.activationId
-          && store.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")
-          && store.get('SELECT 1 FROM bot_actions WHERE activation_id = ? LIMIT 1', ref.activationId)))) {
+        for (const row of capturedRows(message, ref, subagent, maskArguments)) {
           store.putCaptured(row, partial)
           written++
         }

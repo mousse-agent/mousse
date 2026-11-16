@@ -72,6 +72,7 @@ import { BotImageMaker } from './bots/images/BotImageMaker'
 import { botInstructions } from './bots/instructions'
 import { createBotMemoryAdmin } from './bots/memory/admin'
 import type { BotMemoryStore } from './bots/memory/BotMemoryStore'
+import { botAsksFirst } from './bots/actions/BotActions'
 import { createProfileBotMemory } from './bots/memory/profileMemory'
 import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
@@ -859,6 +860,7 @@ export class MmsProfileServices {
       const { memory, journal, pack } = createProfileBotMemory({
         memory: { db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') },
         journal: {
+          asksFirstEnabled: () => botAsksFirst(this.settings.get()),
           readThread: (threadId) => this.threads.loadThreadData(threadId),
           listThreads: () => botThreadsForCatchUp(store.captureThreads()),
           // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
