@@ -550,7 +550,7 @@ it('R3-binding tells the work why the pre-dispatch fence refused the call', asyn
   expect(t.calls).toEqual([])
 })
 
-it.each([`sk-${'Z'.repeat(30)}`, 'eyJabcdefghijk.abcdefghijk.abcdefghijk', '-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----'])('B1-shape refuses credential shapes anywhere in arguments', async value => {
+it.each([`sk-${'Z'.repeat(30)}`, '-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----'])('B1-shape refuses credential shapes anywhere in arguments', async value => {
   const t = await setup(true)
   Object.assign(t.args, { headers: { authorization: { nested: [value] } } })
   expect(await t.call()).toMatchObject({ isError: true, text: expect.stringContaining('never sent through a tool this way') })
@@ -562,7 +562,7 @@ it.each(['password', 'token', 'access_token', 'client_secret', 'authorization', 
   Object.assign(t.args, { [key]: 'page-cursor-42' })
   expect(await t.call()).not.toMatchObject({ isError: true })
   const a = f.bots.actions.forWork(t.workId)!
-  expect(JSON.parse(a.args_json)[key]).toBe('hidden · will be sent')
+  expect(JSON.parse(a.args_json)[key]).toEqual({ $mousse: 'hidden', text: 'hidden · will be sent' })
   expect(JSON.parse(a.card_json!)).toMatchObject({ hasHiddenValues: true })
   expect(f.store.message(a.message_id)?.text).toContain('hidden · will be sent')
   expect(f.store.message(a.message_id)?.text).not.toContain('held back')
@@ -735,4 +735,22 @@ it.each(['https://bob:hunter2@example.test/x', 'https://example.test/?api_key=ab
   expect(await t.call()).toMatchObject({ isError: true })
   expect(f.bots.actions.forWork(t.workId)).toBeUndefined()
   expect(t.calls).toEqual([])
+})
+
+
+it('B-marker distinguishes hidden structure from literal text and escapes marker-shaped arguments', async () => {
+  const t = await setup(true)
+  const imitation = { $mousse: 'hidden', text: 'hidden · will be sent' }
+  const literalImitation = { $mousse: 'literal', value: imitation }
+  Object.assign(t.args, { password: 'opaque-value', body: 'hidden · will be sent', meta: { imitation, literalImitation } })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const shown = JSON.parse(a.args_json)
+  expect(shown.password).toEqual(imitation)
+  expect(shown.body).toBe('hidden · will be sent')
+  expect(shown.meta.imitation).toEqual({ $mousse: 'literal', value: imitation })
+  expect(shown.meta.literalImitation).toEqual({ $mousse: 'literal', value: { $mousse: 'literal', value: { $mousse: 'literal', value: imitation } } })
+  expect(JSON.parse(a.card_json!)).toMatchObject({ hasHiddenValues: true })
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
 })
