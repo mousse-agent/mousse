@@ -525,3 +525,16 @@ it('R5-capture leaves unrelated tool calls classified as bot calls', async () =>
   journal.syncNow(ref)
   expect(f.store.get("SELECT external FROM bot_journal WHERE source_key = ?", `${ref.threadId}:unrelated`)?.external).toBe(0)
 })
+it('S1-refused provider capture masks hidden arguments even when no action row was written', async () => {
+  const t = await setup(true)
+  Object.assign(t.args, { password: 'hunter2' })
+  expect(await t.call()).toMatchObject({ isError: true })
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const ref = { botId: t.botId, activationId: t.workId, lane: 'run' as const, threadId: t.work.payload.threadId }
+  createBotJournal({ store: memory, asksFirstEnabled: () => true, listThreads: () => [ref], readThread: () => ({ messages: [{
+    id: 'refused-secret', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(),
+    toolCall: { title: 'Mail__send', summary: '', details: [], toolName: 'Mail__send', input: t.args, status: 'complete' }
+  }] }) }).syncNow(ref)
+  expect(JSON.stringify(f.store.all('SELECT text, json FROM bot_journal WHERE activation_id = ?', t.workId))).not.toContain('hunter2')
+})
