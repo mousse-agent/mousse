@@ -2365,3 +2365,31 @@ it.each(['done', 'failed', 'uncertain', 'withdrawn'])('C4 integration forgotten 
   expect(card.textContent).not.toContain('Your service')
   expect(button('Send', card)).toBeUndefined()
 })
+
+it.each([
+  ['changed', 'This changed since you saw it. Check it again before sending.', 'open'],
+  ['paused', 'Resume Inbox helper to send this.', 'open'],
+  ['expired', 'This expired, so nothing was sent.', 'expired'],
+  ['withdrawn', 'No longer needed, so nothing was sent.', 'withdrawn'],
+  ['settled', 'This was already answered.', 'done'],
+  ['gone', "This can't be sent any more.", 'gone'],
+  ['unreachable', "Mail couldn't be reached, so nothing was sent.", 'failed']
+])('C4 integration renderer preserves the exact %s service refusal through the real client', async (reason, text, status) => {
+  fake.chats.inbox = [held()]
+  const { createPersonalBotsClient } = await import('../../src/renderer/services/personalBotsClient')
+  const request = vi.fn(async () => {
+    fake.chats.inbox = [status === 'gone' ? message(1, { id: 'held-message', text: 'Earlier request' }) : held({ status })]
+    throw Object.assign(new Error(text), { code: `bot_action_${reason}` })
+  })
+  Object.assign(fake.client, { answerAction: createPersonalBotsClient({ request } as never).answerAction })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(request).toHaveBeenCalledExactlyOnceWith('bots.actions.answer', { actionId: 'held-1', digest: 'shown-digest', answer: 'send' })
+  expect(host.textContent).toContain(text)
+  const card = host.querySelector('[aria-label="Action to review"]')
+  if (reason === 'gone') expect(card).toBeNull()
+  else {
+    expect(button('Send', card!) !== undefined).toBe(status === 'open')
+    expect(button('Not now', card!) !== undefined).toBe(status === 'open')
+  }
+})
