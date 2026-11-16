@@ -1899,13 +1899,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // takes what the owner added meanwhile.
           // A chat turn takes the owner's messages that joined it while it waited to start (`joinChatTurnInTx`).
           const notes = this.workNotes(row)
-          if (notes) this.store.applyWorkNotes(notes.ids)
+          if (notes && row.trigger.kind !== 'work') this.store.applyWorkNotes(notes.ids)
           const skipped = row.trigger.kind === 'schedule' && row.trigger.missed ? Math.max(0, row.trigger.missed.count - 1) : 0
           const capped = row.trigger.kind === 'schedule' && (row.trigger.missed?.count ?? 0) >= MISSED_OCCURRENCES_CAP
           const late = row.trigger.kind === 'schedule' && row.trigger.missed
             ? `\n\nThis run was due at ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}; this computer was off or asleep${skipped ? `, and ${capped ? 'over ' : ''}${skipped} ${skipped === 1 ? 'run was' : 'runs were'} skipped` : ''}.` : ''
           const text = row.lane === 'run' ? `${row.trigger.input}${late}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}`
-          this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text }, policyDigest: row.grantDigest })
+          this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text, ...(notes && row.trigger.kind === 'work' ? { workDelivery: { answers: [], notes: notes.ids } } : {}) }, policyDigest: row.grantDigest })
           if (row.lane === 'run') this.journalInTx({
             botId: row.botId, kind: 'run_start', lane: 'run', activationId: row.id, threadId, sourceKey: `act:${row.id}:start`, who: 'mousse',
             text: row.trigger.input,
@@ -2591,12 +2591,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       )
       if (changed) {
         this.store.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', remainingMs, row.id)
-        const delivery = dispatch.prompt.workDelivery
-        if (delivery) {
-          for (const id of delivery.answers) this.store.markApplied(id)
-          this.store.applyWorkNotes(delivery.notes)
-          if (delivery.question) this.store.markQuestionsRead([delivery.question])
-        }
       }
       return changed > 0
     })
@@ -2649,10 +2643,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     const pack = this.packs.get(row.id)
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, controller.signal) : undefined
+    let confirmed = false
     return {
       activationId: row.id,
       dispatchN: dispatch.n,
       // A leading `/` never runs a command: the trigger is text for the model.
+      modelOutput: () => {
+        if (confirmed) return
+        this.store.confirmWorkDelivery(row.id, dispatch.n, 'output')
+        confirmed = true
+      },
       prompt: dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text,
       // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
       // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
@@ -5211,7 +5211,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' | 'question' | 'approval' | 'gone' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
-      const durableWork = current.trigger.kind === 'work' && Boolean(this.store.workWait(current.id) || this.actions.forWork(current.id))
+      const durableWork = current.trigger.kind === 'work'
+      if (durableWork) this.store.requeueUnconfirmedWorkDelivery(current.id)
       const answers = durableWork ? this.store.pendingAnswers(current.id) : input.answers ?? []
       // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`); a scheduled
       // run or a reminder's work also leaves the slot kept for the owner's work (`runSlotFree`).
@@ -6277,6 +6278,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!row || !dispatch) return
     if (dispatch.kind === 'consult') return this.settleConsult(row, dispatch, run, outcome, true)
     if (dispatch.kind === 'subagent') return this.settleSubagent(row, dispatch, run, outcome, true)
+    if (run.status === 'completed') this.store.confirmWorkDelivery(row.id, dispatch.n, 'completed')
     const key = `${row.id}:${dispatch.n}`
     // A failed turn's final message is the provider's error, never the bot's words: it is not a reply. The exception is a
     // turn that reached its runtime's turn cap: its work goes on, and what it said last is kept (`continueAfterTurnCap`).
@@ -6889,6 +6891,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private async reconcileActivation(row: BotActivationRow, runs: RunEngine): Promise<void> {
+    if (row.trigger.kind === 'work') {
+      for (const dispatch of this.store.dispatches(row.id))
+        if (dispatch.outcome === 'completed' || (dispatch.runId && runs.getRun(dispatch.runId)?.status === 'completed'))
+          this.store.confirmWorkDelivery(row.id, dispatch.n, 'completed')
+      this.store.requeueUnconfirmedWorkDelivery(row.id)
+    }
     // Phase 2: unknown calls across the main runs and every consult (all ended after boot recovery).
     this.collectUnknownCalls(row)
     const end = (status: 'cancelled' | 'failed', reason: string): void => {

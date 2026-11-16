@@ -791,10 +791,11 @@ export interface BotDispatchRow {
   prompt: {
     text: string
     subagent?: BotSubagentSpec
-    /** A wait is told only when a dispatch carrying its id has started. */
+    /** Stored updates are told only after model output or a completed dispatch. */
+    workTold?: 'output' | 'completed'
     workWaitIds?: string[]
     workActionIds?: string[]
-    /** Work's stored additions carried here; consume them with the dispatch's start, not its intent. */
+    /** Work's stored additions carried here; consume them with confirmed delivery, not prepare. */
     workDelivery?: { answers: string[]; notes: number[]; question?: string }
   }
   policyDigest: string
@@ -883,6 +884,9 @@ export interface BotCountersRow {
   outputTokens: number
   activeMs: number
 }
+
+// Completed outcomes also recognize dispatches written before the explicit output marker existed.
+const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN ('output', 'completed') OR d.outcome IS 'completed')"
 
 type Row = Record<string, unknown>
 type Param = string | number | null
@@ -1951,7 +1955,7 @@ export class BotStore {
   /**
    * Work's answered question went out with dispatch `n`, as `line` in its prompt: read once, and the line kept with the
    * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`). With read=false,
-   * only the copy is recorded here; the dispatch start marks it read.
+   * only the copy is recorded here; confirmed delivery marks it read.
    */
   markAnswerSent(questionId: string, n: number, line: string, read = true): void {
     this.run("UPDATE bot_questions SET read_at = CASE WHEN ? THEN ? ELSE read_at END, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", read ? 1 : 0, this.now(), n, line, questionId)
@@ -1987,20 +1991,49 @@ export class BotStore {
     return row ? reminderOf(row) : undefined
   }
 
-  /** Delivery is not telling: only a dispatch that started with the wait consumes it. */
+  /** Delivery is not telling: only model output or completion of a carrying dispatch consumes it. */
   unreadWorkWaits(workId: string): BotReminderRow[] {
     return this.all(`SELECT r.* FROM bot_reminders r WHERE r.work_id = ? AND r.status = 'delivered'
       AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workWaitIds') told
-        WHERE d.activation_id = r.work_id AND d.started_at IS NOT NULL AND told.value = r.id)
+        WHERE d.activation_id = r.work_id AND ${WORK_TOLD} AND told.value = r.id)
       ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
   }
 
-  /** Settling is not telling: only a started dispatch carrying the action consumes it. */
+  /** Settling is not telling: only model output or completion of a carrying dispatch consumes it. */
   unreadWorkActions(workId: string): ActionRow[] {
     return this.all(`SELECT a.* FROM bot_actions a WHERE a.activation_id = ? AND a.status NOT IN ('open', 'approved', 'running')
       AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workActionIds') told
-        WHERE d.activation_id = a.activation_id AND d.started_at IS NOT NULL AND told.value = a.id)
+        WHERE d.activation_id = a.activation_id AND ${WORK_TOLD} AND told.value = a.id)
       ORDER BY COALESCE(a.ran_at, a.answered_at, a.created_at), a.rowid`, workId) as unknown as ActionRow[]
+  }
+
+  /** One confirmation transaction for the whole stored update list. Preparing a run proves nothing was read. */
+  confirmWorkDelivery(activationId: string, n: number, why: 'output' | 'completed'): void {
+    this.db.transaction(() => {
+      const dispatch = this.dispatch(activationId, n)
+      if (!dispatch || dispatch.startedAt === null || dispatch.prompt.workTold ||
+        (!dispatch.prompt.workDelivery && !dispatch.prompt.workWaitIds?.length && !dispatch.prompt.workActionIds?.length)) return
+      this.run("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.workTold', ?) WHERE activation_id = ? AND n = ?", why, activationId, n)
+      const delivery = dispatch.prompt.workDelivery
+      if (delivery) {
+        for (const id of delivery.answers) this.markApplied(id)
+        this.applyWorkNotes(delivery.notes)
+        if (delivery.question) this.markQuestionsRead([delivery.question])
+      }
+    })
+  }
+
+  /** Older builds consumed these ids in prepare. Reopen them unless any carrying dispatch was confirmed. */
+  requeueUnconfirmedWorkDelivery(activationId: string): void {
+    this.db.transaction(() => {
+      for (const [table, column, member] of [
+        ['bot_work_notes', 'applied_at', 'notes'], ['bot_escalations', 'applied_at', 'answers'], ['bot_questions', 'read_at', 'question']
+      ]) this.run(`UPDATE ${table} SET ${column} = NULL WHERE activation_id = ? AND ${column} IS NOT NULL
+        AND EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') carried
+          WHERE d.activation_id = ${table}.activation_id AND carried.value = ${table}.id AND NOT ${WORK_TOLD})
+        AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') carried
+          WHERE d.activation_id = ${table}.activation_id AND carried.value = ${table}.id AND ${WORK_TOLD})`, activationId)
+    })
   }
 
   /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */

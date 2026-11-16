@@ -13142,14 +13142,17 @@ export class OrchestratorService extends EventEmitter {
       // made while a newer turn runs in the thread, would land in that turn's rows: it is dropped.
       const turnSink = this.inTurn<TurnSink>(session, turn, turnId, 'sink', {
         text: (event) => {
+          if (event.content) opts?.bot?.modelOutput?.()
           hold.modelOutput(event.phase)
           this.handleStreamingTextEvent(event)
         },
         thinking: (event) => {
+          if (event.content) opts?.bot?.modelOutput?.()
           hold.modelOutput(event.phase)
           this.handleStreamingThinkingEvent(event)
         },
         tool: (event) => {
+          if (event.phase === 'start' && (event.kind === 'mcp_tool_call' || event.kind === 'build_tool_call')) opts?.bot?.modelOutput?.()
           if (event.kind !== 'skill_loaded') conversationToolsUsed = true
           this.handleStreamingToolEvent(event)
           // After the assembler: the call's row is open (or closed) when the window restarts. Only the turn's own calls
