@@ -2157,3 +2157,17 @@ it.each(c4Refusals)('C4 integration protocol preserves the exact %s refusal and 
   else expect(projected?.status === 'open').toBe(['changed', 'paused'].includes(reason))
   expect(t.calls).toEqual([])
 })
+
+it('C4 integration bridge timeout stub retains the service sentence and settlement time', async () => {
+  const t = await setup(true)
+  t.args.body = 'long email text '.repeat(5000)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  f.clock.now += 11 * 60_000; await f.bots.deliverDueReminders(); await flush()
+  const list = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'full' }).find(method => method.method === 'bots.chat.list')!
+  const page = await list.handle(list.validate!({ botId: t.botId }), { caller: { node: 'phone', user: 'owner' } } as never) as any
+  const card = page.messages.find((message: any) => message.id === a.message_id).action
+  expect(card).toMatchObject({ tooLarge: true, status: 'failed', at: JSON.parse(f.bots.actions.get(a.id)!.card_json!).settledAt, result: { notSentInTime: true, text: "Mail couldn't be reached, so nothing was sent." } })
+})

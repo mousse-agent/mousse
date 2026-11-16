@@ -2393,3 +2393,14 @@ it.each([
     expect(button('Not now', card!) !== undefined).toBe(status === 'open')
   }
 })
+
+it('C4 integration bridge timeout stub has its outcome and computer explanation without an empty review fold', async () => {
+  const text = "Mail couldn't be reached, so nothing was sent."
+  fake.chats.inbox = [held({ status: 'failed', at: AT, tooLarge: true, args: null, hiddenPaths: [], result: { text, notSentInTime: true } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[role="status"]')?.textContent).toContain(text)
+  expect(card.querySelector('details, [role="region"]')).toBeNull()
+  expect(card.textContent).toContain('Use the computer')
+  expect(button('Send', card)).toBeUndefined()
+})
