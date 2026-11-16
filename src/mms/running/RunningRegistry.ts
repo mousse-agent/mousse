@@ -113,8 +113,6 @@ const COMMAND_GRACE_MS = 10_000
 /** Start times are read to the second: a process may seem to start this much before its call. */
 const START_SLACK_MS = 2_000
 const MAX_NOTED_PER_THREAD = 40
-/** One snapshot of the computer serves the lists built within this time (several turns starting together). */
-const SNAPSHOT_TTL_MS = 1_500
 /** Most addresses shown for one entry. */
 const MAX_ADDRESSES = 3
 const CONSOLE_HOSTS = /(^|[\\/])(conhost|OpenConsole)\.exe/i
@@ -135,7 +133,8 @@ export function defaultRunningSystem(): RunningSystem {
 
 export class RunningRegistry {
   private readonly noted = new Map<string, NotedCommand>()
-  private snapshot: { at: number; value: Promise<Snapshot> } | undefined
+  /** The read in progress: lists asked for while it runs (several turns starting together) share it. */
+  private reading: Promise<Snapshot> | undefined
 
   constructor(private readonly sources: RunningSources, private readonly system: RunningSystem = defaultRunningSystem()) {}
 
@@ -285,11 +284,12 @@ export class RunningRegistry {
   }
 
   private read(): Promise<Snapshot> {
-    const now = this.system.now()
-    if (this.snapshot && now - this.snapshot.at < SNAPSHOT_TTL_MS) return this.snapshot.value
-    const value = Promise.all([this.system.processes(), this.system.listeners()]).then(([processes, listeners]) => ({ processes, listeners }))
-    this.snapshot = { at: now, value }
-    return value
+    if (this.reading) return this.reading
+    const reading = Promise.all([this.system.processes(), this.system.listeners()])
+      .then(([processes, listeners]) => ({ processes, listeners }))
+      .finally(() => { if (this.reading === reading) this.reading = undefined })
+    this.reading = reading
+    return reading
   }
 }
 
