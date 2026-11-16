@@ -204,10 +204,11 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       setSettings((current) => {
         if (!current) return current
         const { theme, userTheme, userThemes } = next.appearance!
+        const { quietHours: _quietHours, ...notifications } = current.notifications
         return {
           ...current,
           appearance: { ...current.appearance, theme, userTheme, userThemes },
-          notifications: next.notifications ? { ...current.notifications, quietHours: next.notifications.quietHours } : current.notifications
+          notifications: next.notifications ? { ...notifications, ...(next.notifications.quietHours ? { quietHours: next.notifications.quietHours } : {}) } : current.notifications
         }
       })
     })
