@@ -467,6 +467,55 @@ describe('EffectOutbox', () => {
       })
     }
 
+    describe('a turn that takes no slot (a bot\'s chat turn or a consult)', () => {
+      // Each row: the turns waiting, each on its own thread, oldest first, as `source` or `source:payload`; which claim
+      // asks (the turn fibres, people's slots, or the unslotted claim); and which it takes.
+      // Payloads: `chat` is a bot turn marked unslotted, `work` a bot turn without the mark, `fake` the mark on a payload
+      // that is not a bot's.
+      const payloads: Record<string, unknown> = {
+        chat: { kind: 'bot', runId: 'r', threadId: 't', activationId: 'a', dispatchN: 1, unslotted: true },
+        work: { kind: 'bot', runId: 'r', threadId: 't', activationId: 'a', dispatchN: 1 },
+        fake: { kind: 'wake', unslotted: true },
+        text: 'not an object'
+      }
+      const rows: Array<{ name: string; waiting: string[]; claim: 'turn' | 'person' | 'unslotted'; takes: string | null }> = [
+        { name: 'the turn fibres pass a bot\'s chat turn by and take the next turn', waiting: ['bot:chat', 'delegation'], claim: 'turn', takes: 'delegation' },
+        { name: 'the turn fibres leave a bot\'s chat turn alone when nothing else waits', waiting: ['bot:chat'], claim: 'turn', takes: null },
+        { name: 'people\'s slots never take one either', waiting: ['bot:chat', 'gui'], claim: 'person', takes: 'gui' },
+        { name: 'the unslotted claim takes it, whatever waits before it', waiting: ['gui', 'delegation', 'bot:chat'], claim: 'unslotted', takes: 'bot:chat' },
+        { name: 'the unslotted claim takes nothing else, not even a person\'s turn', waiting: ['gui', 'bot:work', 'delegation'], claim: 'unslotted', takes: null },
+        { name: 'bot work without the mark waits for a slot like any background turn', waiting: ['bot:work', 'gui'], claim: 'turn', takes: 'gui' },
+        { name: 'the mark on a payload that is not a bot\'s is ignored', waiting: ['wake:fake'], claim: 'unslotted', takes: null },
+        { name: 'a payload that is not an object is an ordinary turn', waiting: ['delegation:text'], claim: 'turn', takes: 'delegation:text' }
+      ]
+      for (const row of rows) {
+        it(row.name, () => {
+          const { store, outbox, setClock } = open()
+          const label = new Map<string, string>()
+          row.waiting.forEach((entry, index) => {
+            setClock(at(index * 60_000))
+            const threadId = `t${index}`
+            const [source, payload] = entry.split(':')
+            const run = store.createRun({ threadId, source: source! })
+            const effect = outbox.enqueue({ threadId, runId: run.runId, kind: 'turn.start', ...(payload ? { payload: payloads[payload] } : {}) })
+            label.set(effect.effectId, entry)
+          })
+          const now = at(row.waiting.length * 60_000)
+          const claimed = outbox.claimNext('w', now, row.claim === 'unslotted' ? { unslotted: true } : { lanes: ['turn'], ...(row.claim === 'person' ? { personOnly: true } : {}) })
+          expect(claimed ? label.get(claimed.effectId) : null).toBe(row.takes)
+        })
+      }
+
+      it('keeps the thread lane: a bot\'s next chat turn waits for its running one', () => {
+        const { store, outbox } = open()
+        const chat = { kind: 'bot', runId: 'r', threadId: 'home', activationId: 'a', dispatchN: 1, unslotted: true }
+        const first = outbox.enqueue({ threadId: 'home', runId: store.createRun({ threadId: 'home', source: 'bot' }).runId, kind: 'turn.start', payload: chat })
+        outbox.enqueue({ threadId: 'home', runId: store.createRun({ threadId: 'home', source: 'bot' }).runId, kind: 'turn.start', payload: chat })
+        expect(outbox.claimNext('w', T0, { unslotted: true })?.effectId).toBe(first.effectId)
+        expect(outbox.claimNext('w', T0, { unslotted: true })).toBeNull()
+      })
+    })
+
     it('a person waits only for the thread lane of their own thread', () => {
       const { store, outbox } = open()
       const busy = store.createRun({ threadId: 't', source: 'gui' })

@@ -265,6 +265,46 @@ describe('EffectWorker', () => {
     expect(started[8]).toBe('person-cli')
   })
 
+  it('starts a turn that takes no slot while every turn fibre is busy, counts it in no slot, and stop() waits for it', async () => {
+    const gate = deferred()
+    const started: string[] = []
+    let unwound = false
+    const { store, outbox, worker } = setup(
+      {
+        'turn.start': async (effect) => {
+          started.push(effect.threadId)
+          await gate.promise
+          if (effect.threadId.startsWith('home')) unwound = true
+        }
+      },
+      { laneFibres: { turn: 1 } }
+    )
+    worker.start()
+    const send = (threadId: string, payload?: unknown) =>
+      outbox.enqueue({ threadId, runId: store.createRun({ threadId, source: 'bot' }).runId, kind: 'turn.start', ...(payload ? { payload } : {}) })
+    send('work')
+    await waitFor(() => started.includes('work'), 'the work turn')
+    // Two bots' chat turns start at once beside it; a second ordinary turn waits for the one fibre.
+    send('home-a', { kind: 'bot', runId: 'r', threadId: 'home-a', activationId: 'a', dispatchN: 1, unslotted: true })
+    send('home-b', { kind: 'bot', runId: 'r', threadId: 'home-b', activationId: 'b', dispatchN: 1, unslotted: true })
+    send('other')
+    await waitFor(() => started.includes('home-a') && started.includes('home-b'), 'the chat turns')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(started).not.toContain('other')
+    expect(worker.turnSlots()).toMatchObject({ running: 1, limit: 1 })
+    expect(worker.inFlight()).toBe(3)
+    let stopped = false
+    const stopping = worker.stop().then(() => {
+      stopped = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    // The chat turns are still unwinding: stop() waits for them as for any turn.
+    expect(stopped).toBe(false)
+    gate.resolve()
+    await stopping
+    expect(unwound).toBe(true)
+  })
+
   it('aborts in-flight executions with WorkerStoppedError on stop()', async () => {
     let reason: unknown
     const { outbox, worker } = setup({

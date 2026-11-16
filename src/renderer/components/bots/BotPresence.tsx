@@ -21,6 +21,8 @@ export function workElapsed(startedAt: string, now = Date.now()): string {
 function workDoing(item: BotWorkItem, chip: BotChip | undefined): string {
   if (item.status === 'queued') return 'queued'
   if (item.status === 'waiting_for_internet') return 'waiting for internet'
+  // Its turn has not started: every turn slot it may use runs another turn.
+  if (item.waitsFor === 'slot') return 'waiting for a free slot'
   if (item.wait) {
     const event = item.wait.event
     if (!event) {

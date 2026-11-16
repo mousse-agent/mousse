@@ -73,8 +73,8 @@ export function isResumeSource(source: string | null | undefined): boolean {
  * run (`internal`), and a client's steer that had no turn to join and runs as a turn of its own (`cli-steer`,
  * `protocol-steer`). A `steer-followup` run is a person's only when its outcome says `sentByPerson` (the same
  * source carries agents' leftover steers and subagent results). Such a turn's `turn.start` takes the next free
- * turn slot ahead of background turns (delegated subagents, wakes, resumes, schedules, bots, agent sends), and
- * some turn slots take only these (`EffectWorker`). `resume_now` is not one: it continues the work a usage
+ * turn slot ahead of background turns (delegated subagents, wakes, resumes, schedules, bots' work, agent sends), and
+ * some turn slots take only these (`EffectWorker`). A bot's chat turn takes no slot at all (`isUnslottedTurnPayload`). `resume_now` is not one: it continues the work a usage
  * limit paused, which after a restart is often many background runs resumed together.
  */
 export const PRIORITY_TURN_SOURCES: readonly string[] = ['gui', 'cli', 'remote', 'internal', 'cli-steer', 'protocol-steer']

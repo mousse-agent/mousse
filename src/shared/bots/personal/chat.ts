@@ -255,10 +255,11 @@ export interface BotWorkItem {
   status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'
   /**
    * Why it is held (`paused`): `answer`, it waits for the owner's answer to the question it asked them. Absent from older
-   * services, whose apps show it as held.
+   * services, whose apps show it as held. On running work, `slot`: its turn waits for a free turn slot (other turns use
+   * them all), so nothing of it runs yet; older apps show it as working.
    */
   wait?: { dueAt: string; event: import('./wakes').BotWakeEvent | null }
-  waitsFor?: 'answer'
+  waitsFor?: 'answer' | 'slot'
   /** First line of a held action, supplied by Mousse. */
   detail?: string
   startedAt: string

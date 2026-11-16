@@ -82,7 +82,7 @@ import { buildSubagentView } from '../run/delegation/subagentView'
 import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '../run/delegation/subagentAddress'
 import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
-import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
+import { EffectDeferredError, slotsFullFor, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
@@ -154,6 +154,7 @@ import {
   isWakeTurnPayload,
   hasUnknownTurnPayloadKind,
   isBotTurnPayload,
+  isUnslottedTurnPayload,
   stoppedByPerson,
   type BotTurnPayload,
   type ChildQuestionPayload,
@@ -5559,15 +5560,29 @@ export class OrchestratorService extends EventEmitter {
       if (!entry || entry.started || entry.abandoned || !slots) return
       const run = this.runEngine?.getRun(runId)
       if (run?.status !== 'queued' || this.isStopping(threadId)) return
-      // A person's turn waits only while every slot runs a turn; a background one already while the slots it may use
-      // (all but those kept for people) do.
       const person = isPriorityTurnRun(run)
-      if (person ? slots.running < slots.limit : slots.sharedRunning < slots.limit - slots.keptForPeople) return
+      if (!slotsFullFor(person, slots)) return
       // Another turn of the thread is live (a queue drain raced it): its state is the thread's.
       if (this.loadedSession(threadId)?.activeTurn) return
       this.slotWaits.set(threadId, runId)
       this.setTurnPhase(threadId, 'queued', { turnId: null, step: { kind: 'waiting_slot', running: slots.running, limit: slots.limit, ...(person ? {} : { keptForPeople: slots.keptForPeople }) } })
     })
+  }
+
+  /**
+   * Whether the queued run `runId` waits for a free turn slot now: its `turn.start` is pending and every slot it may use
+   * runs a turn (`slotsFullFor`). A turn that takes no slot (`isUnslottedTurnPayload`: a bot's chat turn, a consult)
+   * never waits for one. What a bot's work line reads (`BotEngine.waitsForSlot`).
+   */
+  turnWaitsForSlot(runId: string): boolean {
+    const engine = this.runEngine
+    const slots = this.effectWorker?.turnSlots()
+    if (!engine || !slots) return false
+    const run = engine.getRun(runId)
+    if (run?.status !== 'queued') return false
+    const start = engine.outbox.listForRun(runId).filter((effect) => effect.kind === 'turn.start').at(-1)
+    if (start?.status !== 'pending' || isUnslottedTurnPayload(start.payload)) return false
+    return slotsFullFor(isPriorityTurnRun(run), slots)
   }
 
   /** The run `showSlotWait` showed ended without starting: its thread no longer shows the wait. */

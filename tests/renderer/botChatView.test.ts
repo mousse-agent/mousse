@@ -1430,6 +1430,13 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w3'])
   })
 
+  it('work whose turn waits for a free turn slot says so in its line, and shows no sticker', async () => {
+    await open({ ...working, stateText: 'Waiting for a free slot', work: [{ ...working.work![0]!, waitsFor: 'slot' }] })
+    expect(sticker()).toBeNull()
+    await click(presence())
+    expect(host.querySelector('.bot-work-line')!.textContent).toBe('Vacuum comparisonwaiting for a free slot · 4 min')
+  })
+
   it('one piece of work is named alone, never "+0", and the browser shows as its sticker', async () => {
     await open({ ...working, work: [working.work![0]!] })
     expect(presence().textContent).toBe('Vacuum comparison')

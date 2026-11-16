@@ -506,6 +506,21 @@ export interface BotTurnPayload {
   threadId: string
   activationId: string
   dispatchN: number
+  /**
+   * The turn takes no turn slot (`isUnslottedTurnPayload`): a bot's chat turn, or a consult, which runs inside its
+   * activation's live turn and is waited for there. Absent: it waits for a background slot like any other bot turn.
+   */
+  unslotted?: true
+}
+
+/**
+ * Whether a `turn.start` takes no turn slot: the effect worker starts it at once, however many turns run, and it never
+ * counts toward the profile's turn slots (`EffectWorker`). Only a bot's turn can be one (`BotTurnPayload.unslotted`):
+ * what bounds them is the bot engine (one chat turn per bot; a consult only inside its activation's live turn) and the
+ * thread lane (one turn per thread at a time). The claim reads the same field (`EffectOutbox`).
+ */
+export function isUnslottedTurnPayload(payload: unknown): boolean {
+  return isBotTurnPayload(payload) && payload.unslotted === true
 }
 
 export function isBotTurnPayload(payload: unknown): payload is BotTurnPayload {

@@ -76,6 +76,7 @@ describe('presence and sticker', () => {
     ['one task alone, never +0', 'working', one, false, false, 'System check', 'working'],
     ['the longest-running task, then +1', 'working', two, false, false, 'System check +1', 'working'],
     ['waiting for internet', 'working', [], false, true, 'waiting for internet', undefined],
+    ['its only work waits for a free turn slot: named, no sticker', 'working', [{ ...one[0]!, waitsFor: 'slot' }], false, false, 'System check', undefined],
     ['paused', 'paused', one, false, false, 'paused', 'paused']
   ]
   it.each(rows)('%s', (_what, state, work, typing, offline, text, sticker) => {

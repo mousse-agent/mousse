@@ -231,13 +231,15 @@ export type BotStickerKind = 'typing' | 'browser' | 'web' | 'search' | 'command'
 
 /**
  * The sticker for what the bot does now: a pen while it types, the lead work's live activity (its chip) while it
- * works, a pause when paused; none when it is free or waits for the internet. Work whose activity is unknown (no chip
+ * works, a pause when paused; none when it is free, waits for the internet, or its lead work waits for a free turn slot. Work whose activity is unknown (no chip
  * yet, or a kind with no picture of its own) shows "working".
  */
 export function stickerOf(presence: BotPresence, chip: BotChip | undefined): BotStickerKind | undefined {
   if (presence.kind === 'typing') return 'typing'
   if (presence.kind === 'paused') return 'paused'
   if (presence.kind !== 'busy') return undefined
+  // Work whose turn waits for a free turn slot does nothing yet, as work waiting for the internet.
+  if (presence.lead?.waitsFor === 'slot') return undefined
   if (!chip || presence.lead?.status !== 'running') return 'working'
   if (/browser/.test(chip.text)) return 'browser'
   if (/command/.test(chip.text)) return 'command'

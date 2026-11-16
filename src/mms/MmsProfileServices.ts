@@ -793,6 +793,7 @@ export class MmsProfileServices {
       }),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
+      turnWaitsForSlot: (runId) => this.orchestrator.turnWaitsForSlot(runId),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
       // A resumed bot's due schedules are claimed at once; before the scheduler started this does nothing.
       settings: this.settings,

@@ -139,7 +139,7 @@ export function statusText(bot: BotSummary | undefined, detail: BotDetail, now =
   const work = summary?.work ?? []
   lines.push(work.length
     ? `Work: ${work.map((item) => {
-      const state = item.status === 'paused' && item.waitsFor === 'answer' ? 'waiting on you' : WORK_STATE[item.status]
+      const state = item.status === 'paused' && item.waitsFor === 'answer' ? 'waiting on you' : item.waitsFor === 'slot' ? 'waiting for a free slot' : WORK_STATE[item.status]
       return `${item.title} (${state || since(item.startedAt, now)})`
     }).join(', ')}`
     : 'Work: none')

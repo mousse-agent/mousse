@@ -72,6 +72,8 @@ export function clockTime(iso: string): string {
 /** The Recent line of a bot whose chat is free while its work runs: "Working on Vacuum comparison", "Working on 2 things". */
 function workingOn(work: readonly BotWorkItem[]): string {
   const running = work.filter((item) => item.status !== 'queued')
+  // Nothing of it runs yet: its turns wait for a free turn slot.
+  if (running.length && running.every((item) => item.waitsFor === 'slot')) return 'Waiting for a free slot'
   if (running.length === 1 && work.length === 1) return `Working on ${running[0]!.title}`
   return `Working on ${work.length} things`
 }
@@ -227,6 +229,8 @@ export class BotChatProjection {
     launched?(botId: string): BotLaunchedThread[]
     /** The bot's background commands running now. */
     watchers?(botId: string): BotWatcherItem[]
+    /** Whether a running activation's turn waits for a free turn slot now (`BotEngine.waitsForSlot`). */
+    waitsForSlot?(activationId: string): boolean
   }) {}
 
   private get store(): BotStore {
@@ -515,7 +519,7 @@ export class BotChatProjection {
       .map((row) => ({
         id: row.id,
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
-        ...workWaitLine(row, { store: () => this.store }),
+        ...this.workLine(row),
         startedAt: row.createdAt,
         ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {}),
         // A model the owner asked for this work alone, not the bot's usual one: named on its line.
@@ -570,6 +574,17 @@ export class BotChatProjection {
       ...(work.length ? { work } : {}),
       ...(threads.length ? { threads } : {}),
       ...(watchers.length ? { watchers } : {})
+    }
+  }
+
+  /** Whether work runs, waits or is held; running work whose turn waits for a free turn slot says so (`waitsFor` `slot`). */
+  private workLine(row: BotActivationRow): Pick<BotWorkItem, 'status' | 'wait' | 'waitsFor' | 'detail'> {
+    const line = workWaitLine(row, { store: () => this.store })
+    if (line.status !== 'running') return line
+    try {
+      return this.options.waitsForSlot?.(row.id) ? { ...line, waitsFor: 'slot' } : line
+    } catch {
+      return line
     }
   }
 

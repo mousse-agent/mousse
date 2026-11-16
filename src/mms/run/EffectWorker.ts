@@ -9,7 +9,9 @@ export type EffectExecutor = (
 /**
  * Fibres per lane class (SPEC §12.3). `turn` fibres claim only `turn.start` and so cap the
  * profile's concurrent turns; `control` fibres claim only interrupts, steers and answers, so a
- * Stop runs however many turns are live; `replaySafe` fibres claim the replay-safe kinds.
+ * Stop runs however many turns are live; `replaySafe` fibres claim the replay-safe kinds. A turn that
+ * takes no slot (a bot's chat turn, a consult) is claimed by none of them, and starts beside them
+ * (`EffectWorker.unslottedLoop`).
  */
 export interface EffectWorkerFibres {
   turn: number
@@ -27,8 +29,20 @@ export const DEFAULT_EFFECT_WORKER_FIBRES: Readonly<EffectWorkerFibres> = {
  * Of the `turn` fibres, how many claim only a turn a person is waiting for (a message from the app, CLI
  * or phone). The rest claim any turn, a person's first. So background turns hold at most
  * `turn - DEFAULT_PERSON_TURN_FIBRES` slots, and a person's message never waits for all of them to end.
+ * A turn that takes no slot (`isUnslottedTurnPayload`: a bot's chat turn, a consult) is on none of them.
  */
 export const DEFAULT_PERSON_TURN_FIBRES = 2
+
+/** Which turn slot an execution holds: one of the shared ones, one kept for people, or none (an unslotted turn). */
+type TurnSlot = 'shared' | 'kept' | 'none'
+
+/**
+ * Whether a turn that needs a slot waits for one now (`EffectWorker.turnSlots`): a person's turn while every slot runs a
+ * turn, a background one already while the slots it may use (all but those kept for people) do.
+ */
+export function slotsFullFor(person: boolean, slots: { running: number; limit: number; keptForPeople: number; sharedRunning: number }): boolean {
+  return person ? slots.running >= slots.limit : slots.sharedRunning >= slots.limit - slots.keptForPeople
+}
 
 export interface EffectWorkerOptions {
   outbox: EffectOutbox
@@ -139,11 +153,14 @@ export class EffectWorker {
     this.stopController = controller
     this.unsubscribe = this.outbox.subscribe(() => this.notify())
     const lanes = Object.keys(this.fibres) as EffectLaneClass[]
-    this.loops = lanes.flatMap((lane) =>
-      Array.from({ length: this.fibres[lane] }, (_, index) =>
-        this.loop(controller.signal, [lane], lane === 'turn' && index < this.personTurnFibres)
-      )
-    )
+    this.loops = [
+      ...lanes.flatMap((lane) =>
+        Array.from({ length: this.fibres[lane] }, (_, index) =>
+          this.loop(controller.signal, [lane], lane === 'turn' && index < this.personTurnFibres)
+        )
+      ),
+      this.unslottedLoop(controller.signal)
+    ]
   }
 
   /** Fibres per lane class; `turn` is the profile's concurrent-turn cap, people's reserved turns included. */
@@ -214,9 +231,43 @@ export class EffectWorker {
         await this.idle(signal, generation, this.pollMs)
         continue
       }
-      if (effect) await this.execute(effect, signal, personOnly)
+      if (effect) await this.execute(effect, signal, personOnly ? 'kept' : 'shared')
       else await this.idle(signal, generation, this.idleDelay(now))
     }
+  }
+
+  /**
+   * The claim path of the turns that take no turn slot (`isUnslottedTurnPayload`: a bot's chat turn, a consult): each
+   * one it claims starts at once beside the others, and it claims again without waiting for it to end, so such a turn
+   * never waits for a slot, and is not counted in `turnSlots`. The lane rule still holds (one turn per thread at a time);
+   * the bot engine bounds the rest (one chat turn per bot, a consult only inside its activation's live turn). Returns
+   * once every turn it started has settled.
+   */
+  private async unslottedLoop(signal: AbortSignal): Promise<void> {
+    const started = new Set<Promise<void>>()
+    while (!signal.aborted) {
+      const generation = this.generation
+      const now = this.now()
+      let effect: EffectRecord | null
+      try {
+        effect = this.outbox.claimNext(this.owner, now, { unslotted: true })
+      } catch (error) {
+        console.warn(`[effect-worker] claim failed: ${messageOf(error)}`)
+        await this.idle(signal, generation, this.pollMs)
+        continue
+      }
+      if (!effect) {
+        await this.idle(signal, generation, this.idleDelay(now))
+        continue
+      }
+      const execution = this.execute(effect, signal, 'none')
+      started.add(execution)
+      const settled = (): void => {
+        started.delete(execution)
+      }
+      void execution.then(settled, settled)
+    }
+    await Promise.allSettled([...started])
   }
 
   private idleDelay(now: string): number {
@@ -248,7 +299,7 @@ export class EffectWorker {
     })
   }
 
-  private async execute(effect: EffectRecord, stopSignal: AbortSignal, kept = false): Promise<void> {
+  private async execute(effect: EffectRecord, stopSignal: AbortSignal, slot: TurnSlot = 'shared'): Promise<void> {
     const { effectId } = effect
     const cancel = new AbortController()
     const lease = new AbortController()
@@ -256,8 +307,10 @@ export class EffectWorker {
     const signal = AbortSignal.any([stopSignal, cancel.signal, timeout, lease.signal])
     this.running.set(effectId, cancel)
     const lane = effectLaneClass(effect.kind)
-    this.busy[lane]++
-    if (kept) this.busyKept++
+    // A turn that takes no slot is not one of the lane's executions: the slots stay free for the others.
+    const counted = slot !== 'none'
+    if (counted) this.busy[lane]++
+    if (slot === 'kept') this.busyKept++
     const renewLease = (): boolean => {
       let renewed = false
       try {
@@ -289,8 +342,8 @@ export class EffectWorker {
     } finally {
       clearInterval(renewer)
       this.running.delete(effectId)
-      this.busy[lane]--
-      if (kept) this.busyKept--
+      if (counted) this.busy[lane]--
+      if (slot === 'kept') this.busyKept--
     }
 
     let settlement: EffectSettlement

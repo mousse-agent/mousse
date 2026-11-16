@@ -30,6 +30,13 @@ const PERSON_TURN_SQL = `(c.kind = 'turn.start' AND EXISTS (SELECT 1 FROM runs r
   AND (r.source IN (${PRIORITY_TURN_SOURCES.map((source) => `'${source}'`).join(',')})
     OR (r.source = 'steer-followup' AND json_extract(r.outcome, '$.sentByPerson') = 1))))`
 
+/**
+ * A `turn.start` that takes no turn slot (`isUnslottedTurnPayload`: a bot's chat turn or a consult). Never null, so
+ * `NOT` of it keeps every other row; a payload that is not JSON is an ordinary turn.
+ */
+const UNSLOTTED_TURN_SQL = `(c.kind = 'turn.start' AND (CASE WHEN json_valid(c.payload)
+  THEN json_extract(c.payload, '$.kind') = 'bot' AND json_extract(c.payload, '$.unslotted') = 1 END) IS 1)`
+
 export type EffectSettlement =
   { settled: true; effect: EffectRecord } | { settled: false; status: EffectStatus | null }
 
@@ -68,6 +75,8 @@ export class EffectOutbox {
   private readonly claimSqlByLanes = new Map<string, string>()
   /** Claim statements restricted to a person's `turn.start`, keyed by the unrestricted statement. */
   private readonly personOnlyByClaim = new Map<string, string>()
+  /** The claim statement of the turns that take no turn slot (`UNSLOTTED_TURN_SQL`). */
+  private readonly unslottedClaimSql: string
 
   constructor(
     readonly store: RunStore,
@@ -95,7 +104,8 @@ export class EffectOutbox {
     // turn), the title lane and the resume lane (a `run.resume` timer waiting for a usage limit).
     // The oldest claimable row comes first, except on the turn fibres (`claimSqlFor` with `turn`):
     // there a person's `turn.start` comes first, and a background one older than
-    // `BACKGROUND_TURN_AGE_MS` ranks with a person's again.
+    // `BACKGROUND_TURN_AGE_MS` ranks with a person's again. The turn fibres never claim a turn that takes no
+    // turn slot (`UNSLOTTED_TURN_SQL`); only the unslotted claim does (`unslottedClaimSql`). Both keep the lane rule.
     this.claimSql = `UPDATE effects SET status = 'running', attempts = attempts + 1,
         lease_owner = :owner, updated_at = :now,
         lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', :now,
@@ -111,6 +121,7 @@ export class EffectOutbox {
                 OR (o.status = 'pending' AND o.rowid < c.rowid)))
         ORDER BY /*rank*/ c.available_at, c.rowid LIMIT 1)
       RETURNING *`
+    this.unslottedClaimSql = this.claimSql.replace('/*lanes*/', `AND ${UNSLOTTED_TURN_SQL}`)
   }
 
   /** Registers a callback run after any commit that may make an effect claimable. */
@@ -175,14 +186,16 @@ export class EffectOutbox {
    * comes first; when `lanes` has `turn`, a person's `turn.start` comes before a background one that
    * has waited less than `BACKGROUND_TURN_AGE_MS`. `lanes` restricts the claim to effect kinds of those lane
    * classes (a worker fibre group, SPEC §12.3); without it any kind may be claimed. `personOnly`
-   * claims only a person's `turn.start` (the turn slots kept for people).
+   * claims only a person's `turn.start` (the turn slots kept for people). A `turn.start` that takes no
+   * turn slot (`isUnslottedTurnPayload`) is claimed only with `unslotted`, which claims nothing else, so
+   * the `turn` lane never holds a slot for it.
    */
   claimNext(
     owner: string,
     now: string,
-    options: { lanes?: readonly EffectLaneClass[]; personOnly?: boolean } = {}
+    options: { lanes?: readonly EffectLaneClass[]; personOnly?: boolean; unslotted?: boolean } = {}
   ): EffectRecord | null {
-    let sql = options.lanes ? this.claimSqlFor(options.lanes) : this.claimSql
+    let sql = options.unslotted ? this.unslottedClaimSql : options.lanes ? this.claimSqlFor(options.lanes) : this.claimSql
     if (sql === null) return null
     if (options.personOnly) sql = this.personOnlySql(sql)
     const params: Record<string, string> = { owner, now }
@@ -204,7 +217,7 @@ export class EffectOutbox {
     if (!kinds.length) return null
     let sql = this.claimSql.replace(
       '/*lanes*/',
-      `AND c.kind IN (${kinds.map((kind) => `'${kind}'`).join(',')})`
+      `AND c.kind IN (${kinds.map((kind) => `'${kind}'`).join(',')})${lanes.includes('turn') ? ` AND NOT ${UNSLOTTED_TURN_SQL}` : ''}`
     )
     if (lanes.includes('turn'))
       sql = sql.replace(

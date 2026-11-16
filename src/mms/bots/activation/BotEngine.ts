@@ -216,6 +216,11 @@ export interface BotEngineHost {
   platform?: string
   /** Wakes the effect worker after a `turn.start` was written. */
   notifyEffects(): void
+  /**
+   * Whether the queued run `runId` waits for a free turn slot now (`OrchestratorService.turnWaitsForSlot`): its work's
+   * line says so. Absent: never shown.
+   */
+  turnWaitsForSlot?(runId: string): boolean
   /** Stops what runs on a thread (a running dispatch). */
   stopThread?(threadId: string): Promise<unknown> | void
   /** `bots.changed`. */
@@ -563,6 +568,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly roomKeys = new Map<string, BotBudgetWallKey>()
   /** The runs of live dispatches (main and consult) by run id, with their activation: a finished call is their progress. */
   private readonly liveRuns = new Map<string, string>()
+  /** Runs of work shown as waiting for a free turn slot (`watchSlotWait`), until their turn starts. */
+  private readonly slotWaits = new Set<string>()
   /**
    * What dispatches that reached their runtime's turn cap did, per activation, until its next message carries it: their
    * chips, and their last words for a message that has none of its own (`continueAfterTurnCap`). Kept in memory.
@@ -760,7 +767,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return live ? { state: 'on', server: live } : { state: 'gone' }
       },
       // A question's follow-up counts from when its bubble is shown.
-      followUpAt: (question, shownAt) => this.firstFollowUpAt(question, shownAt)
+      followUpAt: (question, shownAt) => this.firstFollowUpAt(question, shownAt),
+      // Work whose turn waits for a free turn slot says so on its line.
+      waitsForSlot: (activationId) => this.waitsForSlot(activationId)
     })
     this.tellings = new BotTellings(this.store, this.chat, id => this.nameFor(id).botName ?? 'Your bot', event => this.events.emit('tell', event), REMINDER_RETRY_MS)
     this.service = new BotChatService(this, {
@@ -2639,6 +2648,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       held: effective, allowanceMs: remainingMs, subagentStarts: new Map(), subagentMs: 0, fire
     })
     this.liveRuns.set(payload.runId, row.id)
+    this.slotWaitStarted(row, payload.runId)
     this.watchOffline(row.id, dispatch.n)
     const authority = this.authorityFor({
       row, mainN: dispatch.n, role: 'activation', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
@@ -5498,12 +5508,46 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!runs) throw new BotEngineError('bots_unavailable', 'The run engine is not running.')
       const sent = await runs.sendWithStart(
         { kind: 'send', threadId: dispatch.threadId, clientRequestId: dispatch.clientRequestId, source: 'bot', ...dispatch.send },
-        (runId): BotTurnPayload => ({ kind: 'bot', runId, threadId: dispatch.threadId, activationId: row.id, dispatchN: dispatch.n })
+        (runId) => botTurnPayload(row, dispatch, runId)
       )
       if (sent.status !== 'accepted') throw new BotEngineError('bot_dispatch_refused', `The bot's run was refused (${sent.reason}).`)
       this.store.setDispatchRun(row.id, dispatch.n, sent.runId)
       this.host.notifyEffects()
+      this.watchSlotWait(row, dispatch, sent.runId)
     }
+  }
+
+  /**
+   * Work whose turn waits for a free turn slot says so on its line (`BotWorkItem.waitsFor` `slot`): once the effect
+   * worker had its chance to claim the turn, the bot's summary is sent again when it still waits, and once more when it
+   * starts (`slotWaitStarted`). A turn that starts at once sends nothing more.
+   */
+  private watchSlotWait(row: BotActivationRow, dispatch: Pick<BotDispatchRow, 'kind'>, runId: string): void {
+    // Only a work's own turn has a line to say it; the chat's turns and consults never wait for a slot.
+    if (!this.host.turnWaitsForSlot || row.lane !== 'run' || sideDispatch(dispatch)) return
+    setImmediate(() => {
+      if (this.closed) return
+      try {
+        if (!this.host.turnWaitsForSlot?.(runId)) return
+        this.slotWaits.add(runId)
+        this.changed({ botId: row.botId, activationId: row.id })
+      } catch (error) {
+        console.warn('a bot turn\'s slot wait could not be read', { runId, error: error instanceof Error ? error.message : String(error) })
+      }
+    })
+  }
+
+  /** A turn `watchSlotWait` showed as waiting started: its work's line says what it does again. */
+  private slotWaitStarted(row: BotActivationRow, runId: string): void {
+    if (this.slotWaits.delete(runId)) this.changed({ botId: row.botId, activationId: row.id })
+  }
+
+  /** Whether the live turn of a running activation waits for a free turn slot now (its work line, `BotChatProjection`). */
+  private waitsForSlot(activationId: string): boolean {
+    const turns = this.host.turnWaitsForSlot
+    if (!turns) return false
+    const main = this.store.lastMainDispatch(activationId)
+    return Boolean(main && main.endedAt === null && main.startedAt === null && main.runId && turns(main.runId))
   }
 
   /**
@@ -6286,6 +6330,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const runs = this.host.runs()
     const run = runs?.getRun(payload.runId)
     if (!runs || !run || !TERMINAL_RUN_STATUSES.has(run.status)) return
+    this.slotWaits.delete(payload.runId)
     const row = this.store.activation(payload.activationId)
     const dispatch = row ? this.store.dispatch(row.id, payload.dispatchN) : undefined
     if (!row || !dispatch) return
@@ -7025,7 +7070,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return void this.block(row, 'bot_grant_revoked', 'The bot\'s permissions were revoked or changed.')
       }
       if (main.startedAt === null) {
-        runs.outbox.enqueue({ threadId: main.threadId, runId: run.runId, kind: 'turn.start', payload: { kind: 'bot', runId: run.runId, threadId: main.threadId, activationId: row.id, dispatchN: main.n } satisfies BotTurnPayload })
+        runs.outbox.enqueue({ threadId: main.threadId, runId: run.runId, kind: 'turn.start', payload: botTurnPayload(row, main, run.runId) })
+        this.watchSlotWait(row, main, run.runId)
         return
       }
       // Its time window was already settled (up to its last working moment): too little left is a budget wall, as for an
@@ -9448,6 +9494,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 /** A consult or a subagent: a turn of its own that attaches to the activation's live main dispatch (`mainN`). */
 function sideDispatch(dispatch: Pick<BotDispatchRow, 'kind'>): boolean {
   return dispatch.kind === 'consult' || dispatch.kind === 'subagent'
+}
+
+/**
+ * A dispatch's `turn.start` payload. Every turn of the chat lane and every consult takes no turn slot (`unslotted`):
+ * the owner's chat never waits behind other turns, and a consult runs inside its activation's live turn, which waits
+ * for its answer while it holds a slot itself (perhaps the last one). Work, scheduled runs and subagents of work wait
+ * for a background slot.
+ */
+function botTurnPayload(row: Pick<BotActivationRow, 'id' | 'lane'>, dispatch: Pick<BotDispatchRow, 'n' | 'kind' | 'threadId'>, runId: string): BotTurnPayload {
+  const unslotted = row.lane === 'chat' || dispatch.kind === 'consult'
+  return { kind: 'bot', runId, threadId: dispatch.threadId, activationId: row.id, dispatchN: dispatch.n, ...(unslotted ? { unslotted: true as const } : {}) }
 }
 
 /** One subagent of a work: its thread, what it runs as, and its turns there, oldest first. */
