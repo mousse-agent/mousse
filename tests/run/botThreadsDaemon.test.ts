@@ -483,7 +483,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const w = world({ script: (input) => (input.prompt.includes('Look at the login page.') ? new Promise<string>((resolve) => { release = () => resolve('done') }) : 'done') })
     const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): Array<{ requestId: string }>; dismiss(requestId: string): boolean }
     const changed: string[] = []
-    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, threads: w.d.store as unknown as EventEmitter, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
     const managed = (creators: string[]) => launchedThreadsOf({
       creators: new Set(creators),
       threads: w.d.store.listAllThreads(),
@@ -518,11 +518,27 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(managed([w.chat.id]).map((thread) => [thread.threadId, thread.status, launchedActive(thread)])).toEqual([[made.threadId, 'done', false]])
     expect(changed.length).toBeGreaterThan(seen)
 
-    // A run left queued that nothing will start (no turn.start, nothing running ahead of it) does not bring it back:
-    // the thread sits idle, so the bot does not manage it.
+    // A queued run with no turn.start yet waits on the message queue: the bot still manages it. Once its turn.start
+    // came and went and nothing started it, the thread sits idle, so the bot does not manage it.
     const stray = await w.d.engine.dispatch({ kind: 'send', threadId: made.threadId, clientRequestId: 'stray-send', source: 'mcp' })
-    expect(w.d.engine.getRun((stray as { runId: string }).runId)!.status).toBe('queued')
+    const strayRunId = (stray as { runId: string }).runId
+    expect(w.d.engine.getRun(strayRunId)!.status).toBe('queued')
+    expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['queued', true]])
+    const start = w.d.engine.outbox.enqueue({ threadId: made.threadId, runId: strayRunId, kind: 'turn.start', payload: {} })
+    expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['queued', true]])
+    w.d.engine.outbox.cancel(start.effectId, new Date().toISOString(), 'test: the start died')
+    expect(w.d.engine.getRun(strayRunId)!.status).toBe('queued')
     expect(managed([w.chat.id]).map((thread) => [thread.threadId, launchedActive(thread)])).toEqual([[made.threadId, false]])
+
+    // A question left open would keep it busy, until the thread is archived: an archived thread is never managed,
+    // whatever it left behind, and archiving it tells the chat thread.
+    void w.orch.questions.requestAnswers([{ id: 'q2', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], made.threadId, {}).catch(() => undefined)
+    expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['needs_input', true]])
+    seen = changed.length
+    await w.archive(made.threadId)
+    expect(w.d.store.getThread(made.threadId)?.settledAt).toBeTruthy()
+    expect(managed([w.chat.id]).map((thread) => [thread.threadId, launchedActive(thread)])).toEqual([[made.threadId, false]])
+    expect(changed.length).toBeGreaterThan(seen)
     unwatch()
   })
 })

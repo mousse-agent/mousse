@@ -92,6 +92,19 @@ describe('an archived thread the bot started', () => {
     ['a subagent below it runs', { below: 'running' }],
     ['a subagent below it asks the owner', { asks: ['child'] }]
   ]
+  // Archived below an unarchived thread: a subagent's leftovers never keep the thread above it going.
+  it.each([['runs', { below: 'running' as const }], ['asks the owner', { asks: ['child'] }]])('is not managed because an archived subagent %s', (_name, state: { below?: RunRecord['status']; asks?: string[] }) => {
+    const [listed] = launchedThreadsOf({
+      creators: new Set(['home']),
+      threads: [threads[0]!, { ...threads[1]!, settledAt: NOW }, threads[2]!],
+      activeRuns: state.below ? [run('child', state.below)] : [],
+      lastRun: (id) => (id === 'launched' ? run('launched', 'completed') : undefined),
+      asks: (id) => (state.asks ?? []).includes(id),
+      willStart: () => true
+    })
+    expect(listed?.status).toBe('done')
+    expect(launchedActive(listed!)).toBe(false)
+  })
   it.each(rows)('is not managed while %s', (_name, state) => {
     const activeRuns = [...(state.own ? [run('launched', state.own)] : []), ...(state.below ? [run('child', state.below)] : [])]
     const [listed] = launchedThreadsOf({

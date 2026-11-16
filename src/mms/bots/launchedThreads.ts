@@ -43,8 +43,8 @@ function latest(...times: Array<string | null | undefined>): string | undefined 
  * wait on the owner, then idle ones, then ended ones (most recently updated first); of those not going, at most
  * `BOT_LAUNCHED_ENDED_SHOWN`. `activeRuns`: the profile's runs not ended; `lastRun`: a thread's newest run;
  * `willStart`: whether a queued run is still on its way (`queuedRunWillStart`). A queued run nothing will start (its
- * start already came and went, or it was never given one) does not make its thread go, and an archived thread never
- * goes, whatever runs or questions it left: either reads as its last run ended.
+ * start already came and went) does not make its thread go, and an archived thread (or subagent) never goes, whatever
+ * runs or questions it left: either reads as its last run ended.
  */
 export function launchedThreadsOf(input: {
   creators: ReadonlySet<string>
@@ -63,8 +63,10 @@ export function launchedThreadsOf(input: {
   }
   const mine = input.threads.filter((thread) => thread.createdByThreadId !== undefined && input.creators.has(thread.createdByThreadId))
   const below = subagentDescendantsIn(input.threads)
-  const subagentsAsk = (threadId: string) => below(threadId).some((id) => input.asks(id))
-  const subagentsWork = (threadId: string) => below(threadId).some((id) => active.has(id))
+  // An archived subagent counts for nothing either: its leftovers never keep the thread above it going.
+  const archived = new Set(input.threads.filter((thread) => thread.settledAt).map((thread) => thread.id))
+  const subagentsAsk = (threadId: string) => below(threadId).some((id) => !archived.has(id) && input.asks(id))
+  const subagentsWork = (threadId: string) => below(threadId).some((id) => !archived.has(id) && active.has(id))
   const goes = (thread: LaunchedThreadMeta) => !thread.settledAt && (active.has(thread.id) || input.asks(thread.id) || subagentsWork(thread.id) || subagentsAsk(thread.id))
   const going = mine.filter(goes)
   // Of the rest only the most recently updated are shown: their runs are read, never every thread the bot ever started.
@@ -95,13 +97,15 @@ export function launchedThreadsOf(input: {
 }
 
 /**
- * Whether a queued run is still on its way to starting: its `turn.start` waits or is being run, or it stands in for a
- * remote subagent whose run goes on on another computer. A queued run waiting behind another run of its thread has no
- * `turn.start` yet; that thread goes all the same, by the run ahead of it.
+ * Whether a queued run is still on its way to starting. Only a run whose `turn.start` came and went (every one ended)
+ * is not: the stranded case. One with no `turn.start` yet still counts, as `strandedQueuedRuns` reads it: it waits on
+ * the message queue (behind a pause, a compaction or another process's lease) or its send has not recorded the effect yet.
+ * A queued run that stands in for a remote subagent goes on on another computer.
  */
 export function queuedRunWillStart(engine: Pick<RunEngine, 'outbox' | 'remoteSubagents'>, run: Pick<RunRecord, 'runId'>): boolean {
-  return engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start' && (effect.status === 'pending' || effect.status === 'running'))
-    || Boolean(engine.remoteSubagents.getByChildRun(run.runId))
+  if (engine.remoteSubagents.getByChildRun(run.runId)) return true
+  const starts = engine.outbox.listForRun(run.runId).filter((effect) => effect.kind === 'turn.start')
+  return starts.length === 0 || starts.some((effect) => effect.status === 'pending' || effect.status === 'running')
 }
 
 /**
