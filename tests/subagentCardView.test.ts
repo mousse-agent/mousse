@@ -259,14 +259,14 @@ describe('SubagentCardView', () => {
   const render = (model: SubagentCardModel, result?: string | null) =>
     renderToStaticMarkup(createElement(SubagentCardView, { card: model, now: NOW, result, onOpen: () => undefined }))
 
-  it('shows the provider icon, title, provider and model, elapsed time, and the last result', () => {
+  it('shows the provider icon, title, model name, elapsed time, and the last result', () => {
     const html = render(card({ state: 'done', completedAt: Date.parse('2026-10-25T12:09:00.000Z') }), 'Found two issues.')
     expect(html).toContain('subagent-avatar')
     expect(html).toContain('background-color:#D97757')
     expect(html).toContain('API reviewer')
-    expect(html).toContain('claude · Claude Opus')
+    expect(html).toContain('subagent-card-model">Opus<')
     // A remote subagent's card says where it runs.
-    expect(render(card({ state: 'working', computer: 'Studio Mac' }))).toContain('claude · Claude Opus · on Studio Mac')
+    expect(render(card({ state: 'working', computer: 'Studio Mac' }))).toContain('Opus · on Studio Mac')
     expect(html).toContain('>1m 00s<')
     expect(html).not.toContain('>Done')
     expect(html).toContain('Found two issues.')

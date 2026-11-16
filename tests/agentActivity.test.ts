@@ -50,9 +50,10 @@ describe('activityFromToolCall', () => {
         { content: 'c', status: 'pending' }
       ]
     })
-    expect(from('Agent', { subagent_type: 'Explore', description: 'Look around', run_in_background: true })).toMatchObject({
+    expect(from('Agent', { subagent_type: 'Explore', model: 'haiku', description: 'Look around', run_in_background: true })).toMatchObject({
       kind: 'subagent',
       agentType: 'Explore',
+      model: 'haiku',
       description: 'Look around',
       background: true
     })

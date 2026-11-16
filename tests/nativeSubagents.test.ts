@@ -148,7 +148,8 @@ describe('a thread whose agent starts background agents', () => {
     expect(host.textContent).toContain('2 subagents')
     expect(view.text).toContain('2 working')
     expect(view.text).toContain('Map design language')
-    expect(host.textContent).toContain('Explore')
+    expect(host.textContent).toContain('Searching code')
+    expect(host.textContent).not.toContain('Explore')
     // The agents' own calls are inside their cards, not loose rows.
     expect(view.text).not.toContain('Agent completed')
   })
@@ -214,7 +215,7 @@ describe('a thread whose agent starts background agents', () => {
 
 describe('Lineage lists native subagents', () => {
   it('counts them, shows their kind, opens their card and offers no Stop of its own', () => {
-    const cards = nativeSubagentsOfMessages([backgroundAgent('a1', 13, 'Map design language'), backgroundAgent('a2', 20, 'Find hosting', { summary: 'Done', durationMs: 5000 })], true)
+    const cards = nativeSubagentsOfMessages([backgroundAgent('a1', 13, 'Map design language', { model: 'sonnet' } as never), backgroundAgent('a2', 20, 'Find hosting', { summary: 'Done', durationMs: 5000 })], true)
     const entries = cards.map(nativeLineageEntry)
     expect(lineageTitle(entries)).toBe('Lineage · 1 running')
 
@@ -227,7 +228,9 @@ describe('Lineage lists native subagents', () => {
       root.render(createElement(LineageList, { subagents: entries, now: T0 + 60_000, open: { ...LINEAGE_CLOSED, finished: true }, onOpenPart: () => undefined, onOpen, onReveal, onStop: () => undefined }))
     })
     expect(host.textContent).toContain('Map design language')
-    expect(host.textContent).toContain('Explore')
+    // The kind of agent in plain words, with the model its call named.
+    expect(host.querySelector('.lineage-row.is-working .lineage-model')?.textContent).toBe('Searching code · Sonnet')
+    expect(host.textContent).not.toContain('Explore')
     expect(host.querySelector('.lineage-stop')).toBeNull()
     act(() => host.querySelector<HTMLButtonElement>('.lineage-row.is-working')!.click())
     expect(onReveal).toHaveBeenCalledWith('a1')

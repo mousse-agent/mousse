@@ -1,4 +1,6 @@
-import { modelChoiceOf, modelLabel } from '../../../shared/modelChoice'
+import { modelLabel } from '../../../shared/modelChoice'
+import { inferModelBrand } from '../../../shared/modelVariants'
+import { resolveModelChoice } from '../../lib/modelChoice'
 import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
 import { formatAgo } from '../../lib/formatAgo'
 import type { SubagentCardModel } from '../../chat/adapters/subagentCards'
@@ -18,20 +20,60 @@ type LineageSubagent = Pick<SubagentSummary, 'childThreadId' | 'state' | 'create
  */
 export type LineageEntry = Pick<SubagentSummary, 'childThreadId' | 'state' | 'createdAt' | 'updatedAt' | 'title' | 'provider' | 'model' | 'waitingOn' | 'computer'> & {
   native?: boolean
+  /** A native subagent's line under its name: its kind of agent in plain words and its model (`nativeSubagentLabel`). */
+  nativeLabel?: string | null
 }
 
 function isoOf(ms: number | null): string {
   return ms === null ? '' : new Date(ms).toISOString()
 }
 
-/** The Lineage row of a native subagent's card: its kind of agent stands where a Mousse subagent's model would. */
+/** Claude Code's own kinds of agent, by what they do. Keys are lower case. */
+const NATIVE_AGENT_KINDS: Record<string, string> = {
+  explore: 'Searching code',
+  'general-purpose': 'Helper',
+  plan: 'Planning',
+  'claude-code-guide': 'Claude Code help',
+  'statusline-setup': 'Status line setup',
+  'output-style-setup': 'Output style setup'
+}
+
+/** A runtime's kind of agent in plain words: "Explore" is "Searching code"; a custom agent keeps its name, spaced ("Code reviewer"). */
+export function nativeAgentKindLabel(agentType: string | null | undefined): string | null {
+  const trimmed = agentType?.trim()
+  if (!trimmed) return null
+  const known = NATIVE_AGENT_KINDS[trimmed.toLowerCase()]
+  if (known) return known
+  const words = trimmed.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return words ? words[0]!.toUpperCase() + words.slice(1) : null
+}
+
+/**
+ * What a native subagent's row says under its name: what kind of agent it is, in plain words, and the model it
+ * runs on when its call named one ("Searching code · Sonnet"). Codex names a helper by its model where Claude
+ * Code names its kind, so a kind that is a model's id shows as the model.
+ */
+export function nativeSubagentLabel(native: { agentType: string | null; model?: string | null } | undefined): string | null {
+  if (!native) return null
+  let kind = native.agentType
+  let model = native.model ?? null
+  if (kind && !model && !NATIVE_AGENT_KINDS[kind.trim().toLowerCase()] && inferModelBrand(kind).brandId !== 'other') {
+    model = kind
+    kind = null
+  }
+  const label = [nativeAgentKindLabel(kind), lineageModelLabel({ provider: null, model })].filter(Boolean).join(' · ')
+  return label || null
+}
+
+/** The Lineage row of a native subagent's card: its kind of agent and model stand where a Mousse subagent's model would. */
 export function nativeLineageEntry(card: Pick<SubagentCardModel, 'toolCallId' | 'state' | 'title' | 'createdAt' | 'completedAt' | 'native'>): LineageEntry {
   return {
     childThreadId: card.toolCallId,
     state: card.state,
     title: card.title,
     provider: null,
-    model: card.native?.agentType ?? null,
+    model: null,
+    nativeLabel: nativeSubagentLabel(card.native),
     waitingOn: [],
     createdAt: isoOf(card.createdAt),
     updatedAt: isoOf(card.completedAt ?? card.createdAt),
@@ -139,12 +181,14 @@ export function lineageSubagentName(subagent: Pick<SubagentSummary, 'title'>): s
   return subagent.title.replace(/\s+/g, ' ').trim() || 'Subagent'
 }
 
-/** Provider and model a subagent was asked to run on, or null when it inherited its parent's. */
+/**
+ * The model a subagent was asked to run on, by the name the model picker gives it, or null when it inherited its
+ * parent's. The provider's icon beside it names the provider, so neither its id (`codex:chatgpt-subscription`) nor
+ * Claude's brand is repeated ("Opus 5.5", "GPT-6.1 Sol · High"); a reasoning level the agent chose stays.
+ */
 export function lineageModelLabel(subagent: Pick<SubagentSummary, 'provider' | 'model'>): string | null {
-  // The model by its name, with a reasoning level the agent chose ("GPT-5 · High"), never a stored id like `gpt-5:high`.
-  const model = subagent.model ? modelLabel(modelChoiceOf({ provider: subagent.provider ?? '', model: subagent.model })) : null
-  const label = [subagent.provider, model].filter(Boolean).join(' · ')
-  return label || null
+  if (!subagent.model?.trim()) return null
+  return modelLabel(resolveModelChoice({ provider: subagent.provider ?? '', model: subagent.model }), { short: true }) || null
 }
 
 /** The error of a daemon that does not know the method (the code survives the socket; over IPC only the message does). */

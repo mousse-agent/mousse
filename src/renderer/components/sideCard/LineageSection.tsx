@@ -79,7 +79,7 @@ function LineageRow({ subagent, now, inheritedProvider, onOpen, onReveal, onStop
   const running = isRunningSubagent(subagent)
   // A native subagent runs inside the thread's own process: only the thread's Stop ends it.
   const stoppable = running && !subagent.native
-  const model = lineageModelLabel(subagent)
+  const model = subagent.native ? (subagent.nativeLabel ?? null) : lineageModelLabel(subagent)
   return (
     <li className="lineage-item">
       <button

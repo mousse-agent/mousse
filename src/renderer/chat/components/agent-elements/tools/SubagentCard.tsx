@@ -13,6 +13,7 @@ import { GenericTool } from "./generic-tool";
 import { toolRegistry } from "./tool-registry";
 import { useInheritedProvider, useSubagentCard, useSubagentCards } from "./subagent-cards-context";
 import { useSubagentRevealSeq } from "../../../../stores/chatNavigationStore";
+import { nativeSubagentLabel } from "../../../../components/sideCard/lineageLogic";
 import {
   cardElapsedLabel,
   cardGroupElapsedLabel,
@@ -219,7 +220,7 @@ export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inh
         disabled={!expandable}
         onClick={() => setOpen(!open)}
       >
-        <SubagentRowBody card={card} result={result} label={card.native?.agentType ?? null} inheritedProvider={inheritedProvider} />
+        <SubagentRowBody card={card} result={result} label={nativeSubagentLabel(card.native)} inheritedProvider={inheritedProvider} />
         {elapsed && <span className="subagent-card-elapsed">{elapsed}</span>}
         {expandable && <IconChevronDown className="subagent-card-chevron ui-collapse-chevron" data-open={open || undefined} aria-hidden="true" />}
       </button>
