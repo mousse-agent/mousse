@@ -224,7 +224,7 @@ it.each(['note', 'answer'] as const)('an owner %s resets the work wait chain', a
   const next = await start(f, workId, 2)
   if (input === 'note') f.bots.tools.work.note(botId, workId, 'Check the changelog too.', chat.id)
   else {
-    f.bots.askOwner(botId, workId, { question: 'Which release?', choices: ['A', 'B'] })
+    f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
     await finish(f, next.payload, 'completed', { text: '' })
     await f.bots.service.answerQuestion({ botId, questionId: f.store.workQuestion(workId)!.id, choice: 'A', clientRequestId: 'chain-answer' })
     await flush()
