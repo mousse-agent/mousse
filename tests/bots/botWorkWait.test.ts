@@ -195,19 +195,11 @@ it('Pause preserves a wait and treats its due work like an answered question', a
   expect(f.store.dispatches(workId)).toHaveLength(2)
   expect(f.store.registry(botId)?.pausedReason).toBe('owner')
 })
-it.each(['plain', 'note', 'allowed permission'] as const)('always explains a completed wait alongside %s', async extra => {
+it.each(['plain', 'note'] as const)('always explains a completed wait alongside %s', async extra => {
   const { workId, turn, chat } = await work()
   await wait(workId)
   await finish(f, turn.payload, 'completed', { text: '' })
   if (extra === 'note') f.bots.tools.work.note(botId, workId, 'Also check the changelog.', chat.id)
-  if (extra === 'allowed permission') {
-    // The engine's permission continuation path supplies this list to the shared prompt builder.
-    const row = f.store.activation(workId)!
-    const rule = (await import('../../src/mms/bots/activation/workWaiting')).workWaitRule(row)!
-    const context = rule.continuation(row, { store: () => f.store })
-    const prompt = (f.bots as any).continuationPrompt(row, { ...context, allowed: ['run commands'], answers: [] })
-    expect(prompt).toContain('Check again with the evidence already read.')
-  }
   f.clock.now += 60 * 60_000
   await f.bots.deliverDueReminders()
   await flush()

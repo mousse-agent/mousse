@@ -2163,7 +2163,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.pumpLater(row.botId)
   }
 
-  private readonly workWaitLookups: WorkWaitLookups = { store: () => this.store, clock: clockTime }
+  private readonly workWaitLookups: WorkWaitLookups = { store: () => this.store }
 
   private readonly workWaitFacts: WorkWaitFacts = {
     timerExists: (row) => { const wait = this.store.workWait(row.id); return Boolean(wait && wait.status !== 'cancelled') },
@@ -5112,7 +5112,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; waited?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     if (this.cancelRemovedScheduleRun(row)) return 'none'
@@ -5184,7 +5184,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return { kind: wall.kind === 'wall' ? 'wall' : wall.kind === 'blocked' ? 'blocked' : 'none' }
       }
       const waits = current.trigger.kind === 'work' ? this.store.unreadWorkWaits(current.id) : []
-      const waited = waits.length ? waits.map(wait => workWaitInput(wait, clockTime)).join('\n\n') : undefined
+      const waited = waits.length > 0
       const n = this.store.nextDispatchN(row.id)
       const neverRan = previous && previousRun && !previousRun.activeAttemptId ? previous.prompt.text : undefined
       // A run takes what the owner added since its last dispatch with whatever continues it.
@@ -5262,7 +5262,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; restart?: boolean; reload?: boolean; ownerText?: string; waited?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -5300,15 +5300,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const events = input.workEvents.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n')
       const allowed = input.allowed?.filter(title => !input.answers.some(answer => answer.status !== 'denied' && this.chat.card(answer).title === title))
       const additions = allowed?.length ? `\n\n[Mousse] The owner also allowed you to ${allowed.join(' and ')}; you have it now.` : ''
-      return `[Mousse] ${input.waited !== undefined ? 'Your wait is over.' : 'Updates to your work.'}${interrupted}\n\n${events}${additions}\n\nContinue where you left off. ${BOT_RUN_REPORT_LINE}`
-    }
-    if (input.waited !== undefined) {
-      const additions = [
-        input.allowed?.length ? `[Mousse] The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.` : '',
-        input.answered ?? '', input.notes ?? '',
-        input.answers.length ? input.answers.map(answerLine).join(' ') : ''
-      ].filter(Boolean).join('\n\n')
-      return `[Mousse] Your wait is over.${interrupted}\n\n${input.waited}${additions ? `\n\n${additions}` : ''}\n\nContinue where you left off. ${BOT_RUN_REPORT_LINE}`
+      return `[Mousse] ${input.waited ? 'Your wait is over.' : 'Updates to your work.'}${interrupted}\n\n${events}${additions}\n\nContinue where you left off. ${BOT_RUN_REPORT_LINE}`
     }
     // A chat turn the owner wrote to again while it answered: their messages, answered as part of the same conversation.
     if (row.lane === 'chat' && input.notes) {

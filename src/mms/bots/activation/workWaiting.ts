@@ -5,7 +5,6 @@ import { questionGoneText, QUESTION_WORK_WAITING_TEXT } from '../../../shared/bo
 
 /** Read access for line text, continuation context and owner controls. Future wait/action readers belong here. */
 export interface WorkWaitLookups {
-  clock?: (iso: string) => string
   store(): Pick<BotStore, 'workQuestion' | 'openAsks' | 'get' | 'workWait'>
 }
 export type WorkWaitLine = Pick<BotWorkItem, 'status' | 'waitsFor' | 'wait'> & { detail?: string }
@@ -29,7 +28,7 @@ interface WaitRule {
   endReason: string
   endLine(title: string): string
   resume: 'continue' | 'usageReset'
-  continuation(row: BotActivationRow, facts: WorkWaitLookups): { questionAnswered?: boolean; moreRoom?: boolean; usageReset?: boolean; waited?: string }
+  continuation(row: BotActivationRow, facts: WorkWaitLookups): { questionAnswered?: boolean; moreRoom?: boolean; usageReset?: boolean }
   continueRefusal(row: BotActivationRow): string
   waitsOnOwner(row: BotActivationRow, facts: WorkWaitLookups): boolean
   needsOwner(row: BotActivationRow, facts: WorkWaitLookups): boolean
@@ -56,11 +55,8 @@ export const WORK_WAIT_RULES = {
     ready: (row, _facts) => row.endReason === 'wait_ready',
     stranded: (row, facts) => !facts.timerExists(row),
     endReason: 'wait_gone', endLine: nothingToWaitFor, resume: 'continue',
-    continuation: (row, facts) => {
-      const wait = facts.store().workWait(row.id)
-      if (!wait) return { waited: '' }
-      return { waited: workWaitInput(wait, facts.clock ?? ((iso: string) => iso)) }
-    },
+    // Unread wait events are assembled from storage inside continueWith, independent of this park reason.
+    continuation: (_row, _facts) => ({}),
     checkBeforeResume: true,
     continueRefusal: (_row) => 'This work carries on by itself when its time or event comes, or when a slot is free. Stop it if it is no longer needed.',
     waitsOnOwner: (_row, _facts) => false, needsOwner: (_row, _facts) => false,
