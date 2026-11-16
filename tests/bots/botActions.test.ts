@@ -344,3 +344,23 @@ it.each(['held', 'stopped', 'switch_off'] as const)('R1 summaries and lists surv
   if (state === 'stopped') expect(summary.needsOwner).not.toBe(true)
   else expect(summary).toMatchObject({ needsOwner: true, stateText: 'Wants to send: Send this action?' })
 })
+it.each(['plain', 'note', 'permission'] as const)('R2 carries the action outcome beside %s continuation context', async context => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  if (context === 'note') expect(f.bots.noteWork(t.botId, t.workId, 'Also record the delivery.')).toBe('noted')
+  if (context === 'permission') {
+    // A permission refused earlier in the work is now granted; use a starter permission to keep this fixture focused.
+    ;(f.bots as unknown as { refused(id: string, permission: object): void }).refused(t.workId, { tool: 'web_fetch' })
+  }
+  await finish(f, t.work.payload)
+  await flush()
+  const prompt = f.store.lastMainDispatch(t.workId)!.prompt.text
+  expect(prompt).toContain('Your owner sent it. The tool answered:')
+  expect(prompt).toContain('delivered')
+  expect(prompt).not.toContain('"text":')
+  expect(prompt).not.toContain('The owner asked you to continue.')
+  if (context === 'note') expect(prompt).toContain('Also record the delivery.')
+  if (context === 'permission') expect(prompt).toContain('allowed')
+})
