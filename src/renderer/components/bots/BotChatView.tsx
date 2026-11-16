@@ -21,6 +21,7 @@ import { BotEmojiButton } from './BotEmoji'
 import { BotAskReplies } from './BotAskReplies'
 import { BotReminderReplies } from './BotReminderReplies'
 import { BotQuestionReplies } from './BotQuestionReplies'
+import { BotSecretRequests } from './BotSecretRequests'
 import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
@@ -817,6 +818,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       <div className="chat-input-area bot-input-area" data-applet-composer>
         {(unseen || away) && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />{unseen ? 'New message' : 'Go to latest'}</button>}
         {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
+        {/* A secret the bot asked for: typed into its private card, never into the chat. */}
+        <BotSecretRequests homeThreadId={bot.homeThreadId} />
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
           <ComposerNoticeSlot />

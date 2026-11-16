@@ -158,6 +158,51 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.pi.turns).toHaveLength(0)
   })
 
+  // Bot/thread parity: what a thread's agent steers, queues and answers with, the bot does as itself, in the thread's own
+  // mode (or its owner's device's), and only with "use your threads" held by its turn.
+  const service = (w: ReturnType<typeof world>) => w.d.orch as unknown as {
+    queueCommandAsAgent(threadId: string, command: Record<string, unknown>, options: Record<string, unknown>): { replayed: boolean; item?: { content: string; permissionMode?: PermissionMode; origin?: { kind: string; threadId?: string } } }
+    queueSnapshot(threadId: string): { revision: string; items: Array<{ content: string; permissionMode?: PermissionMode; origin?: { kind: string; threadId?: string } }> }
+    steerRunAsAgent(threadId: string, runId: string, text: string, options: Record<string, unknown>): Promise<{ status: string; reason?: string }>
+    answerApprovalAsAgent(threadId: string, requestId: string, answers: Record<string, string>, options: Record<string, unknown>): { ok: boolean; reason?: string }
+    scheduledCreatorLimits(caller: { threadId: string; runId: string }): { permissionCeiling: PermissionMode }
+  }
+
+  it('it queues a message in a thread as the bot, in the thread\'s own mode, and steers as itself; a turn that may only read does neither', async () => {
+    const w = world()
+    const target = w.d.store.createThread('Target', w.project.id)
+    const s = service(w)
+    // The item as queued (an idle thread takes it at once).
+    const { item } = s.queueCommandAsAgent(target.id, { op: 'enqueue', content: 'Then run the tests.', mode: 'agent', expectedRevision: s.queueSnapshot(target.id).revision }, { clientRequestId: `queue_enqueue:${w.chat.id}:q1`, actor: w.actor })
+    // Labelled as the bot's words, from its chat thread, with no mode narrower than the thread's own (Full access stands for it).
+    expect(item!.content.startsWith(`${BOT_MESSAGE_PREFIX} "alpha".`)).toBe(true)
+    expect(item).toMatchObject({ permissionMode: 'full', origin: { kind: 'agent', threadId: w.chat.id } })
+    // A steer goes through to the engine as the bot's (no `bot_thread` refusal): here there is no such run to steer.
+    const steered = await s.steerRunAsAgent(target.id, 'run-none', 'Use staging.', { clientRequestId: `thread_steer:${w.chat.id}:s1`, actor: w.actor })
+    expect(steered.reason).not.toBe('bot_thread')
+    // Its scheduled jobs run in Full access, or no wider than its owner's device; a turn that may not act gets Ask.
+    expect(s.scheduledCreatorLimits({ threadId: w.chat.id, runId: w.actor.runId })).toEqual({ permissionCeiling: 'full' })
+
+    const reader = world({ held: BOT_THREAD_READ_TOOLS })
+    const other = reader.d.store.createThread('Target', reader.project.id)
+    const r = service(reader)
+    expect(() => r.queueCommandAsAgent(other.id, { op: 'enqueue', content: 'x', mode: 'agent', expectedRevision: r.queueSnapshot(other.id).revision }, { clientRequestId: `queue_enqueue:${reader.chat.id}:q1`, actor: reader.actor })).toThrow(/only in its own turns/)
+    await expect(r.steerRunAsAgent(other.id, 'run-none', 'x', { clientRequestId: `thread_steer:${reader.chat.id}:s1`, actor: reader.actor })).rejects.toThrow(/only in its own turns/)
+    // An approval waiting there stays the owner's: this turn may not answer it.
+    void reader.orch.questions.requestAnswers([{ id: 'permission', prompt: 'Run it?', options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }] }], other.id, { approval: { action: 'edit', permissionKey: 'mousse:integrate', options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }] } })
+    const pending = (reader.orch.questions.listPendingForThread(other.id) as Array<{ requestId: string }>)[0]!.requestId
+    expect(() => r.answerApprovalAsAgent(other.id, pending, { permission: 'allow' }, { clientRequestId: `approval_respond:${reader.chat.id}:a1`, actor: reader.actor })).toThrow(/only in its own turns/)
+    expect(reader.orch.questions.listPendingForThread(other.id)).toHaveLength(1)
+    expect(r.queueSnapshot(other.id).items).toHaveLength(0)
+  })
+
+  it('the jobs it makes from a turn its owner\'s other device started run no wider than that device, and from a turn that may not act, in Ask', async () => {
+    const limited = world({ owner: { limit: 'accept_edits' } })
+    expect(service(limited).scheduledCreatorLimits({ threadId: limited.chat.id, runId: limited.actor.runId })).toEqual({ permissionCeiling: 'accept_edits' })
+    const notOwner = world({ owner: null })
+    expect(service(notOwner).scheduledCreatorLimits({ threadId: notOwner.chat.id, runId: notOwner.actor.runId })).toEqual({ permissionCeiling: 'ask' })
+  })
+
   it('a turn that is not the bot\'s registered one starts nothing', async () => {
     const w = world()
     const stranger = { ...w.actor, runId: 'run:not-registered' }

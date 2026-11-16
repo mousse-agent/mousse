@@ -44,7 +44,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -516,6 +516,13 @@ interface LiveDispatch {
   /** What its deadline does: a budget wall, or a wait for the internet when it made no progress. */
   fire: () => void
 }
+
+/**
+ * What a subagent of a bot's work is compiled with: what a thread's subagent may use of the bot's tools, within the grant
+ * (`subagentManifest`). Its work is a run, which may act on the owner's threads, so the subagent may too; the profiler and
+ * its own task list. Nothing that asks the owner, and none of the bot's own tools.
+ */
+const SUBAGENT_BOT_TOOLS = { escalate: false, consult: false, subagent: true, threads: 'all', profiler: true, tasks: true } as const
 
 /** What a compiled turn started with that a runtime opens once for the whole turn (`LiveDispatch.powers`). */
 function powersOf(permissions: BotPermissions): { shell: boolean } {
@@ -2563,8 +2570,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // The owner's threads: reading in every lane; starting, messaging, stopping and archiving in a turn `threadsActOf`
       // allows (never the bot's first message or a turn another bot's message started). The profiler: in both lanes
-      // (the chat without its minutes-long watch). Mousse's look: in both lanes.
-      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: threadsActOf(row) ? 'all' : 'read', profiler: true, themes: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      // (the chat without its minutes-long watch). Mousse's look: in both lanes. The owner's scheduled jobs, secrets and
+      // quick actions (`owner`): in both lanes, making and changing jobs only where it may act on threads. Its task list.
+      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: threadsActOf(row) ? 'all' : 'read', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -5857,7 +5865,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const definition = this.host.definitions.revision(row.botId, row.revision)
     const grant = this.store.activeGrant(row.botId)
     if (!models || !definition || !grant) return { refused: `${name} can't run a subagent here. ${SUBAGENT_NOTHING_STARTED}` }
-    const compiled = this.compileNeutral(definition.main, this.subagentManifestOf(row, definition, grant.manifest), { escalate: false, consult: false, subagent: true }, row.botId)
+    const compiled = this.compileNeutral(definition.main, this.subagentManifestOf(row, definition, grant.manifest), SUBAGENT_BOT_TOOLS, row.botId)
     if (!compiled.ok) return { refused: `${compiled.error.reason ?? compiled.error.message} ${SUBAGENT_NOTHING_STARTED}` }
     let resolved: BotModelResolution
     try {
@@ -5991,7 +5999,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       nativeNames: (tools) => this.nativeNames(selection.instanceId, tools),
       remaining: { ...limitsOf(effective), deadlineMs: Math.max(1, deadline - this.now()) },
       filesFolder: this.filesFolder(row.botId),
-      botTools: { escalate: false, consult: false, subagent: true }
+      botTools: SUBAGENT_BOT_TOOLS
     })
     if (!compiled.ok) return { refused: `A subagent can't run there: ${compiled.error.reason ?? compiled.error.message} ${SUBAGENT_NOTHING_STARTED}` }
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -7153,6 +7161,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (!botId) return undefined
     return { botId, name: this.ownerOf(threadId) ?? botId }
+  }
+
+  /** The chat thread of the bot `threadId` belongs to (`BotThreads.homeOf`). Never throws. */
+  homeOf(threadId: string): string | undefined {
+    const bot = this.botOf(threadId)
+    if (!bot) return undefined
+    try {
+      return this.store.registry(bot.botId)?.homeThreadId ?? undefined
+    } catch {
+      return undefined
+    }
   }
 
   /**
@@ -9636,10 +9655,14 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
     // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
     if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool) || authority.appTools.has(asked.tool)
     // The browser is held as its tools, the owner's threads as theirs (reading them, in every lane that has them), and the
-    // profiler as its overview and Mousse's look as theme_read (in both lanes).
+    // profiler as its overview, Mousse's look as theme_read, scheduled jobs as their list, secrets as secret_request and
+    // quick actions as create_quick_action (in both lanes).
     if (asked.tool === BOT_BROWSER_PERMISSION) return authority.appTools.has('browser_open')
     if (asked.tool === BOT_PROFILER_PERMISSION) return authority.appTools.has('profiler_overview')
     if (asked.tool === BOT_THEMES_PERMISSION) return authority.appTools.has('theme_read')
+    if (asked.tool === BOT_SCHEDULES_PERMISSION) return authority.appTools.has('schedule_list')
+    if (asked.tool === BOT_SECRETS_PERMISSION) return authority.appTools.has('secret_request')
+    if (asked.tool === BOT_QUICK_ACTIONS_PERMISSION) return authority.appTools.has('create_quick_action')
     return asked.tool === BOT_THREADS_PERMISSION ? authority.appTools.has('thread_list') : authority.appTools.has(asked.tool)
   }
   if ('skill' in asked) return authority.skills.has(asked.skill)

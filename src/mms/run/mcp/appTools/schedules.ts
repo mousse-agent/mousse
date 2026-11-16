@@ -8,7 +8,7 @@ import { cronProblem, minCronGapMinutes } from '../../../scheduled/computeNextRu
 import { asCreateScheduledJobInput, asScheduledJobPatch } from '../../../protocol/validators'
 import type { RunEngine } from '../../RunEngine'
 import type { AgentScheduleHost, AppToolHost } from './host'
-import { lineageRelation } from './thread'
+import { botThreadReach, lineageRelation } from './thread'
 import { CLIENT_REQUEST_ID_SCHEMA, json, McpToolError, type MousseTool, type ToolCallContext } from './types'
 
 /** The prompt `schedule_list` returns is cut to this many characters. */
@@ -163,8 +163,13 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
   }
   const projectOf = (job: Pick<ScheduledJob, 'projectId' | 'threadId'>): string | undefined =>
     job.projectId ?? (job.threadId ? host.threadMeta?.(job.threadId)?.projectId : undefined)
+  /**
+   * Whose jobs the caller makes and sees: its own thread's. A personal bot's are the bot's ("schedule work in your
+   * threads"), whichever of its turns made them: they are filed under its chat thread.
+   */
+  const ownerOf = (ctx: ToolCallContext): string => (ctx.turn.bot ? host.botHomeOf?.(ctx.caller.threadId) ?? ctx.caller.threadId : ctx.caller.threadId)
   /** The jobs an agent may see and change: the ones made through these tools by its own thread. A person's job is never one. */
-  const visible = (job: ScheduledJob, ctx: ToolCallContext): boolean => job.createdBy?.threadId === ctx.caller.threadId
+  const visible = (job: ScheduledJob, ctx: ToolCallContext): boolean => job.createdBy?.threadId === ownerOf(ctx)
   /** The thread that delegated `threadId` as a subagent; undefined for a thread that is no one's subagent (a fork is not one). */
   const subagentParent = (threadId: string): string | undefined => {
     const lineage = engine.delegations.getLineage(threadId)
@@ -191,8 +196,13 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     if (!job || !visible(job, ctx)) throw new McpToolError('mousse_scope_denied', `No scheduled job ${id} that you made.`)
     return job
   }
-  /** Creating or starting a job, and changing what one does, is for a turn a person started. Everything else is refused. */
+  /**
+   * Creating or starting a job, and changing what one does, is for a turn a person started. Everything else is refused. A
+   * personal bot's turn holds these tools only where it may act on its owner's threads (its work, or a chat turn its
+   * owner's message started: `compileBotThread`), which the registry checked against its grant.
+   */
   const requirePerson = (ctx: ToolCallContext, what: string): void => {
+    if (ctx.turn.bot) return
     let person = false
     try {
       person = schedules.startedByPerson(ctx.caller)
@@ -221,7 +231,11 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
   const planOnly = (ctx: ToolCallContext): boolean => ctx.caller.modeCeiling === 'plan' || ctx.turn.modeCeiling === 'plan'
   /** A thread a job may be bound to: the caller's own or one in its delegation lineage; never a bot's, never an archived one. */
   const checkTarget = (threadId: string, ctx: ToolCallContext): void => {
-    if (threadId !== ctx.caller.threadId && lineageRelation(engine, ctx.caller.threadId, threadId) === null)
+    // A personal bot binds a job to one of its owner's threads it may reach (`botThreadReach`), never its own.
+    if (ctx.turn.bot) {
+      const reach = botThreadReach(host, engine, ctx.caller.threadId, threadId)
+      if ('refused' in reach) throw new McpToolError('mousse_scope_denied', reach.refused)
+    } else if (threadId !== ctx.caller.threadId && lineageRelation(engine, ctx.caller.threadId, threadId) === null)
       throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not this thread or one of its lineage; a job can only be bound to those.`)
     const thread = host.threadMeta?.(threadId)
     if (!thread) throw new Error(`Thread ${threadId} was not found.`)
@@ -253,8 +267,8 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     workspace: job.workspace ?? null,
     ...(job.repeat ? { repeat: job.repeat } : {}),
     createdByAgent: Boolean(job.createdBy),
-    createdByYou: job.createdBy?.threadId === ctx.caller.threadId,
-    ...(job.createdBy && job.createdBy.threadId !== ctx.caller.threadId ? { createdBySubagent: job.createdBy.threadId } : {}),
+    createdByYou: job.createdBy?.threadId === ownerOf(ctx),
+    ...(job.createdBy && job.createdBy.threadId !== ownerOf(ctx) ? { createdBySubagent: job.createdBy.threadId } : {}),
     ...(job.expiresAt ? { expiresAt: job.expiresAt } : {}),
     ...(job.pausedReason ? { pausedReason: job.pausedReason } : {}),
     ...(job.permissionCeiling ? { permissionCeiling: job.permissionCeiling } : {}),
@@ -306,6 +320,22 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         const limits = limitsNow()
         return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs a turn a person started: a job, another agent, a subagent or a remote send cannot create jobs; the first time, the person is asked and the job is made only if they allow it). The job outlives this run. It runs no wider than you do: its runs get at most your permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
       },
+      // A personal bot ("schedule work in your threads"): its owner allowed its jobs once, and it names where they run.
+      get botDescription() {
+        const limits = limitsNow()
+        return `Create a scheduled job for your owner that runs a prompt later or on a cadence, as Mousse's Scheduled jobs do: a turn in one of your owner's threads (threadId) or a new thread per run in one of their projects (projectId). Use it when your owner asks for work in their threads on a schedule; for something only you do at a time, use bot_schedule_add. Your owner allowed this, so nothing asks first. Its runs work in Full access (or no wider than the device your owner wrote from). Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless your owner extends it. You see and change only the jobs you made. Use schedule_run to start it at once.`
+      },
+      get botInputSchema() {
+        const schema = this.inputSchema as { properties: Record<string, unknown> }
+        return {
+          ...schema,
+          properties: {
+            ...schema.properties,
+            threadId: { type: 'string', description: 'Run in this thread of your owner\'s (thread_list).' },
+            projectId: { type: 'string', description: 'Or a new thread per run in this project of your owner\'s (thread_list\'s projects).' }
+          }
+        }
+      },
       get inputSchema() {
         return {
           type: 'object',
@@ -326,12 +356,21 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       class: 'mutation',
       handler: (args, ctx) => {
         requirePerson(ctx, 'schedule_create')
-        refuseForbidden(args)
-        const requestKey = `schedule_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        // A personal bot has no project of its own: a job that starts a new thread per run names the project. Any other
+        // caller's job takes its thread's project, so naming one is refused as before.
+        const bot = Boolean(ctx.turn.bot)
+        const { projectId: _named, ...checkedArgs } = args
+        refuseForbidden(bot ? checkedArgs : args)
+        if (bot && args.projectId !== undefined && (typeof args.projectId !== 'string' || !args.projectId.trim()))
+          throw new Error('projectId must be one of your owner\'s projects (thread_list).')
+        const botProject = bot && typeof args.projectId === 'string' ? args.projectId.trim() : undefined
+        const owner = ownerOf(ctx)
+        const requestKey = `schedule_create:${owner}:${toolRequestId(args, ctx)}`
         // A retry of a call that already made its job returns that job and changes nothing, however many jobs exist.
         const earlier = schedules.list().find((job) => job.createdBy?.requestId === requestKey)
         if (earlier) return json({ job: summary(earlier, ctx), replayed: true })
-        const input = asCreateScheduledJobInput(without(args, 'clientRequestId'))
+        const { projectId: _botProject, ...rest } = args
+        const input = asCreateScheduledJobInput(without(rest, 'clientRequestId'))
         const refusal = scheduleRefusal(input.schedule, limitsNow().minIntervalMinutes) ?? promptRefusal(input.prompt)
         if (refusal) throw new Error(refusal)
         if (input.workspace?.kind === 'worktree') throw new Error('A job an agent creates cannot run in an existing worktree.')
@@ -343,10 +382,14 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         const caller = host.threadMeta?.(ctx.caller.threadId)
         if (!caller) throw new Error(`Thread ${ctx.caller.threadId} was not found.`)
         if (!input.threadId && caller.localOnly === true) throw new Error(PRIVATE_JOB_REFUSAL)
-        let projectId = caller.projectId
+        let projectId = bot ? botProject : caller.projectId
         if (input.threadId) {
           checkTarget(input.threadId, ctx)
           projectId = host.threadMeta?.(input.threadId)?.projectId
+        } else if (bot && !botProject) {
+          throw new Error('Name where its runs happen: threadId (one of your owner\'s threads) for a turn there, or projectId (one of their projects) for a new thread per run.')
+        } else if (bot && !host.listProjects?.().some((project) => project.id === botProject)) {
+          throw new Error(`There is no project ${botProject}.`)
         }
         const candidate = { ...(input.threadId ? { threadId: input.threadId } : {}), ...(projectId ? { projectId } : {}), ...(input.selection ? { selection: input.selection } : {}), ...(mode ? { mode } : {}), ...(input.workspace ? { workspace: input.workspace } : {}) }
         const checked = schedules.validate(candidate)
@@ -358,11 +401,12 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
           ...candidate,
           ...(checked.selection ? { selection: checked.selection } : {}),
           ...(input.repeat ? { repeat: input.repeat } : {}),
-          createdBy: { threadId: ctx.caller.threadId, runId: ctx.caller.runId, requestId: requestKey },
+          createdBy: { threadId: owner, runId: ctx.caller.runId, requestId: requestKey },
           permissionCeiling: limits.permissionCeiling
         }
         // The first time, the person is asked; the job is made only when they allow it, which also lets this thread add more.
-        if (!allowed(ctx.caller.threadId)) {
+        // A personal bot's owner allowed "schedule work in your threads" once: that is their Allow for the bot's jobs.
+        if (!bot && !allowed(ctx.caller.threadId)) {
           const ask = schedules.askFirst({ threadId: ctx.caller.threadId, requestKey, job })
           return json({
             waiting: true,

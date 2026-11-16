@@ -34,6 +34,12 @@ export interface BotThreads {
    * (absent: this computer's own window). Undefined for any other turn. Never throws.
    */
   ownerTurn?(activationId: string): { limit?: PermissionMode } | undefined
+  /**
+   * The bot's chat thread (its home) for any of its threads (its chat, its work, a subagent, a consult): what it owns as
+   * one bot, whichever turn made it (the scheduled jobs it made, the secrets its owner gave it). Undefined when the thread
+   * is no bot's. Never throws.
+   */
+  homeOf?(threadId: string): string | undefined
 }
 
 /**

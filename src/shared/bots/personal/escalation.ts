@@ -1,7 +1,7 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
 import type { BotManifest } from './definition'
-import { BOT_BROWSER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
+import { BOT_BROWSER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -165,6 +165,9 @@ export function permissionText(permission: BotPermissionRequest): string {
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_THREADS_PERMISSION) return 'Use your threads'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_PROFILER_PERMISSION) return 'Use the profiler'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_THEMES_PERMISSION) return 'Change how Mousse looks'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_SCHEDULES_PERMISSION) return 'Schedule work in your threads'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_SECRETS_PERMISSION) return 'Use secrets you give it'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_QUICK_ACTIONS_PERMISSION) return 'Add quick actions'
   if ('tool' in permission) return `Use the tool \`${permission.tool}\``
   if ('path' in permission) return 'Use files on this computer'
   if ('skill' in permission) return `Use the skill *${permission.skill}*`
