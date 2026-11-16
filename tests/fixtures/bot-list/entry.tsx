@@ -27,7 +27,8 @@ const errors: string[] = []
 window.addEventListener('error', (event) => errors.push(event.message))
 window.addEventListener('unhandledrejection', (event) => errors.push(String(event.reason)))
 const frame = () => new Promise<void>((done) => requestAnimationFrame(() => done()))
-const rgb = (colour: string) => (colour.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number)
+/** Red, green, blue and alpha (1 when the colour has none). */
+const rgb = (colour: string) => { const [r, g, b, a = 1] = (colour.match(/[\d.]+/g) ?? []).map(Number); return [r!, g!, b!, a] }
 const rect = (element: Element) => { const r = element.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height } }
 const rows = () => [...document.querySelectorAll<HTMLButtonElement>('.chats-sidebar-content button[aria-label^="Message "]')]
 
@@ -59,7 +60,7 @@ function liveFace(attributes: Record<string, string>) {
   face.style.width = face.style.height = '36px'
   face.innerHTML = '<canvas class="bot-face-canvas"></canvas><span class="bot-face-z" style="font-size:8px">z</span>'
   const z = face.querySelector('.bot-face-z')!
-  const measured = { canvasOpacity: Number(getComputedStyle(face.querySelector('canvas')!).opacity), zOpacity: Number(getComputedStyle(z).opacity), zDisplay: getComputedStyle(z).display, z: rect(z), face: rect(face) }
+  const measured = { canvasOpacity: Number(getComputedStyle(face.querySelector('canvas')!).opacity), zOpacity: Number(getComputedStyle(z).opacity), zAnimation: getComputedStyle(z).animationName, zDisplay: getComputedStyle(z).display, z: rect(z), face: rect(face) }
   face.remove()
   return measured
 }
@@ -93,7 +94,12 @@ function liveFace(attributes: Record<string, string>) {
         }
       }),
       colours: { secondary: resolved('var(--text-secondary)'), warning: resolved('var(--warning)') },
-      live: { paused: liveFace({ 'data-state': 'paused' }), resting: liveFace({ 'data-state': 'paused', 'data-resting': 'true' }) },
+      live: {
+        paused: liveFace({ 'data-state': 'paused' }),
+        resting: liveFace({ 'data-state': 'paused', 'data-resting': 'true' }),
+        // Motion off (Animation speed Off or the OS setting): BotFace marks the face still.
+        restingStill: liveFace({ 'data-state': 'paused', 'data-resting': 'true', 'data-still': 'true' })
+      },
       sections: [...document.querySelectorAll<HTMLButtonElement>('.chat-section-heading h2 button')].map((button) => ({
         title: button.textContent,
         expanded: button.getAttribute('aria-expanded'),

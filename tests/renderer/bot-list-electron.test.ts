@@ -25,10 +25,10 @@ type Row = {
   z: { text: string; rect: Box; opacity: number } | null
   row: Box
 }
-type Live = { canvasOpacity: number; zOpacity: number; zDisplay: string; z: Box; face: Box }
+type Live = { canvasOpacity: number; zOpacity: number; zAnimation: string; zDisplay: string; z: Box; face: Box }
 type Measured = {
   sidebar: Box; rows: Row[]; colours: { secondary: number[]; warning: number[] }
-  live: { paused: Live; resting: Live }
+  live: { paused: Live; resting: Live; restingStill: Live }
   sections: Array<{ title: string; expanded: string; chevron: string }>
   newBot: boolean
 }
@@ -69,6 +69,7 @@ it('shows each bot’s state in coloured words with no status dots, idle bots as
     // and idle and paused read in the quiet grey of secondary text.
     const [r, g, b] = row('Busy').colour
     expect(b! > r! && r! > g!, all).toBe(true)
+    expect(open.colours.secondary[3], all).toBeLessThan(1)
     expect(row('Asking').colour, all).toEqual(open.colours.warning)
     const [ar, ag, ab] = row('Asking').colour
     expect(ar! > ag! && ag! > ab!, all).toBe(true)
@@ -91,10 +92,13 @@ it('shows each bot’s state in coloured words with no status dots, idle bots as
     }
     expect([row('Busy').z, row('Asking').z], all).toEqual([null, null])
 
-    // The live face's CSS: a resting face keeps its colour, a paused one fades; its z rests in view without motion.
+    // The live face's CSS: a resting face keeps its colour, a paused one fades. Its z drifts, and with motion off it
+    // rests in view.
     expect([open.live.resting.canvasOpacity, open.live.paused.canvasOpacity], all).toEqual([1, 0.6])
-    expect(open.live.resting.zDisplay, all).not.toBe('none')
-    expect(open.live.resting.zOpacity, all).toBeGreaterThan(0.5)
+    expect(open.live.resting.zAnimation, all).toBe('bot-face-z')
+    expect([open.live.restingStill.zAnimation, open.live.restingStill.zDisplay], all).toEqual(['none', 'block'])
+    expect(open.live.restingStill.zOpacity, all).toBeGreaterThan(0.5)
+    expect(open.live.restingStill.z.right <= open.live.restingStill.face.right + 1 && open.live.restingStill.z.width > 0, all).toBe(true)
 
     // Every section starts open, its chevron turned down; folding one hides its rows, keeps +, and turns its chevron
     // back, leaving the others open.
