@@ -211,7 +211,7 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       let settledPrefix = true
       let written = 0
       const heldDigests = options.asksFirstEnabled?.() === true && ref.activationId ? store.storedActionDigests(ref.activationId) : new Set<string>()
-      const maskArguments = heldDigests.size > 0
+      const maskArguments = options.asksFirstEnabled?.() === true
       for (let index = start; index < messages.length; index++) {
         const message = messages[index]!
         const partial = unsettled(message)
