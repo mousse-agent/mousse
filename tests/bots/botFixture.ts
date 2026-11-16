@@ -6,6 +6,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import type { BotDispatchEnd, BotJournalInput, BotModelProblem, BotPickMiss } from '../../src/mms/bots/seams'
@@ -77,7 +78,7 @@ export interface BotFixture {
   close(): void
 }
 
-export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> = {}): BotFixture {
+export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> & { realWipe?: boolean } = {}): BotFixture {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-p1-')))
   const profile = join(base, 'profile')
   mkdirSync(profile, { recursive: true })
@@ -179,7 +180,7 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> = {}): B
       reindex: async () => {},
       purge: async (botId) => { fixture.purged.push(botId) },
       forgetAll: () => 0,
-      wipeHistory: () => 0,
+      wipeHistory: (botId) => options.realWipe ? new BotMemoryStore({ db: store.db }).wipe(botId, true) : 0,
       reset: () => {}
     },
     clearContext: (threadId) => { fixture.cleared.push(threadId) },
