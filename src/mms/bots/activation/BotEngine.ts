@@ -2137,12 +2137,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The only transition that parks work and releases its run slot; called in the source's transaction. */
   private park(row: BotActivationRow, reason: WorkWaitReason, from: readonly BotActivationRow['status'][] = [row.status], marker: string = reason): boolean {
     if (!WORK_WAIT_RULES[reason].allows(row)) throw new Error(`Cannot park ${row.id} (${row.lane}/${row.trigger.kind}) for ${reason}`)
-    const parked = this.store.moveActivation(row.id, from, 'blocked', { endReason: marker })
-    if (parked && reason === 'waiting') {
-      const wait = this.store.workWait(row.id)
-      if (wait && Date.parse(wait.dueAt) <= this.now()) this.deliverWorkWaitInTx(wait)
-    }
-    return parked
+    return this.store.db.transaction(() => {
+      const parked = this.store.moveActivation(row.id, from, 'blocked', { endReason: marker })
+      if (parked && reason === 'waiting') {
+        const wait = this.store.workWait(row.id)
+        if (wait && Date.parse(wait.dueAt) <= this.now()) this.deliverWorkWaitInTx(wait)
+      }
+      return parked
+    })
   }
 
   /** Cleanup after parking commits. The source keeps its messages and turn-abort order. */
