@@ -26,7 +26,7 @@ async function setup(on: boolean, realServer = false, secondTool = false) {
   settings.experimental.botAsksFirst = on
   f.host.settings = { get: () => settings, set: () => undefined } as never
   const calls: unknown[] = []
-  const descriptor = { configRevision: 'revision-1', toolName: 'send', providerName: 'mail_send', inputSchema: { type: 'object' }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
+  const descriptor = { configRevision: 'revision-1', toolName: 'send', providerName: 'mail_send', inputSchema: { type: 'object', properties: Object.fromEntries(['password', 'token', 'access_token', 'client_secret', 'authorization', 'api_key', 'pin_password'].map(key => [key, { type: 'string' }])) }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
   const server = { installationId: 'mail', serverName: 'Mail', configDigest: 'config-1', failing: false, tools: [descriptor] }
   if (secondTool) server.tools.push({ ...descriptor, toolName: 'other', providerName: 'mail_other' })
   let manager: Pick<McpManager, 'callTool'> = { callTool: vi.fn(async (_name: string, args: Record<string, unknown>) => { calls.push(structuredClone(args)); return { content: [{ type: 'text', text: 'delivered' }] } as never }) }
@@ -658,4 +658,21 @@ it('A-limit keeps the sent outcome unread through a time wall until the resumed 
   expect(t.calls).toEqual([t.args])
   await start(f, t.workId, dispatch.n)
   expect((f.store as any).unreadWorkActions(t.workId)).toEqual([])
+})
+
+
+it('B-schema shows invented sensitive keys at every depth, including metadata array items', async () => {
+  const t = await setup(true)
+  Object.assign(t.descriptor.inputSchema.properties, { meta: { type: 'object', properties: { list: { type: 'array', items: { type: 'object', properties: { access_token: { type: 'string' } } } } } } })
+  Object.assign(t.args, { diary_token: 'Owner private diary at root', meta: { list: [{ diary_token: 'Owner private diary in array', access_token: 'declared-cursor' }], free: { password: 'Owner private freeform text' } } })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const shown = JSON.parse(a.args_json)
+  expect(shown.diary_token).toBe('Owner private diary at root')
+  expect(shown.meta.list[0].diary_token).toBe('Owner private diary in array')
+  expect(shown.meta.free.password).toBe('Owner private freeform text')
+  expect(JSON.stringify(shown.meta.list[0].access_token)).not.toContain('declared-cursor')
+  expect(JSON.parse(a.card_json!)).toMatchObject({ hasHiddenValues: true })
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
 })
