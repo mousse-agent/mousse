@@ -444,6 +444,8 @@ export const BOT_OFFLINE_POLL_MAX_MS = 60_000
 export const BOT_CHECKPOINT_EVERY_MS = 1_000
 
 /** What an answer to a limit ask did to the work that waited on it (`settleRoomInTx`). */
+type WorkContinuationEvent = { at: string; text: string } | { at: string; answer: BotEscalationRow }
+
 interface RoomSettled {
   ended: BotActivationRow[]
   continued: string[]
@@ -5194,6 +5196,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Work's question its owner answered (or that it goes on with its default for) goes with whatever continues it, once
       // (`read_at`).
       const answered = question?.status === 'answered' || question?.status === 'defaulted' ? this.workAnswerOf(question) : undefined
+      const workEvents: WorkContinuationEvent[] | undefined = durableWork ? [
+        ...waits.map(wait => ({ at: wait.dueAt, text: workWaitInput(wait, clockTime) })),
+        ...answers.map(answer => ({ at: answer.answeredAt ?? answer.createdAt, answer })),
+        ...(notes?.events ?? []),
+        ...(answered ? [{ at: question!.answeredAt ?? question!.createdAt, text: answered }] : [])
+      ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) : undefined
       // The line is kept with the answer, so forgetting the answer (or the question) finds this copy (`answer_json.sent`).
       if (answered) this.store.markAnswerSent(question!.id, n, answered, !durableWork)
       const dispatch = {
@@ -5202,7 +5210,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         kind: 'continue' as const,
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
-        prompt: { ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: question!.id } : {}) } } : {}), ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}), text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, waited, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
+        prompt: { ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: question!.id } : {}) } } : {}), ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}), text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, waited, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
         policyDigest: grant.digest,
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
@@ -5254,7 +5262,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; waited?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; restart?: boolean; reload?: boolean; ownerText?: string; waited?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -5288,6 +5296,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const interrupted = (calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${roleOf(call)} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
       : '') + this.stoppedSubagentsLine(row)
+    if (input.workEvents?.length) {
+      const events = input.workEvents.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n')
+      const allowed = input.allowed?.filter(title => !input.answers.some(answer => answer.status !== 'denied' && this.chat.card(answer).title === title))
+      const additions = allowed?.length ? `\n\n[Mousse] The owner also allowed you to ${allowed.join(' and ')}; you have it now.` : ''
+      return `[Mousse] ${input.waited !== undefined ? 'Your wait is over.' : 'Updates to your work.'}${interrupted}\n\n${events}${additions}\n\nContinue where you left off. ${BOT_RUN_REPORT_LINE}`
+    }
     if (input.waited !== undefined) {
       const additions = [
         input.allowed?.length ? `[Mousse] The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.` : '',
@@ -7795,7 +7809,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * transaction). A note the last turn took but never reported read may have reached the model already (`offeredNotes`;
    * after a restart, any note: what the process before knew is gone), so it says it may be a repeat.
    */
-  private workNotes(row: BotActivationRow, restart = false): { text: string; ids: number[] } | undefined {
+  private workNotes(row: BotActivationRow, restart = false): { text: string; ids: number[]; events?: Array<{ at: string; text: string }> } | undefined {
     // A note a live turn took and has not read yet is that turn's until it reads it or hands it back.
     const taken = new Set([...(this.live.get(row.id)?.steering.values() ?? [])].flatMap((entry) => entry.ids))
     const notes = this.store.pendingWorkNotes(row.id).filter((note) => !taken.has(note.id))
@@ -7811,6 +7825,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const lines = marked.map((note) => `- ${note}`)
     return {
       text: `The owner added while you worked:\n${lines.join('\n')}${repeats ? `\n${NOTE_REPEAT_LINE}` : ''}`,
+      events: notes.map((note, index) => ({ at: note.at, text: `The owner added while you worked:\n${lines[index]}${repeat(note.id) ? `\n${NOTE_REPEAT_LINE}` : ''}` })),
       ids
     }
   }
