@@ -4,7 +4,7 @@ import { botFixture, chatOf, createBot, runDispatch, T0, type BotFixture } from 
 let f: BotFixture
 let botId: string
 const MIN = 60_000
-beforeEach(async () => { f = botFixture(); ({ botId } = await createBot(f)) })
+beforeEach(async () => { f = botFixture({ realWipe: true }); ({ botId } = await createBot(f)) })
 afterEach(() => { vi.restoreAllMocks(); f.close() })
 
 it.each(['yesterday', '2000-01-01', '2026-02-30', '2030-13-01'])('refuses an unreadable or past until: %s', (until) => {
@@ -77,7 +77,7 @@ it.each([false, true])('projects the wording and end for say=%s', (say) => {
   expect(entry.label).toBe(detail.runs[0]!.label)
 })
 
-it('an unfinished scheduler claim retried after the stale cutoff keeps the first line and time', async () => {
+it.each([false, true])('an unfinished scheduler claim retried after the stale cutoff keeps its time (forget history: %s)', async wipe => {
   const { ScheduledJobStore, recordTickerHeartbeat } = await import('../../src/mms/scheduled/ScheduledJobStore')
   const { MousseConfigStore } = await import('../../src/mms/config/MousseConfigStore')
   const { ScheduledJobService } = await import('../../src/mms/scheduled/ScheduledJobService')
@@ -93,11 +93,15 @@ it('an unfinished scheduler claim retried after the stale cutoff keeps the first
   try {
     f.clock.now = T0 + 70 * MIN
     await scheduler.tickNow()
+    if (wipe) {
+      await f.bots.wipeMemory(botId, 'saved')
+      expect(chatOf(f, botId)).toEqual([])
+    }
     const claim = store.getJob(entry.jobId)!.runClaim!
     store.releaseClaim(entry.jobId, claim.token)
-    f.clock.now = T0 + 160 * MIN
+    f.clock.now = T0 + (wipe ? 80 : 160) * MIN
     await scheduler.tickNow()
-    expect(chatOf(f, botId).filter((row) => row.text.includes('Take your pills'))).toHaveLength(1)
+    expect(chatOf(f, botId).filter((row) => row.text.includes('Take your pills'))).toHaveLength(wipe ? 0 : 1)
     expect(store.getJob(entry.jobId)).toMatchObject({ lastRunAt: new Date(T0 + 60 * MIN).toISOString(), lastStatus: 'ok' })
     expect(store.getJob(entry.jobId)!.botSkip).toBeUndefined()
     expect(f.store.listActivations(botId).filter((row) => row.lane === 'run')).toEqual([])
@@ -207,4 +211,19 @@ it('an explicitly non-owner fixed line is kept paused with an actionable reason'
   expect(f.bots.runScheduledOccurrence({ botId, scheduleId: entry.scheduleId, say: 'Hello', ownerAsked: false, prompt: 'Say exactly: Hello', occurrenceAt: f.store.now() })).toEqual({ kind: 'skipped', reason: 'say_owner_required' })
   expect(chatOf(f, botId).some(row => row.text === 'Hello' && f.store.message(row.id)?.tell === 'now')).toBe(false)
   expect(f.scheduler.getJob(entry.jobId)).toMatchObject({ state: 'paused', bot: { say: 'Hello', ownerAsked: false }, pausedReason: expect.stringMatching(/owner|prompt/i) })
+})
+
+it('forget history keeps ended and said markers while clearing other history', async () => {
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say: 'Hello' }, 'owner')
+  f.scheduler.updateJob(entry.jobId, { expiresAt: new Date(T0 + 7 * MIN).toISOString() })
+  await f.bots.reconcileOnStartup()
+  await f.tickSchedules(new Date(T0 + 5 * MIN))
+  await f.tickSchedules(new Date(T0 + 8 * MIN))
+  expect(chatOf(f, botId).some(row => row.id.startsWith('bm_schedule_ended_'))).toBe(true)
+  f.store.run("INSERT OR REPLACE INTO bot_memory_state(bot_id,key,value) VALUES(?,?,?)", botId, `schedule-said:${entry.scheduleId}`, '"said"')
+  await f.bots.wipeMemory(botId, 'saved')
+  expect(chatOf(f, botId)).toEqual([])
+  for (const key of [`schedule-ended:${entry.jobId}`, `schedule-said:${entry.scheduleId}`]) expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id=? AND key=?', botId, key)).toBeDefined()
+  await f.tickSchedules(new Date(T0 + 9 * MIN))
+  expect(chatOf(f, botId)).toEqual([])
 })

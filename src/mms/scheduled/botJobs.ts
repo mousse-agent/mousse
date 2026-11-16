@@ -214,8 +214,8 @@ export class BotScheduleBook {
   }
 
   /** Completed schedules stay in Automations; upkeep writes their quiet end line once. */
-  ended(botId: string): Array<{ jobId: string; scheduleId: string; name: string; tellMe: TellMe; canWakeMe?: boolean }> {
-    return this.options.jobs.listJobs().filter((job) => job.bot?.botId === botId && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ jobId: job.id, scheduleId: job.bot!.scheduleId, name: job.name, tellMe: tellMeOf(job), ...(job.bot!.canWakeMe !== undefined ? { canWakeMe: job.bot!.canWakeMe } : {}) }))
+  ended(botId?: string): Array<{ botId: string; jobId: string; scheduleId: string; name: string; tellMe: TellMe; canWakeMe?: boolean }> {
+    return this.options.jobs.listJobs().filter((job) => job.bot && (botId === undefined || job.bot.botId === botId) && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ botId: job.bot!.botId, jobId: job.id, scheduleId: job.bot!.scheduleId, name: job.name, tellMe: tellMeOf(job), ...(job.bot!.canWakeMe !== undefined ? { canWakeMe: job.bot!.canWakeMe } : {}) }))
   }
 
   /** Every bot's schedules, oldest first. */

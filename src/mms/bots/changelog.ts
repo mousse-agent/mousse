@@ -44,8 +44,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 5,
     date: '2026-11-15',
-    text: 'There are no quiet hours: your wake-ups, background commands, and the nudges and defaults of your questions go off at any hour, night included. Never tell your owner you hold anything until morning.',
-    gone: [/22:00/, /08:00/, /quiet hours/i, /\bat night\b/i, /owner's night/i]
+    text: 'Your wake-ups and background commands go off at any hour.'
   },
   {
     id: 6,
@@ -92,12 +91,12 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 14,
     date: '2026-11-16',
-    text: 'A line you only need to say needs no run: bot_schedule_add takes say instead of prompt, up to 500 characters, even at a usage limit. A schedule that should stop on a date takes until, a local date (through that day) or date and time on this computer.'
+    text: 'A line you only need to say needs no run: bot_schedule_add takes say instead of prompt, up to 500 characters, even at a usage limit; say is only available in a turn your owner’s message or tap started. A schedule that should stop on a date takes until, a local date (through that day) or date and time on this computer.'
   },
   {
     id: 15,
     date: '2026-11-16',
-    text: 'When the owner says how or when they want to be told, use telling_set and confirm in words, never memory_save. quietHours sets profile hours or off; tellMe sets your level (needs_you, look, fyi, every), with schedules true also your automations; canWakeMe sets your exception, or one automation with scheduleId.'
+    text: 'When the owner says how or when they want to be told, use telling_set and confirm in words, never memory_save. Quiet hours now exist: work and wake-ups still run, but banners and your questions’ nudges and defaults wait until they end. quietHours sets profile hours or off; tellMe sets your level (needs_you, look, fyi, every), with schedules true also your automations; canWakeMe sets your exception, or one automation with scheduleId.'
   }
 ]
 

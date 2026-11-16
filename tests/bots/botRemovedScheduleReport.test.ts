@@ -126,3 +126,16 @@ it.each([false, true])('a live schedule still gets its wall card when another sc
   expect(f.store.activation(s.row.id)!.status).toBe('waiting_grant')
   expect(chatOf(f, botId).some(message => message.activationId === s.row.id && message.ask)).toBe(true)
 })
+
+it.each(['quiet', 'wake'] as const)('owner removal keeps the schedule telling for its final report: %s', async setting => {
+  const s = await scheduled()
+  f.book.setTelling(botId, { scheduleId: s.schedule.scheduleId, tellMe: setting === 'quiet' ? 'needs_you' : 'every', canWakeMe: true })
+  f.host.quietHoursFor = () => ({ end: f.clock.now + 60_000 } as any)
+  f.scheduler.deleteJob(s.schedule.jobId)
+  await finish(f, s.payload, 'completed', { text: 'Checked the price.' })
+  const report = chatOf(f, botId).find(row => row.activationId === s.row.id && row.kind === 'run_report')!
+  expect(report).toBeDefined()
+  const stored = f.store.message(report.id)!
+  expect(stored.tell).toBe(setting === 'quiet' ? 'later' : 'soon')
+  if (setting === 'wake') expect(stored.tellAt).toBe(stored.at)
+})

@@ -1,3 +1,4 @@
+import { tellMeOf, type ScheduledJob } from '../../src/shared/types'
 /**
  * A bot engine over a real `bots.db` and run database, with fakes for the Bot Phase 1 seams
  * (docs/plans/bot-architecture.md §7.1): the model resolver, the context packs and capture, the
@@ -6,6 +7,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import type { BotDispatchEnd, BotJournalInput, BotModelProblem, BotPickMiss } from '../../src/mms/bots/seams'
@@ -77,7 +79,7 @@ export interface BotFixture {
   close(): void
 }
 
-export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> = {}): BotFixture {
+export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> & { realWipe?: boolean } = {}): BotFixture {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-p1-')))
   const profile = join(base, 'profile')
   mkdirSync(profile, { recursive: true })
@@ -179,7 +181,7 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> = {}): B
       reindex: async () => {},
       purge: async (botId) => { fixture.purged.push(botId) },
       forgetAll: () => 0,
-      wipeHistory: () => 0,
+      wipeHistory: (botId) => options.realWipe ? new BotMemoryStore({ db: store.db }).wipe(botId, true) : 0,
       reset: () => {}
     },
     clearContext: (threadId) => { fixture.cleared.push(threadId) },
@@ -208,6 +210,9 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> = {}): B
   fixture.automationRuns = automationRuns
   fixture.host = host
   fixture.bots = new BotEngine(host)
+  scheduler.on('jobRemoved', (_id: string, job: ScheduledJob) => {
+    if (job.bot) fixture.bots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job), canWakeMe: job.bot.canWakeMe })
+  })
   scheduler.setBotRunner({ findOccurrence: (input) => fixture.bots.findScheduledOccurrence(input), runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
   scheduler.setTickHook((now) => fixture.bots.maintain(now))
   fixture.tickSchedules = async (now) => {

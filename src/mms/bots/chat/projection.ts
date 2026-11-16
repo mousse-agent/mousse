@@ -19,6 +19,10 @@ import { replyApplets } from './replyApplets'
 import { takeToolImages } from './toolImages'
 import { takeReplyCards } from './replyCards'
 import { WAKE_LINE_PREFIX, wakeEventLabel } from '../../../shared/bots/personal/wakes'
+
+function isServiceLine(id: string): boolean {
+  return ['bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX].some(prefix => id.startsWith(prefix))
+}
 import type { AppletReference } from '../../../shared/applets'
 
 /**
@@ -302,7 +306,7 @@ export class BotChatProjection {
         ...(input.activationId ? { activationId: input.activationId } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
         sourceKey: `bm:${id}`,
-        who: input.external ? 'tool' : input.author === 'owner' ? 'owner' : input.kind === 'error' || input.id?.startsWith('bm_schedule_ended_') ? 'mousse' : 'bot',
+        who: input.external ? 'tool' : input.author === 'owner' ? 'owner' : input.kind === 'error' || isServiceLine(id) ? 'mousse' : 'bot',
         ...(input.external ? { external: true } : {}),
         text: shown.journal || (input.error?.text ?? ''),
         json: {
@@ -364,7 +368,7 @@ export class BotChatProjection {
       kind: row.kind,
       // Reserved ids keep permission switch lines quiet after a restart without a message schema change.
       // A wake's line too: it says why the bot speaks unasked.
-      ...(row.kind === 'notice' && (row.id.startsWith('bm_permission_') || row.id.startsWith('bm_schedule_ended_') || row.id.startsWith('bm_schedule_done_') || row.id.startsWith(WAKE_LINE_PREFIX)) ? { systemLine: true as const } : {}),
+      ...(row.kind === 'notice' && isServiceLine(row.id) ? { systemLine: true as const } : {}),
       text: plain ? (row.text ? `${row.text}\n\n${plain}` : plain) : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
       ...(cards.length ? { cards } : {}),

@@ -1,7 +1,7 @@
 import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
 import type { SettingsStore } from '../../settings/SettingsStore'
-import { isTellMe } from '../../../shared/types'
+import { isTellMe, type TellMe } from '../../../shared/types'
 import { readBotTelling, tellingLine, type TellingChange } from '../../../shared/bots/personal/tellingSettings'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
@@ -758,7 +758,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
       const scheduleId = row.trigger.scheduleId
-      const tellMe = row.trigger.completed?.tellMe ?? this.host.schedules?.get(botId, scheduleId)?.tellMe
+      const tellMe = row.trigger.completed?.tellMe ?? row.trigger.removedTelling?.tellMe ?? this.host.schedules?.get(botId, scheduleId)?.tellMe
         ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === scheduleId)?.tellMe
       return tellMe ? !tellMeNotifies(tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
@@ -1566,9 +1566,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.closed) return
     this.retryCompletedScheduleRemovals()
     if (this.removedScheduleSweepPending) this.tryDropRemovedScheduleRuns()
+    let endedSchedules: ReturnType<BotScheduleBook['ended']> = []
+    try { endedSchedules = this.host.schedules?.ended?.() ?? [] } catch (error) {
+      console.warn('ended bot schedules could not be checked', error)
+    }
     for (const botId of this.host.definitions.ids()) {
       try {
-        for (const ended of this.host.schedules?.ended?.(botId) ?? []) {
+        for (const ended of endedSchedules.filter(schedule => schedule.botId === botId)) {
           if (this.store.registry(botId)?.deletedAt) continue
           const endedKey = `schedule-ended:${ended.jobId}`
           if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, endedKey)) continue
@@ -1585,6 +1589,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, key, 'posted')
           })
         }
+      } catch (error) {
+        console.warn('ended bot schedule lines could not be posted', { botId, error })
+      }
+      try {
         this.endUsagePauseIfDue(botId, now)
       } catch (error) {
         console.warn('a bot\'s usage pause could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
@@ -6536,11 +6544,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * is repaired by the next one. A failure pauses the activation with `reconcile_failed`.
    */
   async reconcileOnStartup(): Promise<void> {
-    this.quietHoursChanged()
-    this.loadPendingScheduleRemovals()
-    // Cleanup is best effort: admission enforces the saved intent even while jobs.json cannot be written.
-    this.retryCompletedScheduleRemovals()
     try {
+      try { this.quietHoursChanged() } catch (error) {
+        console.warn('bot quiet hours could not be checked at startup', error)
+      }
+      try { this.loadPendingScheduleRemovals() } catch (error) {
+        console.warn('bot schedule removals could not be read at startup', error)
+      }
+      // Admission still enforces saved completion intents while the job store is unavailable.
+      try { this.retryCompletedScheduleRemovals() } catch (error) {
+        console.warn('completed bot schedules could not be removed at startup', error)
+      }
       // Capture first (bot-context.md §4): every bot thread is copied into the journal past its
       // cursor before any activation is admitted or the scheduler starts.
       try {
@@ -8232,6 +8246,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const trigger = activationId ? this.store.activation(activationId)?.trigger : undefined
     if (trigger?.kind !== 'schedule') return false
     if (trigger.completed) return trigger.completed.canWakeMe === true
+    if (trigger.removedTelling) return trigger.removedTelling.canWakeMe === true
     try {
       return (this.host.schedules?.get(botId, trigger.scheduleId)?.canWakeMe
         ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === trigger.scheduleId)?.canWakeMe) === true
@@ -8623,6 +8638,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       return undefined
     }
+  }
+
+  /** Keep the deleted job's telling wishes for work whose final report is still pending. */
+  scheduleRemoved(botId: string, scheduleId: string, telling: { tellMe: TellMe; canWakeMe?: boolean }): void {
+    this.store.db.transaction(() => {
+      for (const row of this.store.activationsWith(['queued', 'running', 'waiting_grant', 'paused', 'blocked'])) {
+        if (row.botId !== botId || row.trigger.kind !== 'schedule' || row.trigger.scheduleId !== scheduleId) continue
+        this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...row.trigger, removedTelling: telling }), row.id)
+      }
+    })
   }
 
   /** One of a bot's schedules changed in the shared store (an edit on the Automations page): its chat and About read it again. */

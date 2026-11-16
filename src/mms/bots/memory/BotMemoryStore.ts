@@ -1102,7 +1102,7 @@ export class BotMemoryStore {
   /** Shared scheduler deletion covers the bot, the owner and removing all of a bot's schedules. */
   removeProgressForJob(jobId: string): void {
     this.write(() => {
-      const rows = this.all("SELECT bot_id, key FROM bot_memory_state WHERE (key LIKE 'progress:%' AND bot_id || '--' || substr(key, 10) = ?) OR (key LIKE 'progress_pending:%' AND bot_id || '--' || json_extract(value, '$.scheduleId') = ?)", jobId, jobId)
+      const rows = this.all("SELECT bot_id, key FROM bot_memory_state WHERE (key LIKE 'progress:%' AND bot_id || '--' || substr(key, 10) = ?) OR (key LIKE 'progress_pending:%' AND bot_id || '--' || json_extract(value, '$.scheduleId') = ?) OR key = ? OR (key LIKE 'schedule-said:%' AND bot_id || '--' || substr(key, 15) = ?)", jobId, jobId, `schedule-ended:${jobId}`, jobId)
       for (const row of rows) {
         this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.bot_id as string, row.key as string)
         this.dropPacks(row.bot_id as string)
@@ -1218,7 +1218,8 @@ export class BotMemoryStore {
    * memory state go, but the capture cursors (`cursor:<threadId>`), so capture never copies the bot's threads in again.
    * `BotStore` also writes `cursor:create:<clientRequestId>` records, not capture cursors; `cursor:` keeps them here too.
    * `keepSaved` (`bots.memory.wipe` with `keep: 'saved'`): the owner's entries and the bot's notes stay as they are,
-   * forgotten ones as tombstones; only entries that are run notes now go, every version. Without it every entry goes.
+   * forgotten ones as tombstones; only entries that are run notes now go, every version. Schedule delivery markers
+   * also stay with keepSaved, until their shared job is removed. Without it every entry goes.
    * Returns how many current entries went. Entries never need the journal rows they came from (`source_seq`).
    */
   wipe(botId: string, keepSaved: boolean): number {
@@ -1236,7 +1237,7 @@ export class BotMemoryStore {
         this.run('DELETE FROM bot_memories WHERE bot_id = ?', botId)
       }
       this.run('DELETE FROM bot_journal WHERE bot_id = ?', botId)
-      this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 7) <> 'cursor:'", botId)
+      this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 7) <> 'cursor:' AND (? = 0 OR (key NOT LIKE 'schedule-said:%' AND key NOT LIKE 'schedule-ended:%'))", botId, keepSaved ? 1 : 0)
       return removed
     })
   }

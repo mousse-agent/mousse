@@ -54,7 +54,9 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Context thread:** a thread a bot keeps across activations and consults for background, such as notes on a project. The bot's main thread asks it questions; it never acts by itself.
 - **Scratch folder:** a private folder Mousse makes for each activation, outside the bot's folders, where a bot on Pi works and keeps temporary files (on Claude Code and Codex it works in its files folder). Mousse deletes it when the activation ends.
 - **Bot chat:** a bot's conversation with its owner, in the Chats tab. It shows the owner's messages, the bot's replies (drawn as a thread's, with their applets and pictures) with their activity chips, its run reports, its asks and its errors, and never tool rows or model names. It is read from `bots.db`, not from the bot's threads.
-- **Quiet hours:** optional profile times in the owner's last reporting device zone. Bot banners wait, except now messages, activity or can-wake exceptions; personal automation banners appear silently and are never held. Saved schedules keep the computer's clock.
+- **Quiet hours:** optional profile times in the owner's last reporting device zone. Question nudges and defaults wait until they end. Bot banners wait, except now messages, activity or can-wake exceptions; personal automation banners appear silently and are never held. Saved schedules keep the computer's clock.
+- **Can wake me:** an owner-set exception to profile quiet hours, on a bot or one of its automations. The owner sets it by saying so in the bot chat; `telling_set` keeps the choice.
+- **Fixed line:** words Mousse posts without a model run: a service line such as a nudge, or the exact text saved as say on a schedule.
 - **Active (owner):** Mousse observed owner input or a focused, non-idle app window within the last 15 minutes. Bot output and tool calls never count.
 - **Telling:** a bot message's banner and possible sound, kept and decided in the service separately from the chat record. Read messages tell nothing; nearby reports fold into one banner.
 - **Bot work:** something a bot does beside its bot chat, so the chat stays free while it works. The chat hands work off (anything on the web, in the browser, with commands, or with several steps), work runs on a thread of its own, one piece at a time, and its report answers the message that asked for it. While it runs, the owner can ask how it's going, add to it or stop it. Scheduled runs share the same line. See `docs/bots.md`.
@@ -103,4 +105,3 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Contract version:** the version of a protocol, saved format or schema that other builds rely on, such as the daemon protocol or the Run Engine database. Bumped only on incompatible changes; listed in `src/mms/contractVersions.ts`.
 - **Primary checkout:** the first entry in `git worktree list`, normally the copy the user runs and reads.
 
-- **Can wake me:** an owner-set exception to profile quiet hours, on a bot or one of its automations. The owner sets it by saying so in the bot chat; `telling_set` keeps the choice.

@@ -133,7 +133,7 @@ export const BOT_TOOLS: Tool[] = [
     parameters: Type.Object({
       when: WHEN,
       prompt: Type.Optional(Type.String({ description: 'What to do on each run, in your own words. Give prompt or say. If it has an end condition, state it here.' })),
-      say: Type.Optional(Type.String({ maxLength: 500, description: 'A fixed line to say with no model run, in place of prompt.' })),
+      say: Type.Optional(Type.String({ maxLength: 500, description: 'A fixed line to say with no model run, in place of prompt. say is only available in a turn your owner’s message or tap started.' })),
       until: Type.Optional(Type.String({ description: 'A local date (through that day) or date and time on this computer, such as 2026-11-21 or 2026-11-21T18:00.' }))
     })
   },

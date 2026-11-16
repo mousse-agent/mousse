@@ -179,7 +179,7 @@ export class ScheduledJobService extends EventEmitter {
     this.store.setJobRemovedHandler((job) => {
       if (job.trigger?.webhook) this.webhookSecrets?.delete(job.trigger.webhook.secretRef)
       try {
-        this.emit('jobRemoved', job.id)
+        this.emit('jobRemoved', job.id, job)
       } catch {
         /* a listener never breaks a delete */
       }
