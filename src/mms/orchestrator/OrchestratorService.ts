@@ -5257,7 +5257,7 @@ export class OrchestratorService extends EventEmitter {
   /**
    * The owner's bot behind a call from one of its threads ("use your threads"), when the call may go ahead: the bot's
    * main thread made it, in a turn registered with the bot's authority that holds `tool` now (starting, messaging and
-   * stopping only in a chat turn the owner's own message started). Undefined for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
+   * stopping only in a turn that may act on them: a run, or a chat turn the owner's message or tapped answer started). Undefined for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
    */
   private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide'): BotSender | undefined {
     let role: string | undefined
@@ -5267,11 +5267,11 @@ export class OrchestratorService extends EventEmitter {
       role = 'unknown'
     }
     if (!role) return undefined
-    const refused = new McpToolError('mousse_scope_denied', 'A bot starts, messages, stops or archives your threads only in its chat, with "use your threads" allowed.')
+    const refused = new McpToolError('mousse_scope_denied', 'A bot starts, messages, stops or archives your threads only in its own turns, with "use your threads" allowed.')
     if (role !== 'activation') throw refused
     const turn = this.appToolTurns.get(actor.runId)
     if (!turn?.bot || turn.threadId !== actor.threadId || !turn.bot.appTools.has(tool)) throw refused
-    // Only a chat turn its owner's own message started, as the bot's own records say.
+    // Only a turn that may act on threads (a run, or a chat turn its owner started), as the bot's own records say.
     let owned: { limit?: PermissionMode } | undefined
     try {
       owned = this.botThreads?.ownerTurn?.(turn.bot.activationId)

@@ -13,7 +13,7 @@ import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/c
 import { agentMessageText, botMessageText, isPersonMessage, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools'
 import { THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
-import { BOT_THREADS_CHAT_ONLY_TEXT } from '../../src/shared/bots/personal/walls'
+import { BOT_THREADS_NOT_OWNER_TEXT } from '../../src/shared/bots/personal/walls'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { ChatMessage, Thread } from '../../src/shared/types'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
@@ -50,9 +50,9 @@ describe('a bot\'s thread tools ("use your threads")', () => {
   })
 
   /**
-   * A bot whose chat thread is `home`, holding a live run. `threads` is the turn's lane: `all` (a chat turn its owner's
-   * message started), `read` (work, a schedule, a reminder), or none (a consult). `disabled` is the owner's switch as the
-   * engine reads it at each call (`BotEngine.permissionOff`).
+   * A bot whose chat thread is `home`, holding a live run. `threads` is the turn's lane: `all` (a run, or a chat turn its
+   * owner started), `read` (the bot's first message, another bot's message), or none (a consult). `disabled` is the
+   * owner's switch as the engine reads it at each call (`BotEngine.permissionOff`).
    */
   const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; stillHolds?: () => string | undefined } = {}) => {
     fx = delegationFixture()
@@ -142,7 +142,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
   // What a bot's thread is shown for the run its credential acts for: only the thread tools that turn can call. The Mousse MCP server and Pi's per-turn list both list for the run (`listForThread`'s `runId`).
   const listings: Array<[string, Parameters<typeof world>[0], readonly string[]]> = [
     ['a chat turn its owner started', { threads: 'all' }, [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]],
-    ['work, a schedule or a reminder', { threads: 'read' }, BOT_THREAD_READ_TOOLS],
+    ['a chat turn no person started', { threads: 'read' }, BOT_THREAD_READ_TOOLS],
     ['a bot without the permission', { granted: false, threads: 'all' }, []],
     ['a consult', { threads: 'all', role: 'context' }, []]
   ]
@@ -293,11 +293,11 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(host.createThread).not.toHaveBeenCalled()
   })
 
-  it('work, a schedule or a reminder reads threads but never starts, messages or stops one', async () => {
+  it('a chat turn no person started reads threads but never starts, messages or stops one', async () => {
     const { text, host } = await world({ threads: 'read' })
     expect((await text('thread_list', {})).error).toBe(false)
     for (const [name, args] of [['thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y' }], ['thread_send', { threadId: 'mine', content: 'Hi' }], ['thread_interrupt', { threadId: 'mine', runId: 'r1' }], ['thread_archive', { threadId: 'mine' }], ['thread_hide', { threadId: 'mine' }]] as const)
-      expect(await text(name, args), name).toEqual({ error: true, text: BOT_THREADS_CHAT_ONLY_TEXT })
+      expect(await text(name, args), name).toEqual({ error: true, text: BOT_THREADS_NOT_OWNER_TEXT })
     expect(host.createThread).not.toHaveBeenCalled()
     expect(host.sendToThread).not.toHaveBeenCalled()
     expect(host.stopRun).not.toHaveBeenCalled()

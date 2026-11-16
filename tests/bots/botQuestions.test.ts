@@ -112,13 +112,13 @@ describe('a question in the chat', () => {
     expect(next.trigger.kind === 'manual' && next.trigger.input).toBe('(Answering your question: "Which flat should I book a viewing for?")\n\nFlat B')
   })
 
-  it('a tapped answer is not the owner’s own words: its turn reads threads only and cannot switch models; a typed one can', async () => {
+  it('a tapped answer is not the owner’s own words: its turn may use threads but cannot switch models; a typed one can', async () => {
     const { bubble } = await asked({ question: 'Which model should I use?', choices: ['Opus 4.6', 'Something cheaper'] })
     await tap(bubble.question!.questionId, 'Opus 4.6')
     const tapped = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const tappedTurn = await start(f, tapped.id)
     expect(f.bots.ownerWords(botId, tapped.id)).toBe('')
-    expect(tappedTurn.prepared.authority.threadsReadOnly).toBe('not_owner')
+    expect(tappedTurn.prepared.authority.threadsReadOnly).toBeUndefined()
     const refused = JSON.parse((await tool('use_model', tappedTurn.prepared, tappedTurn.payload.threadId, { model: 'Opus 4.6', scope: 'now' })).text)
     expect(refused).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
     await finish(f, tappedTurn.payload, 'completed', { text: 'OK.' })
