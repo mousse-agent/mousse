@@ -426,3 +426,13 @@ it('R5-size caps the whole stored result and keeps each image whole or omits it'
   expect(result.text).toMatch(/image.*left out/i)
   for (const image of result.images ?? []) expect(image.data).toBe(data)
 })
+it('R5-words gives by-hand runs and disabled answers their own refusal', async () => {
+  const t = await setup(true)
+  const manual = await f.bots.activate({ botId: t.botId, input: 'Send', clientRequestId: 'manual-refusal' })
+  const turn = await start(f, manual.id)
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'manual-call', signal: new AbortController().signal })
+  expect(result.text).toContain('run started by hand')
+  expect(result.text).not.toContain('scheduled')
+  f.host.settings!.get().experimental.botAsksFirst = false
+  await expect(f.bots.service.answerAction({ actionId: 'missing', digest: 'missing', answer: 'send' })).rejects.toThrow(/not available/i)
+})
