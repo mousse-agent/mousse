@@ -1,3 +1,4 @@
+import { MAX_SAME_WAKES } from '../../../shared/bots/personal/wakes'
 import { registerHeldCalls } from './lifecycle'
 import { randomUUID } from 'node:crypto'
 import type { MousseSettings } from '../../../shared/settings'
@@ -240,25 +241,31 @@ export class BotActions {
     const dispatch = this.host.store.dispatches(activationId).find(d => d.clientRequestId === dispatchId)
     return dispatch && (dispatch.n === mainN || dispatch.mainN === mainN) ? action : undefined
   }
+  private ownerWroteAfter(action: ActionRow): boolean {
+    const card = JSON.parse(action.card_json ?? '{}')
+    const note = Number(this.host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', action.bot_id, `cursor:action-note:${action.activation_id}`)?.value ?? 0)
+    return this.host.store.ownerLastWroteSeq(action.bot_id) > Number(card.ownerSeq ?? 0) || note > Number(card.noteSeq ?? 0)
+  }
+  private refuse(row: BotActivationRow, action: ActionRow, text: string): ToolOutcome {
+    // A lost tool reply must not lose the refusal: use the same ordered notes as other updates.
+    if (!this.host.store.get('SELECT 1 FROM bot_work_notes WHERE activation_id = ? AND from_message = ? AND text = ?', row.id, action.message_id, text))
+      this.host.store.addWorkNote(row.id, row.botId, text, action.message_id)
+    return { text, isError: true }
+  }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
     const existing = this.host.store.get('SELECT id FROM bot_actions WHERE call_key = ?', callKey)
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
+    const declined = this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND status = 'declined' ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool })) as unknown as ActionRow[]
+    const unanswered = declined.filter(action => !this.ownerWroteAfter(action))
+    if (unanswered.length >= MAX_SAME_WAKES)
+      return this.refuse(row, unanswered[0], 'Your owner said no three times. Say what you need in your report and wait for them to write.')
     const digest = actionDigest(args)
     const refused = this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND args_digest = ? AND status IN ('declined', 'expired') ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), digest)[0]
-    if (refused) {
-      const seq = Number(JSON.parse(String(refused.card_json ?? '{}')).ownerSeq ?? 0)
-      const note = Number(this.host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `cursor:action-note:${row.id}`)?.value ?? 0) > Number(JSON.parse(String(refused.card_json ?? '{}')).noteSeq ?? 0)
-      if (this.host.store.ownerLastWroteSeq(row.botId) <= seq && !note) {
-        const text = 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.'
-        // Reuse notes in the ordered update list: a lost tool reply must not lose the refusal.
-        if (!this.host.store.get('SELECT 1 FROM bot_work_notes WHERE activation_id = ? AND from_message = ? AND text = ?', row.id, String(refused.message_id), text))
-          this.host.store.addWorkNote(row.id, row.botId, text, String(refused.message_id))
-        return { text, isError: true }
-      }
-    }
+    if (refused && !this.ownerWroteAfter(refused as unknown as ActionRow))
+      return this.refuse(row, refused as unknown as ActionRow, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }

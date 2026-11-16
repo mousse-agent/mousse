@@ -1158,7 +1158,7 @@ it.each(['stop', 'expiry', 'forget'] as const)('the disabled switch leaves held 
 })
 
 it.each(['send', 'not_now'] as const)('owner %s resets detection of repeated waits, as a question answer does', async answer => {
-  const t = await setup(true)
+  const t = await setup(true, false, true)
   for (let round = 0; round < 4; round++) {
     const current = f.store.activation(t.workId)!
     const n = f.store.lastMainDispatch(t.workId)!.n
@@ -1168,7 +1168,7 @@ it.each(['send', 'not_now'] as const)('owner %s resets detection of repeated wai
     f.clock.now += 300_000
     await f.bots.deliverDueReminders(); await flush()
     const next = await start(f, t.workId, n + 1)
-    await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: `mail ${round}` }, toolCallId: `mail-${round}`, signal: new AbortController().signal })
+    await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: round % 2 ? 'Mail__other' : 'Mail__send', args: { ...t.args, body: `mail ${round}` }, toolCallId: `mail-${round}`, signal: new AbortController().signal })
     await finish(f, next.payload)
     const a = f.bots.actions.forWork(current.id)!
     await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })
