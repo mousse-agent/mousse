@@ -6850,6 +6850,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // waits to go on gets the notice Mousse stopped before posting, and goes on when its lane is free (`pump`).
     if (row.status === 'queued' || row.status === 'paused' || row.status === 'blocked') {
       if (workWaits(row) && row.endReason === 'budget_exhausted') this.repostRoom(row)
+      // A held call parks before its runtime ends. Boot may have ended that runtime without the executor's settle.
+      if (workWaitRule(row) === WORK_WAIT_RULES.approval) {
+        const main = this.store.lastMainDispatch(row.id)
+        const run = main?.runId ? runs.getRun(main.runId) : undefined
+        if (main && main.endedAt === null && run && TERMINAL_RUN_STATUSES.has(run.status))
+          this.store.run('UPDATE bot_dispatches SET ended_at = ?, outcome = ? WHERE activation_id = ? AND n = ? AND ended_at IS NULL', this.store.now(), run.status, row.id, main.n)
+      }
       return
     }
     // Row 3: an open escalation keeps the activation waiting, whatever its run's state; never continued here.

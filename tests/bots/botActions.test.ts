@@ -1,4 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { McpManager } from '../../src/mms/integrations/mcp/McpManager'
+import { settingsStore, testServerConfig } from '../fixtures/agent-platform/integrations/helpers'
 import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { getDefaultSettings } from '../../src/shared/settings'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
@@ -13,8 +15,9 @@ import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
-afterEach(() => f?.close())
-async function setup(on: boolean) {
+const connections: McpManager[] = []
+afterEach(async () => { f?.close(); await Promise.all(connections.splice(0).map(m => m.shutdown())) })
+async function setup(on: boolean, realServer = false) {
   f = botFixture()
   const settings = getDefaultSettings()
   settings.experimental.botAsksFirst = on
@@ -22,7 +25,27 @@ async function setup(on: boolean) {
   const calls: unknown[] = []
   const descriptor = { configRevision: 'revision-1', toolName: 'send', providerName: 'mail_send', inputSchema: { type: 'object' }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
   const server = { installationId: 'mail', serverName: 'Mail', configDigest: 'config-1', failing: false, tools: [descriptor] }
-  const manager = { callTool: vi.fn(async (_name: string, args: Record<string, unknown>) => { calls.push(structuredClone(args)); return { content: [{ type: 'text', text: 'delivered' }] } as never }) }
+  let manager: Pick<McpManager, 'callTool'> = { callTool: vi.fn(async (_name: string, args: Record<string, unknown>) => { calls.push(structuredClone(args)); return { content: [{ type: 'text', text: 'delivered' }] } as never }) }
+  if (realServer) {
+    const config = testServerConfig({ id: 'mousse:mail', installationId: 'mail', name: 'Mail' })
+    const store = settingsStore(settings => {
+      settings.integrations.mcp.enabled = true
+      settings.integrations.mcp.enableForMainAgent = true
+      settings.integrations.mcp.enabledServers = ['mail']
+    })
+    const live = new McpManager({ discover: async () => ({ servers: [config], sources: [], diagnostics: [] }) } as never, store as never, async () => {}, {
+      clientFactory: { connect: async () => ({
+        listTools: async () => ({ tools: [{ name: 'send', inputSchema: { type: 'object' as const } }] }),
+        callTool: async request => { calls.push(structuredClone(request.arguments)); return { content: [{ type: 'text', text: 'delivered' }] } },
+        close: async () => {}
+      }) }
+    })
+    connections.push(live)
+    const listed = (await live.getEnabledTools())[0]!
+    descriptor.providerName = listed.providerName
+    descriptor.configRevision = listed.configRevision!
+    manager = live
+  }
   const mcp = new BotMcp({ enabled: () => true, catalog: {
     ensure: async () => undefined, listing: () => [{ ...descriptor, name: 'Mail__send' }],
     servers: () => [server]
@@ -49,13 +72,13 @@ async function setup(on: boolean) {
   return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager }
 }
 it('switch off runs the same offered call directly and writes no action', async () => {
-  const t = await setup(false)
+  const t = await setup(false, true)
   expect((await t.call()).text).toContain('delivered')
   expect(t.calls).toEqual([t.args])
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
 })
 it('holds once, frees the slot, and Send executes exactly the stored arguments once', async () => {
-  const t = await setup(true)
+  const t = await setup(true, true)
   await t.call()
   await t.call()
   expect(t.calls).toEqual([])
@@ -249,5 +272,29 @@ it('settlement persists readiness with the result, even when no wake callback ru
   await f.bots.reconcileOnStartup()
   await flush()
   expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose not to send')
+  expect(t.calls).toEqual([])
+})
+it('restart after holding but before the runtime settles still resumes after Send', async () => {
+  const t = await setup(true)
+  await t.call()
+  f.runs.markTerminal(t.work.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+  f.bots.close()
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(t.calls).toEqual([t.args])
+  expect(f.store.lastMainDispatch(t.workId)?.n).toBe(2)
+})
+it('an approved call whose binding changed is withdrawn on restart without retaining arguments', async () => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.bots.actions.transition(a.id, 'open', 'approved')
+  t.server.configDigest = 'edited'
+  await f.bots.actions.reconcile()
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
 })

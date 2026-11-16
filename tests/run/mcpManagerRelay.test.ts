@@ -154,3 +154,16 @@ describe('McpManager for the MCP relay', () => {
     expect(listener).toHaveBeenCalledTimes(2)
   })
 })
+
+it('refuses a pinned schema that changed before dispatch', async () => {
+  const callTool = vi.fn(async () => ({ content: [] }))
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  await expect(mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    schemaDigest: 'a-different-schema'
+  })).rejects.toMatchObject({ code: 'stale_revision' })
+  expect(callTool).not.toHaveBeenCalled()
+  await mcp.shutdown()
+})
