@@ -422,6 +422,45 @@ CREATE INDEX bot_actions_bot ON bot_actions(bot_id, status);
 CREATE INDEX bot_actions_activation ON bot_actions(activation_id);
 ALTER TABLE bot_reminders ADD COLUMN work_id TEXT;
 `
+  },
+  {
+    // What each main turn of a bot cost and carried (docs/plans/bot-context.md, phase 0): one row per dispatch, which
+    // its runtime's usage reports add to. `context_gen` names the runtime context the turn ran in; `started_by` what
+    // started it; `fresh_context` whether it began from a cleared context. Measurements only: nothing reads it to decide.
+    version: 12,
+    sql: `
+CREATE TABLE bot_turn_usage(
+  activation_id TEXT NOT NULL,
+  dispatch_n INTEGER NOT NULL,
+  bot_id TEXT NOT NULL,
+  lane TEXT NOT NULL CHECK(lane IN ('chat','run')),
+  started_by TEXT NOT NULL,
+  instance_id TEXT,
+  model TEXT,
+  context_gen TEXT NOT NULL,
+  fresh_context INTEGER NOT NULL,
+  started_at INTEGER NOT NULL,
+  gap_ms INTEGER,
+  system_chars INTEGER NOT NULL,
+  preamble_chars INTEGER NOT NULL,
+  prompt_chars INTEGER NOT NULL,
+  tools INTEGER,
+  tools_chars INTEGER,
+  reports INTEGER NOT NULL DEFAULT 0,
+  input INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  last_prompt INTEGER,
+  context_window INTEGER,
+  cache_ttl_ms INTEGER,
+  last_request_at INTEGER,
+  compactions INTEGER NOT NULL DEFAULT 0,
+  quota_json TEXT,
+  PRIMARY KEY(activation_id, dispatch_n)
+) STRICT;
+CREATE INDEX bot_turn_usage_by_bot ON bot_turn_usage(bot_id, lane, started_at);
+`
   }
 ]
 
@@ -876,6 +915,84 @@ function escalationOf(row: Row): BotEscalationRow {
     note: str(row.note),
     messageId: str(row.message_id),
     cooldownUntil: str(row.cooldown_until)
+  }
+}
+
+/** A plan usage window a runtime reported with a turn (Claude Code, Codex): how much of it is used, and when it resets. */
+export interface BotQuotaWindow {
+  /** The window as the runtime names it (`five_hour`, `seven_day`, `primary`, `secondary`). */
+  kind: string
+  /** 0-100. */
+  usedPercent: number
+  /** Epoch seconds, when reported. */
+  resetsAt?: number
+}
+
+export interface BotTurnUsageStart {
+  activationId: string
+  dispatchN: number
+  botId: string
+  lane: BotLane
+  /** What started the turn: the chat's start key (`chat`, `answer`, `botmsg`, `create`...) or the run's trigger. */
+  startedBy: string
+  instanceId?: string
+  model?: string
+  /** The runtime context the turn runs in: today the activation (each chat activation starts from a cleared context). */
+  contextGen: string
+  freshContext: boolean
+  startedAt: number
+  /** Since the bot's previous request in this lane, when there was one. */
+  gapMs?: number
+  systemChars: number
+  preambleChars: number
+  promptChars: number
+}
+
+export interface BotTurnUsageRow extends BotTurnUsageStart {
+  tools: number | null
+  toolsChars: number | null
+  reports: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  lastPrompt: number | null
+  contextWindow: number | null
+  cacheTtlMs: number | null
+  lastRequestAt: number | null
+  compactions: number
+  quota: BotQuotaWindow[] | null
+}
+
+function turnUsageOf(row: Row): BotTurnUsageRow {
+  return {
+    activationId: row.activation_id as string,
+    dispatchN: num(row.dispatch_n)!,
+    botId: row.bot_id as string,
+    lane: row.lane as BotLane,
+    startedBy: row.started_by as string,
+    ...(str(row.instance_id) ? { instanceId: str(row.instance_id)! } : {}),
+    ...(str(row.model) ? { model: str(row.model)! } : {}),
+    contextGen: row.context_gen as string,
+    freshContext: num(row.fresh_context) === 1,
+    startedAt: num(row.started_at)!,
+    ...(num(row.gap_ms) !== null ? { gapMs: num(row.gap_ms)! } : {}),
+    systemChars: num(row.system_chars)!,
+    preambleChars: num(row.preamble_chars)!,
+    promptChars: num(row.prompt_chars)!,
+    tools: num(row.tools),
+    toolsChars: num(row.tools_chars),
+    reports: num(row.reports)!,
+    input: num(row.input)!,
+    output: num(row.output)!,
+    cacheRead: num(row.cache_read)!,
+    cacheWrite: num(row.cache_write)!,
+    lastPrompt: num(row.last_prompt),
+    contextWindow: num(row.context_window),
+    cacheTtlMs: num(row.cache_ttl_ms),
+    lastRequestAt: num(row.last_request_at),
+    compactions: num(row.compactions)!,
+    quota: json<BotQuotaWindow[]>(row.quota_json)
   }
 }
 
@@ -1339,7 +1456,7 @@ export class BotStore {
   }
 
   deleteActivation(id: string): void {
-    for (const table of ['bot_counters', 'bot_spend', 'bot_spend_reservations', 'bot_unknown_calls', 'bot_dispatches'])
+    for (const table of ['bot_counters', 'bot_spend', 'bot_spend_reservations', 'bot_unknown_calls', 'bot_turn_usage', 'bot_dispatches'])
       this.run(`DELETE FROM ${table} WHERE activation_id = ?`, id)
     this.run('DELETE FROM bot_activations WHERE id = ?', id)
   }
@@ -1411,6 +1528,74 @@ export class BotStore {
       activeMs: num(row.active_ms) ?? 0,
       limits: JSON.parse(row.limits_json as string) as Record<string, number>
     }
+  }
+
+  // -- Turn usage (v12): what each main turn cost and carried ----------------------------------
+
+  /** A main dispatch began: its row, before any usage is reported. A second start of the same dispatch changes nothing. */
+  startTurnUsage(row: BotTurnUsageStart): void {
+    this.run(
+      `INSERT INTO bot_turn_usage(activation_id, dispatch_n, bot_id, lane, started_by, instance_id, model, context_gen, fresh_context, started_at, gap_ms, system_chars, preamble_chars, prompt_chars)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(activation_id, dispatch_n) DO NOTHING`,
+      row.activationId, row.dispatchN, row.botId, row.lane, row.startedBy, row.instanceId ?? null, row.model ?? null, row.contextGen,
+      row.freshContext ? 1 : 0, row.startedAt, row.gapMs ?? null, row.systemChars, row.preambleChars, row.promptChars
+    )
+  }
+
+  /** One usage report of the turn's runtime (a request, or a whole turn where the runtime sums them), added to its row. */
+  addTurnUsage(activationId: string, n: number, usage: { input: number; output: number; cacheRead: number; cacheWrite: number; at: number }): void {
+    const whole = (value: number): number => (Number.isFinite(value) && value > 0 ? Math.round(value) : 0)
+    this.run(
+      `UPDATE bot_turn_usage SET reports = reports + 1, input = input + ?, output = output + ?, cache_read = cache_read + ?, cache_write = cache_write + ?,
+         last_request_at = MAX(COALESCE(last_request_at, 0), ?) WHERE activation_id = ? AND dispatch_n = ?`,
+      whole(usage.input), whole(usage.output), whole(usage.cacheRead), whole(usage.cacheWrite), usage.at, activationId, n
+    )
+  }
+
+  /**
+   * What the runtime said of its context at the end of a request or turn: the prompt it last sent (input, cache read and
+   * cache write together), its window, the cache lifetime it wrote, the model it really ran and the plan's usage windows.
+   */
+  turnContext(activationId: string, n: number, context: { lastPrompt?: number; contextWindow?: number; cacheTtlMs?: number; at?: number; model?: string; quota?: readonly BotQuotaWindow[] }): void {
+    const positive = (value: number | undefined): number | null => (value !== undefined && Number.isFinite(value) && value > 0 ? Math.round(value) : null)
+    const at = positive(context.at)
+    this.run(
+      `UPDATE bot_turn_usage SET last_prompt = COALESCE(?, last_prompt), context_window = COALESCE(?, context_window), cache_ttl_ms = COALESCE(?, cache_ttl_ms),
+         last_request_at = CASE WHEN ? IS NULL THEN last_request_at ELSE MAX(COALESCE(last_request_at, 0), ?) END, model = COALESCE(?, model), quota_json = COALESCE(?, quota_json)
+       WHERE activation_id = ? AND dispatch_n = ?`,
+      positive(context.lastPrompt), positive(context.contextWindow), positive(context.cacheTtlMs), at, at,
+      context.model ?? null, context.quota?.length ? JSON.stringify(context.quota) : null, activationId, n
+    )
+  }
+
+  /** The Mousse tools the turn's runtime was offered: how many, and the characters of their names, descriptions and schemas. */
+  turnTools(activationId: string, n: number, tools: number, chars: number): void {
+    this.run('UPDATE bot_turn_usage SET tools = ?, tools_chars = ? WHERE activation_id = ? AND dispatch_n = ? AND tools IS NULL', tools, chars, activationId, n)
+  }
+
+  /** The runtime compacted the turn's context. */
+  turnCompacted(activationId: string, n: number): void {
+    this.run('UPDATE bot_turn_usage SET compactions = compactions + 1 WHERE activation_id = ? AND dispatch_n = ?', activationId, n)
+  }
+
+  turnUsage(activationId: string, n: number): BotTurnUsageRow | undefined {
+    const row = this.get('SELECT * FROM bot_turn_usage WHERE activation_id = ? AND dispatch_n = ?', activationId, n)
+    return row ? turnUsageOf(row) : undefined
+  }
+
+  /** The bot's latest turn in `lane` that reached its model, other than `except` (the turn now starting). */
+  lastTurnUsage(botId: string, lane: BotLane, except?: { activationId: string; n: number }): BotTurnUsageRow | undefined {
+    const row = this.get(
+      `SELECT * FROM bot_turn_usage WHERE bot_id = ? AND lane = ? AND last_request_at IS NOT NULL AND NOT (activation_id = ? AND dispatch_n = ?)
+       ORDER BY last_request_at DESC LIMIT 1`,
+      botId, lane, except?.activationId ?? '', except?.n ?? -1
+    )
+    return row ? turnUsageOf(row) : undefined
+  }
+
+  /** The bot's turns in `lane` since `since` (ms) that reported usage, oldest first. */
+  turnUsageSince(botId: string, lane: BotLane, since: number): BotTurnUsageRow[] {
+    return this.all('SELECT * FROM bot_turn_usage WHERE bot_id = ? AND lane = ? AND started_at >= ? AND reports > 0 ORDER BY started_at', botId, lane, since).map(turnUsageOf)
   }
 
   // -- Unknown calls ---------------------------------------------------------------------------

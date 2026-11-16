@@ -25,6 +25,7 @@ function isServiceLine(id: string): boolean {
   return ['bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX].some(prefix => id.startsWith(prefix))
 }
 import type { AppletReference } from '../../../shared/applets'
+import { BOT_USAGE_WINDOW_MS, turnUsageSummary } from '../activation/turnUsage'
 
 /**
  * The Bot UI's view of `bots.db` (Bot Phase 1 §5.1.1, §5.7): the chat rows (`bot_messages`), each
@@ -615,7 +616,8 @@ export class BotChatProjection {
         ...this.store.disabledPermissions(definition.id).flatMap((off) => this.permissionItems(definition.id, off.manifest, grant.approvedAt).filter((item) => item.id === off.id).map((item) => ({ ...item, enabled: false, note: `Switched off for this bot. ${item.note}` })))
       ] : [],
       runs,
-      reminders
+      reminders,
+      ...((usage) => (usage ? { usage } : {}))(turnUsageSummary(this.store.turnUsageSince(definition.id, 'chat', now - BOT_USAGE_WINDOW_MS)))
     }
   }
 

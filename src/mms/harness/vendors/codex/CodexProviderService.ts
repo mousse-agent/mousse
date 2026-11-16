@@ -96,7 +96,7 @@ import { isMousseTempEntry } from '../../../data/closedPlaces'
 import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig, codexOneShotRunsOn } from './oneShot'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
-import type { ChildTurnPolicy } from '../../adapter'
+import type { ChildTurnPolicy, PlanWindowUse } from '../../adapter'
 import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
 import { harnessAppError } from '../../../../shared/harness/types'
 import { QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
@@ -376,6 +376,17 @@ function defaultKillTree(process: CodexProcess): void {
 
 export type CodexToolEvent = ProviderToolEvent
 
+/** A rate-limit snapshot's windows as `ProviderMetrics.quota` names them; undefined when it has none. */
+export function quotaOf(snapshot: RateLimitSnapshot | undefined): PlanWindowUse[] | undefined {
+  if (!snapshot) return undefined
+  const windows = (['primary', 'secondary'] as const).flatMap((kind) => {
+    const window = snapshot[kind]
+    if (!window || typeof window.usedPercent !== 'number' || !Number.isFinite(window.usedPercent)) return []
+    return [{ kind, usedPercent: window.usedPercent, ...(typeof window.resetsAt === 'number' ? { resetsAt: window.resetsAt } : {}) }]
+  })
+  return windows.length ? windows : undefined
+}
+
 export interface CodexTurnUsage {
   input: number
   output: number
@@ -386,6 +397,8 @@ export interface CodexTurnUsage {
   reasoning: number
   /** Prompt side of the last model call (the thread's context size) and the model's window. */
   context?: { input: number; cacheRead: number; cacheWrite: number; contextWindow?: number }
+  /** The plan's usage windows of the latest rate-limit snapshot the server reported while the run was open. */
+  quota?: PlanWindowUse[]
 }
 
 export type CodexChatInput = {
@@ -854,7 +867,8 @@ class TurnRun {
       output: turn.outputTokens ?? 0,
       reasoning: turn.reasoningOutputTokens ?? 0,
       totalTokens: turn.totalTokens ?? 0,
-      context: { ...context, ...(this.usageEnd.window ? { contextWindow: this.usageEnd.window } : {}) }
+      context: { ...context, ...(this.usageEnd.window ? { contextWindow: this.usageEnd.window } : {}) },
+      ...(quotaOf(this.rateLimits) ? { quota: quotaOf(this.rateLimits)! } : {})
     }
   }
 

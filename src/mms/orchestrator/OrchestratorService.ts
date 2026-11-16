@@ -13613,6 +13613,9 @@ export class OrchestratorService extends EventEmitter {
             model, input: usage.input, output: usage.output,
             cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
           })
+          // A bot's turn keeps what it cost with its dispatch (`bot_turn_usage`).
+          try { opts?.bot?.usage?.({ input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite }) }
+          catch (error) { logDebug('OrchestratorService', 'bot turn usage could not be recorded', error, { threadId: session.threadId }) }
         },
         providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) }),
         steerAccepted: (text, token) => {
@@ -13672,6 +13675,8 @@ export class OrchestratorService extends EventEmitter {
         providerMetrics: (metrics) => {
           promptMetrics = metrics
           if (metrics.usage || metrics.context) lastUsageAt = Date.now()
+          try { opts?.bot?.metrics?.(metrics) }
+          catch (error) { logDebug('OrchestratorService', 'bot turn metrics could not be recorded', error, { threadId: session.threadId }) }
         },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }, { dropLate: true })

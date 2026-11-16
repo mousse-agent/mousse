@@ -5,6 +5,7 @@ import { constants } from 'node:fs'
 import { resolve } from 'node:path'
 import { countLineEdits } from '../../../../shared/lineEditStats'
 import { longerTtl, writtenCacheTtl } from '../../promptCache'
+import type { PlanWindowUse } from '../../adapter'
 
 export type ClaudeSubscriptionMetrics = {
   usage: AssistantMessage['usage'] | null
@@ -25,6 +26,8 @@ export type ClaudeSubscriptionMetrics = {
    * stream was seen), and the longest cache lifetime it wrote this turn. The cache lives from the request, not its end.
    */
   promptCache?: { at: number; ttlMs?: number }
+  /** The plan's usage windows Claude Code reported during the turn (`ProviderMetrics.quota`). */
+  quota?: PlanWindowUse[]
 }
 export type ClaudeUsageBaseline = {
   sessionId: string

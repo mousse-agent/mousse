@@ -362,3 +362,29 @@ Tests:
 | Scratch | Deleted at run end, with deliverables saved to the files folder (Opus). |
 
 - **Round-2 scores** of the round-1 designs: Fable 7/8.5/8, Sol 6.5/7/7, Opus 8/6.5/7 (as rated by Fable, Opus and Sol in turn).
+
+## 13. Long chats: measuring cost (November 2026)
+
+A bot chat grows without end (one bot reached about 2,000 messages in four days). The plan for it has four phases:
+measure, then a context that is rebuilt only at a fold, then work in threads, then a tool catalogue. This section covers
+what is built.
+
+**Phase 0, measure.** Each main turn of a bot keeps one row in `bots.db` (`bot_turn_usage`, v12):
+
+- what started it (`chat`, `answer`, `botmsg`, `create` for the chat; the trigger kind for a run), its lane, entry and model;
+- the context it ran in (`context_gen`, today the activation) and whether it began from a cleared context;
+- the gap since the bot's previous request in the same lane;
+- the characters of its system text, pack and prompt, and of the Mousse tools its runtime is offered;
+- its usage summed over the runtime's reports (input, output, cache reads and writes), the prompt it last sent, the
+  model's window, the cache lifetime it wrote and how often the runtime compacted;
+- the plan's usage windows where the runtime reports them (Claude Code's rate-limit events, Codex's rate-limit snapshot;
+  Pi reports none).
+
+The rows are measurements: nothing reads them to decide. About shows one quiet line from the last week of chat turns
+(input a turn and the share read from the cache). `node scripts/bot-turn-usage.mjs <profile home>` prints the numbers
+per runtime and lane, including the "hello" size: the smallest prompt a fresh-context turn sent, which is the system
+text, tools and pack before any chat. The ceiling for that size is set from the first week of real numbers, then
+enforced by a test.
+
+Tool and system sizes count only what Mousse sends. A runtime's own system prompt and built-in tools show up only in
+the prompt sizes the runtime reports.

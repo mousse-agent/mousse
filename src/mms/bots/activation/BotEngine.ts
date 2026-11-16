@@ -13,6 +13,7 @@ import type { WakePullRequestState } from '../wakeSources'
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
+import { startTurnMeter } from './turnUsage'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -265,6 +266,11 @@ export interface BotEngineHost {
    * from a cleared home context (the transcript stays).
    */
   clearContext?(threadId: string): void
+  /**
+   * The Mousse tools the runtime of the run `runId` on `threadId` is offered now: how many, and the characters of their
+   * names, descriptions and schemas (`bot_turn_usage`). A measurement; undefined when unknown.
+   */
+  toolList?(threadId: string, runId: string): { count: number; chars: number } | undefined
   /** Archives a thread (#681): a deleted bot's threads, kept 30 days before the purge. */
   archiveThread?(threadId: string): Promise<unknown> | void
   /**
@@ -2697,22 +2703,31 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const preamble = [pack, readOnlyThreads].filter(Boolean).join('\n\n') || undefined
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, controller.signal) : undefined
     let confirmationAttempted = false
+    // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
+    // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
+    const told = this.instructionsOf(definition, definition.main, row.lane, {
+      allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}) },
+      ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
+    })
+    // A leading `/` never runs a command: the trigger is text for the model.
+    const prompt = dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text
+    // What the turn costs and carries, kept with the dispatch (`bot_turn_usage`): measurements only.
+    const meter = startTurnMeter({
+      row, n: dispatch.n, fresh: dispatch.kind === 'start', contextGen: row.id, prompt,
+      ...(told.instructions ? { instructions: told.instructions } : {}), ...(preamble ? { preamble } : {})
+    }, { store: this.store, now: () => this.now(), ...(this.host.toolList ? { tools: () => this.host.toolList!(payload.threadId, payload.runId) } : {}) })
     return {
       activationId: row.id,
       dispatchN: dispatch.n,
-      // A leading `/` never runs a command: the trigger is text for the model.
       modelOutput: () => {
         if (confirmationAttempted) return
         confirmationAttempted = true
         this.confirmWorkDelivery(row.id, dispatch.n, 'output')
       },
-      prompt: dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text,
-      // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
-      // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
-      ...this.instructionsOf(definition, definition.main, row.lane, {
-        allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}) },
-        ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
-      }),
+      usage: meter.usage,
+      metrics: meter.metrics,
+      prompt,
+      ...told,
       selection: { ...selection },
       policy: compiled.policy,
       authority,
@@ -2795,6 +2810,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       compacted: () => {
         const live = liveNow()
         if (live) live.compactions += 1
+        try { this.store.turnCompacted(row.id, n) } catch { /* a measurement only */ }
       },
       compacting: (active) => {
         const live = ownLive()

@@ -3661,7 +3661,8 @@ export class ClaudeSubscriptionProviderService {
       }
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', cancel)
-      const report = metrics.report()
+      const quota = (liveRun?.rateLimits ?? frames.rateLimits).planUse()
+      const report = { ...metrics.report(), ...(quota.length ? { quota } : {}) }
       try {
         const baseline = metrics.snapshot()
         const sessionId = frames.sessionId

@@ -341,4 +341,17 @@ export interface BotDetail {
   runs: BotRunItem[]
   /** Waiting reminders, soonest first; absent from older services. */
   reminders?: BotReminderItem[]
+  /** What its chat turns of the last week cost; absent before one reported usage, and from older services. */
+  usage?: BotTurnUsageSummary
+}
+
+/**
+ * The bot's chat turns of the last week, as the runtimes reported them: how many, the input tokens a turn sent (fresh
+ * input, cache reads and cache writes together), its output, and the share of input read from the prompt cache (0-1).
+ */
+export interface BotTurnUsageSummary {
+  turns: number
+  inputPerTurn: number
+  outputPerTurn: number
+  cachedShare: number
 }
