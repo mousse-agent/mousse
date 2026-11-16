@@ -2146,3 +2146,18 @@ it('distinguishes scalar data types, scalar-looking text and empty text', async 
   expect(value('plain').textContent).toBe('An ordinary sentence')
   expect(value('plain').querySelector('code')).toBeNull()
 })
+
+it.each(['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn'])('keeps %s cards compact with arguments readable in place and a timed outcome', async (status) => {
+  fake.chats.inbox = [held({ status, at: AT, result: status === 'failed' ? { text: 'Partly delivered', toolReportedError: true } : undefined })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[aria-label="Action summary"]')?.textContent).toBe('Send an email · Mail')
+  const fold = card.querySelector<HTMLDetailsElement>('details[aria-label="Action arguments"]')!
+  expect(fold?.open).toBe(false)
+  expect(fold.querySelector('[aria-label="Complete arguments"]')).toBeTruthy()
+  expect(card.querySelector('[role="status"]')?.textContent).toContain(' · ')
+  if (status === 'failed') expect(card.querySelector('[aria-label="Tool result"]')?.textContent).toBe('Partly delivered')
+  await click(fold.querySelector('summary'))
+  expect(fold.open).toBe(true)
+  expect(fold.textContent).toContain('trip.pdf')
+})
