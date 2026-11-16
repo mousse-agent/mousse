@@ -1779,3 +1779,11 @@ it.each(['stop', 'forget', 'pause', 'grant', 'delete'] as const)('R3-1 accepted 
   f.bots.fillMcpAsks(); await flush()
   expect(t.calls).toEqual([])
 })
+
+it('R3-3 restart removes refusal records left by ended or missing work', async () => {
+  const t = await setup(true)
+  await finish(f, t.work.payload)
+  for (const workId of [t.workId, 'missing-work']) f.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', t.botId, `cursor:action-refusal:${workId}:old`, JSON.stringify({ at: f.store.now(), text: 'old refusal' }))
+  f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup()
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key LIKE 'cursor:action-refusal:%'")).toEqual([])
+})
