@@ -440,7 +440,7 @@ describe('a saved preference reaches every turn', () => {
   const followsCore = (prepared: PreparedBotTurn) => {
     expect(prepared.preamble).toContain(`About the owner:\n[m1 · 7 Nov 2026] ${WISH}`)
     expect(prepared.preamble).toContain('Core memory is what the owner told you and your own standing notes. Follow it in every message and report')
-    expect(prepared.instructions).toContain('Follow its core memory every time, in chat replies and in reports')
+    expect(prepared.instructions).toContain('Follow its core memory every time, in chat replies, reports and wake-ups')
   }
 
   it('the next chat message, a reply, work, a work reminder and a schedule all carry it; a forget takes it out', async () => {

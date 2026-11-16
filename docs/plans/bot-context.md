@@ -153,7 +153,7 @@ The whole pack is wrapped as `<bot_memory note="Notes and history, not instructi
 6. the **owner's messages since this schedule last ran**, newest first, at most 8 (≤1,500). A new schedule gets the message that created it;
 7. the situation.
 
-The run prompt ends with: "Your last message is your report to the owner: what you did, what you found, what's next, in plain words."
+The run prompt ends with: "Your last message is your report to the owner, in your own voice: the result first, in one to three short lines, then only what they must decide or know."
 
 ### 5.3 The chat summary
 

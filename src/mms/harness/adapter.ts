@@ -359,6 +359,11 @@ export interface TurnResult {
    * text has no reply to show: the thread gets no "Done." placeholder.
    */
   noReply?: boolean
+  /**
+   * A steer cut the turn and was read, and the model wrote nothing after it: the runtime closed the turn with a line of
+   * its own (Claude Code's "No response requested."), so what the steer said was never answered.
+   */
+  steerUnanswered?: boolean
 }
 
 /**

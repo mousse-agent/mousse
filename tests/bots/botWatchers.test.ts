@@ -198,7 +198,7 @@ describe('who may start one', () => {
       const before = f.store.waitingReminders(botId)
       try {
         expect(() => f.bots.tools.watchers!.start(botId, id, { command: 'make test', brief: 'Report results.' }))
-          .toThrow(/can't start a background command.*work.*sandbox.*owner/i)
+          .toThrow(/can't start a background command.*owner's own message.*work.*sandbox/i)
         expect(spawn).not.toHaveBeenCalled()
         expect(f.store.waitingReminders(botId)).toEqual(before)
         expect([...turn.prepared.policy.tools!.allow!].sort()).toEqual(ownerTools)

@@ -6009,6 +6009,7 @@ export class OrchestratorService extends EventEmitter {
     const fresh = session.messages.length === 0 && cleared
     if (busy() || (prepared.history === 'cleared' ? !cleared : prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
     let text: string | undefined
+    let unanswered = false
     try {
       const response = await this.runTurnOnSession(
         session,
@@ -6028,11 +6029,12 @@ export class OrchestratorService extends EventEmitter {
       )
       // A failed turn's message is its error, never the bot's words; a turn its work goes on from hands back what it said.
       text = response.error ? response.partial : response.message
+      unanswered = !response.error && Boolean(response.steerUnanswered)
     } catch (error) {
       const settled = engine.getRun(payload.runId)
       if (!settled || (!TERMINAL_RUN_STATUSES.has(settled.status) && settled.status !== 'queued')) throw error
     } finally {
-      dispatcher.settle(payload, text !== undefined ? { text } : {})
+      dispatcher.settle(payload, { ...(text !== undefined ? { text } : {}), ...(unanswered ? { unanswered: true } : {}) })
     }
   }
 
@@ -13197,6 +13199,8 @@ export class OrchestratorService extends EventEmitter {
     let aborted = false
     /** The turn ended where the person cut it with Send now (`TurnResult.noReply`): no text means no reply row. */
     let noReply = false
+    /** A steer cut the turn and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
+    let steerUnanswered = false
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
     let executionFailed = false
@@ -13857,6 +13861,7 @@ export class OrchestratorService extends EventEmitter {
       assistantText = result.text
       aborted = Boolean(result.aborted)
       noReply = Boolean(result.noReply)
+      steerUnanswered = Boolean(result.steerUnanswered)
       responseMetadata = {
         modelName: result.modelName,
         totalResponseTimeMs: result.totalResponseTimeMs,
@@ -14187,9 +14192,11 @@ export class OrchestratorService extends EventEmitter {
 
     // A thread's run keeps the turn's whole text. A bot's reply is its final message only (the row the turn ends on):
     // the notes it wrote between tool calls are working notes, never part of what its owner reads.
+    // A bot's turn a steer cut, with no words after it: what it has is its own words or nothing, never "Done.".
     const response: OrchestratorResponse = {
-      message: (opts?.bot ? finalText : displayText) || 'Done.',
-      actions
+      message: opts?.bot && steerUnanswered ? finalText : (opts?.bot ? finalText : displayText) || 'Done.',
+      actions,
+      ...(opts?.bot && steerUnanswered ? { steerUnanswered: true } : {})
     }
     if (executionFailed) {
       this.setTurnPhase(session.threadId, 'failed', { error: 'LLM error' })

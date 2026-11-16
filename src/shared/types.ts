@@ -1098,6 +1098,8 @@ export interface OrchestratorResponse {
   message: string
   /** With `error`, on a bot's turn whose work goes on (it reached its runtime's turn cap): the words it said last. */
   partial?: string
+  /** On a bot's turn: a steer cut it and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
+  steerUnanswered?: boolean
   actions: OrchestratorAction[]
   /**
    * When true, the send was accepted onto the thread queue instead of starting a turn.

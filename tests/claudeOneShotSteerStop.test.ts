@@ -114,7 +114,8 @@ function cappedTurn(scripts: Script[], steersQueued: { text: string; token: stri
     drainSteerEntry: vi.fn(() => pending.shift()),
     steerTaken: vi.fn((token?: string) => { events.push(`taken ${token}`) }),
     onSteer: vi.fn((text: string, token?: string) => { events.push(`accepted ${text} ${token}`) }),
-    returnSteer: vi.fn((text: string, token?: string) => { events.push(`returned ${text} ${token}`) })
+    returnSteer: vi.fn((text: string, token?: string) => { events.push(`returned ${text} ${token}`) }),
+    onSteerUnanswered: vi.fn()
   }
   const run = () => service.chat({ threadId: 'thread', cwd, model: 'sonnet', prompt: 'go', signal: stop.signal, onText: vi.fn(), ...(mcp ? { mcp } : {}), ...steer })
   return { run, stop, steer, queries, prompts, events, order, pending, reap }
@@ -254,6 +255,28 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
     await expect(turn.run()).rejects.toThrow()
     expect(turn.steer.onSteer).not.toHaveBeenCalled()
     expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+  })
+
+  // Hand-authored frames: Claude Code's resume writes its own "No response requested." and the result repeats it.
+  // Only then is the steer unanswered (`onSteerUnanswered`), which a bot's turn answers in a continuation.
+  it.each([
+    ['repeats the line Claude Code made up', 'No response requested.', '', true],
+    ['is the model\'s own', 'All tests pass.', 'All tests pass.', false]
+  ])('the restarted query wrote nothing; its result %s: the turn\'s text is %j', async (_name, result, text, unanswered) => {
+    let turn!: ReturnType<typeof cappedTurn>
+    turn = cappedTurn([
+      interruptedByTheSteers(() => turn.pending),
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield init
+        yield started(uuid)
+        if (result === 'No response requested.')
+          yield { type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: result }] }, session_id: SESSION }
+        yield { ...done, result }
+      }
+    ], ONE)
+    expect((await turn.run()).trim()).toBe(text)
+    expect(turn.steer.onSteerUnanswered).toHaveBeenCalledTimes(unanswered ? 1 : 0)
   })
 
   it('a taken steer the model answered before the Stop is accepted once and not handed back', async () => {
