@@ -1329,3 +1329,28 @@ it.each(['card', 'request', 'history'] as const)('B5 Forget %s erases the argume
   expect(f.store.get('SELECT id FROM bot_actions WHERE args_digest = ?', a.args_digest)).toBeUndefined()
   expect(t.calls).toEqual([])
 })
+
+it.each([true, false])('B3 three declined cards stop changed calls until owner input, switch=%s', async on => {
+  const t = await setup(on, false, true)
+  let runtime = t.work
+  for (let n = 0; n < 20; n++) {
+    const outcome = await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: t.args.body + ' '.repeat(n) }, toolCallId: `loop-${n}`, signal: new AbortController().signal })
+    if (!on) continue
+    if (n < 3) {
+      await finish(f, runtime.payload)
+      const a = f.bots.actions.forWork(t.workId)!
+      await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+      await flush(); runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+    } else expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('said no three times') })
+  }
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(on ? 3 : 0)
+  if (!on) { expect(t.calls).toHaveLength(20); return }
+  expect(f.store.unreadWorkNotes(t.workId).map(n => n.text).join(' ')).toContain('said no three times')
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__other', args: t.args, toolCallId: 'another-tool', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
+  await finish(f, runtime.payload)
+  const other = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: other.id, digest: other.args_digest, answer: 'not_now' })
+  await flush(); runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+  f.bots.noteWork(t.botId, t.workId, 'Please try again')
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'try again' }, toolCallId: 'after-note', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
+})
