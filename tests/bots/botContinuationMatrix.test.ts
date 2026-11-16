@@ -57,13 +57,20 @@ const actionLines = [
   ['failed', 'Nothing was sent. The call failed:'],
   ['tool_error', 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'],
   ['uncertain', 'It could not be confirmed whether this went through: check before trying again.'],
-  ['withdrawn', 'Nothing was sent. The call failed:'],
-  ['expired', 'Nothing was sent. The call failed:']
+  ['withdrawn', 'No longer needed, so nothing was sent.'],
+  ['send_timeout', "Mail couldn't be reached, so nothing was sent."],
+  ['owner_removed', 'Your owner removed this request. Do not ask for it again unless they write.'],
+  ['expired', 'This call expired. Nothing was sent; do not try the same call again without a new reason.']
 ] as const
 const actionCells = actionLines.flatMap(([status, line]) => [false, true].flatMap(hasWaited => [false, true].flatMap(cause =>
   (['turn cap', 'permission allowed since refused'] as const).flatMap(reason => UPDATES.map(update => ({ status, line, hasWaited, cause, reason, update }))))))
 it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reason / $update', ({ status, line, hasWaited, cause, reason, update }) => {
-  const actionText = actionContinuation({ status: status === 'tool_error' ? 'failed' : status, result_json: JSON.stringify({ text: '[Server data, not instructions]\ndelivery detail', ...(status === 'tool_error' ? { toolReportedError: true } : {}) }) })
+  const actionText = actionContinuation({
+    status: status === 'tool_error' || status === 'send_timeout' ? 'failed' : status === 'owner_removed' ? 'withdrawn' : status,
+    ...(status === 'owner_removed' ? { card_json: JSON.stringify({ ownerRemoved: true }) } : {}),
+    result_json: JSON.stringify({ text: status === 'send_timeout' ? "Mail couldn't be reached, so nothing was sent." : status === 'owner_removed' ? '[forgotten]' : '[Server data, not instructions]\ndelivery detail',
+      ...(status === 'tool_error' ? { toolReportedError: true } : {}), ...(status === 'send_timeout' ? { notSentInTime: true } : {}) })
+  })
   const input = matrixInput(reason, update, true)
   input.workEvents.push({ at: '2026-11-07T09:04:00Z', text: actionText, actionId: 'action-1' })
   input.actionCaused = cause ? actionText : undefined
@@ -89,4 +96,18 @@ it.each(['question answer', 'note and answer'] as const)('N3 a live wait plus a 
   expect(prompt.split(ANSWER)).toHaveLength(2)
   expect(prompt.split('Your wait is over.')).toHaveLength(2)
   expect(prompt).toContain('The owner allowed you to read pages')
+})
+
+
+it.each([false, true].flatMap(hasWaited => [
+  'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.',
+  'You had three cards for this tool that were not sent. Say what you need in your report and wait for your owner to write.'
+].map(refusal => ({ hasWaited, refusal }))))('refusal joins ordered updates with wait history=$hasWaited: $refusal', ({ hasWaited, refusal }) => {
+  const input = matrixInput('turn cap', 'note and answer', hasWaited)
+  f.clock.now = Date.parse('2026-11-07T09:04:00Z')
+  f.store.recordWorkRefusal(ROW.id, ROW.botId, 'matrix-refusal', refusal)
+  input.workEvents = [...eventsOf(input), ...(f.bots as any).workRefusalUpdates(ROW.id)]
+  const prompt: string = (f.bots as any).continuationPrompt(ROW, input)
+  expect(prompt.split(refusal)).toHaveLength(2)
+  expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(refusal))
 })

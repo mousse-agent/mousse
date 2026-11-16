@@ -100,6 +100,8 @@ export interface BotMcpHost {
   /** Whether the servers were read since Mousse started: before that, `servers()` says nothing of a server being gone. */
   listed?(): boolean
   inputSchema?(tool: BotMcpTool): unknown
+  /** Configuration evidence remains available when a server has no successful tool listing. */
+  configurationDigest?(serverId: string): string | undefined
   binding?(tool: BotMcpTool): { serverId: string; tool: string; configDigest: string; schemaDigest: string } | undefined
   call?: BotMcp['call']
   /** The granted tools (`<server id>::<tool>`) of servers set up now. */
@@ -223,7 +225,7 @@ export function failureText(serverName: string, error: unknown, signal?: AbortSi
   return `${serverName} couldn't run this call. ${carryOn}`
 }
 
-export type BotMcpCallOutcome = ToolOutcome & { callState?: 'failed' | 'uncertain'; toolReportedError?: true }
+export type BotMcpCallOutcome = ToolOutcome & { callState?: 'failed' | 'uncertain'; toolReportedError?: true; notSentInTime?: true }
 
 export class BotMcp implements BotMcpHost {
   constructor(private readonly deps: BotMcpDeps) {}
@@ -290,6 +292,10 @@ export class BotMcp implements BotMcpHost {
   /** The installed schema, before descriptions are shortened for the model. */
   inputSchema(tool: BotMcpTool): unknown {
     return this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool)?.inputSchema
+  }
+
+  configurationDigest(serverId: string): string | undefined {
+    return (this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(serverId)) as { configDigest?: string } | undefined)?.configDigest
   }
 
   binding(tool: BotMcpTool): { serverId: string; tool: string; configDigest: string; schemaDigest: string } | undefined {
