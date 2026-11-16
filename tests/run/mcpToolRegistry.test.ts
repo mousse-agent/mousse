@@ -715,6 +715,14 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
 
     expect(ids(await list({ includeUnstarted: true }))).toContain('draft')
     expect(ids(await list({ includeSettled: true }))).toContain('old')
+    // Archived and hidden rows say so; open, shown rows carry neither.
+    threads.set('tucked', thread('tucked', { hidden: true }))
+    const settled = (await list({ includeSettled: true })).threads
+    expect(settled.find((row) => row.id === 'old')).toMatchObject({ archived: true, archivedAt: NOW })
+    expect(settled.find((row) => row.id === 'tucked')).toMatchObject({ hidden: true })
+    expect(settled.find((row) => row.id === 'quiet')).not.toHaveProperty('archived')
+    expect(settled.find((row) => row.id === 'quiet')).not.toHaveProperty('hidden')
+    threads.delete('tucked')
     expect(ids(await list({ includeSubagents: true }))).toContain(sub.childThreadId)
     expect(ids(await list({ projectId: 'p2' }))).toEqual(['elsewhere'])
     expect(ids(await list({ status: 'awaiting_input' }))).toEqual(['stranger'])

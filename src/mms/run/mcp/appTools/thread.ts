@@ -252,6 +252,11 @@ export function botMayNameThread(host: AppToolHost, engine: RunEngine | undefine
   return engine !== undefined && botMayList(host, engine, callerThreadId, thread, inventory)
 }
 
+/** `thread_list`'s flags for a thread out of the open list: archived (since `settledAt`) and hidden from the sidebar. */
+function listedFlags(thread: { settledAt?: string | null; hidden?: boolean }): { archived?: true; archivedAt?: string; hidden?: true } {
+  return { ...(thread.settledAt ? { archived: true, archivedAt: thread.settledAt } : {}), ...(thread.hidden ? { hidden: true } : {}) }
+}
+
 /** Whether a bot may list or find `thread` (the same rule as `botThreadReach`, over a thread already read). */
 function botMayList(host: AppToolHost, engine: RunEngine, callerThreadId: string, thread: Thread, inventory: readonly Thread[]): boolean {
   return thread.id !== callerThreadId && !botThreadHidden(host, engine, thread, () => inventory)
@@ -1141,6 +1146,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         startedAt: thread.startedAt ?? null,
         updatedAt: thread.updatedAt,
         settledAt: thread.settledAt ?? null,
+        ...listedFlags(thread),
         status: statusOf(thread.id),
         ...(thread.subagent && thread.parentThreadId ? { lineage: { parentThreadId: thread.parentThreadId } } : {}),
         ...(thread.launchedByYou ? { startedByYou: true } : thread.startedByAgentHere ? { startedByAnAgentHere: true } : {})
@@ -1293,7 +1299,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_list',
-      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are always listed. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out).`,
+      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are always listed. A row says archived: true (with archivedAt) when the thread is archived, and hidden: true when it is out of the sidebar; an open, shown thread has neither. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out).`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1353,8 +1359,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
               ...(waitingOnSubagents ? { waitingOnSubagents: true } : {}),
               updatedAt: thread.updatedAt,
               ...(thread.createdByThreadId === ctx.caller.threadId ? { startedByYou: true } : {}),
-              // Out of the owner's sidebar (`thread_hide`).
-              ...(thread.hidden ? { hidden: true } : {})
+              // Archived, or out of the owner's sidebar (`thread_hide`).
+              ...listedFlags(thread)
             })
             if (rows.length >= limit) break
           }
@@ -1377,6 +1383,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             startedAt: thread.startedAt ?? null,
             updatedAt: thread.updatedAt,
             settledAt: thread.settledAt ?? null,
+            ...listedFlags(thread),
             modelOverride: thread.modelOverride ?? null,
             status,
             ...(waitingOnSubagents ? { waitingOnSubagents: true } : {}),

@@ -225,6 +225,16 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(managerFound).toEqual([])
   })
 
+  it('with includeSettled, an archived thread says so and an open one does not', async () => {
+    const { text } = await world({ threads: 'all' })
+    const body = (outcome: { text: string }) => JSON.parse(outcome.text.split('\n').slice(1, -1).join('\n'))
+    const rows = body(await text('thread_list', { includeSettled: true })).threads as Array<Record<string, unknown>>
+    expect(rows.find((row) => row.id === 'archived')).toMatchObject({ archived: true, archivedAt: NOW })
+    const open = rows.find((row) => row.id === 'mine')!
+    expect(open.archived).toBeUndefined()
+    expect(open.archivedAt).toBeUndefined()
+  })
+
   it('each thread a bot lists, finds, reads or starts carries its link, for its reply to name', async () => {
     const { text } = await world({ threads: 'all' })
     const body = (outcome: { text: string }) => JSON.parse(outcome.text.split('\n').slice(1, -1).join('\n'))
