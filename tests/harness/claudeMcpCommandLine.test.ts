@@ -903,7 +903,9 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(run.rows).toEqual(expect.arrayContaining([{ name: 'Bash', status: 'committed' }]))
     const results = run.anthropic.results('shell').join('\n')
     expect(results).toContain('pong from /mcp')
-    expect(results).toContain('CLAUDE_CONFIG_DIR=')
+    // Claude Code's subprocess scrub removes its configuration/sign-in directory too (#1294).
+    expect(results).toContain('HOME=')
+    expect(results).not.toContain('CLAUDE_CONFIG_DIR=')
     expect(found(results)).toEqual([])
     expect(run.leftBehind()).toEqual([])
   }, 120_000)
