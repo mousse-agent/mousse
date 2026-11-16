@@ -1276,8 +1276,26 @@ export class OrchestratorService extends EventEmitter {
   private storeMasker?: () => SecretMasker | undefined
   setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined; storeMasker?(): SecretMasker | undefined } | undefined): void {
     this.secretTools = secrets?.tools
-    this.secretMaskerFor = secrets ? (threadId) => secrets.masker(threadId) : undefined
+    this.secretMaskerFor = secrets ? (threadId) => this.threadSecretMasker(secrets, threadId) : undefined
     this.storeMasker = secrets?.storeMasker ? () => secrets.storeMasker!() : undefined
+  }
+
+  /**
+   * Every secret the thread may use, masked: its own, and on a personal bot's thread (its work, a subagent, a consult) the
+   * bot's too, which its owner gave it under its chat thread (`homeOf`) and its commands use from any of its threads.
+   */
+  private threadSecretMasker(secrets: { masker(threadId: string): SecretMasker | undefined }, threadId: string): SecretMasker | undefined {
+    const own = secrets.masker(threadId)
+    let home: string | undefined
+    try {
+      home = this.botThreads?.homeOf?.(threadId)
+    } catch {
+      home = undefined
+    }
+    const bots = home && home !== threadId ? secrets.masker(home) : undefined
+    if (!bots) return own
+    if (!own) return bots
+    return (text) => bots(own(text))
   }
 
   /** Masks every secret the thread may use in the messages, in place (their objects stay the same). */

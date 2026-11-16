@@ -14,8 +14,12 @@ export interface SecretToolHost {
   endThread(threadId: string): void
   /** Whether the thread's agents may use the secret by name. */
   usableIn(name: string, threadId: string): boolean
-  /** Runs the command with the named secrets in the thread's folder; the output is masked. */
-  run(input: { threadId: string; cwd: string; command: string; secrets: Array<Pick<SecretForCommand, 'name' | 'as'>>; timeoutMs: number; signal: AbortSignal }): Promise<SecretRunResult>
+  /**
+   * Runs the command with the named secrets in the thread's folder; the output is masked. `contain`: a personal bot's
+   * command, held to its folders in Mousse's sandbox with its filtered environment (`runWithSecrets`); refused
+   * (`SecretRunResult.refused`) where this computer has none.
+   */
+  run(input: { threadId: string; cwd: string; command: string; secrets: Array<Pick<SecretForCommand, 'name' | 'as'>>; timeoutMs: number; signal: AbortSignal; contain?: { scratch: string; folders: readonly string[] } }): Promise<SecretRunResult>
   /** The thread's masker (every secret it may use), for anything the tool shows. */
   masker(threadId: string): SecretMasker | undefined
 }
@@ -137,9 +141,16 @@ export function secretTools(host: AppToolHost): MousseTool[] {
     ctx.markEffect?.()
     let outcome: ToolOutcome
     try {
-      const result = await service.run({ threadId, cwd, command, secrets: wanted, timeoutMs, signal: ctx.signal })
+      // A personal bot's command is held as its commands are: its own folders, its filtered environment, no network
+      // (`runWithSecrets`'s `contain`), never the service's own environment and every folder.
+      const workspace = ctx.turn.bot?.workspace
+      if (ctx.turn.bot && !workspace) throw new Error('A bot with no folders runs no command.')
+      const contain = workspace ? { scratch: workspace.scratch, folders: [...new Set([cwd, workspace.scratch])] } : undefined
+      const result = await service.run({ threadId, cwd, command, secrets: wanted, timeoutMs, signal: ctx.signal, ...(contain ? { contain } : {}) })
       const status = result.stopped ? 'Stopped.' : result.timedOut ? `Timed out after ${Math.round(timeoutMs / 1000)} seconds.` : `Exit code ${result.exitCode ?? 'unknown'}.`
-      outcome = { text: truncateForModel(`${status}\n${result.output || '(no output)'}`), ...(result.exitCode === 0 && !result.timedOut && !result.stopped ? {} : { isError: true }) }
+      outcome = result.refused
+        ? { text: result.refused, isError: true }
+        : { text: truncateForModel(`${status}\n${result.output || '(no output)'}`), ...(result.exitCode === 0 && !result.timedOut && !result.stopped ? {} : { isError: true }) }
     } catch (error) {
       // The host's own refusals name a secret, never its value; anything else is reported by kind only.
       const message = error instanceof Error ? error.message : ''
@@ -179,7 +190,7 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       approvalPrompt: 'Allow the agent to run this command with a secret you gave this thread?',
       // A personal bot's owner allowed "use secrets you give it" and "run commands": that is its answer, so nothing asks.
       botGrantAnswers: true,
-      botDescription: 'Run a command from your files folder with secrets your owner gave you (secret_request): each as an environment variable (default) or a private file, by name. Its output is masked. It runs on this computer like your other commands, without asking first; use it only for the work your owner asked for.',
+      botDescription: 'Run a command from your files folder with secrets your owner gave you (secret_request): each as an environment variable (default) or a private file, by name. Its output is masked. It runs without asking first, in a sandbox Mousse keeps it in: only your folders, no network, none of your owner\'s other settings or credentials. Where this computer has no such sandbox (it needs Linux with bubblewrap) it is refused: tell your owner it can run in one of their threads instead. Use it only for the work your owner asked for.',
       class: 'mutation',
       listed: () => Boolean(secrets()),
       available: (turn) => (secrets() ? runAvailable(turn) : 'secret_run is not available here.'),

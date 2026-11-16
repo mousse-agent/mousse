@@ -56,7 +56,7 @@ const TOOL_TEXT: Record<string, AskText> = {
   secrets: {
     title: 'use secrets you give it',
     note: 'You type each one into a private card in its chat; it gets only the name.',
-    tip: 'It can ask you for a secret (an API key, a token) with a private card in its chat, where you type it or pick a saved one. It never sees the value: it uses the secret by name in commands its work runs from its files folder (with "run commands"), each command\'s output masked. Settings → Secrets lists and removes them.'
+    tip: 'It can ask you for a secret (an API key, a token) with a private card in its chat, where you type it or pick a saved one. It never sees the value: it uses the secret by name in commands its work runs from its files folder (with "run commands"), each command\'s output masked. Those commands run in a sandbox with only its folders and no network, which needs Linux with bubblewrap; on other computers it can only ask. Settings → Secrets lists and removes them.'
   },
   quick_actions: {
     title: 'add quick actions',
