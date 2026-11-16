@@ -7,10 +7,12 @@ import type { ContextUsageSnapshot } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-// The transcript is not part of this check: the shell shows the composer only.
-vi.mock('../../src/renderer/chat/components/MousseAgentChatShell', () => ({
-  MousseAgentChatShell: ({ composer }: { composer: unknown }) => composer
-}))
+// The transcript is not part of this check: the shell shows the composer and its notices only.
+vi.mock('../../src/renderer/chat/components/MousseAgentChatShell', async () => {
+  const { createElement: create } = await import('react')
+  const { ComposerNoticeProvider } = await import('../../src/renderer/components/ComposerNotice')
+  return { MousseAgentChatShell: ({ composer }: { composer: never }) => create(ComposerNoticeProvider, null, composer) }
+})
 vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 
 let root: Root
@@ -243,5 +245,84 @@ describe('the Full/Compact chip on a thread switch', () => {
     act(() => useAppStore.getState().switchToThread('thread-a'))
     expect(host.querySelector('.composer-context-anchor')).not.toBeNull()
     expect(host.querySelector('.composer-idle-chip')).toBeNull()
+  })
+})
+
+describe('Compact now that fails, or that cannot run now', () => {
+  /** What Electron hands the window when the main process's call to the service threw. */
+  const ipcError = (message: string) => new Error(`Error invoking remote method 'threads:compact': Error: ${message}`)
+
+  /** The chat on thread A (and B), its cache expired; `compact` fails when `fail` is called. */
+  async function mount(options: { subagents?: () => Promise<unknown[]> } = {}) {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const now = new Date().toISOString()
+    useAppStore.setState({
+      threads: [
+        { id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0 },
+        { id: 'thread-b', name: 'B', createdAt: now, updatedAt: now, startedAt: now, order: 1 }
+      ] as never
+    })
+    let fail!: (error: Error) => void
+    const compact = vi.fn(() => new Promise<void>((_resolve, reject) => { fail = reject }))
+    bridge = {
+      orchestrator: { getContextUsage: vi.fn(async () => expired()), isTurnActive: vi.fn(async () => false) },
+      threads: { compact },
+      ...(options.subagents ? { subagents: { list: vi.fn(options.subagents) } } : {}),
+      skills: { list: () => Promise.resolve({ skills: [] }) }
+    }
+    stubBridge()
+    const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
+    await act(async () => root.render(createElement(OrchestratorChat)))
+    await settle(400)
+    const chip = () => host.querySelector<HTMLElement>('.composer-idle-chip')
+    const compactNow = async () => {
+      await act(async () => chip()!.click())
+      const row = [...document.querySelectorAll<HTMLElement>('.composer-idle-menu [role="menuitemradio"]')].find((item) => item.textContent?.includes('Compact now'))!
+      await act(async () => row.click())
+    }
+    return { useAppStore, compact, chip, compactNow, fail: async (error: Error) => { await act(async () => fail(error)); await settle() } }
+  }
+
+  it('says nothing when the call got no answer in time: the compaction may still run, and its row says how it ends', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const t = await mount()
+    await t.compactNow()
+    expect(t.compact).toHaveBeenCalledWith('thread-a')
+    await t.fail(ipcError('Request timeout: threads.compact'))
+    expect(host.textContent).not.toContain('Request timeout')
+    expect(host.textContent).not.toContain('Error invoking remote method')
+    expect(t.chip()?.textContent).toBe('Full · 182K')
+    expect(warn).toHaveBeenCalled()
+  })
+
+  it('says a refusal in plain words on the thread that asked', async () => {
+    const t = await mount()
+    await t.compactNow()
+    await t.fail(ipcError("Wait for this thread's subagents to finish before compacting."))
+    expect(host.textContent).toContain("Wait for this thread's subagents to finish before compacting.")
+    expect(host.textContent).not.toContain('Error invoking remote method')
+  })
+
+  it('never shows the failure on another thread opened meanwhile', async () => {
+    const t = await mount()
+    await t.compactNow()
+    act(() => t.useAppStore.getState().switchToThread('thread-b'))
+    await settle()
+    await t.fail(ipcError('Wait for the turn to finish before compacting.'))
+    expect(host.textContent).not.toContain('Wait for the turn to finish before compacting.')
+  })
+
+  it('is not offered while a subagent of the thread is still going', async () => {
+    const working = {
+      childThreadId: 'child-1', title: 'Reviewer', activity: 'working', state: 'working', latestDelegationId: 'd-1', unread: false,
+      provider: null, model: null, workspace: null, role: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), waitingOn: [], tasks: []
+    }
+    const t = await mount({ subagents: async () => [working] })
+    expect(t.chip()).toBeNull()
+    expect(t.compact).not.toHaveBeenCalled()
+    // Once it has finished, the chip offers Compact now again.
+    act(() => t.useAppStore.getState().setSubagents('thread-a', [{ ...working, activity: 'idle', state: 'idle' }] as never))
+    await settle()
+    expect(t.chip()?.textContent).toBe('Full · 182K')
   })
 })

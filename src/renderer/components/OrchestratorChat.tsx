@@ -56,6 +56,8 @@ import { createTurnActions, type TurnActions } from '../chat/components/agent-el
 import { countRender } from '../chat/components/agent-elements/render-counts'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
+import { useSubagents } from '../hooks/useSubagents'
+import { isRunningSubagent } from '../../shared/subagents'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromTurn, reuseUIMessages } from '../chat/adapters/mousseToUI'
@@ -89,7 +91,7 @@ import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/message
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
 import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerListsModel, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
-import { errorText, readableError, sendErrorLine } from '../lib/errorText'
+import { compactNowFailureLine, errorText, isRequestTimeout, readableError, sendErrorLine } from '../lib/errorText'
 import { showToast } from './ui/Toast'
 import { editablePrompt, PromptUndoNotice } from './PromptUndoControls'
 import { invalidateThreadActionHistory, readThreadActionHistory } from '../utils/threadActionHistory'
@@ -1219,15 +1221,22 @@ export function OrchestratorChat() {
 
   // Compact now (the composer's chip, the context popover): it starts at once and runs while the person types.
   // Until the daemon's compaction row arrives, and while the request is out, the chip reads Compacting….
+  // Never offered beside work in progress: a running turn, or subagents whose results come back to this thread.
+  const subagentsRunning = useSubagents(newChat ? null : activeThreadId).some(isRunningSubagent)
   const [compactingThread, setCompactingThread] = useState<string | null>(null)
   const handleCompactNow = useCallback(() => {
     const threadId = activeThreadId
-    if (!threadId) return
+    if (!threadId || turnActive || loading || subagentsRunning) return
     setCompactingThread(threadId)
     void window.mousse.threads.compact(threadId)
-      .catch((error: unknown) => setSendError(error instanceof Error ? error.message : String(error)))
+      .catch((error: unknown) => {
+        // The compaction's row says how it ended; only a refusal is said here, and only on the thread that asked.
+        const line = compactNowFailureLine(error)
+        if (!line) console.warn('[compact] Compact now got no answer', { threadId, error: errorText(error) })
+        else if (useAppStore.getState().activeThreadId === threadId) setSendError(line)
+      })
       .finally(() => setCompactingThread((current) => (current === threadId ? null : current)))
-  }, [activeThreadId])
+  }, [activeThreadId, turnActive, loading, subagentsRunning])
 
   // What composer commands act on: this thread (none yet on a blank chat) and whether a turn is running.
   const slashCommandEnv = (hasAttachments: boolean): SlashCommandEnv => ({
@@ -1239,7 +1248,15 @@ export function OrchestratorChat() {
     steer: (text) => window.mousse.orchestrator.steer(text, activeThreadId ?? undefined),
     newThread: async (title) => { await window.mousse.threads.createAndSelect(title) },
     clearContext: async (threadId) => { await window.mousse.threads.clearContext(threadId) },
-    compact: async (threadId, focus) => { await window.mousse.threads.compact(threadId, focus) },
+    // A compaction that got no answer in time may still be running; its row in the conversation says how it ends.
+    compact: async (threadId, focus) => {
+      try {
+        await window.mousse.threads.compact(threadId, focus)
+      } catch (error) {
+        if (!isRequestTimeout(error)) throw error
+        console.warn('[compact] /compact got no answer', { threadId, error: errorText(error) })
+      }
+    },
     fork: async (threadId) => { await window.mousse.threads.fork(threadId) },
     rename: async (threadId, title) => { await window.mousse.threads.rename(threadId, title) },
     // The sidebar cancels the event when it opened the thread's rename box.
@@ -1913,7 +1930,7 @@ export function OrchestratorChat() {
                 contextCompactionSetting,
                 contextOpen,
                 onContextOpenChange: setContextOpen,
-                ...(!newChat && activeThreadId ? { onCompactNow: handleCompactNow } : {}),
+                ...(!newChat && activeThreadId && !subagentsRunning ? { onCompactNow: handleCompactNow } : {}),
                 compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId),
                 ...(activeThread?.botOwned ? { contextHidden: true } : {})
               }}

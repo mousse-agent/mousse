@@ -32,10 +32,16 @@ import type { ChatMessage } from '../src/shared/types'
 import { mutateDurableQueue } from '../src/mms/queue/durableQueue'
 import { enqueueMessage } from '../src/mms/queue/ThreadMessageQueue'
 import { getQueueHoldPath, QUEUE_HOLD_STALE_MS, readQueueHold, requestQueueHoldStop } from '../src/mms/queue/queueHold'
+import { dispatchMethod } from '../src/mms/protocol/handlers'
+import { requestTimeoutFor } from '../src/mms/protocol/client'
+import { CONTEXT_COMPACTION_TIME_LIMIT_MS } from '../src/mms/protocol/types'
 
 const cleanups: Array<() => void | Promise<void>> = []
+/** While set, the agent holds each reply until it settles: its turn keeps running. */
+let replyGate: Promise<void> | undefined
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+  replyGate = undefined
 })
 
 async function setup() {
@@ -62,6 +68,7 @@ async function setup() {
       .onRequest(methods.agent.session.prompt, async (c) => {
         const text = c.params.prompt.map((block) => (block as { text?: string }).text ?? '').join('\n')
         prompts.push({ sessionId: c.params.sessionId, text })
+        await replyGate
         await c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `reply ${prompts.length}` } } })
         return { stopReason: 'end_turn' as const }
       })
@@ -181,6 +188,64 @@ describe('/compact', () => {
   }, 30_000)
 })
 
+describe('/compact beside work in progress', () => {
+  type Setup = Awaited<ReturnType<typeof setup>>
+  /** `threads.compact` as a window, the CLI or `/compact` sends it. */
+  const compactRequest = ({ orch, store, engine }: Setup, threadId: string) =>
+    dispatchMethod({ mms: { threads: store, orchestrator: orch, runEngine: engine }, globalSequence: () => 0 } as never, 'threads.compact', { threadId })
+  /** The runtime's compaction, recorded. */
+  const recordRuntime = ({ harness }: Setup) => {
+    const runtime = vi.fn(async () => true)
+    ;(harness as unknown as { compactConversation: typeof runtime }).compactConversation = runtime
+    return runtime
+  }
+  /** Nothing of a compaction started: no row, the runtime not asked, the history as it was. */
+  const nothingStarted = ({ orch }: Setup, threadId: string, revision: number, runtime: ReturnType<typeof recordRuntime>) => {
+    expect(orch.getMessagesForPersistence(threadId).some((message) => message.kind === 'context_compaction')).toBe(false)
+    expect(runtime).not.toHaveBeenCalled()
+    expect(orch.getNativeContext(threadId).revision).toBe(revision)
+  }
+
+  it('is refused while a turn runs on the thread: nothing starts, and the turn ends as it would', async () => {
+    const s = await setup()
+    longThread(s.orch, s.thread.id)
+    const runtime = recordRuntime(s)
+    let reply!: () => void
+    replyGate = new Promise((resolve) => { reply = resolve })
+    const turn = s.send('keep working')
+    await until(() => s.prompts.length === 1)
+    const { revision } = s.orch.getNativeContext(s.thread.id)
+
+    await expect(compactRequest(s, s.thread.id)).rejects.toMatchObject({ code: 'thread_busy', message: 'Wait for the turn to finish before compacting.' })
+    await expect(s.orch.compactConversationContext(s.thread.id)).rejects.toThrow('Wait for the turn to finish before compacting.')
+    nothingStarted(s, s.thread.id, revision, runtime)
+
+    reply()
+    await turn
+    expect(s.orch.getMessagesForPersistence(s.thread.id).at(-1)).toMatchObject({ role: 'assistant', content: 'reply 1' })
+  }, 30_000)
+
+  it('is refused while a subagent the thread started is still going, and compacts once it has ended', async () => {
+    const s = await setup()
+    const { revision } = longThread(s.orch, s.thread.id)
+    const runtime = recordRuntime(s)
+    // The parent's turn ended after delegating; its subagent's run has not ended.
+    const child = s.store.createThread('Reviewer', s.thread.projectId)
+    s.engine.delegations.createLineage({ threadId: child.id, parentThreadId: s.thread.id, parentRunId: 'run-parent', relationship: 'subagent' })
+    const childRun = s.engine.store.createRun({ threadId: child.id, source: 'delegation' })
+    s.engine.delegations.create({ parentRunId: 'run-parent', parentThreadId: s.thread.id, childThreadId: child.id, childRunId: childRun.runId, prompt: 'Review it', wake: 'always' })
+
+    const refusal = "Wait for this thread's subagents to finish before compacting."
+    await expect(compactRequest(s, s.thread.id)).rejects.toMatchObject({ code: 'thread_busy', message: refusal })
+    await expect(s.orch.compactConversationContext(s.thread.id)).rejects.toThrow(refusal)
+    nothingStarted(s, s.thread.id, revision, runtime)
+
+    s.engine.store.casRunStatus({ runId: childRun.runId, expectedEpoch: childRun.epoch, status: 'cancelled', patch: { completedAt: new Date().toISOString() } })
+    await expect(compactRequest(s, s.thread.id)).resolves.toEqual({ outcome: 'native' })
+    expect(runtime).toHaveBeenCalledOnce()
+  }, 30_000)
+})
+
 describe('/compact that is stopped or runs out of time', () => {
   it('keeps the full history when a person stops it: no local cut, and the row says so', async () => {
     const { orch, thread, harness } = await setup()
@@ -215,6 +280,14 @@ describe('/compact that is stopped or runs out of time', () => {
     expect((await orch.stopThread(thread.id, 'user')).ok).toBe(true)
     expect(await running).toBe('stopped')
     expect(orch.getNativeContext(thread.id).compaction).toBeUndefined()
+  }, 30_000)
+
+  it('is waited for longer than its time limit by a window, the CLI and /compact, so none gives up on one still running', async () => {
+    const { orch } = await setup()
+    const limit = (orch as unknown as { nativeCompactTimeoutMs: number }).nativeCompactTimeoutMs
+    expect(limit).toBe(CONTEXT_COMPACTION_TIME_LIMIT_MS)
+    // The time limit, then Mousse's own cut when the runtime's failed.
+    expect(requestTimeoutFor('threads.compact')).toBeGreaterThanOrEqual(limit + 60_000)
   }, 30_000)
 
   it('cuts Mousse\'s copy when the runtime has no compaction, and says the sizes', async () => {

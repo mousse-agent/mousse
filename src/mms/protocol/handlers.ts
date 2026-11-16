@@ -2267,6 +2267,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const focus = asOptionalString(p.focus, 2000)?.trim() || undefined
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      // Never beside work in progress: a running turn, or subagents whose results come back to this conversation.
+      const refusal = ctx.mms.orchestrator.compactionRefusal(threadId)
+      if (refusal) throw new DomainRpcError('thread_busy', refusal, { threadId })
       let started = false
       try {
         const ran = await localActionRun(ctx, threadId, 'compact', () => {
