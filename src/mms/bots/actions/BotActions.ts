@@ -357,6 +357,11 @@ export class BotActions {
   private async runApproved(id: string): Promise<void> {
     const action = this.get(id)
     if (!action || action.status !== 'approved') return
+    if (this.host.store.registry(action.bot_id)?.pausedReason === 'owner') {
+      this.transition(id, 'approved', 'withdrawn', { text: 'This bot was paused by its owner. Nothing was sent; carry on without it when resumed.' })
+      this.finish(action)
+      return
+    }
     const row = this.valid(action)
     if (!row) {
       this.transition(id, 'approved', Date.parse(action.expires_at) <= Date.parse(this.host.store.now()) ? 'expired' : 'withdrawn', { text: 'This changed since you saw it. Nothing was sent; carry on without it.' })
