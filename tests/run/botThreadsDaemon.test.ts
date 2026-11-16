@@ -18,7 +18,7 @@ import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from '../../src/shared/bo
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { AgentActor } from '../../src/mms/run/types'
 import type { EventEmitter } from 'node:events'
-import { launchedThreadsOf, watchLaunchedThreads } from '../../src/mms/bots/launchedThreads'
+import { launchedThreadsOf, queuedRunWillStart, watchLaunchedThreads } from '../../src/mms/bots/launchedThreads'
 import { launchedActive } from '../../src/shared/bots/personal/chat'
 import { appTurn } from './appToolsFixture'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
@@ -394,7 +394,8 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
       threads: w.d.store.listAllThreads(),
       activeRuns: w.d.engine.store.listNonTerminalRuns(),
       lastRun: (id) => w.d.engine.store.listRuns(id, { limit: 1 })[0],
-      asks: () => false
+      asks: () => false,
+      willStart: (run) => queuedRunWillStart(w.d.engine, run)
     }).map((thread) => [thread.title, thread.hidden ?? false])
     const actions = (threadId: string) => w.d.engine.store.listEvents(threadId).filter((event) => event.type === 'agent.action').map((event) => (event.payload as { action: string }).action)
     const made = await w.create('h1', { title: 'Quick check', hidden: true })
@@ -482,13 +483,14 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const w = world({ script: (input) => (input.prompt.includes('Look at the login page.') ? new Promise<string>((resolve) => { release = () => resolve('done') }) : 'done') })
     const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): Array<{ requestId: string }>; dismiss(requestId: string): boolean }
     const changed: string[] = []
-    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, threads: w.d.store as unknown as EventEmitter, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
     const managed = (creators: string[]) => launchedThreadsOf({
       creators: new Set(creators),
       threads: w.d.store.listAllThreads(),
       activeRuns: w.d.engine.store.listNonTerminalRuns(),
       lastRun: (id) => w.d.engine.store.listRuns(id, { limit: 1 })[0],
       asks: (id) => questions.listPendingForThread(id).length > 0,
+      willStart: (run) => queuedRunWillStart(w.d.engine, run),
       projectName: (id) => (id === w.project.id ? 'Shop' : undefined)
     })
     const made = await w.create('c1')
@@ -514,6 +516,28 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     release!()
     await w.settled((made.firstMessage as { runId: string }).runId)
     expect(managed([w.chat.id]).map((thread) => [thread.threadId, thread.status, launchedActive(thread)])).toEqual([[made.threadId, 'done', false]])
+    expect(changed.length).toBeGreaterThan(seen)
+
+    // A queued run with no turn.start yet waits on the message queue: the bot still manages it. Once its turn.start
+    // came and went and nothing started it, the thread sits idle, so the bot does not manage it.
+    const stray = await w.d.engine.dispatch({ kind: 'send', threadId: made.threadId, clientRequestId: 'stray-send', source: 'mcp' })
+    const strayRunId = (stray as { runId: string }).runId
+    expect(w.d.engine.getRun(strayRunId)!.status).toBe('queued')
+    expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['queued', true]])
+    const start = w.d.engine.outbox.enqueue({ threadId: made.threadId, runId: strayRunId, kind: 'turn.start', payload: {} })
+    expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['queued', true]])
+    w.d.engine.outbox.cancel(start.effectId, new Date().toISOString(), 'test: the start died')
+    expect(w.d.engine.getRun(strayRunId)!.status).toBe('queued')
+    expect(managed([w.chat.id]).map((thread) => [thread.threadId, launchedActive(thread)])).toEqual([[made.threadId, false]])
+
+    // A question left open would keep it busy, until the thread is archived: an archived thread is never managed,
+    // whatever it left behind, and archiving it tells the chat thread.
+    void w.orch.questions.requestAnswers([{ id: 'q2', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], made.threadId, {}).catch(() => undefined)
+    expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['needs_input', true]])
+    seen = changed.length
+    await w.archive(made.threadId)
+    expect(w.d.store.getThread(made.threadId)?.settledAt).toBeTruthy()
+    expect(managed([w.chat.id]).map((thread) => [thread.threadId, launchedActive(thread)])).toEqual([[made.threadId, false]])
     expect(changed.length).toBeGreaterThan(seen)
     unwatch()
   })

@@ -54,7 +54,7 @@ import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
-import { launchedThreadsOf, watchLaunchedThreads } from './bots/launchedThreads'
+import { launchedThreadsOf, queuedRunWillStart, watchLaunchedThreads } from './bots/launchedThreads'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
@@ -790,6 +790,7 @@ export class MmsProfileServices {
         activeRuns: this.runEngine.store.listNonTerminalRuns(),
         lastRun: (id) => this.runEngine.store.listRuns(id, { limit: 1 })[0],
         asks: (id) => this.questions.listPendingForThread(id).length > 0,
+        willStart: (run) => queuedRunWillStart(this.runEngine, run),
         projectName: (id) => this.projects.getProject(id)?.name
       }),
       harness,

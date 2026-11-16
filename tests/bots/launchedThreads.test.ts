@@ -35,7 +35,8 @@ describe('a thread the bot started, while its subagents still work', () => {
       threads,
       activeRuns,
       lastRun: (id) => (id === 'launched' ? run('launched', 'completed') : undefined),
-      asks: (id) => (state.asks ?? []).includes(id)
+      asks: (id) => (state.asks ?? []).includes(id),
+      willStart: () => true
     })
     expect(listed?.status).toBe(status)
     // Only an ended thread with nothing below it working sits under Done and leaves the bot free.
@@ -50,5 +51,71 @@ describe('a thread the bot started, while its subagents still work', () => {
     runs.emit('event', { type: 'run.status', payload: run('grandchild', 'completed') })
     expect(changed).toEqual(['home'])
     stop()
+  })
+})
+
+// A queued run nothing will start (its turn.start already came and went, as a bot's message to a thread on 15 Nov did)
+// never makes the thread go: the bot is not "Managing" a thread that sits idle. One that will start still counts.
+describe('a thread the bot started, with a queued run', () => {
+  const rows: Array<[string, { own?: [RunRecord['status'], boolean]; below?: [RunRecord['status'], boolean] }, BotLaunchedThread['status'], boolean]> = [
+    ['its queued run is about to start', { own: ['queued', true] }, 'queued', true],
+    ['its queued run will never start', { own: ['queued', false] }, 'done', false],
+    ['a subagent\'s queued run is about to start', { below: ['queued', true] }, 'subagents', true],
+    ['a subagent\'s queued run will never start', { below: ['queued', false] }, 'done', false],
+    ['its run works, whatever is queued behind it', { own: ['running', false] }, 'running', true]
+  ]
+  it.each(rows)('%s', (_name, state, status, going) => {
+    const activeRuns = [...(state.own ? [run('launched', state.own[0])] : []), ...(state.below ? [run('child', state.below[0])] : [])]
+    const starts = new Set([...(state.own?.[1] ? ['run:launched'] : []), ...(state.below?.[1] ? ['run:child'] : [])])
+    const [listed] = launchedThreadsOf({
+      creators: new Set(['home']),
+      threads,
+      activeRuns,
+      lastRun: (id) => (id === 'launched' ? run('launched', 'completed') : undefined),
+      asks: () => false,
+      willStart: (queued) => starts.has(queued.runId)
+    })
+    expect(listed?.status).toBe(status)
+    expect(launchedActive(listed!)).toBe(going)
+  })
+})
+
+// An archived thread never makes the bot busy, whatever it left behind (a run that never ended, a question, a subagent):
+// archiving one on 15 Nov left a queued run, and the bot said "Managing" it for a day.
+describe('an archived thread the bot started', () => {
+  const archived: LaunchedThreadMeta[] = [{ ...threads[0]!, settledAt: NOW }, ...threads.slice(1)]
+  const rows: Array<[string, { own?: RunRecord['status']; below?: RunRecord['status']; asks?: string[] }]> = [
+    ['a run of it still runs', { own: 'running' }],
+    ['a run of it waits its turn', { own: 'queued' }],
+    ['a run of it is held', { own: 'paused' }],
+    ['it asks the owner', { asks: ['launched'] }],
+    ['a subagent below it runs', { below: 'running' }],
+    ['a subagent below it asks the owner', { asks: ['child'] }]
+  ]
+  // Archived below an unarchived thread: a subagent's leftovers never keep the thread above it going.
+  it.each([['runs', { below: 'running' as const }], ['asks the owner', { asks: ['child'] }]])('is not managed because an archived subagent %s', (_name, state: { below?: RunRecord['status']; asks?: string[] }) => {
+    const [listed] = launchedThreadsOf({
+      creators: new Set(['home']),
+      threads: [threads[0]!, { ...threads[1]!, settledAt: NOW }, threads[2]!],
+      activeRuns: state.below ? [run('child', state.below)] : [],
+      lastRun: (id) => (id === 'launched' ? run('launched', 'completed') : undefined),
+      asks: (id) => (state.asks ?? []).includes(id),
+      willStart: () => true
+    })
+    expect(listed?.status).toBe('done')
+    expect(launchedActive(listed!)).toBe(false)
+  })
+  it.each(rows)('is not managed while %s', (_name, state) => {
+    const activeRuns = [...(state.own ? [run('launched', state.own)] : []), ...(state.below ? [run('child', state.below)] : [])]
+    const [listed] = launchedThreadsOf({
+      creators: new Set(['home']),
+      threads: archived,
+      activeRuns,
+      lastRun: (id) => (id === 'launched' ? run('launched', 'cancelled') : undefined),
+      asks: (id) => (state.asks ?? []).includes(id),
+      willStart: () => true
+    })
+    expect(listed?.threadId).toBe('launched')
+    expect(launchedActive(listed!)).toBe(false)
   })
 })

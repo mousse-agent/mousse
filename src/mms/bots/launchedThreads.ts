@@ -1,6 +1,7 @@
 import type { EventEmitter } from 'node:events'
 import { BOT_LAUNCHED_ENDED_SHOWN, compareLaunched, type BotLaunchedThread } from '../../shared/bots/personal/chat'
 import type { RunRecord, ThreadEvent } from '../run/types'
+import type { RunEngine } from '../run/RunEngine'
 import { subagentDescendantsIn } from '../../shared/threadLineage'
 import type { ThreadLineage } from '../../shared/types'
 
@@ -14,6 +15,8 @@ export interface LaunchedThreadMeta {
   createdByThreadId?: string
   /** `Thread.hidden`: out of the owner's sidebar, so this list is where the owner finds it. */
   hidden?: true
+  /** `Thread.settledAt`: set while the thread is archived. An archived thread never goes, whatever runs it left. */
+  settledAt?: string
   /** `Thread.lineage`: set on a subagent's thread, naming the thread that started it. */
   lineage?: ThreadLineage
 }
@@ -38,7 +41,10 @@ function latest(...times: Array<string | null | undefined>): string | undefined 
  * ended while subagents below it still have runs going (`subagents`); or, with nothing going, it never ran (`idle`) or
  * its last run finished (`done`), failed or was stopped (`compareLaunched`). Those that work come first (oldest first), then those that
  * wait on the owner, then idle ones, then ended ones (most recently updated first); of those not going, at most
- * `BOT_LAUNCHED_ENDED_SHOWN`. `activeRuns`: the profile's runs not ended; `lastRun`: a thread's newest run.
+ * `BOT_LAUNCHED_ENDED_SHOWN`. `activeRuns`: the profile's runs not ended; `lastRun`: a thread's newest run;
+ * `willStart`: whether a queued run is still on its way (`queuedRunWillStart`). A queued run nothing will start (its
+ * start already came and went) does not make its thread go, and an archived thread (or subagent) never goes, whatever
+ * runs or questions it left: either reads as its last run ended.
  */
 export function launchedThreadsOf(input: {
   creators: ReadonlySet<string>
@@ -46,28 +52,35 @@ export function launchedThreadsOf(input: {
   activeRuns: readonly RunRecord[]
   lastRun(threadId: string): RunRecord | undefined
   asks(threadId: string): boolean
+  willStart(run: RunRecord): boolean
   projectName?(projectId: string): string | undefined
 }): BotLaunchedThread[] {
   if (!input.creators.size) return []
   const active = new Map<string, RunRecord>()
-  for (const run of input.activeRuns) if (!active.has(run.threadId)) active.set(run.threadId, run)
+  for (const run of input.activeRuns) {
+    if (active.has(run.threadId) || (run.status === 'queued' && !input.willStart(run))) continue
+    active.set(run.threadId, run)
+  }
   const mine = input.threads.filter((thread) => thread.createdByThreadId !== undefined && input.creators.has(thread.createdByThreadId))
   const below = subagentDescendantsIn(input.threads)
-  const subagentsAsk = (threadId: string) => below(threadId).some((id) => input.asks(id))
-  const subagentsWork = (threadId: string) => below(threadId).some((id) => active.has(id))
-  const going = mine.filter((thread) => active.has(thread.id) || input.asks(thread.id) || subagentsWork(thread.id) || subagentsAsk(thread.id))
+  // An archived subagent counts for nothing either: its leftovers never keep the thread above it going.
+  const archived = new Set(input.threads.filter((thread) => thread.settledAt).map((thread) => thread.id))
+  const subagentsAsk = (threadId: string) => below(threadId).some((id) => !archived.has(id) && input.asks(id))
+  const subagentsWork = (threadId: string) => below(threadId).some((id) => !archived.has(id) && active.has(id))
+  const goes = (thread: LaunchedThreadMeta) => !thread.settledAt && (active.has(thread.id) || input.asks(thread.id) || subagentsWork(thread.id) || subagentsAsk(thread.id))
+  const going = mine.filter(goes)
   // Of the rest only the most recently updated are shown: their runs are read, never every thread the bot ever started.
   const goingIds = new Set(going.map((thread) => thread.id))
   const rest = mine.filter((thread) => !goingIds.has(thread.id))
     .sort((a, b) => (b.updatedAt ?? b.createdAt ?? '').localeCompare(a.updatedAt ?? a.createdAt ?? ''))
     .slice(0, BOT_LAUNCHED_ENDED_SHOWN)
   const launched = [...going, ...rest].map((thread): BotLaunchedThread => {
-    const run = active.get(thread.id)
+    const run = thread.settledAt ? undefined : active.get(thread.id)
     const last = run ?? input.lastRun(thread.id)
-    const status: BotLaunchedThread['status'] = input.asks(thread.id) || subagentsAsk(thread.id) ? 'needs_input'
-      : run ? (run.status === 'queued' ? 'queued' : run.status === 'paused' ? 'paused' : 'running')
-        : subagentsWork(thread.id) ? 'subagents'
-          : endedAs(last)
+    const status: BotLaunchedThread['status'] = !goes(thread) ? endedAs(last)
+      : input.asks(thread.id) || subagentsAsk(thread.id) ? 'needs_input'
+        : run ? (run.status === 'queued' ? 'queued' : run.status === 'paused' ? 'paused' : 'running')
+          : 'subagents'
     const created = thread.createdAt ?? last?.requestedAt ?? new Date(0).toISOString()
     const project = thread.projectId ? input.projectName?.(thread.projectId) : undefined
     return {
@@ -81,6 +94,18 @@ export function launchedThreadsOf(input: {
     }
   })
   return launched.sort(compareLaunched)
+}
+
+/**
+ * Whether a queued run is still on its way to starting. Only a run whose `turn.start` came and went (every one ended)
+ * is not: the stranded case. One with no `turn.start` yet still counts, as `strandedQueuedRuns` reads it: it waits on
+ * the message queue (behind a pause, a compaction or another process's lease) or its send has not recorded the effect yet.
+ * A queued run that stands in for a remote subagent goes on on another computer.
+ */
+export function queuedRunWillStart(engine: Pick<RunEngine, 'outbox' | 'remoteSubagents'>, run: Pick<RunRecord, 'runId'>): boolean {
+  if (engine.remoteSubagents.getByChildRun(run.runId)) return true
+  const starts = engine.outbox.listForRun(run.runId).filter((effect) => effect.kind === 'turn.start')
+  return starts.length === 0 || starts.some((effect) => effect.status === 'pending' || effect.status === 'running')
 }
 
 /**
