@@ -214,7 +214,7 @@ it('the app answer method reaches the held call and returns redraw for a repeate
   const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as never
   const params = { actionId: a.id, digest: a.args_digest, answer: 'send' }
   expect(await domains.dispatch(context, 'bots.actions.answer', params)).toMatchObject({ status: 'done' })
-  await expect(domains.dispatch(context, 'bots.actions.answer', params)).rejects.toMatchObject({ code: 'bot_action_changed' })
+  await expect(domains.dispatch(context, 'bots.actions.answer', params)).rejects.toMatchObject({ code: 'bot_action_settled' })
   expect(t.calls).toEqual([t.args])
 })
 it.each(['relay', 'pi'] as const)('%s holds through the common path, and journals masked arguments', async runtime => {
@@ -1072,7 +1072,7 @@ it('keeps the card during an owner pause and refuses Send in plain words', async
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   f.bots.pauseBot(t.botId)
-  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('Resume this bot')
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('to send this.')
   expect(f.bots.actions.get(a.id)?.status).toBe('open')
   expect(t.calls).toEqual([])
 })

@@ -169,6 +169,7 @@ export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_js
 interface Host {
   store: BotStore
   enabled(): boolean
+  name(botId: string): string
   refresh(): Promise<void>
   park(row: BotActivationRow): void
   schema(tool: BotMcpTool): unknown
@@ -183,8 +184,8 @@ interface Host {
   execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>): Promise<BotMcpCallOutcome>
 }
 const pending = new Set(['open', 'approved', 'running'])
-export class BotActionChanged extends Error { readonly code = 'bot_action_changed' }
-const changed = () => new BotActionChanged('This changed since you saw it. Redraw the action.')
+export class BotActionChanged extends Error { constructor(message: string, readonly code = 'bot_action_changed') { super(message) } }
+const changed = () => new BotActionChanged('This changed since you saw it. Review it again.')
 export class BotActions {
   private readonly executing = new Set<string>()
   constructor(private readonly host: Host) {
@@ -328,11 +329,15 @@ export class BotActions {
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
     await this.host.refresh()
     const action = this.get(input.actionId)
+    if (!action) throw new BotActionChanged('This call is no longer available.', 'bot_action_gone')
+    if (action.status === 'expired') throw new BotActionChanged('This call expired. Nothing was sent.', 'bot_action_expired')
+    if (action.status === 'withdrawn') throw new BotActionChanged('This call was withdrawn. Nothing was sent.', 'bot_action_withdrawn')
+    if (action.status !== 'open') throw new BotActionChanged('This call has already been answered.', 'bot_action_settled')
     if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
       this.expireDue()
-      throw new BotActionChanged('This call expired. Nothing was sent.')
+      throw new BotActionChanged('This call expired. Nothing was sent.', 'bot_action_expired')
     }
-    if (action && input.answer === 'send' && this.host.store.registry(action.bot_id)?.pausedReason === 'owner') throw new BotActionChanged('Resume this bot before sending.')
+    if (action && input.answer === 'send' && this.host.store.registry(action.bot_id)?.pausedReason === 'owner') throw new BotActionChanged(`Resume ${this.host.name(action.bot_id)} to send this.`, 'bot_action_paused')
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
     if (input.answer === 'not_now') {
       this.host.store.db.transaction(() => {

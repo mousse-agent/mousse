@@ -607,6 +607,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     store: this.host.store,
     refresh: async () => { await this.host.mcp?.warm() },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
+    name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
     publish: id => { this.chat.republish(id) },
     ownerAnswered: row => {

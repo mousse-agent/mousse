@@ -97,6 +97,7 @@ it.each([false, true].flatMap(hasWaited => [
   'You had three cards for this tool that were not sent. Say what you need in your report and wait for your owner to write.'
 ].map(refusal => ({ hasWaited, refusal }))))('refusal joins ordered updates with wait history=$hasWaited: $refusal', ({ hasWaited, refusal }) => {
   const input = matrixInput('turn cap', 'note and answer', hasWaited)
+  f.clock.now = Date.parse('2026-11-07T09:04:00Z')
   f.store.recordWorkRefusal(ROW.id, ROW.botId, 'matrix-refusal', refusal)
   input.workEvents = [...eventsOf(input), ...(f.bots as any).workRefusalUpdates(ROW.id)]
   const prompt: string = (f.bots as any).continuationPrompt(ROW, input)
