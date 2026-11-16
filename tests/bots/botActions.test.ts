@@ -988,9 +988,24 @@ it('C4 service projects the complete stored review and settled results behind th
   expect(card()).toMatchObject({ actionId: a.id, digest: a.args_digest, title: 'Send', serverName: 'Mail', args: JSON.parse(a.args_json), hasHiddenValues: true, hiddenPaths: ['password'], note: 'Please review this', status: 'open' })
   expect(JSON.stringify(card())).not.toContain('hidden-password')
   for (const status of ['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn']) {
-    f.store.run('UPDATE bot_actions SET status = ?, result_json = ?, ran_at = ? WHERE id = ?', status, JSON.stringify({ text: 'masked answer', toolReportedError: true }), f.store.now(), a.id)
+    f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ?, result_json = ?, ran_at = ? WHERE id = ?', status, JSON.stringify({ text: 'masked answer', toolReportedError: true }), f.store.now(), a.id)
     expect(card()).toMatchObject({ status, result: { text: 'masked answer', toolReportedError: true } })
   }
   f.host.settings!.get().experimental.botAsksFirst = false
   expect(card()).toBeUndefined()
+})
+
+// Duplicate work: same tool+digest, different tool, different work; only outcomes reaching the server count.
+it.each(['done', 'uncertain', 'failed', 'not_sent'] as const)('C4 duplicate warning for %s is scoped to the same work and tool', async status => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ?, result_json = ?, ran_at = ? WHERE id = ?', status === 'not_sent' ? 'failed' : status, JSON.stringify({ text: 'answer', ...(status === 'failed' ? { toolReportedError: true } : {}) }), f.store.now(), a.id)
+  await callForBot({ bot: t.work.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat', signal: new AbortController().signal })
+  const next = f.bots.actions.forWork(t.workId)!
+  const card = () => f.bots.service.actionMessage(t.botId, next.id).action!
+  if (status === 'not_sent') expect(card().previous).toBeUndefined()
+  else expect(card().previous).toEqual({ status, at: a.ran_at ?? f.store.now() })
+  f.store.run('UPDATE bot_actions SET target_json = ? WHERE id = ?', JSON.stringify({ server: 'mail', tool: 'different' }), a.id)
+  expect(card().previous).toBeUndefined()
 })
