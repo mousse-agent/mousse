@@ -1,9 +1,10 @@
 import type { EventEmitter } from 'node:events'
 import { BOT_LAUNCHED_ENDED_SHOWN, compareLaunched, type BotLaunchedThread } from '../../shared/bots/personal/chat'
-import type { RunRecord, ThreadEvent } from '../run/types'
+import type { EffectRecord, RunRecord, ThreadEvent } from '../run/types'
 import type { RunEngine } from '../run/RunEngine'
 import { subagentDescendantsIn } from '../../shared/threadLineage'
-import type { ThreadLineage } from '../../shared/types'
+import { listPendingQueue } from '../queue/ThreadMessageQueue'
+import type { QueuedMessage, ThreadLineage } from '../../shared/types'
 
 /** What the launched-thread lookup reads of a thread: its title, project, times and the thread that started it. */
 export interface LaunchedThreadMeta {
@@ -35,16 +36,34 @@ function latest(...times: Array<string | null | undefined>): string | undefined 
 }
 
 /**
+ * How a run that has not ended stands, for the threads a bot started (`runStanding`):
+ * - `goes`: it works, or something moves it on by itself: a usage-limit pause whose timer resumes it, or a Resume now on
+ *   its way; a queued run whose `turn.start` waits or runs, or one that stands in for a remote subagent.
+ * - `waits`: a queued run with no `turn.start` yet: it waits in the message queue, behind a turn, a pause, a compaction
+ *   or another process's lease, or its send has not recorded the effect yet. It goes once what is ahead of it does.
+ * - `held`: only a person moves it on: a pause with no timer (automatic resume is off, or the timer was dropped as
+ *   stale) and no Resume now on its way; a queued run whose message a Stop held (Send now); or a queue that stopped at
+ *   a message whose turn could not start (a thread waiting on workspace recovery refuses it, and the drain gives the
+ *   message back and tries no more): that message's run, and every run waiting behind it.
+ * - `never`: a queued run whose `turn.start` came and went (every one ended) and whose message is not waiting in the
+ *   queue: nothing will start it.
+ */
+export type RunStanding = 'goes' | 'waits' | 'held' | 'never'
+
+/**
  * Every thread started by any of `creators` (`Thread.createdByThreadId`), hidden ones too: what a bot manages beside
- * its own work, and what it managed. Each says how it stands: its run works, waits its turn, is held (a usage limit), or
- * waits on the owner (a question or approval in it or in a subagent below it, as the sidebar rolls it up); or its own run
- * ended while subagents below it still have runs going (`subagents`); or, with nothing going, it never ran (`idle`) or
- * its last run finished (`done`), failed or was stopped (`compareLaunched`). Those that work come first (oldest first), then those that
- * wait on the owner, then idle ones, then ended ones (most recently updated first); of those not going, at most
- * `BOT_LAUNCHED_ENDED_SHOWN`. `activeRuns`: the profile's runs not ended; `lastRun`: a thread's newest run;
- * `willStart`: whether a queued run is still on its way (`queuedRunWillStart`). A queued run nothing will start (its
- * start already came and went) does not make its thread go, and an archived thread (or subagent) never goes, whatever
- * runs or questions it left: either reads as its last run ended.
+ * its own work, and what it managed. Each says how it stands: its run works, waits its turn, is held (a usage limit it
+ * resumes from by itself), or waits on the owner (a question or approval in it or in a subagent below it, as the sidebar
+ * rolls it up); or its own run ended while subagents below it still have runs going (`subagents`); or nothing in it or
+ * below it moves until a person continues it (`on_hold`, `RunStanding` `held`): a pause only Resume now ends, messages
+ * a Stop held, or a queue stopped at a message whose turn could not start (workspace recovery); or, with nothing going, it never ran (`idle`) or its last run finished (`done`), failed or was stopped
+ * (`compareLaunched`). Those that work come first (oldest first), then those that wait on the owner (on hold too), then
+ * idle ones, then ended ones (most recently updated first); of those not going, at most `BOT_LAUNCHED_ENDED_SHOWN`.
+ * `activeRuns`: the profile's runs not ended; `lastRun`: a thread's newest run; `standing`: how a run of a thread the bot
+ * started, or of a subagent below one, stands (`runStanding`). A run nothing will start does not make its thread go, a
+ * run waiting in the queue behind a run only a person moves on is on hold with it, and an archived thread (or subagent)
+ * never goes, whatever runs or questions it left: either reads as its last run ended. A thread on hold lists with what
+ * waits on the owner but never keeps the bot busy (`launchedActive`).
  */
 export function launchedThreadsOf(input: {
   creators: ReadonlySet<string>
@@ -52,22 +71,35 @@ export function launchedThreadsOf(input: {
   activeRuns: readonly RunRecord[]
   lastRun(threadId: string): RunRecord | undefined
   asks(threadId: string): boolean
-  willStart(run: RunRecord): boolean
+  standing(run: RunRecord): RunStanding
   projectName?(projectId: string): string | undefined
 }): BotLaunchedThread[] {
   if (!input.creators.size) return []
-  const active = new Map<string, RunRecord>()
-  for (const run of input.activeRuns) {
-    if (active.has(run.threadId) || (run.status === 'queued' && !input.willStart(run))) continue
-    active.set(run.threadId, run)
-  }
   const mine = input.threads.filter((thread) => thread.createdByThreadId !== undefined && input.creators.has(thread.createdByThreadId))
   const below = subagentDescendantsIn(input.threads)
+  // Only runs of these threads and the subagents below them are looked at, never every run of the profile.
+  const relevant = new Set(mine.flatMap((thread) => [thread.id, ...below(thread.id)]))
+  // Per thread, its first run (by ordinal) that goes on by itself, and its first that only a person moves on.
+  const active = new Map<string, RunRecord>()
+  const held = new Map<string, RunRecord>()
+  const waiting = new Map<string, RunRecord>()
+  for (const run of input.activeRuns) {
+    if (!relevant.has(run.threadId)) continue
+    const standing = input.standing(run)
+    const into = standing === 'goes' ? active : standing === 'held' ? held : standing === 'waits' ? waiting : undefined
+    if (into && !into.has(run.threadId)) into.set(run.threadId, run)
+  }
+  // A run waiting in the queue goes once what is ahead of it does: behind a run only a person moves on, it waits for them too.
+  for (const [threadId, run] of waiting) if (!active.has(threadId) && !held.has(threadId)) active.set(threadId, run)
   // An archived subagent counts for nothing either: its leftovers never keep the thread above it going.
   const archived = new Set(input.threads.filter((thread) => thread.settledAt).map((thread) => thread.id))
   const subagentsAsk = (threadId: string) => below(threadId).some((id) => !archived.has(id) && input.asks(id))
   const subagentsWork = (threadId: string) => below(threadId).some((id) => !archived.has(id) && active.has(id))
-  const goes = (thread: LaunchedThreadMeta) => !thread.settledAt && (active.has(thread.id) || input.asks(thread.id) || subagentsWork(thread.id) || subagentsAsk(thread.id))
+  const subagentsHeld = (threadId: string) => below(threadId).some((id) => !archived.has(id) && held.has(id))
+  const asks = (thread: LaunchedThreadMeta) => input.asks(thread.id) || subagentsAsk(thread.id)
+  const works = (thread: LaunchedThreadMeta) => active.has(thread.id) || subagentsWork(thread.id)
+  const onHold = (thread: LaunchedThreadMeta) => held.has(thread.id) || subagentsHeld(thread.id)
+  const goes = (thread: LaunchedThreadMeta) => !thread.settledAt && (works(thread) || asks(thread) || onHold(thread))
   const going = mine.filter(goes)
   // Of the rest only the most recently updated are shown: their runs are read, never every thread the bot ever started.
   const goingIds = new Set(going.map((thread) => thread.id))
@@ -75,12 +107,14 @@ export function launchedThreadsOf(input: {
     .sort((a, b) => (b.updatedAt ?? b.createdAt ?? '').localeCompare(a.updatedAt ?? a.createdAt ?? ''))
     .slice(0, BOT_LAUNCHED_ENDED_SHOWN)
   const launched = [...going, ...rest].map((thread): BotLaunchedThread => {
-    const run = thread.settledAt ? undefined : active.get(thread.id)
+    const working = thread.settledAt ? undefined : active.get(thread.id)
+    const run = working ?? (thread.settledAt ? undefined : held.get(thread.id))
     const last = run ?? input.lastRun(thread.id)
     const status: BotLaunchedThread['status'] = !goes(thread) ? endedAs(last)
-      : input.asks(thread.id) || subagentsAsk(thread.id) ? 'needs_input'
-        : run ? (run.status === 'queued' ? 'queued' : run.status === 'paused' ? 'paused' : 'running')
-          : 'subagents'
+      : asks(thread) ? 'needs_input'
+        : working ? (working.status === 'queued' ? 'queued' : working.status === 'paused' ? 'paused' : 'running')
+          : subagentsWork(thread.id) ? 'subagents'
+            : 'on_hold'
     const created = thread.createdAt ?? last?.requestedAt ?? new Date(0).toISOString()
     const project = thread.projectId ? input.projectName?.(thread.projectId) : undefined
     return {
@@ -97,19 +131,89 @@ export function launchedThreadsOf(input: {
 }
 
 /**
- * Whether a queued run is still on its way to starting. Only a run whose `turn.start` came and went (every one ended)
- * is not: the stranded case. One with no `turn.start` yet still counts, as `strandedQueuedRuns` reads it: it waits on
- * the message queue (behind a pause, a compaction or another process's lease) or its send has not recorded the effect yet.
- * A queued run that stands in for a remote subagent goes on on another computer.
+ * How a run that has not ended stands (`RunStanding`), read from the Run Engine and, only for a run that may wait on a
+ * person, the thread's message queue (`queue`, a read of its saved queue; one that cannot be read holds nothing).
+ * A paused run goes when its pause ends by itself (automatic resume on, and the timer not dropped as stale) or a resume
+ * is on its way (its `run.resume` waits or runs, or the continue message it queued is still in the queue); otherwise only
+ * Resume now ends it. A queued run whose every `turn.start` ended is never started, unless its message is back in the
+ * queue: the turn could not start and the queue stopped there, for a person. One with no `turn.start` yet waits in the
+ * queue, unless a Stop held its message there (`QueuedMessage.heldAfterStop`) or it waits behind a message whose turn
+ * could not start. A queued run that stands in for a remote subagent goes on on another computer.
  */
-export function queuedRunWillStart(engine: Pick<RunEngine, 'outbox' | 'remoteSubagents'>, run: Pick<RunRecord, 'runId'>): boolean {
-  if (engine.remoteSubagents.getByChildRun(run.runId)) return true
-  const starts = engine.outbox.listForRun(run.runId).filter((effect) => effect.kind === 'turn.start')
-  return starts.length === 0 || starts.some((effect) => effect.status === 'pending' || effect.status === 'running')
+export function runStanding(
+  engine: Pick<RunEngine, 'outbox' | 'remoteSubagents'>,
+  run: RunRecord,
+  queue: (threadId: string) => readonly QueuedMessage[]
+): RunStanding {
+  if (run.status === 'paused') return pauseEndsByItself(engine, run, queue) ? 'goes' : 'held'
+  if (run.status !== 'queued') return 'goes'
+  if (engine.remoteSubagents.getByChildRun(run.runId)) return 'goes'
+  const started = startOf(engine, run.runId)
+  if (started === 'on_its_way') return 'goes'
+  // The person's messages waiting in the queue, in the order they run.
+  const waiting = listPendingQueue([...queue(run.threadId)]).filter((item) => item.intent === 'normal' && item.state === 'pending')
+  const own = waiting.findIndex((item) => item.runId === run.runId)
+  if (started === 'ended') return own >= 0 ? 'held' : 'never'
+  if (waiting[own]?.heldAfterStop) return 'held'
+  const ahead = own >= 0 ? waiting.slice(0, own) : waiting
+  return ahead.some((item) => item.runId !== undefined && startOf(engine, item.runId) === 'ended') ? 'held' : 'waits'
+}
+
+/** Where a run's `turn.start` stands: none yet, one waits or runs, or every one it had ended. */
+function startOf(engine: Pick<RunEngine, 'outbox'>, runId: string): 'none' | 'on_its_way' | 'ended' {
+  const starts = engine.outbox.listForRun(runId).filter((effect) => effect.kind === 'turn.start')
+  if (!starts.length) return 'none'
+  return starts.some((effect) => effect.status === 'pending' || effect.status === 'running') ? 'on_its_way' : 'ended'
+}
+
+/** Whether a paused run continues without a person: its timer resumes it, or a resume (a person's or the timer's) is under way. */
+function pauseEndsByItself(engine: Pick<RunEngine, 'outbox'>, run: RunRecord, queue: (threadId: string) => readonly QueuedMessage[]): boolean {
+  const pause = run.outcome?.pause
+  if (!pause || (pause.autoResume && !pause.stale)) return true
+  if (engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'run.resume' && (effect.status === 'pending' || effect.status === 'running'))) return true
+  const item = pause.resumeItemId
+  return item !== undefined && queue(run.threadId).some((queued) => queued.id === item && (queued.state === 'pending' || queued.state === 'claimed'))
 }
 
 /**
- * Calls `changed` with the thread that started a thread when it is made, whenever its run, or a run of a subagent below it, changes status, a question or
+ * The threads `creators` started, as the service lists them for a bot: read from the profile's threads, Run Engine and
+ * questions, each queue read at most once and only for a run that may wait on a person (`runStanding`).
+ */
+export function launchedThreadsIn(profile: {
+  threads: { listAllThreads(): readonly LaunchedThreadMeta[]; loadMessageQueue(threadId: string): QueuedMessage[] }
+  engine: Pick<RunEngine, 'store' | 'outbox' | 'remoteSubagents'>
+  asks(threadId: string): boolean
+  projectName?(projectId: string): string | undefined
+}, creators: ReadonlySet<string>): BotLaunchedThread[] {
+  if (!creators.size) return []
+  const queues = new Map<string, readonly QueuedMessage[]>()
+  const queue = (threadId: string): readonly QueuedMessage[] => {
+    let items = queues.get(threadId)
+    if (!items) {
+      try {
+        items = profile.threads.loadMessageQueue(threadId)
+      } catch {
+        // A queue that cannot be read holds nothing: its runs read as waiting in it, as they did before it was read.
+        items = []
+      }
+      queues.set(threadId, items)
+    }
+    return items
+  }
+  return launchedThreadsOf({
+    creators,
+    threads: profile.threads.listAllThreads(),
+    activeRuns: profile.engine.store.listNonTerminalRuns(),
+    lastRun: (id) => profile.engine.store.listRuns(id, { limit: 1 })[0],
+    asks: profile.asks,
+    standing: (run) => runStanding(profile.engine, run, queue),
+    ...(profile.projectName ? { projectName: profile.projectName } : {})
+  })
+}
+
+/**
+ * Calls `changed` with the thread that started a thread when it is made, whenever its run, or a run of a subagent below it, changes status, a run's
+ * `turn.start` ends (a turn that could not start leaves its queue stopped with no run changing status), a question or
  * approval in it opens or closes, or its place in the lists changes (hidden or shown, archived): a bot that started it
  * reads its summary again, so its header goes busy or back to free and its list shows the thread as it is. Threads no
  * thread started are ignored. Returns the unsubscribe. Never throws into the emitters.
@@ -134,7 +238,15 @@ export function watchLaunchedThreads(input: {
       }
     } catch { /* a refresh never fails a run or a question */ }
   }
-  const onRun = (event: ThreadEvent) => { if (event.type === 'run.status') touch((event.payload as RunRecord | undefined)?.threadId) }
+  const onRun = (event: ThreadEvent) => {
+    if (event.type === 'run.status') touch((event.payload as RunRecord | undefined)?.threadId)
+    // A turn that could not start changes no run's status: its `turn.start` ending is what tells (its message may be back
+    // in the queue, which stopped there).
+    else if (event.type === 'effect.status') {
+      const effect = event.payload as Pick<EffectRecord, 'kind' | 'status'> | undefined
+      if (effect?.kind === 'turn.start' && effect.status !== 'pending' && effect.status !== 'running') touch(event.threadId)
+    }
+  }
   const onAsk = (event: { threadId?: unknown }) => touch(event?.threadId)
   const onListed = (change: { id?: unknown } | undefined) => touch(change?.id)
   input.runs.on('event', onRun)

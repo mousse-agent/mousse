@@ -1595,6 +1595,15 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(rows().slice(2)).toEqual([['Never ran', 'idle', 'idle'], ['Broken', 'failed', 'failed'], ['Halted', 'stopped', 'failed'], ['Old run', 'done', 'done']])
     })
 
+    it('a thread on hold for the owner is listed as waiting on you while the bot reads free, and the rest fold under Done', async () => {
+      await open({ ...inbox, state: 'idle', stateText: 'Done.', threads: [thread('t8', 'Fix login', 'on_hold', 20), thread('t3', 'Old run', 'done', 90)] })
+      expect(presence().textContent).toBe('free')
+      await click(presence())
+      expect(rows()).toEqual([['Fix login', 'waiting on you', 'waiting']])
+      const fold = host.querySelector<HTMLButtonElement>('.bot-thread-fold')!
+      expect([fold.textContent, fold.getAttribute('aria-expanded')]).toEqual(['Done1', 'false'])
+    })
+
     it('opens a thread from its row, moves along the list with the arrow keys, and closes on Escape or a click away', async () => {
       opened.ids.length = 0
       await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })

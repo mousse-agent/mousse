@@ -93,7 +93,9 @@ describe('presence and sticker', () => {
       ['work leads, threads add to +N', one, threads, 'System check +2', 'working'],
       ['none left: free', [], [], 'free', undefined],
       ['threads that ended or sit idle: free', [], [thread('t3', 'A', 'done'), thread('t4', 'B', 'failed'), thread('t5', 'C', 'stopped'), thread('t6', 'D', 'idle')], 'free', undefined],
-      ['waiting on the owner still counts', [], [thread('t2', 'Typing dots shimmer', 'needs_input'), thread('t3', 'A', 'done')], 'Managing Typing dots shimmer', 'working']
+      ['waiting on the owner still counts', [], [thread('t2', 'Typing dots shimmer', 'needs_input'), thread('t3', 'A', 'done')], 'Managing Typing dots shimmer', 'working'],
+      ['on hold for the owner (a pause only Resume now ends): free', [], [thread('t7', 'Fix login', 'on_hold'), thread('t3', 'A', 'done')], 'free', undefined],
+      ['on hold beside one that works: only the working one is managed', [], [thread('t7', 'Fix login', 'on_hold'), thread('t1', 'Dictation mock-ups')], 'Managing Dictation mock-ups', 'working']
     ]
     for (const [what, work, launched, text, sticker] of rows) {
       const presence = presenceOf({ state: text === 'free' ? 'idle' : 'working', work, threads: launched }, { typing: false, offline: false })
@@ -122,12 +124,12 @@ describe('presence and sticker', () => {
     const statuses: Array<[BotLaunchedThread['status'], string, string]> = [
       ['done', 'done', 'done'], ['needs_input', 'waiting', 'waiting on you'], ['running', 'working', 'working'], ['failed', 'failed', 'failed'],
       ['queued', 'working', 'queued'], ['idle', 'idle', 'idle'], ['stopped', 'failed', 'stopped'], ['paused', 'working', 'held'],
-      ['subagents', 'working', 'waiting on subagents']
+      ['subagents', 'working', 'waiting on subagents'], ['on_hold', 'waiting', 'waiting on you']
     ]
     for (const [status, tone, label] of statuses) expect([status, launchedLook(status)]).toEqual([status, { tone, label }])
     const { going, ended } = launchedGroups(statuses.map(([status]) => thread(status, status)))
     // Started at the same time here, so ties go by id.
-    expect(going.map((item) => item.status)).toEqual(['paused', 'queued', 'running', 'subagents', 'needs_input'])
+    expect(going.map((item) => item.status)).toEqual(['paused', 'queued', 'running', 'subagents', 'needs_input', 'on_hold'])
     expect(ended.map((item) => item.status)).toEqual(['idle', 'done', 'failed', 'stopped'])
   })
 
