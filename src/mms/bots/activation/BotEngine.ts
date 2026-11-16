@@ -8621,7 +8621,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (source) {
           at = Math.max(now, Date.parse(source.at) + (question.nudges ? NUDGE_AGAIN_MS : question.follow.afterMs))
           if (question.follow.kind === 'nudge') at = nudgeSlot(at,
-            this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map(time => Date.parse(time)))
+            this.nudgeTimes(question.botId, at))
         }
       }
       at = this.followUpTime(question.botId, at)
@@ -8877,6 +8877,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // survive a restart; only an open question is ever followed up, so one the owner answered or moved on from, or that
   // was withdrawn or forgotten, never is.
 
+  /** Questions and held actions share the same bot-wide spacing and daily budget. */
+  private nudgeTimes(botId: string, at: number): number[] {
+    const since = new Date(at - 24 * 60 * 60_000).toISOString()
+    const actions = botAsksFirst(this.host.settings?.get()) ? this.store.all(`SELECT m.at FROM bot_messages m JOIN bot_actions a
+      ON m.id = 'bm_' || a.id || '_n1' OR m.id = 'bm_' || a.id || '_n2'
+      WHERE m.bot_id = ? AND m.at > ?`, botId, since) : []
+    return [...this.store.nudgeTimes(botId, since).map(time => Date.parse(time)), ...actions.map(row => Date.parse(String(row.at)))]
+  }
+
   /** Durable nudge rows carry the count; telling receipts carry the clock, never executable arguments. */
   private actionNudgeFollowUps(botId?: string): ActionNudgeFollowUp[] {
     if (!botAsksFirst(this.host.settings?.get())) return []
@@ -8893,7 +8902,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const legacy = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', bot, `cursor:action-told:${source.id}`)
       const toldAt = legacy?.value ?? source.toldAt
       if (typeof toldAt !== 'string') return []
-      const at = this.followUpTime(bot, Math.max(this.now(), Date.parse(toldAt) + (first ? NUDGE_AGAIN_MS : DEFAULT_NUDGE_AFTER_MINUTES * 60_000)))
+      const due = Math.max(this.now(), Date.parse(toldAt) + (first ? NUDGE_AGAIN_MS : DEFAULT_NUDGE_AFTER_MINUTES * 60_000))
+      const at = this.followUpTime(bot, nudgeSlot(due, this.nudgeTimes(bot, due)))
       if (!Number.isFinite(at) || at >= Date.parse(String(row.expires_at))) return []
       return [{ id, actionId: id, botId: bot, activationId: String(row.activation_id), messageId, count: first ? 2 : 1, at }]
     })
@@ -8950,7 +8960,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private nudge(question: BotQuestionRow, now: Date): void {
     const at = now.getTime()
-    const slot = nudgeSlot(at, this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map((time) => Date.parse(time)))
+    const slot = nudgeSlot(at, this.nudgeTimes(question.botId, at))
     if (slot > at) {
       this.moveFollowUp(question, slot)
       return
