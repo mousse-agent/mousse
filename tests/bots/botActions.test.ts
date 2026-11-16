@@ -513,3 +513,15 @@ it('S6 a Plan device cannot Send but may choose Not now', async () => {
   expect(t.calls).toEqual([])
   expect(await call('not_now')).toMatchObject({ status: 'declined' })
 })
+it('R5-capture leaves unrelated tool calls classified as bot calls', async () => {
+  const t = await setup(true)
+  await t.call()
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const ref = { botId: t.botId, activationId: t.workId, lane: 'run' as const, threadId: t.work.payload.threadId }
+  const journal = createBotJournal({ store: memory, asksFirstEnabled: () => true, listThreads: () => [ref], readThread: () => ({ messages: [{
+    id: 'unrelated', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(),
+    toolCall: { title: 'web_fetch', summary: '', details: [], toolName: 'web_fetch', input: { url: 'https://example.test' }, status: 'complete' }
+  }] }) })
+  journal.syncNow(ref)
+  expect(f.store.get("SELECT external FROM bot_journal WHERE source_key = ?", `${ref.threadId}:unrelated`)?.external).toBe(0)
+})
