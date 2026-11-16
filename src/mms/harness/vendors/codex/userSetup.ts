@@ -1,3 +1,4 @@
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../../shared/harness/mcpNames'
 import type { CodexConnection } from './CodexAppServerClient'
 
 /**
@@ -35,7 +36,7 @@ export async function readCodexUserSetup(conn: CodexConnection, cwd: string | nu
     const reserved = new Set<string>()
     const collectReserved = (servers: Record<string, ServerEntry> | null | undefined): void => {
       for (const name of Object.keys(servers ?? {}))
-        if (name === 'mousse' || name === 'mousse-relay') reserved.add(name)
+        if (name === MOUSSE_MCP_SERVER_NAME || name === MOUSSE_RELAY_SERVER_NAME) reserved.add(name)
     }
     collectReserved(response.config.mcp_servers)
     for (const layer of response.layers ?? []) {

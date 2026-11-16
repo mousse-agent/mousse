@@ -24,7 +24,7 @@ import { killTree } from '../../spawn'
 import { withEnforced } from '../../env'
 import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
-import { codexMcpConfigOverrides } from '../../../run/mcp/attachment'
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME, codexMcpConfigOverrides } from '../../../run/mcp/attachment'
 import type { McpAttachment } from '../../../run/mcp/MousseMcpServer'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
@@ -2833,7 +2833,7 @@ export class CodexProviderService {
       if (setup.mcpServers === null || setup.features === null) throw refuse(CODEX_BOT_SETUP_UNREADABLE_TEXT)
       // Even a disabled owner entry leaves keys behind when Codex merges the attachment's table.
       const collision = setup.reservedMcpServers?.find((name) =>
-        name === 'mousse' ? Boolean(input.mcp) : Boolean(input.mcp?.relay))
+        (name === MOUSSE_MCP_SERVER_NAME && Boolean(input.mcp)) || (name === MOUSSE_RELAY_SERVER_NAME && Boolean(input.mcp?.relay)))
       if (collision) throw refuse(codexBotMcpCollisionText(collision))
       botOverrides = codexBotMcpOverrides(setup.mcpServers)
       if (!botOverrides) throw refuse(CODEX_BOT_USER_MCP_UNREADABLE)

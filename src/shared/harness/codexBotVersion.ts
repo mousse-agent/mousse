@@ -1,3 +1,5 @@
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from './mcpNames'
+
 /**
  * What a bot's chat says when its turn does not run because the Codex that would run it is not a version Mousse has
  * checked for bots (`codexBotVersionRefusal`): older or newer alike. The run fails with this text as its error, and the
@@ -28,7 +30,7 @@ export function codexBotMcpCollisionText(name: string): string {
 
 /** Whether a bot's run failed with one of these texts, which its chat shows as they are. */
 export function isCodexBotRefusal(reason: string): boolean {
-  return ['mousse', 'mousse-relay'].some((name) => reason === codexBotMcpCollisionText(name)) ||
+  return [MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME].some((name) => reason === codexBotMcpCollisionText(name)) ||
     reason === CODEX_BOT_VERSION_TEXT || reason === CODEX_BOT_VERSION_UNKNOWN_TEXT || reason === CODEX_BOT_SETUP_UNREADABLE_TEXT ||
     /^Codex's own setting ".+" is on, and my work can't run with it\./.test(reason)
 }
