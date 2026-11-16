@@ -93,7 +93,8 @@ function reviewLabel(card: BotActionCardData): string {
   if (card.result?.notSentInTime) return 'What it would have sent'
   if (card.status === 'done' || card.status === 'failed' && card.result?.toolReportedError) return 'What it sent'
   if (card.status === 'uncertain') return 'What it tried to send'
-  if (card.status === 'approved' || card.status === 'running') return 'What it is sending'
+  if (card.status === 'approved') return 'What it will send'
+  if (card.status === 'running') return 'What it is sending'
   return 'What it would have sent'
 }
 

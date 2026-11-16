@@ -2279,7 +2279,7 @@ it('updates the more-arguments cue when a nested fold opens without scrolling', 
 
 it.each([
   ['done', false, 'What it sent'], ['failed', true, 'What it sent'],
-  ['uncertain', false, 'What it tried to send'], ['approved', false, 'What it is sending'],
+  ['uncertain', false, 'What it tried to send'], ['approved', false, 'What it will send'],
   ['running', false, 'What it is sending'], ['declined', false, 'What it would have sent'],
   ['expired', false, 'What it would have sent'], ['withdrawn', false, 'What it would have sent'],
   ['failed', false, 'What it would have sent']
