@@ -387,6 +387,40 @@ it.each(['needs_you', 'look', 'fyi', 'every'] as const)('a scheduled approval is
   const a = f.bots.actions.forWork(t.id)!
   expect(f.store.message(a.message_id)?.tell).toBe('soon')
 })
+it('three unsent calls stop the tool across occurrences, and owner words reset it', async () => {
+  const t = await scheduledCall()
+  let id = t.id, turn = t.run
+  for (let n = 0; n < 3; n++) {
+    await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'version ' + n }, toolCallId: 'call-' + n, signal: new AbortController().signal })
+    await finish(f, turn.payload)
+    const a = f.bots.actions.forWork(id)!
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+    await flush()
+    const resumed = await start(f, id, 2)
+    await finish(f, resumed.payload)
+    f.clock.now += 5 * 60_000
+    const due = await f.tickSchedules(new Date(f.clock.now))
+    id = due.inserted[0]!
+    turn = await start(f, id)
+  }
+  const call = () => callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'new version' }, toolCallId: 'fourth-call', signal: new AbortController().signal })
+  expect(await call()).toMatchObject({ isError: true, text: expect.stringContaining('three cards') })
+  expect(f.bots.actions.forWork(id)).toBeUndefined()
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Please try again', clientRequestId: 'reset-schedule-refusal' })
+  expect((await call()).isError).not.toBe(true)
+})
+it('a schedule ending at until withdraws a parked call and preserves its report', async () => {
+  const t = await scheduledCall()
+  const at = new Date(f.clock.now + 2 * 60_000)
+  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { expiresAt: at.toISOString() })
+  await t.call()
+  await finish(f, t.run.payload, 'completed', { text: 'Draft ready.' })
+  f.clock.now += 3 * 60_000
+  await f.tickSchedules(new Date(f.clock.now))
+  await flush()
+  expect(f.bots.actions.forWork(t.id)?.status).toBe('withdrawn')
+  expect(f.bots.service.chatList(t.botId).messages.filter(m => m.kind === 'run_report' && m.activationId === t.id)).toHaveLength(1)
+})
 it('a subagent holds its call on its work and uses its own dispatch in the call key', async () => {
   const t = await setup(true)
   await t.work.prepared.authority.subagents!.start({ title: 'Sender', brief: 'Send mail', toolCallId: 'start-sender' })

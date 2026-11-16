@@ -1576,7 +1576,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const parked = this.store.laneActivations(botId, 'run', ['blocked']).find(row => same(row) && workWaits(row))
       const previous = parked ?? this.holding(botId, 'run').find(same)
       // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
-      if (previous) { skip = previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
+      if (previous) { skip = previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' || this.actions.forWork(previous.id) ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
       const inserted = this.store.insertActivationOnce({
         id,
         botId,
@@ -5282,7 +5282,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' | 'question' | 'approval' | 'gone' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
-      const durableWork = current.trigger.kind === 'work' || current.trigger.kind === 'schedule'
+      const durableWork = current.trigger.kind === 'work' || current.trigger.kind === 'schedule' && Boolean(this.actions.forWork(current.id))
       const readAtStart = durableWork && Boolean(this.store.workWait(current.id) || this.actions.forWork(current.id))
       const answers = durableWork ? this.store.unreadWorkAnswers(current.id) : input.answers ?? []
       // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`); a scheduled
