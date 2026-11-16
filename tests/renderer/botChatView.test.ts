@@ -2090,3 +2090,27 @@ it.each(['done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn', 'leg
   // The plain fallback is replaced by the card; it must never produce an unpaintable match.
   expect(text).not.toContain('legacy fallback')
 })
+
+it('keeps structural hidden children inside escaped literal objects distinct from literal marker-shaped text', async () => {
+  fake.chats.inbox = [held({ args: { $mousse: 'literal', value: { $mousse: 'custom', password: { $mousse: 'hidden', text: 'hidden · will be sent' }, spoof: { $mousse: 'literal', value: { $mousse: 'literal', value: { $mousse: 'literal', value: { $mousse: 'hidden', text: 'hidden · will be sent' } } } } } } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelectorAll('[aria-label="Hidden value that will be sent"]')).toHaveLength(1)
+  expect(card.textContent).toContain('custom')
+})
+it('passes exactly the shown action identity through the real client transport, and refreshes the settled tool error', async () => {
+  fake.chats.inbox = [held()]
+  const { createPersonalBotsClient } = await import('../../src/renderer/services/personalBotsClient')
+  const request = vi.fn(async () => {
+    fake.chats.inbox = [held({ status: 'failed', result: { text: '<error>Partial delivery</error>', toolReportedError: true } })]
+    return { status: 'failed' }
+  })
+  Object.assign(fake.client, { answerAction: createPersonalBotsClient({ request } as never).answerAction })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(request).toHaveBeenCalledExactlyOnceWith('bots.actions.answer', { actionId: 'held-1', digest: 'shown-digest', answer: 'send' })
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain('The tool reported an error')
+  expect(card.querySelector('[aria-label="Tool result"]')?.textContent).toBe('<error>Partial delivery</error>')
+  expect(button('Send', card)).toBeUndefined()
+})
