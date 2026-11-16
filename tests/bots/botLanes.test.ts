@@ -3,7 +3,7 @@
  * owner's messages in order on the home thread; the run lane runs manual and scheduled runs on
  * threads of their own, each with the run pack of its schedule, and posts a run report.
  */
-import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BotEngine, UNANSWERED_REPLY } from '../../src/mms/bots/activation/BotEngine'
 import { existsSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -75,6 +75,57 @@ describe('messages sent one after another', () => {
     expect(f.store.dispatch(turn!.id, 2)).toBeUndefined()
     expect(botTexts().slice(-1)).toEqual(['You were right: I told the acrylic thread in mousse to retake the screenshots.'])
     expect(lane('chat', ['queued', 'running'])).toEqual([])
+  })
+
+  /**
+   * The follow-up cuts the reply, and Claude Code resumes the session with its own "No response requested." line, which
+   * the turn then ends on (the runtime's result, or a model that copied it from its history). Inputs: the placeholder
+   * alone / after a partial reply / again on the retry / in an owner's turn vs a wake-up.
+   */
+  describe('a reply that ends on the runtime\'s "No response requested."', () => {
+    async function cutTurn(): Promise<{ turn: string; payload: Awaited<ReturnType<typeof start>>['payload']; follow: string }> {
+      await send('what changed in the release?', 'm1')
+      const [turn] = lane('chat', ['running'])
+      const { payload, prepared } = await start(f, turn!.id)
+      prepared.steer!.attached()
+      const follow = (await f.bots.service.chatSend({ botId, text: 'and is it merged?', clientRequestId: 'm2' })).message.id
+      const taken = prepared.steer!.take()!
+      prepared.steer!.accepted(taken.token)
+      return { turn: turn!.id, payload, follow }
+    }
+    const placeholderRows = () => chatOf(f, botId).filter((message) => message.author === 'bot' && /No response requested/i.test(message.text))
+
+    it.each([
+      ['alone', 'No response requested.', undefined],
+      ['after a partial reply', 'Two fixes landed.\n\nNo response requested.', 'Two fixes landed.']
+    ] as const)('%s: it is never posted, and the turn goes on once to answer the owner', async (_name, text, draft) => {
+      const { turn, payload, follow } = await cutTurn()
+      await finish(f, payload, 'completed', { text })
+      expect(placeholderRows()).toEqual([])
+      expect(f.store.activation(turn)?.status).toBe('running')
+      const { payload: next, prepared } = await start(f, turn, 2)
+      expect(prepared.prompt).toContain('Your reply never reached your owner')
+      expect(prepared.prompt).toContain('what changed in the release?')
+      expect(prepared.prompt).toContain('and is it merged?')
+      if (draft) expect(prepared.prompt).toContain(`«${draft}»`)
+      await finish(f, next, 'completed', { text: 'Two fixes landed, and yes, it merged.' })
+      expect(chatOf(f, botId).filter((message) => message.activationId === turn && message.author === 'bot')).toMatchObject([
+        { kind: 'text', text: 'Two fixes landed, and yes, it merged.', replyTo: { id: follow } }
+      ])
+      expect(f.store.activation(turn)?.status).toBe('done')
+    })
+
+    it('cut off again: it says so once, with what it had, and goes on no further', async () => {
+      const { turn, payload } = await cutTurn()
+      await finish(f, payload, 'completed', { text: 'Two fixes landed.\n\nNo response requested.' })
+      const { payload: next } = await start(f, turn, 2)
+      await finish(f, next, 'completed', { text: 'No response requested.' })
+      expect(placeholderRows()).toEqual([])
+      expect(f.store.dispatch(turn, 3)).toBeUndefined()
+      expect(f.store.activation(turn)?.status).toBe('done')
+      expect(chatOf(f, botId).filter((message) => message.activationId === turn && message.author === 'bot').map((message) => message.text))
+        .toEqual([`Two fixes landed.\n\n${UNANSWERED_REPLY}`])
+    })
   })
 
   // Inputs: no calls / reads / mutations; success / Stop / failure / restart; third message.

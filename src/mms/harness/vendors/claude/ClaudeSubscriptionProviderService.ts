@@ -3522,8 +3522,9 @@ export class ClaudeSubscriptionProviderService {
           const failure = sendNowCut ? usageLimitFromResult(result, liveRun.rateLimits) : claudeResultFailure(result, liveRun.rateLimits)
           if (failure) throw failure
           if (sendNowCut) input.onSendNowCut?.()
-          if (frames.segmentEmpty && 'result' in result) {
-            frames.text += result.result
+          const resultText = 'result' in result ? frames.resultText(result.result) : ''
+          if (frames.segmentEmpty && resultText) {
+            frames.text += resultText
             input.onText(frames.text)
           }
         } else if (liveRun.rateLimits.hold) {
@@ -3616,8 +3617,9 @@ export class ClaudeSubscriptionProviderService {
                   !(interruptRequested && steers.length)
                 )
                   throw claudeResultFailure(message, frames.rateLimits)
-                if (frames.text.length === turnTextLength && 'result' in message) {
-                  frames.text += message.result
+                const resultText = 'result' in message ? frames.resultText(message.result) : ''
+                if (frames.text.length === turnTextLength && resultText) {
+                  frames.text += resultText
                   input.onText(frames.text)
                 }
                 success = true

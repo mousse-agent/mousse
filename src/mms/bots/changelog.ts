@@ -100,7 +100,13 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   },
   { id: 16, date: '2026-11-16', text: 'Work can now wait for a time or event with work_wait and end its turn. It carries on in the same work with what it already saw; use wake only in chat. Scheduled runs and subagents cannot wait.' },
   { id: 17, date: '2026-11-16', text: 'A turn now starts with a "Running now" note when something already runs in your folders (your background commands, servers), with its local address; running_list shows the list any time. Reuse a running server instead of starting another copy.' },
-  { id: 18, date: '2026-11-16', text: 'With "use your threads", terminal_read reads the terminals your owner has open in one of their threads: what runs there and its last lines of output. watch_list with a watcherId gives all of a background command\'s output, page by page, also for a while after it ended, not just its last line.' }
+  { id: 18, date: '2026-11-16', text: 'With "use your threads", terminal_read reads the terminals your owner has open in one of their threads: what runs there and its last lines of output. watch_list with a watcherId gives all of a background command\'s output, page by page, also for a while after it ended, not just its last line.' },
+  {
+    id: 19,
+    date: '2026-11-17',
+    text: 'A wake-up, a notice from a thread you handed work to, another bot\'s message, and work you started from one of them may end with exactly [SILENT] when nothing finished and nothing needs your owner: nothing is posted. Never post "nothing new" or "still running", and never write "No response requested.". Keep replies to one to three short lines: the result, not how you got it.',
+    gone: [/If there is nothing worth saying, say so in one line/i, /that you'll do it when your owner replies with a message/i]
+  }
 ]
 
 /** The newest entry's id: what a bot has seen once it is told everything. */

@@ -375,3 +375,53 @@ describe('pull request checks and reviews', () => {
     for (const set of sets) expect(f.store.listActivations(botId).filter((r) => r.idempotencyKey === `wake:${set.wakeId}`)).toHaveLength(1)
   })
 })
+
+/**
+ * A wake-up that finds nothing new says nothing: a turn no person started or waits on may end with exactly `[SILENT]`,
+ * and then nothing is posted (so nobody is notified); its quiet line still shows it ran. Work such a turn started may
+ * too. A turn of the owner's, and work they asked for, always post what they wrote. Inputs: who started the turn (the
+ * owner, a wake-up), what it said (`[SILENT]`, real news), chat or work.
+ */
+describe('a wake-up with nothing to say', () => {
+  async function wakeUp(): Promise<{ row: NonNullable<ReturnType<typeof wakeTurn>>; wakeId: string }> {
+    const turn = await chat('Tell me when the deploy is done', 'm1')
+    const set = await wake(turn.activation.id, { brief: 'See whether the deploy finished.', dueAt: inMinutes(20) })
+    await finish(f, turn.payload, 'completed', { text: "I'll check in 20 minutes." })
+    f.clock.now += 20 * MIN
+    await fireDue()
+    return { row: wakeTurn(set.wakeId)!, wakeId: set.wakeId }
+  }
+  const postedBy = (activationId: string) => chatOf(f, botId).filter((message) => message.activationId === activationId && message.author === 'bot')
+
+  it.each([
+    ['[SILENT]', []],
+    ['Nothing new yet.\n[SILENT]', []],
+    ['The deploy finished.', ['The deploy finished.']]
+  ] as const)('a wake-up that says %j posts %j', async (text, posted) => {
+    const { row, wakeId } = await wakeUp()
+    const { payload, prepared } = await start(f, row.id)
+    expect(prepared.prompt).toContain('reply exactly [SILENT]')
+    await finish(f, payload, 'completed', { text })
+    expect(postedBy(row.id).map((message) => message.text)).toEqual(posted)
+    expect(f.store.activation(row.id)?.status).toBe('done')
+    expect(lineOf(wakeId)).toBeDefined()
+  })
+
+  it.each([
+    ['a wake-up', true],
+    ['the owner', false]
+  ] as const)('work %s started that reports [SILENT] posts nothing only when no person asked for it (%s)', async (_who, fromWake) => {
+    const from = fromWake ? (await wakeUp()).row : (await chat('Research this', 'm2')).activation
+    const { workId } = await f.bots.tools.work.start(botId, from.id, { title: 'Deploy check', brief: 'Check the deploy.', key: 'k1' })
+    const work = await start(f, workId)
+    await finish(f, work.payload, 'completed', { text: '[SILENT]' })
+    expect(f.store.activation(workId)?.status).toBe('done')
+    expect(postedBy(workId).map((message) => message.text)).toEqual(fromWake ? [] : ['[SILENT]'])
+  })
+
+  it("an owner's own turn is never silenced", async () => {
+    const turn = await chat('Say nothing', 'm3')
+    await finish(f, turn.payload, 'completed', { text: '[SILENT]' })
+    expect(postedBy(turn.activation.id).map((message) => message.text)).toEqual(['[SILENT]'])
+  })
+})

@@ -2531,9 +2531,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `draft:${row.id}`)
   }
 
-  private canHoldChatDraft(row: BotActivationRow, main: BotDispatchRow, text?: string): boolean {
+  private canHoldChatDraft(row: BotActivationRow, main: BotDispatchRow, text?: string, unanswered = false): boolean {
     if (hasReplyCards(row.id) || hasToolImages(row.id) || (text && (replyMayCarryPicture(text) || extractAppletParts(text, true).some(part => part.type !== 'text')))) return false
-    if (row.lane !== 'chat' || this.chatDraft(row) || !this.store.pendingWorkNotes(row.id).length) return false
+    if (row.lane !== 'chat' || this.chatDraft(row) || (!unanswered && !this.store.pendingWorkNotes(row.id).length)) return false
     if (this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)) return false
     return this.replyEffects.get(`${row.id}:${main.n}`) === false
   }
@@ -4934,7 +4934,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // left for them; without the time it reports what it has, and the notes stay unread (work_list shows it ended).
       // The same holds, in either lane, for a permission the owner allowed after the turn was refused it (issue #983).
       const allowed = !reload && run.status === 'completed' ? this.allowedSinceRefused(row) : []
-      const hold = this.canHoldChatDraft(row, main, text)
+      // The runtime's placeholder is never the bot's words. A chat turn of the owner's that ended on it never answered
+      // what they wrote: it goes on once to answer it; a second time it says it was cut off (`UNANSWERED_REPLY`).
+      const placeholder = row.lane === 'chat' && text !== undefined ? withoutRuntimePlaceholder(text) : undefined
+      if (placeholder?.cut) text = placeholder.text
+      const unanswered = Boolean(placeholder?.cut) && !reload && run.status === 'completed' && memoryLaneOf(row) === 'chat'
+      const retryUnanswered = unanswered && !this.store.dispatches(row.id).some((dispatch) => dispatch.send.unanswered) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
+      // Cut off again: what it held back goes out with the line that asks the owner to send it again.
+      if (unanswered && !retryUnanswered && !text?.trim()) text = [this.chatDraft(row)?.text.trim(), UNANSWERED_REPLY].filter(Boolean).join('\n\n')
+      const hold = this.canHoldChatDraft(row, main, text, retryUnanswered)
       // The executor can deliver its final words after the terminal event. Wait before making the
       // continuation, so its request and the durable draft contain those words too.
       if (hold && text === undefined && options.expectText) {
@@ -4957,7 +4965,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const next = this.recorded(row, () => {
         // A chat turn the owner wrote to again while it answered, and that never read it, answers it now in its thread;
         // without the time for it the turn ends and the message gets a turn of its own (`requeueChatNotes`).
-        noted = !reload && run.status === 'completed' && (this.store.pendingWorkNotes(row.id).length > 0 || allowed.length > 0) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
+        noted = retryUnanswered || (!reload && run.status === 'completed' && (this.store.pendingWorkNotes(row.id).length > 0 || allowed.length > 0) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS)
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         // Work that asked its owner a question (`ask_owner`) waits for the answer, holding no run slot, and never reports
         // now: its question's bubble is what the owner sees. Answered while its turn was ending, it goes on at once.
@@ -5012,7 +5020,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (heldDraft) this.drained.delete(`${row.id}:${main.n}`)
       else this.postReply(next, main, text, options.expectText === true)
       if (noted && next.status === 'running') {
-        await this.continueWith(row.id, ['running'], { afterReport: true, ...(allowed.length ? { allowed } : {}) })
+        await this.continueWith(row.id, ['running'], { afterReport: true, ...(retryUnanswered ? { unanswered: true } : {}), ...(allowed.length ? { allowed } : {}) })
         return
       }
       if (reload && next.status === 'running') {
@@ -5106,6 +5114,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Its open walls, unless a card for them was posted in this activation already (a moved run ask keeps its old card too).
     const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open' &&
       !this.store.messagesForAsk(ask.id).some((message) => message.activationId === row.id))
+    // The runtime's placeholder never reaches the chat, whichever way the reply arrives (`withoutRuntimePlaceholder`).
+    if (row.lane === 'chat' && text) text = withoutRuntimePlaceholder(text).text
     // A chat turn that handed work off and says its one line twice (before the work_start call and after it) says it
     // once. Any other reply is posted as written.
     const handedOff = row.lane === 'chat' && chips.some((chip) => WORK_STARTED_CHIPS.has(chip.text))
@@ -5117,8 +5127,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A scheduled run that found nothing new reports `quiet` (or says `[SILENT]`), as any automation run is told to:
     // its report is not posted, so the chat shows nothing; the run and its line stay in Automations. Open asks and
     // cards it made still show, without the marker. Work the owner asked for and chat replies are posted as written.
-    const silent = report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))
-    if (silent && !asks.length && !waiting && !cards) return
+    // A chat turn nobody started or waits on (a wake-up, a thread's notice, another bot's message), and work such a turn
+    // started, may say `[SILENT]` when nothing finished and nothing needs the owner: nothing is
+    // posted and nobody is notified; the wake's quiet line and the work list still show it happened. An empty reply
+    // stays as it is (a chat turn that only handed work off still shows it).
+    const quietTurn = unattendedChatTurn(row) || (report && row.trigger.kind === 'work' && unattendedChatTurn(this.store.activation(row.trigger.from) ?? { lane: 'run', idempotencyKey: '' }))
+    const silent = (report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))) || (quietTurn && written !== '' && isSilentOutput(written))
+    if (silent && !asks.length && !waiting && !cards && !questions.length) return
     const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
       ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
     const body = silent ? '' : lateReport ? `${lateReport}${written || 'Done.'}` : written
@@ -5379,7 +5394,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean; unanswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     if (this.cancelRemovedScheduleRun(row)) return 'none'
@@ -5505,7 +5520,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
           ? { usageRetry: true }
-          : { ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}), ...(input.turnCap ? { turnCap: true } : {}) }
+          : { ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}), ...(input.turnCap ? { turnCap: true } : {}), ...(input.unanswered ? { unanswered: true } : {}) }
       }
       this.store.insertDispatch(dispatch)
       if (!readAtStart && !input.usageRetry) for (const answer of answers) this.store.markApplied(answer.id)
@@ -5553,7 +5568,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; actionCaused?: string; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; answerCaused?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; actionCaused?: string; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; answerCaused?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string; unanswered?: boolean }, neverRan?: string): string {
+    // A chat turn whose reply was the runtime's placeholder: nothing reached the owner, so it answers them now.
+    if (input.unanswered && row.lane === 'chat') {
+      const draft = this.chatDraft(row)
+      const said = draft?.text.trim() ? ` What you wrote before it, not sent yet: «${draft.text.trim()}».` : ''
+      return `[Mousse] Your reply never reached your owner: it ended with "${RUNTIME_PLACEHOLDER_REPLY}", a line the runtime writes when a reply is cut off, never an answer.${said} Their messages:\n\n${this.ownerWords(row.botId, row.id)}\n\nAnswer them now, in one reply. Never write "${RUNTIME_PLACEHOLDER_REPLY}" yourself.`
+    }
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -8461,7 +8482,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.entry(botId)
     const setting = this.store.activation(from)
     if (!setting || setting.botId !== botId || !ownerChatTurn(setting))
-      throw new BotEngineError('invalid_params', "You can't start a background command from here. Only your chat turn started by your owner's own message can do that. Hand the job to work, which runs commands in the sandbox, or tell your owner what to start.")
+      throw new BotEngineError('invalid_params', "You can't start a background command from here. Only your chat turn started by your owner's own message can do that. Hand the job to work, which runs commands in the sandbox.")
     const command = input.command.trim()
     if (!command) throw new BotEngineError('invalid_params', 'watch_start needs a command.')
     if (command.length > MAX_WATCHER_COMMAND_CHARS) throw new BotEngineError('invalid_params', `Keep the command to ${MAX_WATCHER_COMMAND_CHARS} characters.`)
@@ -10064,6 +10085,37 @@ export const NOTE_REPEAT_LINE = 'A note marked "may be a repeat" may have reache
 export const CHAT_NOTE_REPEAT_LINE = 'A message marked "may be a repeat" may have reached you already while you answered: if you already answered it, don\'t answer it again.'
 
 /**
+ * What Claude Code writes as the model's reply when it resumes a session it cut (a steer's restart): never the bot's
+ * answer, and never shown to its owner. A model that saw it in its history may write it itself, too.
+ */
+export const RUNTIME_PLACEHOLDER_REPLY = 'No response requested.'
+
+/**
+ * A bot's reply without the runtime's placeholder (`RUNTIME_PLACEHOLDER_REPLY`): the reply is that line alone, or ends
+ * with it as a paragraph of its own. `cut` says it did, so the owner's message it was to answer went unanswered.
+ */
+export function withoutRuntimePlaceholder(text: string): { text: string; cut: boolean } {
+  const paragraphs = text.trim().split(/\n\s*\n/)
+  let cut = false
+  while (paragraphs.length && paragraphs.at(-1)!.trim().toLowerCase() === RUNTIME_PLACEHOLDER_REPLY.toLowerCase()) {
+    paragraphs.pop()
+    cut = true
+  }
+  return cut ? { text: paragraphs.join('\n\n').trim(), cut } : { text, cut }
+}
+
+/**
+ * The chat turns no person started and no person waits on: a wake-up (`wake:`), a thread's notice (`job:`) and another
+ * bot's message (`botmsg:`). They may end silently (`[SILENT]`). A question's default answer (`question:`) always says
+ * what it went with, so it is not one of them.
+ */
+const UNATTENDED_CHAT_KEYS = ['wake:', 'job:', 'botmsg:'] as const
+
+export function unattendedChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
+  return row.lane === 'chat' && UNATTENDED_CHAT_KEYS.some((key) => row.idempotencyKey.startsWith(key))
+}
+
+/**
  * The owner's messages as they reach a chat turn while it answers (sent quickly, one after another): part of the same
  * conversation, answered in the one reply the turn is writing, never as a separate request.
  */
@@ -10132,6 +10184,9 @@ function chatTurnEndRow(row: Pick<BotActivationRow, 'id' | 'botId' | 'threadId'>
     sourceKey: `${BOT_CHAT_TURN_END_KEY}${row.id}:${end}`, who: 'mousse', text, json: { v: 1, turnEnd: end, ...(end === 'stopped' ? {} : { reason: error }) }
   }
 }
+
+/** What a chat turn says when its reply was cut off twice and the owner's message is still unanswered. */
+export const UNANSWERED_REPLY = 'My reply got cut off before it reached you. Could you send that again?'
 
 /** Why an activation stopped, in plain words for its chat; never a provider's own message (it may name a model). */
 function failureText(reason: string): string {

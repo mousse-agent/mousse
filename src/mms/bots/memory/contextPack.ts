@@ -110,7 +110,7 @@ export const BOT_MEMORY_WRAPPER_OPEN = '<bot_memory note="Your saved memory and 
 export const BOT_MEMORY_WRAPPER_CLOSE = '</bot_memory>'
 
 /** The run prompt's last line (bot-context.md §5.2): the engine appends it to a run's request, after the pack. */
-export const BOT_RUN_REPORT_LINE = "Your last message is your report to the owner, in your own voice: what you did, what you found, what's next, in plain words."
+export const BOT_RUN_REPORT_LINE = "Your last message is your report to the owner, in your own voice: the result first, in one to three short lines, then only what they must decide or know."
 
 /**
  * Block 1 (≤300 tokens): how memory works. Core memory (what the owner told the bot, and its own

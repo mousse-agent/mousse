@@ -136,6 +136,9 @@ export function wakeFiredLabel(fired: BotWakeFired | null): string {
   return `Following up · ${wakeEndWords(fired.reason)}`
 }
 
+/** What a turn nobody started replies with when it has nothing for its owner: nothing is posted (`isSilentOutput`). */
+export const SILENT_REPLY = '[SILENT]'
+
 /**
  * The text a wake's chat turn starts with: what the bot wrote for itself, when it set it, and what happened (its fixed
  * fields), framed as Mousse's, never the owner's. `late`: the time it was for, when it is said later (Mousse was off).
@@ -177,6 +180,6 @@ export function wakeInput(input: { brief: string; setAt: string; event: BotWakeE
   if (input.work) {
     return [...lines.map((line, index) => index === 0 ? line.replace('A wake-up', 'A work wait').replace(' Your owner did not write: you carry on by yourself.', '') : line), 'Carry on with this work in this thread, then report as usual.'].join('\n\n')
   }
-  lines.push(`Do what you planned, then tell your owner in a short message what happened. If there is nothing worth saying, say so in one line. This is wake-up ${input.chain} in a row without your owner. Set another only if you are still waiting on something new; repeating the same wake-up with no progress is refused.`)
+  lines.push(`Do what you planned. You can act in this turn yourself (start work, use your owner's threads when you may), so never ask your owner to write to you first. Then write to your owner only if something finished, failed or needs their decision: the result in one or two short lines. Otherwise, or when work you start here will report it, reply exactly ${SILENT_REPLY}: nothing is posted. "Nothing new", "still running" or a new wake-up is not news. This is wake-up ${input.chain} in a row without your owner. Set another only if you are still waiting on something new; repeating the same wake-up with no progress is refused.`)
   return lines.join('\n\n')
 }

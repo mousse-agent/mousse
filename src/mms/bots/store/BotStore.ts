@@ -887,6 +887,8 @@ export interface BotDispatchRow {
     usageRetry?: boolean
     /** A continuation after the previous dispatch reached its runtime's cap on model turns. */
     turnCap?: boolean
+    /** A chat turn going on to answer the owner after its reply was the runtime's placeholder (at most once). */
+    unanswered?: boolean
   }
 }
 

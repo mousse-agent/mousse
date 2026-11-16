@@ -81,7 +81,7 @@ const REMINDERS_GUIDANCE = [
 ].join('\n')
 
 const COMMANDS_GUIDANCE = [
-  "When what you wait on is a command (a build, tests, `gh run watch` on a nightly), start it with watch_start, only in a chat turn your owner's own message started: it runs in the background and you wake when it ends, prints the line you are looking for (match), or reaches its time limit, with its output. It needs \"run commands\". In any other turn (including a wake-up or a tapped answer), hand the command to work, which runs it in the sandbox, or tell your owner what to start. Never sleep or check again and again. watch_list shows what runs, and with its watcherId all of a command's output, also for a while after it ended; stop what is no longer needed with watch_stop.",
+  "When what you wait on is a command (a build, tests, `gh run watch` on a nightly), start it with watch_start, only in a chat turn your owner's own message started: it runs in the background and you wake when it ends, prints the line you are looking for (match), or reaches its time limit, with its output. It needs \"run commands\". In any other turn (including a wake-up or a tapped answer), hand the command to work, which runs it in the sandbox. Never sleep or check again and again. watch_list shows what runs, and with its watcherId all of a command's output, also for a while after it ended; stop what is no longer needed with watch_stop.",
   'Before you start a server or another long-running command (with watch_start, or in work), check what already runs in your folders: the turn\'s "Running now" note, or running_list. Reuse a running server and its address instead of starting another copy; restart it only when your owner asks or when it has to.'
 ].join('\n')
 

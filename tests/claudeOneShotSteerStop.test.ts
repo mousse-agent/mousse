@@ -256,6 +256,26 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
     expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
   })
 
+  // Hand-authored frames: Claude Code's resume writes its own "No response requested." and the result repeats it.
+  it.each([
+    ['repeats the line Claude Code made up', 'No response requested.', ''],
+    ['is the model\'s own', 'All tests pass.', 'All tests pass.']
+  ])('the restarted query wrote nothing; its result %s: the turn\'s text is %j', async (_name, result, text) => {
+    let turn!: ReturnType<typeof cappedTurn>
+    turn = cappedTurn([
+      interruptedByTheSteers(() => turn.pending),
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield init
+        yield started(uuid)
+        if (result === 'No response requested.')
+          yield { type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: result }] }, session_id: SESSION }
+        yield { ...done, result }
+      }
+    ], ONE)
+    expect((await turn.run()).trim()).toBe(text)
+  })
+
   it('a taken steer the model answered before the Stop is accepted once and not handed back', async () => {
     let turn!: ReturnType<typeof cappedTurn>
     turn = cappedTurn([

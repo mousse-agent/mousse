@@ -151,7 +151,7 @@ export function jobNoticeInput(job: BotJob, result?: string): string {
   if (job.state === 'needs_input')
     lines.push('Tell your owner in one short line that it waits for them, with the link. You are told again when it finishes.')
   else
-    lines.push('Tell your owner in a short message what it did, with the link. Carry on only if the job needs a next step; otherwise one line is enough.')
+    lines.push('Tell your owner in one line what came of it, with the link: the result, never the housekeeping (cleanup, what was left alone). If you already told them this result, reply exactly [SILENT] and nothing is posted. Carry on only if the job needs a next step.')
   return lines.join('\n\n')
 }
 
