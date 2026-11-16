@@ -164,7 +164,7 @@ export function wakeInput(input: { brief: string; setAt: string; event: BotWakeE
   }
   lines.push(`What you wrote for yourself: ${input.brief}`)
   if (input.work) {
-    return [...lines.map((line, index) => index === 0 ? line.replace('A wake-up', 'A work wait') : line), 'Carry on with this work in this thread, then report as usual.'].join('\n\n')
+    return [...lines.map((line, index) => index === 0 ? line.replace('A wake-up', 'A work wait').replace(' Your owner did not write: you carry on by yourself.', '') : line), 'Carry on with this work in this thread, then report as usual.'].join('\n\n')
   }
   lines.push(`Do what you planned, then tell your owner in a short message what happened. If there is nothing worth saying, say so in one line. This is wake-up ${input.chain} of at most ${MAX_WAKE_CHAIN} in a row without your owner.`)
   return lines.join('\n\n')
