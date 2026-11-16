@@ -296,6 +296,8 @@ export interface BotWorkItem {
 
 /** One thing a bot may use, in About → Can use. `id` is the permission's fingerprint. */
 export interface BotPermissionItem {
+  /** At least one granted tool of this service asks first. */
+  asksFirst?: true
   /** Absent on older services, which cannot switch permissions. */
   enabled?: boolean
   /** Devices need Full access to allow this permission. */
