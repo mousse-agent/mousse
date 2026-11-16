@@ -398,11 +398,15 @@ it('R5-slot keeps the slot until the held runtime finishes', async () => {
   await f.bots.activate({ botId: t.botId, input: 'Other one', clientRequestId: 'other1' })
   await f.bots.activate({ botId: t.botId, input: 'Other two', clientRequestId: 'other2' })
   await t.call()
-  const next = await f.bots.activate({ botId: t.botId, input: 'Next', clientRequestId: 'next' })
-  expect(f.store.activation(next.id)?.status).toBe('queued')
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Next job', clientRequestId: 'next-message' })
+  const chat = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const talk = await start(f, chat.id)
+  const next = await f.bots.tools.work.start(t.botId, chat.id, { title: 'Next', brief: 'Next job', key: 'next-owner-job' })
+  await finish(f, talk.payload)
+  expect(f.store.activation(next.workId)?.status).toBe('queued')
   await finish(f, t.work.payload)
   await flush()
-  expect(f.store.activation(next.id)?.status).toBe('running')
+  expect(f.store.activation(next.workId)?.status).toBe('running')
 })
 it.each(['access_token', 'client_secret', 'password', 'authorization', 'api_key', 'x-api-key', 'apiToken', 'AccessToken', 'clientSecret'] as const)('R5-mask masks %s by key', async key => {
   const { maskedActionData } = await import('../../src/mms/bots/actions/BotActions')
