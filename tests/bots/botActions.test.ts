@@ -1041,12 +1041,22 @@ it('allows a different argument after Not now, with only one outstanding card', 
   expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(1)
 })
 
-it.each(['clear', 'reset', 'delete', 'forget history', 'permission', 'tool'] as const)('withdraws pending arguments on %s and preserves a running row', async path => {
+it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget history', 'permission', 'allowed', 'tool', 'server', 'card', 'request'] as const)('withdraws pending arguments on %s and preserves a running row', async path => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   // A second work's running call is independent and must retain its run-once record.
   f.store.run(`INSERT INTO bot_actions SELECT id || '_running', call_key || '_running', bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, place_json, card_json, bot_note, 'running', result_json, message_id, next_at, nudges, expires_at, answered_at, answered_device, created_at, ran_at FROM bot_actions WHERE id = ?`, a.id)
+  if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
+  if (['failed', 'limits', 'week'].includes(path)) f.store.moveActivation(t.workId, ['blocked'], 'failed', { endReason: path })
+  if (path === 'allowed') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) }))
+  if (path === 'server') { vi.spyOn(t.mcp, 'binding').mockReturnValue(undefined); f.bots.fillMcpAsks() }
+  if (path === 'card' || path === 'request') {
+    const id = path === 'card' ? a.message_id : String(f.store.all("SELECT id FROM bot_messages WHERE bot_id = ? AND author = 'owner' ORDER BY seq DESC", t.botId)[0].id)
+    const memory = new BotMemoryStore({ db: f.store.db })
+    const seq = memory.append({ botId: t.botId, sourceKey: `bm:${id}`, kind: 'notice', who: 'bot', text: 'request' })!
+    memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  }
   if (path === 'clear') await f.bots.clearChat(t.botId)
   if (path === 'reset') await f.bots.resetBot(t.botId)
   if (path === 'delete') await f.bots.remove(t.botId)
@@ -1179,7 +1189,7 @@ it('a tool withdrawal is delivered through unread updates and confirmed on compl
   expect(f.store.unreadWorkActions(t.workId)).toEqual([])
 })
 
-it.each(['clear', 'reset', 'delete', 'permission', 'forget'] as const)('%s rolls back withdrawal and its owning change together on a failed write', async path => {
+it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget history', 'permission', 'allowed', 'tool', 'server', 'card', 'request'] as const)('%s rolls back withdrawal and its owning change together on a failed write', async path => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
@@ -1187,13 +1197,23 @@ it.each(['clear', 'reset', 'delete', 'permission', 'forget'] as const)('%s rolls
   const grant = f.store.activeGrant(t.botId)
   f.store.db.statement(`CREATE TRIGGER fail_card BEFORE UPDATE ON bot_messages WHEN OLD.id = '${a.message_id}' BEGIN SELECT RAISE(ABORT, 'card failure'); END`).run()
   let change: () => unknown
-  if (path === 'clear') change = () => f.bots.clearChat(t.botId)
+  if (path === 'stop') change = () => f.bots.stopWork(t.botId, t.workId)
+  else if (['failed', 'limits', 'week'].includes(path)) change = () => f.store.moveActivation(t.workId, ['blocked'], 'failed', { endReason: path })
+  else if (path === 'forget history') change = () => f.bots.wipeMemory(t.botId, 'saved')
+  else if (path === 'allowed') change = () => f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) }))
+  else if (path === 'tool' || path === 'server') change = () => {
+    if (path === 'tool') t.server.tools.splice(0)
+    else vi.spyOn(t.mcp, 'binding').mockReturnValue(undefined)
+    f.bots.fillMcpAsks()
+  }
+  else if (path === 'clear') change = () => f.bots.clearChat(t.botId)
   else if (path === 'reset') change = () => f.bots.resetBot(t.botId)
   else if (path === 'delete') change = () => f.bots.remove(t.botId)
   else if (path === 'permission') change = () => f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
   else {
     const memory = new BotMemoryStore({ db: f.store.db })
-    const seq = memory.append({ botId: t.botId, kind: 'notice', sourceKey: `bm:${a.message_id}`, who: 'bot', text: 'Held call' })!
+    const id = path === 'request' ? String(f.store.all("SELECT id FROM bot_messages WHERE bot_id = ? AND author = 'owner' ORDER BY seq DESC", t.botId)[0].id) : a.message_id
+    const seq = memory.append({ botId: t.botId, kind: 'notice', sourceKey: `bm:${id}`, who: 'bot', text: 'Held call' })!
     change = () => memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
   }
   await expect(Promise.resolve().then(change)).rejects.toThrow()
@@ -1202,4 +1222,43 @@ it.each(['clear', 'reset', 'delete', 'permission', 'forget'] as const)('%s rolls
   expect(f.store.activeGrant(t.botId)).toEqual(grant)
   expect(f.store.registry(t.botId)?.deletedAt).toBeNull()
   expect(f.store.message(a.message_id)?.text).not.toBe('Not sent')
+})
+
+
+it('a repeat refusal joins unread work updates without another action or card', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  const next = await start(f, t.workId, 2)
+  ;(next.prepared as any).modelOutput?.()
+  await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-refused', signal: new AbortController().signal })
+  expect(f.store.unreadWorkNotes(t.workId).map(n => n.text).join(' ')).toContain('Do not ask again')
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
+  await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], { network: true })
+  expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('Do not ask again')
+  const receiving = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+  ;(receiving.prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkNotes(t.workId)).toEqual([])
+})
+
+it('switch off keeps repeated and differing calls direct without cards or refusal notes', async () => {
+  const t = await setup(false)
+  for (const body of [t.args.body, t.args.body, 'different']) {
+    expect(await callForBot({ bot: t.work.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body }, toolCallId: body, signal: new AbortController().signal })).not.toMatchObject({ isError: true })
+  }
+  expect(t.calls).toHaveLength(3)
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(f.store.unreadWorkNotes(t.workId)).toEqual([])
+})
+
+it('switch off refuses card answers without resetting repeated-wait detection', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.host.settings!.get().experimental.botAsksFirst = false
+  for (const answer of ['send', 'not_now'] as const)
+    await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })).rejects.toThrow('switch is off')
+  expect(f.store.all("SELECT * FROM bot_memory_state WHERE key LIKE 'cursor:action-owner:%'")).toEqual([])
 })
