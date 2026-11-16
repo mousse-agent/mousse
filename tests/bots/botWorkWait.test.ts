@@ -594,7 +594,7 @@ it.each(['question', 'wall'] as const)('uses the master opening when an owner %s
   expect(f.store.dispatch(workId, 3)?.prompt.text).toBe(golden.prompts[key])
 })
 
-it.each(['restart', 'network'] as const)('N2 repeats a wait, note and answer after %s until output confirms them', async failure => {
+it.each(['restart', 'network', 'usage_retry'] as const)('N2 repeats a wait, note and answer after %s until output confirms them', async failure => {
   const { workId, turn, chat } = await work()
   f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
   const questionId = f.store.workQuestion(workId)!.id
@@ -619,7 +619,7 @@ it.each(['restart', 'network'] as const)('N2 repeats a wait, note and answer aft
     await f.bots.reconcileOnStartup()
   } else {
     await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
-    await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
+    await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: failure === 'network', usageRetry: failure === 'usage_retry' })
   }
   await flush()
   const retry = f.store.lastMainDispatch(workId)!
