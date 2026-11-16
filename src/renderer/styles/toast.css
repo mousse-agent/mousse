@@ -151,7 +151,9 @@ html[data-theme='light'] .ui-toaster {
   padding-bottom: 7px;
 }
 
-.ui-toast-success { --tone: var(--success); }
+/* --success is vivid so it reads at dot size; across a whole card it shouts. The toast keeps its
+   hue and lightness at about half its chroma: still green, calm against the theme. */
+.ui-toast-success { --tone: oklch(from var(--success) l calc(c * 0.5) h); }
 .ui-toast-attention { --tone: var(--status-input, var(--accent)); }
 .ui-toast-paused { --tone: var(--warning); }
 .ui-toast-error { --tone: var(--danger); }
