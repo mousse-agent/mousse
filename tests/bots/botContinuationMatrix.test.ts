@@ -57,8 +57,8 @@ const actionLines = [
   ['failed', 'Nothing was sent. The call failed:'],
   ['tool_error', 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'],
   ['uncertain', 'It could not be confirmed whether this went through: check before trying again.'],
-  ['withdrawn', 'Nothing was sent. The call failed:'],
-  ['expired', 'Nothing was sent. The call failed:']
+  ['withdrawn', 'This call was withdrawn. Nothing was sent.'],
+  ['expired', 'This call expired. Nothing was sent; do not try the same call again without a new reason.']
 ] as const
 const actionCells = actionLines.flatMap(([status, line]) => [false, true].flatMap(hasWaited => [false, true].flatMap(cause =>
   (['turn cap', 'permission allowed since refused'] as const).flatMap(reason => UPDATES.map(update => ({ status, line, hasWaited, cause, reason, update }))))))

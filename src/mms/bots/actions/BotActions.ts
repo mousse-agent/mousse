@@ -174,6 +174,7 @@ interface Host {
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
   post(row: BotActivationRow, id: string, text: string): void
   settled(row: BotActivationRow): void
+  publish(messageId: string): void
   ownerAnswered(row: BotActivationRow): void
   held(): void
   execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>): Promise<BotMcpCallOutcome>
@@ -213,7 +214,7 @@ export class BotActions {
   withdrawChanged(): void {
     if (!this.host.enabled()) return
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
-      if (!this.valid(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: 'This tool or its permission changed. Carry on without it.' })) this.finish(a as unknown as ActionRow)
+      if (!this.valid(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: 'This tool or its permission changed. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
     }
   }
   get(id: string): ActionRow | undefined { return this.host.store.get('SELECT * FROM bot_actions WHERE id = ?', id) as unknown as ActionRow | undefined }
@@ -237,10 +238,11 @@ export class BotActions {
     const refused = this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND args_digest = ? AND status IN ('declined', 'expired') ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), digest)[0]
     if (refused) {
       const seq = Number(JSON.parse(String(refused.card_json ?? '{}')).ownerSeq ?? 0)
-      const note = this.host.store.get('SELECT 1 FROM bot_work_notes WHERE activation_id = ? AND id > ? LIMIT 1', row.id, Number(JSON.parse(String(refused.card_json ?? '{}')).noteSeq ?? 0))
+      const note = Number(this.host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `cursor:action-note:${row.id}`)?.value ?? 0) > Number(JSON.parse(String(refused.card_json ?? '{}')).noteSeq ?? 0)
       if (this.host.store.ownerLastWroteSeq(row.botId) <= seq && !note)
         return { text: 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.', isError: true }
     }
+    if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call already waits for your owner. End your turn now.', isError: true }
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
@@ -273,13 +275,14 @@ export class BotActions {
       if (moved && ['declined', 'expired'].includes(to)) {
         const action = this.get(id)!
         this.host.store.run(`UPDATE bot_actions SET card_json = json_set(COALESCE(card_json, '{}'), '$.ownerSeq', ?, '$.noteSeq', ?) WHERE id = ?`,
-          this.host.store.ownerLastWroteSeq(action.bot_id), Number(this.host.store.get('SELECT MAX(id) AS id FROM bot_work_notes WHERE activation_id = ?', action.activation_id)?.id ?? 0), id)
+          this.host.store.ownerLastWroteSeq(action.bot_id), Number(this.host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', action.bot_id, `cursor:action-note:${action.activation_id}`)?.value ?? 0), id)
       }
       if (moved && !pending.has(to)) {
         const action = this.get(id)!
         const row = this.host.store.activation(action.activation_id)
         this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
         if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
+        this.host.store.db.afterCommit(() => this.host.publish(action.message_id))
       }
       return moved
     })

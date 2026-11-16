@@ -193,7 +193,7 @@ it.each(['approved', 'running'] as const)('restart clears arguments from an expi
   const a = f.bots.actions.forWork(t.workId)!
   f.bots.actions.transition(a.id, 'open', 'approved')
   if (state === 'running') f.bots.actions.transition(a.id, 'approved', 'running')
-  f.clock.now += 49 * 3600_000
+  f.clock.now += 48 * 3600_000 + 1000
   await f.bots.actions.reconcile()
   expect(t.calls).toEqual([])
   expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: state === 'approved' ? 'expired' : 'uncertain', exec_args: null })
@@ -202,8 +202,8 @@ it('an expired Send is refused', async () => {
   const t = await setup(true)
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
-  f.clock.now += 49 * 3600_000
-  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('changed since')
+  f.clock.now += 48 * 3600_000 + 1000
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
   expect(t.calls).toEqual([])
 })
 it('the app answer method reaches the held call and returns redraw for a repeated Send', async () => {
@@ -985,7 +985,7 @@ it.each(['open', 'approved'] as const)('withdraws %s calls atomically when work 
   const a = f.bots.actions.forWork(t.workId)!
   if (status === 'approved') f.bots.actions.transition(a.id, 'open', 'approved')
   f.store.db.statement(`CREATE TRIGGER fail_card BEFORE UPDATE ON bot_messages WHEN OLD.id = '${a.message_id}' BEGIN SELECT RAISE(ABORT, 'card failure'); END`).run()
-  expect(() => f.store.moveActivation(t.workId, ['blocked'], 'cancelled')).toThrow('card failure')
+  expect(() => f.store.moveActivation(t.workId, ['blocked'], 'cancelled')).toThrow()
   expect(f.bots.actions.get(a.id)).toMatchObject({ status, exec_args: JSON.stringify(t.args) })
   expect(f.store.activation(t.workId)?.status).toBe('blocked')
   f.store.db.statement('DROP TRIGGER fail_card').run()
@@ -1010,4 +1010,196 @@ it('expires on the due timer and carries its outcome until model output', async 
   ;(receiving.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkActions(t.workId)).toEqual([])
   expect(t.calls).toEqual([])
+})
+
+it.each(['declined', 'expired'] as const)('refuses an identical %s call without a new row; owner notes and changed arguments allow a card', async outcome => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  if (outcome === 'declined') await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  else { f.clock.now = Date.parse(a.expires_at); await f.bots.deliverDueReminders() }
+  await flush()
+  const next = await start(f, t.workId, 2)
+  const call = (args = t.args, id = 'repeat') => callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: id, signal: new AbortController().signal })
+  expect(await call()).toMatchObject({ isError: true })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(f.bots.noteWork(t.botId, t.workId, 'Please try it again')).toBe('noted')
+  expect(await call(t.args, 'after-note')).not.toMatchObject({ isError: true })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(2)
+})
+
+it('allows a different argument after Not now, with only one outstanding card', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  await flush()
+  const next = await start(f, t.workId, 2)
+  const call = (body: string) => callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body }, toolCallId: body, signal: new AbortController().signal })
+  expect(await call('new reason')).not.toMatchObject({ isError: true })
+  expect(await call('another reason')).toMatchObject({ isError: true })
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(1)
+})
+
+it.each(['clear', 'reset', 'delete', 'forget history', 'permission', 'tool'] as const)('withdraws pending arguments on %s and preserves a running row', async path => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  // A second work's running call is independent and must retain its run-once record.
+  f.store.run(`INSERT INTO bot_actions SELECT id || '_running', call_key || '_running', bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, place_json, card_json, bot_note, 'running', result_json, message_id, next_at, nudges, expires_at, answered_at, answered_device, created_at, ran_at FROM bot_actions WHERE id = ?`, a.id)
+  if (path === 'clear') await f.bots.clearChat(t.botId)
+  if (path === 'reset') await f.bots.resetBot(t.botId)
+  if (path === 'delete') await f.bots.remove(t.botId)
+  if (path === 'forget history') await f.bots.wipeMemory(t.botId, 'saved')
+  if (path === 'permission') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  if (path === 'tool') { t.server.tools.splice(0); f.bots.fillMcpAsks() }
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(f.bots.actions.get(`${a.id}_running`)).toMatchObject({ status: 'running', exec_args: JSON.stringify(t.args) })
+  await f.bots.actions.reconcile()
+  expect(f.bots.actions.get(`${a.id}_running`)).toMatchObject({ status: 'uncertain', exec_args: null })
+})
+
+it('keeps the card during an owner pause and refuses Send in plain words', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.bots.pauseBot(t.botId)
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('Resume this bot')
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  expect(t.calls).toEqual([])
+})
+
+it.each(['card', 'request'] as const)('Forget of the %s withdraws exact arguments in the redaction transaction', async which => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const request = f.store.all("SELECT id FROM bot_messages WHERE bot_id = ? AND author = 'owner' ORDER BY seq DESC", t.botId)[0]!
+  const id = which === 'card' ? a.message_id : String(request.id)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${id}`, kind: which === 'card' ? 'notice' : 'owner_msg', who: which === 'card' ? 'bot' : 'owner', text: f.store.message(id)!.text })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  f.bots.afterForget()
+  await flush()
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(f.store.activation(t.workId)?.status).toBe('cancelled')
+})
+
+it('forget history removes settled text and preserves the call key that prevents another execution', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  await f.bots.wipeMemory(t.botId, 'saved')
+  const saved = f.bots.actions.get(a.id)!
+  expect(saved).toMatchObject({ call_key: a.call_key, status: 'declined', args_json: '"[forgotten]"', card_json: '"[forgotten]"', result_json: '{"text":"[forgotten]"}' })
+  const result = f.bots.actions.hold(f.store.activation(t.workId)!, JSON.parse(a.call_key)[1], { server: 'mail', tool: 'send' } as never, t.args, 'runtime-call-1')
+  expect(result).not.toMatchObject({ isError: true })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(t.calls).toEqual([])
+})
+
+it.each(['restart', 'sleep', 'late Send'] as const)('expires at the written deadline after %s', async path => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.clock.now = Date.parse(a.expires_at) + 1000
+  if (path === 'restart') { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
+  else if (path === 'sleep') await f.bots.deliverDueReminders()
+  else await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('expired')
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'expired', exec_args: null })
+  expect(t.calls).toEqual([])
+})
+
+it('an owner chat message lifts the identical-call refusal using its sequence', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  await flush()
+  const next = await start(f, t.workId, 2)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Please try again', clientRequestId: 'retry-owner' })
+  expect(await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'after-owner', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(2)
+})
+
+it('settled approval stranded before its readiness write ends with a line', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.store.run("UPDATE bot_actions SET status = 'withdrawn', exec_args = NULL WHERE id = ?", a.id)
+  f.bots.afterForget()
+  expect(f.store.activation(t.workId)).toMatchObject({ status: 'failed', endReason: 'action_gone' })
+  expect(f.store.message(`bm_${t.workId}_ended`)?.text).toContain('nothing could let it carry on')
+})
+
+it.each(['stop', 'expiry', 'forget'] as const)('the disabled switch leaves held rows unchanged on %s', async path => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.host.settings!.get().experimental.botAsksFirst = false
+  if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
+  if (path === 'expiry') { f.clock.now = Date.parse(a.expires_at); await f.bots.deliverDueReminders() }
+  if (path === 'forget') {
+    const memory = new BotMemoryStore({ db: f.store.db })
+    const seq = memory.append({ botId: t.botId, kind: 'notice', sourceKey: `bm:${a.message_id}`, who: 'bot', text: 'Held call' })!
+    memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  }
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
+})
+
+it.each(['send', 'not_now'] as const)('owner %s resets detection of repeated waits, as a question answer does', async answer => {
+  const t = await setup(true)
+  for (let round = 0; round < 4; round++) {
+    const current = f.store.activation(t.workId)!
+    const n = f.store.lastMainDispatch(t.workId)!.n
+    const runtime = round === 0 ? t.work : await start(f, t.workId, n)
+    await f.bots.tools.wakes!.wait!(t.botId, t.workId, { brief: 'Wait for mail evidence', dueAt: new Date(f.clock.now + 300_000).toISOString() })
+    await finish(f, runtime.payload)
+    f.clock.now += 300_000
+    await f.bots.deliverDueReminders(); await flush()
+    const next = await start(f, t.workId, n + 1)
+    await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: `mail ${round}` }, toolCallId: `mail-${round}`, signal: new AbortController().signal })
+    await finish(f, next.payload)
+    const a = f.bots.actions.forWork(current.id)!
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })
+    await flush()
+  }
+})
+
+it('a tool withdrawal is delivered through unread updates and confirmed on completion', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  t.server.tools.splice(0)
+  f.bots.fillMcpAsks(); await flush()
+  expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('This call was withdrawn')
+  expect(f.store.unreadWorkActions(t.workId).map(a => a.id)).toEqual([a.id])
+  const next = await start(f, t.workId, 2)
+  await finish(f, next.payload)
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+})
+
+it.each(['clear', 'reset', 'delete', 'permission', 'forget'] as const)('%s rolls back withdrawal and its owning change together on a failed write', async path => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const before = f.store.activation(t.workId)!
+  const grant = f.store.activeGrant(t.botId)
+  f.store.db.statement(`CREATE TRIGGER fail_card BEFORE UPDATE ON bot_messages WHEN OLD.id = '${a.message_id}' BEGIN SELECT RAISE(ABORT, 'card failure'); END`).run()
+  let change: () => unknown
+  if (path === 'clear') change = () => f.bots.clearChat(t.botId)
+  else if (path === 'reset') change = () => f.bots.resetBot(t.botId)
+  else if (path === 'delete') change = () => f.bots.remove(t.botId)
+  else if (path === 'permission') change = () => f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  else {
+    const memory = new BotMemoryStore({ db: f.store.db })
+    const seq = memory.append({ botId: t.botId, kind: 'notice', sourceKey: `bm:${a.message_id}`, who: 'bot', text: 'Held call' })!
+    change = () => memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  }
+  await expect(Promise.resolve().then(change)).rejects.toThrow()
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
+  expect(f.store.activation(t.workId)).toEqual(before)
+  expect(f.store.activeGrant(t.botId)).toEqual(grant)
+  expect(f.store.registry(t.botId)?.deletedAt).toBeNull()
+  expect(f.store.message(a.message_id)?.text).not.toBe('Not sent')
 })

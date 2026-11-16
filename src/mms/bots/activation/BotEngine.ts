@@ -599,6 +599,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     refresh: async () => { await this.host.mcp?.warm() },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
     enabled: () => botAsksFirst(this.host.settings?.get()),
+    publish: id => { this.chat.republish(id) },
     ownerAnswered: row => {
       this.resetWorkWaitChain(row.id)
       const last = this.store.get('SELECT MAX(rowid) AS n FROM bot_reminders WHERE work_id = ?', row.id)
@@ -2228,7 +2229,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private readonly workWaitFacts: WorkWaitFacts = {
     approvalReady: (row) => this.store.lastMainDispatch(row.id)?.endedAt !== null && !this.live.has(row.id),
-    approvalExists: (row) => { const action = this.actions.forWork(row.id); return Boolean(action && (row.endReason === 'approval_answered' || ['open', 'approved', 'running'].includes(action.status))) },
+    approvalExists: (row) => { const action = this.actions.forWork(row.id); return Boolean(action && (!botAsksFirst(this.host.settings?.get()) || row.endReason === 'approval_answered' || ['open', 'approved', 'running'].includes(action.status))) },
     timerExists: (row) => { const wait = this.store.workWait(row.id); return Boolean(wait && wait.status !== 'cancelled') },
     usageResumable: (row) => this.usageResumable(row),
     questionExists: (row) => Boolean(this.store.workQuestion(row.id)),
@@ -7960,6 +7961,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
       if (from && this.store.activation(from) && ownerChatTurn(this.store.activation(from)!)) this.resetWorkWaitChain(workId)
       this.store.addWorkNote(workId, botId, text, from ? this.ownerMessageOf(from) : undefined)
+      if (botAsksFirst(this.host.settings?.get()) && (!from || (this.store.activation(from) && ownerChatTurn(this.store.activation(from)!))))
+        this.store.run(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, '1') ON CONFLICT(bot_id, key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`, botId, `cursor:action-note:${workId}`)
       return 'noted' as const
     })
   }
