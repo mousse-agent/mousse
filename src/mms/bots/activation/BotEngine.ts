@@ -2137,7 +2137,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The only transition that parks work and releases its run slot; called in the source's transaction. */
   private park(row: BotActivationRow, reason: WorkWaitReason, from: readonly BotActivationRow['status'][] = [row.status], marker: string = reason): boolean {
     if (!WORK_WAIT_RULES[reason].allows(row)) throw new Error(`Cannot park ${row.id} (${row.lane}/${row.trigger.kind}) for ${reason}`)
-    return this.store.moveActivation(row.id, from, 'blocked', { endReason: marker })
+    const parked = this.store.moveActivation(row.id, from, 'blocked', { endReason: marker })
+    if (parked && reason === 'waiting') {
+      const wait = this.store.workWait(row.id)
+      if (wait && Date.parse(wait.dueAt) <= this.now()) this.deliverWorkWaitInTx(wait)
+    }
+    return parked
   }
 
   /** Cleanup after parking commits. The source keeps its messages and turn-abort order. */
@@ -8502,6 +8507,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * run now, has the wake said as a line instead, so it is never lost and never retried forever. Marked delivered in the
    * transaction that queues the turn: it wakes once.
    */
+  /** Also used by park: a due row and its ready work commit together, without a timer gap. */
+  private deliverWorkWaitInTx(wake: BotReminderRow): boolean {
+    if (this.store.reminder(wake.id)?.status !== 'waiting' || !wake.workId) return false
+    const row = this.store.activation(wake.workId)
+    if (!row || ENDED_ACTIVATION_STATUSES.has(row.status)) { this.store.settleReminder(wake.id, 'cancelled'); return false }
+    if (row.status !== 'blocked' || row.endReason !== 'waiting') return false
+    if (!this.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'wait_ready' })) return false
+    this.store.settleReminder(wake.id, 'delivered', { activationId: row.id })
+    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired: wake.fired, chain: wake.chain, work: true, clock: clockTime, ...(this.now() - Date.parse(wake.dueAt) > REMINDER_LATE_MS && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
+    this.store.run('UPDATE bot_reminders SET text = ? WHERE id = ?', input, wake.id)
+    return true
+  }
+
   private async deliverWake(wake: BotReminderRow, late: boolean): Promise<void> {
     const fired: BotWakeFired | null = wake.fired ?? (wake.event ? { kind: 'ended', reason: 'expired' } : null)
     // The owner sees the original label; titles and command errors remain outside data in memory.
@@ -8509,16 +8527,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       || fired?.kind === 'watcher' && fired.message)
     const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), work: Boolean(wake.workId), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
     if (wake.workId) {
-      const resumed = this.store.db.transaction(() => {
-        if (this.store.reminder(wake.id)?.status !== 'waiting') return false
-        const row = this.store.activation(wake.workId!)
-        if (!row || ENDED_ACTIVATION_STATUSES.has(row.status)) { this.store.settleReminder(wake.id, 'cancelled'); return false }
-        if (row.status !== 'blocked' || row.endReason !== 'waiting') return false
-        if (!this.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'wait_ready' })) return false
-        this.store.settleReminder(wake.id, 'delivered', { activationId: row.id })
-        this.store.run('UPDATE bot_reminders SET text = ? WHERE id = ?', input, wake.id)
-        return true
-      })
+      const resumed = this.store.db.transaction(() => this.deliverWorkWaitInTx(wake))
       if (resumed) { this.changed({ botId: wake.botId, activationId: wake.workId }); this.pumpLater(wake.botId) }
       return
     }

@@ -1812,6 +1812,7 @@ export class BotStore {
   nextQuestionDue(botId?: string): BotQuestionRow | undefined {
     const row = this.get(`SELECT * FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL AND message_id IS NOT NULL
       AND bot_id IN (SELECT bot_id FROM bot_registry WHERE deleted_at IS NULL)
+      AND (work_id IS NULL OR due_at > ? OR work_id IN (SELECT id FROM bot_activations WHERE status = 'blocked' AND end_reason = 'waiting'))
       ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY next_at, rowid LIMIT 1`, ...(botId === undefined ? [] : [botId]))
     return row ? questionOf(row) : undefined
   }
@@ -2036,7 +2037,7 @@ export class BotStore {
   nextReminder(botId?: string): BotReminderRow | undefined {
     const row = this.get(`SELECT * FROM bot_reminders WHERE status = 'waiting'
       AND bot_id IN (SELECT bot_id FROM bot_registry WHERE deleted_at IS NULL)
-      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY due_at, id LIMIT 1`, ...(botId === undefined ? [] : [botId]))
+      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY due_at, id LIMIT 1`, this.now(), ...(botId === undefined ? [] : [botId]))
     return row ? reminderOf(row) : undefined
   }
 
