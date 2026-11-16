@@ -2269,9 +2269,9 @@ describe('a bot turn on Codex', () => {
 
   // Hand-authored wire replays: owner names × attachments × enabled/disabled entries.
   // Refused cases must never send thread/start (nor let leftover owner keys reach Codex).
-  const reservedCases = [[], ['mousse'], ['mousse-relay'], ['mousse', 'mousse-relay']].flatMap((names) =>
+  const reservedCases = [[], ['mousse'], ['mousse-relay'], ['mousse', 'mousse-relay'], ['mousse-relay', 'mousse']].flatMap((names) =>
     ['none', 'mousse', 'both'].flatMap((attachment) => [true, false].flatMap((enabled) =>
-      ['effective', 'active layer', 'ignored layer'].map((source) => ({ names, attachment, enabled, source })))))
+      ['effective', 'active layer', 'ignored layer', 'user and project', 'ancestor project'].map((source) => ({ names, attachment, enabled, source })))))
   it.each(reservedCases)('contains reserved names $names with attachment $attachment, enabled=$enabled, $source', async ({ names, attachment, enabled, source }) => {
     const files = join(home, 'files')
     mkdirSync(files)
@@ -2285,7 +2285,7 @@ describe('a bot turn on Codex', () => {
       http_headers: { Owner: 'leftover' }, bearer_token_env_var: 'OWNER_TOKEN'
     }]))
     const activeNames = source === 'ignored layer' ? [] : names
-    const collisions = activeNames.filter((name) => mcp && (name === 'mousse' || attachment === 'both'))
+    const collisions = ['mousse', 'mousse-relay'].filter((name) => activeNames.includes(name) && mcp && (name === 'mousse' || attachment === 'both'))
     const config = {
       ...Object.fromEntries(enabled ? activeNames.map((name) => [`mcp_servers.${name}.enabled`, false]) : []),
       ...NO_COMMANDS, model_provider: 'openai',
@@ -2307,7 +2307,10 @@ describe('a bot turn on Codex', () => {
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
       inn({ id: 4, result: {
         config: { mcp_servers: source === 'effective' ? servers : {} },
-        layers: source === 'effective' ? [] : [{ name: { type: 'project', dotCodexFolder: join(files, '.codex') }, disabledReason: source === 'ignored layer' ? 'untrusted' : null, config: { mcp_servers: servers } }]
+        layers: source === 'effective' ? [] : [
+          ...(source === 'user and project' ? [{ name: { type: 'user', file: '/owner/.codex/config.toml', profile: null }, disabledReason: null, config: { mcp_servers: servers } }] : []),
+          { name: { type: 'project', dotCodexFolder: join(source === 'ancestor project' ? home : files, '.codex') }, disabledReason: source === 'ignored layer' ? 'untrusted' : null, config: { mcp_servers: servers } }
+        ]
       } }),
       ...(!collisions.length ? [
         ...threadStart(5, threadParams({ config, ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {}) })),
@@ -2326,7 +2329,9 @@ describe('a bot turn on Codex', () => {
     if (collisions.length) {
       const plural = collisions.length > 1
       const namesText = collisions.map((name) => `"${name}"`).join(' and ')
-      const file = source === 'active layer' ? "the project's .codex/config.toml" : "Codex's config.toml"
+      const file = source === 'user and project' ? "Codex's config.toml and the project's .codex/config.toml"
+        : source === 'ancestor project' ? "the project's ../.codex/config.toml"
+        : source === 'active layer' ? "the project's .codex/config.toml" : "Codex's config.toml"
       await expect(run).rejects.toMatchObject({ code: 'policy_unenforceable', message:
         `Your Codex config has ${plural ? 'MCP servers' : 'an MCP server'} named ${namesText}, ${plural ? 'names' : 'a name'} Mousse needs for my work. Rename ${plural ? 'them' : 'it'} in ${file} to let me work on Codex.` })
     }
