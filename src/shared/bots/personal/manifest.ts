@@ -31,7 +31,7 @@ export const BOT_OWN_APP_TOOLS: readonly string[] = [
  * keeps one-off reminders and wakes (its own follow-ups). Like memory they are always on and never grantable, so bots made before them have them too;
  * only a chat turn gets them, so work never starts work.
  */
-export const BOT_WORK_TOOLS: readonly string[] = ['work_wait', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'wake', 'watch_start', 'watch_list', 'watch_stop']
+export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'wake', 'watch_start', 'watch_list', 'watch_stop']
 
 /**
  * The tools a bot's work splits a job among subagents with: start one on a title and a brief (on the work's model, or one
@@ -212,6 +212,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...BOT_THREAD_TOOLS,
   ...BOT_PROFILER_TOOLS,
   ...BOT_WORK_TOOLS,
+  'work_wait',
   ...BOT_SUBAGENT_TOOLS,
   ...BOT_MEMORY_TOOLS,
   BOT_MCP_LIST_TOOL,

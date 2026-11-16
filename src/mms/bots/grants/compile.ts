@@ -110,6 +110,8 @@ export interface CompileInput {
      * (`work_models`). Never the chat, a consult or a subagent.
      */
     subagents?: boolean
+    /** Only work (including a reminder's work) may park on time or events. */
+    workWaiting?: boolean
     /**
      * This turn is one of a run's subagents: it holds what its work holds of the built-ins, files, MCP tools and skills,
      * and of the app tools only the web and the browser (`subagentManifest`). Every other bot tool is left out whatever
@@ -202,6 +204,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
     ...(own?.escalate ? ['escalate'] : []),
     ...(own?.consult ? ['consult'] : []),
+    ...(own?.workWaiting ? ['work_wait'] : []),
     ...(own?.scheduled ? ['schedule_done'] : []),
     // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
     ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
@@ -212,7 +215,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.cards ? [BOT_CARD_TOOL] : []),
     ...(own?.bots ? BOT_MESSAGE_TOOLS : []),
     // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
-    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models', 'work_wait'] : [])
+    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
   return {

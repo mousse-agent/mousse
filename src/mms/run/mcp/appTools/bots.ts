@@ -605,10 +605,10 @@ function ownTool(tool: Tool, deps: (() => BotAppToolDeps | undefined) | undefine
     definition: () => tool,
     // It writes only bots.db, about the caller's own bot.
     access: 'actsAsCaller',
-    listed: (listing) => listing.botRole === 'activation',
+    listed: (listing) => listing.botRole === 'activation' && (tool.name !== 'work_wait' || Boolean(listing.botTurnTools?.has('work_wait'))),
     // A subagent of the bot's work has none of the bot's own tools: its authority holds none either.
     available: (turn) => (turn.bot && turn.bot.role !== 'subagent' && deps?.() ? true : tool.name === 'work_wait' ? 'A subagent cannot park work. Return what you found to the work that started you.' : NOT_A_BOT),
-    offered: (turn) => Boolean(turn.bot && turn.bot.role !== 'subagent' && deps?.()),
+    offered: (turn) => Boolean(turn.bot && turn.bot.role !== 'subagent' && deps?.() && (tool.name !== 'work_wait' || turn.bot.appTools.has('work_wait'))),
     ...part
   }
 }

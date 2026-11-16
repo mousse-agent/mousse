@@ -2503,7 +2503,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
       // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message. The profiler:
       // in both lanes (the chat without its minutes-long watch).
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -7893,6 +7893,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const setting = this.store.activation(from)
     if (workWait) {
       if (setting?.lane === 'chat') throw new BotEngineError('invalid_params', 'Use wake here; work_wait is only for work.')
+      if (setting?.trigger.kind === 'manual') throw new BotEngineError('invalid_params', 'A run started by hand ends with its report. Start work from chat to wait for a time or event.')
       if (setting?.trigger.kind !== 'work') throw new BotEngineError('invalid_params', 'A scheduled run ends with its report and where it left off; its next run carries on.')
       if (setting.status !== 'running') throw new BotEngineError('invalid_params', 'Only running work can wait.')
       if (this.store.workWait(from)?.status === 'waiting') throw new BotEngineError('invalid_params', 'This work already has a wait. End your turn; it carries on by itself.')
