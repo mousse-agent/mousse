@@ -6103,6 +6103,7 @@ export class OrchestratorService extends EventEmitter {
       estimated: pause.estimated,
       autoResume: pause.autoResume,
       ...(pause.stale ? { stale: true as const } : {}),
+      ...(run.outcome?.resumedFromPause ? { again: true as const } : {}),
       ...(pause.provider ? { provider: pause.provider } : {}),
       ...(pause.limitKind ? { limitKind: pause.limitKind } : {})
     }
@@ -6263,6 +6264,41 @@ export class OrchestratorService extends EventEmitter {
       this.mutateQueue(threadId, (items) => items.map((item) => (item.id === itemId && item.state === 'pending' ? { ...item, source: 'resume_now' } : item)))
     }
     this.scheduleQueueDrain(session)
+    await this.resumePausedSubagents(threadId, manual)
+  }
+
+  /**
+   * A thread that resumes resumes the subagents below it that the limit paused too. Without this a parent
+   * waiting on a paused subagent waits forever: the subagent has no timer when auto-resume is off, and a
+   * person sees only the parent's Try now. A person's press resumes each one now. The timer resumes one whose
+   * own reset has passed or that has no timer of its own; one whose own timer is still ahead keeps it. A
+   * subagent already resuming (a resume due now, pending or running) is left alone, so each level of a tree
+   * that resumes does not request its descendants again. Best-effort: the parent's resume stands regardless.
+   */
+  private async resumePausedSubagents(threadId: string, manual: boolean): Promise<void> {
+    const engine = this.runEngine
+    if (!engine || !this.threadStore) return
+    const nowMs = Date.now()
+    const requested: EffectRecord[] = []
+    for (const childThreadId of subagentDescendants(threadId, this.threadStore.listAllThreads())) {
+      try {
+        const run = engine.store.getPausedRun(childThreadId)
+        const pause = run?.outcome?.pause
+        if (!run || !pause) continue
+        if (!manual && pause.autoResume && !pause.stale && Date.parse(pause.until) > nowMs) continue
+        const resuming = engine.outbox.listForRun(run.runId).some((effect) =>
+          effect.kind === 'run.resume' &&
+          (effect.status === 'running' || (effect.status === 'pending' && Date.parse(effect.availableAt) <= nowMs)) &&
+          (!manual || (effect.payload as RunResumePayload).manual === true))
+        if (resuming) continue
+        requested.push(engine.requestResume(run.runId, manual))
+      } catch (error) {
+        console.warn('a paused subagent could not be resumed with its parent', { threadId, childThreadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    if (requested.length === 0) return
+    if (this.effectsEnabled()) this.effectWorker?.notify()
+    else for (const effect of requested) await this.executeResumeEffect(effect)
   }
 
   /** `runs.resumeNow`: continue the paused run `runId` now. Refused `conflict` when it is not paused. */
@@ -13825,6 +13861,8 @@ export class OrchestratorService extends EventEmitter {
           until: usagePause.until,
           estimated: usagePause.estimated,
           autoResume: usagePause.autoResume,
+          // A continue turn that hit the limit again: the notice says it is still limited.
+          ...(this.runEngine?.getRun(engineRunId)?.outcome?.resumedFromPause ? { again: true as const } : {}),
           ...(usagePause.provider ? { provider: usagePause.provider } : {}),
           ...(usagePause.limitKind ? { limitKind: usagePause.limitKind } : {})
         }

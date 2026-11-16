@@ -1676,6 +1676,8 @@ export interface TurnPause {
   autoResume: boolean
   /** The reset passed while Mousse was off for more than a day: the timer was dropped and only Resume now (or a message) continues the run. */
   stale?: true
+  /** The paused run was itself the continue turn of an earlier pause: resuming ran into the limit again. */
+  again?: true
 }
 
 export interface TurnState {
