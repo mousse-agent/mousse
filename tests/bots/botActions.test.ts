@@ -1049,3 +1049,21 @@ it('C4 About marks one service that asks first, preserving invalid marks and the
   settings.experimental.botAsksFirst = false
   expect(permission()).toEqual(before)
 })
+
+it('C4 action telling names the action without its arguments and holds soon in quiet hours', async () => {
+  const t = await setup(true)
+  const end = f.clock.now + 3600_000
+  f.host.quietHoursFor = () => ({ end }) as never
+  f.bots.setTellingWindows(1)
+  const events: any[] = []
+  f.bots.events.on('tell', event => events.push(event))
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(f.store.message(a.message_id)).toMatchObject({ tell: 'soon', tellAt: new Date(end).toISOString() })
+  f.bots.tellings.release(f.clock.now)
+  expect(events).toHaveLength(0)
+  f.clock.now = end
+  f.bots.tellings.release(f.clock.now)
+  expect(events.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
+  expect(JSON.stringify(events)).not.toContain('example.test')
+})
