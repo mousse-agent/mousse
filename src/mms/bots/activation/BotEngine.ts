@@ -615,6 +615,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.db.statement(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value`).run(row.botId, `cursor:action-owner:${row.id}`, String(last?.n ?? 0))
     },
     held: () => { this.watchMcp(); this.armDue() },
+    forgottenRequest: row => {
+      const ended = this.endWaitingInTx(row, 'request_gone', 'This work ended because its request was forgotten.')
+      if (ended) this.store.db.afterCommit(() => this.afterEnd(ended))
+    },
     schema: (tool) => this.host.mcp?.inputSchema?.(tool),
     binding: (row, tool) => {
       const pair = this.actionPair(row, tool)

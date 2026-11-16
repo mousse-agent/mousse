@@ -179,6 +179,7 @@ interface Host {
   publish(messageId: string): void
   ownerAnswered(row: BotActivationRow): void
   held(): void
+  forgottenRequest(row: BotActivationRow): void
   execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>): Promise<BotMcpCallOutcome>
 }
 const pending = new Set(['open', 'approved', 'running'])
@@ -199,8 +200,8 @@ export class BotActions {
           this.forgetText(botId, String(action.id))
           if (!pending) continue
           const row = host.store.activation(String(action.activation_id))
-          if (row && host.store.moveActivation(row.id, ['blocked'], 'cancelled', { endReason: 'forgotten', result: 'This work ended because its request was forgotten.' }))
-            host.post(row, `bm_${action.id}_forgotten`, 'This work ended because its request was forgotten.')
+          if (row && row.trigger.kind === 'work' && row.trigger.replyTo === messageId) host.forgottenRequest(row)
+          else host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
         }
       }
     })

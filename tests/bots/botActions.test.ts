@@ -1088,7 +1088,7 @@ it.each(['card', 'request'] as const)('Forget of the %s withdraws exact argument
   f.bots.afterForget()
   await flush()
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
-  expect(f.store.activation(t.workId)?.status).toBe('cancelled')
+  expect(f.store.activation(t.workId)?.status).toBe(which === 'card' ? 'running' : 'failed')
 })
 
 it('forget history removes settled text and preserves the call key that prevents another execution', async () => {
