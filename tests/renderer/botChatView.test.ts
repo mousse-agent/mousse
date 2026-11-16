@@ -2161,3 +2161,19 @@ it.each(['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expi
   expect(fold.open).toBe(true)
   expect(fold.textContent).toContain('trip.pdf')
 })
+
+it('folds long list values and names when more arguments remain below', async () => {
+  fake.chats.inbox = [held({ args: { subject: 'S'.repeat(250), to: ['alice@example.com\n'.repeat(40)], final: 'Last field' } })]
+  await open()
+  const args = host.querySelector<HTMLElement>('[aria-label="Complete arguments"]')!
+  const subject = [...args.querySelectorAll('dt')].find((item) => item.textContent === 'subject')!.nextElementSibling!
+  expect(subject.querySelector('details')?.open).toBe(false)
+  expect(args.querySelector('li details')?.textContent).toContain('alice@example.com')
+  expect(args.textContent).toContain('Last field')
+  Object.defineProperties(args, { scrollHeight: { configurable: true, value: 900 }, clientHeight: { configurable: true, value: 360 }, scrollTop: { configurable: true, writable: true, value: 0 } })
+  await act(async () => args.dispatchEvent(new Event('scroll', { bubbles: true })))
+  expect(host.textContent).toContain('More arguments below')
+  args.scrollTop = 540
+  await act(async () => args.dispatchEvent(new Event('scroll', { bubbles: true })))
+  expect(host.textContent).not.toContain('More arguments below')
+})
