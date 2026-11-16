@@ -1,4 +1,4 @@
-import { WORK_WAIT_RULES, workWaitRule, workReadiness, workWaitLine, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
+import { WORK_WAIT_RULES, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
 import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
 import type { SettingsStore } from '../../settings/SettingsStore'
@@ -1623,7 +1623,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // The same posted asks and questions as projection.summary's needsOwner, without
           // building a whole summary (threads, watchers, model slots and work) every tick.
           return !(this.store.openAsks(botId).some((ask) => ask.messageId !== null)
-            || this.store.waitingQuestions(botId).length || this.store.openChatQuestions(botId).length)
+            || this.store.waitingQuestions(botId).length || this.store.openChatQuestions(botId).length
+            || parkedNeedsOwner(this.store.activationsIn(botId, ['blocked']), this.workWaitLookups))
         })
       } catch (error) {
         console.warn("a bot's duplicate memory could not be put away", { botId, error: error instanceof Error ? error.message : String(error) })
@@ -2152,6 +2153,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.changed({ botId: row.botId, activationId: row.id })
     this.pumpLater(row.botId)
   }
+
+  private readonly workWaitLookups: WorkWaitLookups = { store: () => this.store }
 
   private readonly workWaitFacts: WorkWaitFacts = {
     usageResumable: (row) => this.usageResumable(row),
@@ -3955,12 +3958,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           await this.sendDispatch(this.store.activation(row.id)!, main)
           return
         }
-        await this.continueWith(row.id, ['blocked'], { usageReset: true, ...(allowed.length ? { allowed } : {}) })
+        await this.continueWith(row.id, ['blocked'], { ...rule.continuation(row, this.workWaitLookups), ...(allowed.length ? { allowed } : {}) })
         return
       }
       case 'continue':
       default:
-        await this.continueWith(row.id, ['blocked'], { ...(rule?.continuation ?? { moreRoom: true }), ...(allowed.length ? { allowed } : {}) })
+        await this.continueWith(row.id, ['blocked'], { ...(rule?.continuation(row, this.workWaitLookups) ?? { moreRoom: true }), ...(allowed.length ? { allowed } : {}) })
     }
   }
 
@@ -5343,12 +5346,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.status !== 'paused' && row.status !== 'blocked') throw new BotEngineError('bot_not_paused', 'Only a paused or blocked activation can be continued.')
     // Work that waits to go on goes on by its own way: its ask's answer, or the usage limit's reset (or Resume).
     if (workWaits(row)) {
-      throw new BotEngineError('bot_work_waiting', row.endReason === 'usage_limit'
-        ? 'This work waits for a usage limit to reset. It carries on then, or press Resume to try now.'
-        : row.endReason === 'room_allowed' ? 'This work already has more room. It carries on when the work before it is done.'
-          : row.endReason === 'question_answered' ? 'This work has your answer. It carries on when the work before it is done.'
-            : row.endReason === 'question' ? QUESTION_WORK_WAITING_TEXT
-              : 'This work ran out of room. Answer its ask to let it carry on, or stop it.')
+      throw new BotEngineError('bot_work_waiting', workWaitRule(row)!.continueRefusal(row))
     }
     if (!row.threadId || !this.store.lastMainDispatch(row.id)) throw new BotEngineError('bot_not_started', 'This activation never started; run the bot again.')
     if (!(row.lane === 'run' ? this.runSlotFree(row) : this.slotFree(row.botId, row.lane, row.id)))
@@ -7202,7 +7200,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.entry(botId)
     const asking = new Set(this.store.openAsks(botId).map((ask) => ask.activationId))
     const waiting = this.store.laneActivations(botId, 'run', [...NOT_ENDED]).filter((row) =>
-      row.status === 'waiting_grant' || (row.status === 'blocked' && (asking.has(row.id) || row.endReason === 'question')))
+      row.status === 'waiting_grant' || (row.status === 'blocked' && (asking.has(row.id) || workWaitRule(row)?.waitsOnOwner(row, this.workWaitLookups))))
     await this.endAll([...this.store.laneActivations(botId, 'chat', [...NOT_ENDED]), ...waiting], 'stopped', () => {
       this.store.withdrawAsks(botId)
       this.store.withdrawQuestions(botId)
@@ -7688,7 +7686,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Work that waits to go on is listed too: held while it waits for the owner, waiting its turn once allowed.
     const now = this.store.laneActivations(botId, 'run', ['running', 'waiting_grant', 'queued', 'paused', 'blocked']).filter((row) => row.status !== 'blocked' || workWaits(row)).sort(workOrder).map((row) => {
       const chip = this.liveChips.get(row.id)?.chip
-      const status = workWaitLine(row).status
+      const status = workWaitLine(row, this.workWaitLookups).status
       // Held for the owner's answer to its question, which the chat can pass on.
       const question = row.status === 'blocked' && row.endReason === 'question' ? this.store.workQuestion(row.id) : undefined
       return {
@@ -7738,7 +7736,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.store.db.transaction(() => {
       const current = this.store.activation(workId)
       if (!current || ENDED_ACTIVATION_STATUSES.has(current.status)) return 'ended' as const
-      if (current.status === 'blocked' && current.endReason === 'question') return 'question' as const
+      const wait = workWaitRule(current)
+      if (current.status === 'blocked' && wait && !wait.takesNotes(current)) return wait.noteRefusal
       // Only work that will take it: waiting, running, or waiting to go on. Other paused or blocked work may never continue.
       if (!['queued', 'running', 'waiting_grant'].includes(current.status) && !workWaits(current)) return 'held' as const
       // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.

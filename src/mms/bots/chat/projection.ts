@@ -1,4 +1,4 @@
-import { workWaitLine } from '../activation/workWaiting'
+import { workWaitLine, parkedNeedsOwner } from '../activation/workWaiting'
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
 import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
@@ -513,7 +513,7 @@ export class BotChatProjection {
       .map((row) => ({
         id: row.id,
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
-        ...workWaitLine(row),
+        ...workWaitLine(row, { store: () => this.store }),
         startedAt: row.createdAt,
         ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {}),
         // A model the owner asked for this work alone, not the bot's usual one: named on its line.
@@ -523,7 +523,8 @@ export class BotChatProjection {
     // Posted chat questions and questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
     const waitingOn = this.store.waitingQuestions(definition.id)
     const chatQuestions = this.store.openChatQuestions(definition.id)
-    const needsOwner = !paused && asks.length + waitingOn.length + chatQuestions.length > 0
+    const needsOwner = !paused && (asks.length + waitingOn.length + chatQuestions.length > 0
+      || parkedNeedsOwner(this.store.activationsIn(definition.id, ['blocked']), { store: () => this.store }))
     // Threads it started that still work keep it busy: it manages them. Those that ended are listed, never counted.
     const threads = this.launchedOf(definition.id)
     const watchers = this.options.watchers?.(definition.id) ?? []
