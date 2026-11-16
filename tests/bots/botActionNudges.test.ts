@@ -8,7 +8,7 @@ import { botFixture, createBot, finish, start, type BotFixture } from './botFixt
 const HOUR = 60 * 60_000
 let f: BotFixture
 afterEach(() => f?.close())
-async function held(on = true) {
+async function held(on = true, options: { quietFor?: number; canWake?: boolean } = {}) {
   f = botFixture()
   const settings = getDefaultSettings()
   settings.experimental.botAsksFirst = on
@@ -20,6 +20,11 @@ async function held(on = true) {
   f.host.mcp = mcp
   await f.bots.reconcileOnStartup()
   const { botId } = await createBot(f, { reply: 'Hello' })
+  if (options.quietFor) {
+    const end = f.clock.now + options.quietFor
+    f.host.quietHoursFor = (_botId, at) => at < end ? { end } as never : undefined
+  }
+  if (options.canWake) f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
   const permission = await f.bots.activate({ botId, input: 'Allow mail', clientRequestId: 'permission' })
   const asking = await start(f, permission.id)
   asking.prepared.authority.escalate!({ permission: { mcp: { server: 'Mail' } } as never, reason: 'To send mail' })
@@ -90,5 +95,45 @@ it('adds no rows, source, state writes or immediate timer when the switch is off
   expect(f.store.all('SELECT * FROM bot_actions')).toEqual([])
   expect(f.store.all('SELECT * FROM bot_memory_state ORDER BY bot_id, key')).toEqual(state)
   expect(f.bots.nextDueAt(t.botId)).toBeUndefined()
+  expect(f.timers.slice(timers).some(timer => timer.ms === 0)).toBe(false)
+})
+
+
+it.each([false, true])('keeps nudges out of quiet hours even when original canWakeMe=%s', async canWake => {
+  const t = await held(true, { quietFor: 3 * HOUR, canWake })
+  const created = f.clock.now
+  await tellOriginal()
+  expect(f.store.message(t.action.message_id)!.toldAt).toBe(canWake ? f.store.now() : null)
+  f.clock.now = created + HOUR
+  f.host.ownerActive = () => true
+  await f.bots.deliverDueReminders()
+  expect(t.nudges()).toHaveLength(0)
+  expect(f.bots.nextDueAt(t.botId)).toBe(new Date(created + 3 * HOUR).toISOString())
+  f.clock.now = created + 3 * HOUR
+  await f.bots.deliverDueReminders()
+  if (canWake) expect(t.nudges()).toHaveLength(1)
+  else {
+    expect(t.nudges()).toHaveLength(0)
+    expect(f.bots.nextDueAt(t.botId)).toBe(new Date(created + 4 * HOUR).toISOString())
+    f.clock.now += HOUR
+    await f.bots.deliverDueReminders()
+    expect(t.nudges()).toHaveLength(1)
+  }
+})
+
+it('follows the question pause convention without a due-time spin or extra timer', async () => {
+  const t = await held()
+  await tellOriginal()
+  await f.bots.service.pause(t.botId)
+  // Parked work is busy even while the owner has paused schedules, as with a work question.
+  expect(f.bots.isIdle(t.botId, { within: HOUR - 1 })).toBe(false)
+  expect(f.bots.isIdle(t.botId, { within: HOUR })).toBe(false)
+  f.clock.now += HOUR
+  await f.bots.deliverDueReminders()
+  expect(t.nudges()).toHaveLength(1)
+  expect(Date.parse(f.bots.nextDueAt(t.botId)!)).toBeGreaterThan(f.clock.now)
+  const timers = f.timers.length
+  await f.bots.deliverDueReminders()
+  expect(t.nudges()).toHaveLength(1)
   expect(f.timers.slice(timers).some(timer => timer.ms === 0)).toBe(false)
 })
