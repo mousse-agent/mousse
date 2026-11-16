@@ -92,6 +92,8 @@ export interface BotActionCard {
   note?: string
   previous?: { status: 'done' | 'uncertain' | 'failed'; at: string }
   tooLarge?: boolean
+  /** The stored review was erased by the owner; only its outcome remains. */
+  forgotten?: true
 }
 
 /** One row of a bot's chat (`bot_messages`). */

@@ -126,12 +126,12 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
     {card.note && <blockquote className="bot-action-note" aria-label="Bot note">{actionText(botName).replace(/\s+/g, " ")} says: <span>{actionText(card.note).replace(/\s+/g, " ")}</span></blockquote>}
   </>
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
-    <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span> · <span className="bot-action-server">{actionText(card.serverName)}</span></p>
+    <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span>{!card.forgotten && <> · <span className="bot-action-server">{actionText(card.serverName)}</span></>}</p>
     {actionStatus(card) && <p role="status" className="bot-action-outcome" data-find-text data-message-id={messageId} data-part-index="1">{actionStatus(card)}</p>}
-    {card.result && !card.result.notSentInTime && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
-    {card.status === 'open' ? argumentsView : <details aria-label={reviewLabel(card)}><summary>{reviewLabel(card)}</summary>{argumentsView}</details>}
+    {!card.forgotten && card.result && !card.result.notSentInTime && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
+    {card.forgotten ? <p role="note">Forgotten</p> : card.status === 'open' ? argumentsView : <details aria-label={reviewLabel(card)}><summary>{reviewLabel(card)}</summary>{argumentsView}</details>}
     {refusal && <p role="status" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(refusal.text).replace(/\s+/g, ' ')}</p>}
-    {card.status === 'open' && <>
+    {card.status === 'open' && !card.forgotten && <>
       {previous && <p role="note" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {repeatedAt}</p>}
       {card.hasHiddenValues && <div role="note" className="bot-action-notice"><CircleAlert size={14} aria-hidden />Hidden values will be sent{card.hiddenPaths.length ? ': ' : ''}<HiddenPaths paths={card.hiddenPaths} /></div>}
       {card.tooLarge && <p role="note" className="bot-action-notice"><CircleAlert size={14} aria-hidden />This action is too large to review on this device. Use the computer to review and send it.</p>}

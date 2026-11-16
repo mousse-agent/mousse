@@ -406,8 +406,10 @@ export class BotChatProjection {
   private actionForMessage(messageId: string): BotActionCard | undefined {
     const row = this.store.get('SELECT id, bot_id, activation_id, args_digest, args_json, card_json, status, ran_at, answered_at, target_json, result_json, bot_note FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { bot_note: string | null }) | undefined
     if (!row) return undefined
-    const metadata = JSON.parse(row.card_json ?? '{}')
-    const args: unknown = JSON.parse(row.args_json)
+    const storedMetadata = JSON.parse(row.card_json ?? '{}')
+    const metadata = storedMetadata && typeof storedMetadata === 'object' && !Array.isArray(storedMetadata) ? storedMetadata : {}
+    const forgotten = row.args_digest === '[forgotten]' && row.args_json === '"[forgotten]"'
+    const args: unknown = forgotten ? null : JSON.parse(row.args_json)
     const hiddenPaths: string[][] = []
     const visit = (value: unknown, path: string[]): void => {
       if (!value || typeof value !== 'object') return
@@ -422,8 +424,10 @@ export class BotChatProjection {
       for (const [key, item] of Object.entries(value)) visit(item, [...path, key])
     }
     visit(args, [])
-    const result = row.result_json ? JSON.parse(row.result_json) : undefined
-    const previous = row.status === 'open' ? this.store.all(`SELECT status, ran_at, answered_at, created_at, target_json, result_json FROM bot_actions WHERE bot_id = ? AND args_digest = ?
+    const result = forgotten
+      ? (metadata.toolReportedError === true || metadata.toolReportedError === 1 ? { text: '', toolReportedError: true } : undefined)
+      : row.result_json ? JSON.parse(row.result_json) : undefined
+    const previous = row.status === 'open' && !forgotten ? this.store.all(`SELECT status, ran_at, answered_at, created_at, target_json, result_json FROM bot_actions WHERE bot_id = ? AND args_digest = ?
       AND rowid < (SELECT rowid FROM bot_actions WHERE id = ?) AND status IN ('done', 'uncertain', 'failed') ORDER BY rowid DESC`, row.bot_id, row.args_digest, row.id)
       .find(candidate => {
         const target = JSON.parse(String(candidate.target_json))
@@ -436,14 +440,15 @@ export class BotChatProjection {
     const at = [metadata.settledAt, row.ran_at, row.answered_at].find(validAt)
     return {
       actionId: row.id, digest: row.args_digest,
-      title: metadata.title ?? readableActionTitle(JSON.parse(row.target_json).tool),
-      serverName: metadata.serverName ?? 'Your service', args,
-      hasHiddenValues: metadata.hasHiddenValues === true, hiddenPaths,
+      title: typeof metadata.title === 'string' ? metadata.title : readableActionTitle(JSON.parse(row.target_json).tool),
+      serverName: typeof metadata.serverName === 'string' ? metadata.serverName : 'Your service', args,
+      hasHiddenValues: !forgotten && metadata.hasHiddenValues === true, hiddenPaths,
+      ...(forgotten ? { forgotten: true as const } : {}),
       status: row.status as BotActionCard['status'],
       ...(previous && typeof previousAt === 'string' ? { previous: { status: previous.status as 'done' | 'uncertain' | 'failed', at: previousAt } } : {}),
       ...(at ? { at } : {}),
       ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}), ...(result.notSentInTime === true ? { notSentInTime: true } : {}) } } : {}),
-      ...(row.bot_note ? { note: row.bot_note } : {})
+      ...(!forgotten && row.bot_note ? { note: row.bot_note } : {})
     }
   }
 
