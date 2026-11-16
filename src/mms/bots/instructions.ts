@@ -214,6 +214,13 @@ function workKinds(off: BotSwitchedOff | undefined, first: readonly string[], la
   return `${kinds.join(', ')} and ${last}`
 }
 
+/**
+ * The turn note of a chat turn with "use your threads" that no message the owner typed started (a tapped answer, a
+ * reminder, another bot's message): it only reads their threads (`threadsReadOnlyOf`). It goes in the turn's preamble,
+ * never the system text, so the system text stays the same across turns (a changed one starts a new Codex thread).
+ */
+export const BOT_THREADS_READ_ONLY_TURN_NOTE = "## Your owner's threads this turn\nThis turn did not start with a message your owner typed (it started from a tapped answer, a reminder or another bot's message), so you can only list, search, read and wait on their threads now: thread_create, thread_send, thread_interrupt, thread_archive and thread_hide are not offered. Nothing is broken and the permission is not missing. Say what you would start, send, stop or archive, and that you'll do it when your owner replies with a message."
+
 /** What the permissions list says of something the owner switched off for this bot. */
 export const BOT_SWITCHED_OFF_ANSWER = "switched off by your owner for now, so asking won't help"
 

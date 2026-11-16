@@ -91,7 +91,7 @@ import { lockedEnv } from '../../harness/env'
 import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHAIN, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_PER_DAY, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_BRIEF_CHARS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
-import { botAllowedOf, namedPowerOf, type BotAllowed, type BotNamedPower } from '../instructions'
+import { BOT_THREADS_READ_ONLY_TURN_NOTE, botAllowedOf, namedPowerOf, type BotAllowed, type BotNamedPower } from '../instructions'
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
@@ -2590,6 +2590,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       mcpTools: this.offeredMcp(compiled.permissions.mcp)
     })
     const pack = this.packs.get(row.id)
+    // A chat turn that only reads the owner's threads (no typed message of theirs started it) is told so, and why, in
+    // its preamble: the system text stays the same on every turn, so a runtime keeps its thread and cache.
+    const readOnlyThreads = row.lane === 'chat' && compiled.permissions.threads === 'read' ? BOT_THREADS_READ_ONLY_TURN_NOTE : undefined
+    const preamble = [pack, readOnlyThreads].filter(Boolean).join('\n\n') || undefined
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, controller.signal) : undefined
     return {
       activationId: row.id,
@@ -2609,7 +2613,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       skills: compiled.permissions.skills,
       history: dispatch.kind === 'start' ? (cleared ? 'cleared' : 'none') : 'thread',
       lane: row.lane,
-      ...(pack ? { preamble: pack } : {}),
+      ...(preamble ? { preamble } : {}),
       ...(browser ? { browser } : {}),
       steer: this.steerFor(row, dispatch.n)
     }
