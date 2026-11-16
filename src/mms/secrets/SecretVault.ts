@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isKeyName } from '../../shared/automationKeys'
 import { SECRET_DAY_MS, type SecretEntryView, type SecretKeep } from '../../shared/secretRequests'
@@ -23,6 +23,9 @@ interface SecretMeta {
 
 type MetaFile = Record<string, SecretMeta>
 
+/** A thread id that can name a folder; any other thread gets no files. */
+const FOLDER_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+
 export interface SecretVaultOptions {
   profileRoot: string
   /** Whether a thread still exists and is not archived; a thread-only secret is deleted with its thread. */
@@ -35,11 +38,14 @@ export interface SecretVaultOptions {
 
 /**
  * The secrets agents asked for in threads, over the profile's secret store (`secrets/refs.json`, the store saved keys
- * use). The values stay in that file; `secrets/meta.json` beside it keeps how long each is kept, which threads may use
- * it and when it was last used. Values are read only to run a command, resolve a tool's settings, and mask a thread.
+ * use). `secrets/meta.json` beside it keeps how long each is kept, which threads may use it and when it was last used.
+ * Each thread may use its secrets directly: `secrets/threads/<thread>/<NAME>` holds a copy only this account can open,
+ * which its agents read and use in commands, settings and logins. The copies follow the store: a secret deleted,
+ * expired or no longer given to a thread loses its file, and an archived thread loses its folder.
  */
 export class SecretVault {
   private readonly metaPath: string
+  private readonly filesRoot: string
   private readonly now: () => number
   /** Each thread's masker, built when first needed and dropped on any change. */
   private readonly maskers = new Map<string, SecretMasker | null>()
@@ -47,6 +53,7 @@ export class SecretVault {
 
   constructor(private readonly options: SecretVaultOptions) {
     this.metaPath = join(options.profileRoot, 'secrets', 'meta.json')
+    this.filesRoot = join(options.profileRoot, 'secrets', 'threads')
     this.now = options.now ?? Date.now
     this.values = createProfileSecretAdapter({ profileRoot: options.profileRoot, inheritProcessEnv: false })
   }
@@ -109,6 +116,13 @@ export class SecretVault {
   usableIn(name: string, threadId: string): boolean {
     if (!this.has(name)) return false
     return this.readMeta()[name]?.threads.includes(threadId) ?? false
+  }
+
+  /** The private file that holds the secret for the thread's agents to read; undefined when the thread may not use it. */
+  fileFor(name: string, threadId: string): string | undefined {
+    if (!isKeyName(name) || !FOLDER_ID.test(threadId) || !this.usableIn(name, threadId)) return undefined
+    const path = join(this.filesRoot, threadId, name)
+    return existsSync(path) ? path : undefined
   }
 
   /** The value for a command or a tool's settings; undefined when it is gone. */
@@ -211,6 +225,9 @@ export class SecretVault {
     if (gone.length) {
       this.writeMeta(meta)
       this.didChange()
+    } else {
+      // Nothing expired, but a thread may have been archived since: its copies go.
+      this.syncFiles()
     }
     return gone
   }
@@ -222,7 +239,53 @@ export class SecretVault {
 
   private didChange(): void {
     this.maskers.clear()
+    this.syncFiles()
     this.options.changed?.()
+  }
+
+  /** Makes the thread folders hold exactly the secrets each live thread may use, with their current values. */
+  private syncFiles(): void {
+    try {
+      const wanted = new Map<string, Map<string, string>>()
+      for (const [name, entry] of Object.entries(this.readMeta())) {
+        const threads = entry.threads.filter((threadId) => FOLDER_ID.test(threadId) && this.options.threadAlive(threadId))
+        const value = threads.length ? this.value(name) : undefined
+        if (!value) continue
+        for (const threadId of threads) {
+          const files = wanted.get(threadId) ?? new Map<string, string>()
+          files.set(name, value)
+          wanted.set(threadId, files)
+        }
+      }
+      const root = this.filesRoot
+      if (existsSync(root)) {
+        for (const folder of readdirSync(root)) {
+          const files = wanted.get(folder)
+          const path = join(root, folder)
+          if (!files) {
+            rmSync(path, { recursive: true, force: true })
+            continue
+          }
+          for (const file of readdirSync(path)) if (!files.has(file)) rmSync(join(path, file), { recursive: true, force: true })
+        }
+      }
+      if (!wanted.size) return
+      // The root is private and its folders and files inherit that (on Windows through its access list).
+      ensurePrivateDirectory(root)
+      for (const [threadId, files] of wanted) {
+        const folder = join(root, threadId)
+        mkdirSync(folder, { recursive: true, mode: 0o700 })
+        for (const [name, value] of files) {
+          const path = join(folder, name)
+          if (existsSync(path) && readFileSync(path, 'utf8') === value) continue
+          writeFileSync(path, value, { mode: 0o600 })
+          if (process.platform !== 'win32') chmodSync(path, 0o600)
+        }
+      }
+    } catch (error) {
+      // The store stays right; an agent without its file still has secret_run.
+      console.warn('Secret files could not be updated', { error: error instanceof Error ? error.name : 'unknown' })
+    }
   }
 
   private readMeta(): MetaFile {

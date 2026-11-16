@@ -1,6 +1,6 @@
 // #595: how long a secret given in a thread is kept, which threads may use it, and what Settings and the saved-key list
-// show. Values are kept only in the profile's secret store.
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+// show. Values are kept in the profile's secret store, and each thread that may use one gets a private copy to read.
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -52,9 +52,50 @@ describe('the secrets a thread asked for', () => {
     expect(vault.has('API_TOKEN')).toBe(kept)
     expect(vault.value('API_TOKEN')).toBe(kept ? VALUE : undefined)
     expect(vault.list().map((entry) => entry.name)).toEqual(kept ? ['API_TOKEN'] : [])
+    // The thread's readable copy goes with the secret, and with the thread.
+    expect(existsSync(fileOf('t1'))).toBe(kept && alive.has('t1'))
   })
 
-  it('keeps the values in the secret store only; its record beside it holds names and times', async () => {
+  const fileOf = (threadId: string, name = 'API_TOKEN') => join(home, 'secrets', 'threads', threadId, name)
+  /** Every readable copy, as `thread/NAME`. */
+  const copies = () => (existsSync(join(home, 'secrets', 'threads')) ? readdirSync(join(home, 'secrets', 'threads')).flatMap((thread) => readdirSync(join(home, 'secrets', 'threads', thread)).map((name) => `${thread}/${name}`)) : [])
+
+  it('gives the thread that asked a private file holding the value, and tells the agent its path', async () => {
+    const outcome = await give('t1', 'day')
+    expect(outcome).toMatchObject({ kind: 'stored', name: 'API_TOKEN', file: fileOf('t1') })
+    expect(vault.fileFor('API_TOKEN', 't1')).toBe(fileOf('t1'))
+    expect(readFileSync(fileOf('t1'), 'utf8')).toBe(VALUE)
+    expect(vault.fileFor('API_TOKEN', 't2')).toBeUndefined()
+    expect(copies()).toEqual(['t1/API_TOKEN'])
+  })
+
+  // What happens to the readable copies: [what happens, the copies left]
+  const COPIES: Array<[string, () => void, string[]]> = [
+    ['Use saved gives one to another thread', () => {
+      requests.request('t2', { label: 'API token', reason: 'x', name: 'API_TOKEN' })
+      requests.useSaved('t2', requests.list('t2')[0].requestId)
+    }, ['t1/API_TOKEN', 't2/API_TOKEN']],
+    ['removing it in Settings', () => vault.delete('API_TOKEN'), []],
+    ['the thread that asked is archived', () => { alive.delete('t1'); vault.sweep() }, []],
+    ['another secret is removed', () => { writeProfileSecret(home, 'OTHER', 'x1234'); vault.refresh(); vault.delete('OTHER') }, ['t1/API_TOKEN']]
+  ]
+  it.each(COPIES)('keeps the copies in step with the store: %s', async (_what, happen, left) => {
+    await give('t1', 'saved')
+    happen()
+    expect(copies()).toEqual(left)
+  })
+
+  it('rewrites a copy when its value changes in the store, and never leaves a stray file in a thread folder', async () => {
+    await give('t1', 'saved')
+    writeProfileSecret(home, 'API_TOKEN', 'tok_new_value')
+    vault.refresh()
+    expect(readFileSync(fileOf('t1'), 'utf8')).toBe('tok_new_value')
+    rmSync(join(home, 'secrets', 'threads', 't1'), { recursive: true })
+    vault.sweep()
+    expect(readFileSync(fileOf('t1'), 'utf8')).toBe('tok_new_value')
+  })
+
+  it('keeps no value in its record or in what Settings lists; the record holds names and times', async () => {
     await give('t1', 'day')
     expect(readFileSync(join(home, 'secrets', 'meta.json'), 'utf8')).not.toContain(VALUE)
     expect(JSON.stringify(vault.list())).not.toContain(VALUE)
@@ -63,7 +104,7 @@ describe('the secrets a thread asked for', () => {
 
   it('never overwrites another secret: a taken name gets the next free one, and the agent is told that name', async () => {
     writeProfileSecret(home, 'API_TOKEN', 'automation-key')
-    expect(await give('t1', 'day')).toEqual({ kind: 'stored', name: 'API_TOKEN_2', keep: 'day' })
+    expect(await give('t1', 'day')).toEqual({ kind: 'stored', name: 'API_TOKEN_2', keep: 'day', file: fileOf('t1', 'API_TOKEN_2') })
     expect(vault.value('API_TOKEN')).toBe('automation-key')
     expect(vault.value('API_TOKEN_2')).toBe(VALUE)
   })
@@ -78,7 +119,7 @@ describe('the secrets a thread asked for', () => {
     const [card] = requests.list('t2')
     expect(card.savedExists).toBe(true)
     requests.useSaved('t2', card.requestId)
-    expect(await asked).toEqual({ kind: 'saved_reused', name: 'API_TOKEN' })
+    expect(await asked).toEqual({ kind: 'saved_reused', name: 'API_TOKEN', file: fileOf('t2') })
     expect(vault.usableIn('API_TOKEN', 't2')).toBe(true)
     expect(vault.maskerFor('t2')?.(`x ${VALUE} y`)).toBe('x [secret API_TOKEN hidden] y')
   })

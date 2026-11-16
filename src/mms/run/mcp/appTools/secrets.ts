@@ -29,7 +29,9 @@ const REQUEST_DEFINITION: Tool = {
   description: [
     'Ask the user for a secret you need (an API key, access token or password) through a private card in the thread.',
     'Never ask for a secret in a message: the value would sit in the conversation. The user types it into the card;',
-    'Mousse keeps it and you get only its name, which you use with secret_run or as ${secret:NAME} in an MCP server\'s settings.',
+    'Mousse keeps it out of the chat and gives you its name and a private file holding it: read that file and use the value',
+    'directly (commands, config files, API calls, logins), or use secret_run, or ${secret:NAME} in an MCP server\'s settings.',
+    'Never print or echo the value into the chat.',
     'Blocks until the user answers (at most one hour) or your turn ends.'
   ].join(' '),
   parameters: Type.Object({
@@ -47,7 +49,8 @@ const RUN_DEFINITION: Tool = {
     'Run one shell command in the thread\'s project folder with secrets the user gave this thread (through secret_request).',
     'Each secret is the environment variable of its name (as: "env", the default), or a private file whose path is in NAME_FILE',
     '(as: "file"); the file is deleted when the command ends. Refer to the variable in the command (e.g. "$HF_TOKEN"), never the value.',
-    'The output comes back with every secret masked, and Authorization headers hidden. Use this tool, not your own shell, for any command that needs a secret.',
+    'The output comes back with every secret masked, and Authorization headers hidden.',
+    'You may also read the secret\'s private file (its path is in the secret_request result) and use it with your own tools.',
     'Prefer a program option that reads the secret from the environment or a file (e.g. curl -H @file, or a tool that reads NAME itself):',
     'a value expanded onto a program\'s command line ("$NAME" as an argument) can be seen by other processes on this computer while it runs.'
   ].join(' '),

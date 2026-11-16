@@ -1,9 +1,10 @@
 /**
  * Secrets an agent asks for in a thread (#595, the chat part). The agent calls `secret_request`; the person types the
  * value into a private card in the thread; Mousse keeps it in the profile's secret store (the one saved keys use) and
- * the agent gets only its name, `${secret:NAME}`. The value is never part of a message, a tool result, an event, a log
- * or a thread's saved data. The agent uses it by name only: `secret_run` gives it to one command as an environment
- * variable or a private file, and `${secret:NAME}` reads it in an MCP server's settings.
+ * the agent gets its name and a private file holding it (`secrets/threads/<thread>/<NAME>`), which it may read and use
+ * directly. The value is never part of a message, a tool result, an event, a log or a thread's saved data, and the
+ * agent is told never to print it. `secret_run` also gives it to one command as an environment variable or a private
+ * file, and `${secret:NAME}` reads it in an MCP server's settings.
  */
 
 import { isKeyName, keyNameOf, MAX_KEY_VALUE_BYTES } from './automationKeys'
@@ -109,11 +110,11 @@ export function secretMask(name: string): string {
 export function secretKeepLine(keep: SecretKeep): string {
   switch (keep) {
     case 'thread':
-      return "Kept in Mousse's secret store on this computer for this thread only, and deleted with the thread. The agent gets only its name."
+      return "Kept in Mousse's secret store on this computer for this thread only, and deleted with the thread. The agent can use it but never shows it in the chat."
     case 'day':
-      return "Kept in Mousse's secret store on this computer for 24 hours, then deleted. The agent gets only its name."
+      return "Kept in Mousse's secret store on this computer for 24 hours, then deleted. The agent can use it but never shows it in the chat."
     case 'saved':
-      return "Kept in Mousse's secret store on this computer until you remove it in Settings → Agents → Secrets. The agent gets only its name."
+      return "Kept in Mousse's secret store on this computer until you remove it in Settings → Agents → Secrets. The agent can use it but never shows it in the chat."
   }
 }
 

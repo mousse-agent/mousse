@@ -1,6 +1,7 @@
 // #595: an agent asks for a secret through a private card; the person's value goes to the secret store and nowhere
 // else. The thread's messages (as windows get them and as they are saved), the agent's tool results, the protocol's
-// replies and events, and anything written to the console or to a file under the profile hold only its name.
+// replies and events, and anything written to the console or to a file under the profile hold only its name. The one
+// place besides the store that holds it is the thread's private copy, which the agent is told to read and use.
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,7 +23,7 @@ import { createOrchestrator, phase6Daemon, piAdapter, waitFor, type Phase6Daemon
 
 const VALUE = 'hf_Secr3tValue-that-must-never-leak'
 
-/** Every file under `root` but the secret store's own value file, with its text. */
+/** Every file under `root` but the secret store's own value file and the threads' private copies, with its text. */
 function filesUnder(root: string): Array<{ path: string; text: string }> {
   const out: Array<{ path: string; text: string }> = []
   const walk = (dir: string): void => {
@@ -30,7 +31,7 @@ function filesUnder(root: string): Array<{ path: string; text: string }> {
       const path = join(dir, entry)
       const stat = statSync(path)
       if (stat.isDirectory()) walk(path)
-      else if (path !== join(root, 'secrets', 'refs.json')) out.push({ path, text: readFileSync(path).toString('latin1') })
+      else if (path !== join(root, 'secrets', 'refs.json') && !path.startsWith(join(root, 'secrets', 'threads'))) out.push({ path, text: readFileSync(path).toString('latin1') })
     }
   }
   walk(root)
@@ -173,9 +174,12 @@ describe('a secret given through the card', () => {
     expect(vault.value('HF_TOKEN')).toBe(VALUE)
     const messages = JSON.stringify(orch.getMessages(threadId))
     expect(messages).toContain('[secret HF_TOKEN hidden]')
-    // The agent's tool result names it and never holds it.
-    expect(agentToolResult?.text).toContain('kept by Mousse as HF_TOKEN')
+    // The agent's tool result names it and its private file, and never holds the value; the file does, for the agent.
+    const copy = join(home, 'secrets', 'threads', threadId, 'HF_TOKEN')
+    expect(agentToolResult?.text).toContain('keeps it as HF_TOKEN')
+    expect(agentToolResult?.text).toContain(`read and use directly with your own tools: ${copy}.`)
     expect(agentToolResult?.text).not.toContain(VALUE)
+    expect(readFileSync(copy, 'utf8')).toBe(VALUE)
     expect(messages).not.toContain(VALUE)
     expect(messages).not.toContain(Buffer.from(VALUE).toString('base64'))
     expect(JSON.stringify(orch.getNativeContext(threadId))).not.toContain(VALUE)
@@ -183,7 +187,7 @@ describe('a secret given through the card', () => {
     expect(events.length).toBeGreaterThan(0)
     for (const event of events) expect(event).not.toContain(VALUE)
     expect(JSON.stringify(await dispatch(cli, 'secrets.list', {}))).not.toContain(VALUE)
-    // Nothing logged it, and no file under the profile but the secret store holds it.
+    // Nothing logged it, and no file under the profile but the secret store and the thread's copy holds it.
     for (const line of console_) expect(line).not.toContain(VALUE)
     const files = filesUnder(home)
     expect(files.some((file) => file.path.includes('thread'))).toBe(true)

@@ -6,7 +6,7 @@ import { ConfirmRemoveButton } from './IconButtons'
 import { MoreDetails, SettingsGroup, SettingsRow } from './SettingsRow'
 
 export const SECRETS_HELP =
-  "An agent that needs a key, token or password asks for it with a private card in its thread. What you type there goes to Mousse's secret store on this computer, never into the conversation, and the agent uses it only by name: in a command Mousse runs for it, whose output is masked, or as ${secret:NAME} in an MCP server's settings. Keys you save for automations are listed here too. Removing one here deletes it at once; a thread that used it can no longer."
+  "An agent that needs a key, token or password asks for it with a private card in its thread. What you type there goes to Mousse's secret store on this computer, never into the conversation. The agent gets its name and a private file holding it, which only threads you gave it to can read: it uses the value in its commands, settings and logins, and never shows it in the chat (any output that holds it is masked). ${secret:NAME} reads it in an MCP server's settings. Keys you save for automations are listed here too. Removing one here deletes it at once; a thread that used it can no longer."
 
 function when(iso: string | undefined): string | undefined {
   if (!iso) return undefined
@@ -62,7 +62,7 @@ export function SecretsSettings() {
       icon={Lock}
       anchor="agents-secrets"
       description={<>
-        Keys, tokens and passwords you gave agents, kept on this computer. Agents use them by name only.
+        Keys, tokens and passwords you gave agents, kept on this computer. Agents use them but never show them in the chat.
         <MoreDetails>{SECRETS_HELP}</MoreDetails>
       </>}
     >

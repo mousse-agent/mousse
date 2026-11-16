@@ -21,10 +21,10 @@ export interface SecretRequestInput {
   name?: string
 }
 
-/** How a request ended, as the agent is told. Never holds a value. */
+/** How a request ended, as the agent is told. Never holds a value; `file` is the private file the agent may read. */
 export type SecretRequestOutcome =
-  | { kind: 'stored'; name: string; keep: SecretKeep }
-  | { kind: 'saved_reused'; name: string }
+  | { kind: 'stored'; name: string; keep: SecretKeep; file?: string }
+  | { kind: 'saved_reused'; name: string; file?: string }
   | { kind: 'declined' }
   | { kind: 'ended'; why: 'stopped' | 'timed_out' | 'shutdown' }
 
@@ -115,7 +115,8 @@ export class SecretRequests extends EventEmitter {
     if (typeof keep !== 'string' || !(SECRET_KEEPS as readonly string[]).includes(keep)) throw new SecretRequestError('invalid', 'Choose how long to keep it.')
     const name = this.vault.freeName(entry.view.name)
     this.vault.store(name, value as string, { keep: keep as SecretKeep, threadId, label: entry.view.label })
-    entry.settle({ kind: 'stored', name, keep: keep as SecretKeep })
+    const file = this.vault.fileFor(name, threadId)
+    entry.settle({ kind: 'stored', name, keep: keep as SecretKeep, ...(file ? { file } : {}) })
     return { name }
   }
 
@@ -125,7 +126,8 @@ export class SecretRequests extends EventEmitter {
     const name = entry.view.name
     if (!this.vault.isSaved(name)) throw new SecretRequestError('not_saved', `No saved secret is named ${name}.`)
     this.vault.grant(name, threadId)
-    entry.settle({ kind: 'saved_reused', name })
+    const file = this.vault.fileFor(name, threadId)
+    entry.settle({ kind: 'saved_reused', name, ...(file ? { file } : {}) })
     return { name }
   }
 
@@ -152,7 +154,10 @@ export class SecretRequests extends EventEmitter {
   }
 }
 
-/** What the agent's tool returns for an outcome. Names only. */
+/**
+ * What the agent's tool returns for an outcome: the name and the private file, never the value. The secret is kept out
+ * of the transcript, not out of the agent's hands: it may read the file and use the value wherever the work needs it.
+ */
 export function secretOutcomeText(outcome: SecretRequestOutcome): { text: string; isError?: boolean } {
   switch (outcome.kind) {
     case 'stored':
@@ -160,10 +165,13 @@ export function secretOutcomeText(outcome: SecretRequestOutcome): { text: string
       const kept = outcome.kind === 'saved_reused' ? 'a saved secret' : outcome.keep === 'thread' ? 'for this thread only' : outcome.keep === 'day' ? 'for 24 hours' : 'saved in Settings'
       return {
         text: [
-          `The user gave the secret. It is kept by Mousse as ${outcome.name} (${kept}); you never see its value.`,
-          `Use it by name only: secret_run with secrets [{ "name": "${outcome.name}" }] gives it to one command as the environment variable ${outcome.name} (or as a private file whose path is in ${outcome.name}_FILE), and \${secret:${outcome.name}} reads it in an MCP server's settings.`,
-          'Never print it, write it to a file, or put it in a reply; output that holds it is masked.'
-        ].join(' ')
+          `The user gave the secret. Mousse keeps it as ${outcome.name} (${kept}), out of the chat.`,
+          outcome.file
+            ? `It is in a private file you may read and use directly with your own tools: ${outcome.file}. Use it as you would any credential the user handed you: in commands, config files, API calls and logins (for example, pipe the file into gh auth login --with-token).`
+            : '',
+          `secret_run with secrets [{ "name": "${outcome.name}" }] also gives it to one command as the environment variable ${outcome.name} (or as a file whose path is in ${outcome.name}_FILE), and \${secret:${outcome.name}} reads it in an MCP server's settings.`,
+          'Keep the value out of the transcript: never print or echo it in a reply, a message or command output. Output that holds it is masked.'
+        ].filter(Boolean).join(' ')
       }
     }
     case 'declined':
