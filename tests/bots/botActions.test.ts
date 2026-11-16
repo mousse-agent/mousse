@@ -1554,3 +1554,18 @@ it('R2-5 a timely Send remains running when the deadline passes', async () => {
   release(); await sending
   expect(f.bots.actions.get(a.id)?.status).toBe('done')
 })
+
+it.each(['stop', 'expiry', 'forget'] as const)('R2-6 existing rows still settle after switch-off on %s', async path => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.host.settings!.get().experimental.botAsksFirst = false
+  if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
+  if (path === 'expiry') { f.clock.now = Date.parse(a.expires_at); f.timers.at(-1)!.fn(); await flush() }
+  if (path === 'forget') {
+    const memory = new BotMemoryStore({ db: f.store.db })
+    const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'card' })!
+    memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  }
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: path === 'expiry' ? 'expired' : 'withdrawn', exec_args: null })
+})
