@@ -343,7 +343,7 @@ export class BotActions {
       if (moved && !pending.has(to)) {
         const action = this.get(id)!
         const row = this.host.store.activation(action.activation_id)
-        if (action.args_json !== '"[forgotten]"') this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', result?.notSentInTime ? result.text : to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError || card.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
+        if (action.args_json !== '"[forgotten]"') this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', result?.notSentInTime ? result.text : to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
         if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
         this.host.store.db.afterCommit(() => this.host.publish(action.message_id))
       }
