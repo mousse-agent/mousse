@@ -408,7 +408,12 @@ export class BotChatProjection {
       if (!value || typeof value !== 'object') return
       const object = value as Record<string, unknown>
       if (object.$mousse === 'hidden') { hiddenPaths.push(path.join(' → ')); return }
-      if (object.$mousse === 'literal') return
+      if (object.$mousse === 'literal') {
+        // The wrapper escapes this object's namespace only. Its children may still contain real markers.
+        if (object.value && typeof object.value === 'object')
+          for (const [key, item] of Object.entries(object.value)) visit(item, [...path, key])
+        return
+      }
       for (const [key, item] of Object.entries(value)) visit(item, [...path, key])
     }
     visit(args, [])
