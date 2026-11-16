@@ -1102,7 +1102,7 @@ export class BotMemoryStore {
   /** Shared scheduler deletion covers the bot, the owner and removing all of a bot's schedules. */
   removeProgressForJob(jobId: string): void {
     this.write(() => {
-      const rows = this.all("SELECT bot_id, key FROM bot_memory_state WHERE (key LIKE 'progress:%' AND bot_id || '--' || substr(key, 10) = ?) OR (key LIKE 'progress_pending:%' AND bot_id || '--' || json_extract(value, '$.scheduleId') = ?)", jobId, jobId)
+      const rows = this.all("SELECT bot_id, key FROM bot_memory_state WHERE (key LIKE 'progress:%' AND bot_id || '--' || substr(key, 10) = ?) OR (key LIKE 'progress_pending:%' AND bot_id || '--' || json_extract(value, '$.scheduleId') = ?) OR key = ? OR (key LIKE 'schedule-said:%' AND bot_id || '--' || substr(key, 15) = ?)", jobId, jobId, `schedule-ended:${jobId}`, jobId)
       for (const row of rows) {
         this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.bot_id as string, row.key as string)
         this.dropPacks(row.bot_id as string)
