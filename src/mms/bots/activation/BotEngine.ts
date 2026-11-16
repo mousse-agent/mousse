@@ -642,6 +642,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly offeredNotes = new Map<string, Set<number>>()
   /** Replies whose final message the executor still delivers, by `<activationId>:<n>`. */
   /** Present only after a main authority was prepared here; absent after restart means unknown. */
+  private readonly deliveryWarnings = new Set<string>()
   private readonly replyEffects = new Map<string, boolean>()
   private readonly pendingReplies = new Map<string, { post(text?: string): void; timer: { clear(): void } }>()
   /** The live chip of each working activation (`bots.chat.list`'s `live`). */
@@ -2650,15 +2651,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     const pack = this.packs.get(row.id)
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, controller.signal) : undefined
-    let confirmed = false
+    let confirmationAttempted = false
     return {
       activationId: row.id,
       dispatchN: dispatch.n,
       // A leading `/` never runs a command: the trigger is text for the model.
       modelOutput: () => {
-        if (confirmed) return
-        this.store.confirmWorkDelivery(row.id, dispatch.n, 'output')
-        confirmed = true
+        if (confirmationAttempted) return
+        confirmationAttempted = true
+        this.confirmWorkDelivery(row.id, dispatch.n, 'output')
       },
       prompt: dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text,
       // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
@@ -6295,7 +6296,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!row || !dispatch) return
     if (dispatch.kind === 'consult') return this.settleConsult(row, dispatch, run, outcome, true)
     if (dispatch.kind === 'subagent') return this.settleSubagent(row, dispatch, run, outcome, true)
-    if (run.status === 'completed') this.store.confirmWorkDelivery(row.id, dispatch.n, 'completed')
+    if (run.status === 'completed') this.confirmWorkDelivery(row.id, dispatch.n, 'completed')
     const key = `${row.id}:${dispatch.n}`
     // A failed turn's final message is the provider's error, never the bot's words: it is not a reply. The exception is a
     // turn that reached its runtime's turn cap: its work goes on, and what it said last is kept (`continueAfterTurnCap`).
@@ -6384,6 +6385,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.settling.delete(row.id)
       return undefined
     }).catch(failed)
+  }
+
+  /** Confirmation is advisory: a failed write means repeat the update, never fail the runtime's turn. */
+  private confirmWorkDelivery(activationId: string, n: number, why: 'output' | 'completed'): void {
+    try { this.store.confirmWorkDelivery(activationId, n, why) }
+    catch (error) {
+      const key = `${activationId}:${n}`
+      if (this.deliveryWarnings.has(key)) return
+      this.deliveryWarnings.add(key)
+      console.warn('A bot work update could not be confirmed; it will be carried again.', { activationId, dispatchN: n, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** Copies a bot thread into the journal again (`needsSync`); it stays listed until a copy succeeds. */
@@ -6911,7 +6923,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.trigger.kind === 'work') {
       for (const dispatch of this.store.dispatches(row.id))
         if (dispatch.outcome === 'completed' || (dispatch.runId && runs.getRun(dispatch.runId)?.status === 'completed'))
-          this.store.confirmWorkDelivery(row.id, dispatch.n, 'completed')
+          this.confirmWorkDelivery(row.id, dispatch.n, 'completed')
     }
     // Phase 2: unknown calls across the main runs and every consult (all ended after boot recovery).
     this.collectUnknownCalls(row)

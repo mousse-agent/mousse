@@ -26,7 +26,7 @@ it('R3-gap a late tap after a default was carried reaches running work as a note
   f.clock.now += 30 * 60_000
   await f.bots.deliverDueReminders(); await flush()
   await start(f, t.workId, 2)
-  expect((f.store.dispatch(t.workId, 2)!.prompt as any).workTold).toBeUndefined()
+  expect((f.store.dispatch(t.workId, 2)!.prompt as any).workTold).toBe('pending')
   await f.bots.service.answerQuestion({ botId, questionId: t.questionId, choice: 'B', clientRequestId: 'gap-late' })
   expect(f.store.pendingWorkNotes(t.workId).map(note => note.text)).toEqual([lateWorkNote('B')])
   expect(f.store.question(t.questionId)).toMatchObject({ status: 'defaulted', answer: { choice: 'A', late: { choice: 'B' } } })
@@ -50,7 +50,7 @@ it('R3-gap compaction re-gives a carried note before any output confirms it', as
   f.bots.noteWork(botId, t.workId, 'Only flats with lifts.')
   await finish(f, t.turn.payload, 'completed', { text: 'Initial findings.' })
   const next = await start(f, t.workId, 2)
-  expect((f.store.dispatch(t.workId, 2)!.prompt as any).workTold).toBeUndefined()
+  expect((f.store.dispatch(t.workId, 2)!.prompt as any).workTold).toBe('pending')
   next.prepared.steer!.compacted()
   expect(next.prepared.steer!.peek()).toContain('What the owner added since:\n- Only flats with lifts.')
 })

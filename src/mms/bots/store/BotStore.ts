@@ -792,7 +792,7 @@ export interface BotDispatchRow {
     text: string
     subagent?: BotSubagentSpec
     /** Stored updates are told only after model output or a completed dispatch. */
-    workTold?: 'output' | 'completed'
+    workTold?: 'pending' | 'output' | 'completed'
     workWaitIds?: string[]
     workActionIds?: string[]
     /** Work's stored additions carried here; consume them with confirmed delivery, not prepare. */
@@ -886,7 +886,12 @@ export interface BotCountersRow {
 }
 
 // Completed outcomes also recognize dispatches written before the explicit output marker existed.
-const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN ('output', 'completed') OR d.outcome IS 'completed')"
+const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN ('output', 'completed') OR (json_extract(d.prompt_json, '$.workTold') IS NULL AND d.outcome IS 'completed'))"
+
+const hasWorkUpdates = (prompt: BotDispatchRow['prompt']): boolean => Boolean(
+  prompt.workActionIds?.length || prompt.workWaitIds?.length || prompt.workDelivery?.notes.length ||
+  prompt.workDelivery?.answers.length || prompt.workDelivery?.question
+)
 
 /** Only prompt delivery uses confirmation. Existing read/applied markers keep their carried semantics. */
 const unconfirmedDelivery = (table: string, member: 'notes' | 'answers' | 'question'): string => `
@@ -1356,9 +1361,10 @@ export class BotStore {
   }
 
   insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'> & { mainN?: number; send?: BotDispatchRow['send'] }): void {
+    const prompt = hasWorkUpdates(row.prompt) ? { ...row.prompt, workTold: row.prompt.workTold ?? 'pending' } : row.prompt
     this.run(
       'INSERT INTO bot_dispatches(activation_id, n, kind, main_n, client_request_id, thread_id, prompt_json, policy_digest, send_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      row.activationId, row.n, row.kind === 'subagent' ? 'consult' : row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
+      row.activationId, row.n, row.kind === 'subagent' ? 'consult' : row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
     )
   }
 
@@ -2016,10 +2022,12 @@ export class BotStore {
 
   /** One confirmation transaction for the whole stored update list. Preparing a run proves nothing was read. */
   confirmWorkDelivery(activationId: string, n: number, why: 'output' | 'completed'): void {
+    const needsConfirmation = (dispatch: BotDispatchRow | undefined): boolean => Boolean(dispatch && dispatch.startedAt !== null &&
+      dispatch.prompt.workTold !== 'output' && dispatch.prompt.workTold !== 'completed' && hasWorkUpdates(dispatch.prompt))
+    // A chat turn or empty continuation costs a read, never BEGIN IMMEDIATE on its first output.
+    if (!needsConfirmation(this.dispatch(activationId, n))) return
     this.db.transaction(() => {
-      const dispatch = this.dispatch(activationId, n)
-      if (!dispatch || dispatch.startedAt === null || dispatch.prompt.workTold ||
-        (!dispatch.prompt.workDelivery && !dispatch.prompt.workWaitIds?.length && !dispatch.prompt.workActionIds?.length)) return
+      if (!needsConfirmation(this.dispatch(activationId, n))) return
       this.run("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.workTold', ?) WHERE activation_id = ? AND n = ?", why, activationId, n)
     })
   }
