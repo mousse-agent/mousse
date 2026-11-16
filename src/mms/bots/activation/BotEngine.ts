@@ -5163,7 +5163,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; waitContext?: string; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     if (this.cancelRemovedScheduleRun(row)) return 'none'
@@ -5308,7 +5308,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; waitContext?: string; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
+    // A wait outcome is service context, not an owner's message. Preserve it across every continuation branch.
+    if (input.waitContext) {
+      const { waitContext, ...rest } = input
+      const continuation = this.continuationPrompt(row, rest, neverRan)
+      return `[Mousse] ${waitContext}\n\n${continuation.replace('[Mousse] The owner asked you to continue.', '[Mousse] Continue where you left off.')}`
+    }
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
