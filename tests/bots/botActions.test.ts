@@ -1591,7 +1591,7 @@ it.each(['paused', 'expired', 'withdrawn', 'binding'] as const)('R2-8 Send repor
   if (reason === 'withdrawn') await f.bots.stopWork(t.botId, t.workId)
   if (reason === 'binding') t.server.configDigest = 'changed'
   const code = reason === 'binding' ? 'bot_action_changed' : `bot_action_${reason}`
-  const sentence = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : reason === 'expired' ? 'This call expired. Nothing was sent.' : reason === 'withdrawn' ? 'This call was withdrawn. Nothing was sent.' : 'This changed since you saw it. Review it again.'
+  const sentence = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : reason === 'expired' ? 'This expired, so nothing was sent.' : reason === 'withdrawn' ? 'No longer needed, so nothing was sent.' : 'This changed since you saw it. Check it again before sending.'
   await expect(f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code, message: sentence })
   expect(t.calls).toEqual([])
 })
@@ -1702,4 +1702,22 @@ it('R3-2 Forget blocks the tool until owner input without retaining call content
   const saved = f.bots.actions.get(a.id)!
   expect(saved).toMatchObject({ args_json: '"[forgotten]"', args_digest: '[forgotten]', exec_args: null, result_json: '{"text":"[forgotten]"}' })
   expect(JSON.stringify(memory.actions(t.botId))).not.toContain('Exact text')
+})
+
+
+it.each(['gone', 'settled', 'unreachable'] as const)('R3-3 owner wording for %s reaches the service unchanged', async reason => {
+  const t = await setup(true)
+  let id = 'missing', digest = 'missing'
+  if (reason !== 'gone') {
+    await t.call(); await finish(f, t.work.payload)
+    const a = f.bots.actions.forWork(t.workId)!; id = a.id; digest = a.args_digest
+    if (reason === 'settled') await f.bots.actions.answer({ actionId: id, digest, answer: 'not_now' })
+    else {
+      vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+      await f.bots.actions.answer({ actionId: id, digest, answer: 'send' })
+      f.clock.now += 11 * 60_000; await f.bots.deliverDueReminders()
+    }
+  }
+  const sentence = reason === 'gone' ? "This can't be sent any more." : reason === 'settled' ? 'This was already answered.' : "Mail couldn't be reached, so nothing was sent."
+  await expect(f.bots.service.answerAction({ actionId: id, digest, answer: 'send' })).rejects.toMatchObject({ code: `bot_action_${reason}`, message: sentence })
 })
