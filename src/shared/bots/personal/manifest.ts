@@ -63,6 +63,13 @@ export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'w
 export const BOT_MCP_LIST_TOOL = 'mcp_servers'
 
 /**
+ * What runs now for the bot's folders (`running_list`): its background commands, and servers and commands there, with
+ * their addresses. It reads and starts nothing, so it is never grantable and every bot turn has it (chat, work, consults
+ * and subagents), as a thread's agent has it on every turn.
+ */
+export const BOT_RUNNING_TOOL = 'running_list'
+
+/**
  * Making a picture (#1088): offered only to a bot whose owner picked a model in Runs on's Images row, in chat and in
  * work. The pick is the consent, so it is no permission: it is never in a grant, never asked for, and About never lists
  * it. It runs no command, reads no file and opens no page: Mousse calls the picked model and saves the picture in the
@@ -223,6 +230,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...BOT_SUBAGENT_TOOLS,
   ...BOT_MEMORY_TOOLS,
   BOT_MCP_LIST_TOOL,
+  BOT_RUNNING_TOOL,
   BOT_IMAGE_TOOL,
   BOT_APPLET_TOOL,
   BOT_QUESTION_TOOL,

@@ -244,7 +244,9 @@ export function ProjectTerminalPanel() {
           agentId: `${PROJECT_SHELL_AGENT_ID}:${tabId}`,
           ...(cwd ? { cwd } : {}),
           // The tab's own thread, not whichever thread the window shows now; a tab kept in every thread has none.
-          threadId: tab.ownerThreadId
+          threadId: tab.ownerThreadId,
+          // A quick action's terminal: agents are told what runs in it by the action's name.
+          ...(tab.quickAction ? { label: tab.quickAction } : {})
         })
         setTabNotice(tabId, null)
         updateProjectTerminalTab(tabId, { ptyId, ...(cwd ? { cwd } : {}), exited: false })

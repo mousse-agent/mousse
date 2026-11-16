@@ -11,7 +11,7 @@ import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
 import { profilerTools } from './profiler'
 import { projectGitTools } from './projectGit'
-import { quickActionTools } from './quickActions'
+import { quickActionTools, runningTools } from './quickActions'
 import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
 import { scheduleTools } from './schedules'
 import { secretTools } from './secrets'
@@ -108,7 +108,7 @@ export function createAppToolRegistry(input: {
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
-  add('quickActions', quickActionTools(host))
+  add('quickActions', [...quickActionTools(host), ...runningTools(host)])
   add('devGui', devGuiTools(host))
   add('web', webTools(host))
   add('browser', browserTools(host))

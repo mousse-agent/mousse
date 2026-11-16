@@ -1,5 +1,6 @@
 import { describeQuickActionKind, QuickActionTools, type StagedQuickAction } from '../../../orchestrator/QuickActionTools'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
+import { RUNNING_LIST_TOOL } from '../../../running/RunningRegistry'
 import type { AppToolHost } from './host'
 import { disabledInSettings, plainSchema, truncateForDisplay, type MousseTool } from './types'
 
@@ -70,4 +71,29 @@ export function quickActionTools(host: AppToolHost): MousseTool[] {
       return result
     }
   }))
+}
+
+/**
+ * `running_list`: what runs now for the caller's folder, so an agent checks before it starts a dev server and reuses one
+ * that is up. The same list as the turn's "Running now" note, read again now. Every agent has it: a thread's, a
+ * subagent's (its parent's folder) and a bot's (its own folders).
+ */
+export function runningTools(host: AppToolHost): MousseTool[] {
+  if (!host.running) return []
+  const running = host.running
+  return [{
+    name: RUNNING_LIST_TOOL,
+    description:
+      'List what runs now for your folder: quick actions and commands in Mousse\'s terminals, background commands left running by ' +
+      'this or another thread or by a bot, and other processes listening on a port there. Each has what started it, how long it ' +
+      'has been up and its local address (http://localhost:<port>) when it listens or printed one. Call it before you start a ' +
+      'dev server or another long-running command: reuse a running one instead of starting a second copy, and restart it only ' +
+      'when the user asks or when it has to.',
+    inputSchema: { type: 'object', properties: {} },
+    access: 'actsAsCaller',
+    class: 'read',
+    readOnlySafe: true,
+    describe: () => 'Check what is running',
+    handler: async (_args, ctx) => ({ text: await running(ctx.turn) })
+  }]
 }

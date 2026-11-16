@@ -109,6 +109,7 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   watch_start: ["start", "a background command in Mousse"],
   watch_list: ["check", "background commands in Mousse"],
   watch_stop: ["stop", "a background command in Mousse"],
+  running_list: ["check", "what is running in Mousse"],
   // Subagents and tasks
   delegate_task: ["start", "a subagent in Mousse"],
   create_subagent: ["start", "a subagent in Mousse"],

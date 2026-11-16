@@ -140,7 +140,7 @@ export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its
 const DRAFT_READ_ONLY_TOOLS = new Set([
   'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'memory_list', 'memory_search', 'memory_read',
   'read', 'list', 'search', 'ls', 'find', 'grep', 'Read', 'Glob', 'Grep',
-  'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list',
+  'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list', 'running_list',
   'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
 ])
 /** A reply can carry a picture as Markdown or as a path, without calling a tool.
@@ -8188,6 +8188,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.armDue()
     this.changed({ botId })
     return { watcherId, until: new Date(this.now() + limitMs).toISOString() }
+  }
+
+  /** Every bot's background commands running now, with their processes: the running list (`RunningRegistry`). */
+  runningWatchers(): ReturnType<BotWatchers['processes']> {
+    return this.watchers.processes()
+  }
+
+  /** A bot's name as its owner set it, for the running list; undefined when it is gone. */
+  botName(botId: string): string | undefined {
+    const row = this.store.registry(botId)
+    return row?.revision ? this.host.definitions.revision(row.botId, row.revision)?.name : undefined
   }
 
   /** The bot's background commands running now (`watch_list`, the chat's Background work). */

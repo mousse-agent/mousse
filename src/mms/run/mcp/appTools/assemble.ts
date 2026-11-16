@@ -187,19 +187,23 @@ export const PLAN_TURN_NOTE = 'Plan mode: this turn is read-only. Inspect what y
 /**
  * What a runtime with its own loop is told at the start of each prompt (PR 2 §2 "Instructions"):
  * skills loaded for the turn (an explicit `/skill` included), the mode's own instructions, the
- * conversation's applet catalogue, and which Mousse tools are usable now. Empty when there is none.
+ * conversation's applet catalogue, what already runs for the turn's folder, and which Mousse tools are usable now.
+ * Empty when there is none.
  */
 export function turnPreamble(input: {
   loadedSkills: Array<{ name: string; content: string }>
   modePrompt?: string
   appletCatalogue?: string
   usableTools?: string[]
+  /** What already runs for the turn's folder (`runningNote`); empty or absent: nothing runs, and no section. */
+  running?: string
 }): string {
   const sections: string[] = []
   if (input.loadedSkills.length)
     sections.push(`## Loaded Skill Instructions\n${input.loadedSkills.map((skill) => `### ${skill.name}\n${skill.content}`).join('\n\n')}`)
   if (input.modePrompt?.trim()) sections.push(`## Mode\n${input.modePrompt.trim()}`)
   if (input.appletCatalogue?.trim()) sections.push(`## Applets${input.appletCatalogue}`)
+  if (input.running?.trim()) sections.push(`## Running now\n${input.running.trim()}`)
   if (input.usableTools) sections.push(`## Mousse tools this turn\n${input.usableTools.length ? `Usable now: ${input.usableTools.join(', ')}.` : 'None of Mousse\'s tools are usable this turn.'}`)
   return sections.join('\n\n')
 }

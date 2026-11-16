@@ -459,7 +459,7 @@ interface AppState {
   setActiveProjectTerminalTab: (threadId: string | null, tabId: string) => void
   updateProjectTerminalTab: (
     tabId: string,
-    patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'cwd' | 'exited' | 'title'>>
+    patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'cwd' | 'exited' | 'title' | 'quickAction'>>
   ) => void
   openDocument: (title: string, markdown: string) => string
   /** Shows a thread's applet in the side panel's Documents tab, reusing its tab when it is already open. */
