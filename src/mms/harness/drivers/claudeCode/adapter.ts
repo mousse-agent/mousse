@@ -182,6 +182,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     let toolStarted = false
     // The turn ended at Send now's cut (`onSendNowCut`): with no text, it has no reply to show.
     let sendNowCut = false
+    // A steer cut the turn and the model wrote nothing after it (`onSteerUnanswered`).
+    let steerUnanswered = false
     const progress = (): void => {
       progressed = true
       sink.progress()
@@ -191,6 +193,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       mode: input.mode === 'plan' ? 'plan' : 'default',
       onSendNowCut: () => {
         sendNowCut = true
+      },
+      onSteerUnanswered: () => {
+        steerUnanswered = true
       },
       // A bot turn asks about every call, whatever the thread's or the entry's default.
       permissionMode: locked ? 'ask' : input.permissionMode,
@@ -344,7 +349,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       contextModelKey: contextKey,
       nativeMessages: [],
       providerRef,
-      ...(sendNowCut ? { noReply: true } : {})
+      ...(sendNowCut ? { noReply: true } : {}),
+      ...(steerUnanswered ? { steerUnanswered: true } : {})
     }
   }
 

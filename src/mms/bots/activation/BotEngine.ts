@@ -96,7 +96,7 @@ import { nudgeSlot } from './questionFollowUps'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
 import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
-import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, SILENT_REPLY, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { BOT_THREADS_READ_ONLY_TURN_NOTE, botAllowedOf, namedPowerOf, type BotAllowed, type BotNamedPower } from '../instructions'
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
@@ -736,6 +736,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private closed = false
   /** Final messages the executor delivered while the dispatch's end was still being recorded, by `<activationId>:<n>`. */
   private readonly lateTexts = new Map<string, string>()
+  /** Chat turns whose main dispatch (`n`) read the owner's messages as a steer while it answered, by activation. */
+  private readonly steeredChats = new Map<string, number>()
+  /** Turns whose main dispatch (`n`) a steer cut with no words after it (`TurnResult.steerUnanswered`), by activation. */
+  private readonly cutReplies = new Map<string, number>()
   /** The owner's message that answered a wall while its turn was still ending: the continuation's input. */
   private readonly ownerTexts = new Map<string, string>()
   /**
@@ -2535,7 +2539,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (hasReplyCards(row.id) || hasToolImages(row.id) || (text && (replyMayCarryPicture(text) || extractAppletParts(text, true).some(part => part.type !== 'text')))) return false
     if (row.lane !== 'chat' || this.chatDraft(row) || (!unanswered && !this.store.pendingWorkNotes(row.id).length)) return false
     if (this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)) return false
-    return this.replyEffects.get(`${row.id}:${main.n}`) === false
+    // A reply cut off before it answered is never posted as it stands, whatever the turn did: the continuation says it.
+    return unanswered || this.replyEffects.get(`${row.id}:${main.n}`) === false
   }
 
   /** End and startup recovery share this consumption path; posting and deleting the key are one transaction. */
@@ -2561,6 +2566,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** What follows any end of an activation: its scratch and pack go, the lane moves on. */
   private afterEnd(row: BotActivationRow): void {
+    this.steeredChats.delete(row.id)
+    this.cutReplies.delete(row.id)
     this.host.progress?.finishProgress(row.botId, row.id, false)
     this.clearInternetCheck(row.id)
     this.cleanup(row)
@@ -2888,6 +2895,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const notices = this.subagentNotices.get(row.id)
         for (const thread of taken.subagents ?? []) notices?.delete(thread)
         if (!taken.ids.length) return
+        if (row.lane === 'chat') this.steeredChats.set(row.id, n)
         this.notOffered(row.id, taken.ids)
         try {
           this.store.applyWorkNotes(taken.ids)
@@ -4934,18 +4942,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // left for them; without the time it reports what it has, and the notes stay unread (work_list shows it ended).
       // The same holds, in either lane, for a permission the owner allowed after the turn was refused it (issue #983).
       const allowed = !reload && run.status === 'completed' ? this.allowedSinceRefused(row) : []
-      // The runtime's placeholder is never the bot's words. A chat turn of the owner's that ended on it never answered
-      // what they wrote: it goes on once to answer it; a second time it says it was cut off (`UNANSWERED_REPLY`).
-      const placeholder = row.lane === 'chat' && text !== undefined ? withoutRuntimePlaceholder(text) : undefined
+      // The runtime's placeholder is never the bot's words. A chat turn of the owner's that a steer cut with no words
+      // after it (the runtime says so, `cutReplies`, or the reply ends on its placeholder) never answered what they
+      // wrote: it goes on once to answer it, holding back what it had; a second time it posts what it had and says it
+      // was cut off (`UNANSWERED_REPLY`).
+      const placeholder = text !== undefined ? withoutRuntimePlaceholder(text) : undefined
       if (placeholder?.cut) text = placeholder.text
-      const unanswered = Boolean(placeholder?.cut) && !reload && run.status === 'completed' && memoryLaneOf(row) === 'chat'
+      // A steer that carried none of the owner's messages (the pack again after a compaction, a subagent's end) asked
+      // for no answer: its cut is not one.
+      const cut = Boolean(placeholder?.cut) || (this.cutReplies.get(row.id) === main.n && this.steeredChats.get(row.id) === main.n)
+      const unanswered = cut && row.lane === 'chat' && !reload && run.status === 'completed' && memoryLaneOf(row) === 'chat'
       const retryUnanswered = unanswered && !this.store.dispatches(row.id).some((dispatch) => dispatch.send.unanswered) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
-      // Cut off again: what it held back goes out with the line that asks the owner to send it again.
-      if (unanswered && !retryUnanswered && !text?.trim()) text = [this.chatDraft(row)?.text.trim(), UNANSWERED_REPLY].filter(Boolean).join('\n\n')
       const hold = this.canHoldChatDraft(row, main, text, retryUnanswered)
-      // The executor can deliver its final words after the terminal event. Wait before making the
-      // continuation, so its request and the durable draft contain those words too.
-      if (hold && text === undefined && options.expectText) {
+      // The executor can deliver its final words, and whether a steer cut them, after the terminal event. Wait before
+      // making the continuation, so its request and the durable draft contain those words too; and before posting the
+      // reply of a turn that read the owner's messages as it answered, so a cut reply is never posted as it stands.
+      if ((hold || this.steeredChats.get(row.id) === main.n) && text === undefined && options.expectText) {
         const key = `${row.id}:${main.n}`
         const replyTo = this.answeredOwnerMessageOf(row.id)
         if (!this.pendingReplies.has(key)) {
@@ -4960,6 +4972,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         return
       }
+      // Cut off again: what it held back and what it had now go out with the line that asks the owner to send it again.
+      if (unanswered && !retryUnanswered) text = [this.chatDraft(row)?.text.trim(), text?.trim(), UNANSWERED_REPLY].filter(Boolean).join('\n\n')
+      this.steeredChats.delete(row.id)
+      this.cutReplies.delete(row.id)
       let heldDraft = false
       let noted = false
       const next = this.recorded(row, () => {
@@ -5115,11 +5131,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open' &&
       !this.store.messagesForAsk(ask.id).some((message) => message.activationId === row.id))
     // The runtime's placeholder never reaches the chat, whichever way the reply arrives (`withoutRuntimePlaceholder`).
-    if (row.lane === 'chat' && text) text = withoutRuntimePlaceholder(text).text
+    if (text) text = withoutRuntimePlaceholder(text).text
     // A chat turn that handed work off and says its one line twice (before the work_start call and after it) says it
     // once. Any other reply is posted as written.
     const handedOff = row.lane === 'chat' && chips.some((chip) => WORK_STARTED_CHIPS.has(chip.text))
-    const written = handedOff ? sayOnce((text ?? '').trim()) : (text ?? '').trim()
+    const said = handedOff ? sayOnce((text ?? '').trim()) : (text ?? '').trim()
     // Only the last turn of a run reports; an earlier one (work that went on with the owner's notes) is an update.
     const report = row.lane === 'run' && row.status === 'done' && (this.store.lastMainDispatch(row.id)?.n ?? dispatch.n) === dispatch.n
     // Cards the turn made (`show_card`) go on its message, even one with no words.
@@ -5131,8 +5147,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // started, may say `[SILENT]` when nothing finished and nothing needs the owner: nothing is
     // posted and nobody is notified; the wake's quiet line and the work list still show it happened. An empty reply
     // stays as it is (a chat turn that only handed work off still shows it).
+    // Its marker is a line of its own: a reply that also says something posts what it says, without the marker.
     const quietTurn = unattendedChatTurn(row) || (report && row.trigger.kind === 'work' && unattendedChatTurn(this.store.activation(row.trigger.from) ?? { lane: 'run', idempotencyKey: '' }))
-    const silent = (report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))) || (quietTurn && written !== '' && isSilentOutput(written))
+    const marked = quietTurn ? withoutSilentMarker(said) : undefined
+    const written = marked?.text ?? said
+    const silent = (report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))) || (marked?.marked === true && written === '')
     if (silent && !asks.length && !waiting && !cards && !questions.length) return
     const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
       ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
@@ -5573,7 +5592,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (input.unanswered && row.lane === 'chat') {
       const draft = this.chatDraft(row)
       const said = draft?.text.trim() ? ` What you wrote before it, not sent yet: «${draft.text.trim()}».` : ''
-      return `[Mousse] Your reply never reached your owner: it ended with "${RUNTIME_PLACEHOLDER_REPLY}", a line the runtime writes when a reply is cut off, never an answer.${said} Their messages:\n\n${this.ownerWords(row.botId, row.id)}\n\nAnswer them now, in one reply. Never write "${RUNTIME_PLACEHOLDER_REPLY}" yourself.`
+      return `[Mousse] Your reply never reached your owner: their new message cut it off, and nothing you wrote after it answered them.${said} Their messages:\n\n${this.ownerWords(row.botId, row.id)}\n\nAnswer them now, in one reply. Never write "${RUNTIME_PLACEHOLDER_REPLY}" yourself.`
     }
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
@@ -6480,7 +6499,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A consult: its end, and its final message for the waiting `consult` call. Idempotent; the
    * executor's final message may come after the run's terminal event settled the dispatch.
    */
-  settle(payload: BotTurnPayload, outcome: { text?: string }): void {
+  settle(payload: BotTurnPayload, outcome: { text?: string; unanswered?: boolean }): void {
     const runs = this.host.runs()
     const run = runs?.getRun(payload.runId)
     if (!runs || !run || !TERMINAL_RUN_STATUSES.has(run.status)) return
@@ -6490,6 +6509,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (dispatch.kind === 'consult') return this.settleConsult(row, dispatch, run, outcome, true)
     if (dispatch.kind === 'subagent') return this.settleSubagent(row, dispatch, run, outcome, true)
     if (run.status === 'completed') this.confirmWorkDelivery(row.id, dispatch.n, 'completed')
+    if (outcome.unanswered) this.cutReplies.set(row.id, dispatch.n)
     const key = `${row.id}:${dispatch.n}`
     // A failed turn's final message is the provider's error, never the bot's words: it is not a reply. The exception is a
     // turn that reached its runtime's turn cap: its work goes on, and what it said last is kept (`continueAfterTurnCap`).
@@ -7338,7 +7358,32 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   launchedThreadChanged(creatorThreadId: string, threadId?: string): void {
     const bot = this.botOf(creatorThreadId)
     if (bot) this.changed({ botId: bot.botId })
-    if (bot && threadId) this.checkJobs(threadId)
+    if (bot && threadId) {
+      this.followUpJob(bot.botId, threadId)
+      this.checkJobs(threadId)
+    }
+  }
+
+  /**
+   * A thread the bot started works again with no job of the bot's open on it (its owner wrote to it after its job
+   * ended, or its first job was never recorded): a follow-up job opens, with no turn of the bot's (`activationId`
+   * empty), so its end reaches the bot as a notice like the first one's. A message the bot sends it meanwhile takes the
+   * follow-up over (`BotStore.openJob`). Never throws.
+   */
+  private followUpJob(botId: string, threadId: string): void {
+    try {
+      if (this.store.openJobsOn(threadId).some((job) => job.botId === botId) || !this.host.jobThread) return
+      const seen = this.host.jobThread(threadId)
+      const state = seen ? jobStateOf(seen.status) : undefined
+      if (state !== 'running' && state !== 'needs_input') return
+      const earlier = this.store.latestJobOn(botId, threadId)
+      const title = jobLine(seen?.title?.trim() || earlier?.title || 'Untitled thread', 200)
+      const request = jobLine(earlier ? `More work after "${earlier.request}"` : 'Work in a thread you started')
+      this.store.openJob({ id: `job_${randomUUID()}`, botId, activationId: '', threadId, title, request, askedBy: 'owner', ...(earlier?.project ? { project: earlier.project } : {}) })
+      this.changed({ botId })
+    } catch (error) {
+      console.warn('a follow-up job could not be opened', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   // -- Jobs: the ledger of work handed to threads (docs/plans/bot-context.md §16) ---------------------------------
@@ -10096,12 +10141,21 @@ export const RUNTIME_PLACEHOLDER_REPLY = 'No response requested.'
  */
 export function withoutRuntimePlaceholder(text: string): { text: string; cut: boolean } {
   const paragraphs = text.trim().split(/\n\s*\n/)
-  let cut = false
-  while (paragraphs.length && paragraphs.at(-1)!.trim().toLowerCase() === RUNTIME_PLACEHOLDER_REPLY.toLowerCase()) {
-    paragraphs.pop()
-    cut = true
-  }
-  return cut ? { text: paragraphs.join('\n\n').trim(), cut } : { text, cut }
+  const kept = paragraphs.filter((paragraph) => !RUNTIME_PLACEHOLDER_PATTERN.test(paragraph.trim()))
+  return kept.length < paragraphs.length ? { text: kept.join('\n\n').trim(), cut: true } : { text, cut: false }
+}
+
+/** The runtime's placeholder as a whole paragraph, in any case, with or without its full stop. */
+const RUNTIME_PLACEHOLDER_PATTERN = /^no response requested\.?$/i
+
+/**
+ * `text` without its lines that are exactly the silent marker (`SILENT_REPLY`), and whether it had one. A reply that is
+ * only the marker is silent; one that says more posts the rest.
+ */
+export function withoutSilentMarker(text: string): { text: string; marked: boolean } {
+  const lines = text.split(/\r?\n/)
+  const kept = lines.filter((line) => line.trim() !== SILENT_REPLY)
+  return kept.length < lines.length ? { text: kept.join('\n').trim(), marked: true } : { text, marked: false }
 }
 
 /**

@@ -291,6 +291,8 @@ export type ClaudeSubscriptionChatInput = {
   returnSteer?: (text: string, token?: string) => void
   /** The turn ended at the aborted result of Send now's interrupt (`LiveRun.sendNowAbort`): what it wrote is all it says. */
   onSendNowCut?: () => void
+  /** A one-shot turn restarted with a steer ended with no words of the model's after it (`TurnResult.steerUnanswered`). */
+  onSteerUnanswered?: () => void
   /** A drained steer was pushed to Claude: its token is spent. */
   steerTaken?: (token?: string) => void
   /**
@@ -3560,6 +3562,10 @@ export class ClaudeSubscriptionProviderService {
         })()
         /** The query that answered, still exiting (`awaitOneShotExit`). */
         let detached: Promise<void> | undefined
+        /** The query runs on a steer: the turn restarted with it. */
+        let resumedWithSteer = false
+        /** The last query ran on a steer and ended with no words of the model's after it (`onSteerUnanswered`). */
+        let steerUnanswered = false
         const options = locked ? lockedOptions(controller, () => turn) : buildOptions(controller, () => turn, false)
         /**
          * Stop ended a query whose prompt carries steers it had not been seen reading, and sent its process SIGTERM
@@ -3622,6 +3628,7 @@ export class ClaudeSubscriptionProviderService {
                   frames.text += resultText
                   input.onText(frames.text)
                 }
+                steerUnanswered = resumedWithSteer && !frames.text.slice(turnTextLength).trim()
                 success = true
                 // The answer is complete. Claude Code still writes its session and exits, which the turn does not wait
                 // for: the thread's next start does. A steer taken meanwhile restarts the query once it has exited.
@@ -3645,7 +3652,10 @@ export class ClaudeSubscriptionProviderService {
           query = undefined
           collectSteer()
           if (!detached) completed.close()
-          if (!steers.length) break
+          if (!steers.length) {
+            if (steerUnanswered) input.onSteerUnanswered?.()
+            break
+          }
           if (detached) await detached
           detached = undefined
           controller.signal.throwIfAborted()
@@ -3674,6 +3684,8 @@ export class ClaudeSubscriptionProviderService {
           interruptRequested = false
           turn.locked?.cut(false)
           success = false
+          resumedWithSteer = true
+          steerUnanswered = false
           if (frames.text) frames.text += '\n\n'
         }
       }

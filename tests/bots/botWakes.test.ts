@@ -395,7 +395,9 @@ describe('a wake-up with nothing to say', () => {
 
   it.each([
     ['[SILENT]', []],
-    ['Nothing new yet.\n[SILENT]', []],
+    // A marker tacked on to words never swallows them: the words go out without it.
+    ['The deploy finished.\n[SILENT]', ['The deploy finished.']],
+    ['The deploy finished. [SILENT] if nothing changed', ['The deploy finished. [SILENT] if nothing changed']],
     ['The deploy finished.', ['The deploy finished.']]
   ] as const)('a wake-up that says %j posts %j', async (text, posted) => {
     const { row, wakeId } = await wakeUp()
@@ -414,7 +416,7 @@ describe('a wake-up with nothing to say', () => {
     const from = fromWake ? (await wakeUp()).row : (await chat('Research this', 'm2')).activation
     const { workId } = await f.bots.tools.work.start(botId, from.id, { title: 'Deploy check', brief: 'Check the deploy.', key: 'k1' })
     const work = await start(f, workId)
-    await finish(f, work.payload, 'completed', { text: '[SILENT]' })
+    await finish(f, work.payload, 'completed', { text: 'No response requested.\n\n[SILENT]' })
     expect(f.store.activation(workId)?.status).toBe('done')
     expect(postedBy(workId).map((message) => message.text)).toEqual(fromWake ? [] : ['[SILENT]'])
   })

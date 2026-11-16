@@ -146,6 +146,52 @@ describe('the ledger in the bot engine', () => {
     expect(f.store.job(jobId)).toMatchObject({ state: 'done' })
     expect(notices(jobId)).toBe(1)
   })
+
+  it('a thread the bot started that works again after its job ended (the owner said go in it) reaches the bot again when it ends', async () => {
+    const jobId = await handOff('Fix the login page in project Web', 't4', 'm4')
+    threads.set('t4', { status: 'done', title: 'Fix the login page', result: 'Ready to open the PR. Say go.' })
+    f.bots.threadRunEnded('t4')
+    await flush()
+    expect(noticeTurns()).toHaveLength(1)
+    const home = f.store.registry(botId)!.homeThreadId!
+
+    // Ended and seen again: nothing opens.
+    f.bots.launchedThreadChanged(home, 't4')
+    expect(f.store.openJobsOn('t4')).toEqual([])
+
+    // The owner says go in the thread: it works again, with no job of the bot's open there.
+    threads.set('t4', { status: 'running', title: 'Fix the login page' })
+    f.bots.launchedThreadChanged(home, 't4')
+    const [followUp, ...more] = f.store.openJobsOn('t4')
+    expect(more).toEqual([])
+    expect(followUp).toMatchObject({ botId, askedBy: 'owner', state: 'running', request: 'More work after "Fix the login page in project Web"' })
+    expect(followUp!.id).not.toBe(jobId)
+    // Seen again while it works: still the one follow-up.
+    f.bots.launchedThreadChanged(home, 't4')
+    expect(f.store.openJobsOn('t4')).toHaveLength(1)
+
+    threads.set('t4', { status: 'done', title: 'Fix the login page', result: 'Opened PR #12.' })
+    f.bots.threadRunEnded('t4')
+    await flush()
+    const turns = noticeTurns()
+    expect(turns).toHaveLength(2)
+    const followUpTurn = turns.find((row) => row.idempotencyKey.startsWith(`job:${followUp!.id}:`))
+    expect((followUpTurn!.trigger as { input: string }).input).toContain('Opened PR #12.')
+    expect(f.store.job(followUp!.id)).toMatchObject({ state: 'done', line: 'Opened PR #12.' })
+  })
+
+  it('a message the bot sends to a thread whose follow-up is open takes the follow-up over: its turn, request and asker', async () => {
+    await handOff('Fix the login page in project Web', 't5', 'm5')
+    threads.set('t5', { status: 'done', title: 'Fix the login page' })
+    f.bots.threadRunEnded('t5')
+    await flush()
+    threads.set('t5', { status: 'running', title: 'Fix the login page' })
+    f.bots.launchedThreadChanged(f.store.registry(botId)!.homeThreadId!, 't5')
+    const [followUp] = f.store.openJobsOn('t5')
+    const turn = noticeTurns()[0]!
+    expect(f.bots.openJob(botId, turn.id, { threadId: 't5', title: 'Fix the login page', sent: 'Open the PR now.' }).jobId).toBe(followUp!.id)
+    expect(f.store.job(followUp!.id)).toMatchObject({ activationId: turn.id, askedBy: 'self', request: 'Open the PR now.' })
+  })
 })
 
 describe('the ledger in bots.db', () => {

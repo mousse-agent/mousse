@@ -1623,12 +1623,18 @@ export class BotStore {
 
   /**
    * A job handed to `threadId`. A thread that still works on an earlier job of the same bot takes the new message as
-   * part of it: that row is kept (and touched), and no second one opens. Returns the job's row.
+   * part of it: that row is kept (and touched), and no second one opens. A follow-up the bot did not hand off (no
+   * turn: `activationId` empty, opened when the thread worked again) becomes this hand-off: its turn, request and asker
+   * are this one's. Returns the job's row.
    */
   openJob(row: Pick<BotJob, 'id' | 'botId' | 'activationId' | 'threadId' | 'title' | 'request' | 'askedBy'> & { project?: string }): BotJob {
     return this.db.transaction(() => {
       const open = this.get('SELECT * FROM bot_jobs WHERE bot_id = ? AND thread_id = ? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1', row.botId, row.threadId)
       const now = this.now()
+      if (open && String(open.activation_id) === '' && row.activationId) {
+        this.run('UPDATE bot_jobs SET updated_at = ?, title = ?, activation_id = ?, request = ?, asked_by = ? WHERE id = ?', now, row.title, row.activationId, row.request, row.askedBy, String(open.id))
+        return this.job(String(open.id))!
+      }
       if (open) {
         this.run('UPDATE bot_jobs SET updated_at = ?, title = ? WHERE id = ?', now, row.title, String(open.id))
         return jobOf({ ...open, updated_at: now, title: row.title })
@@ -1650,6 +1656,12 @@ export class BotStore {
   /** The jobs not ended on `threadId`, of any bot. */
   openJobsOn(threadId: string): BotJob[] {
     return this.all('SELECT * FROM bot_jobs WHERE thread_id = ? AND ended_at IS NULL ORDER BY created_at', threadId).map(jobOf)
+  }
+
+  /** The bot's newest job on `threadId`, ended or not. */
+  latestJobOn(botId: string, threadId: string): BotJob | undefined {
+    const row = this.get('SELECT * FROM bot_jobs WHERE bot_id = ? AND thread_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', botId, threadId)
+    return row ? jobOf(row) : undefined
   }
 
   /** Every job not ended, oldest first: what the startup pass checks. */

@@ -69,7 +69,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 10,
     date: '2026-11-16',
-    text: "Only a chat turn your owner's own message started can start a background command with watch_start. From a wake-up, your first message, a question's default, a tapped answer or another bot's message, hand the command to work, which runs it in the sandbox, or tell your owner what to start; watch_list and watch_stop still work in every chat turn.",
+    text: "Only a chat turn your owner's own message started can start a background command with watch_start. From a wake-up, your first message, a question's default, a tapped answer or another bot's message, hand the command to work, which runs it in the sandbox; watch_list and watch_stop still work in every chat turn.",
     gone: [/start it with watch_start instead, from here/i, /never start work only to wait on something/i]
   },
   {
@@ -104,8 +104,8 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 19,
     date: '2026-11-17',
-    text: 'A wake-up, a notice from a thread you handed work to, another bot\'s message, and work you started from one of them may end with exactly [SILENT] when nothing finished and nothing needs your owner: nothing is posted. Never post "nothing new" or "still running", and never write "No response requested.". Keep replies to one to three short lines: the result, not how you got it.',
-    gone: [/If there is nothing worth saying, say so in one line/i, /that you'll do it when your owner replies with a message/i]
+    text: 'A wake-up, a notice from a thread you handed work to, another bot\'s message, and work you started from one of them may end with exactly [SILENT] when nothing finished and nothing needs your owner: nothing is posted. Never post "nothing new" or "still running", and never write "No response requested.". Keep replies to one to three short lines: the result, not how you got it. A thread you started that works again after its job ended (your owner wrote to it) now reaches you again when it ends.',
+    gone: [/If there is nothing worth saying, say so in one line/i, /that you'll do it when your owner replies with a message/i, /or tell your owner what to start/i]
   }
 ]
 
