@@ -2216,7 +2216,7 @@ it('guards hidden characters consistently while preserving ordinary script and e
   expect(args.textContent).toContain('bob@exa�mple.com')
   expect(args.textContent).toContain('https://exa�mple.com')
   expect(args.textContent).toContain('می‌روم 👩‍💻 Ελληνικά Русский')
-  expect(args.querySelectorAll('[aria-label="Look-alike letters"]')).toHaveLength(2)
+  expect(args.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')).toHaveLength(2)
   const { plainLabel } = await import('../../src/shared/bots/personal/modelSlots')
   expect(plainLabel('one\u200ctwo\u2029three')).toBe('one two three')
 })

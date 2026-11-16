@@ -12,9 +12,10 @@ export function actionText(text: string): string {
   return text.split(/(\s+)/u).map((token) => guardTextCharacters(token, addressLike(token) ? 'address' : 'data')).join('')
 }
 function AlphabetWarning({ text, name = false }: { text: string; name?: boolean }) {
-  const mixed = (token: string) => /[A-Za-z]/u.test(token) && /[АВЕКМНОРСТХаеорсухіјѕΑΒΕΖΗΙΚΜΝΟΡΤΥΧαεικνορτυχω]/u.test(token)
-  const warn = name ? mixed(text) : text.split(/\s+/u).some((token) => addressLike(token) && mixed(token))
-  return warn ? <small className="bot-action-alphabet" aria-label="Look-alike letters"><CircleAlert size={12} aria-hidden />Contains look-alike letters from another alphabet</small> : null
+  const outsideAscii = (token: string) => /(?=[^\x00-\x7f])[\p{L}\p{N}]/u.test(token)
+  const phoneLike = /^\+?[\p{N}(][\p{N}\s()+.-]{4,}$/u.test(text.trim())
+  const warn = name ? outsideAscii(text) : text.split(/\s+/u).some(token => addressLike(token) && outsideAscii(token)) || phoneLike && outsideAscii(text)
+  return warn ? <small className="bot-action-alphabet" aria-label="Non-ASCII letters or digits">Contains letters or digits outside A–Z and 0–9</small> : null
 }
 
 /** A literal wrapper escapes this object only; its children have their own stored markers or escapes. */
