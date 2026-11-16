@@ -1001,11 +1001,34 @@ it.each(['done', 'uncertain', 'failed', 'not_sent'] as const)('C4 duplicate warn
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
   f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ?, result_json = ?, ran_at = ? WHERE id = ?', status === 'not_sent' ? 'failed' : status, JSON.stringify({ text: 'answer', ...(status === 'failed' ? { toolReportedError: true } : {}) }), f.store.now(), a.id)
-  await callForBot({ bot: t.work.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat', signal: new AbortController().signal })
+  f.bots.actions.hold(f.store.activation(t.workId)!, t.work.payload.clientRequestId, t.work.prepared.authority.mcpTools![0]!, t.args, 'repeat')
   const next = f.bots.actions.forWork(t.workId)!
   const card = () => f.bots.service.actionMessage(t.botId, next.id).action!
   if (status === 'not_sent') expect(card().previous).toBeUndefined()
   else expect(card().previous).toEqual({ status, at: a.ran_at ?? f.store.now() })
   f.store.run('UPDATE bot_actions SET target_json = ? WHERE id = ?', JSON.stringify({ server: 'mail', tool: 'different' }), a.id)
   expect(card().previous).toBeUndefined()
+})
+
+it.each([false, true])('C4 bridge delivers a complete card or disables Send when oversized=%s', async large => {
+  const t = await setup(true)
+  if (large) t.args.body = 'long email text '.repeat(5000)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'full' })
+  const list = methods.find(m => m.method === 'bots.chat.list')!
+  const page = await list.handle(list.validate!({ botId: t.botId }), { caller: { node: 'phone', user: 'owner' } } as never) as any
+  const message = page.messages.find((m: any) => m.id === a.message_id)
+  expect(message.action).toMatchObject({ actionId: a.id, digest: a.args_digest, status: 'open' })
+  if (large) {
+    expect(message.action.tooLarge).toBe(true)
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(56 * 1024)
+  } else {
+    expect(message.action.args).toEqual(t.args)
+    const method = methods.find(m => m.method === 'bots.actions.answer')!
+    const answer = method.validate!({ botId: t.botId, actionId: message.action.actionId, digest: message.action.digest, answer: 'send' })
+    const results = await Promise.allSettled(['phone', 'second'].map(node => method.handle(answer, { caller: { node, user: 'owner' } } as never)))
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1)
+    expect(t.calls).toEqual([t.args])
+  }
 })
