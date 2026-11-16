@@ -699,8 +699,8 @@ describe('long work', () => {
       await f.bots.maintain()
       expect(f.store.dispatches(workId)).toHaveLength(1)
       expect(f.store.activation(workId)).toMatchObject({ status: 'cancelled' })
-      // The wider grant stays for later runs.
-      expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(120 * MIN)
+      // Stopped work gives no wider limit to later runs.
+      expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(60 * MIN)
     })
 
     it('an Allow recorded just before Mousse stopped carries it on once after the restart, with no second notice', async () => {
