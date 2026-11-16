@@ -355,7 +355,7 @@ it.each(['held', 'stopped', 'switch_off'] as const)('R1 summaries and lists surv
   const summary = f.bots.service.list().bots.find(b => b.id === t.botId)!
   expect(() => f.bots.service.get(t.botId)).not.toThrow()
   if (state === 'stopped') expect(summary.needsOwner).not.toBe(true)
-  else expect(summary).toMatchObject({ needsOwner: true, stateText: 'Wants to send: Send this action?' })
+  else expect(summary).toMatchObject({ needsOwner: true, stateText: 'Wants to send: Mail · send' })
 })
 it.each(['plain', 'note', 'permission'] as const)('R2 carries the action outcome beside %s continuation context', async context => {
   const t = await setup(true)
@@ -815,4 +815,17 @@ it('C-partial reports a server error without claiming that nothing was sent', as
   expect(t.calls).toEqual([t.args])
   await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
   expect(t.calls).toHaveLength(1)
+})
+
+
+it('D-copy gives an approval resume one continuation instruction', async () => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const prompt = f.store.lastMainDispatch(t.workId)!.prompt.text
+  expect(prompt).not.toContain('Continue where you left off. Continue.')
+  expect(prompt.split('Your owner sent it. The tool answered:')).toHaveLength(2)
+  expect(f.bots.service.list().bots.find(b => b.id === t.botId)?.stateText).not.toContain('Send this action?')
 })
