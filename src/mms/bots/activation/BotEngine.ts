@@ -596,6 +596,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly actions: BotActions
   private createActions(): BotActions { return new BotActions({
     store: this.host.store,
+    refresh: async () => { await this.host.mcp?.warm() },
+    park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
     enabled: () => botAsksFirst(this.host.settings?.get()),
     binding: (row, tool) => {
       const grant = this.store.activeGrant(row.botId)
@@ -615,10 +617,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const tool = mcp?.offered(new Set([`${target.server}::${target.tool}`]))[0]
       if (!mcp?.call || !tool) throw new Error('tool changed')
       const signal = new AbortController().signal
+      const actionId = this.actions.forWork(row.id)!.id
       return callForBot({ mcp: mcp as BotMcp, bot: {
         activationId: row.id, mcpTools: [tool], workspace: null, time: { signal, deadline: () => Number.MAX_SAFE_INTEGER },
         check: () => this.grantNow(row.id)?.mcp.some(p => p.serverId === target.server && p.tool === target.tool) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
-      }, name: tool.name, args, signal })
+      }, name: tool.name, args, signal, heldAction: true, assertExecutionActive: async () => {
+        this.actions.assertRunning(actionId)
+      } })
     }
   }) }
   readonly service: BotChatService
@@ -2185,6 +2190,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.pumpLater(row.botId)
   }
 
+  setAsksFirstForDevelopment(botId: string, serverId: string, tool: string): void {
+    if (!botAsksFirst(this.host.settings?.get())) throw new BotEngineError('feature_off', 'Asks first is off.')
+    const grant = this.store.activeGrant(botId)
+    if (!grant?.manifest.mcp.some(p => p.serverId === serverId && p.tool === tool)) throw new BotEngineError('not_found', 'This tool is not granted.')
+    this.narrowGrant(botId, manifest => ({ ...manifest, mcp: manifest.mcp.map(p => p.serverId === serverId && p.tool === tool ? { ...p, level: 'asks_first' } : p) }))
+  }
+
   private approvalPending(id: string): boolean {
     return botAsksFirst(this.host.settings?.get()) && ['open', 'approved', 'running'].includes(this.actions.forWork(id)?.status ?? '')
   }
@@ -2192,6 +2204,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly workWaitLookups: WorkWaitLookups = { store: () => this.store }
 
   private readonly workWaitFacts: WorkWaitFacts = {
+    approvalReady: (row) => this.store.lastMainDispatch(row.id)?.endedAt !== null && !this.live.has(row.id),
     approvalExists: (row) => Boolean(this.actions.forWork(row.id)),
     usageResumable: (row) => this.usageResumable(row),
     questionExists: (row) => Boolean(this.store.workQuestion(row.id)),
@@ -3244,7 +3257,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const subagent = input.role === 'subagent'
     // Work that asked its owner a question in this dispatch ends its turn: every later call is refused (never a wall,
     // which would cut the turn as an interruption), and the answer continues it. It only refuses; it never allows.
-    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? QUESTION_END_TURN_TEXT : undefined)
+    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? (this.actions.forWork(row.id) ? 'The call is held for your owner. End your turn now.' : QUESTION_END_TURN_TEXT) : undefined)
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
       const stop = endTurn()
@@ -3291,7 +3304,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             if (!allowed.ok) return { text: checkMessage(allowed), isError: true }
           }
           const outcome = this.actions.hold(row, input.dispatchId, tool, args, toolCallId)
-          if (!outcome.isError) this.askedIn.set(row.id, input.mainN)
+          if (!outcome.isError) { this.askedIn.set(row.id, input.mainN); this.releaseParked(this.store.activation(row.id) ?? row, 'approval') }
           return outcome
         }
       } : {}),
@@ -4813,6 +4826,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     if (workWaits(row)) {
+      if (workWaitRule(row) === WORK_WAIT_RULES.approval) {
+        if (main?.endedAt) { this.askedIn.delete(row.id); this.releaseParked(row, 'approval') }
+        return
+      }
       // Work that ran out of room during this turn: its reply waits for the turn's last words, and carries its ask (or,
       // when the owner already allowed more on an earlier card, is an update with what it had).
       if (main?.endedAt) this.postReply(row, main, text, options.expectText === true)
@@ -5408,6 +5425,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.status !== 'paused' && row.status !== 'blocked') throw new BotEngineError('bot_not_paused', 'Only a paused or blocked activation can be continued.')
     // Work that waits to go on goes on by its own way: its ask's answer, or the usage limit's reset (or Resume).
     if (workWaits(row)) {
+      if (workWaitRule(row) === WORK_WAIT_RULES.approval) {
+        if (main?.endedAt) { this.askedIn.delete(row.id); this.releaseParked(row, 'approval') }
+        return
+      }
       throw new BotEngineError('bot_work_waiting', workWaitRule(row)!.continueRefusal(row))
     }
     if (!row.threadId || !this.store.lastMainDispatch(row.id)) throw new BotEngineError('bot_not_started', 'This activation never started; run the bot again.')
@@ -7760,7 +7781,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         workId: row.id,
         title: this.workTitle(row),
         status,
-        ...(workWaitLine(row, this.workWaitLookups).detail ? { doing: workWaitLine(row, this.workWaitLookups).detail } : {}),
+        ...(workWaitLine(row, this.workWaitLookups).detail ? { doing: `waiting on you · ${workWaitLine(row, this.workWaitLookups).detail}`, waitsFor: 'answer' as const } : {}),
         startedAt: row.createdAt,
         ...(chip && !question ? { doing: `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` } : {}),
         kind: row.trigger.kind === 'schedule' ? 'schedule' as const : 'work' as const,

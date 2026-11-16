@@ -1,3 +1,4 @@
+import { canonicalJson, sha256Bytes } from '../revision'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { OwnedWorkEntry } from '../../execution/OwnedWorkBarrier'
 import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -82,6 +83,7 @@ export interface McpClientFactory {
 export interface McpToolExecutionPin {
   installationId: string
   configRevision: string
+  schemaDigest?: string
   toolName: string
   /** Workflow defaults must remain selected even though dispatch narrows to one tool. */
   requireProfileSelection?: boolean
@@ -502,7 +504,7 @@ export class McpManager {
       throw new Error(`Unknown MCP tool: ${providerName}`)
     }
     const assertPin = (tool: McpToolDescriptor | undefined): void => {
-      if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName)) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
+      if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName || (expected.schemaDigest !== undefined && sha256Bytes(canonicalJson(tool.inputSchema ?? {})) !== expected.schemaDigest))) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
     }
     assertPin(descriptor)
 
@@ -546,7 +548,7 @@ export class McpManager {
     providerName: string
   ): Promise<McpToolCallResult> {
     const assertPin = (tool: McpToolDescriptor | undefined): void => {
-      if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName)) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
+      if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName || (expected.schemaDigest !== undefined && sha256Bytes(canonicalJson(tool.inputSchema ?? {})) !== expected.schemaDigest))) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
     }
     const connection = await this.connect(server, projectPath, signal)
     if (expected && (mcpInstallationId(connection.config) !== expected.installationId || connection.config.configRevision !== expected.configRevision)) throw Object.assign(new Error('MCP connection does not match the admitted revision.'), { category: 'disabled', code: 'stale_revision' })

@@ -26,6 +26,8 @@ export interface ActionRow {
 interface Host {
   store: BotStore
   enabled(): boolean
+  refresh(): Promise<void>
+  park(row: BotActivationRow): void
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
   post(row: BotActivationRow, id: string, text: string): void
   settled(row: BotActivationRow): void
@@ -55,6 +57,7 @@ export class BotActions {
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
       id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(maskedActionData(args)), actionDigest(JSON.parse(exact)), JSON.stringify(binding), messageId,
       new Date(Date.parse(this.host.store.now()) + 48 * 3600_000).toISOString(), this.host.store.now())
+      this.host.park(row)
       this.host.post(row, messageId, `Send this action?\n${JSON.stringify(maskedActionData(args))}`)
     })
     return { text: 'This call is held for your owner. End your turn now.' }
@@ -69,12 +72,17 @@ export class BotActions {
   }
   private valid(action: ActionRow): BotActivationRow | undefined {
     const row = this.host.store.activation(action.activation_id)
-    if (!row || Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) return undefined
+    if (!row || !action.exec_args || actionDigest(JSON.parse(action.exec_args)) !== action.args_digest || Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) return undefined
     const binding = this.host.binding(row, JSON.parse(action.target_json))
     return binding && canonicalJson(binding) === canonicalJson(JSON.parse(action.binding_json)) ? row : undefined
   }
+  assertRunning(id: string): void {
+    const action = this.get(id)
+    if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
+  }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
     if (!this.host.enabled()) throw changed()
+    await this.host.refresh()
     const action = this.get(input.actionId)
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
     if (input.answer === 'not_now') {
@@ -118,6 +126,7 @@ export class BotActions {
   }
   async reconcile(): Promise<void> {
     if (!this.host.enabled()) return
+    await this.host.refresh()
     for (const a of this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")) {
       const action = this.get(String(a.id))!
       if (action.status === 'running') {

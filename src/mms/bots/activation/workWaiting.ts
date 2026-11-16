@@ -10,6 +10,7 @@ export type WorkWaitLine = Pick<BotWorkItem, 'status' | 'waitsFor'> & { detail?:
 
 /** Facts supplied by the engine; the rules themselves neither write nor hold engine state. */
 export interface WorkWaitFacts {
+  approvalReady(row: BotActivationRow): boolean
   approvalExists(row: BotActivationRow): boolean
   usageResumable(row: BotActivationRow): boolean
   questionExists(row: BotActivationRow): boolean
@@ -43,7 +44,7 @@ const nothingToWaitFor = (title: string) => `I stopped "${title}": nothing could
 export const WORK_WAIT_RULES = {
   approval: {
     reasons: ['approval', 'approval_answered'], allows: workOnly,
-    ready: (row, _facts) => row.endReason === 'approval_answered',
+    ready: (row, facts) => row.endReason === 'approval_answered' && facts.approvalReady(row),
     stranded: (row, facts) => !facts.approvalExists(row),
     endReason: 'action_gone', endLine: nothingToWaitFor, resume: 'continue', checkBeforeResume: true,
     continuation: (row, facts) => {
@@ -54,7 +55,7 @@ export const WORK_WAIT_RULES = {
     waitsOnOwner: (row, _facts) => row.endReason === 'approval',
     needsOwner: (row, facts) => Boolean(facts.store().get("SELECT 1 FROM bot_actions WHERE activation_id = ? AND status = 'open' AND message_id IS NOT NULL", row.id)),
     takesNotes: (row) => row.endReason !== 'approval', noteRefusal: 'approval',
-    line: (row, _facts) => ({ status: row.endReason === 'approval_answered' ? 'queued' : 'paused', ...(row.endReason === 'approval' ? { detail: 'waiting on you · Send this action?' } : {}) }),
+    line: (row, _facts) => ({ status: row.endReason === 'approval_answered' ? 'queued' : 'paused', ...(row.endReason === 'approval' ? { waitsFor: 'answer' as const, detail: 'Send this action?' } : {}) }),
     clearLiveChip: true, republishQuestion: false
   },
   question: {

@@ -256,6 +256,8 @@ export interface BotWorkItem {
    * services, whose apps show it as held.
    */
   waitsFor?: 'answer'
+  /** First line of a held action, supplied by Mousse. */
+  detail?: string
   startedAt: string
   /** A scheduled run rather than work the chat started. */
   scheduled?: true

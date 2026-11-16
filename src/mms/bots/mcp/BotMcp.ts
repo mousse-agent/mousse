@@ -5,7 +5,7 @@ import { mcpGrantable } from '../../../shared/bots/personal/manifest'
 import { checkMessage } from '../../../shared/bots/personal/walls'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../shared/integrations/results'
-import type { McpCallOptions } from '../../integrations/mcp/McpManager'
+import type { McpCallOptions, McpToolExecutionPin } from '../../integrations/mcp/McpManager'
 import { redactSensitiveText } from '../../integrations/secrets'
 import { logWarn } from '../../log/diag'
 import { userMcpOutcome } from '../../run/mcp/appTools/registry'
@@ -111,7 +111,7 @@ export interface BotMcpHost {
 
 export interface BotMcpDeps {
   catalog: Pick<RelayCatalog, 'ensure' | 'servers' | 'listing'> & Partial<Pick<RelayCatalog, 'listed' | 'configured' | 'onPublished'>>
-  manager: { callTool(providerName: string, args: Record<string, unknown>, projectPath: string | undefined, signal: AbortSignal | undefined, actor: ReturnType<typeof defaultIntegrationActor>, expected: undefined, options: McpCallOptions): Promise<McpToolCallResult> }
+  manager: { callTool(providerName: string, args: Record<string, unknown>, projectPath: string | undefined, signal: AbortSignal | undefined, actor: ReturnType<typeof defaultIntegrationActor>, expected: McpToolExecutionPin | undefined, options: McpCallOptions): Promise<McpToolCallResult> }
   /** MCP is on in Settings. */
   enabled(): boolean
   callMs?: number
@@ -345,9 +345,14 @@ export class BotMcp implements BotMcpHost {
    * sign-in, and its result is framed as data from the server (`images`: the turn's model can see images). A failure is
    * a plain result, never a throw; its raw text goes to the owner's log only.
    */
-  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<ToolOutcome> {
+  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; heldAction?: boolean; assertExecutionActive?: () => Promise<void>; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<ToolOutcome> {
     if (signal.aborted) return { text: `The call to ${tool.serverName} was stopped.`, isError: true }
     if (!this.deps.enabled()) return { text: `MCP is turned off in Mousse's Settings now, so ${tool.serverName}'s tools can't be used. Carry on without it, and say so in your report.`, isError: true }
+    const descriptor = options.heldAction ? this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool) : undefined
+    const pin: McpToolExecutionPin | undefined = options.heldAction && descriptor?.configRevision ? {
+      installationId: installationOf(tool.server), toolName: tool.tool, configRevision: descriptor.configRevision,
+      schemaDigest: shortHash(canonicalJson(descriptor.inputSchema ?? {}), 64), assertExecutionActive: options.assertExecutionActive
+    } : undefined
     const callMs = this.deps.callMs ?? BOT_MCP_CALL_MS
     // The manager times the call out itself; this timer is the floor under it, so nothing a server does holds the run.
     const timeout = new AbortController()
@@ -358,7 +363,7 @@ export class BotMcp implements BotMcpHost {
       const result = await new Promise<McpToolCallResult>((resolve, reject) => {
         const stop = () => reject(both.reason ?? new Error('stopped'))
         both.addEventListener('abort', stop, { once: true })
-        this.deps.manager.callTool(tool.providerName, args, undefined, both, defaultIntegrationActor(false), undefined, { timeoutMs: callMs, signIn: false })
+        this.deps.manager.callTool(tool.providerName, args, undefined, both, defaultIntegrationActor(false), pin, { timeoutMs: callMs, signIn: false })
           .then(resolve, reject)
           .finally(() => both.removeEventListener('abort', stop))
       })
@@ -370,7 +375,7 @@ export class BotMcp implements BotMcpHost {
 ${kept}` } : framed
     } catch (error) {
       const failure = timeout.signal.aborted && !signal.aborted ? timeout.signal.reason : error
-      if (!signal.aborted) logWarn('BotMcp', `A bot's call of ${tool.tool} on "${tool.serverName}" failed: ${redactSensitiveText(failure instanceof Error ? failure.message : String(failure)).slice(0, 2000)}`)
+      if (!signal.aborted && !options.heldAction) logWarn('BotMcp', `A bot's call of ${tool.tool} on "${tool.serverName}" failed: ${redactSensitiveText(failure instanceof Error ? failure.message : String(failure)).slice(0, 2000)}`)
       return { text: failureText(tool.serverName, failure, signal), isError: true }
     } finally {
       clearTimeout(timer)
@@ -457,6 +462,8 @@ export async function callForBot(input: {
   /** The turn's model can see images: a result's images reach it (within limits); otherwise a plain note does. */
   images?: boolean
   toolCallId?: string
+  heldAction?: boolean
+  assertExecutionActive?: () => Promise<void>
 }): Promise<ToolOutcome> {
   const offered = input.bot.mcpTools?.find((tool) => tool.name === input.name || tool.providerName === input.name)
   const target = offered ?? input.known?.(input.name)
@@ -469,6 +476,7 @@ export async function callForBot(input: {
   const { activationId, workspace } = input.bot
   return input.mcp.call(offered, input.args, AbortSignal.any([input.signal, input.bot.time.signal]), {
     images: input.images === true,
+    ...(input.heldAction ? { heldAction: true, assertExecutionActive: input.assertExecutionActive } : {}),
     keepImages: (images) => keepToolImages({ activationId, filesFolder: workspace?.files, source: `${offered.serverName}-${offered.tool}`, images })
   })
 }
