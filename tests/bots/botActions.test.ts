@@ -1300,3 +1300,13 @@ it.each(['card', 'request'].flatMap(which => ['open', 'declined', 'done'].map(st
   expect(JSON.stringify(memory.actions(t.botId))).not.toContain('one@example.test')
   expect(saved.call_key).toBe(a.call_key)
 })
+
+it('B4 forget history keeps the refusal counters while erasing card text', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  const before = JSON.parse(f.bots.actions.get(a.id)!.card_json!)
+  await f.bots.wipeMemory(t.botId, 'saved')
+  expect(JSON.parse(f.bots.actions.get(a.id)!.card_json!)).toMatchObject({ text: '[forgotten]', ownerSeq: before.ownerSeq, noteSeq: before.noteSeq })
+})
