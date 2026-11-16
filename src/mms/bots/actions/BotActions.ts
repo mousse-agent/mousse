@@ -13,7 +13,7 @@ export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): b
 }
 export const actionDigest = (value: unknown): string => shortHash(canonicalJson(value), 64)
 const hiddenKey = (key: string): boolean => /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, ''))
-export const ACTION_HIDDEN_VALUE = 'hidden · will be sent'
+export const ACTION_HIDDEN_VALUE = Object.freeze({ $mousse: 'hidden', text: 'hidden · will be sent' })
 /** Total serialized argument JSON, kept whole for review. */
 export const ACTION_MAX_ARGUMENT_CHARS = 256_000
 
@@ -27,13 +27,12 @@ export function maskedActionData(value: unknown, limit = 32_000): unknown {
 /** Defense for older rows: an echoed hidden argument must not outlive executable storage. */
 export function removeHiddenArguments(result: ToolOutcome, args: unknown, schema: unknown): ToolOutcome {
   const hidden = new Set<string>()
-  const collect = (original: unknown, shown: unknown): void => {
-    if (typeof original === 'string') { if (original.length >= 4 && original !== shown) hidden.add(original); return }
-    if (Array.isArray(original)) { original.forEach((v, i) => collect(v, Array.isArray(shown) ? shown[i] : undefined)); return }
-    if (original && typeof original === 'object') for (const [key, value] of Object.entries(original))
-      collect(value, shown && typeof shown === 'object' ? (shown as Record<string, unknown>)[key] : undefined)
+  const collect = (original: unknown): void => {
+    if (typeof original === 'string') { if (original.length >= 4) hidden.add(original); return }
+    if (Array.isArray(original)) { original.forEach(collect); return }
+    if (original && typeof original === 'object') Object.values(original).forEach(collect)
   }
-  collect(args, reviewArguments(args, schema).args)
+  reviewArguments(args, schema).hiddenValues.forEach(collect)
   let text = result.text
   for (const value of [...hidden].sort((a, b) => b.length - a.length)) text = text.split(value).join('[held back: looks like a secret]')
   return { ...result, text }
@@ -70,17 +69,23 @@ function containsCredential(value: unknown): boolean {
   return Boolean(value && typeof value === 'object' && Object.entries(value).some(([key, item]) => containsCredential(key) || containsCredential(item)))
 }
 /** The review hides named sensitive values without claiming they are withheld from the call. */
-function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasHiddenValues: boolean } {
-  let hasHiddenValues = false
+function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasHiddenValues: boolean; hiddenValues: unknown[] } {
+  const hiddenValues: unknown[] = []
   const visit = (item: unknown, shape: any): unknown => {
     if (Array.isArray(item)) return item.map((entry, i) => visit(entry, Array.isArray(shape?.items) ? shape.items[i] : shape?.items))
-    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, entry]) => {
-      if (shape?.properties && Object.hasOwn(shape.properties, key) && hiddenKey(key)) { hasHiddenValues = true; return [key, ACTION_HIDDEN_VALUE] }
-      return [key, visit(entry, shape?.properties?.[key])]
-    }))
+    if (item && typeof item === 'object') {
+      const entries = Object.entries(item).map(([key, entry]) => {
+        if (shape?.properties && Object.hasOwn(shape.properties, key) && hiddenKey(key)) { hiddenValues.push(entry); return [key, ACTION_HIDDEN_VALUE] }
+        return [key, visit(entry, shape?.properties?.[key])]
+      })
+      const value = Object.fromEntries(entries)
+      // Escape every object in the reserved namespace, including an attempted literal wrapper.
+      return Object.hasOwn(item, '$mousse') ? { $mousse: 'literal', value } : value
+    }
     return item
   }
-  return { args: visit(value, schema), hasHiddenValues }
+  const args = visit(value, schema)
+  return { args, hasHiddenValues: hiddenValues.length > 0, hiddenValues }
 }
 export interface ActionRow {
   id: string; call_key: string; bot_id: string; activation_id: string; status: string
