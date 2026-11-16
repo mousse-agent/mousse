@@ -4182,6 +4182,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  /** A shared limit may still help fresh work; an old or stopped piece alone grants nothing. */
+  private canAllowRoom(ask: BotEscalationRow, key: BotBudgetWallKey, waiting: ReadonlyMap<string, BotBudgetWallKey | undefined>): boolean {
+    if (this.store.registry(ask.botId)?.deletedAt) return false
+    const rows = [...waiting].filter(([, limit]) => limit === key).map(([id]) => this.store.activation(id)!)
+    if (rows.length) return rows.some((row) => workWaits(row) && this.now() - this.waitingSince(row) <= MAX_ROOM_WAIT_MS)
+    const owner = this.store.activation(ask.activationId)
+    // Scheduled-run asks still raise limits for future runs. A work card needs live waiting work.
+    return Boolean(owner && owner.trigger.kind !== 'work' && !['cancelled'].includes(owner.status))
+  }
+
   /**
    * The owner's answer to a wall (the v1 form's). "Allow for this bot" publishes a revision with
    * the permission and approves it in one action; "Allow this time" and "Allow N more" add an overlay
@@ -4213,12 +4223,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A limit: the work that waits on it, read before the answer widens the grant.
     const limit = 'budget' in escalation.permission ? escalation.permission.budget.key : undefined
     const waiting = limit ? this.waitingKeys(row.botId) : undefined
-    if (input.answer === 'allow_bot' && !special) this.allowForBot(row.botId, escalation.permission as BotPermissionRequest, amount)
+    const allow = input.answer !== 'deny' && (!limit || this.canAllowRoom(escalation, limit, waiting!))
     const status = input.answer === 'deny' ? 'denied' : input.answer === 'allow_bot' ? 'allowed_bot' : 'allowed_once'
     let settled: RoomSettled | undefined
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, status, amount)) return false
-      if (!special && (input.answer === 'allow_once' || input.answer === 'allow_more')) this.store.putOverlay(row.id, escalation.id, escalation.permission, amount)
+      if (allow && input.answer === 'allow_bot' && !special) this.allowForBot(row.botId, escalation.permission as BotPermissionRequest, amount)
+      if (allow && !special && (input.answer === 'allow_once' || input.answer === 'allow_more')) this.store.putOverlay(row.id, escalation.id, escalation.permission, amount)
       this.journalAnswer(escalation, status === 'denied' ? 'not_now' : 'allow')
       // Work that waits on the same limit is settled with the answer: an overlay for this activation gives it no room.
       if (limit) settled = this.settleRoomInTx(row.botId, limit, status !== 'denied', waiting!)
@@ -4257,6 +4268,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A limit: the work that waits on it, read before the answer widens the grant.
     const limit = 'budget' in escalation.permission ? escalation.permission.budget.key : undefined
     const waiting = limit ? this.waitingKeys(botId) : undefined
+    const allow = answer === 'allow' && (!limit || this.canAllowRoom(escalation, limit, waiting!))
     let amount: number | undefined
     if (answer === 'allow' && 'path' in escalation.permission) throw new BotEngineError('ask_not_available', BOT_FILE_ASK_GONE_TEXT)
     if (answer === 'allow' && this.permissionOff(botId, escalation.permission)) throw new BotEngineError('permission_off', this.offText())
@@ -4265,12 +4277,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A limit grows by what the card said, at most doubling (the limit may have changed since it was asked).
       amount = 'budget' in permission ? this.limitAsk(botId, permission).budget.amount : undefined
       if ('budget' in permission && amount === undefined) throw new BotEngineError('invalid_answer', 'This limit cannot be raised.')
-      this.allowForBot(botId, permission, amount)
     }
     const cooldown = answer === 'not_now' && escalation.mode === 'ask' ? new Date(this.now() + BOT_ASK_DENY_COOLDOWN_MS).toISOString() : undefined
     let settled: RoomSettled | undefined
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, answer === 'allow' ? 'allowed_bot' : 'denied', amount, cooldown)) return false
+      if (allow && !special) this.allowForBot(botId, escalation.permission as BotPermissionRequest, amount)
       this.journalAnswer(escalation, answer)
       // Work that waits for room goes on with the wider grant, or ends with what it posted, with the answer.
       if (limit) settled = this.settleRoomInTx(botId, limit, answer === 'allow', waiting!)
