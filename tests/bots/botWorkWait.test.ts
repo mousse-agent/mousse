@@ -337,3 +337,12 @@ it('delivers a wait late after more than a week offline', async () => {
   expect(f.store.activation(workId)?.status).toBe('running')
   expect(f.store.dispatch(workId, 2)?.prompt.text).toContain('it was for')
 })
+it('offers work_wait to work started by a reminder', async () => {
+  const { chat } = await work()
+  f.bots.tools.reminders.add(botId, chat.id, { text: 'Check release', dueAt: new Date(f.clock.now + 60_000).toISOString(), work: { title: 'Reminder release', brief: 'Check release' } })
+  f.clock.now += 60_000
+  await f.bots.deliverDueReminders()
+  const reminderWork = f.store.laneActivations(botId, 'run', ['running']).find(r => r.trigger.kind === 'work' && r.trigger.title === 'Reminder release')!
+  expect((await start(f, reminderWork.id)).prepared.policy.tools!.allow).toContain('work_wait')
+  expect(await wait(reminderWork.id)).toMatchObject({ wakeId: expect.any(String) })
+})
