@@ -1,3 +1,5 @@
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from './mcpNames'
+
 /**
  * What a bot's chat says when its turn does not run because the Codex that would run it is not a version Mousse has
  * checked for bots (`codexBotVersionRefusal`): older or newer alike. The run fails with this text as its error, and the
@@ -21,9 +23,19 @@ export function codexBotSettingText(features: readonly string[]): string {
  */
 export const CODEX_BOT_SETUP_UNREADABLE_TEXT = 'Mousse couldn\'t read Codex\'s own settings, so my work can\'t run on it now.'
 
+/** Codex recursively merges server tables, so an attachment cannot erase the owner's leftover keys. */
+export function codexBotMcpCollisionText(names: readonly string[], files: readonly string[] = ["Codex's config.toml"]): string {
+  const plural = names.length > 1
+  return `Your Codex config has ${plural ? 'MCP servers' : 'an MCP server'} named ${names.map((name) => `"${name}"`).join(' and ')}, ${plural ? 'names' : 'a name'} Mousse needs for my work. Rename ${plural ? 'them' : 'it'} in ${files.join(' and ')} to let me work on Codex.`
+}
+
 /** Whether a bot's run failed with one of these texts, which its chat shows as they are. */
 export function isCodexBotRefusal(reason: string): boolean {
-  return reason === CODEX_BOT_VERSION_TEXT || reason === CODEX_BOT_VERSION_UNKNOWN_TEXT || reason === CODEX_BOT_SETUP_UNREADABLE_TEXT ||
+  return [[MOUSSE_MCP_SERVER_NAME], [MOUSSE_RELAY_SERVER_NAME], [MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME]].some((names) => {
+    const prefix = codexBotMcpCollisionText(names).split('. Rename ')[0]! + '. Rename ' + (names.length > 1 ? 'them' : 'it') + ' in '
+    return reason.startsWith(prefix) && reason.endsWith(' to let me work on Codex.')
+  }) ||
+    reason === CODEX_BOT_VERSION_TEXT || reason === CODEX_BOT_VERSION_UNKNOWN_TEXT || reason === CODEX_BOT_SETUP_UNREADABLE_TEXT ||
     /^Codex's own setting ".+" is on, and my work can't run with it\./.test(reason)
 }
 

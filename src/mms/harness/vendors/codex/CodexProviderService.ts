@@ -24,7 +24,7 @@ import { killTree } from '../../spawn'
 import { withEnforced } from '../../env'
 import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
-import { codexMcpConfigOverrides } from '../../../run/mcp/attachment'
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME, codexMcpConfigOverrides } from '../../../run/mcp/attachment'
 import type { McpAttachment } from '../../../run/mcp/MousseMcpServer'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
@@ -75,7 +75,7 @@ import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerE
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotSandbox, codexBotSandboxConfig, codexBotWebOff, codexPackageOf, codexTurnPolicy } from './childPolicy'
-import { CODEX_BOT_SETUP_UNREADABLE_TEXT, codexBotSettingText, codexBotVersionRefusal, codexVersionOf } from '../../../../shared/harness/codexBotVersion'
+import { CODEX_BOT_SETUP_UNREADABLE_TEXT, codexBotMcpCollisionText, codexBotSettingText, codexBotVersionRefusal, codexVersionOf } from '../../../../shared/harness/codexBotVersion'
 import { STOP_GRACE_MS, listProcesses, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
@@ -2831,6 +2831,14 @@ export class CodexProviderService {
       signal.throwIfAborted()
       // The owner's own Codex config can't be read: neither its MCP servers nor its process-wide features can be checked.
       if (setup.mcpServers === null || setup.features === null) throw refuse(CODEX_BOT_SETUP_UNREADABLE_TEXT)
+      // Even a disabled owner entry leaves keys behind when Codex merges the attachment's table.
+      const collisions = [MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME].filter((name) =>
+        setup.reservedMcpServers?.includes(name) &&
+        ((name === MOUSSE_MCP_SERVER_NAME && Boolean(input.mcp)) || (name === MOUSSE_RELAY_SERVER_NAME && Boolean(input.mcp?.relay))))
+      if (collisions.length) {
+        const files = [...new Set(collisions.flatMap((name) => setup.reservedMcpFiles?.[name] ?? ["Codex's config.toml"]))]
+        throw refuse(codexBotMcpCollisionText(collisions, files))
+      }
       botOverrides = codexBotMcpOverrides(setup.mcpServers)
       if (!botOverrides) throw refuse(CODEX_BOT_USER_MCP_UNREADABLE)
       // A feature a thread's config can't switch off, on in the owner's config: the bot's turn doesn't run.
