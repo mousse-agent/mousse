@@ -950,8 +950,8 @@ describe('long work', () => {
       expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'waited_too_long' })
       expect(f.store.dispatches(workId)).toHaveLength(1)
       expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: '"Vacuums" waited too long, so I stopped it. Ask me again if you still want it.', replyTo: { id: message.id } })
-      // The wider limit stays for later work.
-      expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(120 * MIN)
+      // A late Allow gives no wider limit to later work.
+      expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(60 * MIN)
     })
 
     it('work that waits more than a week ends at the next tick, whatever it waits for', async () => {
