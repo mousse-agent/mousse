@@ -150,33 +150,48 @@ export function PausedRunNotice({ threadId, client }: { threadId?: string | null
     const timer = setInterval(() => setNow(Date.now()), TICK_MS)
     return () => clearInterval(timer)
   }, [runId])
-  // A different run (or none) starts clean: an old press or error is not about it.
-  useEffect(() => { setBusy(null); setError(null) }, [runId])
-  // The run on screen now: a press made for an earlier run reports nothing when it settles.
-  const runIdRef = useRef(runId)
-  runIdRef.current = runId
+  // The press in flight (or holding "Resuming…"): its id, and the paused runs it asked for. A press that is no longer
+  // this one (the notice moved on to other runs) reports nothing when it settles.
+  const pressRef = useRef<{ id: number; runIds: ReadonlySet<string> }>({ id: 0, runIds: new Set() })
+  // A different run (or none) starts clean: an old press or error is not about it. Runs leaving their pause one at a
+  // time are not a different run: while every run still shown is one the press asked for, the press holds.
+  useEffect(() => {
+    const press = pressRef.current
+    if (runId && press.runIds.size > 0 && runId.split(',').every((id) => press.runIds.has(id))) return
+    pressRef.current = { id: press.id + 1, runIds: new Set() }
+    setBusy(null)
+    setError(null)
+  }, [runId])
 
-  // Try now stays busy after the daemon takes it, until the pause on screen ends (the run continues, or pauses
-  // again as another run): the continue turn starts a moment later, and a button that came back in between
-  // would look as though nothing happened. If the run still shows as paused after RESUME_WAIT_MS, it says so.
+  // Try now stays busy after the daemon takes it, until every run it asked for has left its pause (continued, or
+  // paused again as another run): the continue turns start a moment later, and a button that came back in between
+  // would look as though nothing happened. If one still shows as paused RESUME_WAIT_MS after the press, it says so.
   useEffect(() => {
     if (busy !== 'resume') return
     const timer = setTimeout(() => {
+      pressRef.current = { id: pressRef.current.id, runIds: new Set() }
       setBusy(null)
       setError(RESUME_STALLED_TEXT)
     }, RESUME_WAIT_MS)
     return () => clearTimeout(timer)
-  }, [busy, runId])
+  }, [busy])
 
-  const run = async (action: PausedAction, pressedFor: string, call: () => Promise<void>) => {
+  const run = async (action: PausedAction, runIds: string[], call: () => Promise<void>) => {
+    const id = pressRef.current.id + 1
+    pressRef.current = { id, runIds: new Set(runIds) }
     setBusy(action)
     setError(null)
     let taken = false
     try {
       await call()
       taken = true
-    } catch (failure) { if (runIdRef.current === pressedFor) setError(pausedActionError(failure, action)) }
-    finally { if (runIdRef.current === pressedFor && !(taken && action === 'resume')) setBusy(null) }
+    } catch (failure) { if (pressRef.current.id === id) setError(pausedActionError(failure, action)) }
+    finally {
+      if (pressRef.current.id === id && !(taken && action === 'resume')) {
+        pressRef.current = { id, runIds: new Set() }
+        setBusy(null)
+      }
+    }
   }
   // Each paused subagent resumes on its own thread; one that is no longer paused does not fail the others.
   const resumeSubagents = async (): Promise<void> => {
@@ -190,8 +205,8 @@ export function PausedRunNotice({ threadId, client }: { threadId?: string | null
     busy,
     error,
     ...(own ? {} : { subagents: subagents.length }),
-    onResume: () => void run('resume', runId, own ? () => actions.resumeNow(own.runId, threadId ?? undefined) : resumeSubagents),
-    onEndPause: () => { if (own) void run('cancel', runId, () => actions.cancel(own.runId, threadId ?? undefined)) },
+    onResume: () => void run('resume', runId.split(','), own ? () => actions.resumeNow(own.runId, threadId ?? undefined) : resumeSubagents),
+    onEndPause: () => { if (own) void run('cancel', [own.runId], () => actions.cancel(own.runId, threadId ?? undefined)) },
     onDismissError: () => setError(null)
   }) : null)
   return null

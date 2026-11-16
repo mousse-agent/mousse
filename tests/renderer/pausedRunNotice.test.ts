@@ -315,6 +315,34 @@ describe('the notice on a thread that waits on paused subagents', () => {
     expect((client.resumeNow as ReturnType<typeof vi.fn>).mock.calls).toEqual([['run:c2', 'c2'], ['run:g1', 'g1']])
   })
 
+  it('stays Resuming… until every subagent it resumed has continued, and the minute counts from the press', async () => {
+    vi.useFakeTimers({ now: NOW })
+    setTurns(turn('p'), pausedTurn('c1', 15), pausedTurn('c2', 16))
+    show(clientOf())
+    click(button('Try now'))
+    await flush()
+    act(() => { vi.advanceTimersByTime(20_000) })
+    // c1 continues first; c2 is still on its way.
+    setTurns(turn('p'), turn('c1', { phase: 'thinking' }), pausedTurn('c2', 16))
+    expect(line()!.textContent).toBe('Subagent hit a usage limit · resuming…')
+    expect(button('Resuming…').getAttribute('aria-busy')).toBe('true')
+    // c2 never continues: the minute from the press runs out, not a new minute from c1's start.
+    act(() => { vi.advanceTimersByTime(RESUME_WAIT_MS - 20_000) })
+    expect(host.querySelector('[role="alert"]')!.textContent).toBe(RESUME_STALLED_TEXT)
+    expect(button('Try now').getAttribute('aria-disabled')).toBeNull()
+  })
+
+  it('when the last resumed subagent continues, the notice goes', async () => {
+    setTurns(turn('p'), pausedTurn('c1', 15), pausedTurn('c2', 16))
+    show(clientOf())
+    click(button('Try now'))
+    await flush()
+    setTurns(turn('p'), turn('c1', { phase: 'thinking' }), pausedTurn('c2', 16))
+    expect(button('Resuming…')).toBeDefined()
+    setTurns(turn('p'), turn('c1', { phase: 'thinking' }), turn('c2', { phase: 'thinking' }))
+    expect(notice()).toBeNull()
+  })
+
   it('a subagent that ran into the limit again reads still limited', () => {
     setTurns(turn('p'), pausedTurn('c1', 15, { again: true }))
     show(clientOf())
