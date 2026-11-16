@@ -1310,3 +1310,22 @@ it('B4 forget history keeps the refusal counters while erasing card text', async
   await f.bots.wipeMemory(t.botId, 'saved')
   expect(JSON.parse(f.bots.actions.get(a.id)!.card_json!)).toMatchObject({ text: '[forgotten]', ownerSeq: before.ownerSeq, noteSeq: before.noteSeq })
 })
+
+it.each(['card', 'request', 'history'] as const)('B5 Forget %s erases the argument digest and keeps the call key', async which => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  if (which === 'history') await f.bots.wipeMemory(t.botId, 'saved')
+  else {
+    const id = which === 'card' ? a.message_id : String(f.store.all("SELECT id FROM bot_messages WHERE bot_id = ? AND author = 'owner' ORDER BY seq DESC", t.botId)[0].id)
+    const memory = new BotMemoryStore({ db: f.store.db })
+    const seq = memory.append({ botId: t.botId, sourceKey: `bm:${id}`, kind: 'notice', who: 'bot', text: 'call' })!
+    memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  }
+  expect(f.bots.actions.get(a.id)).toMatchObject({ args_digest: '[forgotten]', call_key: a.call_key, status: 'declined' })
+  f.bots.actions.hold(f.store.activation(t.workId)!, JSON.parse(a.call_key)[1], { server: 'mail', tool: 'send' } as never, t.args, 'runtime-call-1')
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(f.store.get('SELECT id FROM bot_actions WHERE args_digest = ?', a.args_digest)).toBeUndefined()
+  expect(t.calls).toEqual([])
+})
