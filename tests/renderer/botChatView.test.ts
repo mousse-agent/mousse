@@ -2291,3 +2291,13 @@ it.each([
   expect(card.querySelector('[role="region"]')?.getAttribute('aria-label')).toBe('Everything it will send')
   expect(card.textContent).not.toContain('arguments')
 })
+
+it('puts the outcome directly after the title, before the tool answer and review', async () => {
+  fake.chats.inbox = [held({ status: 'failed', at: AT, result: { text: 'Partly delivered', toolReportedError: true } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const status = card.querySelector('[role="status"]')!
+  expect(card.querySelector('[aria-label="Action summary"]')?.nextElementSibling).toBe(status)
+  expect(status.nextElementSibling).toBe(card.querySelector('[aria-label="Tool result"]'))
+  expect(status.nextElementSibling?.nextElementSibling).toBe(card.querySelector('details'))
+})
