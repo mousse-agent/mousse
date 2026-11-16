@@ -4,7 +4,7 @@ import type { BotMcpTool } from '../../../shared/bots/personal/authority'
 import type { BotActivationRow, BotStore } from '../store/BotStore'
 import { canonicalJson, shortHash } from '../../integrations/revision'
 import { maskMemoryCredentials } from '../memory/guard'
-import type { BotMcpCallOutcome } from '../mcp/BotMcp'
+import { plainText, type BotMcpCallOutcome } from '../mcp/BotMcp'
 import type { ToolOutcome } from '../../run/mcp/appTools/types'
 
 /** The sole feature-switch read. No UI sets it until the complete feature ships. */
@@ -12,7 +12,7 @@ export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): b
   return settings?.experimental.botAsksFirst === true
 }
 export function readableActionTitle(name: string): string {
-  const words = name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_ .:/-]+/g, ' ').trim()
+  const words = plainText(name, 160).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_ .:/-]+/g, ' ').trim()
   return words ? words[0]!.toUpperCase() + words.slice(1) : 'Send this action'
 }
 export const actionDigest = (value: unknown): string => shortHash(canonicalJson(value), 64)
