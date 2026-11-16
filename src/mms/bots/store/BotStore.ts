@@ -787,7 +787,7 @@ export interface BotDispatchRow {
   runId: string | null
   threadId: string
   /** `subagent`: what a subagent's turn runs as, on its every dispatch (`BotSubagentSpec`). */
-  prompt: { text: string; subagent?: BotSubagentSpec; workWaitIds?: string[] }
+  prompt: { text: string; subagent?: BotSubagentSpec; workWaitIds?: string[]; workDelivery?: { answers: string[]; notes: number[]; question?: string } }
   policyDigest: string
   deadlineMs: number | null
   prepaidMs: number | null
@@ -1943,8 +1943,8 @@ export class BotStore {
    * Work's answered question went out with dispatch `n`, as `line` in its prompt: read once, and the line kept with the
    * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`).
    */
-  markAnswerSent(questionId: string, n: number, line: string): void {
-    this.run("UPDATE bot_questions SET read_at = ?, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", this.now(), n, line, questionId)
+  markAnswerSent(questionId: string, n: number, line: string, read = true): void {
+    this.run("UPDATE bot_questions SET read_at = CASE WHEN ? THEN ? ELSE read_at END, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", read ? 1 : 0, this.now(), n, line, questionId)
   }
 
   /** The bot's questions that work waits on now (the work is `blocked` with `question`), oldest first. */
