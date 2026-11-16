@@ -5,6 +5,7 @@ import { McpManager } from '../../src/mms/integrations/mcp/McpManager'
 import { settingsStore, testServerConfig } from '../fixtures/agent-platform/integrations/helpers'
 import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { getDefaultSettings } from '../../src/shared/settings'
+import { botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { createBotJournal } from '../../src/mms/bots/memory/capture'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
@@ -20,7 +21,7 @@ import { botFixture, createBot, finish, flush, start, type BotFixture } from './
 let f: BotFixture
 const connections: McpManager[] = []
 afterEach(async () => { f?.close(); await Promise.all(connections.splice(0).map(m => m.shutdown())) })
-async function setup(on: boolean, realServer = false, secondTool = false) {
+async function setup(on: boolean, realServer = false, secondTool = false, threads = false) {
   f = botFixture()
   const settings = getDefaultSettings()
   settings.experimental.botAsksFirst = on
@@ -62,6 +63,13 @@ async function setup(on: boolean, realServer = false, secondTool = false) {
   asking.prepared.authority.escalate!({ permission: { mcp: { server: 'Mail' } } as never, reason: 'To send mail' })
   await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
   await finish(f, asking.payload)
+  if (threads) {
+    const request = await f.bots.activate({ botId, input: 'Allow threads', clientRequestId: 'thread-permission' })
+    const askingThreads = await start(f, request.id)
+    askingThreads.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To help in threads' })
+    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+    await finish(f, askingThreads.payload)
+  }
   const grant = f.store.activeGrant(botId)!
   const manifest = { ...grant.manifest, mcp: server.tools.map(d => ({ serverId: 'mail', tool: d.toolName, ...(on ? { level: 'asks_first' as const } : {}) })) }
   f.store.approve(botId, botManifestDigest(manifest), manifest)
@@ -945,4 +953,25 @@ it.each([
   const result = JSON.parse(f.bots.actions.forWork(t.workId)!.result_json!).text
   expect(result).not.toContain(value)
   expect(result).toContain('[held back: looks like a secret]')
+})
+
+// Both callers are already live when either one holds a call. Each actual app-tool gate
+// must refuse later thread actions; disabling asks first preserves master's allowed grant.
+it.each([true, false])('integration thread actions after a call, switch=%s', async on => {
+  const t = await setup(on, false, false, true)
+  await t.work.prepared.authority.subagents!.start({ title: 'Helper', brief: 'Help with mail', toolCallId: 'helper' })
+  const d = f.store.dispatches(t.workId).find(d => d.kind === 'subagent')!
+  const child = await start(f, t.workId, d.n)
+  const authorities = [t.work.prepared.authority, child.prepared.authority]
+  for (const bot of authorities) for (const name of ['thread_create', 'thread_send', 'thread_archive']) {
+    if (bot === t.work.prepared.authority) expect(botAppToolRefusal(bot, name, {})).toBeUndefined()
+    else expect(botAppToolRefusal(bot, name, {})).toBeTruthy()
+  }
+  await t.call()
+  for (const bot of authorities) for (const name of ['thread_create', 'thread_send', 'thread_archive']) {
+    const refused = botAppToolRefusal(bot, name, {})
+    if (on || bot === child.prepared.authority) expect(refused).toBeTruthy()
+    else expect(refused).toBeUndefined()
+  }
+  expect(t.calls).toEqual(on ? [] : [t.args])
 })
