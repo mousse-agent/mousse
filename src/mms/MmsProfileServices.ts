@@ -54,7 +54,7 @@ import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
-import { launchedThreadsOf, queuedRunWillStart, watchLaunchedThreads } from './bots/launchedThreads'
+import { launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
@@ -784,15 +784,12 @@ export class MmsProfileServices {
         pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
       }, repo, number),
       // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works.
-      launchedThreads: (creators) => launchedThreadsOf({
-        creators,
-        threads: this.threads.listAllThreads(),
-        activeRuns: this.runEngine.store.listNonTerminalRuns(),
-        lastRun: (id) => this.runEngine.store.listRuns(id, { limit: 1 })[0],
+      launchedThreads: (creators) => launchedThreadsIn({
+        threads: this.threads,
+        engine: this.runEngine,
         asks: (id) => this.questions.listPendingForThread(id).length > 0,
-        willStart: (run) => queuedRunWillStart(this.runEngine, run),
         projectName: (id) => this.projects.getProject(id)?.name
-      }),
+      }, creators),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
