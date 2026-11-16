@@ -1,6 +1,6 @@
 import type { BotStoreTx } from '../store/BotStore'
 
-/** Per open database, never persisted: a disabled feature installs no active behavior. */
+/** Per open database: existing held rows settle even when new holds are disabled. */
 export interface HeldCallLifecycle {
   endWork(id: string): void
   grantChanged(botId: string): void
