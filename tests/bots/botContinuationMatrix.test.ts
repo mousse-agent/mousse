@@ -111,3 +111,14 @@ it.each([false, true].flatMap(hasWaited => [
   expect(prompt.split(refusal)).toHaveLength(2)
   expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(refusal))
 })
+
+// Schedule outcomes use the same ordered unread updates; captured work cells above stay untouched.
+it.each(actionLines)('schedule outcome %s shares the ordered continuation', (status, line) => {
+  const input = matrixInput('turn cap', 'note', false)
+  input.actionCaused = line
+  input.workEvents = [...eventsOf(input), { at: '2026-11-07T09:04:00Z', text: line, actionId: 'schedule-action' }]
+  const row = { ...ROW, trigger: { kind: 'schedule', scheduleId: 'mail', occurrenceAt: ROW.createdAt, input: 'Send' } }
+  const prompt: string = (f.bots as any).continuationPrompt(row, input)
+  expect(prompt.split(line)).toHaveLength(2)
+  expect(prompt).toContain(NOTE)
+})

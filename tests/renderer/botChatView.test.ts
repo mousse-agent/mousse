@@ -2016,3 +2016,14 @@ it('R5-time formats a sent action in the client clock', async () => {
   await open()
   expect(host.querySelector('[data-message-id="bm_action_sent"]')?.textContent).toContain(`Sent · ${botGroupTime(AT)}`)
 })
+
+it('six adjacent expired schedule cards fold to one quiet line, keeping the waiting row', async () => {
+  fake.chats[inbox.id] = [
+    ...Array.from({ length: 6 }, (_, n) => message('expired-' + n, { seq: n + 1, kind: 'notice', text: 'Expired · not sent', expiredActionSchedule: 'mail' })),
+    message('waiting', { seq: 7, text: 'Waiting for your answer' })
+  ]
+  await open()
+  expect(transcript().textContent).toContain('6 expired · not sent')
+  expect(transcript().textContent).toContain('Waiting for your answer')
+  expect([...host.querySelectorAll('[role="note"]')].filter(el => el.textContent?.includes('expired · not sent'))).toHaveLength(1)
+})
