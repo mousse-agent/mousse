@@ -95,7 +95,7 @@ it.each(['question answer', 'note and answer'] as const)('N3 a live wait plus a 
 it.each([false, true])('repeat refusal joins ordered updates with wait history=%s', hasWaited => {
   const input = matrixInput('turn cap', 'note and answer', hasWaited)
   const refusal = 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.'
-  input.workEvents.push({ at: '2026-11-07T09:04:00Z', text: refusal })
+  input.workEvents = [...eventsOf(input), { at: '2026-11-07T09:04:00Z', text: refusal }]
   const prompt: string = (f.bots as any).continuationPrompt(ROW, input)
   expect(prompt.split(refusal)).toHaveLength(2)
   expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(refusal))
