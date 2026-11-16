@@ -263,15 +263,46 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   expect(JSON.stringify([exported, captured, f.journal, f.bots.service.chatList(t.botId).messages, ledger.start.mock.calls])).not.toContain('private-call-secret')
   expect(t.calls).toEqual([])
 })
-it('a scheduled run is refused without parking or writing a card', async () => {
-  const t = await setup(true)
-  f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send the email' }, 'owner')
-  const due = await f.tickSchedules(new Date(f.clock.now + 5 * 60_000))
-  const scheduled = await start(f, due.inserted[0])
-  const outcome = await callForBot({ bot: scheduled.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
-  expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('cannot wait') })
+async function scheduledCall(on = true, minutes = 5) {
+  const t = await setup(on, false, false, true)
+  await finish(f, t.work.payload)
+  const schedule = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes }, prompt: 'Send the email' }, 'owner')
+  f.clock.now += minutes * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const id = due.inserted[0]!
+  const run = await start(f, id)
+  const call = (args = t.args) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
+  return { ...t, schedule, id, run, call }
+}
+it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
+  const t = await scheduledCall()
+  expect((await t.call()).isError).not.toBe(true)
   expect(t.calls).toEqual([])
+  expect(botAppToolRefusal(t.run.prepared.authority, 'thread_create')).toBeTruthy()
+  await finish(f, t.run.payload)
+  expect(f.store.activation(t.id)).toMatchObject({ status: 'blocked', endReason: 'approval' })
+  f.clock.now += 5 * 60_000
+  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+  expect(f.book.get(t.botId, t.schedule.scheduleId)?.skip?.reason).toBe('bot_waiting_for_owner')
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  const next = await start(f, t.id, 2)
+  expect(f.store.dispatch(t.id, 2)?.threadId).toBe(f.store.dispatch(t.id, 1)?.threadId)
+  expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('Your owner sent it')
+  expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('delivered')
+  await finish(f, next.payload, { text: 'Sent and recorded.' })
+  expect(t.calls).toEqual([t.args])
+  expect(f.store.activation(t.id)?.status).toBe('done')
+  expect(f.bots.service.chatList(t.botId).messages.filter(m => m.activationId === t.id && m.kind === 'run_report')).toHaveLength(1)
+})
+it('with asks first off a scheduled call sends directly, writes no card and finishes normally', async () => {
+  const t = await scheduledCall(false)
+  expect((await t.call()).text).toContain('delivered')
+  await finish(f, t.run.payload, { text: 'Sent.' })
+  expect(t.calls).toEqual([t.args])
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(f.store.activation(t.id)?.status).toBe('done')
 })
 it('a subagent holds its call on its work and uses its own dispatch in the call key', async () => {
   const t = await setup(true)
