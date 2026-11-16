@@ -2026,6 +2026,12 @@ export class BotStore {
       ORDER BY created_at DESC, rowid DESC LIMIT 1`, activationId)
     return row ? questionOf(row) : undefined
   }
+  /** Notes in a started prompt may have reached the model even without confirmed output. */
+  carriedWorkNoteIds(activationId: string): Set<number> {
+    return new Set(this.all(`SELECT DISTINCT item.value AS id FROM bot_dispatches d,
+      json_each(d.prompt_json, '$.workDelivery.notes') item
+      WHERE d.activation_id = ? AND d.started_at IS NOT NULL`, activationId).map(row => num(row.id)!))
+  }
   unreadWorkNotes(activationId: string): ReturnType<BotStore['pendingWorkNotes']> {
     return this.all(`SELECT id, text, at, from_message FROM bot_work_notes WHERE activation_id = ?
       AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_work_notes', 'notes')})) ORDER BY id`, activationId)

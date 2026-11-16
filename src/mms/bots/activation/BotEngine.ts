@@ -7953,7 +7953,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * The notes a run takes with its next dispatch, as prompt text, and their ids (marked applied in that dispatch's
    * transaction). A note the last turn took but never reported read may have reached the model already (`offeredNotes`;
-   * after a restart, any note: what the process before knew is gone), so it says it may be a repeat.
+   * after a restart, any note: what the process before knew is gone), or a note carried in a started
+   * dispatch without confirmed output, says it may be a repeat.
    */
   private workNotes(row: BotActivationRow, restart = false, redeliver = false): { text: string; ids: number[]; events?: Array<{ at: string; text: string }> } | undefined {
     // A note a live turn took and has not read yet is that turn's until it reads it or hands it back.
@@ -7961,7 +7962,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const notes = (redeliver ? this.store.unreadWorkNotes(row.id) : this.store.pendingWorkNotes(row.id)).filter((note) => !taken.has(note.id))
     if (!notes.length) return undefined
     const offered = this.offeredNotes.get(row.id)
-    const repeat = (id: number): boolean => restart || offered?.has(id) === true
+    const carried = redeliver ? this.store.carriedWorkNoteIds(row.id) : undefined
+    const repeat = (id: number): boolean => restart || offered?.has(id) === true || carried?.has(id) === true
     const repeated = notes.map(note => repeat(note.id))
     const marked = notes.map((note, index) => `${repeated[index] ? '(may be a repeat) ' : ''}${note.text}`)
     const ids = notes.map((note) => note.id)
