@@ -2220,3 +2220,12 @@ it('guards hidden characters consistently while preserving ordinary script and e
   const { plainLabel } = await import('../../src/shared/bots/personal/modelSlots')
   expect(plainLabel('one\u200ctwo\u2029three')).toBe('one two three')
 })
+
+it('gives an earlier repeated action its calendar day as well as its time', async () => {
+  fake.chats.inbox = [held({ previous: { status: 'done', at: '2020-02-03T09:14:00.000Z' } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const warning = [...card.querySelectorAll('[role="note"]')].find((item) => item.textContent?.includes('already sent exactly this'))!
+  expect(warning.textContent).toContain('2020')
+  expect(warning.textContent).toContain('Feb')
+})
