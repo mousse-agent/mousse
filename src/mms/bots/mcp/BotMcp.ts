@@ -99,7 +99,7 @@ export interface BotMcpHost {
   servers(): BotMcpServer[]
   /** Whether the servers were read since Mousse started: before that, `servers()` says nothing of a server being gone. */
   listed?(): boolean
-  binding?(tool: BotMcpTool): { serverId: string; configDigest: string; schemaDigest: string } | undefined
+  binding?(tool: BotMcpTool): { serverId: string; tool: string; configDigest: string; schemaDigest: string } | undefined
   call?: BotMcp['call']
   /** The granted tools (`<server id>::<tool>`) of servers set up now. */
   offered(granted: ReadonlySet<string>): BotMcpTool[]
@@ -286,13 +286,13 @@ export class BotMcp implements BotMcpHost {
       .sort((a, b) => a.name.localeCompare(b.name))
   }
 
-  binding(tool: BotMcpTool): { serverId: string; configDigest: string; schemaDigest: string } | undefined {
+  binding(tool: BotMcpTool): { serverId: string; tool: string; configDigest: string; schemaDigest: string } | undefined {
     if (!this.deps.enabled()) return undefined
     const server = this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))
     const current = server?.tools.find(t => t.toolName === tool.tool)
     const configDigest = (server as { configDigest?: string } | undefined)?.configDigest
     if (!server || !current || !configDigest || !this.offered(new Set([`${tool.server}::${tool.tool}`])).length) return undefined
-    return { serverId: tool.server, configDigest, schemaDigest: shortHash(canonicalJson(current.inputSchema ?? {}), 64) }
+    return { serverId: tool.server, tool: tool.tool, configDigest, schemaDigest: shortHash(canonicalJson(current.inputSchema ?? {}), 64) }
   }
 
   where(serverId: string): BotMcpWhere | undefined {
