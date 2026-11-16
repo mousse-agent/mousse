@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import type { PermissionMode } from '../../../shared/permissionMode'
 import type { MousseSettings } from '../../../shared/settings'
 import type { BotMcpTool } from '../../../shared/bots/personal/authority'
 import type { BotActivationRow, BotStore } from '../store/BotStore'
@@ -133,9 +132,8 @@ export class BotActions {
     const action = this.get(id)
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
-  async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; from?: { limit: PermissionMode; node?: string } }): Promise<{ status: string }> {
+  async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
     if (!this.host.enabled()) throw new BotActionChanged('Asks first is not available while its switch is off.')
-    if (input.answer === 'send' && input.from?.limit === 'plan') throw new BotActionChanged('This device is in Plan mode. Send is not available here; use a device that may run tools.')
     await this.host.refresh()
     const action = this.get(input.actionId)
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()

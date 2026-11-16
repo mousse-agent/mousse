@@ -497,11 +497,11 @@ it('S5 reconciliation never settles a call started in this process during refres
   await sending
   expect(f.bots.actions.forWork(t.workId)?.status).toBe('done')
 })
-it('S6 a Plan device cannot Send but may choose Not now', async () => {
+it.each(['ask', 'accept_edits', 'auto', 'full'] as const)('S6 explicit Send is permitted from a device limited to %s', async limit => {
   const t = await setup(true)
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
-  const method = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'plan' }).find(m => m.method === 'bots.actions.answer')!
+  const method = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => limit }).find(m => m.method === 'bots.actions.answer')!
   const context = { caller: { node: 'phone', user: 'owner' } } as never
   const call = (answer: string) => {
     const params = method.validate!({ botId: t.botId, actionId: a.id, digest: a.args_digest, answer })
@@ -509,9 +509,8 @@ it('S6 a Plan device cannot Send but may choose Not now', async () => {
     method.authorizeNew?.(params, context)
     return method.handle(params, context)
   }
-  await expect(call('send')).rejects.toThrow(/Plan/)
-  expect(t.calls).toEqual([])
-  expect(await call('not_now')).toMatchObject({ status: 'declined' })
+  expect(await call('send')).toMatchObject({ status: 'done' })
+  expect(t.calls).toEqual([t.args])
 })
 it('R5-capture leaves unrelated tool calls classified as bot calls', async () => {
   const t = await setup(true)
