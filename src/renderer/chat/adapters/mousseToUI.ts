@@ -540,24 +540,31 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // Answers to the agent's questions are a step of the agent's turn (one row that opens to each
     // question and its answer), not a message from the user. Older answers carry only the text and
     // stay a user message: typed text can look the same, so it is not parsed.
-    if (msg.role === 'user' && msg.questionAnswers?.length) {
-      base.role = 'assistant'
-      base.parts = [{
+    // The answers to a question the agent asked without waiting arrive in the message that delivers them to the agent
+    // (a steer, or a turn of their own), as notice items: the same row. What else that notice carries (a subagent's
+    // result delivered with them) shows as usual, below it.
+    const deliveredAnswers = msg.role === 'user' ? msg.subagentNotice?.filter((item) => item.event === 'answer') ?? [] : []
+    const otherNotice = deliveredAnswers.length ? msg.subagentNotice!.filter((item) => item.event !== 'answer') : msg.subagentNotice
+    const answers = msg.role === 'user' && msg.questionAnswers?.length ? msg.questionAnswers : deliveredAnswers.flatMap((item) => item.answers ?? [])
+    if (answers.length) {
+      const row = otherNotice?.length ? { ...base, id: `${msg.id}:answers` } as UIMessage : base
+      row.role = 'assistant'
+      row.parts = [{
         type: 'tool-QuestionAnswers',
-        toolCallId: msg.id,
+        toolCallId: row.id,
         state: 'output-available',
         // The images sent with the answers; each question names its own by index. One of a thread on another
         // computer may arrive by name first, its bytes fetched when shown.
         input: {
-          questions: msg.questionAnswers,
-          ...(msg.images?.length
+          questions: answers,
+          ...(msg.images?.length && msg.questionAnswers?.length
             ? { images: msg.images.map((img) => ({ name: img.name, ...(img.data ? { url: `data:${img.mimeType};base64,${img.data}` } : {}) })) }
             : {}),
         },
       } as unknown as UIMessage['parts'][number]]
-      out.push(base)
+      out.push(row)
       lastAssistantText = null
-      continue
+      if (!otherNotice?.length) continue
     }
 
     if (msg.role === 'assistant' && msg.streaming) {
@@ -611,7 +618,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     const sender = msg.role === 'user' && msg.turnId && !msg.steered ? senders?.[msg.turnId] : undefined
     if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }
     if (agentOrigin) base.metadata = { ...(base.metadata as object | undefined), origin: agentOrigin }
-    const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
+    const subagentNotice = msg.role === 'user' && otherNotice?.length ? otherNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
     // The same for the message a turn the provider started itself opens with: the background tasks it reports.
     const backgroundNotice = msg.role === 'user' && msg.backgroundNotice?.length ? msg.backgroundNotice : undefined

@@ -13,7 +13,8 @@ import type { Migration } from './ProfileDatabase'
  * access level on credentials, delegations and runs; version 17 binds a remote subagent's task to the
  * run on another computer that does it (issue #469); version 18 lets that task's mode be Full access; version 19
  * records whether a remote subagent's calls carry the agent mark; version 20 keeps the watches of the settle notice (an
- * agent that sent a message with `notify` is told when the work it started settles, SPEC §15.1).
+ * agent that sent a message with `notify` is told when the work it started settles, SPEC §15.1); version 23 keeps the
+ * questions an agent asked without waiting (`open_questions`, issue #1372).
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -691,6 +692,32 @@ ALTER TABLE remote_launches ADD COLUMN stop_reason TEXT CHECK(stop_reason IS NUL
 ALTER TABLE remote_launches ADD COLUMN stop_deadline TEXT;
 ALTER TABLE remote_launches ADD COLUMN stop_result TEXT;
 CREATE INDEX remote_launches_stops ON remote_launches(stop_state);
+`
+  },
+  {
+    version: 23,
+    sql: `
+-- A question an agent asked without waiting (ask_user with wait false, issue #1372). The agent keeps working; the
+-- answer reaches it through the inbox (inbox_id), written in the same transaction as the answer.
+--   open:      waiting for the person;
+--   answered:  answered (answers, answered_by);
+--   dismissed: closed by the person without an answer (the agent is told, as for an answer);
+--   withdrawn: the agent no longer needs it;
+--   closed:    the thread was stopped, archived or deleted (close_reason).
+CREATE TABLE open_questions(
+  request_id   TEXT PRIMARY KEY,
+  thread_id    TEXT NOT NULL,
+  run_id       TEXT,
+  questions    TEXT NOT NULL,
+  status       TEXT NOT NULL CHECK(status IN ('open','answered','dismissed','withdrawn','closed')),
+  answers      TEXT,
+  answered_by  TEXT,
+  close_reason TEXT,
+  inbox_id     TEXT,
+  created_at   TEXT NOT NULL,
+  settled_at   TEXT
+) STRICT;
+CREATE INDEX open_questions_thread ON open_questions(thread_id, status);
 `
   }
 ]

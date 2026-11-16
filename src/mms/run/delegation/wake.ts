@@ -18,6 +18,7 @@ import {
   type WakeTurnPayload
 } from '../types'
 import { formatWakeNotice } from './notice'
+import { isQuestionAnswerRow } from '../OpenQuestions'
 
 /** Provider capabilities of the adapter that serves a thread's selected model; null when unknown. */
 export type CapabilitiesFor = (threadId: string) => ProviderCapabilities | null
@@ -208,6 +209,8 @@ function deliveryFailure(store: RunStore, effect: EffectRecord, row: InboxRecord
  * - no active run and no wake run already queued (its `turn.start` pending, deferred while the
  *   thread is busy, or claimed) → one `wake` run with a `turn.start` effect for all of the
  *   thread's pending rows, which become `delivered` by that effect;
+ * - an active run, for a person's answers to the thread's open questions → one `turn.steer` with them, on a provider
+ *   that steers natively or by restarting its reply (`steeredRows`);
  * - an active run that takes native steer, while every row wants `wake: 'always'` → one
  *   `turn.steer` with the formatted notice, rows `delivered` by that steer;
  * - otherwise the rows stay pending and the rule fires again on a later pass. This includes an
@@ -263,22 +266,22 @@ export function wakeThreads(
         // A run that is being stopped takes no steer (its executor would drop it); the rows wait for the wake.
         if (active.outcome?.stopRequested) return
         const caps = capabilitiesFor?.(threadId) ?? null
-        // Only native steer joins the live turn without cancelling in-flight work.
-        if (!caps || steerStrategy(caps, active) !== 'native') return
-        if (!rows.every((row) => wantsSteer(row, delegations))) return
-        const text = formatWakeNotice(rows)
+        if (!caps) return
+        const steering = steeredRows(rows, steerStrategy(caps, active), delegations)
+        if (steering.length === 0) return
+        const text = formatWakeNotice(steering)
         const effect = outbox.enqueue({
           threadId,
           runId: active.runId,
           kind: 'turn.steer',
-          payload: { runId: active.runId, threadId, text, inboxIds: rows.map((row) => row.inboxId) }
+          payload: { runId: active.runId, threadId, text, inboxIds: steering.map((row) => row.inboxId) }
         })
-        inbox.markDelivered(rows.map((row) => row.inboxId), effect.effectId)
+        inbox.markDelivered(steering.map((row) => row.inboxId), effect.effectId)
         store.appendEvent({
           threadId,
           runId: active.runId,
           type: 'reconcile.wake_steer',
-          payload: { effectId: effect.effectId, inboxIds: rows.map((row) => row.inboxId) }
+          payload: { effectId: effect.effectId, inboxIds: steering.map((row) => row.inboxId) }
         })
         report.steers.push(effect.effectId)
       })
@@ -288,6 +291,18 @@ export function wakeThreads(
     }
   }
   return report
+}
+
+/**
+ * The rows that join a live run now. Only native steer joins it without cancelling in-flight work, so notices steer
+ * only then, all together or not at all. A person's answer to an open question is the person's own words: it joins the
+ * run as their steer would, also on a provider that steers by restarting its reply (the restart waits for a running
+ * tool), and it does not wait for notices that cannot steer.
+ */
+function steeredRows(rows: InboxRecord[], strategy: ReturnType<typeof steerStrategy>, delegations: Delegations): InboxRecord[] {
+  if (strategy === 'native' && rows.every((row) => wantsSteer(row, delegations))) return rows
+  if (strategy === 'native' || strategy === 'interrupt_restart') return rows.filter(isQuestionAnswerRow)
+  return []
 }
 
 /** Rows without a delegation (notices) steer; a child result follows its delegation. */

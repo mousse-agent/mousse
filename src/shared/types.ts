@@ -641,6 +641,11 @@ export interface PendingUserQuestions {
   threadId?: string
   /** Present on a provider's, the Pi agent's or a Mousse tool's saved approval request. */
   approval?: PendingApprovalInfo
+  /**
+   * `false`: the agent asked without waiting (`ask_user` with `wait: false`) and keeps working. The question stays
+   * open until it is answered, dismissed or withdrawn; a new message does not close it.
+   */
+  wait?: false
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>

@@ -1014,7 +1014,8 @@ export function registerGuiIpc(
       // event. If the thread is still tracked as working, flip it and ding;
       // if the activity event already landed, that path already notified.
       if (isThreadActivityActive(activityTrackerFor().getState(event.threadId))) {
-        setThreadActivity(event.threadId, 'awaiting_input')
+        // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
+        if ((event.data as { wait?: unknown } | null)?.wait !== false) setThreadActivity(event.threadId, 'awaiting_input')
         notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
       }
     }
@@ -1221,8 +1222,11 @@ export function registerGuiIpc(
     if (event.type === 'bots.message' && !replay && !guiMms.tellsForSender?.(senderId)) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
     if (event.type === 'scheduled.runEnded' && !replay) notifyAutomationRun(event.data, win, presentationForSender(senderId).getActiveThreadId(), windowSettings.get(senderId) ?? settings.get())
     if (event.type === 'questions.pending' && event.threadId && isThreadActivityActive(tracker.getState(event.threadId))) {
-      tracker.setState(event.threadId, 'awaiting_input')
-      target('threads:activity', tracker.getSnapshot())
+      // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
+      if ((event.data as { wait?: unknown } | null)?.wait !== false) {
+        tracker.setState(event.threadId, 'awaiting_input')
+        target('threads:activity', tracker.getSnapshot())
+      }
       if (!replay) notifyThread(
         event.threadId,
         'question',
@@ -1269,7 +1273,7 @@ export function registerGuiIpc(
     const full = snap as {
       agents?: unknown[]
       tasks?: unknown[]
-      pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
+      pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown; wait?: false }>
       turnSnapshot?: TurnStateSnapshot
     }
     const profileId = out.profileId ?? currentProfileKey()
@@ -1305,7 +1309,8 @@ export function registerGuiIpc(
         questions: q.questions,
         // The window shows the question only while it shows this thread.
         threadId,
-        ...(q.approval ? { approval: q.approval } : {})
+        ...(q.approval ? { approval: q.approval } : {}),
+        ...(q.wait === false ? { wait: false } : {})
       })
     }
     out.send('orchestrator:turn-state', turn)
@@ -1708,7 +1713,7 @@ export function registerGuiIpc(
       const full = snap as {
         agents?: unknown[]
         tasks?: unknown[]
-        pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
+        pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown; wait?: false }>
       }
       syncDaemonTurnSnapshot(snap)
       broadcastThreadSnapshot(
@@ -1731,7 +1736,8 @@ export function registerGuiIpc(
           requestId: q.requestId,
           questions: q.questions,
           threadId: activeId,
-          ...(q.approval ? { approval: q.approval } : {})
+          ...(q.approval ? { approval: q.approval } : {}),
+          ...(q.wait === false ? { wait: false } : {})
         })
       }
       const projects = await guiMms.request<{ projects: unknown[] }>('projects.list')
