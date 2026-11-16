@@ -1520,8 +1520,8 @@ it('R2-3 allowing use your threads from chat preserves a sendable card', async (
   const chat = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const asking = await start(f, chat.id)
   asking.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Help in threads' })
-  await f.bots.service.answer(t.botId, f.store.openAsks(t.botId)[0].id, 'allow')
   await finish(f, asking.payload)
+  await f.bots.service.answer(t.botId, f.store.openAsks(t.botId)[0].id, 'allow')
   expect(f.bots.actions.get(a.id)?.status).toBe('open')
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
