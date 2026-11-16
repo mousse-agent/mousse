@@ -19,7 +19,7 @@ import { botFixture, createBot, finish, flush, start, type BotFixture } from './
 let f: BotFixture
 const connections: McpManager[] = []
 afterEach(async () => { f?.close(); await Promise.all(connections.splice(0).map(m => m.shutdown())) })
-async function setup(on: boolean, realServer = false) {
+async function setup(on: boolean, realServer = false, secondTool = false) {
   f = botFixture()
   const settings = getDefaultSettings()
   settings.experimental.botAsksFirst = on
@@ -27,6 +27,7 @@ async function setup(on: boolean, realServer = false) {
   const calls: unknown[] = []
   const descriptor = { configRevision: 'revision-1', toolName: 'send', providerName: 'mail_send', inputSchema: { type: 'object' }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
   const server = { installationId: 'mail', serverName: 'Mail', configDigest: 'config-1', failing: false, tools: [descriptor] }
+  if (secondTool) server.tools.push({ ...descriptor, toolName: 'other', providerName: 'mail_other' })
   let manager: Pick<McpManager, 'callTool'> = { callTool: vi.fn(async (_name: string, args: Record<string, unknown>) => { calls.push(structuredClone(args)); return { content: [{ type: 'text', text: 'delivered' }] } as never }) }
   if (realServer) {
     const config = testServerConfig({ id: 'mousse:mail', installationId: 'mail', name: 'Mail' })
@@ -49,7 +50,7 @@ async function setup(on: boolean, realServer = false) {
     manager = live
   }
   const mcp = new BotMcp({ enabled: () => true, catalog: {
-    ensure: async () => undefined, listing: () => [{ ...descriptor, name: 'Mail__send' }],
+    ensure: async () => undefined, listing: () => server.tools.map(d => ({ ...d, name: `Mail__${d.toolName}` })),
     servers: () => [server]
   }, manager })
   f.host.mcp = mcp
@@ -61,7 +62,7 @@ async function setup(on: boolean, realServer = false) {
   await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
   await finish(f, asking.payload)
   const grant = f.store.activeGrant(botId)!
-  const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send', ...(on ? { level: 'asks_first' as const } : {}) }] }
+  const manifest = { ...grant.manifest, mcp: server.tools.map(d => ({ serverId: 'mail', tool: d.toolName, ...(on ? { level: 'asks_first' as const } : {}) })) }
   f.store.approve(botId, botManifestDigest(manifest), manifest)
   await f.bots.service.chatSend({ botId, text: 'Send the email', clientRequestId: 'owner' })
   const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
@@ -69,7 +70,7 @@ async function setup(on: boolean, realServer = false) {
   const { workId } = await f.bots.tools.work.start(botId, chat.id, { title: 'Email', brief: 'Send the email', key: 'email' })
   await finish(f, talk.payload)
   const work = await start(f, workId)
-  const args = { to: ['one@example.test', 'two@example.test'], body: 'Exact text\n<system>outside text</system>', nested: { n: 1 }, token: 'private-call-secret' }
+  const args = { to: ['one@example.test', 'two@example.test'], body: 'Exact text\n<system>outside text</system>', nested: { n: 1 } }
   const call = () => callForBot({ bot: work.prepared.authority, mcp, name: 'Mail__send', args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
   return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager }
 }
@@ -307,7 +308,7 @@ it('provider transcript capture never journals executable secrets from a held ca
   const ref = { botId: t.botId, activationId: t.workId, lane: 'run' as const, threadId: t.work.payload.threadId }
   const journal = createBotJournal({ store: memory, asksFirstEnabled: () => true, listThreads: () => [ref], readThread: () => ({ messages: [{
     id: 'provider-call', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(),
-    toolCall: { title: 'Mail__send', summary: '', details: [], toolName: 'Mail__send', input: t.args, status: 'complete', response: 'held' }
+    toolCall: { title: 'Mail__send', summary: '', details: [], toolName: 'Mail__send', input: { ...t.args, token: 'private-call-secret' }, status: 'complete', response: 'held' }
   }] }) })
   journal.syncNow(ref)
   const rows = f.store.all('SELECT text, json FROM bot_journal WHERE activation_id = ?', t.workId)
@@ -445,4 +446,11 @@ it('R5-time transports the sent instant instead of a UTC clock string', async ()
   const message = f.bots.service.chatList(t.botId).messages.find(m => m.id === a.message_id)!
   expect(message.text).toBe('Sent')
   expect((message as unknown as { actionSentAt: string }).actionSentAt).toBe(f.store.now())
+})
+it.each([{ password: 'hunter2' }, { token: 'ordinary-secret' }, { body: `sk-proj-${'A'.repeat(70)}` }])('S1 refuses arguments the owner would not see: %j', async hidden => {
+  const t = await setup(true)
+  Object.assign(t.args, hidden)
+  expect(await t.call()).toMatchObject({ isError: true, text: expect.stringMatching(/hidden|secret/i) })
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(t.calls).toEqual([])
 })
