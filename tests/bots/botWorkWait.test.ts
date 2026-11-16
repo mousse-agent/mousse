@@ -412,3 +412,33 @@ it.each(['allow', 'not_now'] as const)('carries a permission wall %s and its wai
   expect(following).not.toContain('Your wait is over')
   expect(following).toContain('Read the release notes next.')
 })
+
+it('keeps notes and question answers unread until the wait continuation starts', async () => {
+  const { workId, turn, chat } = await work()
+  f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
+  const questionId = f.store.workQuestion(workId)!.id
+  await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.clock.now += 60_000
+  f.bots.tools.work.note(botId, workId, 'Read the release notes too.', chat.id)
+  f.clock.now += 60_000
+  await f.bots.service.answerQuestion({ botId, questionId, choice: 'A', clientRequestId: 'wait-answer' })
+  f.clock.now += 58 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  const prompt = f.store.dispatch(workId, 2)!.prompt.text
+  expect(prompt).toContain('Read the release notes too.')
+  expect(prompt).toContain('Which release?')
+  expect(prompt).toContain('Check again with the evidence already read.')
+  expect(f.store.pendingWorkNotes(workId)).toHaveLength(1)
+  expect(f.store.question(questionId)?.readAt).toBeNull()
+  const next = await start(f, workId, 2)
+  expect(f.store.pendingWorkNotes(workId)).toEqual([])
+  expect(f.store.question(questionId)?.readAt).not.toBeNull()
+  f.bots.tools.work.note(botId, workId, 'Now check the changelog.', chat.id)
+  await finish(f, next.payload, 'completed', { text: '' })
+  const following = f.store.dispatch(workId, 3)!.prompt.text
+  expect(following).not.toContain('Read the release notes too.')
+  expect(following).not.toContain('Which release?')
+  expect(following).not.toContain('Your wait is over')
+})
