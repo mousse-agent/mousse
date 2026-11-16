@@ -762,3 +762,21 @@ it('B-marker-literal keeps marker-shaped freeform data literal even with no hidd
   expect(JSON.parse(a.args_json).meta).toEqual({ $mousse: 'literal', value: { $mousse: 'hidden', text: 'hidden · will be sent' } })
   expect(JSON.parse(a.card_json!)).toMatchObject({ hasHiddenValues: false })
 })
+
+it.each(['escaped', 'numeric'] as const)('B-echo redacts %s hidden values in stored results, prompts, journals and exports', async kind => {
+  const t = await setup(true)
+  const value = kind === 'escaped' ? 'pa"ss\\word' : 482913
+  Object.assign(t.args, { password: value })
+  const echo = kind === 'escaped' ? JSON.stringify(value) : String(value)
+  vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ isError: true, content: [{ type: 'text', text: `Login failed for password ${echo}` }] } as never)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const saved = JSON.stringify([f.store.all('SELECT * FROM bot_actions'), f.store.all('SELECT * FROM bot_dispatches'), f.store.all('SELECT * FROM bot_messages'), f.journal, memory.actions(t.botId)])
+  expect(saved).not.toContain(JSON.stringify(echo).slice(1, -1))
+  expect(saved).toContain('Login failed for password')
+  expect(JSON.parse(f.bots.actions.forWork(t.workId)!.result_json!).text).toContain('[held back: looks like a secret]')
+})
