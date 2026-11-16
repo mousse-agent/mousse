@@ -213,6 +213,7 @@ it('the app answer method reaches the held call and returns redraw for a repeate
 })
 it.each(['relay', 'pi'] as const)('%s holds through the common path, and journals masked arguments', async runtime => {
   const t = await setup(true)
+  Object.assign(t.args, { token: 'private-call-secret' })
   const bot = t.work.prepared.authority
   const turn = appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot })
   const ledger = { start: vi.fn(() => 'ledger'), commit: vi.fn(), failed: vi.fn() }
@@ -233,8 +234,18 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   const a = f.bots.actions.forWork(t.workId)!
   expect(a.status).toBe('open')
   expect(JSON.parse(a.exec_args!)).toEqual(t.args)
-  const exported = new BotMemoryStore({ db: f.store.db }).actions(t.botId)
-  expect(JSON.stringify([exported, f.journal, f.bots.service.chatList(t.botId).messages, ledger.start.mock.calls])).not.toContain('private-call-secret')
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const ref = { botId: t.botId, activationId: t.workId, lane: 'run' as const, threadId: t.work.payload.threadId }
+  createBotJournal({ store: memory, asksFirstEnabled: () => true, listThreads: () => [ref], readThread: () => ({ messages: [{
+    id: 'held-runtime-call', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(),
+    toolCall: { title: 'Mail__send', summary: '', details: [], toolName: 'Mail__send', input: t.args, status: 'complete', response: 'held' }
+  }] }) }).syncNow(ref)
+  expect(ledger.start).toHaveBeenCalledTimes(1)
+  expect(JSON.stringify(ledger.start.mock.calls)).toContain('held back')
+  const exported = memory.actions(t.botId)
+  const captured = f.store.all('SELECT text, json FROM bot_journal WHERE activation_id = ?', t.workId)
+  expect(captured.length).toBeGreaterThan(0)
+  expect(JSON.stringify([exported, captured, f.journal, f.bots.service.chatList(t.botId).messages, ledger.start.mock.calls])).not.toContain('private-call-secret')
   expect(t.calls).toEqual([])
 })
 it('a scheduled run is refused without parking or writing a card', async () => {
