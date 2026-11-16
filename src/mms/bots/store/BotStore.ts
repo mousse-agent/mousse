@@ -1304,8 +1304,7 @@ export class BotStore {
       if (moved) {
         this.withdrawWorkQuestions(id)
         heldCalls(this.db)?.endWork(id)
-        const prefix = `cursor:action-refusal:${id}:`
-        this.run('DELETE FROM bot_memory_state WHERE key IN (?, ?) OR substr(key, 1, ?) = ?', `cursor:action-note:${id}`, `cursor:action-owner:${id}`, prefix.length, prefix)
+        this.run('DELETE FROM bot_memory_state WHERE key IN (?, ?)', `cursor:action-note:${id}`, `cursor:action-owner:${id}`)
         this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE work_id = ? AND status = 'waiting'", this.now(), id)
       }
       return moved
@@ -2031,6 +2030,7 @@ export class BotStore {
     this.db.transaction(() => {
       if (!needsConfirmation(this.dispatch(activationId, n))) return
       this.run("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.workTold', ?) WHERE activation_id = ? AND n = ?", why, activationId, n)
+      for (const id of this.dispatch(activationId, n)?.prompt.workRefusalIds ?? []) this.run('DELETE FROM bot_memory_state WHERE key = ?', id)
     })
   }
 
