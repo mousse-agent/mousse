@@ -153,7 +153,7 @@ it.each(['event already happened', 'turn still running', 'permission wall', 'unk
   const set = await f.bots.tools.wakes!.wait!(botId, workId, { brief: 'Continue the release', ...(state === 'event already happened' ? { event: { kind: 'thread' as const, threadId: 'other' } } : { dueAt: new Date(f.clock.now + 5 * 60_000).toISOString() }) })
   let askId: string | undefined
   if (state === 'permission wall') {
-    const wall = f.store.db.transaction(() => (f.bots as any).wallInTransaction(workId, ['running'], { dispatchN: 1, kind: 'tool', permission: { tool: 'shell' }, reason: 'Run the check' }))
+    const wall = f.store.db.transaction(() => (f.bots as any).wallInTransaction(workId, ['running'], { dispatchN: 1, kind: 'escalate', permission: { tool: 'shell' }, reason: 'Run the check' }))
     askId = wall.escalation.id
     await finish(f, turn.payload, 'completed', { text: '' })
     expect(f.store.activation(workId)?.status).toBe('waiting_grant')
