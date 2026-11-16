@@ -957,7 +957,7 @@ it.each([
 
 // Both callers are already live when either one holds a call. Each actual app-tool gate
 // must refuse later thread actions; disabling asks first preserves master's allowed grant.
-it.each([true, false])('integration thread actions after a call, switch=%s', async on => {
+it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, caller }))))('integration thread actions after a $caller call, switch=$on', async ({ on, caller }) => {
   const t = await setup(on, false, false, true)
   await t.work.prepared.authority.subagents!.start({ title: 'Helper', brief: 'Help with mail', toolCallId: 'helper' })
   const d = f.store.dispatches(t.workId).find(d => d.kind === 'subagent')!
@@ -967,7 +967,8 @@ it.each([true, false])('integration thread actions after a call, switch=%s', asy
     if (bot === t.work.prepared.authority) expect(botAppToolRefusal(bot, name, {})).toBeUndefined()
     else expect(botAppToolRefusal(bot, name, {})).toBeTruthy()
   }
-  await t.call()
+  if (caller === 'work') await t.call()
+  else await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-mail', signal: new AbortController().signal })
   for (const bot of authorities) for (const name of ['thread_create', 'thread_send', 'thread_archive']) {
     const refused = botAppToolRefusal(bot, name, {})
     if (on || bot === child.prepared.authority) expect(refused).toBeTruthy()
