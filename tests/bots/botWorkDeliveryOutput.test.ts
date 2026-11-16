@@ -11,7 +11,7 @@ import { RunStore } from '../../src/mms/run/RunStore'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { createOrchestrator, piAdapter } from '../run/phase6Fixture'
 
-it.each(['empty', 'text', 'thinking', 'tool'] as const)('N2 confirms delivery on %s model output through the real turn sink', async kind => {
+it.each(['empty', 'text', 'thinking', 'tool', 'throw'] as const)('N2 confirms delivery on %s model output through the real turn sink', async kind => {
   const home = mkdtempSync(join(tmpdir(), 'mousse-bot-delivery-output-'))
   const previousHome = process.env.MOUSSE_HOME
   process.env.MOUSSE_HOME = home
@@ -21,16 +21,24 @@ it.each(['empty', 'text', 'thinking', 'tool'] as const)('N2 confirms delivery on
     const threads = new ThreadDataStore(new ProjectManager())
     const orch = createOrchestrator(home, threads)
     const thread = threads.createThread('Bot output')
-    const modelOutput = vi.fn()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    stop = () => warning.mockRestore()
+    const modelOutput = vi.fn(() => { if (kind === 'throw') throw new Error('database closed') })
     let calls = 0
-    const adapter = piAdapter(() => 'unused')
-    adapter.startTurn = async (_input, sink) => {
+    const adapter = piAdapter(() => 'Completed normally.')
+    const original = adapter.startTurn.bind(adapter)
+    adapter.startTurn = async (_input, sink, ctl, host) => {
       calls++
       sink.text({ phase: 'start', content: '', contentIndex: 0 })
       expect(modelOutput).not.toHaveBeenCalled()
       if (kind === 'text') sink.text({ phase: 'delta', content: 'Received.', contentIndex: 0 })
       if (kind === 'thinking') sink.thinking({ phase: 'delta', content: 'Checking the request.' })
       if (kind === 'tool') sink.tool({ phase: 'start', callId: 'model-call', kind: 'mcp_tool_call', title: 'Read', summary: '', details: [] })
+      if (kind === 'throw') {
+        sink.text({ phase: 'delta', content: 'First.', contentIndex: 0 })
+        sink.text({ phase: 'delta', content: 'Second.', contentIndex: 0 })
+        return original(_input, sink, ctl, host)
+      }
       expect(modelOutput).toHaveBeenCalledTimes(kind === 'empty' ? 0 : 1)
       throw new Error('network_error')
     }
@@ -44,7 +52,7 @@ it.each(['empty', 'text', 'thinking', 'tool'] as const)('N2 confirms delivery on
     }
     const engine = new RunEngine({ store: new RunStore(db) })
     orch.setRunEngine(engine)
-    stop = () => orch.setRunEngine(null)
+    stop = () => { orch.setRunEngine(null); warning.mockRestore() }
     const sent = await engine.sendWithStart({ kind: 'send', threadId: thread.id, clientRequestId: 'model-output', source: 'bot' }, runId => ({ kind: 'bot', runId, threadId: thread.id, activationId: 'work', dispatchN: 2 }))
     if (sent.status !== 'accepted') throw new Error('run refused')
     const result = await (orch as any).runTurnOnSession(orch.getOrCreateSession(thread.id), { content: 'Continue', mode: 'agent' }, false, true, { bot, runId: sent.runId, source: 'bot' })
@@ -52,6 +60,11 @@ it.each(['empty', 'text', 'thinking', 'tool'] as const)('N2 confirms delivery on
     orch.setRunEngine(null)
     expect(calls, JSON.stringify(result)).toBe(1)
     expect(modelOutput).toHaveBeenCalledTimes(kind === 'empty' ? 0 : 1)
+    if (kind === 'throw') {
+      expect(result.error).toBeUndefined()
+      expect(result.message).toContain('Completed normally.')
+      expect(warning).toHaveBeenCalledTimes(1)
+    }
   } finally {
     await new Promise(resolve => setImmediate(resolve))
     stop?.()

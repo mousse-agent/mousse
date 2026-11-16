@@ -1,5 +1,5 @@
 /** Carried and confirmed are different facts in the gap before a model's first output. */
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { lateWorkNote } from '../../src/shared/bots/personal/questions'
 import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
@@ -53,4 +53,31 @@ it('R3-gap compaction re-gives a carried note before any output confirms it', as
   expect((f.store.dispatch(t.workId, 2)!.prompt as any).workTold).toBeUndefined()
   next.prepared.steer!.compacted()
   expect(next.prepared.steer!.peek()).toContain('What the owner added since:\n- Only flats with lifts.')
+})
+
+it('R3-hook a failed confirmation is nonfatal, logs once and leaves the note for the next continuation', async () => {
+  const t = await work()
+  f.bots.noteWork(botId, t.workId, 'Keep this unconfirmed note.')
+  await finish(f, t.turn.payload, 'completed', { text: 'Initial findings.' })
+  const next = await start(f, t.workId, 2)
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const confirm = vi.spyOn(f.store, 'confirmWorkDelivery').mockImplementation(() => { throw new Error('database busy') })
+  try {
+    expect(() => next.prepared.modelOutput?.()).not.toThrow()
+    expect(() => next.prepared.modelOutput?.()).not.toThrow()
+    expect(confirm).toHaveBeenCalledTimes(1)
+    f.bots.noteWork(botId, t.workId, 'Also check transport.')
+    await finish(f, next.payload, 'completed', { text: 'Completed normally.' })
+    expect(f.runs.getRun(next.payload.runId)?.status).toBe('completed')
+    expect(warning).toHaveBeenCalledTimes(1)
+    expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('Keep this unconfirmed note.')
+  } finally { confirm.mockRestore(); warning.mockRestore() }
+})
+it('R3-hook output without stored updates performs no confirmation write transaction', async () => {
+  const t = await work()
+  const transaction = vi.spyOn(f.store.db, 'transaction')
+  try {
+    t.turn.prepared.modelOutput?.()
+    expect(transaction).not.toHaveBeenCalled()
+  } finally { transaction.mockRestore() }
 })
