@@ -5296,13 +5296,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) : undefined
       // The line is kept with the answer, so forgetting the answer (or the question) finds this copy (`answer_json.sent`).
       if (answered) this.store.markAnswerSent(question!.id, n, answered, !durableWork)
+      // A usage retry repeats the previous text, so only its carried ids may be confirmed by that retry.
+      const delivery = input.usageRetry && previous ? {
+        ...(previous.prompt.workActionIds ? { workActionIds: previous.prompt.workActionIds } : {}),
+        ...(previous.prompt.workWaitIds ? { workWaitIds: previous.prompt.workWaitIds } : {}),
+        ...(previous.prompt.workDelivery ? { workDelivery: previous.prompt.workDelivery } : {})
+      } : {
+        ...(actions.length ? { workActionIds: actions.map(action => action.id) } : {}),
+        ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}),
+        ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: question!.id } : {}) } } : {})
+      }
       const dispatch = {
         activationId: row.id,
         n,
         kind: 'continue' as const,
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
-        prompt: { ...(actions.length ? { workActionIds: actions.map(action => action.id) } : {}), ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: question!.id } : {}) } } : {}), ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}), text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, ...(actionCaused ? { actionCaused: actionContinuation(actionCaused) } : {}), waited, answerCaused: current.status === 'waiting_grant' && answers.length > 0, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
+        prompt: { ...delivery, text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, ...(actionCaused ? { actionCaused: actionContinuation(actionCaused) } : {}), waited, answerCaused: current.status === 'waiting_grant' && answers.length > 0, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
         policyDigest: grant.digest,
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
