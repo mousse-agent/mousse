@@ -343,3 +343,93 @@ it('Forget removes a redacted message’s legacy receipt and preserves unrelated
   expect(f.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:telling-legacy:${forgotten.id}`)).toBeUndefined()
   expect(f.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:telling-legacy:${kept.id}`)).toBeDefined()
 })
+
+it('holds unattended reports until the configured end without hiding the chat row', () => {
+  f.clock.now = Date.parse('2026-11-07T23:00:00Z')
+  Object.assign(f.host, { quietHoursFor: () => ({ end: Date.parse('2026-11-08T08:00:00Z') }), ownerActive: () => false })
+  const message = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'Night report' })
+  expect(f.store.message(message.id)?.tellAt).toBe('2026-11-08T08:00:00.000Z')
+  expect(f.bots.service.chatList(botId).messages.some(m => m.id === message.id)).toBe(true)
+})
+
+it.each(['end', 'activity', 'off', 'changed'] as const)('releases held rows once as one fold on %s, including after restart', async reason => {
+  const end = Date.parse('2026-11-08T08:00:00Z')
+  f.clock.now = end - 3600_000
+  let heldEnd: number | undefined = end, active = false
+  Object.assign(f.host, { quietHoursFor: () => heldEnd ? { end: heldEnd } : undefined, ownerActive: () => active })
+  f.bots.setTellingWindows(1)
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  const read = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'Read meanwhile' })
+  const rows = [1, 2].map(n => f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: `Night ${n}` }))
+  await f.bots.deliverDueReminders(); expect(events).toHaveLength(0)
+  // Advance the read marker without claiming owner activity (a read on another device was persisted).
+  f.store.setReadSeq(botId, read.seq)
+  if (reason === 'activity') active = true
+  if (reason === 'off') heldEnd = undefined
+  if (reason === 'changed') heldEnd = end + 3600_000
+  f.clock.now += 60_000
+  if (reason !== 'end') f.bots.quietHoursChanged()
+  if (reason === 'changed') {
+    expect(f.store.message(rows[0]!.id)?.tellAt).toBe(new Date(heldEnd!).toISOString())
+    f.clock.now = heldEnd!
+  } else if (reason === 'end') f.clock.now = end
+  await f.bots.deliverDueReminders()
+  expect(events).toHaveLength(1)
+  expect(events[0]).toMatchObject({ title: expect.stringContaining('While you were away:'), rows: expect.any(Array), sound: true })
+  expect(events[0].rows.map((r: any) => r.messageId)).toEqual(rows.map(r => r.id))
+  expect(f.store.message(read.id)?.toldAt).toBeTruthy()
+  const { BotTellings } = await import('../../src/mms/bots/chat/BotTellings')
+  const reopened = new BotStore({ profileHome: f.profile, clock: () => f.clock.now })
+  try {
+    const restarted = new BotTellings(reopened, new BotChatProjection({ store: reopened, emit() {} }), () => 'Scout', e => events.push(e))
+    restarted.attach(1); restarted.release(f.clock.now)
+    expect(events).toHaveLength(1)
+  } finally { reopened.close() }
+})
+
+it.each(['active', 'wake', 'now'] as const)('does not hold a night row with the %s exception', async exception => {
+  Object.assign(f.host, { quietHoursFor: () => ({ end: f.clock.now + 3600_000 }), ownerActive: () => exception === 'active' })
+  if (exception === 'wake') f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
+  f.bots.setTellingWindows(1)
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  let id: string
+  if (exception === 'now') {
+    const reminder = f.bots.addReminder(botId, 'owner', { dueAt: f.store.now(), text: 'At this time' })
+    f.store.run('UPDATE bot_reminders SET owner_set = 1 WHERE id = ?', reminder.reminderId)
+    id = `bm_${reminder.reminderId}`
+  } else id = f.bots.chat.post({ botId, author: 'bot', kind: 'error', text: 'Repair needed', error: { text: 'Failed' } }).id
+  await f.bots.deliverDueReminders()
+  expect(f.store.message(id)).toMatchObject({ tell: exception === 'now' ? 'now' : 'soon', tellAt: f.store.now(), toldAt: f.store.now() })
+  expect(events.at(-1)?.sound).toBe(true)
+})
+
+it('keeps the same class and due time with no quiet-hours wish even when active or allowed to wake', () => {
+  Object.assign(f.host, { quietHoursFor: () => undefined, ownerActive: () => true })
+  f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
+  const report = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'Normal report' })
+  expect(f.store.message(report.id)).toMatchObject({ tell: 'soon', tellAt: f.store.now() })
+})
+
+// Same reports by day, during quiet hours with owner activity, and from a can-wake bot.
+it.each(['day', 'active at night', 'can wake at night'] as const)('folds five soon reports into one banner and one sound: %s', async scenario => {
+  Object.assign(f.host, {
+    quietHoursFor: () => scenario === 'day' ? undefined : { end: f.clock.now + 3600_000 },
+    ownerActive: () => scenario === 'active at night'
+  })
+  if (scenario === 'can wake at night') f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
+  f.bots.setTellingWindows(1)
+  const events: import('../../src/shared/bots/personal/telling').BotTelling[] = []
+  f.bots.events.on('tell', event => events.push(event))
+  const classes: unknown[] = []
+  for (let n = 0; n < 5; n++) {
+    const message = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: `Report ${n}` })
+    classes.push(f.store.message(message.id)?.tell)
+    expect(f.store.message(message.id)?.tellAt).toBe(f.store.now())
+    await f.bots.deliverDueReminders()
+    f.clock.now += 1000
+  }
+  expect(new Set(events.map(event => event.id)).size).toBe(1)
+  expect(events.filter(event => event.sound)).toHaveLength(1)
+  expect(events.at(-1)?.rows).toHaveLength(5)
+  expect(classes).toEqual(['soon', 'soon', 'soon', 'soon', 'soon'])
+})

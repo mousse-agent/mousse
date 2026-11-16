@@ -101,6 +101,7 @@ export interface BotScheduleEntry {
   /** Paused from the Automations page (the bot's own pause is the bot's). */
   paused: boolean
   tellMe: TellMe
+  canWakeMe?: boolean
   /** The last occurrence that did not start, and why. */
   skip?: { at: string; reason: string }
 }
@@ -196,6 +197,7 @@ export class BotScheduleBook {
       ...(job.nextRunAt && job.state !== 'paused' && job.enabled ? { nextAt: job.nextRunAt } : {}),
       paused: job.state === 'paused' || !job.enabled,
       tellMe: tellMeOf(job),
+      ...(job.bot.canWakeMe !== undefined ? { canWakeMe: job.bot.canWakeMe } : {}),
       ...(job.botSkip ? { skip: job.botSkip } : {})
     }
   }
@@ -212,8 +214,8 @@ export class BotScheduleBook {
   }
 
   /** Completed schedules stay in Automations; upkeep writes their quiet end line once. */
-  ended(botId: string): Array<{ jobId: string; scheduleId: string; name: string; tellMe: TellMe }> {
-    return this.options.jobs.listJobs().filter((job) => job.bot?.botId === botId && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ jobId: job.id, scheduleId: job.bot!.scheduleId, name: job.name, tellMe: tellMeOf(job) }))
+  ended(botId: string): Array<{ jobId: string; scheduleId: string; name: string; tellMe: TellMe; canWakeMe?: boolean }> {
+    return this.options.jobs.listJobs().filter((job) => job.bot?.botId === botId && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ jobId: job.id, scheduleId: job.bot!.scheduleId, name: job.name, tellMe: tellMeOf(job), ...(job.bot!.canWakeMe !== undefined ? { canWakeMe: job.bot!.canWakeMe } : {}) }))
   }
 
   /** Every bot's schedules, oldest first. */

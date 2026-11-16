@@ -1,7 +1,8 @@
+import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
 import type { SettingsStore } from '../../settings/SettingsStore'
 import { isTellMe } from '../../../shared/types'
-import { readBotTelling, tellingLine, validQuietHours, type TellingChange } from '../../../shared/bots/personal/tellingSettings'
+import { readBotTelling, tellingLine, type TellingChange } from '../../../shared/bots/personal/tellingSettings'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
@@ -232,6 +233,10 @@ export interface BotEngineHost {
   progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
   runLevel?(activationId: string): RunLevel | undefined
+  /** Profile quiet-hours reader and activity measured by Mousse, never by bot turns. */
+  quietHoursFor?(botId?: string, at?: number): { end: number } | undefined
+  ownerActive?(): boolean
+  ownerActivity?(): void
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
@@ -687,6 +692,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.tellings.read()
         this.armDue()
       },
+      tellAt: (botId, tell, at, messageId) => tell === 'soon' && !this.ownerActive() && !this.canWake(botId, messageId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
       classify: (message, input) => {
         const activation = message.activationId ? this.store.activation(message.activationId) : undefined
         const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
@@ -4171,6 +4177,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const amount = input.amount ?? ('budget' in escalation.permission ? escalation.permission.budget.amount : undefined)
     if (budget && input.answer !== 'deny' && (amount === undefined || !Number.isFinite(amount) || amount <= 0))
       throw new BotEngineError('invalid_answer', 'Say how much more to allow.')
+    this.noteOwnerActivity()
     const special = isSpecialAsk(escalation.permission)
     // Allow never grants tools the owner has not seen: an MCP ask whose server has not listed them waits for them.
     if (input.answer !== 'deny' && waitsForTools(escalation.permission)) throw new BotEngineError('ask_not_ready', MCP_ASK_LOADING_TEXT)
@@ -4222,6 +4229,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       throw new BotEngineError('ask_not_ready', 'Wait until the bot finishes its message.')
     // Allow never grants tools the owner has not seen: an MCP ask whose server has not listed them waits for them.
     if (answer === 'allow' && waitsForTools(escalation.permission)) throw new BotEngineError('ask_not_ready', MCP_ASK_LOADING_TEXT)
+    this.noteOwnerActivity()
     const special = isSpecialAsk(escalation.permission)
     // A limit: the work that waits on it, read before the answer widens the grant.
     const limit = 'budget' in escalation.permission ? escalation.permission.budget.key : undefined
@@ -6528,6 +6536,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * is repaired by the next one. A failure pauses the activation with `reconcile_failed`.
    */
   async reconcileOnStartup(): Promise<void> {
+    this.quietHoursChanged()
     this.loadPendingScheduleRemovals()
     // Cleanup is best effort: admission enforces the saved intent even while jobs.json cannot be written.
     this.retryCompletedScheduleRemovals()
@@ -7248,6 +7257,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** `bots.chat.markRead`: the unread count drops to what follows `seq`. */
   markRead(botId: string, seq: number): void {
     this.entry(botId)
+    this.noteOwnerActivity()
     this.store.setReadSeq(botId, seq)
     this.tellings.read()
     this.changed({ botId })
@@ -7743,6 +7753,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   snoozeReminder(botId: string, messageId: string, choice: import('../../../shared/bots/personal/chat').BotSnoozeChoice): void {
+    this.noteOwnerActivity()
     this.entry(botId)
     this.store.db.transaction(() => {
       const reminder = this.store.reminderForMessage(botId, messageId)
@@ -7778,14 +7789,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   setTelling(botId: string, activationId: string, change: TellingChange): string {
     if (!this.timerOwnerSet(botId, activationId)) throw new BotEngineError('owner_only', 'Only a turn your owner’s own message or tap started can change telling. Suggest it in your report instead.')
     if (change.tellMe !== undefined && !isTellMe(change.tellMe)) throw new BotEngineError('invalid_params', 'tellMe is needs_you, look, fyi or every.')
-    if (change.quietHours !== undefined && change.quietHours !== 'off' && !validQuietHours(change.quietHours)) throw new BotEngineError('invalid_params', 'Quiet hours need different from and to times in HH:MM (00:00 to 23:59), or off.')
+    if (change.quietHours !== undefined && change.quietHours !== 'off' && !isQuietHours(change.quietHours)) throw new BotEngineError('invalid_params', 'Quiet hours need different from and to times in HH:MM (00:00 to 23:59), or off.')
     if (change.canWakeMe !== undefined && typeof change.canWakeMe !== 'boolean' || change.schedules !== undefined && typeof change.schedules !== 'boolean') throw new BotEngineError('invalid_params', 'canWakeMe and schedules must be true or false.')
     if (change.scheduleId !== undefined && (typeof change.scheduleId !== 'string' || !change.scheduleId || change.canWakeMe === undefined || change.tellMe !== undefined || change.schedules)) throw new BotEngineError('invalid_params', 'For one automation give scheduleId and canWakeMe only.')
     if (change.quietHours !== undefined && !this.host.settings) throw new BotEngineError('unavailable', 'Quiet hours cannot be changed here.')
     if ((change.schedules || change.scheduleId) && !this.host.schedules?.setTelling) throw new BotEngineError('unavailable', 'Automations cannot be changed here.')
     if (change.schedules || change.scheduleId) this.host.schedules!.setTelling!(botId, { ...(change.schedules ? { tellMe: change.tellMe } : {}), ...(change.scheduleId ? { scheduleId: change.scheduleId, canWakeMe: change.canWakeMe } : {}) })
     if (change.quietHours !== undefined) {
-      const settings = this.host.settings!.set({ notifications: { quietHours: change.quietHours === 'off' ? undefined : change.quietHours } } as Parameters<SettingsStore['set']>[0])
+      const settings = this.host.settings!.set({ notifications: { quietHours: change.quietHours === 'off' ? null : change.quietHours } })
       this.host.settingsChanged?.(settings)
     }
     this.store.db.transaction(() => {
@@ -7793,6 +7804,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ ...previous, ...(change.tellMe !== undefined ? { tellMe: change.tellMe } : {}), ...(!change.scheduleId && change.canWakeMe !== undefined ? { canWakeMe: change.canWakeMe } : {}) }), botId)
     })
     this.changed({ botId })
+    this.quietHoursChanged()
     const line = this.tellingLine(botId)
     if (change.scheduleId) return [line, `That automation ${change.canWakeMe ? 'can' : 'cannot'} wake you.`].filter(Boolean).join('\n')
     return line ?? 'No telling preferences set.'
@@ -8213,6 +8225,50 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.tellings.noteLegacy(event.botId, event.message, event.quiet === true)
   }
 
+  private ownerActive(): boolean { return this.host.ownerActive?.() ?? false }
+  private canWake(botId: string, messageId: string): boolean {
+    if (readBotTelling(this.store.registry(botId)?.tellJson).canWakeMe === true) return true
+    const activationId = this.store.message(messageId)?.activationId
+    const trigger = activationId ? this.store.activation(activationId)?.trigger : undefined
+    if (trigger?.kind !== 'schedule') return false
+    if (trigger.completed) return trigger.completed.canWakeMe === true
+    try {
+      return (this.host.schedules?.get(botId, trigger.scheduleId)?.canWakeMe
+        ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === trigger.scheduleId)?.canWakeMe) === true
+    } catch { return false } // An unavailable job store never prevents the report from being posted.
+  }
+  private followUpTime(botId: string, at: number): number { return this.host.quietHoursFor?.(botId, at)?.end ?? at }
+  noteOwnerActivity(): void { this.host.ownerActivity?.(); this.quietHoursChanged() }
+  /** Only future tell_at on a soon row denotes a hold; no additional stored state. */
+  quietHoursChanged(): void {
+    const now = this.now()
+    for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND tell_at > at")) {
+      const botId = String(row.bot_id)
+      const end = !this.ownerActive() && !this.canWake(botId, String(row.id)) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
+      this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(end ?? Math.max(now, Date.parse(String(row.at)) + 1)).toISOString(), String(row.id))
+    }
+    // Reconstruct the normal due time from the saved bubble/last nudge, so an old quiet-hours end
+    // is not mistaken for the requested time after the wish is shortened or cleared. No extra receipt is needed.
+    for (const row of this.store.all("SELECT id FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL")) {
+      const question = this.store.question(String(row.id))
+      if (!question?.nextAt || !question.follow) continue
+      const previous = Date.parse(question.nextAt)
+      let at = previous
+      if (previous > now) {
+        const source = question.nudges ? this.store.message(`bm_${question.id}_n${question.nudges}`)
+          : question.messageId ? this.store.message(question.messageId) : undefined
+        if (source) {
+          at = Math.max(now, Date.parse(source.at) + (question.nudges ? NUDGE_AGAIN_MS : question.follow.afterMs))
+          if (question.follow.kind === 'nudge') at = nudgeSlot(at,
+            this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map(time => Date.parse(time)))
+        }
+      }
+      at = this.followUpTime(question.botId, at)
+      if (at !== previous) this.moveFollowUp(question, at)
+    }
+    this.armDue()
+  }
+
   setTellingWindows(count: number): void { this.tellings.attach(count); this.armDue() }
 
   nextDueAt(botId?: string): string | undefined {
@@ -8433,9 +8489,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // was withdrawn or forgotten, never is.
 
   /** When a question's first follow-up is due, its bubble shown at `shownAt`: the time the bot gave after that. */
-  private firstFollowUpAt(question: Pick<BotQuestionRow, 'follow'>, shownAt: string): string | null {
+  private firstFollowUpAt(question: Pick<BotQuestionRow, 'follow' | 'botId'>, shownAt: string): string | null {
     if (!question.follow) return null
-    return new Date(Date.parse(shownAt) + question.follow.afterMs).toISOString()
+    return new Date(this.followUpTime(question.botId, Date.parse(shownAt) + question.follow.afterMs)).toISOString()
   }
 
   /**
@@ -8448,13 +8504,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.setQuestionNext(question.id, null)
       return
     }
+    const allowed = this.followUpTime(question.botId, now.getTime())
+    if (allowed > now.getTime()) { this.moveFollowUp(question, allowed); return }
     if (question.follow.kind === 'nudge') this.nudge(question, now)
     else await this.goWithDefault(question, question.follow, now)
   }
 
   /** A question's follow-up moves later; a bubble that says when its default goes ahead shows the new time. */
   private moveFollowUp(question: BotQuestionRow, at: number): void {
-    if (!this.store.setQuestionNext(question.id, new Date(at).toISOString())) return
+    if (!this.store.setQuestionNext(question.id, new Date(this.followUpTime(question.botId, at)).toISOString())) return
     if (question.follow?.kind === 'default') for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.chat.republish(row.id)
   }
 
@@ -8478,7 +8536,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const count = question.nudges + 1
-    const next = count < MAX_NUDGES_PER_QUESTION ? new Date(at + NUDGE_AGAIN_MS).toISOString() : null
+    const next = count < MAX_NUDGES_PER_QUESTION ? new Date(this.followUpTime(question.botId, at + NUDGE_AGAIN_MS)).toISOString() : null
     const posted = this.store.db.transaction(() => {
       if (!this.store.recordNudge(question.id, count, next)) return false
       this.chat.post({
@@ -8738,7 +8796,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const schedule = this.host.schedules?.get(row.botId, trigger.scheduleId)
     if (!schedule) return
     // Persist the intent before removing the shared job: retry after a crash can finish its removal.
-    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe } }), row.id)
+    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe, ...(schedule.canWakeMe !== undefined ? { canWakeMe: schedule.canWakeMe } : {}) } }), row.id)
     this.pendingScheduleRemovals.set(this.scheduleKey(row.botId, trigger.scheduleId), row.id)
     this.removeSchedule(row.botId, trigger.scheduleId)
     this.markCompletedScheduleRemoved(row)

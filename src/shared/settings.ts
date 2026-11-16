@@ -136,8 +136,17 @@ export interface NotificationChannels {
   sound: boolean
 }
 
+export interface QuietHours { from: string; to: string }
+export function isQuietHours(value: unknown): value is QuietHours {
+  if (!value || typeof value !== 'object') return false
+  const { from, to } = value as QuietHours
+  const time = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+  return typeof from === 'string' && typeof to === 'string' && time.test(from) && time.test(to) && from !== to
+}
+
 export interface NotificationSettings {
-  quietHours?: { from: string; to: string }
+  /** Absent means off. Times use the owner's last device zone. */
+  quietHours?: QuietHours
   /**
    * The sound for every event, from before sounds were chosen per event. Still read for an event
    * whose `sound` has not been chosen.
@@ -524,7 +533,9 @@ export type DeepPartial<T> = {
       : T[K]
 }
 
-export type MousseSettingsUpdate = DeepPartial<MousseSettings>
+export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'notifications'> & {
+  notifications?: Omit<DeepPartial<NotificationSettings>, 'quietHours'> & { quietHours?: QuietHours | null }
+}
 
 export interface ThemeOption {
   id: ThemeId

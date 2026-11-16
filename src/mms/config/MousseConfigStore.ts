@@ -45,6 +45,7 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
   for (const key of Object.keys(partial) as Array<keyof T>) {
     const value = partial[key]
     if (key === '__proto__' || key === 'prototype' || key === 'constructor') continue
+    if (key === 'quietHours' && value === null) { delete result[key]; continue }
     if (value === undefined) continue
     const existing = base[key]
     if (
@@ -507,13 +508,6 @@ export class MousseConfigStore {
   /** Assemble full MousseSettings for SettingsStore compatibility. */
   assembleSettings(): MousseSettings {
     return mergeSettings(this.conf.settings, this.conf.providers, this.conf.agents)
-  }
-
-  clearQuietHours(): void {
-    this.assertPersonalMutation('settings')
-    const { quietHours: _quiet, ...notifications } = this.conf.settings.notifications
-    this.conf.settings = { ...this.conf.settings, notifications }
-    this.save()
   }
 
   updateSettingsSection(partial: Partial<MousseSettingsSection>): void {

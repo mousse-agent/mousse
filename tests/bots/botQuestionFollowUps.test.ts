@@ -535,3 +535,73 @@ describe('owner attention in the shared summary', () => {
     expect(summary().needsOwner).toBeUndefined()
   })
 })
+
+it.each(['nudge', 'default'])('moves a %s due at 03:00 to the quiet-hours end and never applies it overnight', async kind => {
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  const q = new OwnerQuietHours(() => ({ from: '22:00', to: '08:00' }), () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (botId: string, at: number) => q.quietHoursFor(botId, at) })
+  f.clock.now = Date.parse('2026-11-08T02:30:00Z')
+  const { questionId } = await chatAsks(kind === 'default' ? DEFAULT_A : { ...FLATS, ifNoAnswer: 'nudge', after: 30 })
+  expect(f.store.question(questionId)?.nextAt).toBe('2026-11-08T08:00:00.000Z')
+  await reach(Date.parse('2026-11-08T04:00:00Z'))
+  expect(f.store.question(questionId)).toMatchObject({ status: 'open', nudges: 0 })
+  await reach(Date.parse('2026-11-08T08:00:00Z'))
+  expect(f.store.question(questionId)).toMatchObject(kind === 'default' ? { status: 'defaulted' } : { nudges: 1 })
+})
+
+it('updates the shown default time when a new quiet-hours wish moves it', async () => {
+  f.clock.now = Date.parse('2026-11-07T21:45:00Z')
+  const { questionId } = await chatAsks(DEFAULT_A)
+  const messages: BotChatMessage[] = []
+  f.bots.events.on('message', e => messages.push(e.message))
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  const q = new OwnerQuietHours(() => ({ from: '22:00', to: '08:00' }), () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (id: string, at: number) => q.quietHoursFor(id, at) })
+  f.bots.quietHoursChanged()
+  expect(messages.find(m => m.question?.questionId === questionId)?.question?.defaultAt).toBe('2026-11-08T08:00:00.000Z')
+})
+
+// First follow-up: nudge/default, shortened/cleared hours, before/after its original due time.
+it.each([
+  ['nudge', 'shorten', false], ['default', 'shorten', false],
+  ['nudge', 'off', false], ['default', 'off', false],
+  ['nudge', 'shorten', true], ['default', 'shorten', true],
+  ['nudge', 'off', true], ['default', 'off', true]
+] as const)('pulls a held %s back on %s (original time elapsed=%s)', async (kind, change, elapsed) => {
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  let hours: { from: string; to: string } | undefined = { from: '22:00', to: '08:00' }
+  const q = new OwnerQuietHours(() => hours, () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (id: string, at: number) => q.quietHoursFor(id, at) })
+  f.clock.now = Date.parse('2026-11-08T02:30:00Z')
+  const { questionId } = await chatAsks(kind === 'default' ? DEFAULT_A : { ...FLATS, ifNoAnswer: 'nudge', after: 30 })
+  expect(f.store.question(questionId)?.nextAt).toBe('2026-11-08T08:00:00.000Z')
+  const messages: BotChatMessage[] = []
+  f.bots.events.on('message', e => messages.push(e.message))
+  f.clock.now = Date.parse(elapsed ? '2026-11-08T04:00:00Z' : '2026-11-08T02:45:00Z')
+  hours = change === 'off' ? undefined : { from: '22:00', to: '05:00' }
+  f.bots.quietHoursChanged()
+  const expected = change === 'shorten' ? '2026-11-08T05:00:00.000Z' : elapsed ? f.store.now() : '2026-11-08T03:00:00.000Z'
+  expect(f.store.question(questionId)?.nextAt).toBe(expected)
+  if (kind === 'default') expect(messages.find(m => m.question?.questionId === questionId)?.question?.defaultAt).toBe(expected)
+  await reach(Date.parse(expected))
+  expect(f.store.question(questionId)).toMatchObject(kind === 'default' ? { status: 'defaulted' } : { nudges: 1 })
+})
+
+it('keeps the second nudge a day after the first when quiet hours are cleared', async () => {
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  let hours: { from: string; to: string } | undefined
+  const q = new OwnerQuietHours(() => hours, () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (id: string, at: number) => q.quietHoursFor(id, at) })
+  f.clock.now = Date.parse('2026-11-07T02:30:00Z')
+  const { questionId } = await chatAsks({ ...FLATS, ifNoAnswer: 'nudge', after: 30 })
+  await reach(Date.parse('2026-11-07T03:00:00Z'))
+  hours = { from: '22:00', to: '08:00' }
+  f.bots.quietHoursChanged()
+  expect(f.store.question(questionId)?.nextAt).toBe('2026-11-08T08:00:00.000Z')
+  f.clock.now += HOUR
+  hours = undefined
+  f.bots.quietHoursChanged()
+  expect(f.store.question(questionId)?.nextAt).toBe('2026-11-08T03:00:00.000Z')
+  await f.bots.deliverDueReminders()
+  expect(f.store.question(questionId)?.nudges).toBe(1)
+})
