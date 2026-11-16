@@ -1140,7 +1140,7 @@ it('C4 looks for earlier matching calls only while a review is open', async () =
   const a = f.bots.actions.forWork(t.workId)!
   const reads = vi.spyOn(f.store, 'all')
   for (const status of ['open', 'approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn']) {
-    f.store.run('UPDATE bot_actions SET status = ? WHERE id = ?', status, a.id)
+    f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ? WHERE id = ?', status, a.id)
     reads.mockClear()
     const card = f.bots.service.actionMessage(t.botId, a.id).action!
     expect(card.status).toBe(status)
