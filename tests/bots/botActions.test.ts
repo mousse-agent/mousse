@@ -852,6 +852,7 @@ it.each(['restart', 'network'] as const)('N2 repeats a sent outcome after %s onl
   await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
   const next = await start(f, t.workId, 2)
   expect(f.store.unreadWorkActions(t.workId).map(a => a.id)).toEqual([a.id])
   if (failure === 'restart') {
@@ -883,6 +884,7 @@ it('N2 a completed dispatch confirms a sent outcome without a streamed response'
   await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
   const next = await start(f, t.workId, 2)
   expect(f.store.unreadWorkActions(t.workId)).toHaveLength(1)
   await finish(f, next.payload, 'completed')
