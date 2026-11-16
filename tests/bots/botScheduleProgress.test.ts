@@ -90,9 +90,15 @@ it.each(['bot', 'owner'])('removing a schedule by %s clears its progress', async
   await report('Checked through 16 Nov.')
   await finish(f, turn.payload, 'completed', { text: '[SILENT]' })
   expect(memory.getState(botId, `progress:${a}`)).toBeDefined()
+  memory.write(() => {
+    memory.setState(botId, `schedule-ended:${botJobId(botId, a)}`, 'posted')
+    memory.setState(botId, `schedule-said:${a}`, 'said')
+  })
   if (by === 'bot') f.bots.removeSchedule(botId, a)
   else f.scheduler.deleteJob(botJobId(botId, a))
   expect(memory.getState(botId, `progress:${a}`)).toBeUndefined()
+  expect(memory.getState(botId, `schedule-ended:${botJobId(botId, a)}`)).toBeUndefined()
+  expect(memory.getState(botId, `schedule-said:${a}`)).toBeUndefined()
 })
 
 it('replaces the note, accepts 600 characters, and a silent run keeps it across a store reopen', async () => {
