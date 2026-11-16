@@ -402,6 +402,7 @@ it.each(['allow', 'not_now'] as const)('carries a permission wall %s and its wai
   // An intent is not a started turn; its store facts are still unread.
   expect(f.store.unreadWorkWaits(workId).map(r => r.id)).toContain(set.wakeId)
   const next = await start(f, workId, 2)
+  ;(next.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkWaits(workId)).toEqual([])
   f.bots.tools.work.note(botId, workId, 'Read the release notes next.', chat.id)
   await finish(f, next.payload, 'completed', { text: '' })
@@ -481,6 +482,7 @@ it('keeps wait additions through a usage hold before the dispatch starts and a r
   await flush()
   const dispatch = f.store.lastMainDispatch(workId)!
   const next = await start(f, workId, dispatch.n)
+  ;(next.prepared as any).modelOutput?.()
   expect(next.prepared.prompt).toContain('Check again with the evidence already read.')
   expect(next.prepared.prompt).toContain('Read the release notes too.')
   expect(next.prepared.prompt).toContain('Which release?')
@@ -506,7 +508,8 @@ it('keeps a delivered wait unread while the run queue has no free slot', async (
   await flush()
   expect(f.store.dispatch(workId, 2)?.prompt.text).toContain('Check again with the evidence already read.')
   expect(f.store.activation(queued.workId)?.status).toBe('queued')
-  await start(f, workId, 2)
+  const receiving = await start(f, workId, 2)
+  ;(receiving.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkWaits(workId)).toEqual([])
 })
 
@@ -594,4 +597,93 @@ it.each(['question', 'wall'] as const)('uses the master opening when an owner %s
   await flush()
   const key = kind === 'question' ? 'question answered / none' : 'wall Allow / none'
   expect(f.store.dispatch(workId, 3)?.prompt.text).toBe(golden.prompts[key])
+})
+
+it.each(['restart', 'network', 'usage_retry'] as const)('N2 repeats a wait, note and answer after %s until output confirms them', async failure => {
+  const { workId, turn, chat } = await work()
+  f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
+  const questionId = f.store.workQuestion(workId)!.id
+  await wait(workId)
+  await finish(f, turn.payload)
+  f.bots.tools.work.note(botId, workId, 'Remember the delivery evidence.', chat.id)
+  await f.bots.service.answerQuestion({ botId, questionId, choice: 'A', clientRequestId: 'N2-answer' })
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  const next = await start(f, workId, 2)
+  expect(f.store.unreadWorkWaits(workId)).toHaveLength(1)
+  expect(f.store.unreadWorkNotes(workId)).toHaveLength(1)
+  expect(f.store.unreadWorkQuestion(workId)?.id).toBe(questionId)
+  if (failure === 'restart') {
+    // Simulate the previous build's eager read markers as well as a fresh interrupted dispatch.
+    f.store.run('UPDATE bot_work_notes SET applied_at = ? WHERE activation_id = ?', f.store.now(), workId)
+    f.store.run('UPDATE bot_questions SET read_at = ? WHERE id = ?', f.store.now(), questionId)
+    f.runs.markTerminal(next.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+  } else {
+    await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
+    await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: failure === 'network', usageRetry: failure === 'usage_retry' })
+  }
+  await flush()
+  const retry = f.store.lastMainDispatch(workId)!
+  expect(retry.n).toBeGreaterThan(2)
+  for (const text of ['Check again with the evidence already read.', 'Remember the delivery evidence.', 'Which release?']) expect(retry.prompt.text).toContain(text)
+  if (failure !== 'usage_retry') {
+    expect(retry.prompt.text).toContain('(may be a repeat) Remember the delivery evidence.')
+    expect(retry.prompt.text).toContain('if you already acted on it, don\'t do it again.')
+  }
+  const running = await start(f, workId, retry.n)
+  ;(running.prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkWaits(workId)).toEqual([])
+  expect(f.store.unreadWorkNotes(workId)).toEqual([])
+  expect(f.store.unreadWorkQuestion(workId)).toBeUndefined()
+  await finish(f, running.payload, 'failed', { outcome: { error: 'network_error' } })
+  await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
+  const later = f.store.lastMainDispatch(workId)!.prompt.text
+  for (const text of ['Check again with the evidence already read.', 'Remember the delivery evidence.', 'Which release?']) expect(later).not.toContain(text)
+})
+
+it('N2 recovers confirmation when the run completed before its dispatch settled', async () => {
+  const { workId, turn, chat } = await work()
+  await wait(workId)
+  await finish(f, turn.payload)
+  f.bots.tools.work.note(botId, workId, 'Keep the completed delivery.', chat.id)
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  const next = await start(f, workId, 2)
+  f.runs.markTerminal(next.payload.runId, 'completed')
+  f.bots.close()
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  await flush()
+  expect(f.store.unreadWorkWaits(workId)).toEqual([])
+  expect(f.store.unreadWorkNotes(workId)).toEqual([])
+  expect((f.store.dispatch(workId, 2)!.prompt as any).workTold).toBe('completed')
+})
+
+it.each(['restart', 'network'] as const)('N2 keeps a note without any wait history after %s until model output', async failure => {
+  const { workId, turn, chat } = await work()
+  f.bots.tools.work.note(botId, workId, 'Use the ordinary work note.', chat.id)
+  await finish(f, turn.payload, 'completed', { text: 'Initial findings.' })
+  const next = await start(f, workId, 2)
+  expect(f.store.unreadWorkNotes(workId)).toHaveLength(1)
+  if (failure === 'restart') {
+    f.runs.markTerminal(next.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+  } else {
+    await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
+    await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
+  }
+  await flush()
+  const retry = f.store.lastMainDispatch(workId)!
+  expect(retry.prompt.text).toContain('(may be a repeat) Use the ordinary work note.')
+  expect(retry.prompt.text).toContain('if you already acted on it, don\'t do it again.')
+  const receiving = await start(f, workId, retry.n)
+  ;(receiving.prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkNotes(workId)).toEqual([])
 })

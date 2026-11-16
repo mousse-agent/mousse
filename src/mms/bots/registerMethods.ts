@@ -35,6 +35,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.markRead': ['botId', 'seq'],
   'bots.chat.react': ['botId', 'messageId', 'emoji'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
+  'bots.actions.answer': ['actionId', 'digest', 'answer'],
   'bots.questions.answer': ['botId', 'questionId', 'choice', 'clientRequestId'],
   'bots.permissions.set': ['botId', 'permissionId', 'enabled'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
@@ -176,6 +177,9 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (typeof p.askId !== 'string' || !ASK_ID.test(p.askId)) throw new DomainRpcError('invalid_params', 'An ask id is required')
       if (p.answer !== 'allow' && p.answer !== 'not_now') throw new DomainRpcError('invalid_params', 'The answer must be allow or not_now')
       break
+    case 'bots.actions.answer':
+      if (!text(p.actionId, 100) || !text(p.digest, 64) || (p.answer !== 'send' && p.answer !== 'not_now')) throw new DomainRpcError('invalid_params', 'Name the held action, its digest and Send or Not now.')
+      break
     case 'bots.questions.answer':
       if (typeof p.questionId !== 'string' || !QUESTION_ID.test(p.questionId)) throw new DomainRpcError('invalid_params', 'A question id is required')
       if (!text(p.choice, MAX_CHOICE_LABEL_CHARS)) throw new DomainRpcError('invalid_params', 'The choice is one of the question\'s answers')
@@ -254,6 +258,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
     case 'bots.chat.react': return bots.react(botId, p.messageId as string, p.emoji as string | null)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
+    case 'bots.actions.answer': return bots.answerAction({ actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
     case 'bots.questions.answer': return bots.answerQuestion({ botId, questionId: p.questionId as string, choice: p.choice as string, clientRequestId: p.clientRequestId as string })
     case 'bots.permissions.set': return bots.setPermission(botId, p.permissionId as string, p.enabled as boolean)
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)

@@ -101,7 +101,7 @@ import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { CommandInfoNotice, GoalNotice } from '../chat/components/GoalNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
-import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
+import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
@@ -1656,13 +1656,19 @@ export function OrchestratorChat() {
     [projects, workspace.node]
   )
 
+  /** Sets the new chat's draft; a project picked on this computer is remembered for the next new thread. */
+  const pickDraftProject = (next: ComposerWorkspace) => {
+    setComposerWorkspaceDraft(activeThreadId, next)
+    if (!next.node && next.projectId !== workspace.projectId) useAppStore.getState().setLastNewThreadProjectId(next.projectId ?? null)
+  }
+
   /** Opens a folder as a project and makes it the new chat's project. */
   const openProjectForDraft = async () => {
     const project = await window.mousse.projects.open()
     const state = useAppStore.getState()
     if (!project || state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
     if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
-    setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: project.id })
+    pickDraftProject({ ...workspace, projectId: project.id })
   }
 
   /** Picks where the new chat runs; the project carries over only if the target lists the same Git repository. */
@@ -1869,7 +1875,7 @@ export function OrchestratorChat() {
             workspace={workspace}
             disabled={workspaceLocked}
             device={composerDevice}
-            onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
+            onChange={pickDraftProject}
             onOpenProject={openProjectForDraft}
             onError={setSendError}
           />

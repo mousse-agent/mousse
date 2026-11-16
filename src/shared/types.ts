@@ -1279,6 +1279,18 @@ export interface AgentOrigin {
   body?: AgentMessageBody
   /** The sending thread's title when it sent, shown for a sender that was deleted since. */
   title?: string
+  /**
+   * The owner's bot that sent it ("use your threads"), whose chat thread is `threadId`: its id, and its name when it sent,
+   * shown for a bot this window does not list (deleted, or on another computer). Absent on an agent's message, and on a
+   * bot's stored before it was kept.
+   */
+  bot?: AgentOriginBot
+}
+
+/** The bot behind a message (`AgentOrigin.bot`). */
+export interface AgentOriginBot {
+  id: string
+  name: string
 }
 
 /** The length of the header before an agent's words (`head`) and of the closing line after them (`tail`). */

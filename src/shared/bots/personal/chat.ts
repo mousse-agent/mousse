@@ -79,6 +79,8 @@ export type BotSnoozeChoice = '10m' | '1h' | 'tomorrow'
 
 /** One row of a bot's chat (`bot_messages`). */
 export interface BotChatMessage {
+  /** Sent action instant; formatted in the client clock. */
+  actionSentAt?: string
   /** Only delivered text reminders carry snooze replies; older services omit it. */
   reminder?: { expiresAt?: string; snoozedUntil?: string }
   seq: number
@@ -257,6 +259,8 @@ export interface BotWorkItem {
    */
   wait?: { dueAt: string; event: import('./wakes').BotWakeEvent | null }
   waitsFor?: 'answer'
+  /** First line of a held action, supplied by Mousse. */
+  detail?: string
   startedAt: string
   /** A scheduled run rather than work the chat started. */
   scheduled?: true

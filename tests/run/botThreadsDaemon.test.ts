@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BOT_MESSAGE_PREFIX, McpToolError, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
+import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { AGENT_MESSAGE_MAX_HOPS } from '../../src/mms/orchestrator/OrchestratorService'
 import type { PermissionMode } from '../../src/shared/permissionMode'
@@ -196,6 +197,35 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     // Every message is a turn that runs before the daemon stops; on a busy machine they take a while.
     await waitFor(() => sent.every((runId) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(w.d.engine.getRun(runId)?.status ?? '')), 'the runs', 120_000)
   }, 180_000)
+
+  it('its message names the bot and marks its words, whether it runs at once or waits in the queue', async () => {
+    let busy = ''
+    let release!: () => void
+    const held = new Promise<string>((resolve) => { release = () => resolve('done late') })
+    const w = world({ script: (input) => (input.threadId === busy ? held : 'done') })
+    const idle = w.d.store.createThread('Idle', w.project.id)
+    const target = w.d.store.createThread('Busy', w.project.id)
+    busy = target.id
+    const owner = await w.d.orch.send('Work on this.', false, { threadId: target.id, clientRequestId: 'owner-busy-words', awaitMode: 'ack' })
+    await waitFor(() => w.d.engine.getRun(owner.runId!)?.status === 'running', "the owner's turn running")
+    const atOnce = await w.send(idle.id, 'w1')
+    const queued = await w.send(target.id, 'w2')
+    // Waiting in the queue, as read back from it.
+    const item = w.d.orch.listQueue(target.id).find((entry) => entry.origin?.kind === 'agent')!
+    expect(item.origin).toMatchObject({ kind: 'agent', threadId: w.chat.id, bot: { id: 'b1', name: 'alpha' } })
+    expect(agentMessageWords(item.content, item.origin)).toBe('Please also check the signup page.')
+    release()
+    await w.settled(atOnce.runId)
+    await w.settled(owner.runId!)
+    await w.settled(queued.runId)
+    for (const threadId of [idle.id, target.id]) {
+      const message = w.d.orch.getMessages(threadId).find((entry) => entry.role === 'user' && entry.origin)!
+      // The model still reads whose words they are; the chat shows the words alone, under the bot.
+      expect(message.content.startsWith(`${BOT_MESSAGE_PREFIX} "alpha".`)).toBe(true)
+      expect(message.origin).toMatchObject({ kind: 'agent', threadId: w.chat.id, bot: { id: 'b1', name: 'alpha' } })
+      expect(agentMessageWords(message.content, message.origin)).toBe('Please also check the signup page.')
+    }
+  })
 
   it(`has no cap at once and no limit on agent messages in a row: more than ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} of its threads work at once, and a turn deep in a chain still starts and messages threads`, async () => {
     let release!: () => void

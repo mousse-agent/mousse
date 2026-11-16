@@ -42,6 +42,8 @@ export interface PreparedBotTurn {
   authority: BotAuthority
   /** The activation's private scratch folder: the turn's working directory. */
   scratch: string
+  /** The runtime produced model text, thinking or a tool call: its prompt reached the model. */
+  modelOutput?(): void
   /** Skill ids the turn may list and load. */
   skills: readonly string[]
   /**

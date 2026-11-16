@@ -2,8 +2,8 @@
 /**
  * A message another thread's agent sent, in the transcript: a bubble whose header names the agent ("Agent · <thread>") and
  * opens the sending thread, showing only the agent's words, with Copy of those words and no Edit. The label comes from
- * the stored origin, never from the text: a message stored before the words were marked shows whole, still labelled,
- * and a bot's message keeps the look it has.
+ * the stored origin, never from the text: a message stored before the words were marked shows whole, still labelled.
+ * A message the owner's bot sent shows the bot's face, drawn still, and its name, with "open" for its chat.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -21,7 +21,8 @@ import { PromptUndoProvider } from '../../src/renderer/components/PromptUndoCont
 import { selectThread } from '../../src/renderer/lib/threadActions'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useBotsStore } from '../../src/renderer/stores/botsStore'
-import { agentMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
+import { agentMessage, botMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
+import { useChatsStore } from '../../src/renderer/stores/chatsStore'
 import type { AgentOrigin, ChatMessage, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -137,13 +138,49 @@ describe('a message another thread\'s agent sent', () => {
     }
   })
 
-  it('a bot\'s message keeps its look: no header, its whole text', async () => {
-    useBotsStore.setState({ bots: [{ id: 'bot-1', name: 'Alpha', homeThreadId: 'bot-home' } as never] })
-    const fromBot: ChatMessage = { ...typed('t1', '[Message from your bot "Alpha". ...]\n\nGo ahead.\n\n[End of message from your bot]'), origin: { kind: 'agent', threadId: 'bot-home', runId: 'run:bot', hops: 1 } }
-    await show([fromBot, reply('t1')])
+})
+
+describe('a message the owner\'s bot sent', () => {
+  const BOT_WORDS = 'Go ahead and ship it.'
+  const alpha = { id: 'bot-1', name: 'Alpha', homeThreadId: 'bot-home', look: { colour: 'blue', accessory: 'none' } }
+
+  /** As this change stores it: the labelled text, where the bot's words are, and the bot. */
+  const fromBot = (): ChatMessage => {
+    const letter = botMessage('Alpha', BOT_WORDS)
+    return { ...typed('t1', letter.text), origin: { kind: 'agent', threadId: 'bot-home', runId: 'run:bot', hops: 1, body: { head: letter.head, tail: letter.tail }, bot: { id: 'bot-1', name: 'Alpha' } } }
+  }
+
+  it('shows the bot\'s face and "<name> · open" over its words alone; open opens its chat; no Edit', async () => {
+    useBotsStore.setState({ bots: [alpha as never], loaded: true })
+    const openBot = vi.fn(async () => undefined)
+    useChatsStore.setState({ openBot })
+    const message = fromBot()
+    await show([message, reply('t1')])
     const [bubble] = bubbles()
-    expect(header(bubble!)).toBeNull()
-    expect(bubble!.querySelector('.chat-user-text')?.textContent).toBe(fromBot.content)
-    expect(prompt(fromBot.id).querySelector('button[aria-label="Edit"]')).not.toBeNull()
+    expect(header(bubble!)?.textContent).toBe('Alpha·open')
+    expect(header(bubble!)!.querySelector('.bot-face')).not.toBeNull()
+    expect(bubble!.querySelector('.chat-user-text')?.textContent).toBe(BOT_WORDS)
+    expect(bubble!.textContent).not.toContain('[Message from your bot')
+    expect(prompt(message.id).querySelector('button[aria-label="Edit"]')).toBeNull()
+    await act(async () => header(bubble!)!.querySelector<HTMLButtonElement>('button')!.click())
+    expect(openBot).toHaveBeenCalledWith('bot-1')
+  })
+
+  it('a message stored before it named the bot or marked its words shows the same, found by the bot\'s chat thread', async () => {
+    useBotsStore.setState({ bots: [alpha as never], loaded: true })
+    const message: ChatMessage = { ...typed('t1', botMessage('Alpha', BOT_WORDS).text), origin: { kind: 'agent', threadId: 'bot-home', runId: 'run:bot', hops: 1 } }
+    await show([message, reply('t1')])
+    const [bubble] = bubbles()
+    expect(header(bubble!)?.textContent).toBe('Alpha·open')
+    expect(bubble!.querySelector('.chat-user-text')?.textContent).toBe(BOT_WORDS)
+  })
+
+  it('a bot this window does not list shows the name it had when it sent, with nothing to open', async () => {
+    useBotsStore.setState({ bots: [], loaded: true })
+    await show([fromBot(), reply('t1')])
+    const [bubble] = bubbles()
+    expect(header(bubble!)?.textContent).toBe('Alpha')
+    expect(header(bubble!)!.querySelector('button')).toBeNull()
+    expect(bubble!.querySelector('.chat-user-text')?.textContent).toBe(BOT_WORDS)
   })
 })

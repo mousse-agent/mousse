@@ -11,6 +11,8 @@ export type WorkWaitLine = Pick<BotWorkItem, 'status' | 'waitsFor' | 'wait'> & {
 
 /** Facts supplied by the engine; the rules themselves neither write nor hold engine state. */
 export interface WorkWaitFacts {
+  approvalReady(row: BotActivationRow): boolean
+  approvalExists(row: BotActivationRow): boolean
   timerExists(row: BotActivationRow): boolean
   usageResumable(row: BotActivationRow): boolean
   questionExists(row: BotActivationRow): boolean
@@ -33,7 +35,7 @@ interface WaitRule {
   waitsOnOwner(row: BotActivationRow, facts: WorkWaitLookups): boolean
   needsOwner(row: BotActivationRow, facts: WorkWaitLookups): boolean
   takesNotes(row: BotActivationRow): boolean
-  noteRefusal: 'question' | 'held' | 'waiting'
+  noteRefusal: 'question' | 'held' | 'approval' | 'waiting'
   checkBeforeResume: boolean
   line(row: BotActivationRow, facts: WorkWaitLookups): WorkWaitLine
   clearLiveChip: boolean
@@ -50,6 +52,19 @@ export function workWaitInput(wait: BotReminderRow, clock: (iso: string) => stri
 
 /** One row per reason. Wake sources keep their existing transactions, messages and stored markers. */
 export const WORK_WAIT_RULES = {
+  approval: {
+    weekExemptWhenReady: false, rank: 0, reasons: ['approval', 'approval_answered'], allows: workOnly,
+    ready: (row, facts) => row.endReason === 'approval_answered' && facts.approvalReady(row),
+    stranded: (row, facts) => !facts.approvalExists(row),
+    endReason: 'action_gone', endLine: nothingToWaitFor, resume: 'continue', checkBeforeResume: true,
+    continuation: (_row, _facts) => ({}),
+    continueRefusal: (row) => row.endReason === 'approval_answered' ? 'This work has your answer and carries on when a slot is free.' : 'This work waits for Send or Not now on its held action.',
+    waitsOnOwner: (row, _facts) => row.endReason === 'approval',
+    needsOwner: (row, facts) => Boolean(facts.store().get("SELECT 1 FROM bot_actions WHERE activation_id = ? AND status = 'open' AND message_id IS NOT NULL", row.id)),
+    takesNotes: (row) => row.endReason !== 'approval', noteRefusal: 'approval',
+    line: (row, _facts) => ({ status: row.endReason === 'approval_answered' ? 'queued' : 'paused', ...(row.endReason === 'approval' ? { waitsFor: 'answer' as const, detail: 'Send this action?' } : {}) }),
+    clearLiveChip: true, republishQuestion: false
+  },
   waiting: {
     weekExemptWhenReady: true, rank: 1, reasons: ['waiting', 'wait_ready'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'wait_ready',

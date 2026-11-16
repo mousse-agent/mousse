@@ -31,7 +31,7 @@ function workDoing(item: BotWorkItem, chip: BotChip | undefined): string {
     if (event.kind === 'pr') return `waits for ${event.repo}#${event.number}${event.on === 'checks' ? ' · its checks' : event.on === 'review' ? ' · a review' : ''}`
     return `waits for ${event.kind === 'thread' ? event.title ?? `thread ${event.threadId}` : event.title}`
   }
-  if (item.status === 'paused') return item.waitsFor === 'answer' ? 'waiting on you' : 'held'
+  if (item.status === 'paused') return item.waitsFor === 'answer' ? `waiting on you${item.detail ? ` · ${item.detail}` : ''}` : 'held'
   return chip ? `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` : 'working'
 }
 

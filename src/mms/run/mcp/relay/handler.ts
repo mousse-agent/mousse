@@ -148,8 +148,8 @@ export class RelayHandler {
     if (!mcp) throw unknownTool(name)
     const offered = bot.mcpTools?.find((tool) => tool.name === name)
     const ledger = offered ? this.host.toolLedger?.(active) : undefined
-    const ledgerId = ledger?.start({ type: 'toolCall', id: request.toolCallId, name, arguments: args } as ToolCall)
-    const outcome = await callForBot({ bot, name, args, signal: request.signal, mcp, ...(mcp.known ? { known: (relayed: string) => mcp.known!(relayed) } : {}), images })
+    const ledgerId = ledger?.start({ type: 'toolCall', id: request.toolCallId, name, arguments: bot.maskMcpArguments?.(args) ?? args } as ToolCall)
+    const outcome = await callForBot({ bot, name, args, toolCallId: request.toolCallId, signal: request.signal, mcp, ...(mcp.known ? { known: (relayed: string) => mcp.known!(relayed) } : {}), images })
     if (ledgerId) {
       if (outcome.isError) ledger?.failed(ledgerId)
       else ledger?.commit(ledgerId)

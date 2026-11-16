@@ -143,6 +143,9 @@ export interface BotAuthority {
    * the turn starts; every call is checked again against `mcp` and the server as it is then.
    */
   mcpTools?: readonly BotMcpTool[]
+  /** Mousse holds calls requiring the owner's answer; undefined means the ordinary call path. */
+  holdMcp?(tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): { text: string; isError?: boolean } | undefined
+  maskMcpArguments?(args: Record<string, unknown>): Record<string, unknown>
   /**
    * The bot's own folders: its files folder (`files`) and the activation's private scratch folder, both writable;
    * `roots` is empty (a bot has no folder beyond them). Null when it may touch no folder at all.

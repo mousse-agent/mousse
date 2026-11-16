@@ -15,6 +15,10 @@ import { CLIENT_REQUEST_ID_SCHEMA, json, McpToolError, type MousseTool, type Too
 const PROMPT_LIST_CHARS = 2000
 /** Run records `schedule_list` returns per job. */
 const RECENT_RUNS = 3
+/** Subagent links followed up from a job's creating thread to the caller; a deeper chain is not the caller's. */
+const SUBAGENT_DEPTH = 64
+/** Removals remembered for repeats and retries (`schedule_delete`); the oldest is forgotten first. */
+const REMEMBERED_REMOVALS = 512
 
 /** The schedule's schema with the profile's shortest interval as it is now. */
 function scheduleSchema(minMinutes: number) {
@@ -124,8 +128,9 @@ function permissionFieldsAfterAgentEdit(job: ScheduledJob, editor: PermissionMod
 }
 
 /**
- * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause` and `schedule_run`: an agent's hand on the jobs
- * its own thread made (docs/run-engine/SPEC.md §15.1). The
+ * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_run` and `schedule_delete`: an
+ * agent's hand on the jobs its own thread made (docs/run-engine/SPEC.md §15.1). `schedule_delete` also removes a job one
+ * of the thread's subagents made, and is refused to every subagent. The
  * first automation a thread's agent adds is an ask the person answers (Allow or Not now); after Allow it adds more
  * within the limits. Only a turn a person started may create or start a job or change what one does, so
  * no scheduled run, agent message, subagent or remote send can make jobs of its own and no chain of jobs can form. A job an
@@ -160,6 +165,26 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     job.projectId ?? (job.threadId ? host.threadMeta?.(job.threadId)?.projectId : undefined)
   /** The jobs an agent may see and change: the ones made through these tools by its own thread. A person's job is never one. */
   const visible = (job: ScheduledJob, ctx: ToolCallContext): boolean => job.createdBy?.threadId === ctx.caller.threadId
+  /** The thread that delegated `threadId` as a subagent; undefined for a thread that is no one's subagent (a fork is not one). */
+  const subagentParent = (threadId: string): string | undefined => {
+    const lineage = engine.delegations.getLineage(threadId)
+    return lineage?.relationship === 'subagent' ? lineage.parentThreadId : undefined
+  }
+  /** Whether a subagent of the caller (or a subagent of one of those) made the job through these tools. */
+  const madeBySubagent = (job: ScheduledJob, ctx: ToolCallContext): boolean => {
+    let current = job.createdBy?.threadId
+    for (let depth = 0; current && depth < SUBAGENT_DEPTH; depth += 1) {
+      current = subagentParent(current)
+      if (current === ctx.caller.threadId) return true
+    }
+    return false
+  }
+  /** Jobs this tool set removed, by job id and by request key, so a repeat or a retry is answered rather than refused. */
+  const removals = new Map<string, { removedBy: string; job: { id: string; name: string } }>()
+  const remember = (key: string, entry: { removedBy: string; job: { id: string; name: string } }): void => {
+    removals.set(key, entry)
+    while (removals.size > REMEMBERED_REMOVALS) removals.delete(removals.keys().next().value as string)
+  }
   const findVisible = (id: string, ctx: ToolCallContext): ScheduledJob => {
     const job = schedules.get(id)
     // A job the caller may not see is refused the same way whether it exists or not.
@@ -181,10 +206,10 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       )
   }
   /** Every change an agent makes is an `agent.action` event on its own thread, with a row in its transcript. */
-  const record = (ctx: ToolCallContext, action: string, job: Pick<ScheduledJob, 'id' | 'name'>, summaryText: string): void => {
+  const record = (ctx: ToolCallContext, action: string, job: Pick<ScheduledJob, 'id' | 'name'>, summaryText: string, target: { threadId: string; runId?: string } = { threadId: ctx.caller.threadId, runId: ctx.caller.runId }): void => {
     try {
       host.recordAgentAction?.(
-        { threadId: ctx.caller.threadId, runId: ctx.caller.runId },
+        target,
         { kind: 'agent', threadId: ctx.caller.threadId, runId: ctx.caller.runId, toolCallId: ctx.toolCallId },
         action,
         { jobId: job.id, jobName: job.name.slice(0, 120), summary: summaryText }
@@ -229,6 +254,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     ...(job.repeat ? { repeat: job.repeat } : {}),
     createdByAgent: Boolean(job.createdBy),
     createdByYou: job.createdBy?.threadId === ctx.caller.threadId,
+    ...(job.createdBy && job.createdBy.threadId !== ctx.caller.threadId ? { createdBySubagent: job.createdBy.threadId } : {}),
     ...(job.expiresAt ? { expiresAt: job.expiresAt } : {}),
     ...(job.pausedReason ? { pausedReason: job.pausedReason } : {}),
     ...(job.permissionCeiling ? { permissionCeiling: job.permissionCeiling } : {}),
@@ -264,11 +290,11 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       ...common,
       name: 'schedule_list',
       description:
-        'List the scheduled jobs your thread created. Jobs a person made, and jobs other threads made, are not shown and cannot be changed. Each job shows its cadence, state, when it ends, last runs and the limits its runs have.',
+        'List the scheduled jobs your thread created, and the ones your subagents created (createdBySubagent names the subagent\'s thread: you may remove those with schedule_delete, not change them). Jobs a person made, and jobs other threads made, are not shown and cannot be changed. Each job shows its cadence, state, when it ends, last runs and the limits its runs have.',
       inputSchema: { type: 'object', properties: {} },
       class: 'read',
       handler: (_args, ctx) => {
-        const jobs = schedules.list().filter((job) => visible(job, ctx)).map((job) => summary(job, ctx))
+        const jobs = schedules.list().filter((job) => visible(job, ctx) || madeBySubagent(job, ctx)).map((job) => summary(job, ctx))
         return json({ jobs })
       }
     },
@@ -486,6 +512,49 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         schedules.wake()
         record(ctx, 'scheduled_job_run', started, `started scheduled job "${started.name}" (${started.id})`)
         return json({ job: summary(started, ctx), started: true })
+      }
+    },
+    {
+      ...common,
+      name: 'schedule_delete',
+      description:
+        'Remove a scheduled job your thread created, or one your subagents created, for good: it leaves Automations and schedule_list and starts no further runs. A run that already started, or already waits in its thread\'s queue, still runs and finishes in that thread; its result is not recorded on any job. A person\'s job and another thread\'s job are never removed. A subagent cannot remove any job, not even its own: the thread that delegated it does. Any turn of your thread may remove one, so a job bound to your thread can remove itself when its work is done. The removal is recorded in your thread with the job\'s name. A repeat for a job already removed, or a retry with the same clientRequestId, says it is gone and changes nothing.',
+      inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, clientRequestId: CLIENT_REQUEST_ID_SCHEMA }, required: ['jobId'] },
+      class: 'mutation',
+      handler: (args, ctx) => {
+        // No delete permission for a subagent, whoever started its turn: its parent removes the job.
+        if (subagentParent(ctx.caller.threadId) !== undefined)
+          throw new McpToolError('mousse_scope_denied', 'A subagent cannot remove scheduled jobs, not even one it made. The thread that delegated you can remove it: say which job in your result.')
+        const id = requiredId(args, 'jobId')
+        const requestKey = `schedule_delete:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        const replay = removals.get(requestKey)
+        if (replay) return json({ removed: true, alreadyRemoved: true, replayed: true, job: replay.job })
+        const job = schedules.get(id)
+        if (!job || !(visible(job, ctx) || madeBySubagent(job, ctx))) {
+          // A job this thread removed before is gone, not refused; anything else is refused the same way whether it exists or not.
+          const earlier = removals.get(`job:${id}`)
+          if (!job && earlier?.removedBy === ctx.caller.threadId) return json({ removed: true, alreadyRemoved: true, job: earlier.job })
+          throw new McpToolError(
+            'mousse_scope_denied',
+            `No scheduled job ${id} that you or your subagents made. A thread removes only the jobs it made and the ones its subagents made; a person's job and another thread's job are not removed by an agent. A job you removed already is gone: schedule_list shows the ones you can remove.`
+          )
+        }
+        const entry = { removedBy: ctx.caller.threadId, job: { id: job.id, name: job.name } }
+        // The deletion Automations' Delete makes. False: someone removed it in between, which is the same outcome.
+        if (!schedules.remove(job.id)) return json({ removed: true, alreadyRemoved: true, job: entry.job })
+        remember(`job:${job.id}`, entry)
+        remember(requestKey, entry)
+        const summaryText = `removed scheduled job "${job.name}" (${job.id})`
+        record(ctx, 'scheduled_job_deleted', job, summaryText)
+        // A subagent's job: its own thread shows the removal too, by whom.
+        const creator = job.createdBy!.threadId
+        if (creator !== ctx.caller.threadId) record(ctx, 'scheduled_job_deleted', job, `${summaryText}, which this thread made; removed by thread ${ctx.caller.threadId}`, { threadId: creator })
+        const started = job.state === 'running' || job.pendingOccurrence !== undefined
+        return json({
+          removed: true,
+          job: entry.job,
+          ...(started ? { runInProgress: 'A run of this job had started or was waiting in its thread\'s queue; it still runs and finishes there, and its result is not recorded on any job.' } : {})
+        })
       }
     }
   ]

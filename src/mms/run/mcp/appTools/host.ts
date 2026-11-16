@@ -279,6 +279,11 @@ export interface AgentScheduleHost {
   create(input: CreateScheduledJobInput): ScheduledJob
   update(id: string, patch: Partial<ScheduledJob>): ScheduledJob | null
   pause(id: string, reason?: string): ScheduledJob | null
+  /**
+   * Deletes the job as Automations' Delete does (`MmsProfileServices.deleteScheduledJob`, the one deletion path): the job
+   * and its run history go; a run already started or queued in its thread still runs there. False when it was gone.
+   */
+  remove(id: string): boolean
   /** Makes the job due now, as Run now does; a job with a run in flight or waiting is returned as it is. */
   trigger(id: string): ScheduledJob | null
   /** The scheduler ticks now instead of at the next minute, so a job that was just made due starts within seconds. */

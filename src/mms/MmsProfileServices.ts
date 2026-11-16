@@ -72,6 +72,7 @@ import { BotImageMaker } from './bots/images/BotImageMaker'
 import { botInstructions } from './bots/instructions'
 import { createBotMemoryAdmin } from './bots/memory/admin'
 import type { BotMemoryStore } from './bots/memory/BotMemoryStore'
+import { botAsksFirst } from './bots/actions/BotActions'
 import { createProfileBotMemory } from './bots/memory/profileMemory'
 import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
@@ -861,6 +862,7 @@ export class MmsProfileServices {
       const { memory, journal, pack } = createProfileBotMemory({
         memory: { db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') },
         journal: {
+          asksFirstEnabled: () => botAsksFirst(this.settings.get()),
           readThread: (threadId) => this.threads.loadThreadData(threadId),
           listThreads: () => botThreadsForCatchUp(store.captureThreads()),
           // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
@@ -1149,6 +1151,7 @@ export class MmsProfileServices {
       create: (input) => this.scheduled.createJob(input),
       update: (id, patch) => this.scheduled.updateJob(id, patch),
       pause: (id, reason) => this.scheduled.pauseJob(id, reason),
+      remove: (id) => this.deleteScheduledJob(id),
       trigger: (id) => this.scheduled.triggerJob(id),
       wake: () => this.scheduled.wake()
     })
@@ -1909,6 +1912,19 @@ export class MmsProfileServices {
    * while one of them needs it, and an `event` watch off once none does. A failure to turn it on is shown on the row
    * (the watch is off), never thrown at the edit that caused it.
    */
+  /**
+   * Deletes a scheduled job: Automations' Delete (`scheduled.delete`) and an agent's `schedule_delete` both come here.
+   * The job and the run history on it go, and the scheduler starts no further runs; a run already started, or already
+   * waiting in its thread's queue, still runs there. The inbox keeps its runs and their threads. False when there was no such job.
+   */
+  deleteScheduledJob(id: string): boolean {
+    const watched = this.scheduled.getJob(id)?.trigger?.threadEvent?.threadId
+    const ok = this.scheduled.deleteJob(id)
+    // The pull request's watch stops with the last automation that needed it, unless it is a Notify watch.
+    if (ok && watched) this.syncThreadEventWatch(watched)
+    return ok
+  }
+
   syncThreadEventWatch(threadId: string): void {
     try {
       // A draft never runs, so it needs no watch until it is turned on.
