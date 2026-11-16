@@ -581,3 +581,10 @@ it('B2-whole keeps long reviewable text whole and sends the shown suffix', async
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
+it('B2-limit refuses an oversized total even when each individual value is small', async () => {
+  const t = await setup(true)
+  Object.assign(t.args, { chunks: Array(260).fill('A'.repeat(1000)) })
+  expect(await t.call()).toMatchObject({ isError: true, text: expect.stringContaining('256,000') })
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(t.calls).toEqual([])
+})
