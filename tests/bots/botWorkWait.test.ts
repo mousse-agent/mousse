@@ -153,7 +153,7 @@ it.each(['event already happened', 'turn still running', 'permission wall', 'unk
   expect(f.timers.slice(before).filter(t => t.ms === 0)).toEqual([])
   expect(f.bots.nextDueAt(botId)).toBeUndefined()
   if (state === 'permission wall' || state === 'unknown calls') {
-    f.runs.markTerminal(turn.payload.runId, 'completed')
+    await finish(f, turn.payload, 'completed', { text: '' })
     await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], {})
   } else await finish(f, turn.payload, 'completed', { text: '' })
   await flush()
