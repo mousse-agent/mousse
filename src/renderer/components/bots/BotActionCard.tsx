@@ -98,6 +98,9 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
     } finally { setSending(false) }
   }
   const previous = card.previous
+  const repeatedAt = previous && (new Date(previous.at).toDateString() === new Date().toDateString()
+    ? botGroupTime(previous.at)
+    : new Date(previous.at).toLocaleString([], { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))
   const argumentsView = <>
     {!card.tooLarge && <Arguments value={card.args} />}
     {card.note && <blockquote className="bot-action-note" aria-label="Bot note">{actionText(botName).replace(/\s+/g, " ")} says: <span>{actionText(card.note).replace(/\s+/g, " ")}</span></blockquote>}
@@ -108,7 +111,7 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
     {card.result && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
     {actionStatus(card) && <p role="status" className="bot-question-settled" data-find-text data-message-id={messageId} data-part-index="0">{actionStatus(card)}</p>}
     {card.status === 'open' && <>
-      {previous && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {botGroupTime(previous.at)}</p>}
+      {previous && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {repeatedAt}</p>}
       {card.hasHiddenValues && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />Hidden values will be sent{card.hiddenPaths.length ? ': ' : ''}<HiddenPaths paths={card.hiddenPaths as unknown as string[][]} /></p>}
       {card.tooLarge && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />This action is too large to review on this device. Use the computer to review and send it.</p>}
       {changed && <p role="status" className="bot-action-notice"><Shield size={14} aria-hidden />This changed since you saw it</p>}
