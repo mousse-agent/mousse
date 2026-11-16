@@ -141,11 +141,11 @@ it.each(['event already happened', 'turn still running', 'permission wall', 'unk
   let idle = false
   f.host.wakeThread = () => ({ state: idle ? 'idle' : 'running' })
   const { workId, turn } = await work()
-  const set = await wait(workId, state === 'event already happened' ? { kind: 'thread', threadId: 'other' } : undefined)
+  const set = await f.bots.tools.wakes!.wait!(botId, workId, { brief: 'Continue the release', ...(state === 'event already happened' ? { event: { kind: 'thread' as const, threadId: 'other' } } : { dueAt: new Date(f.clock.now + 5 * 60_000).toISOString() }) })
   if (state === 'permission wall') f.store.moveActivation(workId, ['running'], 'waiting_grant')
   if (state === 'unknown calls') f.store.moveActivation(workId, ['running'], 'paused', { endReason: 'unknown_calls' })
   idle = true
-  f.clock.now += 2 * 60 * 60_000
+  f.clock.now += 6 * 60_000
   if (state === 'event already happened') await f.bots.checkWakeEvents()
   const before = f.timers.length
   await f.bots.deliverDueReminders()
