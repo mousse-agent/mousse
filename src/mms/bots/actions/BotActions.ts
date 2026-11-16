@@ -207,7 +207,7 @@ export class BotActions {
   /** Erase call content without erasing owner intervention facts or the run-once key. */
   forgetText(botId: string, actionId?: string): void {
     if (!this.host.enabled()) return
-    this.host.store.run(`UPDATE bot_actions SET args_json = ?,
+    this.host.store.run(`UPDATE bot_actions SET args_json = ?, args_digest = '[forgotten]',
       card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0)),
       bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
     '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId, actionId ?? null, actionId ?? null)
