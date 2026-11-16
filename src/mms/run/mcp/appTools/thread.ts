@@ -1707,8 +1707,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_archive',
-      description: 'Archive one of your owner\'s threads when its work is merged or dropped and your owner asks you to tidy it away, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. archived: false unarchives it again. A thread that is still working is refused: stop it first with thread_interrupt.',
-      inputSchema: {
+      description: 'Archive this thread when your turn ends, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. Only when the user asks you to settle or archive this thread once its work is done (merged, or dropped), never on your own. Call it last, in the turn that finishes the work, and only when nothing is outstanding: no subagent, launched thread, background command, pending check or question to the user. It happens after your reply, and only if the turn ends well: a failed or stopped turn leaves the thread open. Your own thread only; a subagent cannot.',
+      botDescription: 'Archive one of your owner\'s threads when its work is merged or dropped and your owner asks you to tidy it away, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. archived: false unarchives it again. A thread that is still working is refused: stop it first with thread_interrupt.',
+      inputSchema: { type: 'object', properties: {} },
+      botInputSchema: {
         type: 'object',
         properties: {
           threadId: { type: 'string' },
@@ -1718,15 +1720,37 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       },
       access: 'managesOthers',
       class: 'mutation',
-      // A personal bot's tool ("use your threads"): no other thread lists it.
-      listed: (listing) => listing.botRole !== undefined,
       offered: () => false,
       handler: async (args, ctx) => {
+        const bot = botThreadCall(bots, ctx)
+        if (!bot) {
+          // A thread's agent archives its own thread only, when its turn ends.
+          if (args.threadId !== undefined && args.threadId !== ctx.caller.threadId)
+            throw new McpToolError('mousse_scope_denied', 'thread_archive archives your own thread only; the user archives other threads.')
+          if (args.archived === false) throw new McpToolError('mousse_scope_denied', 'thread_archive cannot unarchive; the user unarchives threads.')
+          if (!host.archiveOwnThreadAfterTurn) return notAvailable('thread_archive')
+          const result = host.archiveOwnThreadAfterTurn({ actor: actorOf(ctx) })
+          if (result.status === 'rejected') {
+            const why = result.reason === 'subagent'
+              ? 'A subagent cannot archive its thread.'
+              : result.reason === 'not_started_by_person'
+                ? 'Only a turn the user started can archive its thread.'
+                : 'This turn is not the thread\'s running turn.'
+            throw new McpToolError('mousse_scope_denied', `Not archived. ${why}`, { conflict: result.reason })
+          }
+          const own = ctx.caller.threadId
+          return json({
+            threadId: own,
+            link: threadLink(own),
+            archived: result.status === 'accepted' ? true : 'after_this_turn',
+            note: result.status === 'accepted'
+              ? 'This thread is already archived.'
+              : 'This thread is archived once this turn ends, unless the turn fails or is stopped. Call it last, in the turn that finishes the work, and only when nothing is outstanding: no subagent, launched thread, background command, pending check or question to the user. Finish your reply as usual.'
+          })
+        }
         const threadId = requiredId(args, 'threadId')
         if (args.archived !== undefined && typeof args.archived !== 'boolean') throw new Error('archived must be true or false')
         const archived = args.archived !== false
-        const bot = botThreadCall(bots, ctx)
-        if (!bot) throw new McpToolError('mousse_scope_denied', 'thread_archive is for personal bots; agents leave archiving to the user.')
         if (!host.setThreadArchived) return notAvailable('thread_archive')
         // The one rule of what a bot reaches (`botThreadReach`): never its own chat or another bot's thread, a private
         // thread, a subagent or the Automation manager's; its owner's threads in its projects, and the ones it started.

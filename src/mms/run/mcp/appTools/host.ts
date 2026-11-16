@@ -181,6 +181,16 @@ export type AgentArchiveResult =
   | { status: 'accepted'; archived: boolean; changed: boolean }
   | { status: 'rejected'; reason: 'thread_running' }
 
+/**
+ * What asking to archive the caller's own thread did (`thread_archive` from a thread's agent): `scheduled` archives it
+ * when the running turn ends well, `changed: false` when it already is archived. Refused for a subagent, a bot's thread,
+ * a turn no person started, or a run that is not the thread's running turn.
+ */
+export type AgentArchiveOwnResult =
+  | { status: 'scheduled' }
+  | { status: 'accepted'; changed: false }
+  | { status: 'rejected'; reason: 'subagent' | 'not_started_by_person' | 'not_running' }
+
 /** A thread's queue as a reader sees it: what is waiting, what a turn has claimed, and the revision a change must name. */
 export interface QueueSnapshot {
   /** Pending and steering items, in order; internal items are left out. */
@@ -458,6 +468,8 @@ export interface AppToolHost extends DelegationToolsHost {
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Archives (`archived`) or unarchives another thread through the app's own Archive, as a personal bot's call (`thread_archive`). */
   setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult>
+  /** Archives the caller's own thread once its running turn ends well (`thread_archive` from a thread's agent). */
+  archiveOwnThreadAfterTurn?(options: { actor: AgentActor }): AgentArchiveOwnResult
   /**
    * Hides a thread the calling bot started from its owner's sidebar, or shows it there again (`thread_hide`). `changed`
    * is false when it already was so.

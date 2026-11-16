@@ -162,8 +162,9 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     // With no turn of its own running, none; and never what no bot can hold.
     expect(thread(registry.listForThread('home', 'default').map((tool) => tool.name))).toEqual([])
     expect(registry.listForThread('home', 'default', runId).map((tool) => tool.name).filter((name) => name === 'delegate_task' || name === 'continue_subagent')).toEqual([])
-    // Archiving is a bot's tool only: an ordinary thread does not list it.
-    expect(registry.listForThread('mine', 'default').map((tool) => tool.name)).not.toContain('thread_archive')
+    // An ordinary thread lists it as the agent's own (its own thread only, no thread to name).
+    const own = registry.listForThread('mine', 'default').find((tool) => tool.name === 'thread_archive')
+    expect(own?.inputSchema).toEqual({ type: 'object', properties: {} })
   })
 
   // Who the bot may reach, by each tool that names a thread: whether read, send, wait, stop and archive go ahead. Every thread the
@@ -489,14 +490,14 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(await text('thread_archive', { threadId: 'mine' })).toEqual({ error: true, text: expect.stringContaining('is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_interrupt') })
     expect(host.showAgentAction).not.toHaveBeenCalled()
     expect(onAppResult).not.toHaveBeenCalled()
-    // An ordinary thread's agent never archives through it, even if it names the tool.
+    // An ordinary thread's agent archives only its own thread: another thread it names is refused.
     fx?.dispose()
     fx = undefined
     const fresh = await world({ threads: 'all' })
     const plain = await fx!.runningRun('mine')
     fresh.turns.register(appTurn({ threadId: 'mine', runId: plain.runId }))
     const asAgent = await fresh.registry.call('thread_archive', { threadId: 'archived' }, fresh.request({ threadId: 'mine', runId: plain.runId })).catch((error: Error) => ({ isError: true, text: error.message }))
-    expect(asAgent).toMatchObject({ isError: true, text: expect.stringContaining('thread_archive is for personal bots') })
+    expect(asAgent).toMatchObject({ isError: true, text: expect.stringContaining('archives your own thread only') })
     expect(fresh.host.setThreadArchived).not.toHaveBeenCalled()
   })
 

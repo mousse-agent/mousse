@@ -85,7 +85,7 @@ import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
-import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { botMessage } from '../run/mcp/appTools/agentMessage'
@@ -779,6 +779,9 @@ const CONTINUATION_REFUSALS: ReadonlySet<string> = new Set([
 const ADMITTED_TURN_FAILURES = new WeakMap<object, { workflowRun?: WorkflowChatRun }>()
 
 /** Agent messages in a row, without a person in between, that a message may be the end of; the next one is refused. */
+/** Why a thread its agent asked to archive stayed open when the turn ended (`archiveOwnThreadNow`). */
+export const ARCHIVE_AFTER_TURN_KEPT = 'Not archived: this thread still has work queued or running.'
+
 export const AGENT_MESSAGE_MAX_HOPS = 3
 
 /**
@@ -2087,6 +2090,8 @@ export class OrchestratorService extends EventEmitter {
   private runEngineUnsubscribe: (() => void) | null = null
   /** Runs whose bridge write hit a stale epoch; later marks for that turn are skipped. */
   private readonly staleRuns = new Set<string>()
+  /** Threads whose agent asked to archive them when the running turn ends (`archiveOwnThreadAfterTurn`), by thread. */
+  private readonly archiveAfterTurn = new Map<string, { runId: string; actor: AgentActor }>()
   /** `WAKE_BUSY_DEFER_MS`; tests shorten it. */
   private readonly wakeBusyDeferMs = WAKE_BUSY_DEFER_MS
   /** `DEFINITION_HEARTBEAT_MS`; tests shorten it. */
@@ -4406,6 +4411,7 @@ export class OrchestratorService extends EventEmitter {
       noteOnThread: (threadId, text, launched) => this.noteAgentLaunch(threadId, text, launched),
       stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
       setThreadArchived: (threadId, archived, options) => this.setThreadArchivedAsAgent(threadId, archived, options),
+      archiveOwnThreadAfterTurn: (options) => this.archiveOwnThreadAfterTurn(options),
       setThreadHidden: (threadId, hidden, options) => this.setThreadHiddenAsAgent(threadId, hidden, options),
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
       approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
@@ -5367,6 +5373,118 @@ export class OrchestratorService extends EventEmitter {
       payload: { action: archived ? 'archived_thread' : 'unarchived_thread', actorThreadId: options.actor.threadId, actorRunId: options.actor.runId, toolCallId: options.actor.toolCallId }
     })
     return { status: 'accepted', archived, changed: true }
+  }
+
+  /**
+   * `thread_archive` from a thread's own agent: the person asked it to archive ("settle") its thread when done. A turn
+   * cannot archive the thread it runs in, so the request is kept with the run and done when that turn ends well
+   * (`archiveAfterTurnEnds`). Only the thread's own top-level turn that a person started: never a subagent, a bot's
+   * thread, or a turn another agent's message started.
+   */
+  private archiveOwnThreadAfterTurn(options: { actor: AgentActor }): AgentArchiveOwnResult {
+    const engine = this.requireRunEngine()
+    const { threadId, runId } = options.actor
+    const thread = this.threadStore?.getThread(threadId)
+    let botThread = false
+    try {
+      botThread = thread?.botOwned === true || this.botThreads?.roleOf(threadId) !== undefined
+    } catch {
+      botThread = true
+    }
+    if (!thread || botThread) throw new McpToolError('mousse_scope_denied', 'thread_archive is not available in this thread.')
+    if (thread.lineage?.relationship === 'subagent') return { status: 'rejected', reason: 'subagent' }
+    if (thread.settledAt) return { status: 'accepted', changed: false }
+    if (engine.getActiveRun(threadId)?.runId !== runId) return { status: 'rejected', reason: 'not_running' }
+    if (!this.runStartedByPerson(options.actor)) return { status: 'rejected', reason: 'not_started_by_person' }
+    this.archiveAfterTurn.set(threadId, { runId, actor: options.actor })
+    return { status: 'scheduled' }
+  }
+
+  /**
+   * The end of a turn whose agent asked to archive its thread (`archiveOwnThreadAfterTurn`). A turn that ended well is
+   * archived through the app's own Archive (`settleThread`) once its run has let go of the thread, unless that Archive
+   * would end work still outstanding by then (`archiveOwnThreadKept`). The thread then stays, and says why.
+   * A turn that failed, paused or was stopped leaves the thread as it is.
+   */
+  private archiveAfterTurnEnds(threadId: string, runId: string | undefined, ended: 'completed' | 'failed' | 'interrupted' | 'paused'): void {
+    const request = this.archiveAfterTurn.get(threadId)
+    if (!request || request.runId !== runId) return
+    this.archiveAfterTurn.delete(threadId)
+    if (ended !== 'completed') return
+    // After the turn's own settling (its lease, the drain it asks for), never inside it.
+    setImmediate(() => {
+      void this.archiveOwnThreadNow(threadId, request.actor).catch((error: unknown) => {
+        console.warn('a thread its agent asked to archive could not be archived', { threadId, error: error instanceof Error ? error.message : String(error) })
+      })
+    })
+  }
+
+  private async archiveOwnThreadNow(threadId: string, actor: AgentActor): Promise<void> {
+    const engine = this.runEngine
+    const store = this.threadStore
+    if (!engine || !store || !store.getThread(threadId)) return
+    // The one wait: the computers the thread's launches run on. Everything after it, up to the archive, runs without
+    // yielding, so no turn or message can start between the last check and the archive (an archived thread takes none).
+    const remoteWorking = await this.remoteLaunchesWorking([threadId, ...subagentDescendants(threadId, store.listAllThreads())])
+    const thread = store.getThread(threadId)
+    if (!thread || thread.settledAt || this.lifecycle.stopping) return
+    const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+    if (session?.deleted) return
+    if (session) this.refreshSessionQueueFromDisk(session)
+    if (remoteWorking || this.archiveOwnThreadKept(threadId, actor.runId, session)) {
+      const target = session ?? this.getOrCreateSession(threadId)
+      this.sessionAls.run(target, () => this.addSystemMessage(ARCHIVE_AFTER_TURN_KEPT))
+      return
+    }
+    // `settleThread` marks the thread archived before its first wait.
+    await this.settleThread(threadId, true)
+    engine.store.appendEvent({
+      threadId,
+      runId: null,
+      type: 'agent.action',
+      payload: { action: 'archived_thread', actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
+    })
+  }
+
+  /** Whether any of these threads launched a thread on another computer that is still working there (`launchedThreadsWorking`). */
+  private async remoteLaunchesWorking(launcherThreadIds: readonly string[]): Promise<boolean> {
+    const remote = this.remoteThreads
+    if (!remote) return false
+    for (const id of launcherThreadIds) {
+      if ((await remote.working(id)) > 0) return true
+    }
+    return false
+  }
+
+  /**
+   * Whether a thread its agent asked to archive still has local work an Archive would end (`settleThread` is a Stop, and
+   * a Stop reaches all of it): a queued message, a run starting, running, waiting or paused, provider background work (a
+   * command it left running), or a question to the person, in the thread or a subagent below it; or a thread one of
+   * them launched here that is still working (`remoteLaunchesWorking` asks the other computers). The turn that asked
+   * (`askedRunId`) is not counted. Synchronous, so the archive can follow it with nothing starting in between.
+   */
+  private archiveOwnThreadKept(threadId: string, askedRunId: string, session: ThreadSession | undefined): boolean {
+    const engine = this.requireRunEngine()
+    const store = this.threadStore
+    if (!store) return true
+    if (session?.isTurnRunning() || session?.turnAdmitted) return true
+    const threads = store.listAllThreads()
+    const subtree = new Set([threadId, ...subagentDescendants(threadId, threads)])
+    const runs = engine.store.listNonTerminalRuns()
+    if (runs.some((run) => subtree.has(run.threadId) && run.runId !== askedRunId)) return true
+    const busy = new Set(runs.map((run) => run.threadId))
+    if (threads.some((thread) => thread.createdByThreadId !== undefined && subtree.has(thread.createdByThreadId) && busy.has(thread.id))) return true
+    for (const id of subtree) {
+      if (this.providerBackground.has(id) || this.questions.listPendingForThread(id).length > 0) return true
+      const live = id === threadId ? session : this.boundSession.threadId === id ? this.boundSession : this.sessions.get(id)
+      if (live?.isTurnRunning() || live?.turnAdmitted) return true
+      try {
+        if (listPendingQueue(readDurableQueue(store, id)).length > 0) return true
+      } catch {
+        return true
+      }
+    }
+    return false
   }
 
   /**
@@ -11480,6 +11598,8 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     if (session.activeTurn === turn) session.activeTurn = null
+    // The agent asked to archive the thread when this turn ends.
+    this.archiveAfterTurnEnds(session.threadId, turn.runId, wasAborted ? 'interrupted' : paused ? 'paused' : failed ? 'failed' : 'completed')
     // The turn's terminal write saw its unread steers and held the thread's tasks. They are queued as a
     // follow-up turn now (which keeps holding them), or were dropped (which releases them).
     if (hadUnreadSteers) this.reevaluateHold(session.threadId)
