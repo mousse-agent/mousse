@@ -178,13 +178,13 @@ When a model's context fills inside one long dispatch, the runtime compacts it b
 
 Work that takes long is held to the bot's own budget, its work time per activation (an hour in the starter grant) and its turn budget when the grant has one, never to a runtime's limits on one turn.
 
-Work that waits uses one path: `BotEngine.park` writes the existing blocked status and end reason inside the wake source's transaction; `releaseParked` releases its browser and pack after commit. `WORK_WAIT_RULES` in `activation/workWaiting.ts` defines which activations may park, readiness, stranded endings and the projected work line. `workWaits`, `resumeWork`, `settleStrandedWork` and the chat projection read these rules. Only the owner's work can park; scheduled runs still end at a limit. No stored values or message ids change.
+Work that waits uses one path: `BotEngine.park` writes the existing blocked status and end reason inside the wake source's transaction; `releaseParked` releases its browser and pack after commit. `WORK_WAIT_RULES` in `activation/workWaiting.ts` defines which activations may park, readiness, stranded endings, Continue refusals, owner-wait and shown-attention facts, note acceptance, store-backed continuation options and the projected work line. Both the chat and `work_list` use its status. `workWaits`, `resumeWork`, `settleStrandedWork` and the chat projection read these rules. Only the owner's work can park; scheduled runs still end at a limit. No stored values or message ids change.
 
 | Reason (stored wake marker) | What wakes it | Stranded when | Work line and card |
 |---|---|---|---|
 | `question` (`question_answered`) | Tap, reply or default | Its question is gone: `question_gone` and a notice | Waiting on you; question bubble with answers |
 | `budget_exhausted` (`room_allowed`) | Allow on its limit | No open ask for that limit: `nothing_to_wait_for` and a notice | Held; partial result with the limit card; queued after Allow |
-| `usage_limit` | Reset time or Resume | The bot has a usage pause with no reset time: `nothing_to_wait_for` and a notice | Held; the bot's pause line gives the reset time and Resume |
+| `usage_limit` | Reset time or Resume | The bot has a usage pause with no reset time: `nothing_to_wait_for` and a notice | Held; legacy bots show their bot-wide pause line; picked models show their entry's limit line once per limit, without pausing the bot. Both give the retry time and Resume |
 
 All three keep the existing week expiry, Stop and queue limits. A provider that omits a reset time gets a 30-minute retry time, so it is not stranded just because the provider omitted one. The details below describe the wake sources and their messages; they all use the shared parking rules.
 
