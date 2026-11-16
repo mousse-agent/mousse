@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
+import { flushSync } from 'react-dom'
 import type { AppletReference } from '../../../shared/applets'
 import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { subscribeAppletScroll } from './scrollPresentation'
@@ -208,6 +209,9 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
       if (runtime.current && !scrollPaused && geometry !== lastGeometry) {
         lastGeometry = geometry
         const live = { x: area.x - rect.left, y: area.y - rect.top, width: area.width, height: area.height }
+        // Before the view moves or its clip shrinks (a hover label), show the frame wherever either geometry leaves the
+        // live view off, so no strip is blank until the reply below sets the new area.
+        flushSync(() => setLiveArea((previous) => (previous ? overlapOf(previous, live) : previous)))
         void api
           .update({ runtimeId: runtime.current, bounds, clip, visible: true })
           .then(() => {
@@ -342,4 +346,11 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
   ])
 
   return { runtime, ready, error, setError, scrollImage, liveArea, height, conversationInput, setConversationInput }
+}
+
+/** The part two areas share, or null when they share none. */
+function overlapOf(a: ScreenRect, b: ScreenRect): ScreenRect | null {
+  const x = Math.max(a.x, b.x), y = Math.max(a.y, b.y)
+  const right = Math.min(a.x + a.width, b.x + b.width), bottom = Math.min(a.y + a.height, b.y + b.height)
+  return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null
 }
