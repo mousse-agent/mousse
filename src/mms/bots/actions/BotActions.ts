@@ -89,6 +89,7 @@ const pending = new Set(['open', 'approved', 'running'])
 export class BotActionChanged extends Error { readonly code = 'bot_action_changed' }
 const changed = () => new BotActionChanged('This changed since you saw it. Redraw the action.')
 export class BotActions {
+  private readonly executing = new Set<string>()
   constructor(private readonly host: Host) {}
   get(id: string): ActionRow | undefined { return this.host.store.get('SELECT * FROM bot_actions WHERE id = ?', id) as unknown as ActionRow | undefined }
   forWork(id: string): ActionRow | undefined {
@@ -181,12 +182,15 @@ export class BotActions {
     }
     // Separate autocommits: a restart can distinguish approved from a call that may have reached the server.
     if (!action.exec_args || !this.transition(id, 'approved', 'running')) return
+    this.executing.add(id)
     try {
       const result = await this.host.execute(row, JSON.parse(action.target_json), JSON.parse(action.exec_args))
       // A transport failure can have happened after the server acted. Never promise that retrying is safe.
       this.transition(id, 'running', result.isError ? result.callState ?? 'uncertain' : 'done', result)
     } catch (error) {
       this.transition(id, 'running', error instanceof BotActionChanged ? 'failed' : 'uncertain', { text: error instanceof BotActionChanged ? error.message : 'It could not be confirmed whether this went through: check before trying again.' })
+    } finally {
+      this.executing.delete(id)
     }
     this.finish(action)
   }
@@ -200,7 +204,8 @@ export class BotActions {
     const interrupted = this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")
     await this.host.refresh()
     for (const a of interrupted) {
-      const action = this.get(String(a.id))!
+      const action = this.get(String(a.id))
+      if (!action || this.executing.has(action.id)) continue
       if (action.status === 'running') {
         if (this.transition(action.id, 'running', 'uncertain', { text: 'It could not be confirmed whether this went through: check before trying again.' })) this.finish(action)
       } else await this.runApproved(action.id)
