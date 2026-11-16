@@ -8231,8 +8231,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const activationId = this.store.message(messageId)?.activationId
     const trigger = activationId ? this.store.activation(activationId)?.trigger : undefined
     if (trigger?.kind !== 'schedule') return false
-    return (trigger.completed?.canWakeMe ?? this.host.schedules?.get(botId, trigger.scheduleId)?.canWakeMe
-      ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === trigger.scheduleId)?.canWakeMe) === true
+    if (trigger.completed) return trigger.completed.canWakeMe === true
+    try {
+      return (this.host.schedules?.get(botId, trigger.scheduleId)?.canWakeMe
+        ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === trigger.scheduleId)?.canWakeMe) === true
+    } catch { return false } // An unavailable job store never prevents the report from being posted.
   }
   private followUpTime(botId: string, at: number): number { return this.host.quietHoursFor?.(botId, at)?.end ?? at }
   noteOwnerActivity(): void { this.host.ownerActivity?.(); this.quietHoursChanged() }
