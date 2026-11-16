@@ -5317,6 +5317,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       const waits = current.trigger.kind === 'work' ? this.store.unreadWorkWaits(current.id) : []
       const actions = current.trigger.kind === 'work' ? this.store.unreadWorkActions(current.id) : []
+      const refusals = this.workRefusalUpdates(current.id)
       const actionCaused = current.endReason === 'approval_answered' ? actions.at(-1) : undefined
       const waited = waits.length > 0
       const n = this.store.nextDispatchN(row.id)
@@ -5332,6 +5333,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const deliveryQuestion = input.usageRetry ? undefined : durableWork ? this.store.unreadWorkQuestion(current.id) : question
       const answered = deliveryQuestion?.status === 'answered' || deliveryQuestion?.status === 'defaulted' ? this.workAnswerOf(deliveryQuestion) : undefined
       const workEvents: WorkContinuationEvent[] | undefined = durableWork ? [
+        ...refusals,
         ...actions.map(action => ({ at: (action.status === 'declined' ? action.answered_at : action.ran_at) ?? action.answered_at ?? current.createdAt, text: actionContinuation(action), actionId: action.id })),
         ...waits.map(wait => ({ at: wait.dueAt, text: workWaitInput(wait, clockTime) })),
         ...answers.map(answer => ({ at: answer.answeredAt ?? answer.createdAt, answer })),
@@ -5342,10 +5344,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (answered) this.store.markAnswerSent(deliveryQuestion!.id, n, answered, !readAtStart)
       // A usage retry repeats the previous text, so only its carried ids may be confirmed by that retry.
       const delivery = input.usageRetry && previous ? {
+        ...(previous.prompt.workRefusalIds ? { workRefusalIds: previous.prompt.workRefusalIds } : {}),
         ...(previous.prompt.workActionIds ? { workActionIds: previous.prompt.workActionIds } : {}),
         ...(previous.prompt.workWaitIds ? { workWaitIds: previous.prompt.workWaitIds } : {}),
         ...(previous.prompt.workDelivery ? { workDelivery: previous.prompt.workDelivery } : {})
       } : {
+        ...(refusals.length ? { workRefusalIds: refusals.map(event => event.id) } : {}),
         ...(actions.length ? { workActionIds: actions.map(action => action.id) } : {}),
         ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}),
         ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: deliveryQuestion!.id } : {}) } } : {})
@@ -6416,6 +6420,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** Confirmation is advisory: a failed write means repeat the update, never fail the runtime's turn. */
+  private workRefusalUpdates(workId: string) { return this.store.unreadWorkRefusals(workId) }
+
   private confirmWorkDelivery(activationId: string, n: number, why: 'output' | 'completed'): void {
     try { this.store.confirmWorkDelivery(activationId, n, why) }
     catch (error) {

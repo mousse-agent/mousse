@@ -247,9 +247,7 @@ export class BotActions {
     return this.host.store.ownerLastWroteSeq(action.bot_id) > Number(card.ownerSeq ?? 0) || note > Number(card.noteSeq ?? 0)
   }
   private refuse(row: BotActivationRow, action: ActionRow, text: string): ToolOutcome {
-    // A lost tool reply must not lose the refusal: use the same ordered notes as other updates.
-    if (!this.host.store.get('SELECT 1 FROM bot_work_notes WHERE activation_id = ? AND from_message = ? AND text = ?', row.id, action.message_id, text))
-      this.host.store.addWorkNote(row.id, row.botId, text, action.message_id)
+    this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner declined') ? 'repeat' : 'loop'}`, text)
     return { text, isError: true }
   }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {

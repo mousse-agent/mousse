@@ -796,6 +796,7 @@ export interface BotDispatchRow {
     workTold?: 'pending' | 'output' | 'completed'
     workWaitIds?: string[]
     workActionIds?: string[]
+    workRefusalIds?: string[]
     /** Carried ids for replay; existing read/applied markers remain independent of confirmation. */
     workDelivery?: { answers: string[]; notes: number[]; question?: string }
   }
@@ -890,7 +891,7 @@ export interface BotCountersRow {
 const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN ('output', 'completed') OR (json_extract(d.prompt_json, '$.workTold') IS NULL AND d.outcome IS 'completed'))"
 
 const hasWorkUpdates = (prompt: BotDispatchRow['prompt']): boolean => Boolean(
-  prompt.workActionIds?.length || prompt.workWaitIds?.length || prompt.workDelivery?.notes.length ||
+  prompt.workRefusalIds?.length || prompt.workActionIds?.length || prompt.workWaitIds?.length || prompt.workDelivery?.notes.length ||
   prompt.workDelivery?.answers.length || prompt.workDelivery?.question
 )
 
@@ -2002,6 +2003,20 @@ export class BotStore {
       AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workActionIds') told
         WHERE d.activation_id = a.activation_id AND ${WORK_TOLD} AND told.value = a.id)
       ORDER BY COALESCE(a.ran_at, a.answered_at, a.created_at), a.rowid`, workId) as unknown as ActionRow[]
+  }
+
+  recordWorkRefusal(workId: string, botId: string, id: string, text: string): void {
+    this.run('INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId,
+      `cursor:action-refusal:${workId}:${id}`, JSON.stringify({ at: this.now(), text }))
+  }
+
+  /** Mousse updates are neither owner notes nor a reason to start another turn. */
+  unreadWorkRefusals(workId: string): Array<{ id: string; at: string; text: string }> {
+    const prefix = `cursor:action-refusal:${workId}:`
+    return this.all(`SELECT s.key, s.value FROM bot_memory_state s WHERE substr(s.key, 1, ?) = ?
+      AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workRefusalIds') told
+        WHERE d.activation_id = ? AND ${WORK_TOLD} AND told.value = s.key) ORDER BY s.rowid`, prefix.length, prefix, workId)
+      .map(row => ({ id: String(row.key), ...JSON.parse(String(row.value)) as { at: string; text: string } }))
   }
 
   /** Confirmation controls replay only; existing carried/read markers are not changed here. */

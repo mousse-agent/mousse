@@ -1230,14 +1230,14 @@ it('a repeat refusal joins unread work updates without another action or card', 
   const next = await start(f, t.workId, 2)
   ;(next.prepared as any).modelOutput?.()
   await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-refused', signal: new AbortController().signal })
-  expect(f.store.unreadWorkNotes(t.workId).map(n => n.text).join(' ')).toContain('Do not ask again')
+  expect(f.store.unreadWorkRefusals(t.workId).map(n => n.text).join(' ')).toContain('Do not ask again')
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
   await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
   await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], { network: true })
   expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('Do not ask again')
   const receiving = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   ;(receiving.prepared as any).modelOutput?.()
-  expect(f.store.unreadWorkNotes(t.workId)).toEqual([])
+  expect(f.store.unreadWorkRefusals(t.workId)).toEqual([])
 })
 
 it('switch off keeps repeated and differing calls direct without cards or refusal notes', async () => {
@@ -1341,7 +1341,7 @@ it.each([true, false])('B3 three declined cards stop changed calls until owner i
   }
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(on ? 3 : 0)
   if (!on) { expect(t.calls).toHaveLength(20); return }
-  expect(f.store.unreadWorkNotes(t.workId).map(n => n.text).join(' ')).toContain('said no three times')
+  expect(f.store.unreadWorkRefusals(t.workId).map(n => n.text).join(' ')).toContain('said no three times')
   expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__other', args: t.args, toolCallId: 'another-tool', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
   await finish(f, runtime.payload)
   const other = f.bots.actions.forWork(t.workId)!
