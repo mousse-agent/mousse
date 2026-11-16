@@ -364,7 +364,10 @@ export class BotActions {
     }
     const row = this.valid(action)
     if (!row) {
-      if (Date.parse(action.expires_at) > Date.parse(this.host.store.now()) && !this.host.obsolete(action)) return
+      const current = this.host.store.activation(action.activation_id)
+      let intact = false
+      try { intact = Boolean(action.exec_args && action.exec_args.length <= ACTION_MAX_ARGUMENT_CHARS && !containsCredential(JSON.parse(action.exec_args)) && actionDigest(JSON.parse(action.exec_args)) === action.args_digest) } catch { /* Corrupt arguments are never recoverable. */ }
+      if (Date.parse(action.expires_at) > Date.parse(this.host.store.now()) && intact && current && !this.host.binding(current, JSON.parse(action.target_json)) && !this.host.obsolete(action)) return
       this.transition(id, 'approved', Date.parse(action.expires_at) <= Date.parse(this.host.store.now()) ? 'expired' : 'withdrawn', { text: 'This changed since you saw it. Nothing was sent; carry on without it.' })
       this.finish(action)
       return
