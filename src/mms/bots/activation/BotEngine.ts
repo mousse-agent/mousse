@@ -113,7 +113,7 @@ import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagent
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
-import { isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
+import { computeNextRun, isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
 import { tellMeNotifies } from '../../../shared/automations'
 import type { RunLevel } from '../../../shared/automationInbox'
 import { statusLineOf } from '../activity/statusLine'
@@ -614,6 +614,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     store: this.host.store,
     refresh: async () => { await this.host.mcp?.warm() },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
+    lifetime: row => {
+      if (row.trigger.kind !== 'schedule') return 48 * 3600_000
+      const schedule = this.host.schedules?.get(row.botId, row.trigger.scheduleId)
+      if (!schedule) return 3600_000
+      const at = new Date(row.trigger.occurrenceAt)
+      const next = computeNextRun(schedule.when, at.toISOString(), at)
+      return Math.max(3600_000, next ? Date.parse(next) - at.getTime() : 3600_000)
+    },
     name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
     publish: id => { this.chat.republish(id) },
@@ -635,11 +643,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!server) return undefined
       const source = row.trigger.kind === 'work' ? this.store.activation(row.trigger.from) : row
       const limit = source?.trigger.kind === 'manual' ? source.trigger.owner?.limit ?? null : null
-      return { ...server, pairLevel: pair.level ?? 'allowed', deviceLimit: limit }
+      const schedule = row.trigger.kind === 'schedule' ? this.host.schedules?.get(row.botId, row.trigger.scheduleId) : undefined
+      if (row.trigger.kind === 'schedule' && !schedule) return undefined
+      return { ...server, pairLevel: pair.level ?? 'allowed', deviceLimit: limit, ...(schedule ? { scheduleRevision: schedule.revision } : {}) }
     },
     obsolete: action => {
       const row = this.store.activation(action.activation_id)
       const held = JSON.parse(action.binding_json)
+      if (row?.trigger.kind === 'schedule' && this.host.schedules?.get(row.botId, row.trigger.scheduleId)?.revision !== held.scheduleRevision) return true
       const tool = JSON.parse(action.target_json) as BotMcpTool
       const pair = row && this.actionPair(row, tool)
       if (!pair || held.pairLevel !== (pair.level ?? 'allowed')) return true

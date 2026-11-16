@@ -179,6 +179,7 @@ interface Host {
   name(botId: string): string
   refresh(): Promise<void>
   park(row: BotActivationRow): void
+  lifetime(row: BotActivationRow): number
   schema(tool: BotMcpTool): unknown
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
   obsolete(action: ActionRow): boolean
@@ -289,16 +290,20 @@ export class BotActions {
     const existing = this.host.store.get('SELECT id FROM bot_actions WHERE call_key = ?', callKey)
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
-    const removed = (this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND json_extract(card_json, '$.ownerRemoved') = 1 ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool })) as unknown as ActionRow[]).find(action => !this.ownerWroteAfter(action, true))
+    // Work's refusals belong to that work; occurrences share their schedule's owner intervention.
+    const scope = row.trigger.kind === 'schedule'
+      ? this.host.store.all("SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id WHERE a.bot_id = ? AND json_extract(w.trigger_json, '$.kind') = 'schedule' AND json_extract(w.trigger_json, '$.scheduleId') = ? AND a.target_json = ? ORDER BY a.rowid DESC", row.botId, row.trigger.scheduleId, JSON.stringify({ server: tool.server, tool: tool.tool }))
+      : this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool }))
+    const history = scope as unknown as ActionRow[]
+    const removed = history.find(action => JSON.parse(action.card_json ?? '{}').ownerRemoved && !this.ownerWroteAfter(action, true))
     if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
-    const declined = this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND status IN ('declined', 'expired') ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool })) as unknown as ActionRow[]
-    const unanswered = declined.filter(action => !this.ownerWroteAfter(action))
+    const unanswered = history.filter(action => ['declined', 'expired'].includes(action.status) && !this.ownerWroteAfter(action))
     if (unanswered.length >= MAX_SAME_WAKES)
       return this.refuse(row, unanswered[0], 'You had three cards for this tool that were not sent. Say what you need in your report and wait for your owner to write.')
     const digest = actionDigest(args)
-    const refused = this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND args_digest = ? AND status IN ('declined', 'expired') ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), digest)[0]
-    if (refused && !this.ownerWroteAfter(refused as unknown as ActionRow))
-      return this.refuse(row, refused as unknown as ActionRow, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')
+    const refused = unanswered.find(action => action.args_digest === digest)
+    if (refused)
+      return this.refuse(row, refused, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
@@ -313,7 +318,7 @@ export class BotActions {
         args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
       id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues, serverName: tool.serverName }), messageId,
-      new Date(Date.parse(this.host.store.now()) + 48 * 3600_000).toISOString(), this.host.store.now())
+      new Date(Date.parse(this.host.store.now()) + this.host.lifetime(row)).toISOString(), this.host.store.now())
       this.host.park(row)
       this.host.post(row, messageId, `${tool.serverName} · ${tool.tool}\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)
     })
