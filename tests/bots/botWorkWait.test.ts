@@ -396,6 +396,7 @@ it.each(['allow', 'not_now'] as const)('carries a permission wall %s and its wai
   // An intent is not a started turn; its store facts are still unread.
   expect(f.store.unreadWorkWaits(workId).map(r => r.id)).toContain(set.wakeId)
   const next = await start(f, workId, 2)
+  ;(next.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkWaits(workId)).toEqual([])
   f.bots.tools.work.note(botId, workId, 'Read the release notes next.', chat.id)
   await finish(f, next.payload, 'completed', { text: '' })
@@ -405,7 +406,7 @@ it.each(['allow', 'not_now'] as const)('carries a permission wall %s and its wai
   expect(following).toContain('Read the release notes next.')
 })
 
-it('keeps notes and question answers unread until the wait continuation starts', async () => {
+it('keeps notes and question answers unread until the wait continuation produces output', async () => {
   const { workId, turn, chat } = await work()
   f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
   const questionId = f.store.workQuestion(workId)!.id
@@ -427,6 +428,7 @@ it('keeps notes and question answers unread until the wait continuation starts',
   expect(f.store.pendingWorkNotes(workId)).toHaveLength(1)
   expect(f.store.question(questionId)?.readAt).toBeNull()
   const next = await start(f, workId, 2)
+  ;(next.prepared as any).modelOutput?.()
   expect(f.store.pendingWorkNotes(workId)).toEqual([])
   expect(f.store.question(questionId)?.readAt).not.toBeNull()
   f.bots.tools.work.note(botId, workId, 'Now check the changelog.', chat.id)
@@ -475,6 +477,7 @@ it('keeps wait additions through a usage hold before the dispatch starts and a r
   await flush()
   const dispatch = f.store.lastMainDispatch(workId)!
   const next = await start(f, workId, dispatch.n)
+  ;(next.prepared as any).modelOutput?.()
   expect(next.prepared.prompt).toContain('Check again with the evidence already read.')
   expect(next.prepared.prompt).toContain('Read the release notes too.')
   expect(next.prepared.prompt).toContain('Which release?')
@@ -500,7 +503,8 @@ it('keeps a delivered wait unread while the run queue has no free slot', async (
   await flush()
   expect(f.store.dispatch(workId, 2)?.prompt.text).toContain('Check again with the evidence already read.')
   expect(f.store.activation(queued.workId)?.status).toBe('queued')
-  await start(f, workId, 2)
+  const receiving = await start(f, workId, 2)
+  ;(receiving.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkWaits(workId)).toEqual([])
 })
 
@@ -588,4 +592,46 @@ it.each(['question', 'wall'] as const)('uses the master opening when an owner %s
   await flush()
   const key = kind === 'question' ? 'question answered / none' : 'wall Allow / none'
   expect(f.store.dispatch(workId, 3)?.prompt.text).toBe(golden.prompts[key])
+})
+
+it.each(['restart', 'network'] as const)('N2 repeats a wait, note and answer after %s until output confirms them', async failure => {
+  const { workId, turn, chat } = await work()
+  f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
+  const questionId = f.store.workQuestion(workId)!.id
+  await wait(workId)
+  await finish(f, turn.payload)
+  f.bots.tools.work.note(botId, workId, 'Remember the delivery evidence.', chat.id)
+  await f.bots.service.answerQuestion({ botId, questionId, choice: 'A', clientRequestId: 'N2-answer' })
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  const next = await start(f, workId, 2)
+  expect(f.store.unreadWorkWaits(workId)).toHaveLength(1)
+  expect(f.store.pendingWorkNotes(workId)).toHaveLength(1)
+  expect(f.store.question(questionId)?.readAt).toBeNull()
+  if (failure === 'restart') {
+    // Simulate the previous build's eager read markers as well as a fresh interrupted dispatch.
+    f.store.run('UPDATE bot_work_notes SET applied_at = ? WHERE activation_id = ?', f.store.now(), workId)
+    f.store.run('UPDATE bot_questions SET read_at = ? WHERE id = ?', f.store.now(), questionId)
+    f.runs.markTerminal(next.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+  } else {
+    await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
+    await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
+  }
+  await flush()
+  const retry = f.store.lastMainDispatch(workId)!
+  expect(retry.n).toBeGreaterThan(2)
+  for (const text of ['Check again with the evidence already read.', 'Remember the delivery evidence.', 'Which release?']) expect(retry.prompt.text).toContain(text)
+  const running = await start(f, workId, retry.n)
+  ;(running.prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkWaits(workId)).toEqual([])
+  expect(f.store.pendingWorkNotes(workId)).toEqual([])
+  expect(f.store.question(questionId)?.readAt).not.toBeNull()
+  await finish(f, running.payload, 'failed', { outcome: { error: 'network_error' } })
+  await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
+  const later = f.store.lastMainDispatch(workId)!.prompt.text
+  for (const text of ['Check again with the evidence already read.', 'Remember the delivery evidence.', 'Which release?']) expect(later).not.toContain(text)
 })

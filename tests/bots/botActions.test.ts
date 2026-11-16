@@ -638,7 +638,7 @@ it.each(['credential', 'oversized'] as const)('B-recovery refuses a previously a
   expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'withdrawn', exec_args: null })
 })
 
-it('A-limit keeps the sent outcome unread through a time wall until the resumed dispatch starts', async () => {
+it('A-limit keeps the sent outcome unread through a time wall until the resumed dispatch produces output', async () => {
   const t = await setup(true)
   f.clock.now += 60 * 60_000 - 10_000
   await t.call()
@@ -655,8 +655,10 @@ it('A-limit keeps the sent outcome unread through a time wall until the resumed 
   expect(dispatch.prompt.text).toContain('delivered')
   expect((dispatch.prompt as any).workActionIds).toEqual([a.id])
   expect(t.calls).toEqual([t.args])
-  await start(f, t.workId, dispatch.n)
-  expect((f.store as any).unreadWorkActions(t.workId)).toEqual([])
+  const receiving = await start(f, t.workId, dispatch.n)
+  expect(f.store.unreadWorkActions(t.workId)).toHaveLength(1)
+  ;(receiving.prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
 })
 
 
@@ -842,4 +844,48 @@ it.each(['$ref', 'allOf', 'anyOf', 'oneOf', 'recursive', 'remote', 'broken', 'de
   await finish(f, t.work.payload)
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
+})
+
+it.each(['restart', 'network'] as const)('N2 repeats a sent outcome after %s only until model output confirms delivery', async failure => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const next = await start(f, t.workId, 2)
+  expect(f.store.unreadWorkActions(t.workId).map(a => a.id)).toEqual([a.id])
+  if (failure === 'restart') {
+    f.runs.markTerminal(next.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+  } else {
+    await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
+    await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], { network: true })
+  }
+  await flush()
+  const retry = f.store.lastMainDispatch(t.workId)!
+  expect(retry.n).toBeGreaterThan(2)
+  expect(retry.prompt.text).toContain('Your owner sent it. The tool answered:')
+  expect(retry.prompt.text).toContain('delivered')
+  const running = await start(f, t.workId, retry.n)
+  ;(running.prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+  await finish(f, running.payload, 'failed', { outcome: { error: 'network_error' } })
+  await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], { network: true })
+  expect(f.store.lastMainDispatch(t.workId)!.prompt.text).not.toContain('Your owner sent it')
+  expect(t.calls).toEqual([t.args])
+})
+
+it('N2 a completed dispatch confirms a sent outcome without a streamed response', async () => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const next = await start(f, t.workId, 2)
+  expect(f.store.unreadWorkActions(t.workId)).toHaveLength(1)
+  await finish(f, next.payload, 'completed')
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+  expect((f.store.dispatch(t.workId, 2)!.prompt as any).workTold).toBe('completed')
 })
