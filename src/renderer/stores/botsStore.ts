@@ -612,6 +612,8 @@ export const useBotsStore = create<BotsState>((set, get) => {
       } catch (cause) {
         if (owner !== epoch) throw cause
         await get().loadChat(botId)
+        // A gone row unmounts its card, so its refusal belongs in the chat's existing notice.
+        if (owner === epoch && !get().chats[botId]?.messages.some(message => message.action?.actionId === actionId)) fail(owner, cause, botId)
         return { reason: String((cause as { code?: unknown } | null)?.code ?? 'request_failed'), text: errorText(cause) }
       }
     },
