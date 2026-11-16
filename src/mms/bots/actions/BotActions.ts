@@ -327,7 +327,6 @@ export class BotActions {
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
-    await this.host.refresh()
     const action = this.get(input.actionId)
     if (!action) throw new BotActionChanged('This call is no longer available.', 'bot_action_gone')
     if (action.status === 'expired') throw new BotActionChanged('This call expired. Nothing was sent.', 'bot_action_expired')
@@ -351,10 +350,11 @@ export class BotActions {
       if (!this.transition(action.id, 'open', 'approved')) throw changed()
       this.host.ownerAnswered(this.host.store.activation(action.activation_id)!)
     })
-    await this.runApproved(action.id)
+    await this.runApproved(action.id, true)
     return { status: this.get(action.id)!.status }
   }
-  private async runApproved(id: string): Promise<void> {
+  private async runApproved(id: string, refresh = false): Promise<void> {
+    if (refresh) await this.host.refresh()
     const action = this.get(id)
     if (!action || action.status !== 'approved') return
     if (this.host.store.registry(action.bot_id)?.pausedReason === 'owner') {
