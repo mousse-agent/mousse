@@ -2251,6 +2251,22 @@ describe('a bot turn on Codex', () => {
     return { bot, calls }
   }
 
+  it.each(['mousse', 'mousse-relay'])('switches off the owner server %s without an attachment', async (name) => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { mcp_servers: { [name]: { url: 'https://owner.invalid/mcp', enabled: true } } }, layers: [] } }),
+      ...threadStart(5, threadParams({ config: { [`mcp_servers.${name}.enabled`]: false, ...NO_COMMANDS, model_provider: 'openai' } })),
+      ...turnStart(6, 'go'),
+      completed('completed')
+    ])
+    await new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: bot as never })
+    replay.assertDone()
+  })
+
   it('runs in Ask with the user\'s MCP servers off, in its files folder; its authority answers every approval and nobody is asked', async () => {
     const files = join(home, 'files')
     mkdirSync(files)
