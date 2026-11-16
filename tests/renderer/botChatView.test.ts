@@ -2122,7 +2122,7 @@ it('keeps the A note/subject probes and B multiline recipient probe inside label
   fake.chats.inbox = [held({ note, args: { subject, to: [recipient], 'Hidden values will be sent': 'pretend notice' }, previous: { status: 'done', at: AT } })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
-  const argumentsRegion = card.querySelector('[role="region"][aria-label="Complete arguments"]')!
+  const argumentsRegion = card.querySelector('[role="region"][aria-label="Everything it will send"]')!
   expect(argumentsRegion).toBeTruthy()
   expect(argumentsRegion.querySelector('blockquote')?.textContent).toContain('Hi↵')
   expect(argumentsRegion.textContent).toContain('alice@example.com↵\nbcc↵\nevil@example.com')
@@ -2136,7 +2136,7 @@ it('keeps the A note/subject probes and B multiline recipient probe inside label
 it('distinguishes scalar data types, scalar-looking text and empty text', async () => {
   fake.chats.inbox = [held({ args: { off: false, textOff: 'false', on: true, textOn: 'true', count: 123, textCount: '123', nothing: null, textNothing: 'null', list: [], textList: '[]', object: {}, textObject: '{}', empty: '', plain: 'An ordinary sentence' } })]
   await open()
-  const args = host.querySelector('[aria-label="Complete arguments"]')!
+  const args = host.querySelector('[aria-label="Everything it will send"]')!
   const value = (key: string) => [...args.querySelectorAll('dt')].find((element) => element.textContent === key)!.nextElementSibling!
   for (const [key, display] of [['off', 'false'], ['on', 'true'], ['count', '123'], ['nothing', 'null'], ['list', '[]'], ['object', '{}']]) {
     expect(value(key).querySelector('code')?.textContent).toBe(display)
@@ -2152,9 +2152,9 @@ it.each(['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expi
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
   expect(card.querySelector('[aria-label="Action summary"]')?.textContent).toBe('Send an email · Mail')
-  const fold = card.querySelector<HTMLDetailsElement>('details[aria-label="Action arguments"]')!
+  const fold = card.querySelector<HTMLDetailsElement>('details')!
   expect(fold?.open).toBe(false)
-  expect(fold.querySelector('[aria-label="Complete arguments"]')).toBeTruthy()
+  expect(fold.querySelector('[aria-label="Everything it will send"]')).toBeTruthy()
   expect(card.querySelector('[role="status"]')?.textContent).toContain(' · ')
   if (status === 'failed') expect(card.querySelector('[aria-label="Tool result"]')?.textContent).toBe('Partly delivered')
   await click(fold.querySelector('summary'))
@@ -2165,24 +2165,24 @@ it.each(['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expi
 it('folds long list values and names when more arguments remain below', async () => {
   fake.chats.inbox = [held({ args: { subject: 'S'.repeat(250), to: ['alice@example.com\n'.repeat(40)], final: 'Last field' } })]
   await open()
-  const args = host.querySelector<HTMLElement>('[aria-label="Complete arguments"]')!
+  const args = host.querySelector<HTMLElement>('[aria-label="Everything it will send"]')!
   const subject = [...args.querySelectorAll('dt')].find((item) => item.textContent === 'subject')!.nextElementSibling!
   expect(subject.querySelector('details')?.open).toBe(false)
   expect(args.querySelector('li details')?.textContent).toContain('alice@example.com')
   expect(args.textContent).toContain('Last field')
   Object.defineProperties(args, { scrollHeight: { configurable: true, value: 900 }, clientHeight: { configurable: true, value: 360 }, scrollTop: { configurable: true, writable: true, value: 0 } })
   await act(async () => args.dispatchEvent(new Event('scroll', { bubbles: true })))
-  expect(host.textContent).toContain('More arguments below')
+  expect(host.textContent).toContain('More below')
   args.scrollTop = 540
   await act(async () => args.dispatchEvent(new Event('scroll', { bubbles: true })))
-  expect(host.textContent).not.toContain('More arguments below')
+  expect(host.textContent).not.toContain('More below')
 })
 
 it('shows a too-large device stub without null arguments or an empty hidden-field list', async () => {
   fake.chats.inbox = [held({ tooLarge: true, args: null, hiddenPaths: [] })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
-  expect(card.querySelector('[aria-label="Complete arguments"]')).toBeNull()
+  expect(card.querySelector('[aria-label="Everything it will send"]')).toBeNull()
   expect(card.textContent).toContain('too large to review on this device')
   expect(card.textContent).toContain('Hidden values will be sent')
   expect(card.textContent).not.toContain('Hidden values will be sent:')
@@ -2210,7 +2210,7 @@ it('guards hidden characters consistently while preserving ordinary script and e
   const hidden = '\u2028\u2029\u034f\u115f\u1160\u3164\uffa0\u200b\u202e\u2067\ufeff'
   fake.chats.inbox = [held({ args: { subject: `before${hidden}after`, to: ['bob@exa\u200dmple.com', 'https://exa\u200cmple.com', 'bоb@example.com'], 'tо': 'lookalike name', ordinary: 'می‌روم 👩‍💻 Ελληνικά Русский' } })]
   await open()
-  const args = host.querySelector('[aria-label="Complete arguments"]')!
+  const args = host.querySelector('[aria-label="Everything it will send"]')!
   expect(args.textContent).not.toContain(hidden)
   expect(args.textContent).toContain(`before${'�'.repeat([...hidden].length)}after`)
   expect(args.textContent).toContain('bob@exa�mple.com')
@@ -2270,11 +2270,11 @@ it.each(['open', 'done'])('finds literal title and visible status with matching 
 it('updates the more-arguments cue when a nested fold opens without scrolling', async () => {
   fake.chats.inbox = [held()]
   await open()
-  const region = host.querySelector<HTMLElement>('[aria-label="Complete arguments"]')!
+  const region = host.querySelector<HTMLElement>('[aria-label="Everything it will send"]')!
   Object.defineProperties(region, { scrollHeight: { configurable: true, value: 900 }, clientHeight: { configurable: true, value: 360 }, scrollTop: { configurable: true, value: 0 } })
   const fold = region.querySelector('details')!
   await act(async () => { fold.open = true; fold.dispatchEvent(new Event('toggle')) })
-  expect(host.textContent).toContain('More arguments below')
+  expect(host.textContent).toContain('More below')
 })
 
 it.each([
@@ -2306,7 +2306,7 @@ it('distinguishes quoted text, backslashes and the literal empty-text label', as
   const values = ['false', '"false"', '"a\\b"', '(empty text)', '']
   fake.chats.inbox = [held({ args: Object.fromEntries(values.map((value, index) => [String(index), value])) })]
   await open()
-  const blocks = [...host.querySelectorAll('[aria-label="Complete arguments"] > dl > div > dd')].map(block => block.textContent)
+  const blocks = [...host.querySelectorAll('[aria-label="Everything it will send"] > dl > div > dd')].map(block => block.textContent)
   expect(blocks).toEqual(['"false"', JSON.stringify('"false"'), JSON.stringify('"a\\b"'), '"(empty text)"', '(empty text)'])
   expect(new Set(blocks).size).toBe(values.length)
 })
@@ -2315,7 +2315,7 @@ it('notes non-ASCII address and phone letters or digits without warning on ordin
   const values = ['bob@ｅxample.com', 'bob@exօmple.com', 'раураӏ.рф', '+1 ８００ 555 0100', 'Мария Иванова']
   fake.chats.inbox = [held({ args: Object.fromEntries(values.map((value, index) => [String(index), value])) })]
   await open()
-  const blocks = [...host.querySelectorAll('[aria-label="Complete arguments"] > dl > div > dd')]
+  const blocks = [...host.querySelectorAll('[aria-label="Everything it will send"] > dl > div > dd')]
   for (const block of blocks.slice(0, 4)) expect(block.textContent).toContain('Contains letters or digits outside A–Z and 0–9')
   expect(blocks[4].textContent).toBe('Мария Иванова')
 })
@@ -2323,7 +2323,7 @@ it('notes non-ASCII address and phone letters or digits without warning on ordin
 it('shows field-name line breaks as marks and gives an empty field a name', async () => {
   fake.chats.inbox = [held({ args: { 'to\nalice@example.com': 'evil@example.com', '': 'value' } })]
   await open()
-  const names = [...host.querySelectorAll('[aria-label="Complete arguments"] dt')].map(item => item.textContent)
+  const names = [...host.querySelectorAll('[aria-label="Everything it will send"] dt')].map(item => item.textContent)
   expect(names).toEqual(['to↵alice@example.com', '(no name)'])
 })
 

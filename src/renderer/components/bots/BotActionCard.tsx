@@ -55,7 +55,7 @@ function Arguments({ value }: { value: unknown }) {
     return () => { observer?.disconnect(); element?.removeEventListener('toggle', measure, true) }
   }, [value])
   return <>
-    <div ref={region} className="bot-action-arguments" role="region" tabIndex={0} aria-label="Complete arguments" onScroll={measure}><Value value={value} /></div>
+    <div ref={region} className="bot-action-arguments" role="region" tabIndex={0} aria-label="Everything it will send" onScroll={measure}><Value value={value} /></div>
     {more && <p role="note" className="bot-action-notice">More below</p>}
   </>
 }
@@ -82,6 +82,13 @@ function outcome(card: BotActionCardData): string {
 
 export function actionTitle(card: BotActionCardData): string {
   return actionText(card.title).replace(/\s+/g, ' ')
+}
+
+function reviewLabel(card: BotActionCardData): string {
+  if (card.status === 'done' || card.status === 'failed' && card.result?.toolReportedError) return 'What it sent'
+  if (card.status === 'uncertain') return 'What it tried to send'
+  if (card.status === 'approved' || card.status === 'running') return 'What it is sending'
+  return 'What it would have sent'
 }
 
 export function actionStatus(card: BotActionCardData): string {
@@ -114,7 +121,7 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   </>
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
     <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span> · <span className="bot-action-server">{actionText(card.serverName)}</span></p>
-    {card.status === 'open' ? argumentsView : <details aria-label="Action arguments"><summary>Review arguments</summary>{argumentsView}</details>}
+    {card.status === 'open' ? argumentsView : <details aria-label={reviewLabel(card)}><summary>{reviewLabel(card)}</summary>{argumentsView}</details>}
     {card.result && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
     {actionStatus(card) && <p role="status" className="bot-question-settled" data-find-text data-message-id={messageId} data-part-index="1">{actionStatus(card)}</p>}
     {refusal && <p role="status" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(refusal.text).replace(/\s+/g, ' ')}</p>}
