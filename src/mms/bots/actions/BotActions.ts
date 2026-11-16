@@ -16,7 +16,7 @@ export const actionDigest = (value: unknown): string => shortHash(canonicalJson(
 export function maskedActionData(value: unknown): unknown {
   if (typeof value === 'string') return maskMemoryCredentials(value).slice(0, 32_000)
   if (Array.isArray(value)) return value.map(maskedActionData)
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [maskMemoryCredentials(key), /^(authorization|password|secret|token|api[_-]?key)$/i.test(key) ? '[held back: looks like a secret]' : maskedActionData(item)]))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [maskMemoryCredentials(key), /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, '')) ? '[held back: looks like a secret]' : maskedActionData(item)]))
   return value
 }
 export interface ActionRow {
