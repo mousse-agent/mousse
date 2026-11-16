@@ -565,3 +565,27 @@ it('marks a denied limit answered even when work has a past wait', async () => {
   expect(f.store.pendingAnswers(workId)).toEqual([])
   expect(f.store.escalation(wall.escalation.id)?.appliedAt).not.toBeNull()
 })
+
+it.each(['question', 'wall'] as const)('uses the master opening when an owner %s answer resumes work after a past wait', async kind => {
+  const { default: golden } = await import('./fixtures/continuationMaster.json')
+  const { workId, turn } = await work()
+  await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  const next = await start(f, workId, 2)
+  if (kind === 'question') {
+    f.bots.askOwner(botId, workId, { question: 'Which flat?', choices: [{ label: 'A' }, { label: 'B' }] })
+    const questionId = f.store.workQuestion(workId)!.id
+    await finish(f, next.payload, 'completed', { text: '' })
+    await f.bots.service.answerQuestion({ botId, questionId, choice: 'A', clientRequestId: 'after-wait-question' })
+  } else {
+    const wall = f.store.db.transaction(() => (f.bots as any).wallInTransaction(workId, ['running'], { dispatchN: 2, kind: 'escalate', permission: { tool: 'shell' }, reason: 'Run the check' }))
+    await finish(f, next.payload, 'completed', { text: '' })
+    await f.bots.answerAsk(botId, wall.escalation.id, 'allow')
+  }
+  await flush()
+  const key = kind === 'question' ? 'question answered / none' : 'wall Allow / none'
+  expect(f.store.dispatch(workId, 3)?.prompt.text).toBe(golden.prompts[key])
+})
