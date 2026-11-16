@@ -163,12 +163,13 @@ describe('a bot\'s secret is masked in what a turn of its work keeps', () => {
     delete process.env.MOUSSE_HOME
   })
 
-  /** Every file under `root` but the secret store's own value file, with its text. */
+  /** Every file under `root` but the secret store's own value file and the threads' private copies, with its text. */
   const filesUnder = (root: string): Array<{ path: string; text: string }> => {
     const out: Array<{ path: string; text: string }> = []
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir)) {
         const path = join(dir, entry)
+        if (path === join(root, 'secrets', 'threads')) continue
         if (statSync(path).isDirectory()) walk(path)
         else if (!path.endsWith(join('secrets', 'refs.json'))) out.push({ path, text: readFileSync(path).toString('latin1') })
       }
