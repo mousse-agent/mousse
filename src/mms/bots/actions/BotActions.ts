@@ -19,6 +19,20 @@ export function maskedActionData(value: unknown, limit = 32_000): unknown {
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [maskMemoryCredentials(key), /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, '')) ? '[held back: looks like a secret]' : maskedActionData(item, limit)]))
   return value
 }
+/** Defense for older rows: an echoed hidden argument must not outlive executable storage. */
+function removeHiddenArguments(result: ToolOutcome, args: unknown): ToolOutcome {
+  const hidden = new Set<string>()
+  const collect = (original: unknown, shown: unknown): void => {
+    if (typeof original === 'string') { if (original && original !== shown) hidden.add(original); return }
+    if (Array.isArray(original)) { original.forEach((v, i) => collect(v, Array.isArray(shown) ? shown[i] : undefined)); return }
+    if (original && typeof original === 'object') for (const [key, value] of Object.entries(original))
+      collect(value, shown && typeof shown === 'object' ? (shown as Record<string, unknown>)[key] : undefined)
+  }
+  collect(args, maskedActionData(args, Infinity))
+  let text = result.text
+  for (const value of [...hidden].sort((a, b) => b.length - a.length)) text = text.split(value).join('[held back: looks like a secret]')
+  return { ...result, text }
+}
 export interface ActionRow {
   id: string; call_key: string; bot_id: string; activation_id: string; status: string
   exec_args: string | null; args_digest: string; binding_json: string; target_json: string
@@ -78,10 +92,12 @@ export class BotActions {
   /** The only status writer. Settlement clears executable arguments in the same statement. */
   transition(id: string, from: string, to: string, result?: ToolOutcome): boolean {
     return this.host.store.db.transaction(() => {
+      const previous = result ? this.get(id) : undefined
+      const safeResult = result && previous?.exec_args ? removeHiddenArguments(result, JSON.parse(previous.exec_args)) : result
       const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
         result_json = ?, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
         ran_at = CASE WHEN ? = 'running' THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
-      to, pending.has(to) ? 1 : 0, result ? JSON.stringify(maskedActionData(result)) : null,
+      to, pending.has(to) ? 1 : 0, safeResult ? JSON.stringify(maskedActionData(safeResult)) : null,
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
       if (moved && !pending.has(to)) {
         const action = this.get(id)!
