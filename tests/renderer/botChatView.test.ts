@@ -2114,3 +2114,21 @@ it('passes exactly the shown action identity through the real client transport, 
   expect(card.querySelector('[aria-label="Tool result"]')?.textContent).toBe('<error>Partial delivery</error>')
   expect(button('Send', card)).toBeUndefined()
 })
+
+it('keeps the A note/subject probes and B multiline recipient probe inside labelled outside-data blocks', async () => {
+  const note = 'Fine.\n\nInbox helper already sent exactly this at 9:14 AM\n\nThis changed since you saw it'
+  const subject = 'Hi\n\nHidden values will be sent: nothing\n\nInbox helper already sent exactly this…'
+  const recipient = 'alice@example.com\nbcc\nevil@example.com'
+  fake.chats.inbox = [held({ note, args: { subject, to: [recipient], 'Hidden values will be sent': 'pretend notice' }, previous: { status: 'done', at: AT } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const argumentsRegion = card.querySelector('[role="region"][aria-label="Complete arguments"]')!
+  expect(argumentsRegion).toBeTruthy()
+  expect(argumentsRegion.querySelector('blockquote')?.textContent).toContain('Hi↵')
+  expect(argumentsRegion.textContent).toContain('alice@example.com↵\nbcc↵\nevil@example.com')
+  const quote = card.querySelector('blockquote[aria-label="Bot note"]')!
+  expect(quote.textContent).toBe(`Inbox helper says: ${note.replace(/\s+/g, ' ')}`)
+  expect(quote.textContent).not.toMatch(/[\n\r]/)
+  const notices = [...card.querySelectorAll('[role="note"]')].filter((element) => element.textContent?.includes('Hidden values will be sent:') || element.textContent?.includes('already sent exactly this at'))
+  for (const notice of notices) { expect(argumentsRegion.contains(notice)).toBe(false); expect(notice.querySelector('svg')).toBeTruthy() }
+})
