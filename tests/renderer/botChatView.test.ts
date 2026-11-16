@@ -2038,7 +2038,7 @@ it('shows complete stored action arguments as guarded text, with an in-place bod
 })
 it('answers only the card id, digest and choice, then redraws a changed card with live buttons', async () => {
   fake.chats.inbox = [held()]
-  const answer = vi.fn(async () => { fake.chats.inbox = [held({ digest: 'new-digest', title: 'Changed email' })]; throw Object.assign(new Error('changed'), { code: 'bot_action_changed' }) })
+  const answer = vi.fn(async () => { fake.chats.inbox = [held({ digest: 'new-digest', title: 'Changed email' })]; throw Object.assign(new Error('This changed since you saw it'), { code: 'bot_action_changed' }) })
   Object.assign(fake.client, { answerAction: answer })
   await open()
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))

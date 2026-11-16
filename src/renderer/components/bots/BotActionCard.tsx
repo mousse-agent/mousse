@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Shield } from '../../lib/icons'
-import { useBotsStore } from '../../stores/botsStore'
+import { useBotsStore, type BotActionRefusal } from '../../stores/botsStore'
 import { guardTextCharacters } from '../../../shared/bots/personal/modelSlots'
 import { botGroupTime } from './messageGroups'
 
@@ -84,7 +84,7 @@ export function actionStatus(card: BotActionCardData): string {
 
 export function BotActionCard({ card, botId, botName, messageId }: { card: BotActionCardData; botId: string; botName: string; messageId: string }) {
   const [sending, setSending] = useState(false)
-  const [changed, setChanged] = useState(false)
+  const [refusal, setRefusal] = useState<BotActionRefusal | null>(null)
   const [error, setError] = useState('')
   const answer = async (choice: 'send' | 'not_now') => {
     if (sending) return
@@ -92,7 +92,7 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
     setError('')
     try {
       const result = await useBotsStore.getState().answerAction(botId, card.actionId, card.digest, choice)
-      setChanged(result === 'changed')
+      setRefusal(result)
     } catch {
       setError('Could not answer. Try again.')
     } finally { setSending(false) }
@@ -110,11 +110,11 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
     {card.status === 'open' ? argumentsView : <details aria-label="Action arguments"><summary>Review arguments</summary>{argumentsView}</details>}
     {card.result && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
     {actionStatus(card) && <p role="status" className="bot-question-settled" data-find-text data-message-id={messageId} data-part-index="0">{actionStatus(card)}</p>}
+    {refusal && <p role="status" className="bot-action-notice"><Shield size={14} aria-hidden />{actionText(refusal.text).replace(/\s+/g, ' ')}</p>}
     {card.status === 'open' && <>
       {previous && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {repeatedAt}</p>}
       {card.hasHiddenValues && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />Hidden values will be sent{card.hiddenPaths.length ? ': ' : ''}<HiddenPaths paths={card.hiddenPaths as unknown as string[][]} /></p>}
       {card.tooLarge && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />This action is too large to review on this device. Use the computer to review and send it.</p>}
-      {changed && <p role="status" className="bot-action-notice"><Shield size={14} aria-hidden />This changed since you saw it</p>}
       {error && <p role="alert" className="bot-action-notice"><Shield size={14} aria-hidden />{error}</p>}
       <div className="bot-ask-buttons" role="group" aria-label="Answer this action">
         <button type="button" disabled={sending || card.tooLarge} onClick={() => void answer('send')}>Send</button>
