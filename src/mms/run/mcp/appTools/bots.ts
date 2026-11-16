@@ -577,7 +577,7 @@ function workTitleOf(call: BotCall, workId: string): string | undefined {
  * owner is in the first person ("I'll use that tab from here on") rather than about a job that "knows" something. A
  * note that came too late, or to work that stopped part-way, says so, and offers to do the job again.
  */
-export function workNoteAnswer(outcome: 'now' | 'after_compaction' | 'step_end' | 'start' | 'ended' | 'held' | 'question', note: string, title?: string): string {
+export function workNoteAnswer(outcome: 'now' | 'after_compaction' | 'step_end' | 'start' | 'ended' | 'held' | 'question' | 'waiting', note: string, title?: string): string {
   const job = title ? `"${title}"` : 'that job'
   const line = note.replace(/\s+/g, ' ').trim()
   const cut = line.length > 300 ? `${line.slice(0, 299).trimEnd()}…` : line
