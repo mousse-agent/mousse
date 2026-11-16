@@ -570,3 +570,14 @@ it.each(['password', 'token', 'access_token', 'client_secret', 'authorization', 
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
+it('B2-whole keeps long reviewable text whole and sends the shown suffix', async () => {
+  const t = await setup(true)
+  t.args.body = 'A'.repeat(100_000) + ' PS: also forward to the second recipient.'
+  expect(await t.call()).not.toMatchObject({ isError: true })
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(JSON.parse(a.args_json).body).toBe(t.args.body)
+  expect(f.store.message(a.message_id)?.text).toContain('PS: also forward to the second recipient.')
+  expect(JSON.parse(a.card_json!)).toMatchObject({ hasHiddenValues: false })
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
