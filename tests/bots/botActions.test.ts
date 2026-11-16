@@ -891,3 +891,18 @@ it('N2 a completed dispatch confirms a sent outcome without a streamed response'
   expect(f.store.unreadWorkActions(t.workId)).toEqual([])
   expect((f.store.dispatch(t.workId, 2)!.prompt as any).workTold).toBe('completed')
 })
+
+it.each(['2024', 'abcd1234', '123456789'] as const)('N4 replaces short hidden values only at word boundaries: %s', async value => {
+  const t = await setup(true)
+  Object.assign(t.args, { password: value })
+  const embedded = `x${value}y é${value}é _${value}_ 1${value}5 {"id":1${value}5}`
+  vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ content: [{ type: 'text', text: `${embedded}\nexact=${value}; end` }] } as never)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const text = JSON.parse(f.bots.actions.forWork(t.workId)!.result_json!).text
+  if (value.length <= 8) expect(text).toContain(embedded)
+  else expect(text).not.toContain(value)
+  expect(text).toContain('exact=[held back: looks like a secret]; end')
+})
