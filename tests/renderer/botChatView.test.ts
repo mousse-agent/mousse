@@ -2326,3 +2326,11 @@ it('shows field-name line breaks as marks and gives an empty field a name', asyn
   const names = [...host.querySelectorAll('[aria-label="Complete arguments"] dt')].map(item => item.textContent)
   expect(names).toEqual(['to↵alice@example.com', '(no name)'])
 })
+
+it('keeps a curly-quoted arrow name in one unquoted hidden-path segment', async () => {
+  fake.chats.inbox = [held({ hiddenPaths: [['a” → “b', 'token']] })]
+  await open()
+  const path = host.querySelector('[aria-label="Hidden field path"]')!
+  expect(path.querySelector('q')).toBeNull()
+  expect([...path.querySelectorAll('[aria-label="Field name"]')].map(item => item.textContent)).toEqual(['a” → “b', 'token'])
+})
