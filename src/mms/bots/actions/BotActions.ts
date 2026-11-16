@@ -144,8 +144,9 @@ export class BotActions {
   }
   async reconcile(): Promise<void> {
     if (!this.host.enabled()) return
+    const interrupted = this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")
     await this.host.refresh()
-    for (const a of this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")) {
+    for (const a of interrupted) {
       const action = this.get(String(a.id))!
       if (action.status === 'running') {
         if (this.transition(action.id, 'running', 'uncertain', { text: 'It could not be confirmed whether this went through: check before trying again.' })) this.finish(action)
