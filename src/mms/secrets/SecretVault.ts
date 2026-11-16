@@ -30,6 +30,18 @@ type MetaFile = Record<string, SecretMeta>
 export const RETIRED_SECRET_GRACE_MS = 60_000
 
 /**
+ * How long a retired value is remembered after the last thread that used it was seen running. A subagent of the thread
+ * that had it may first ask for its masker long after that thread settled, so the value outlives the owner's grace.
+ */
+export const RETIRED_SECRET_KEEP_MS = 24 * 60 * 60 * 1000
+
+/** Values retired from a thread's masker, and when each thread that may use them (it, or a subagent) was last running. */
+interface RetiredSecrets {
+  secrets: Array<{ name: string; value: string }>
+  seen: Map<string, number>
+}
+
+/**
  * Whether a thread has a turn running, in this process or in the run engine. A lookup that fails (a run conflict) counts
  * as running: masking a removed value a little longer is safe, and a throw here would break every masker of the thread.
  */
@@ -77,8 +89,8 @@ export class SecretVault {
   private readonly maskers = new Map<string, SecretMasker | null>()
   /** The values each built masker covers, so a change can keep them masking a thread whose turn is still running. */
   private readonly known = new Map<string, Array<{ name: string; value: string }>>()
-  /** Values removed or changed while a thread's turn ran, and when it was last seen running: they mask it until it settles. */
-  private readonly retired = new Map<string, { secrets: Array<{ name: string; value: string }>; lastBusy: number }>()
+  /** Values removed or changed while a thread's turn ran: they mask it, and its running subagents, until each settles. */
+  private readonly retired = new Map<string, RetiredSecrets>()
   private readonly values: ReturnType<typeof createProfileSecretAdapter>
 
   constructor(private readonly options: SecretVaultOptions) {
@@ -205,24 +217,28 @@ export class SecretVault {
   }
 
   /**
-   * The retired values of the thread and of the threads above it, while its turn (or theirs) runs or has just ended;
-   * forgotten after that. A subagent's running turn keeps its parents' retired values too: it may have been handed one.
+   * The retired values of the thread and of the threads above it, while its turn (or the one that had them) runs or has
+   * just ended. Each thread gets its own grace: a parent that settled stops being masked with them, while a subagent
+   * of it that is still running (or that first asks only now) keeps them. An entry no thread has used for
+   * `RETIRED_SECRET_KEEP_MS` is forgotten.
    */
   private retiredFor(threadId: string, ancestors: readonly string[]): Array<{ name: string; value: string }> {
     const out: Array<{ name: string; value: string }> = []
     const now = this.now()
+    const fresh = (at: number | undefined): boolean => at !== undefined && now - at < RETIRED_SECRET_GRACE_MS
     let busy: boolean | undefined
     for (const id of [threadId, ...ancestors]) {
       const entry = this.retired.get(id)
       if (!entry) continue
       busy ??= this.options.threadBusy?.(threadId) ?? false
-      if (busy || (id !== threadId && this.options.threadBusy?.(id))) entry.lastBusy = now
-      if (now - entry.lastBusy < RETIRED_SECRET_GRACE_MS) {
+      if (busy) entry.seen.set(threadId, now)
+      if (id !== threadId && this.options.threadBusy?.(id)) entry.seen.set(id, now)
+      if (fresh(entry.seen.get(threadId)) || fresh(entry.seen.get(id))) {
         for (const secret of entry.secrets) if (!out.some((other) => other.value === secret.value)) out.push(secret)
-        continue
+      } else if (now - Math.max(0, ...entry.seen.values()) >= RETIRED_SECRET_KEEP_MS) {
+        this.retired.delete(id)
+        this.maskers.delete(id)
       }
-      this.retired.delete(id)
-      this.maskers.delete(id)
     }
     return out
   }
@@ -302,10 +318,12 @@ export class SecretVault {
     for (const [threadId, secrets] of this.known) {
       const entry = this.retired.get(threadId)
       const busy = this.options.threadBusy?.(threadId) ?? false
-      if (!busy && (entry === undefined || now - entry.lastBusy >= RETIRED_SECRET_GRACE_MS)) continue
+      if (!busy && (entry === undefined || ![...entry.seen.values()].some((at) => now - at < RETIRED_SECRET_GRACE_MS))) continue
       const kept = entry?.secrets ?? []
       for (const secret of secrets) if (!kept.some((other) => other.value === secret.value)) kept.push(secret)
-      this.retired.set(threadId, { secrets: kept, lastBusy: busy ? now : entry!.lastBusy })
+      const seen = entry?.seen ?? new Map<string, number>()
+      if (busy) seen.set(threadId, now)
+      this.retired.set(threadId, { secrets: kept, seen })
     }
     this.known.clear()
     this.maskers.clear()

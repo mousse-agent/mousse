@@ -214,6 +214,25 @@ describe('the secrets a thread asked for', () => {
     expect(masked('t1', VALUE)).toBe(VALUE)
   })
 
+  it.each(MID_RUN)("keeps a parent's value %s for its running subagent even after the settled parent's own masker was asked for first", async (_what, happen) => {
+    await give('t1', 'day')
+    roots.set('c1', 't1')
+    busy.add('t1').add('c1')
+    expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')
+    happen()
+    // The parent settles, and its own text is masked again past its grace, before the subagent writes anything.
+    busy.delete('t1')
+    now += RETIRED_SECRET_GRACE_MS * 3
+    expect(masked('t1', VALUE)).toBe(VALUE)
+    expect(masked('c1', `late ${VALUE}`)).toBe('late [secret API_TOKEN hidden]')
+    // A subagent that is not running does not pick it up.
+    roots.set('c2', 't1')
+    expect(masked('c2', VALUE)).toBe(VALUE)
+    busy.clear()
+    now += RETIRED_SECRET_GRACE_MS + 1
+    expect(masked('c1', VALUE)).toBe(VALUE)
+  })
+
   it('counts a thread as running when looking up its run fails, so a masker still builds', async () => {
     const turns = { isTurnActive: () => false }
     expect(secretThreadBusy('t1', turns, { getActiveRun: () => null })).toBe(false)
