@@ -109,16 +109,11 @@ html[data-theme='light'] {
   font-family: inherit;
   font-size: 12px;
 }
-/* Dim tool chrome (thought rows, tool groups, tool cards) so the
-   assistant's text keeps the contrast. Hover and focus stay at the same
-   level — brightening them matches the reply text. A running shimmer and
-   a card waiting for approval still come up to full opacity. Nested chrome
-   inherits the group's level instead of dimming twice, and drops the
-   outer margin so rows inside a group sit close together. */
+/* Tool chrome (thought rows, tool groups, tool cards) is not faded: its rows step back from the reply by size
+   (14px, regular weight) and the muted text colour, so their words stay sharp. Nested chrome drops the outer
+   margin so rows inside a group sit close together. */
 .an-message-list .an-tool-chrome {
-  opacity: 0.55;
   margin-block: 2px;
-  transition: opacity 0.15s ease-out;
 }
 /* The spacing scale (see settings.css) for the turn's meta lines: "Worked
    for …" above the reply and the changed-files line after it. */
@@ -136,9 +131,9 @@ html[data-theme='light'] {
   margin-top: 6px;
 }
 .an-message-list .turn-work-label {
-  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
-  font-size: 12.5px;
-  font-weight: 450;
+  color: color-mix(in srgb, var(--text-secondary) 85%, transparent);
+  font-size: 14px;
+  font-weight: 400;
   letter-spacing: -0.011em;
   line-height: 1.3;
 }
@@ -202,21 +197,7 @@ html[data-theme='light'] {
 .an-message-list .turn-answer > .group\/assistant-turn:has(> .group\/assistant-text:empty):not(:has(> :not(.group\/assistant-text:empty))) {
   display: none;
 }
-.an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
-  opacity: 1;
-}
-/* A thought being written reads at the label's colour, not dimmed: its words are what the person follows. */
-.an-message-list .an-tool-chrome:has(.thinking-icon.is-thinking) {
-  opacity: 1;
-}
-/* Cards awaiting the user's decision (quick-action approval) stay at full
-   opacity — dimming a call to action to 0.55 buries exactly the card that
-   needs attention. Cleared when the card decides (attribute removed). */
-.an-message-list .an-tool-chrome[data-awaiting-approval="true"] {
-  opacity: 1;
-}
 .an-message-list .an-tool-chrome .an-tool-chrome {
-  opacity: inherit;
   margin-block: 0;
 }
 /* A tool's output shown as a code block (an MCP call's result) sits in the same plain block as a command's output:
