@@ -5210,7 +5210,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         kind: 'continue' as const,
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
-        prompt: { ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: question!.id } : {}) } } : {}), ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}), text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, waited, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
+        prompt: { ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: question!.id } : {}) } } : {}), ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}), text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, waited, answerCaused: current.status === 'waiting_grant' && answers.length > 0, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
         policyDigest: grant.digest,
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
@@ -5262,7 +5262,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; answerCaused?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -5276,11 +5276,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // Ordered store events supply the same update slot as ordinary notes and answers. The reason
     // and all continuation instructions below are shared, whatever the work's wait history.
-    const ordered = input.workEvents?.length ? input.workEvents : undefined
+    // Without a live wait, master's answers belong in the lead. With a wait, only an answer
+    // that caused this resume belongs there; incidental answers keep their event order below.
+    const answersInLead = !input.waited || input.answerCaused
+    const questionInLead = !input.waited || input.questionAnswered
+    const remainingEvents = input.workEvents?.filter(event => 'answer' in event
+      ? !answersInLead
+      : !(questionInLead && event.text === input.answered))
+    const ordered = remainingEvents?.length ? remainingEvents : undefined
     const updates = ordered ? ordered.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n') : input.notes
     const orderedAnswers = ordered?.some(event => 'answer' in event)
     const orderedQuestion = ordered?.some(event => 'text' in event && event.text === input.answered)
-    const allowed = input.allowed?.filter(title => !orderedAnswers || !input.answers.some(answer => answer.status !== 'denied' && this.chat.card(answer).title === title))
+    const allowed = input.allowed?.filter(title => !input.workEvents?.some(event => 'answer' in event) || !input.answers.some(answer => answer.status !== 'denied' && this.chat.card(answer).title === title))
     const depth = row.modelOverride?.depth
     const reason = input.answers.length && !orderedAnswers
       ? [...input.answers.map(answerLine), ...(input.askAgain ?? []).map(askAgainLine)].join(' ')
