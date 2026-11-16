@@ -29,9 +29,10 @@ const REQUEST_DEFINITION: Tool = {
   description: [
     'Ask the user for a secret you need (an API key, access token or password) through a private card in the thread.',
     'Never ask for a secret in a message: the value would sit in the conversation. The user types it into the card;',
-    'Mousse keeps it out of the chat and gives you its name and a private file holding it: read that file and use the value',
-    'directly (commands, config files, API calls, logins), or use secret_run, or ${secret:NAME} in an MCP server\'s settings.',
-    'Never print or echo the value into the chat.',
+    'Mousse keeps it out of the chat and gives you its name and a private file holding it. Use it directly (commands, config',
+    'files, API calls, logins) by passing the file inside the command, e.g. gh auth login --with-token < file, so the value',
+    'never comes back as output; open the file to look at its contents only when you need the value itself. secret_run and',
+    '${secret:NAME} in an MCP server\'s settings work too. Never print or echo the value into the chat.',
     'Blocks until the user answers (at most one hour) or your turn ends.'
   ].join(' '),
   parameters: Type.Object({
@@ -50,7 +51,7 @@ const RUN_DEFINITION: Tool = {
     'Each secret is the environment variable of its name (as: "env", the default), or a private file whose path is in NAME_FILE',
     '(as: "file"); the file is deleted when the command ends. Refer to the variable in the command (e.g. "$HF_TOKEN"), never the value.',
     'The output comes back with every secret masked, and Authorization headers hidden.',
-    'You may also read the secret\'s private file (its path is in the secret_request result) and use it with your own tools.',
+    'You may also pass the secret\'s private file (its path is in the secret_request result) to commands you run yourself.',
     'Prefer a program option that reads the secret from the environment or a file (e.g. curl -H @file, or a tool that reads NAME itself):',
     'a value expanded onto a program\'s command line ("$NAME" as an argument) can be seen by other processes on this computer while it runs.'
   ].join(' '),
