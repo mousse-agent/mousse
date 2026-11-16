@@ -152,15 +152,15 @@ export class BotTellings {
   }
   private announce(rows: BotMessageRow[], sound: boolean, id = `bt_${randomUUID()}`, closed: false | string = false): void {
     rows = rows.map(r => this.store.message(r.id)!).filter(Boolean)
-    const messages = new Map(rows.map(row => [row.id, this.chat.toMessage(row)]))
-    const priority = (row: BotMessageRow): number => row.tell === 'later' ? 0 : row.askId || row.questionId || row.error || messages.get(row.id)!.action ? 2 : 1
+    const actions = new Set(rows.filter(row => this.chat.isActionMessage(row)).map(row => row.id))
+    const priority = (row: BotMessageRow): number => row.tell === 'later' ? 0 : row.askId || row.questionId || row.error || actions.has(row.id) ? 2 : 1
     rows.sort((a, b) => priority(b) - priority(a) || a.seq - b.seq)
-    const first = messages.get(rows[0]!.id)!
+    const first = this.chat.toMessage(rows[0]!)
     const names = [...new Set(rows.map(r => this.name(r.botId)))]
     const { body } = botNotificationContent(this.name(rows[0]!.botId), first)
     const summary = names.map(name => {
       const group = rows.filter(r => this.name(r.botId) === name)
-      return group.some(r => r.askId || r.questionId || r.error || messages.get(r.id)!.action) ? `${name} needs you` : `${name} ${group.length} ${closed === 'While you were away' ? group.length === 1 ? 'update' : 'updates' : group.length === 1 ? 'message' : 'messages'}`
+      return group.some(r => r.askId || r.questionId || r.error || actions.has(r.id)) ? `${name} needs you` : `${name} ${group.length} ${closed === 'While you were away' ? group.length === 1 ? 'update' : 'updates' : group.length === 1 ? 'message' : 'messages'}`
     }).join(' · ')
     const title = rows.length === 1 && closed !== 'While you were away' ? names[0]! : closed ? `${closed}: ${summary}` : `${names.join(', ')} · ${rows.length} messages`
     this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: first.action || first.ask || first.question ? 'question' : 'completed', sound })

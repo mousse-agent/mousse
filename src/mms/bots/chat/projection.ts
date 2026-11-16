@@ -351,11 +351,16 @@ export class BotChatProjection {
     }
   }
 
+  /** A lightweight row-kind check for telling priority; no card or message reads. */
+  isActionMessage(row: Pick<BotMessageRow, 'id'>): boolean {
+    return row.id.startsWith('bm_action_') && this.options.asksFirst?.() === true
+  }
+
   toMessage(row: BotMessageRow): BotChatMessage {
     const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
     const expiresAt = reminder?.deliveredAt ? new Date(Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000).toISOString() : undefined
     const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
-    const action = row.id.startsWith('bm_action_') && this.options.asksFirst?.() ? this.actionForMessage(row.id) : undefined
+    const action = this.isActionMessage(row) ? this.actionForMessage(row.id) : undefined
     const sentAction = row.id.startsWith('bm_action_') ? this.store.get("SELECT ran_at FROM bot_actions WHERE message_id = ? AND status = 'done'", row.id) : undefined
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
     const question = row.questionId ? this.store.question(row.questionId) : undefined
