@@ -25,7 +25,7 @@ interface WaitRule {
   endReason: string
   endLine(title: string): string
   resume: 'continue' | 'usageReset'
-  continuation(row: BotActivationRow, facts: WorkWaitLookups): { questionAnswered?: boolean; moreRoom?: boolean; usageReset?: boolean; ownerText?: string }
+  continuation(row: BotActivationRow, facts: WorkWaitLookups): { questionAnswered?: boolean; moreRoom?: boolean; usageReset?: boolean; waited?: string }
   continueRefusal(row: BotActivationRow): string
   waitsOnOwner(row: BotActivationRow, facts: WorkWaitLookups): boolean
   needsOwner(row: BotActivationRow, facts: WorkWaitLookups): boolean
@@ -46,7 +46,7 @@ export const WORK_WAIT_RULES = {
     ready: (row, _facts) => row.endReason === 'wait_ready',
     stranded: (row, facts) => !facts.timerExists(row),
     endReason: 'wait_gone', endLine: nothingToWaitFor, resume: 'continue',
-    continuation: (row, facts) => ({ ownerText: facts.store().workWait(row.id)?.text ?? '' }),
+    continuation: (row, facts) => ({ waited: facts.store().workWait(row.id)?.text ?? '' }),
     checkBeforeResume: true,
     continueRefusal: (_row) => 'This work carries on by itself when its time or event comes, or when a slot is free. Stop it if it is no longer needed.',
     waitsOnOwner: (_row, _facts) => false, needsOwner: (_row, _facts) => false,

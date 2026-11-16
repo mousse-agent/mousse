@@ -5096,7 +5096,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; waited?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     if (this.cancelRemovedScheduleRun(row)) return 'none'
@@ -5237,7 +5237,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; waited?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -5271,6 +5271,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const interrupted = (calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${roleOf(call)} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
       : '') + this.stoppedSubagentsLine(row)
+    if (input.waited !== undefined) {
+      const additions = [
+        input.allowed?.length ? `[Mousse] The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.` : '',
+        input.answered ?? '', input.notes ?? '',
+        input.answers.length ? input.answers.map(answerLine).join(' ') : ''
+      ].filter(Boolean).join('\n\n')
+      return `[Mousse] Your wait is over.${interrupted}\n\n${input.waited}${additions ? `\n\n${additions}` : ''}\n\nContinue where you left off. ${BOT_RUN_REPORT_LINE}`
+    }
     // A chat turn the owner wrote to again while it answered: their messages, answered as part of the same conversation.
     if (row.lane === 'chat' && input.notes) {
       const draft = input.afterReport ? this.chatDraft(row) : undefined
