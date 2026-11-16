@@ -594,6 +594,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly chat: BotChatProjection
   /** The Bot UI's methods (`bots.*` v2). */
   readonly actions: BotActions
+  /** A held call is authorized only for its own pair, independent of unrelated grant revisions. */
+  private actionPair(row: BotActivationRow, tool: BotMcpTool): BotManifest['mcp'][number] | undefined {
+    const current = this.store.activation(row.id)
+    const grant = this.store.activeGrant(row.botId)
+    const definition = current && this.host.definitions.revision(row.botId, current.revision)
+    if (!current || !['running', 'blocked'].includes(current.status) || !grant || !definition) return undefined
+    const offered = this.effectiveManifest(current, definition.permissions, grant.manifest).mcp.some(p => p.serverId === tool.server && p.tool === tool.tool)
+    return offered ? grant.manifest.mcp.find(p => p.serverId === tool.server && p.tool === tool.tool) : undefined
+  }
   private createActions(): BotActions { return new BotActions({
     store: this.host.store,
     refresh: async () => { await this.host.mcp?.warm() },
@@ -608,23 +617,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     held: () => { this.watchMcp(); this.armDue() },
     schema: (tool) => this.host.mcp?.inputSchema?.(tool),
     binding: (row, tool) => {
-      const grant = this.store.activeGrant(row.botId)
-      const current = this.store.activation(row.id)
-      if (!grant || !current || !['running', 'blocked'].includes(current.status) || current.grantDigest !== grant.digest || !this.grantNow(row.id)?.mcp.some(p => p.serverId === tool.server && p.tool === tool.tool)) return undefined
+      const pair = this.actionPair(row, tool)
+      if (!pair) return undefined
       const server = this.host.mcp?.binding?.(tool)
       if (!server) return undefined
       const source = row.trigger.kind === 'work' ? this.store.activation(row.trigger.from) : row
       const limit = source?.trigger.kind === 'manual' ? source.trigger.owner?.limit ?? null : null
-      const revision = this.store.get('SELECT grant_id FROM bot_grants WHERE bot_id = ? AND revoked_at IS NULL ORDER BY grant_id DESC LIMIT 1', row.botId)?.grant_id
-      return { ...server, grantRevision: revision, grantDigest: actionDigest(grant.manifest), deviceLimit: limit }
+      return { ...server, pairLevel: pair.level ?? 'allowed', deviceLimit: limit }
     },
     obsolete: action => {
       const row = this.store.activation(action.activation_id)
-      const grant = this.store.activeGrant(action.bot_id)
       const held = JSON.parse(action.binding_json)
-      const revision = this.store.get('SELECT grant_id FROM bot_grants WHERE bot_id = ? AND revoked_at IS NULL ORDER BY grant_id DESC LIMIT 1', action.bot_id)?.grant_id
-      if (!row || !grant || held.grantRevision !== revision || held.grantDigest !== actionDigest(grant.manifest)) return true
       const tool = JSON.parse(action.target_json) as BotMcpTool
+      const pair = row && this.actionPair(row, tool)
+      if (!pair || held.pairLevel !== (pair.level ?? 'allowed')) return true
       const where = this.host.mcp?.where?.(tool.server)
       if (!where) return false // A cold catalogue is not evidence of removal.
       if (where.state !== 'on') return true
@@ -643,7 +649,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const actionId = this.actions.forWork(row.id)!.id
       return callForBot({ mcp: mcp as BotMcp, bot: {
         activationId: row.id, mcpTools: [tool], workspace: null, time: { signal, deadline: () => Number.MAX_SAFE_INTEGER },
-        check: () => this.grantNow(row.id)?.mcp.some(p => p.serverId === target.server && p.tool === target.tool) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
+        check: () => this.actionPair(row, target) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
       }, name: tool.name, args, signal, heldAction: true, sanitizeResult: (result) => removeHiddenArguments(result, args, mcp.inputSchema?.(target)), assertDispatchActive: () => {
         this.actions.assertRunning(actionId)
       } })
