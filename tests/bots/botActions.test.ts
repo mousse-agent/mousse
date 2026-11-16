@@ -1591,7 +1591,7 @@ it.each(['paused', 'expired', 'withdrawn', 'binding'] as const)('R2-8 Send repor
   if (reason === 'binding') t.server.configDigest = 'changed'
   const code = reason === 'binding' ? 'bot_action_changed' : `bot_action_${reason}`
   const sentence = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : reason === 'expired' ? 'This call expired. Nothing was sent.' : reason === 'withdrawn' ? 'This call was withdrawn. Nothing was sent.' : 'This changed since you saw it. Review it again.'
-  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code, message: sentence })
+  await expect(f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code, message: sentence })
   expect(t.calls).toEqual([])
 })
 
