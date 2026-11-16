@@ -2310,3 +2310,12 @@ it('distinguishes quoted text, backslashes and the literal empty-text label', as
   expect(blocks).toEqual(['"false"', JSON.stringify('"false"'), JSON.stringify('"a\\b"'), '"(empty text)"', '(empty text)'])
   expect(new Set(blocks).size).toBe(values.length)
 })
+
+it('notes non-ASCII address and phone letters or digits without warning on ordinary prose', async () => {
+  const values = ['bob@ｅxample.com', 'bob@exօmple.com', 'раураӏ.рф', '+1 ８００ 555 0100', 'Мария Иванова']
+  fake.chats.inbox = [held({ args: Object.fromEntries(values.map((value, index) => [String(index), value])) })]
+  await open()
+  const blocks = [...host.querySelectorAll('[aria-label="Complete arguments"] > dl > div > dd')]
+  for (const block of blocks.slice(0, 4)) expect(block.textContent).toContain('Contains letters or digits outside A–Z and 0–9')
+  expect(blocks[4].textContent).toBe('Мария Иванова')
+})
