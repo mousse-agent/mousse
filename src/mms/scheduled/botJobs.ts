@@ -165,6 +165,15 @@ export class BotScheduleBook {
     now?(): Date
   }) {}
 
+  setTelling(botId: string, change: { tellMe?: TellMe; canWakeMe?: boolean; scheduleId?: string }): void {
+    const jobs = this.options.jobs.listJobs().filter(job => job.bot?.botId === botId && (!change.scheduleId || job.bot.scheduleId === change.scheduleId))
+    if (change.scheduleId && !jobs.length) throw new BotScheduleError('schedule_not_found', 'No automation of yours has that id. Use bot_schedule_list first.')
+    for (const job of jobs) this.options.jobs.updateJob(job.id, {
+      ...(change.tellMe ? { tellMe: change.tellMe } : {}),
+      ...(change.canWakeMe !== undefined ? { bot: { ...job.bot!, canWakeMe: change.canWakeMe } } : {})
+    })
+  }
+
   private now(): Date {
     return this.options.now?.() ?? new Date()
   }

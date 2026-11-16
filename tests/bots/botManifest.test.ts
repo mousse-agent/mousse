@@ -209,7 +209,7 @@ describe('default app tools (Bot Phase 1 §5.10)', () => {
   it('every new bot gets the web, its schedules, profile, depth, model, escalate, run_report and the five memory tools', () => {
     expect([...BOT_DEFAULT_APP_TOOLS].sort()).toEqual([
       'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'escalate', 'memory_forget', 'memory_list', 'memory_read', 'memory_save', 'memory_search',
-      'run_report', 'set_depth', 'set_profile', 'use_model', 'web_fetch', 'web_search'
+      'run_report', 'set_depth', 'set_profile', 'telling_set', 'use_model', 'web_fetch', 'web_search'
     ])
     for (const tool of BOT_MEMORY_TOOLS) {
       expect(BOT_DEFAULT_APP_TOOLS).toContain(tool)

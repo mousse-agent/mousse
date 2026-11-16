@@ -1,4 +1,7 @@
 import { BotTellings } from '../chat/BotTellings'
+import type { SettingsStore } from '../../settings/SettingsStore'
+import { isTellMe } from '../../../shared/types'
+import { readBotTelling, tellingLine, validQuietHours, type TellingChange } from '../../../shared/bots/personal/tellingSettings'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
@@ -164,6 +167,8 @@ export class BotEngineError extends Error {
 
 export interface BotEngineHost {
   profileHome: string
+  settings?: Pick<SettingsStore, 'get' | 'set'>
+  settingsChanged?(settings: ReturnType<SettingsStore['get']>): void
   store: BotStore
   definitions: BotDefinitionStore
   threads: {
@@ -222,7 +227,7 @@ export interface BotEngineHost {
    * The bots' schedules, in the shared scheduled-job store (`BotScheduleBook`): automations whose Who is the bot. The
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
-  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended'>>
+  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended' | 'setTelling'>>
   /** Per-schedule progress in bot memory; pending reports are published only on successful completion. */
   progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
@@ -678,16 +683,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => {
-        this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) })
+        this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.store.message(event.message.id)?.tell === 'later' ? { quiet: true } : {}) })
         this.tellings.read()
         this.armDue()
       },
       classify: (message, input) => {
         const activation = message.activationId ? this.store.activation(message.activationId) : undefined
         const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
-        return tellingClass({ message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
+        const botId = this.store.message(message.id)!.botId
+        const tellMe = activation?.trigger.kind === 'schedule' ? undefined : readBotTelling(this.store.registry(botId)?.tellJson).tellMe
+        return tellingClass({ tellMe, level: activation ? this.host.runLevel?.(activation.id) : undefined, message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
           reminder: !!reminder, reminderOwner: reminder?.ownerSet, quiet: this.quietReport(this.store.message(message.id)!.botId, message) })
       },
+      tellingSettings: (botId) => this.tellingSettings(botId),
+      telling: (botId) => this.tellingLine(botId),
       schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused })),
       // The threads it started that still work: it is busy while it manages them.
       launched: (botId) => this.launchedThreads(botId),
@@ -7261,6 +7270,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       done: (threadId, why) => this.completeSchedule(threadId, why),
       list: (botId) => this.listSchedules(botId)
     },
+    setTelling: (botId, activationId, change) => this.setTelling(botId, activationId, change),
     setProfile: (botId, profile) => this.setProfile(botId, profile),
     setModel: (botId, activationId, scope, choice) => this.setModel(botId, activationId, scope, choice),
     ownerWords: (botId, activationId) => this.ownerWords(botId, activationId),
@@ -7753,6 +7763,39 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.armDue()
     this.chat.republish(messageId)
     this.changed({ botId })
+  }
+
+  tellingSettings(botId: string): import('../../../shared/bots/personal/tellingSettings').BotTellingPreferences {
+    const quietHours = this.host.settings?.get().notifications.quietHours
+    return { ...readBotTelling(this.store.registry(botId)?.tellJson), ...(quietHours ? { quietHours } : {}) }
+  }
+
+  tellingLine(botId: string): string | undefined {
+    const settings = this.tellingSettings(botId)
+    return tellingLine(settings, settings.quietHours)
+  }
+
+  setTelling(botId: string, activationId: string, change: TellingChange): string {
+    if (!this.timerOwnerSet(botId, activationId)) throw new BotEngineError('owner_only', 'Only a turn your owner’s own message or tap started can change telling. Suggest it in your report instead.')
+    if (change.tellMe !== undefined && !isTellMe(change.tellMe)) throw new BotEngineError('invalid_params', 'tellMe is needs_you, look, fyi or every.')
+    if (change.quietHours !== undefined && change.quietHours !== 'off' && !validQuietHours(change.quietHours)) throw new BotEngineError('invalid_params', 'Quiet hours need different from and to times in HH:MM (00:00 to 23:59), or off.')
+    if (change.canWakeMe !== undefined && typeof change.canWakeMe !== 'boolean' || change.schedules !== undefined && typeof change.schedules !== 'boolean') throw new BotEngineError('invalid_params', 'canWakeMe and schedules must be true or false.')
+    if (change.scheduleId !== undefined && (typeof change.scheduleId !== 'string' || !change.scheduleId || change.canWakeMe === undefined || change.tellMe !== undefined || change.schedules)) throw new BotEngineError('invalid_params', 'For one automation give scheduleId and canWakeMe only.')
+    if (change.quietHours !== undefined && !this.host.settings) throw new BotEngineError('unavailable', 'Quiet hours cannot be changed here.')
+    if ((change.schedules || change.scheduleId) && !this.host.schedules?.setTelling) throw new BotEngineError('unavailable', 'Automations cannot be changed here.')
+    if (change.schedules || change.scheduleId) this.host.schedules!.setTelling!(botId, { ...(change.schedules ? { tellMe: change.tellMe } : {}), ...(change.scheduleId ? { scheduleId: change.scheduleId, canWakeMe: change.canWakeMe } : {}) })
+    if (change.quietHours !== undefined) {
+      const settings = this.host.settings!.set({ notifications: { quietHours: change.quietHours === 'off' ? undefined : change.quietHours } } as Parameters<SettingsStore['set']>[0])
+      this.host.settingsChanged?.(settings)
+    }
+    this.store.db.transaction(() => {
+      const previous = readBotTelling(this.store.registry(botId)?.tellJson)
+      this.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ ...previous, ...(change.tellMe !== undefined ? { tellMe: change.tellMe } : {}), ...(!change.scheduleId && change.canWakeMe !== undefined ? { canWakeMe: change.canWakeMe } : {}) }), botId)
+    })
+    this.changed({ botId })
+    const line = this.tellingLine(botId)
+    if (change.scheduleId) return [line, `That automation ${change.canWakeMe ? 'can' : 'cannot'} wake you.`].filter(Boolean).join('\n')
+    return line ?? 'No telling preferences set.'
   }
 
   private timerOwnerSet(botId: string, from: string): boolean {

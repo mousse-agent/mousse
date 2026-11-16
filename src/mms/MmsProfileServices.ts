@@ -788,9 +788,12 @@ export class MmsProfileServices {
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
       // A resumed bot's due schedules are claimed at once; before the scheduler started this does nothing.
+      settings: this.settings,
+      settingsChanged: (settings) => this.events.emit({ channel: 'protocol:event', data: { type: 'settings.changed', data: { settings } } }),
       schedulesChanged: () => { this.scheduled?.wake() },
       // The shared store, through the book made once the scheduler exists below (nothing reads it before that).
       schedules: {
+        setTelling: (botId, change) => this.botSchedules.setTelling(botId, change),
         list: (botId) => this.botSchedules?.list(botId) ?? [],
         get: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId),
         add: (botId, input, createdBy, options) => this.botSchedules.add(botId, input, createdBy, options),
@@ -2220,6 +2223,7 @@ export class MmsProfileServices {
     const slots = engine.customSlots(botId).map((slot) => ({ name: slot.name, ...(slot.description ? { description: slot.description } : {}) }))
     return {
       ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
+      telling: engine.tellingLine(botId),
       work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {}), ...(questions.length ? { questions } : {}),
       ...(slots.length ? { slots } : {})
     }

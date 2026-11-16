@@ -135,7 +135,7 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     selection: job.selection,
     ...(job.agent?.definitionId ? { agent: { definitionId: job.agent.definitionId } } : {}),
     // An automation's model by hand keeps its entry beside its name (#673); a build that writes only the name drops it.
-    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.ownerAsked !== undefined ? { ownerAsked: job.bot.ownerAsked } : {}), ...(job.bot.say !== undefined ? { say: job.bot.say } : {}), ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick ? { pick: job.bot.pick } : {}) } } : {}),
+    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.canWakeMe !== undefined ? { canWakeMe: job.bot.canWakeMe } : {}), ...(job.bot.ownerAsked !== undefined ? { ownerAsked: job.bot.ownerAsked } : {}), ...(job.bot.say !== undefined ? { say: job.bot.say } : {}), ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick ? { pick: job.bot.pick } : {}) } } : {}),
     mode: job.mode,
     workspace: job.workspace,
     permissionMode: job.permissionMode,
@@ -507,6 +507,13 @@ export class MousseConfigStore {
   /** Assemble full MousseSettings for SettingsStore compatibility. */
   assembleSettings(): MousseSettings {
     return mergeSettings(this.conf.settings, this.conf.providers, this.conf.agents)
+  }
+
+  clearQuietHours(): void {
+    this.assertPersonalMutation('settings')
+    const { quietHours: _quiet, ...notifications } = this.conf.settings.notifications
+    this.conf.settings = { ...this.conf.settings, notifications }
+    this.save()
   }
 
   updateSettingsSection(partial: Partial<MousseSettingsSection>): void {
