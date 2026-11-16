@@ -111,6 +111,19 @@ describe('Settings > Appearance and General', () => {
   }
   const group = (label: string) => host.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!
 
+  it('chooses and saves each project color style from Appearance', () => {
+    show()
+    for (const [label, value] of [['Off', 'off'], ['Outline', 'outline'], ['Fill', 'fill'], ['Gradient', 'gradient']]) {
+      const trigger = host.querySelector<HTMLButtonElement>('[role="combobox"][aria-label="Project colors on threads"]')!
+      act(() => trigger.click())
+      const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => entry.textContent === label)!
+      act(() => option.click())
+      expect(store.get().appearance.threadProjectColors).toBe(value)
+      expect(trigger.textContent).toContain(label)
+      expect(new SettingsStore(MousseConfigStore.load(home)).get().appearance.threadProjectColors).toBe(value)
+    }
+  })
+
   it('the theme cards are one tab stop; the arrows choose the next theme and save it', () => {
     store.set({ appearance: { ...store.get().appearance, theme: 'dark' } })
     show()

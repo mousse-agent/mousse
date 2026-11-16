@@ -530,6 +530,15 @@ html[data-theme='light'] .threads-sidebar-thread.threads-sidebar-card.project-ti
   pointer-events: none;
 }
 
+.threads-sidebar-thread.threads-sidebar-card.project-color-outline::after {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--project-tint) 35%, transparent);
+}
+
+.threads-sidebar-thread.threads-sidebar-card.project-color-gradient::after {
+  background: linear-gradient(to left, color-mix(in srgb, var(--project-tint) var(--project-tint-strength), transparent), transparent);
+}
+
 /* The selected row keeps its plain raised look, so the selection reads first; its mark still shows the hue. */
 .threads-sidebar-thread.threads-sidebar-card.project-tinted.active::after,
 .threads-sidebar-thread.threads-sidebar-card.project-tinted.has-open-subagent::after,

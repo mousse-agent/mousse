@@ -45,6 +45,8 @@ export interface AgentModelOption {
   group?: string
 }
 
+export type ThreadProjectColorStyle = 'off' | 'outline' | 'fill' | 'gradient'
+
 export interface AppearanceSettings {
   /** The built-in theme in use: the active user theme's base while one is on. */
   theme: ThemeId
@@ -65,8 +67,8 @@ export interface AppearanceSettings {
   interfaceFont: FontChoice
   /** Font for monospace text: code, diffs, the file editor and terminals. */
   codeFont: FontChoice
-  /** Tint each thread in the Threads tab with its project's color. */
-  threadProjectColors: boolean
+  /** How cards in the Threads tab show their project's color. */
+  threadProjectColors: ThreadProjectColorStyle
   /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
   threadPathInTitleBar: boolean
   /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
@@ -878,7 +880,7 @@ export function getDefaultSettings(): MousseSettings {
       replyPacing: true,
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
-      threadProjectColors: true,
+      threadProjectColors: 'fill',
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
@@ -964,7 +966,7 @@ export function getDefaultSettings(): MousseSettings {
  * Migrates legacy theme ids (`*-acrylic`) into theme + acrylic boolean.
  */
 export function normalizeAppearance(
-  raw: Partial<AppearanceSettings> & { theme?: string } | null | undefined
+  raw: (Omit<Partial<AppearanceSettings>, 'threadProjectColors'> & { threadProjectColors?: ThreadProjectColorStyle | boolean; theme?: string }) | null | undefined
 ): AppearanceSettings {
   const defaults = getDefaultSettings().appearance
   if (!raw || typeof raw !== 'object') {
@@ -1019,7 +1021,10 @@ export function normalizeAppearance(
     interfaceFont: normalizeFontChoice(raw.interfaceFont),
     codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
-      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
+      raw.threadProjectColors === false ? 'off'
+        : raw.threadProjectColors === true ? 'fill'
+          : raw.threadProjectColors === 'off' || raw.threadProjectColors === 'outline' || raw.threadProjectColors === 'fill' || raw.threadProjectColors === 'gradient'
+            ? raw.threadProjectColors : defaults.threadProjectColors,
     threadPathInTitleBar:
       typeof raw.threadPathInTitleBar === 'boolean' ? raw.threadPathInTitleBar : defaults.threadPathInTitleBar,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,
