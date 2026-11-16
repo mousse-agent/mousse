@@ -21,9 +21,15 @@ export function codexBotSettingText(features: readonly string[]): string {
  */
 export const CODEX_BOT_SETUP_UNREADABLE_TEXT = 'Mousse couldn\'t read Codex\'s own settings, so my work can\'t run on it now.'
 
+/** Codex recursively merges server tables, so an attachment cannot erase the owner's leftover keys. */
+export function codexBotMcpCollisionText(name: string): string {
+  return `Your Codex MCP entry "${name}" uses a name Mousse needs for this bot. Rename that entry in your Codex settings before running this bot on Codex.`
+}
+
 /** Whether a bot's run failed with one of these texts, which its chat shows as they are. */
 export function isCodexBotRefusal(reason: string): boolean {
-  return reason === CODEX_BOT_VERSION_TEXT || reason === CODEX_BOT_VERSION_UNKNOWN_TEXT || reason === CODEX_BOT_SETUP_UNREADABLE_TEXT ||
+  return ['mousse', 'mousse-relay'].some((name) => reason === codexBotMcpCollisionText(name)) ||
+    reason === CODEX_BOT_VERSION_TEXT || reason === CODEX_BOT_VERSION_UNKNOWN_TEXT || reason === CODEX_BOT_SETUP_UNREADABLE_TEXT ||
     /^Codex's own setting ".+" is on, and my work can't run with it\./.test(reason)
 }
 

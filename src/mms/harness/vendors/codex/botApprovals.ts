@@ -104,8 +104,3 @@ export function codexBotMcpOverrides(servers: readonly string[] | null): Record<
   }
   return overrides
 }
-
-/** Codex recursively merges server tables, so an attachment cannot erase the owner's leftover keys. */
-export function codexBotMcpCollisionText(name: string): string {
-  return `Your Codex MCP entry "${name}" uses a name Mousse needs for this bot. Rename that entry in your Codex settings before running this bot on Codex.`
-}

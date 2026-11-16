@@ -11,12 +11,12 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_ASK_REFUSED_TEXT, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { CLAUDE_TOPS_UNLISTED, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, holdClaudeBotTemp, removeClaudeBotTemp, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
-import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange, codexBotMcpCollisionText } from '../../src/mms/harness/vendors/codex/botApprovals'
+import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from './botFixture'
-import { CODEX_BOT_RUNS_ON_TEXT, CODEX_BOT_VERSION_TEXT } from '../../src/shared/harness/codexBotVersion'
+import { CODEX_BOT_RUNS_ON_TEXT, CODEX_BOT_VERSION_TEXT, codexBotMcpCollisionText } from '../../src/shared/harness/codexBotVersion'
 
 let f: BotFixture
 let botId: string
