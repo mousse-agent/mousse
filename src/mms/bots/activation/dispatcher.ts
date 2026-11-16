@@ -4,6 +4,7 @@ import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { BindPolicy, ProviderSelection } from '../../../shared/harness/types'
 import type { BrowserExecutionBinding } from '../../orchestrator/browser/binding'
 import type { BotTurnPayload } from '../../run/types'
+import type { ProviderMetrics } from '../../harness/adapter'
 
 /**
  * What the `turn.start` executor asks of the bot engine (PR 6 §4 "Execution"). The payload names
@@ -44,6 +45,13 @@ export interface PreparedBotTurn {
   scratch: string
   /** The runtime produced model text, thinking or a tool call: its prompt reached the model. */
   modelOutput?(): void
+  /**
+   * The turn's runtime reported token usage (`TurnSink.usage`): one request, or the whole turn where the runtime sums
+   * them. Kept as a measurement in `bots.db` (`bot_turn_usage`); it never changes the turn.
+   */
+  usage?(usage: { input: number; output: number; cacheRead: number; cacheWrite: number }): void
+  /** The turn's runtime reported its measurements (`TurnSink.providerMetrics`): context size, window, cache and plan use. */
+  metrics?(metrics: ProviderMetrics): void
   /** Skill ids the turn may list and load. */
   skills: readonly string[]
   /**

@@ -257,6 +257,20 @@ export interface ProviderMetrics {
    * requests wrote (absent when they wrote none or the provider does not say).
    */
   promptCache?: { at?: number; ttlMs?: number }
+  /**
+   * The plan's usage windows as the runtime last reported them during the turn (Claude Code's rate-limit events,
+   * Codex's rate-limit snapshot): how much of each is used, 0-100, and when it resets (epoch seconds). Absent when the
+   * runtime reports none (Pi, an API key).
+   */
+  quota?: PlanWindowUse[]
+}
+
+/** How much of one plan usage window is used (`ProviderMetrics.quota`). */
+export interface PlanWindowUse {
+  /** The window as the runtime names it (`five_hour`, `seven_day`, `primary`, `secondary`). */
+  kind: string
+  usedPercent: number
+  resetsAt?: number
 }
 
 export interface TurnControl {

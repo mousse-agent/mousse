@@ -322,7 +322,8 @@ export class CodexAdapter implements ProviderAdapter {
           totalTokens: result.usage.totalTokens,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
         },
-        context: result.usage.context ? { ...result.usage.context, modelName: result.model } : undefined
+        context: result.usage.context ? { ...result.usage.context, modelName: result.model } : undefined,
+        ...(result.usage.quota?.length ? { quota: result.usage.quota } : {})
       })
       sink.usage(usage)
     } else sink.providerMetrics({ realModelName, totalResponseTimeMs })

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { BOTS_MIGRATIONS, BotStore } from '../../src/mms/bots/store/BotStore'
+import { BOTS_DB_VERSION, BOTS_MIGRATIONS, BotStore } from '../../src/mms/bots/store/BotStore'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
@@ -46,7 +46,7 @@ function buildV10(profileHome: string) {
 describe('bots.db v10 → v11', () => {
   it('preserves every old field in every table, matches a fresh schema, and reopens without changes', () => {
     const home = folder(), before = buildV10(home), store = open(home)
-    expect(store.db.userVersion()).toBe(11)
+    expect(store.db.userVersion()).toBe(BOTS_DB_VERSION)
     for (const [table, rows] of Object.entries(before)) {
       const columns = Object.keys(rows[0]!).join(',')
       expect(store.all(`SELECT ${columns} FROM ${table}`)).toEqual(rows)
@@ -54,20 +54,20 @@ describe('bots.db v10 → v11', () => {
     expect(store.get('SELECT work_id FROM bot_reminders')).toEqual({ work_id: null })
     const schema = (s: BotStore) => s.all("SELECT name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
     expect(schema(store)).toEqual(schema(open(folder())))
-    const copy = readFileSync(join(home, 'bots', 'bots.db.pre-v11'))
+    const copy = readFileSync(join(home, 'bots', `bots.db.pre-v${BOTS_DB_VERSION}`))
     store.close()
     const again = open(home)
-    expect(again.db.userVersion()).toBe(11)
+    expect(again.db.userVersion()).toBe(BOTS_DB_VERSION)
     expect(again.all('SELECT * FROM bot_actions')).toEqual([])
-    expect(readFileSync(join(home, 'bots', 'bots.db.pre-v11'))).toEqual(copy)
+    expect(readFileSync(join(home, 'bots', `bots.db.pre-v${BOTS_DB_VERSION}`))).toEqual(copy)
     expect(again.get('PRAGMA integrity_check')).toEqual({ integrity_check: 'ok' })
   })
 
   it('rolls back a failure after the new table and before the reminder column', () => {
     const home = folder(), before = buildV10(home)
     const db = new ProfileDatabase({ profileHome: home, name: 'bots' })
-    const migration = BOTS_MIGRATIONS.at(-1)!
-    expect(() => db.migrate([...BOTS_MIGRATIONS.slice(0, -1), {
+    const migration = BOTS_MIGRATIONS.find((m) => m.version === 11)!
+    expect(() => db.migrate([...BOTS_MIGRATIONS.filter((m) => m.version < 11), {
       ...migration, sql: migration.sql.replace('ALTER TABLE bot_reminders', 'SELECT * FROM missing_table; ALTER TABLE bot_reminders')
     }])).toThrow()
     expect(db.userVersion()).toBe(10)
@@ -76,7 +76,7 @@ describe('bots.db v10 → v11', () => {
     for (const [table, rows] of Object.entries(before)) expect(db.statement(`SELECT * FROM ${table}`).all()).toEqual(rows)
     db.migrate(BOTS_MIGRATIONS.filter((m) => m.version <= 10))
     db.close()
-    expect(open(home).db.userVersion()).toBe(11)
+    expect(open(home).db.userVersion()).toBe(BOTS_DB_VERSION)
   })
 
   it('enforces call identity and closed domains and permits cleared arguments and absent lifecycle fields', () => {

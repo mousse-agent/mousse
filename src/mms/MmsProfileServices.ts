@@ -805,6 +805,11 @@ export class MmsProfileServices {
       models: botModels,
       activity: botActivity,
       clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
+      // A turn's Mousse tools as its runtime lists them (`bot_turn_usage`): how many, and their characters.
+      toolList: (threadId, runId) => {
+        const tools = this.orchestrator.mcpToolRegistry().listForTurn(threadId, runId)
+        return { count: tools.length, chars: tools.reduce((sum, tool) => sum + tool.name.length + tool.description.length + JSON.stringify(tool.inputSchema ?? {}).length, 0) }
+      },
       archiveThread: (threadId) => { this.threads.setThreadSettled(threadId, true) },
       // Naming a new bot: one short call on the model its activations would use.
       oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
