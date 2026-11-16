@@ -152,14 +152,14 @@ export class BotTellings {
   }
   private announce(rows: BotMessageRow[], sound: boolean, id = `bt_${randomUUID()}`, closed: false | string = false): void {
     rows = rows.map(r => this.store.message(r.id)!).filter(Boolean)
-    const priority = (row: BotMessageRow): number => row.tell === 'later' ? 0 : row.askId || row.questionId || row.error ? 2 : 1
+    const priority = (row: BotMessageRow): number => row.tell === 'later' ? 0 : row.askId || row.questionId || row.error || this.chat.toMessage(row).action ? 2 : 1
     rows.sort((a, b) => priority(b) - priority(a) || a.seq - b.seq)
     const first = this.chat.toMessage(rows[0]!)
     const names = [...new Set(rows.map(r => this.name(r.botId)))]
     const { body } = botNotificationContent(this.name(rows[0]!.botId), first)
     const summary = names.map(name => {
       const group = rows.filter(r => this.name(r.botId) === name)
-      return group.some(r => r.askId || r.questionId || r.error) ? `${name} needs you` : `${name} ${group.length} ${closed === 'While you were away' ? group.length === 1 ? 'update' : 'updates' : group.length === 1 ? 'message' : 'messages'}`
+      return group.some(r => r.askId || r.questionId || r.error || this.chat.toMessage(r).action) ? `${name} needs you` : `${name} ${group.length} ${closed === 'While you were away' ? group.length === 1 ? 'update' : 'updates' : group.length === 1 ? 'message' : 'messages'}`
     }).join(' · ')
     const title = rows.length === 1 && closed !== 'While you were away' ? names[0]! : closed ? `${closed}: ${summary}` : `${names.join(', ')} · ${rows.length} messages`
     this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: first.action || first.ask || first.question ? 'question' : 'completed', sound })

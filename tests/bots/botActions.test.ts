@@ -1001,7 +1001,7 @@ it.each(['done', 'uncertain', 'failed', 'not_sent'] as const)('C4 duplicate warn
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
   f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ?, result_json = ?, ran_at = ? WHERE id = ?', status === 'not_sent' ? 'failed' : status, JSON.stringify({ text: 'answer', ...(status === 'failed' ? { toolReportedError: true } : {}) }), f.store.now(), a.id)
-  f.bots.actions.hold(f.store.activation(t.workId)!, t.work.payload.clientRequestId, t.work.prepared.authority.mcpTools![0]!, t.args, 'repeat')
+  f.bots.actions.hold(f.store.activation(t.workId)!, f.store.lastMainDispatch(t.workId)!.clientRequestId, t.work.prepared.authority.mcpTools![0]!, t.args, 'repeat')
   const next = f.bots.actions.forWork(t.workId)!
   const card = () => f.bots.service.actionMessage(t.botId, next.id).action!
   if (status === 'not_sent') expect(card().previous).toBeUndefined()
