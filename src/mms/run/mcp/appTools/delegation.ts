@@ -83,7 +83,8 @@ export interface SubagentRef {
  */
 export interface DelegationToolHost {
   delegateTask(input: DelegateTaskInput, call: DelegationToolCall): Promise<unknown>
-  continueSubagent(input: { subagent: string; prompt: string }, call: DelegationToolCall): Promise<unknown>
+  /** `mode: 'plan'` (from `thread_send`) runs the follow-up as a plan turn whatever the subagent's ceiling. */
+  continueSubagent(input: { subagent: string; prompt: string; mode?: 'plan' }, call: DelegationToolCall): Promise<unknown>
   answerSubagent(input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }, call: DelegationToolCall): Promise<unknown> | unknown
   taskStatus(input: SubagentRef): Promise<unknown> | unknown
   taskCancel(input: SubagentRef): Promise<unknown>

@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../../src/shared/types'
 import { AppToolTurns, McpToolError, ToolRegistry, TURN_TOKEN_KEY, type McpTurnBinding } from '../../src/mms/run/mcp/appTools'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import type { Socket } from 'node:net'
+import { BOUNDARY_NOTICE_HEADER, MCP_ERROR_CODES, MousseMcpServer, type McpToolBoundary } from '../../src/mms/run/mcp/MousseMcpServer'
 import { runStdioBridge } from '../../src/mms/run/mcp/stdioBridge'
 import { PassThrough } from 'node:stream'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
@@ -34,13 +35,13 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     fx = undefined
   })
 
-  const setup = async (hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}) => {
+  const setup = async (hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}, options: { boundary?: McpToolBoundary } = {}) => {
     fx = delegationFixture()
     const run = await fx.runningRun('thread-a')
     const credentials = new McpCredentials(fx.store)
     const fake = fakeAppToolHost(hostOverrides)
     const { registry, turns } = appToolRegistry(fx.engine, fake.host)
-    server = new MousseMcpServer({ credentials, registry })
+    server = new MousseMcpServer({ credentials, registry, ...(options.boundary ? { boundary: options.boundary } : {}) })
     await server.start()
     const registered = turns.register(appTurn({ threadId: 'thread-a', runId: run.runId }))
     const bearer = (input: { runId?: string; instanceId?: string; modeCeiling?: 'plan' | 'default'; binding?: McpTurnBinding; generation?: string } = {}) =>
@@ -90,6 +91,38 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
 
     const get = await fetch(server.url, { headers: { Authorization: `Bearer ${attachment.token}`, Accept: 'text/event-stream' } })
     expect(get.status).toBe(405)
+  })
+
+  describe('notices handed over with a tool result (McpToolBoundary)', () => {
+    const stubBoundary = (onDeliver: () => void = () => undefined) => {
+      const release = vi.fn()
+      const boundary: McpToolBoundary = { deliver: vi.fn(() => (onDeliver(), { text: 'a subagent finished', release })) }
+      return { boundary, release }
+    }
+
+    it('come as their own block after the tool\'s result, and stay delivered once the response is written', async () => {
+      const { boundary, release } = stubBoundary()
+      const { server, attachment } = await setup({}, { boundary })
+      const read = await rpc(server.url, attachment.token, call(1, 'thread_read'))
+      expect(JSON.parse(read.body.result.content[0].text).threadId).toBe('thread-a')
+      expect(read.body.result.content[1]).toEqual({ type: 'text', text: `${BOUNDARY_NOTICE_HEADER}\n\na subagent finished` })
+      expect(boundary.deliver).toHaveBeenCalledWith({ threadId: 'thread-a', runId: expect.any(String) })
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(release).not.toHaveBeenCalled()
+    })
+
+    it('are released when the connection closes after they were handed over and before the response is written', async () => {
+      // The connection drops at the one point that matters: inside `deliver`, before the server writes anything.
+      let sockets: Set<Socket> = new Set()
+      const { boundary, release } = stubBoundary(() => {
+        for (const socket of sockets) socket.destroy()
+      })
+      const { server, attachment } = await setup({}, { boundary })
+      sockets = (server as unknown as { sockets: Set<Socket> }).sockets
+      await expect(rpc(server.url, attachment.token, call(1, 'thread_read'))).rejects.toThrow()
+      expect(boundary.deliver).toHaveBeenCalledTimes(1)
+      await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1))
+    })
   })
 
   it('rejects a missing, invalid or revoked token with 401, and every call after revokeThread', async () => {

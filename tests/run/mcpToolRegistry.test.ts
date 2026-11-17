@@ -769,6 +769,34 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect((await call('parent', 'thread_search', { query: 'work', limit: 201 })).isError).toBe(true)
   })
 
+  it('thread_search finds subagents, labelled with their parent, under the visibility of the thread at the top of their chain', async () => {
+    const seen: Array<{ hideSubagents?: boolean; allow?: (thread: Thread) => boolean }> = []
+    const { call, hits, host, threads, fx, strangerRun } = await world()
+    const sub = await fx.delegate(strangerRun.runId, 'call-sub')
+    const lineage = (parentThreadId: string, rootThreadId = parentThreadId) => ({ lineage: { parentThreadId, rootThreadId, relationship: 'subagent' as const } })
+    threads.set(sub.childThreadId, thread(sub.childThreadId, { name: 'Reviewer work', ...lineage('stranger') }))
+    hits.push({ threadId: sub.childThreadId, threadName: 'Reviewer work', projectId: 'p1', projectName: 'One', matchType: 'thread' })
+    const search = host.searchThreads!
+    host.searchThreads = (query, limit, options) => (seen.push({ ...options }), search(query, limit, options))
+    const results = JSON.parse((await call('parent', 'thread_search', { query: 'reviewer' })).text).results as Array<Record<string, unknown>>
+    expect(results).toEqual([expect.objectContaining({ threadId: sub.childThreadId, subagent: true, parentThreadId: 'stranger', link: `mousse://thread/${sub.childThreadId}` })])
+    // The store is asked not to fold subagents away, and decides each one by its chain.
+    expect(seen[0].hideSubagents).toBe(false)
+    const allow = seen[0].allow!
+    threads.set('private-root', thread('private-root', { localOnly: true }))
+    threads.set('bot-root', thread('bot-root', { botOwned: true } as Partial<Thread>))
+    threads.set('manager', thread('manager', { automationManager: true } as Partial<Thread>))
+    expect(allow(threads.get(sub.childThreadId)!)).toBe(true)
+    expect(allow(thread('under-private', lineage('private-root')))).toBe(false)
+    expect(allow(thread('under-bot', lineage('bot-root')))).toBe(false)
+    expect(allow(thread('under-manager', lineage('manager')))).toBe(false)
+    expect(allow(threads.get('manager')!)).toBe(false)
+    // A thread that is no subagent carries no label.
+    hits.push({ threadId: 'stranger', threadName: 'Stranger work', projectId: 'p1', projectName: 'One', matchType: 'thread' })
+    const plain = JSON.parse((await call('parent', 'thread_search', { query: 'stranger' })).text).results as Array<Record<string, unknown>>
+    expect(plain[0]).not.toHaveProperty('subagent')
+  })
+
   it('a definition run is held to the thread check before its approval is asked, so a refused call never prompts a person', async () => {
     fx = delegationFixture()
     const run = await fx.runningRun('parent')

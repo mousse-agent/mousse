@@ -156,6 +156,20 @@ export class EffectOutbox {
   }
 
   /**
+   * Records an effect that has already happened outside the worker (a notice handed over with a tool's
+   * result): inserted and `succeeded` in one transaction, so no executor ever claims it. Same ids and
+   * events as `enqueue`.
+   */
+  recordDone(input: { threadId: string; runId: string; kind: EffectKind; payload?: unknown }): EffectRecord {
+    return this.db.transaction(() => {
+      const pending = this.enqueue(input)
+      if (pending.status !== 'pending') return pending
+      const now = this.now()
+      return this.write(pending, { status: 'succeeded', attempts: 1, updatedAt: now, completedAt: now })
+    })
+  }
+
+  /**
    * Claims the next claimable effect for `owner`, or null. One `UPDATE … RETURNING`; the oldest
    * comes first. `lanes` restricts the claim to effect kinds of those lane classes (the worker's turn
    * claimer or a fibre group, SPEC §12.3); without it any kind may be claimed.

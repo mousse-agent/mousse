@@ -155,13 +155,27 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
 
-    it('refuses a subagent, whose parent reaches it with continue_subagent', async () => {
-      const { call, denied, fx, callerRun, threads, host } = await world()
+    it('to the caller\'s own subagent it is the follow-up continue_subagent starts, under the same call id; another thread\'s subagent is refused', async () => {
+      const { call, denied, fx, callerRun, targetRun, threads, host } = await world()
       const child = await fx.delegate(callerRun.runId, 'call-1')
       threads.set(child.childThreadId, thread(child.childThreadId))
-      const error = await denied(call('thread_send', { threadId: child.childThreadId, content: 'x' }))
+      const delegation = (host.delegation as unknown as () => { continueSubagent: ReturnType<typeof vi.fn> })()
+      delegation.continueSubagent.mockResolvedValueOnce({ delegationId: 'd2', childThreadId: child.childThreadId, childRunId: 'run:child:2', title: 'Helper', status: 'queued', note: 'busy' })
+      const sent = JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })).text)
+      expect(delegation.continueSubagent).toHaveBeenCalledWith({ subagent: child.childThreadId, prompt: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })
+      expect(sent).toMatchObject({ threadId: child.childThreadId, runId: 'run:child:2', delivery: 'queued', queued: true, delegationId: 'd2', subagent: true })
+      // A refusal (the subagent waits for an answer) comes back as continue_subagent gives it.
+      delegation.continueSubagent.mockResolvedValueOnce({ started: false, code: 'needs_answer', message: 'answer it first' })
+      expect(JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'more' })).text)).toMatchObject({ started: false, code: 'needs_answer' })
+      // Nothing went the untracked way.
+      expect(host.sendToThread).not.toHaveBeenCalled()
+
+      const theirs = await fx.delegate(targetRun.runId, 'call-2')
+      threads.set(theirs.childThreadId, thread(theirs.childThreadId))
+      const error = await denied(call('thread_send', { threadId: theirs.childThreadId, content: 'x' }))
       expect(error!.code).toBe('mousse_scope_denied')
-      expect(error!.message).toContain('continue_subagent')
+      expect(error!.message).toContain('only its parent')
+      expect(delegation.continueSubagent).toHaveBeenCalledTimes(2)
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
 
@@ -520,6 +534,46 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       // The delegation path reads the stored result, not the tool's: the parent's notice row has every character.
       const row = fx.engine.inbox.listForChildThread(child.childThreadId, 'child_result')[0]
       expect((row.payload as { result: { text: string } }).result.text).toBe(long)
+    })
+
+    it('the result of your own subagent read here is acknowledged, as task_status does, so its notice is not handed over again', async () => {
+      const { call, result, fx, callerRun, threads } = await world()
+      const child = await fx.delegate(callerRun.runId, 'call-ack')
+      threads.set(child.childThreadId, { id: child.childThreadId, name: 'Child', createdAt: '', updatedAt: '' } as never)
+      fx.finish(child.childRunId, 'the child answer')
+      expect(fx.engine.inbox.listPending('caller')).toHaveLength(1)
+      expect(await result(call('thread_wait', { threadId: child.childThreadId, runId: child.childRunId }))).toMatchObject({ status: 'finished', resultText: 'the child answer' })
+      expect(fx.engine.delegations.get(child.delegationId)!.status).toBe('acknowledged')
+      expect(fx.engine.inbox.listForDelegation(child.delegationId).map((row) => row.status)).toEqual(['acknowledged'])
+      expect(fx.engine.inbox.listPending('caller')).toEqual([])
+    })
+
+    it('a question answered before the wait could report it does not end the wait: it goes on to the run\'s result, never a false timeout', async () => {
+      let open = false
+      const listeners = new Set<(threadId: string) => void>()
+      const { call, result, fx, targetRun } = await world({
+        pendingRequests: (threadId) => (threadId === 'target' && open ? [{ requestId: 'q-1', questions: [] }] : []),
+        onRequestPending: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        }
+      })
+      const waiting = result(call('thread_wait', { threadId: 'target', runId: targetRun.runId, timeoutMs: 20_000 }))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      // The question opens and is answered before the waiter reads it.
+      open = true
+      for (const listener of listeners) listener('target')
+      open = false
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      fx.finish(targetRun.runId, 'answered and done')
+      expect(await waiting).toMatchObject({ status: 'finished', resultText: 'answered and done' })
+    })
+
+    it('a question still open when the wait reports it ends the wait with needs_input', async () => {
+      const { call, result, targetRun } = await world({
+        pendingRequests: (threadId) => (threadId === 'target' ? [{ requestId: 'q-1', questions: [] }] : [])
+      })
+      expect(await result(call('thread_wait', { threadId: 'target', runId: targetRun.runId, timeoutMs: 20_000 }))).toMatchObject({ status: 'needs_input', needsInput: true, requests: 1 })
     })
 
     it('a run that left no text is finished without resultText', async () => {
