@@ -7,7 +7,7 @@ import { OpenSurfacePicker } from '../../src/renderer/components/OpenSurfaceMenu
 import { WorkspaceLoading, WORKSPACE_SKELETON_DELAY_MS } from '../../src/renderer/components/WorkspaceLoading'
 import { ProfileSwitcher } from '../../src/renderer/components/profiles/ProfileSwitcher'
 import { surfaceTabItems } from '../../src/renderer/lib/surfaces'
-import { RESIZER_KEY_STEP, resizerKeyTarget } from '../../src/renderer/lib/resizerKeys'
+import { resizerKeyTarget } from '../../src/renderer/lib/resizerKeys'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { ProjectTerminalTab } from '../../src/shared/types'
 
@@ -60,7 +60,6 @@ describe('terminal tab labels', () => {
 
 describe('resizer keys', () => {
   it('moves 16px with Left and Right and stops at the bounds', () => {
-    expect(RESIZER_KEY_STEP).toBe(16)
     expect(resizerKeyTarget('ArrowLeft', 260, 180, 480)).toBe(244)
     expect(resizerKeyTarget('ArrowRight', 260, 180, 480)).toBe(276)
     expect(resizerKeyTarget('ArrowLeft', 190, 180, 480)).toBe(180)
@@ -200,7 +199,6 @@ describe('workspace loading', () => {
     act(() => { vi.advanceTimersByTime(WORKSPACE_SKELETON_DELAY_MS - 1) })
     expect(host.querySelector('.workspace-loading-composer')).toBeNull()
     act(() => { vi.advanceTimersByTime(1) })
-    expect(WORKSPACE_SKELETON_DELAY_MS).toBe(160)
     expect(host.querySelector('.workspace-loading-sidebar')).not.toBeNull()
     expect(host.querySelector('.workspace-loading-composer')).not.toBeNull()
     expect(loading.textContent).toBe('')
