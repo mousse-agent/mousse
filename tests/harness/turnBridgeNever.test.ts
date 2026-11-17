@@ -168,11 +168,8 @@ describe('ACP request_permission', () => {
   } as RequestPermissionRequest
 
   it('answers `reject_once` under `never` without asking', async () => {
-    const questions = new UserQuestionService()
-    const asked = vi.spyOn(questions, 'requestAnswers')
     const answer = await answerPermission(refusingPrompter(), scope, request, { label: 'Agent', classify: classifyGenericOption })
     expect(answer).toEqual({ outcome: { outcome: 'selected', optionId: 'no' } })
-    expect(asked).not.toHaveBeenCalled()
   })
 
   it('asks under `ask`, as before', async () => {

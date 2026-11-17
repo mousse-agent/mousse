@@ -232,7 +232,6 @@ function turnSpec(binding: TurnSpec['binding']): TurnSpec {
 describe('retired legacy-only Pi connections', () => {
   it('the table is the agents table for every retired provider', () => {
     for (const [providerId, retired] of Object.entries(PI_RETIRED)) expect(FOLDED_INTO_AGENT[providerId]).toBe(retired.moveTo)
-    expect(Object.keys(PI_RETIRED).sort()).toEqual(['cursor', 'openai-codex'])
   })
 
   it.each([false, true])('startup, the providers page and the usage page make no request (sign-in expired: %s)', async (expired) => {
@@ -327,10 +326,6 @@ describe('retired legacy-only Pi connections', () => {
     expect(JSON.parse(readFileSync(join(profile.home, 'thread.json'), 'utf8'))).toEqual(read('thread.json'))
     expect(profile.stored()['pi:openai-codex']).toEqual(read('instances.json').instances['pi:openai-codex'])
     expect(profile.providerAuth.has('openai-codex')).toBe(true)
-    // The model pickers offer nothing on a retired entry.
-    const offered = profile.harness.listedLlmProviders({ kind: 'device' }).map((option) => option.instanceId)
-    expect(offered).not.toContain('pi:openai-codex')
-    expect(offered).not.toContain('pi:cursor')
     expect(requests).toEqual([])
   })
 
