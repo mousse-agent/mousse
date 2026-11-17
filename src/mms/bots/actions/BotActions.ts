@@ -186,6 +186,7 @@ interface Host {
   refresh(): Promise<void>
   park(row: BotActivationRow): void
   lifetime(row: BotActivationRow): number
+  origin(row: BotActivationRow): 'owner' | 'unattended' | undefined
   schema(tool: BotMcpTool): unknown
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
   obsolete(action: ActionRow): boolean
@@ -283,7 +284,7 @@ export class BotActions {
   private ownerWroteAfter(action: ActionRow, removed = false): boolean {
     const card = JSON.parse(action.card_json ?? '{}')
     const note = Number(this.host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', action.bot_id, `cursor:action-note:${action.activation_id}`)?.value ?? 0)
-    return this.host.store.ownerLastWroteSeq(action.bot_id) > Number((removed ? card.removedOwnerSeq : card.ownerSeq) ?? 0) || note > Number((removed ? card.removedNoteSeq : card.noteSeq) ?? 0)
+    return this.host.store.ownerLastWroteSeq(action.bot_id) > Number((removed ? card.removedOwnerSeq : card.ownerSeq) ?? (action.status === 'open' ? this.host.store.message(action.message_id)?.seq : 0) ?? 0) || note > Number((removed ? card.removedNoteSeq : card.noteSeq) ?? 0)
   }
   private refuse(row: BotActivationRow, action: ActionRow, text: string): ToolOutcome {
     this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner declined') ? 'repeat' : 'loop'}`, text)
@@ -296,17 +297,23 @@ export class BotActions {
     const existing = this.host.store.get('SELECT id FROM bot_actions WHERE call_key = ?', callKey)
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
-    // Work's refusals belong to that work; scheduled occurrences share the bot's tool refusal history.
-    const scope = row.trigger.kind === 'schedule'
-      ? this.host.store.all("SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id WHERE a.bot_id = ? AND json_extract(w.trigger_json, '$.kind') = 'schedule' AND a.target_json = ? ORDER BY a.rowid DESC", row.botId, JSON.stringify({ server: tool.server, tool: tool.tool }))
-      : this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool }))
+    const origin = this.host.origin(row)
+    if (!origin) return { text: "This work's starting turn could not be established. Nothing was held or sent; say so in your report.", isError: true }
+    const digest = actionDigest(args)
+    const target = JSON.stringify({ server: tool.server, tool: tool.tool })
+    const duplicate = this.host.store.get("SELECT * FROM bot_actions WHERE bot_id = ? AND target_json = ? AND args_digest = ? AND status = 'open' LIMIT 1", row.botId, target, digest) as unknown as ActionRow | undefined
+    if (duplicate) return this.refuse(row, duplicate, 'This exact call is already waiting for your owner on an open card. Carry on without asking again; nothing new was held or sent.')
+    // Unattended work and schedules share history. Owner messages and taps retain per-work history.
+    const scope = origin === 'unattended'
+      ? this.host.store.all('SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id WHERE a.bot_id = ? AND a.target_json = ? ORDER BY a.rowid DESC', row.botId, target)
+        .filter(action => { const owner = this.host.store.activation(String(action.activation_id)); return owner && this.host.origin(owner) === 'unattended' })
+      : this.host.store.all('SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? ORDER BY rowid DESC', row.id, target)
     const history = scope as unknown as ActionRow[]
     const removed = history.find(action => JSON.parse(action.card_json ?? '{}').ownerRemoved && !this.ownerWroteAfter(action, true))
     if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
-    const unanswered = history.filter(action => ['declined', 'expired'].includes(action.status) && !this.ownerWroteAfter(action))
+    const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
     if (unanswered.length >= MAX_SAME_WAKES)
       return this.refuse(row, unanswered[0], 'You had three cards for this tool that were not sent. Say what you need in your report and wait for your owner to write.')
-    const digest = actionDigest(args)
     const refused = unanswered.find(action => action.args_digest === digest)
     if (refused)
       return this.refuse(row, refused, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')

@@ -641,6 +641,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     store: this.host.store,
     refresh: async () => { await this.host.mcp?.warm() },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
+    origin: row => {
+      if (row.trigger.kind === 'schedule') return 'unattended'
+      if (row.trigger.kind !== 'work') return undefined
+      const from = this.store.activation(row.trigger.from)
+      if (from?.botId === row.botId) return memoryLaneOf(from) === 'chat' ? 'owner' : 'unattended'
+      // A reminder's work starts automatically, rather than in an owner's chat turn.
+      if (this.store.reminder(row.trigger.from)?.botId === row.botId) return 'unattended'
+      return undefined
+    },
     lifetime: row => {
       if (row.trigger.kind !== 'schedule') return 48 * 3600_000
       const schedule = this.host.schedules?.get(row.botId, row.trigger.scheduleId)
