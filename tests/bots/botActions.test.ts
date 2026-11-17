@@ -349,14 +349,19 @@ it.each(['repeat', 'three', 'forgotten'] as const)('recreating a schedule or sta
     await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'hold-' + n, signal: new AbortController().signal })
     await finish(f, turn.payload)
     const a = f.bots.actions.forWork(id)!
-    if (rule === 'forgotten') f.store.forgetMessage(t.botId, a.message_id)
+    if (rule === 'forgotten') {
+      const memory = new BotMemoryStore({ db: f.store.db })
+      const seq = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', 'bm:' + a.message_id)!.seq
+      memory.forget(t.botId, { refs: ['j' + seq], by: 'owner_ui' })
+    }
     else await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
     await flush()
     const resumed = await start(f, id, 2)
     // The scheduled run itself removes and recreates its automation, after the held call settled.
     expect(botAppToolRefusal(resumed.prepared.authority, 'bot_schedule_remove')).toBeUndefined()
     f.bots.tools.schedules.remove(t.botId, schedule.scheduleId)
-    schedule = f.bots.tools.schedules.add(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send the email' }, 'bot')
+    const added = f.bots.tools.schedules.add(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send the email' })
+    schedule = f.book.get(t.botId, added.scheduleId)!
     await finish(f, resumed.payload)
     f.clock.now += 5 * 60_000
     const due = await f.tickSchedules(new Date(f.clock.now))
