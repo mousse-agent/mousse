@@ -567,7 +567,7 @@ export class MmsWorkflowAgents {
     const host: AgentRuntimeHostBindings & { browserRuntime?: BrowserRuntimePort } = {
       workspaceRoots: [workspace.cwd],
       ...(workspace.kind === 'git-worktree' ? { dedicatedWorktreeRoot: workspace.cwd } : {}),
-      approveToolRequest: (approval) => this.approve(approval),
+      approveToolRequest: (approval) => this.approve(approval, signal),
       ...(this.browserRuntime ? { browserRuntime: this.browserRuntime } : {})
     }
     try {
@@ -796,8 +796,9 @@ export class MmsWorkflowAgents {
     return { output, tokens, cost, workspaceRevision }
   }
 
-  private async approve(request: AgentRuntimeToolApprovalRequest) {
-    if (this.stopped) return { status: 'cancelled' as const }
+  /** A tool call the agent's grants send to a person: it waits for them, and is withdrawn when the call is cancelled (`signal`). */
+  private async approve(request: AgentRuntimeToolApprovalRequest, signal: AbortSignal) {
+    if (this.stopped || signal.aborted) return { status: 'cancelled' as const }
     const argumentsJson = canonicalJson(request.arguments)
     if (Buffer.byteLength(argumentsJson, 'utf8') > APPROVAL_ARGUMENT_MAX_BYTES || sha256Hex(argumentsJson) !== request.argumentDigest) {
       return { status: 'denied' as const }
@@ -807,8 +808,8 @@ export class MmsWorkflowAgents {
         id: 'approval',
         prompt: `Allow ${request.canonicalToolName}?\nDigest: ${request.argumentDigest}\nArguments: ${argumentsJson}`,
         options: [{ id: 'approve', label: 'Allow this action' }, { id: 'reject', label: 'Reject' }]
-      }], request.threadId)
-      return { status: !this.stopped && answers.approval === 'approve' ? 'approved' as const : 'denied' as const, digest: request.argumentDigest }
+      }], request.threadId, { signal })
+      return { status: !this.stopped && !signal.aborted && answers.approval === 'approve' ? 'approved' as const : 'denied' as const, digest: request.argumentDigest }
     } catch {
       return { status: 'cancelled' as const }
     }
