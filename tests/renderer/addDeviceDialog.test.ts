@@ -20,17 +20,25 @@ const blocked = (state: AddDeviceState) => Object.fromEntries(addDeviceRoutes(st
 
 describe('Add device routes', () => {
   it('offers the routes in order, with a phone only in a build with Mousse ID', () => {
-    expect(addDeviceRoutes(ready).map((route) => route.title)).toEqual(['Invite a computer', 'Remote machine over SSH', 'Join with invitation'])
-    expect(addDeviceRoutes({ ...ready, phone: {} }).map((route) => route.id)).toEqual(['invite', 'phone', 'ssh', 'join'])
+    expect(addDeviceRoutes(ready).map((route) => route.title)).toEqual(['Make a link', 'Paste a link', 'Invite a computer', 'Remote machine over SSH', 'Join with invitation'])
+    expect(addDeviceRoutes({ ...ready, phone: {} }).map((route) => route.id)).toEqual(['link', 'paste', 'invite', 'phone', 'ssh', 'join'])
   })
 
   it('lets the computer that manages the devices invite and set up over SSH, and never join again', () => {
-    expect(blocked(ready)).toEqual({ invite: undefined, join: 'Only on a device that is not set up yet.', ssh: undefined })
+    expect(blocked(ready)).toEqual({ link: undefined, paste: undefined, invite: undefined, join: 'Only on a device that is not set up yet.', ssh: undefined })
+  })
+
+  it('makes and pastes links on any computer, set up or not, once it is unlocked', () => {
+    expect(blocked(fresh)).toMatchObject({ link: undefined, paste: undefined })
+    expect(blocked({ ...ready, authority: false, protectedKeys: false })).toMatchObject({ link: undefined, paste: undefined })
+    expect(blocked({ ...ready, unlocked: false })).toMatchObject({ link: 'Unlock this device first.', paste: 'Unlock this device first.' })
   })
 
   it('says what adding a phone needs, and holds everything but joining while this computer reconnects', () => {
     expect(blocked({ ...ready, phone: { blocked: 'Sign in to add phones.' } }).phone).toBe('Sign in to add phones.')
     expect(blocked({ ...ready, phone: {}, lapsed: true })).toEqual({
+      link: 'Wait for this computer to reconnect first.',
+      paste: 'Wait for this computer to reconnect first.',
       invite: 'Wait for this computer to reconnect first.',
       phone: 'Wait for this computer to reconnect first.',
       ssh: 'Wait for this computer to reconnect first.',
@@ -38,8 +46,8 @@ describe('Add device routes', () => {
     })
   })
 
-  it('lets a device that is not set up only join, and says what inviting needs', () => {
-    expect(blocked(fresh)).toEqual({ invite: 'Turn on networking first.', join: undefined, ssh: 'Turn on networking first.' })
+  it('lets a device that is not set up join or use a link, and says what inviting needs', () => {
+    expect(blocked(fresh)).toEqual({ link: undefined, paste: undefined, invite: 'Turn on networking first.', join: undefined, ssh: 'Turn on networking first.' })
   })
 
   it('names the first thing a device needs before it can invite', () => {
@@ -69,12 +77,12 @@ describe('Add device menu', () => {
     await act(async () => trigger.click())
     const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
     expect(items.map((item) => [item.dataset.action, item.getAttribute('aria-disabled') === 'true', item.disabled])).toEqual([
-      ['add-invite', true, false], ['add-phone', true, false], ['add-ssh', true, false], ['add-join', false, false]
+      ['add-link', false, false], ['add-paste', false, false], ['add-invite', true, false], ['add-phone', true, false], ['add-ssh', true, false], ['add-join', false, false]
     ])
-    expect(items[1].textContent).toBe('Add a phoneSign in to add phones.')
-    await act(async () => items[0].click())
+    expect(items[3].textContent).toBe('Add a phoneSign in to add phones.')
+    await act(async () => items[2].click())
     expect(chosen).not.toHaveBeenCalled()
-    await act(async () => items[3].click())
+    await act(async () => items[5].click())
     expect(chosen).toHaveBeenCalledWith('join')
     act(() => root.unmount())
     host.remove()

@@ -5,7 +5,7 @@ import { PAIRING_DISCLOSURE } from '../../lib/netDevices'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
 
-export type AddDeviceRouteId = 'invite' | 'phone' | 'ssh' | 'join'
+export type AddDeviceRouteId = 'link' | 'paste' | 'invite' | 'phone' | 'ssh' | 'join'
 
 export interface AddDeviceRoute {
   id: AddDeviceRouteId
@@ -46,12 +46,16 @@ function inviteBlocked(state: AddDeviceState): string | undefined {
 
 /**
  * The ways to add a device, in the Add device menu, each with what it needs first when it is not possible yet.
- * Inviting a computer and setting one up over SSH both need this device to sign the invitation; a phone comes
- * through Mousse ID; joining is only for a device that has no network identity yet.
+ * A connect link comes first: made here or pasted from another computer, on a computer set up or not. Inviting a
+ * computer and setting one up over SSH both need this device to sign the invitation; a phone comes through Mousse ID;
+ * joining is only for a device that has no network identity yet.
  */
 export function addDeviceRoutes(state: AddDeviceState): AddDeviceRoute[] {
   const invite = inviteBlocked(state)
+  const link = state.lapsed ? 'Wait for this computer to reconnect first.' : state.hasIdentity && !state.unlocked ? 'Unlock this device first.' : undefined
   return [
+    { id: 'link', icon: Link2, title: 'Make a link', detail: 'Paste it on the other computer.', blocked: link },
+    { id: 'paste', icon: Link2, title: 'Paste a link', detail: 'A link made on another computer.', blocked: link },
     { id: 'invite', icon: Laptop, title: 'Invite a computer', detail: 'Paste an invitation on a computer with Mousse.', blocked: invite },
     ...(state.phone ? [{ id: 'phone' as const, icon: Smartphone, title: 'Add a phone', detail: 'Scan a code with the Mousse app.', blocked: state.lapsed ? invite : state.phone.blocked }] : []),
     { id: 'ssh', icon: Server, title: 'Remote machine over SSH', detail: 'Set up Mousse on a machine you reach with ssh.', blocked: invite },
@@ -59,7 +63,8 @@ export function addDeviceRoutes(state: AddDeviceState): AddDeviceRoute[] {
   ]
 }
 
-function useNow(active: boolean) {
+/** The time now, ticking each second while `active`. */
+export function useNow(active: boolean) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     if (!active) return

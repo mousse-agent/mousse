@@ -1,5 +1,5 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { AgentReach, BridgeAccessMine, BridgeAccessThere, BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { AgentReach, BridgeAccessMine, BridgeAccessThere, BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, NetLinkCheck, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
@@ -66,7 +66,8 @@ export function connectedHere(device: Pick<Device, 'connection'>): boolean {
  * otherwise a link from it. Undefined for a connected device.
  */
 export function connectStep(device: Pick<Device, 'connection' | 'routeHeld' | 'name'>): { connect: true } | { hint: string } | undefined {
-  if (connectedHere(device)) return undefined
+  // A held device is connected with Allow, which also sets what it may do here.
+  if (connectedHere(device) || device.connection === 'held') return undefined
   return device.routeHeld ? { connect: true } : { hint: `Paste a link from ${device.name}` }
 }
 
@@ -234,17 +235,73 @@ export function passLapsed(status?: Pick<NetStatus, 'error' | 'peers'>): boolean
 }
 
 /**
- * A device's state on this computer, for its row: connected here or not. A daemon from before the record sends none.
- * One more state is planned (a device that came in by a connect link and waits for Allow); it gets its words here.
+ * A device's state on this computer, for its row: connected here, held (it came in by a connect link and waits for
+ * Allow), or not connected. A daemon from before the record sends none.
  */
-export type DeviceConnectionState = 'connected' | 'not_connected'
+export type DeviceConnectionState = 'connected' | 'held' | 'not_connected'
 const CONNECTION_WORDS: Record<DeviceConnectionState, string> = {
   connected: 'connected here',
+  held: 'waits for Allow',
   not_connected: 'not connected here'
 }
 export function connectionState(device: Pick<Device, 'connection'>): DeviceConnectionState | undefined {
   if (device.connection === undefined) return undefined
-  return device.connection === 'connected' ? 'connected' : 'not_connected'
+  return device.connection === 'connected' || device.connection === 'held' ? device.connection : 'not_connected'
+}
+
+/** The held devices, each with which side this computer is on: it made the link (`maker`) or joined through it. */
+export function heldDevices(devices: Device[]): Array<{ device: Device; side: 'maker' | 'joiner' }> {
+  return devices
+    .filter((device) => !device.self && !device.revoked && device.connection === 'held')
+    // Only a computer that joined holds the one that keeps the list.
+    .map((device) => ({ device, side: device.keeper ? 'joiner' as const : 'maker' as const }))
+}
+
+/** What Allow does, for its tooltip; the maker's adds that Mousse ID connects the device elsewhere on its own. */
+export function allowDetail(name: string, side: 'maker' | 'joiner'): string {
+  const work = accessPreset('work')
+  const access = `Allow connects ${name} here with ${work.label}: ${work.detail}`
+  return side === 'maker' ? `${access} Your other computers signed in to Mousse ID connect it on their own.` : access
+}
+
+/** Why a connect link can't be used here, from `net.link.check`; undefined for a link that can. */
+export function linkRefusal(check: NetLinkCheck): string | undefined {
+  if (check.row !== 'refused') return undefined
+  switch (check.reason) {
+    case 'connect_only':
+      return 'This link only connects devices already in its list. Make the link on the computer that keeps that list.'
+    case 'own_link':
+      return 'This link was made on this computer. Paste it on the other one.'
+    case 'other_list':
+      return 'This computer is in another list. Two lists can’t be merged.'
+    case 'join_unfinished':
+      return 'Finish or give up the connection under way first.'
+    case 'live_devices':
+      if (check.startOver?.keeper) return 'This computer keeps other devices connected. Make the link here and paste it on the other computer.'
+  }
+  return check.startOver ? startOverRefusal(check.startOver) ?? 'This link can’t be used here.' : 'This link can’t be used here.'
+}
+
+/**
+ * Why making or pasting a connect link failed, with the one thing to do next. `side` is where it failed: a link
+ * pasted here names the fix on the computer that made it.
+ */
+export function linkErrorWords(error: { code?: unknown; details?: unknown; message?: unknown }, side: 'make' | 'paste'): string {
+  const reason = (error.details as { reason?: unknown } | undefined)?.reason
+  switch (reason) {
+    case 'stale':
+      return 'This link was used or replaced. Make a new link.'
+    case 'link_unreachable':
+      return 'Couldn’t reach the computer that made this link. On it, allow Mousse through the firewall, or connect both computers with Tailscale or SSH.'
+    case 'no_listener':
+      return 'No other computer can reach this one. Allow Mousse through the firewall, or turn on Tailscale or SSH.'
+    case 'passphrase':
+      return 'The system keychain refused. Choose a passphrase for this computer’s keys.'
+    case 'refused':
+      return 'The computer that made this link refused it. Make a new link there.'
+  }
+  if (side === 'paste' && error.code === 'peer_key_mismatch') return 'Another computer answered for this link. Make a new link.'
+  return side === 'paste' ? joinErrorWords(error) : String(error.message ?? error.code ?? 'The link couldn’t be made.')
 }
 
 /**
