@@ -386,6 +386,11 @@ export interface RunSettings {
   /** How many turns Mousse starts for a thread's goal (`/goal`) before it stops; Continue allows as many again. */
   goalTurnLimit: number
   /**
+   * Keep this computer from sleeping while a run of a thread, a subagent or a bot is working, and for a short grace
+   * after the last one ends. The screen may still turn off. Absent counts as on.
+   */
+  keepAwake: boolean
+  /**
    * How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2). `strict`: on
    * a provider that reports a tool only when it starts, a steer held for a tool waits for the provider's own turn to
    * end, or Send now. Absent or `best_effort`: it goes in shortly after the tool. No UI sets it.
@@ -412,7 +417,8 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
     newThreadWorktree: raw?.newThreadWorktree !== false,
     privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never',
-    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit)
+    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit),
+    keepAwake: raw?.keepAwake !== false
   }
 }
 

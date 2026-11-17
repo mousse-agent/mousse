@@ -53,6 +53,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Finished', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'when a thread finishes', 'completion sound', 'toast', 'system notification', 'done'] },
   { title: 'Needs you', section: 'general', anchor: 'general-notify-needs-you', keywords: ['notifications', 'when a thread needs you', 'question', 'approval', 'toast', 'sound'] },
   { title: 'Stopped', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'when a thread stops', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
+  { title: 'Keep computer awake', section: 'general', anchor: 'general-keep-awake', keywords: ['sleep', 'awake', 'power', 'caffeinate', 'suspend', 'idle', 'battery'] },
   { title: 'Goal turn limit', section: 'general', anchor: 'general-goal-turns', keywords: ['goal', '/goal', 'turns', 'continue', 'keep working', 'limit', 'autonomous'] },
   { title: 'Delete private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto delete', 'timer', 'incognito', 'chats'] },
   { title: 'All threads on my other devices', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote', 'computers'] },

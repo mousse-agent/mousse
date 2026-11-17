@@ -1034,7 +1034,7 @@ function assertPermissionsPatch(value: unknown): void {
 function assertRunsPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.runs')
   for (const key of Object.keys(patch)) {
-    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry' && key !== 'goalTurnLimit' && key !== 'steerRelease') throw new Error(`partial.runs.${key} is not allowed`)
+    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry' && key !== 'goalTurnLimit' && key !== 'keepAwake' && key !== 'steerRelease') throw new Error(`partial.runs.${key} is not allowed`)
   }
   // How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2).
   if (patch.steerRelease !== undefined) {
@@ -1046,6 +1046,8 @@ function assertRunsPatch(value: unknown): void {
     throw new Error('partial.runs.newThreadWorktree must be a boolean')
   if (patch.privateThreadExpiry !== undefined && patch.privateThreadExpiry !== 'never' && !isExpiryPreset(patch.privateThreadExpiry))
     throw new Error('partial.runs.privateThreadExpiry must be never, 1h, 24h, 7d or 30d')
+  if (patch.keepAwake !== undefined && typeof patch.keepAwake !== 'boolean')
+    throw new Error('partial.runs.keepAwake must be a boolean')
   if (patch.resumeAfterUsageLimit !== undefined && typeof patch.resumeAfterUsageLimit !== 'boolean')
     throw new Error('partial.runs.resumeAfterUsageLimit must be a boolean')
   if (patch.usageLimitPauseCap !== undefined && (!Number.isInteger(patch.usageLimitPauseCap) || (patch.usageLimitPauseCap as number) < 1 || (patch.usageLimitPauseCap as number) > MAX_USAGE_LIMIT_PAUSE_CAP))
