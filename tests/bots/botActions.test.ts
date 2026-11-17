@@ -3262,3 +3262,24 @@ it.each(['stop', 'done', 'failed'] as const)('C9 work ending %s consumes unread 
   }
   expect(f.store.unreadWorkActions(t.workId)).toEqual([])
 })
+
+it('C9 a scheduled unsent loop ends at its report', async () => {
+  const t = await scheduledCall()
+  let turn = t.run
+  for (let n = 0; n < 3; n++) {
+    await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: `request ${n}` }, toolCallId: `unsent-${n}`, signal: new AbortController().signal })
+    await finish(f, turn.payload)
+    const a = f.bots.actions.forWork(t.id)!
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+    await flush(); turn = await start(f, t.id, f.store.lastMainDispatch(t.id)!.n)
+  }
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'fourth request' }, toolCallId: 'fourth', signal: new AbortController().signal })
+  expect(result).toMatchObject({ isError: true, text: 'Three requests for this tool are waiting or were not sent. Say what you need in your report.' })
+})
+it('C9 chat asks-first refusal tells the bot to start work', async () => {
+  const t = await setup(true)
+  const chat = await f.bots.enqueueChat(t.botId, 'chat:needs-work', 'Send another email')
+  const turn = await start(f, chat.id)
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'chat-send', signal: new AbortController().signal })
+  expect(result).toMatchObject({ isError: true, text: 'This tool needs your owner to approve each request. Start it as work with work_start so they can answer it in the chat.' })
+})
