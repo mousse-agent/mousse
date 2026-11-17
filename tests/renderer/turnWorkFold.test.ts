@@ -213,8 +213,8 @@ describe('a running turn', () => {
     expect(text).toContain('Read 2 files and ran 2 commands')
     // No call row shows on its own; the line under the work names what runs.
     expect(answerOf(0).querySelector('.an-tool-group-rows')).toBeNull()
-    const live = host.querySelector<HTMLElement>('[data-turn-progress]')!
+    const live = host.querySelector<HTMLElement>('[data-turn-live]')!
     expect(answerOf(0).lastElementChild).toBe(live)
-    expect(live.textContent).toBe('Running Bash…npm test')
+    expect(live.querySelector('[data-turn-progress]')!.textContent).toBe('Running Bash…npm test')
   })
 })

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * A tool row or group the person opened stays open while the reply goes on: when a thought starts or ends beside it,
- * and when the next call joins it into a group (the group then opens with the row in it).
+ * and when the next call joins a lone call's run (the run keeps its container from its first call).
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -51,14 +51,18 @@ describe('an opened tool row', () => {
     expect(toggle('Ran 2 commands').getAttribute('aria-expanded')).toBe('true')
   })
 
-  it('a row stays open when the next call joins it into a group, and the group opens with it', () => {
+  it('a lone call, opened, stays open as the same element when the next call joins it', () => {
     render([user, command('a'), thought('t', false)])
-    act(() => toggle('Ran').click())
-    expect(toggle('Ran').getAttribute('aria-expanded')).toBe('true')
+    const opened = toggle('Ran npm run a')
+    act(() => opened.click())
+    expect(opened.getAttribute('aria-expanded')).toBe('true')
     render([user, command('a'), thought('t', true), command('b', false)])
-    const group = toggles().find((b) => b.getAttribute('aria-expanded') !== null && !b.closest('.an-tool-group-rows') && /command/.test(b.textContent ?? ''))!
-    expect(group.getAttribute('aria-expanded')).toBe('true')
-    const row = [...host.querySelectorAll<HTMLButtonElement>('.an-tool-group-rows button[aria-expanded]')].find((b) => b.textContent!.includes('npm run a'))!
-    expect(row.getAttribute('aria-expanded')).toBe('true')
+    // The run keeps its container: the line the person opened is the group's, still open, now with both calls.
+    expect(opened.isConnected).toBe(true)
+    expect(opened.getAttribute('aria-expanded')).toBe('true')
+    expect(opened.textContent).toMatch(/command/)
+    const rows = [...host.querySelectorAll<HTMLButtonElement>('.an-tool-group-rows button[aria-expanded]')].map((b) => b.textContent!)
+    expect(rows.some((text) => text.includes('npm run a'))).toBe(true)
+    expect(rows.some((text) => text.includes('npm run b'))).toBe(true)
   })
 })

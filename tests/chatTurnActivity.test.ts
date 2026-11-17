@@ -43,11 +43,12 @@ describe('a turn right after sending', () => {
     expect(html).not.toContain('Thinking…')
   })
 
-  it('streams the thought in its own row, which is the live line: no second one under it', () => {
+  it('heads the one live row with the thought being written, and shows it nowhere else', () => {
     const html = render([user, thought('t1', 'Looking for the start script', 'input-available')], 'streaming')
-    expect(text(html)).toContain('Looking for the start script')
-    expect(text(html)).not.toContain('Thinking Looking')
-    expect(html).not.toContain('data-turn-progress')
+    expect(text(html).split('Looking for the start script').length - 1).toBe(1)
+    expect(html.split('data-turn-live').length - 1).toBe(1)
+    expect(html).toMatch(/class="turn-live-headline">Looking for the start script</)
+    expect(html).toMatch(/data-turn-progress="thinking"[\s\S]*Thinking…/)
   })
 })
 
@@ -68,7 +69,7 @@ const edit = (id: string, path: string): UIMessage =>
 const reply = (id: string, said: string): UIMessage => ({ id, role: 'assistant', parts: [{ type: 'text', text: said }] })
 
 describe('a tool call group', () => {
-  it('is titled with its latest thought, then what its calls did', () => {
+  it('is titled with the thought that led to its first call, then what its calls did', () => {
     const html = render(
       [
         user,
@@ -83,8 +84,9 @@ describe('a tool call group', () => {
       ],
       'streaming'
     )
-    // The latest thought says why the calls ran; what they did follows it.
-    expect(text(html)).toContain('The app is starting; watch the log · 6 actions')
+    // The thought that started the calls says why they ran; what they did follows it. A later thought leaves the title.
+    expect(text(html)).toContain('Find the start script · 6 actions')
+    expect(text(html)).not.toContain('The app is starting; watch the log ·')
   })
 
   it('splits at narration: the calls on each side are a group of their own, the narration prose between them', () => {
@@ -150,8 +152,8 @@ describe('a finished turn', () => {
     const html = render(turn, 'streaming')
     expect(rows(html)).toEqual([
       'Checking the start script first.',
-      // The thought came after the command: it says what is next, so the group keeps its count.
-      'Ran 1 command',
+      // The thought came after the command: it says what is next, so the lone call keeps its own title.
+      'Ran npm start',
       'The app starts on port 3000.',
       'Nothing else to check',
       'Thinking…'

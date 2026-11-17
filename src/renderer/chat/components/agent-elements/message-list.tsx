@@ -41,7 +41,7 @@ import {
 import { createToolOpenStore, ToolOpenContext } from "./tools/tool-open-state";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
-import { TurnProgressRow, useTurnProgressState } from "./turn-progress";
+import { callTitle, TurnProgressRow, useTurnProgressState } from "./turn-progress";
 import { ToolIcon } from "./tools/tool-icon";
 import {
   PermissionRequestRow,
@@ -63,8 +63,8 @@ import { getToolStatus } from "./utils/format-tool";
 import {
   analyzeAssistantMessage,
   foldTurnWork,
-  isLiveThoughtItem,
   isStandaloneToolType,
+  pendingFailures,
   settleEarlierThoughts,
   workGroupIconType,
   workGroupHeading,
@@ -2240,10 +2240,7 @@ function isUnrecoveredFailure(part: unknown): boolean {
   return isV5ToolPart(part) && getToolStatus(part).isError && !(part as { failureRecovered?: boolean }).failureRecovered;
 }
 
-/** A call (not a thought) that has not finished. */
-function isRunningCall(part: ToolPartBase): boolean {
-  return part.type !== "tool-Thinking" && (part.state === "input-streaming" || part.state === "input-available");
-}
+const NO_FAILURES: ReadonlySet<string> = new Set();
 
 /**
  * What folding needs to know of one message of a finished turn: whether it is work (calls, thoughts), narration or
@@ -2417,9 +2414,30 @@ const TurnRow = memo(function TurnRow({
 
       {turn.userMsg && lastTurnNotice}
 
-      {turn.assistantMsgs.length > 0 &&
-        !(isLastTurn && showPlanning) &&
-        (() => {
+      {(() => {
+          // Sent, with no output yet: the live row alone, under Working. It is laid out like the turn's answer below,
+          // the same elements in the same places, so when the first output arrives the live row stays the same
+          // element and only rows above it are added.
+          const liveBeforeOutput = isLastTurn && (showAwaitingReply || showPlanning);
+          const hasOutput = turn.assistantMsgs.length > 0 && !(isLastTurn && showPlanning);
+          if (!hasOutput) {
+            if (!liveBeforeOutput) return null;
+            return (
+              <div className="group/assistant-turn">
+                <TurnWorkStatus
+                  active
+                  startedAt={liveStartedAt ?? readCreatedAt(turn.userMsg)}
+                  durationMs={null}
+                />
+                <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
+                  <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
+                    {null}
+                  </TurnIdContext.Provider>
+                  <TurnProgressRow messages={turn.assistantMsgs} standalone />
+                </div>
+              </div>
+            );
+          }
           const assistantText = getTextFromParts(
             turn.assistantMsgs.flatMap((msg) => msg.parts ?? []),
             "\n\n",
@@ -2479,6 +2497,7 @@ const TurnRow = memo(function TurnRow({
               subagentCardIds,
             ),
           );
+          const turnFailures = isTurnStreaming ? pendingFailures(turnMsgs) : NO_FAILURES;
           // A finished turn ends on its answer: the work that led to it comes above it. A cut-off turn keeps
           // the order it ran in when work followed its last text.
           const settled = isTurnStreaming
@@ -2487,14 +2506,15 @@ const TurnRow = memo(function TurnRow({
           const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
           const analyses = settled.order.map((index) => settled.analyses[index]!);
           // Consecutive calls and thoughts become one line that says what they did; narration between them
-          // splits them. While the turn runs, a call still running folds into such a line even alone: the live
-          // line under the work says what runs now, so it does not show twice.
+          // splits them. While the turn runs, every run with a call is such a line from its first call to its last,
+          // even a run of one: a row never turns into a group (or back) as calls start and finish. (A thought at the
+          // very end is the live row's, below, so a run of thoughts alone is one that text closed: it cannot grow.)
           const segments = partitionTurnSegments(
             analyses.map((a) => a.toolsOnly),
             analyses.map((a) => a.cardsOnly),
             analyses.map((a) => a.toolItems.length),
             isTurnStreaming
-              ? (run) => run.some((msgIndex) => analyses[msgIndex]!.toolItems.some((item) => isRunningCall(item.part)))
+              ? (run) => run.some((msgIndex) => analyses[msgIndex]!.toolItems.some((item) => item.part.type !== "tool-Thinking"))
               : undefined,
             // Subagents started in quick succession share one card: only thinking between them, and each started
             // within a short gap of the one before.
@@ -2520,6 +2540,17 @@ const TurnRow = memo(function TurnRow({
               toolRenderers={toolRenderers}
             />
           );
+          // The thought at the very end of a running turn, being written or just finished with nothing after it yet,
+          // is no row of its own: the live row shows its headline. Once something follows it, it takes its place in
+          // the list, as the thought that led to a group's first call or as a finished thought before the text.
+          const liveTurn = isLastTurn && isStreaming;
+          const lastSegment = segments[segments.length - 1];
+          const lastRunItems = !liveTurn || !lastSegment || lastSegment.kind === "cards"
+            ? []
+            : (lastSegment.kind === "tools" ? lastSegment.msgIndices : [lastSegment.msgIndex]).flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+          const endThought = lastRunItems.at(-1)?.part.type === "tool-Thinking" ? lastRunItems.at(-1) : undefined;
+          // The latest thought of the turn's current run of work, for the live row's first line.
+          const runThought = lastRunItems.filter((item) => item.part.type === "tool-Thinking").at(-1)?.part;
           const rows = segments.map((segment): { node: React.ReactNode; fold: FoldRow } => {
             if (segment.kind === "cards") {
               // A card still starting is not drawn: the progress line says "Starting subagent…".
@@ -2596,6 +2627,8 @@ const TurnRow = memo(function TurnRow({
                 };
               }
               const isLastMsg = isLastTurn && segment.msgIndex === answerMsgs.length - 1;
+              const ownItems = analyses[segment.msgIndex]!.toolItems;
+              if (endThought && ownItems.length === 1 && ownItems[0] === endThought) return { fold, node: null };
               return {
                 fold,
                 node: (
@@ -2615,16 +2648,22 @@ const TurnRow = memo(function TurnRow({
             const items = segment.msgIndices.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
             const firstId = answerMsgs[segment.msgIndices[0]!]!.id;
             const itemKey = (item: (typeof items)[number], k: number) => item.part.toolCallId ?? `${firstId}-tool-${k}`;
-            // A thought still being written stays out of the group: its own row is the turn's live line.
-            const liveThought = isLastTurn && isStreaming && isLiveThoughtItem(items[items.length - 1]) ? items[items.length - 1]! : undefined;
-            const grouped = liveThought ? items.slice(0, -1) : items;
+            const grouped = endThought && items[items.length - 1] === endThought ? items.slice(0, -1) : items;
             const iconType = workGroupIconType(grouped);
             // A group titled by a thought shows the thinking icon: the line is the agent's words, not a tool's.
             const heading = workGroupHeading(grouped);
-            const unrecovered = grouped.filter((item) => isUnrecoveredFailure(item.part)).length;
-            // One finished call left beside the live thought is its own row: it says more than "Read 1 file".
-            const single = grouped.length === 1 && !isRunningCall(grouped[0]!.part) ? grouped[0]! : undefined;
-            const group = grouped.length === 0 ? null : single ? renderTool(single.part, single.nestedTools, itemKey(single, 0)) : (
+            const calls = grouped.filter((item) => item.part.type !== "tool-Thinking");
+            // Only failures the agent did not get past are named on the group line; while the turn runs, a failure
+            // nothing has followed yet counts too, as it will if the turn ends there.
+            const failedNow = (item: (typeof items)[number]) =>
+              isUnrecoveredFailure(item.part) || (isTurnStreaming && Boolean(item.part.toolCallId && turnFailures.has(item.part.toolCallId)));
+            const unrecovered = grouped.filter(failedNow).length;
+            // A run of one call says what that call does, as its own row would.
+            const title = !heading.thought && calls.length === 1 && isV5ToolPart(calls[0]!.part)
+              ? callTitle(calls[0]!.part)
+              : heading.title;
+            // Keyed by the run's first message, so the line stays one element while the run grows.
+            const group = grouped.length === 0 ? null : (
               <ToolCallsGroup
                 key={`${firstId}-toolcalls`}
                 openKey={`${firstId}-toolcalls`}
@@ -2639,26 +2678,15 @@ const TurnRow = memo(function TurnRow({
                     <RowTools size={18} />
                   )
                 }
-                title={heading.title}
+                title={title}
                 summary={heading.summary}
-                // Only failures the agent did not get past are named on the group line.
                 failed={unrecovered}
                 live={isLastTurn && isStreaming}
               >
                 {grouped.map((item, k) => renderTool(item.part, item.nestedTools, itemKey(item, k)))}
               </ToolCallsGroup>
             );
-            return {
-              fold: { kind: "tools", keep: unrecovered > 0 },
-              // One wrapper whether or not a thought is being written beside the calls, so the group is not rebuilt
-              // when one starts or ends.
-              node: (
-                <Fragment key={`${firstId}-toolcalls-live`}>
-                  {group}
-                  {liveThought && renderTool(liveThought.part, liveThought.nestedTools, itemKey(liveThought, items.length - 1))}
-                </Fragment>
-              ),
-            };
+            return { fold: { kind: "tools", keep: unrecovered > 0 }, node: group };
           });
           // A finished turn folds its work behind its "Worked for" line; the line opens it in place.
           const folded = isTurnStreaming ? rows.map(() => false) : foldTurnWork(rows.map((row) => row.fold));
@@ -2689,8 +2717,13 @@ const TurnRow = memo(function TurnRow({
                 <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
                   {rows.map((row, index) => (folded[index] && !workOpen ? null : row.node))}
                 </TurnIdContext.Provider>
-                {isTurnStreaming && (
-                  <TurnProgressRow messages={turn.assistantMsgs} awaitingSubagents={!isStreaming} />
+                {(isTurnStreaming || liveBeforeOutput) && (
+                  <TurnProgressRow
+                    messages={turn.assistantMsgs}
+                    awaitingSubagents={isTurnStreaming && !isStreaming}
+                    standalone={!isTurnStreaming}
+                    thought={runThought}
+                  />
                 )}
               </div>
               {!isTurnStreaming && (
@@ -2727,20 +2760,6 @@ const TurnRow = memo(function TurnRow({
           );
         })()}
 
-      {isLastTurn && (showAwaitingReply || showPlanning) && (
-        // Laid out like the turn's answer below, so its first row
-        // takes the live row's place without moving.
-        <div className="group/assistant-turn">
-          <TurnWorkStatus
-            active
-            startedAt={liveStartedAt ?? readCreatedAt(turn.userMsg)}
-            durationMs={null}
-          />
-          <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
-            <TurnProgressRow messages={turn.assistantMsgs} standalone />
-          </div>
-        </div>
-      )}
     </div>
   );
 });

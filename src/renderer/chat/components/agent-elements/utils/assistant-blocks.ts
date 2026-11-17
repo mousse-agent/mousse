@@ -322,11 +322,6 @@ export function thoughtSourceOf(part: ToolPartBase & { liveId?: string; liveFrom
   return { id, thought, from: Math.min(part.liveFrom ?? 0, thought.length) };
 }
 
-/** A thought still being written: while the turn runs it is the turn's live line, never folded into a group. */
-export function isLiveThoughtItem(item: AssistantToolItem | undefined): boolean {
-  return item?.part.type === "tool-Thinking" && item.part.state === "input-available";
-}
-
 /**
  * The calls of a running turn that failed with nothing after them yet: no later call succeeded and no reply followed.
  * The transcript marks such a failure as got past while the turn runs (`markRecoveredFailures`), so its row stays

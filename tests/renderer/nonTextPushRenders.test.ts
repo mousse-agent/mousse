@@ -200,7 +200,9 @@ describe('pushes other than text while a reply streams', () => {
   it('a turn-state push renders the line under Working only', async () => {
     await mount()
     const useAppStore = await store()
-    expect(progressLine()?.dataset.turnProgress).toBe('writing')
+    // The reply being written is on screen: the live row has nothing to add.
+    expect(progressLine()).toBeNull()
+    expect(host.querySelector<HTMLElement>('[data-turn-live]')!.hidden).toBe(true)
     // The service sends every thread's turn and then the one that changed, both new objects.
     const push = (state: TurnState) => () => {
       useAppStore.getState().setTurnSnapshot(turns(state))
@@ -288,7 +290,7 @@ describe('a thought being written', () => {
   const thought = (content: string): ChatMessage =>
     ({ id: 'th', role: 'system', kind: 'thinking', content: '', timestamp: at(21), thinking: { content, status: 'processing' } })
 
-  it('a streamed delta of the thought renders its row only: no sidebar row, the chat or the transcript', async () => {
+  it('a streamed delta of the thought renders the live row only: no sidebar row, the chat or the transcript', async () => {
     const thinking = [...transcript().slice(0, -1), thought('**Reading the logs**\n\nThe first run')]
     await mount({ messages: thinking, turn: turn({ phase: 'thinking', step: { kind: 'reasoning' } }) })
     const useAppStore = await store()
@@ -300,9 +302,11 @@ describe('a thought being written', () => {
     })
     expectTranscriptAndRowsStill(delta)
     expect(delta.counts.ThreadsSidebar ?? 0).toBe(0)
-    expect(delta.counts.ThinkingTool).toBe(1)
+    expect(delta.counts.TurnProgressRow).toBe(1)
+    expect(delta.counts.ThinkingTool ?? 0).toBe(0)
     expect(useAppStore.getState().messages).toBe(before)
-    expect(host.textContent).toContain('failed on the cache step')
+    expect(host.querySelector('.turn-live-headline')?.textContent).toBe('Reading the logs')
+    expect(host.querySelector<HTMLElement>('.turn-live-thought')?.title).toBe('The first run failed on the cache step')
   })
 })
 
