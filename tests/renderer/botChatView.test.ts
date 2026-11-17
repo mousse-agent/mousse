@@ -2733,3 +2733,22 @@ it('keeps only the newest review after two nudges, with earlier copies reduced t
   expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
   expect(button('Send', transcript())).toBeUndefined()
 })
+
+it('keeps empty and unusual field names injective and reserves the non-ASCII note for address-shaped values', async () => {
+  fake.chats.inbox = [held({ args: { '': 'empty key', '(no name)': 'literal label', '\n\n': 'newlines', '↵↵': 'literal arrows', '   ': 'spaces', 'имя': 'Анна', '名前': '太郎', 'tо': 'mixed key', to: 'аlice@example.test', wide: '＂false＂', french: '«false»', german: '„false„', blank: '   ' } })]
+  await open()
+  const region = host.querySelector('[aria-label="Everything it will send"]')!
+  const label = (value: string) => [...region.querySelectorAll('dd')].find(item => item.textContent === value)!.previousElementSibling!
+  expect(label('empty key').querySelector('[aria-label="Empty field name"]')).toBeTruthy()
+  expect(label('literal label').textContent).toBe('"(no name)"')
+  expect(label('newlines').textContent).toBe('"\\n\\n"')
+  expect(label('literal arrows').textContent).toBe('"↵↵"')
+  expect(label('spaces').textContent).toBe('"   "')
+  for (const key of ['имя', '名前', 'tо']) {
+    const name = [...region.querySelectorAll('dt')].find(item => item.textContent === key)!
+    expect(name).toBeTruthy()
+    expect(name.querySelector('[aria-label="Non-ASCII letters or digits"]')).toBeNull()
+  }
+  expect(region.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')).toHaveLength(1)
+  for (const text of ['＂false＂', '«false»', '„false„', '   ']) expect([...region.querySelectorAll('dd')].some(item => item.textContent === JSON.stringify(text))).toBe(true)
+})
