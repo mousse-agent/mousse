@@ -899,6 +899,14 @@ export class BotMemoryStore {
         if (row.redactedAt || redactedSeqs.has(row.seq)) return
         forgottenTexts.push(row.text)
         this.run("UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = ? WHERE seq = ?", tombstone, at, row.seq)
+        // Treat review copies as cited rows too, so folds/digests sourced only from them are invalidated.
+        if (/^bm:bm_action_[a-zA-Z0-9-]+$/.test(row.sourceKey)) {
+          const statusPrefix = `${row.sourceKey}:status:`
+          const copies = this.all(`SELECT * FROM bot_journal WHERE bot_id = ? AND redacted_at IS NULL
+            AND (source_key IN (?, ?) OR substr(source_key, 1, ?) = ?)`,
+          botId, `${row.sourceKey}_n1`, `${row.sourceKey}_n2`, statusPrefix.length, statusPrefix).map(journalRowOf)
+          for (const copy of copies) redact(copy)
+        }
         if (row.sourceKey.startsWith('bm:')) this.redactMessage(this.db, botId, row.sourceKey.slice(3), tombstone)
         redacted.push(`j${row.seq}`)
         redactedSeqs.add(row.seq)
