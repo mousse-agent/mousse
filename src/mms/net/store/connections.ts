@@ -62,23 +62,6 @@ export class SqliteConnections {
     const fresh = nodes.filter((node) => isId('node', node) && !this.states.has(node))
     if (fresh.length) this.write(fresh, 'connected', source, { onlyUnrecorded: true, marker: false })
   }
-  /** Forgets every record (a computer that starts over has a new list of devices). */
-  clear(): void {
-    const nodes = [...this.states.keys()] as NodeId[]
-    if (!nodes.length) return
-    this.db.transaction(() => {
-      this.db.database.prepare('DELETE FROM net_connections').run()
-      this.db.afterCommit(() => {
-        const events: ConnectionEvent[] = []
-        for (const node of nodes) {
-          const before = this.state(node)
-          this.states.delete(node)
-          events.push({ node, before, after: 'none' })
-        }
-        this.notify(events)
-      })
-    })
-  }
   onChange(listener: (events: readonly ConnectionEvent[]) => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)

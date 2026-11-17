@@ -180,6 +180,17 @@ describe('the keeper and a member', () => {
     await expect(info(a.net, b.node)).rejects.toMatchObject(notConnected)
   }, 90_000)
 
+  it('a member disconnected on both ends still gets the list from the keeper, as renewals travel', async () => {
+    const a = await keeper(),
+      b = await member(a, 'Laptop')
+    await a.net.request('bridge.disconnect', { node: b.node })
+    await b.net.request('bridge.disconnect', { node: a.node })
+    // The pair keeps its session for control traffic; a new list signed by the keeper reaches the member on it.
+    await vi.waitFor(() => expect(open(b.net, a.node)).toBe(true), { timeout: 15_000 })
+    await a.net.request('bridge.rename', { node: b.node, name: 'Laptop renamed' })
+    await vi.waitFor(async () => expect((await device(b.net, b.node)).name).toBe('Laptop renamed'), { timeout: 15_000 })
+  }, 60_000)
+
   it('refuses a saved result and ends a stream as the member is disconnected, and serves them again once connected', async () => {
     const a = await keeper(),
       b = await member(a, 'Laptop')
