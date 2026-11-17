@@ -432,6 +432,25 @@ it('a paused schedule refuses Send', async () => {
   await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
   expect(t.calls).toEqual([])
 })
+it.each(['prompt', 'timing', 'end', 'model', 'on/off', 'fixed line'] as const)('changing schedule %s retires its pending approval', async field => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const job = f.scheduler.getJob(t.schedule.jobId)!
+  const patch = field === 'prompt' ? { prompt: 'Different instructions' }
+    : field === 'timing' ? { schedule: { kind: 'interval' as const, minutes: 10 } }
+    : field === 'end' ? { expiresAt: new Date(f.clock.now + 3600_000).toISOString() }
+    : field === 'model' ? { bot: { ...job.bot!, model: 'another/model' } }
+    : field === 'on/off' ? { enabled: false }
+    : { bot: { ...job.bot!, say: 'A fixed line' } }
+  const retire = f.bots.actions.withdrawChanged.bind(f.bots.actions)
+  const inTransaction: boolean[] = []
+  vi.spyOn(f.bots.actions, 'withdrawChanged').mockImplementation(bot => { inTransaction.push(f.store.db.inTransaction); retire(bot) })
+  f.scheduler.updateJob(job.id, patch)
+  expect(inTransaction).toContain(true)
+  expect(inTransaction).not.toContain(false)
+  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
