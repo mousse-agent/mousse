@@ -192,6 +192,8 @@ interface NetConfiguration {
 }
 /** Transports that carry a session through a relay server rather than straight to the peer. */
 const RELAY_TRANSPORTS = new Set(['relay', HOSTED_RELAY_TRANSPORT])
+/** The other computer’s own answer to a join, as `EnrollmentQuarantine` marks it. */
+const fromPeer = (error: NetError) => (error.details as { from?: unknown } | undefined)?.from === 'peer'
 /** How long a join waits for its first session with the computer it joined through. */
 const JOIN_FIRST_SESSION_WAIT_MS = 20_000
 /** Clocks further apart than this are named as the reason a join failed. */
@@ -2925,10 +2927,7 @@ export class NetService {
     clockOffsetMs: number | undefined
   ): Promise<unknown> {
     if (this.stopped) return error
-    const refused =
-      error instanceof NetError &&
-      error.code === 'invite_invalid' &&
-      (error.details as { from?: unknown } | undefined)?.from === 'peer'
+    const refused = error instanceof NetError && error.code === 'invite_invalid' && fromPeer(error)
     let leftovers: 'none' | 'unsent' | 'sent' = 'none'
     try {
       leftovers = this.joinLeftovers(this.runtime())
@@ -2948,7 +2947,10 @@ export class NetService {
         cause: error,
         details: { reason: 'cancelled', ...named }
       })
-    if (!(error instanceof NetError) || error.details !== undefined) return error
+    // Errors already worded here (an unfinished join) pass as they are; a failure the other
+    // computer reported, other than a refusal, reads like any other.
+    const worded = error instanceof NetError && error.details !== undefined && !fromPeer(error)
+    if (!(error instanceof NetError) || worded) return error
     if (leftovers === 'sent')
       return new NetError('outcome_uncertain', undefined, {
         cause: error,

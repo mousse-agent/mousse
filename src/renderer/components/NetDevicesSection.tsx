@@ -391,7 +391,7 @@ export function NetDevicesSection() {
           title={`Finishing the connection to ${unfinishedJoin.name ?? 'the other computer'}`}
           anchor="devices-join"
           htmlFor={locked ? `${id}-join-passphrase` : undefined}
-          description={locked ? 'Enter this computer’s passphrase to retry' : 'Its answer never arrived'}
+          description={locked ? 'Enter this computer’s passphrase to retry' : 'The last try didn’t finish'}
           control={
             <form className="devices-inline-form" onSubmit={retryJoin}>
               {locked && <input id={`${id}-join-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy} onChange={(event) => setPassphrase(event.target.value)} autoComplete="current-password" />}

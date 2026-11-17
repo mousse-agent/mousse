@@ -94,7 +94,7 @@ export function joinErrorWords(error: { code?: unknown; details?: unknown; messa
     case 'cancelled':
       return `This connection was cancelled on ${other}. Start again with a new link from ${other}.`
     case 'join_unfinished':
-      return `The answer from ${other} never arrived. Retry, or give up and start again.`
+      return `Couldn’t finish connecting to ${other}. Retry, or give up and start again.`
   }
   switch (error.code) {
     case 'invite_invalid':

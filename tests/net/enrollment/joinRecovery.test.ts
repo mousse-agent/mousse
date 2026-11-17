@@ -162,7 +162,9 @@ it('the other computer refusing a sent join ends it, with the reason and its nam
   }
   const path = directory(),
     b = service(path)
-  await rejection(b.request('bridge.join', { invite: link.invite, name: 'Laptop' }))
+  // A failure on the other computer's side leaves the outcome unknown here, like a lost answer.
+  const failed = await rejection(b.request('bridge.join', { invite: link.invite, name: 'Laptop' }))
+  expect(failed).toMatchObject({ code: 'outcome_uncertain', details: { reason: 'join_unfinished', label: 'Studio Mac' } })
   expect(b.status().unfinishedJoin).toMatchObject({ name: 'Studio Mac' })
   // The owner cancels the link there; the retry gets a definite refusal.
   enrollment.revokeInvite(link.inviteId as never)
