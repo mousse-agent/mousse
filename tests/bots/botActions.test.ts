@@ -264,19 +264,25 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   expect(JSON.stringify([exported, captured, f.journal, f.bots.service.chatList(t.botId).messages, ledger.start.mock.calls])).not.toContain('private-call-secret')
   expect(t.calls).toEqual([])
 })
-// A catalogue turn's use_tool call of an offered owner MCP tool is the direct call: the same hold, call key and result.
-// The direct request carries the key the Mousse MCP server makes from a top-level clientRequestId; use_tool's carries it inside.
-it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route => ({ on, route }))))('a catalogue turn calls an offered MCP tool $route, asks first $on', async ({ on, route }) => {
-  const t = await setup(on)
+/** A catalogue turn (`use_tool`) of the bot `setup` made, on a registry with the catalogue tools; `call` names its tool call id. */
+function catalogueTurn(t: Awaited<ReturnType<typeof setup>>) {
   const bot = { ...t.work.prepared.authority, catalogue: 'use_tool' as const }
   const turns = new AppToolTurns()
   turns.register(appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot }))
   const registry = new ToolRegistry({ activeRunId: () => 'r1', turns, botMcp: t.mcp, userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never })
   for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
-  const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }, signal: new AbortController().signal } as Omit<Parameters<ToolRegistry['call']>[2], 'toolCallId'>
+  const credential = { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }
+  return (name: string, args: Record<string, unknown>, toolCallId: string) =>
+    registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, { credential, toolCallId, signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2])
+}
+// A catalogue turn's use_tool call of an offered owner MCP tool is the direct call: the same hold, call key and result.
+// The direct request carries the key the Mousse MCP server makes from a top-level clientRequestId; use_tool's carries it inside.
+it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route => ({ on, route }))))('a catalogue turn calls an offered MCP tool $route, asks first $on', async ({ on, route }) => {
+  const t = await setup(on)
+  const call = catalogueTurn(t)
   const result = route === 'direct'
-    ? await registry.call('mail_send', { ...t.args, [TURN_TOKEN_KEY]: 'tt' }, { ...request, toolCallId: 'mcp:send-once' })
-    : await registry.call('use_tool', { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'send-once' }, [TURN_TOKEN_KEY]: 'tt' }, { ...request, toolCallId: 'mcp:outer' })
+    ? await call('mail_send', t.args, 'mcp:send-once')
+    : await call('use_tool', { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'send-once' } }, 'mcp:outer')
   const actions = f.store.all('SELECT status, exec_args, call_key FROM bot_actions') as Array<{ status: string; exec_args: string; call_key: string }>
   if (on) {
     expect(result, result.text).toMatchObject({ text: expect.stringContaining('held') })
@@ -292,13 +298,7 @@ it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route 
 })
 it('a catalogue turn still refuses a tool it was not offered through use_tool', async () => {
   const t = await setup(false)
-  const bot = { ...t.work.prepared.authority, catalogue: 'use_tool' as const }
-  const turns = new AppToolTurns()
-  turns.register(appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot }))
-  const registry = new ToolRegistry({ activeRunId: () => 'r1', turns, botMcp: t.mcp, userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never })
-  for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
-  const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }, toolCallId: 'mcp:outer', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
-  const result = await registry.call('use_tool', { tool: 'mail_other', arguments: t.args, [TURN_TOKEN_KEY]: 'tt' }, request)
+  const result = await catalogueTurn(t)('use_tool', { tool: 'mail_other', arguments: t.args }, 'mcp:outer')
   expect(result).toEqual({ text: 'You have no tool named mail_other. tool_catalogue lists each group\'s tools.', isError: true })
   expect(t.calls).toEqual([])
 })
