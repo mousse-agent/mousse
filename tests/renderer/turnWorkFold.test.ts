@@ -265,6 +265,45 @@ describe('a turn stopped before its answer', () => {
   })
 })
 
+describe('a message that holds text beside its calls', () => {
+  const mixed = (id: string, text: string, part: Record<string, unknown>, seconds: number): UIMessage =>
+    ({ id, role: 'assistant', createdAt: at(seconds), parts: [{ type: 'text', text }, part] }) as unknown as UIMessage
+  const bash = (id: string, command: string, state: 'output-available' | 'input-available' | 'output-error') =>
+    ({ type: 'tool-Bash', toolCallId: id, state, input: { command }, ...(state === 'output-available' ? { output: 'ok' } : {}), ...(state === 'output-error' ? { errorText: 'exit 1' } : {}) })
+  const read = (id: string) => ({ type: 'tool-Read', toolCallId: id, state: 'output-available', input: { file_path: 'src/cache.ts' }, output: 'ok' })
+  const stopped = { id: 'stop', role: 'assistant', createdAt: at(6), parts: [], metadata: { turnEnd: { cause: 'user' } } } as unknown as UIMessage
+
+  it('keeps that text in view when it is the last thing the turn said', () => {
+    render([ask('u1', 'Fix it', 0), call('r1', 'tool-Read', { file_path: 'package.json' }, 2), mixed('m1', 'The key changed every run, so I am rebuilding it.', bash('b1', 'npm run build', 'output-available'), 5)])
+    expect(toggles()).toHaveLength(1)
+    expect(visible(0)).toContain('The key changed every run, so I am rebuilding it.')
+    expect(visible(0)).not.toContain('package.json')
+  })
+
+  it('folds it with the work when an answer follows, and counts it among the replies inside', () => {
+    render([ask('u1', 'Fix it', 0), mixed('m1', "I'll read how the key is built.", read('r1'), 2), said('a1', 'The key changed every run.', 9)])
+    expect(visible(0)).not.toContain("I'll read how the key is built.")
+    expect(visible(0)).toContain('The key changed every run.')
+    expect(nameOf(toggles()[0]!)).toContain('1 reply inside')
+  })
+
+  it('keeps it in view when the turn is stopped during its call', () => {
+    render([ask('u1', 'Fix it', 0), call('r1', 'tool-Read', { file_path: 'package.json' }, 2), mixed('m1', 'Running the slow tests now.', bash('b1', 'npm test', 'input-available'), 4), stopped])
+    expect(toggles()).toHaveLength(1)
+    expect(visible(0)).toContain('Running the slow tests now.')
+    expect(visible(0)).not.toContain('package.json')
+  })
+
+  it('keeps a failed call in view with the text beside it, and the answer after it', () => {
+    render([ask('u1', 'Fix it', 0), call('r1', 'tool-Read', { file_path: 'package.json' }, 2), mixed('m1', 'Trying the build.', bash('b1', 'npm run build', 'output-error'), 3), said('a1', 'The build still fails on the missing key.', 9)])
+    const text = visible(0)
+    expect(text).toContain('Trying the build.')
+    expect(text).toContain('npm run build')
+    expect(text).toContain('The build still fails on the missing key.')
+    expect(text).not.toContain('package.json')
+  })
+})
+
 describe('what you opened in a thread', () => {
   const show = (threadId: string, messages: UIMessage[]) =>
     act(() => root.render(createElement(MessageList, { key: threadId, threadId, messages, status: 'ready' })))

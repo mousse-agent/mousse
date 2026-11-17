@@ -2352,6 +2352,7 @@ function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boo
   }
   let text = false;
   let work = false;
+  let failed = false;
   for (const part of normalizeAssistantToolParts(msg.parts ?? []) as unknown[]) {
     if (isTextPart(part)) {
       if (part.text.trim()) text = true;
@@ -2363,10 +2364,14 @@ function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boo
       if (suppressQuestionTool && part.type === "tool-Question") continue;
       if (isStandaloneToolType(part.type)) return { kind: "message", keep: true };
       work = true;
+      if (isUnrecoveredFailure(part)) failed = true;
     }
   }
-  // Text written beside calls in one message is part of the work.
-  if (work) return { kind: "message", toolsOnly: true, text };
+  // A failure the agent did not get past stays in view, with whatever text is beside it.
+  if (failed) return { kind: "message", text, keep: true };
+  // Calls alone are work. Text written beside calls in one message was said to the person: the message is a reply,
+  // and stays with its calls when it is its part's last one.
+  if (work && !text) return { kind: "message", toolsOnly: true };
   return { kind: "message", text };
 }
 
