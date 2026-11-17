@@ -264,38 +264,50 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   expect(JSON.stringify([exported, captured, f.journal, f.bots.service.chatList(t.botId).messages, ledger.start.mock.calls])).not.toContain('private-call-secret')
   expect(t.calls).toEqual([])
 })
-// Direct and catalogue calls must reach the same owner-MCP gate, with and without asks first.
-it.each([true, false].flatMap(on => ['direct', 'use_tool'].map(route => ({ on, route }))))('catalogue MCP $route preserves the call, switch=$on', async ({ on, route }) => {
+// Owner MCP tools are separate offers. use_tool names only registered app tools.
+it.each([true, false].flatMap(on => ['pi', 'codex', 'claude'].map(runtime => ({ on, runtime }))))('owner MCP stays directly offered on $runtime, switch=$on', async ({ on, runtime }) => {
   const t = await setup(on, false, true, true)
-  const bot = { ...t.work.prepared.authority, catalogue: 'use_tool' as const }
+  const bot = { ...t.work.prepared.authority, catalogue: runtime === 'claude' ? 'search' as const : 'use_tool' as const }
   const turns = new AppToolTurns()
   turns.register(appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot }))
-  const registry = new ToolRegistry({
-    activeRunId: () => 'r1', turns, botMcp: t.mcp,
-    userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never
-  })
+  const proxy = vi.fn(async () => { throw new Error('ordinary proxy must not run') })
+  const registry = new ToolRegistry({ activeRunId: () => 'r1', turns, botMcp: t.mcp, botRole: () => 'activation', access: { botReach: () => ({ scope: 'manage' }) } as never,
+    userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: proxy } as never })
   for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
-  const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }, toolCallId: 'catalogue-call', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
-  const result = await registry.call(route === 'direct' ? 'mail_send' : 'use_tool', {
-    ...(route === 'direct' ? t.args : { tool: 'mail_send', arguments: t.args }), [TURN_TOKEN_KEY]: 'tt'
-  }, request)
+  const app = vi.fn(async () => ({ text: 'registered read' }))
+  registry.register({ name: 'git_status', description: 'List threads', inputSchema: { type: 'object' }, access: 'reads', class: 'read', handler: app })
+  const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: runtime, modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'catalogue-call', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
+  const callApp = () => registry.call(runtime === 'claude' ? 'git_status' : 'use_tool', { ...(runtime === 'claude' ? {} : { tool: 'git_status', arguments: {} }), [TURN_TOKEN_KEY]: 'tt' }, request)
+  expect((await registry.userMcpForTurn('bot-thread', 'r1')).map(tool => tool.providerName)).toContain('mail_send')
+  expect((await registry.userMcpListingForTurn('bot-thread', 'r1')).map(tool => tool.name)).toContain('mail_send')
+  const relay = new RelayHandler({ catalog: {} as never, manager: {} as never, botMcp: t.mcp, botOf: () => bot, projectPathFor: () => undefined })
+  expect(relay.list(request.credential).map(tool => tool.name)).toContain('Mail__send')
+  expect(registry.listForThread('bot-thread', 'default', 'r1').some(tool => tool.name === 'git_status')).toBe(runtime === 'claude')
+  const catalogue = await registry.call('tool_catalogue', { group: 'threads', [TURN_TOKEN_KEY]: 'tt' }, request)
+  expect(catalogue.text).toContain(runtime === 'claude' ? 'ToolSearch' : 'use_tool')
+  if (runtime !== 'claude') {
+    expect(await registry.call('use_tool', { tool: 'mail_send', arguments: t.args, [TURN_TOKEN_KEY]: 'tt' }, request)).toMatchObject({ isError: true, text: expect.stringContaining('no tool named mail_send') })
+    expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+    expect(t.calls).toEqual([])
+    expect(proxy).not.toHaveBeenCalled()
+  }
+  expect(await callApp()).toMatchObject({ text: 'registered read' })
+  expect(app).toHaveBeenCalledTimes(1)
+  const result = await registry.call('mail_send', { ...t.args, [TURN_TOKEN_KEY]: 'tt' }, request)
   const action = f.bots.actions.forWork(t.workId)
   if (on) {
-    expect(action, result.text).toBeDefined()
-    expect(action).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
+    expect(action, result.text).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
     expect(JSON.parse(action!.call_key)).toEqual([t.workId, f.store.dispatches(t.workId)[0]!.clientRequestId, 'catalogue-call'])
-    expect(f.bots.service.chatList(t.botId).messages.find(m => m.id === action!.message_id)?.action).toMatchObject({ title: 'Send', serverName: 'Mail', status: 'open' })
-    for (const name of ['thread_create', 'thread_send', 'thread_archive']) expect(botAppToolRefusal(bot, name, {}), name).toBeTruthy()
-    for (const name of ['mail_send', 'mail_other']) {
-      expect(await registry.call(name, { ...t.args, [TURN_TOKEN_KEY]: 'tt' }, { ...request, toolCallId: `later-${name}` })).toMatchObject({ isError: true })
-    }
+    expect(f.bots.service.actionMessage(t.botId, action!.id).action).toMatchObject({ title: 'Send', serverName: 'Mail', status: 'open' })
+    expect(await callApp()).toMatchObject({ isError: true })
+    expect(app).toHaveBeenCalledTimes(1)
+    for (const name of ['mail_send', 'mail_other']) expect(await registry.call(name, { ...t.args, [TURN_TOKEN_KEY]: 'tt' }, { ...request, toolCallId: `later-${name}` })).toMatchObject({ isError: true })
     expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
     expect(t.calls).toEqual([])
   } else {
-    expect(result, result.text).toMatchObject({ text: expect.stringContaining('delivered') })
+    expect(result).toMatchObject({ text: expect.stringContaining('delivered') })
     expect(t.calls).toEqual([t.args])
     expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
-    for (const name of ['thread_create', 'thread_send', 'thread_archive']) expect(botAppToolRefusal(bot, name, {}), name).toBeUndefined()
   }
 })
 it('a scheduled run is refused without parking or writing a card', async () => {
@@ -2239,3 +2251,4 @@ it.each(['2030-04-05T09:14:00.000Z', 'invalid', 99])('C4 integration reads only 
   expect(card.at).toBe(typeof settledAt === 'string' && settledAt !== 'invalid' ? settledAt : fallback)
   for (const key of ['settledAt', 'ownerSeq', 'noteSeq', 'ownerRemoved', 'removedOwnerSeq', 'removedNoteSeq']) expect(Object.hasOwn(card, key)).toBe(false)
 })
+
