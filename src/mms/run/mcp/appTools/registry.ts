@@ -36,11 +36,11 @@ import {
 import { asRefusal, refused } from './refusal'
 import {
   compileTool,
+  heldBeforeArguments,
   listsTool,
   offeredThisTurn,
   READ_ONLY_TOOL_NAMES,
   toolNeeds,
-  usableNow,
   userMcpForReader,
   userMcpSource,
   type AskFirst,
@@ -103,6 +103,13 @@ export interface ToolRegistryOptions {
   readOnlyThread?(threadId: string): boolean
   /** The ceiling a thread's delegations gave it, whatever its current turn's mode (the stable listing). */
   threadCeiling?(threadId: string): ModeCeiling
+  /**
+   * Narrowing from above, read at every call (docs/plans/tool-api.md §1.3 "Subagents"): `plan` while an ancestor of the
+   * thread runs a Plan turn, so a subtree narrows at its next call. Absent or undefined: nothing above narrows it.
+   */
+  liveCeiling?(threadId: string): ModeCeiling | undefined
+  /** The thread is a Mousse subagent, from its lineage: it lists and holds nothing that never passes down. */
+  subagentThread?(threadId: string): boolean
   /** The thread's role when it is a personal bot's thread; bot tools are listed only there. */
   botRole?(threadId: string): 'activation' | 'context' | 'subagent' | undefined
   /** The turns registered by the `turn.start` executor; MCP calls act only inside one. */
@@ -332,6 +339,7 @@ export class ToolRegistry {
       threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
+      ...(this.options.subagentThread?.(threadId) === true ? { subagent: true } : {}),
       ...bot,
       ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools, ...(turn.bot.catalogue ? { botCatalogue: turn.bot.catalogue } : {}) } : {})
     })
@@ -369,7 +377,7 @@ export class ToolRegistry {
     const plain = (tool: MousseTool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, class: tool.class })
     if (!turn?.definition || turn.threadId !== threadId) return listed.map(plain)
     return listed
-      .filter((tool) => !tool.offered || offeredThisTurn(tool, turn, { requestPolicy: false }))
+      .filter((tool) => offeredThisTurn(tool, turn))
       .map((tool) => {
         const offered = tool.definition?.(turn)
         return offered ? { ...plain(tool), description: offered.description, inputSchema: plainSchema(offered) } : plain(tool)
@@ -448,17 +456,13 @@ export class ToolRegistry {
     }
   }
 
-  /** The tools an in-process loop offers this turn, in registration order (none that a `never` run refuses). */
-  offeredFor(turn: AppToolTurn): MousseTool[] {
-    return this.list().filter((tool) => offeredThisTurn(tool, turn, { requestPolicy: true }))
-  }
-
   /**
-   * The tools a turn's preamble names as usable now (`usableNow`): the thread's list as the turn's run reads it, less
-   * what the turn lacks before any argument.
+   * The tools a turn's preamble names as usable now: the thread's list as the turn's run reads it, less what dispatch
+   * would refuse before any argument (`heldBeforeArguments`), under the turn's ceiling narrowed from above.
    */
   usableNow(turn: AppToolTurn): string[] {
-    return this.listForThread(turn.threadId, 'default', turn.runId).filter((tool) => usableNow(tool, turn)).map((tool) => tool.name)
+    const inputs = { readOnly: this.options.readOnlyThread?.(turn.threadId) === true, ceiling: this.callCeiling(turn.threadId, turn.modeCeiling) }
+    return this.listForThread(turn.threadId, 'default', turn.runId).filter((tool) => heldBeforeArguments(tool, turn, inputs)).map((tool) => tool.name)
   }
 
   /**
@@ -597,8 +601,20 @@ export class ToolRegistry {
         : turnToken === turn.turnToken
       if (!tagged) throw notLive(`This call was made for an earlier turn of thread ${threadId}; it was not run.`)
     }
-    const caller: McpCaller = { threadId, runId: active, provider: credential.provider, modeCeiling: credential.modeCeiling, accessLevel: credential.accessLevel }
+    // The credential's ceiling, narrowed by what is above the thread now: an ancestor that switched to Plan narrows this
+    // call even though the credential was minted before.
+    const caller: McpCaller = { threadId, runId: active, provider: credential.provider, modeCeiling: this.callCeiling(threadId, credential.modeCeiling), accessLevel: credential.accessLevel }
     return { threadId, active, turn, args, caller, boundToken }
+  }
+
+  /** `ceiling` narrowed by the thread's ancestors now (`liveCeiling`); one that cannot be read narrows to `plan`. */
+  private callCeiling(threadId: string, ceiling: ModeCeiling): ModeCeiling {
+    if (ceiling === 'plan' || !this.options.liveCeiling) return ceiling
+    try {
+      return this.options.liveCeiling(threadId) === 'plan' ? 'plan' : ceiling
+    } catch {
+      return 'plan'
+    }
   }
 
   /**

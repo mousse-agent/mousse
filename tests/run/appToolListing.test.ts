@@ -41,7 +41,7 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
 
     expect(onPlan.tools).toEqual(onAgent.tools)
     expect(onPlan.tools).toContain('thread_fork')
-    expect(refusalOf(onPlan.fork)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'ceiling_exceeded' } })
+    expect(refusalOf(onPlan.fork)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'lacks_capability', lacks: 'threads.start' } })
 
     // Claude's per_call binding keeps the bearer and re-binds it to the next run with that turn's ceiling.
     expect(onAgent.mcp.token).toBe(onPlan.mcp.token)
@@ -56,12 +56,12 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     ])
     expect(plan.runId).not.toBe(agent.runId)
 
-    // The usable-tools note names what each turn may use: thread_fork only on the agent turn.
+    // The usable-tools note names what each turn may use: the tools that start threads only on the agent turn.
     const planNote = usableNow(vendor.bridges[0].turnPreamble)
     const agentNote = usableNow(vendor.bridges[1].turnPreamble)
     expect(planNote).not.toContain('thread_fork')
     expect(agentNote).toContain('thread_fork')
-    expect(agentNote.filter((name) => !planNote.includes(name))).toEqual(['thread_fork'])
+    expect(agentNote.filter((name) => !planNote.includes(name))).toEqual(['thread_create', 'thread_fork'])
     for (const name of agentNote) expect(onAgent.tools).toContain(name)
 
     // Plan mode has no tool to submit a plan: the plan turn neither lists nor may use one, and is told its reply is the plan.
@@ -202,6 +202,6 @@ describe('listing and per-turn availability over the server', () => {
     expect(tools).not.toContain('thread_fork')
     expect(tools).not.toContain('queue_enqueue')
     const refused = await callTool(mcp, 'queue_enqueue', { content: 'x' })
-    expect(refusalOf(refused)).toMatchObject({ code: 'mousse_read_only', refused: { code: 'read_only' } })
+    expect(refusalOf(refused)).toMatchObject({ code: 'mousse_read_only', refused: { code: 'lacks_capability', lacks: 'threads.manage' } })
   })
 })

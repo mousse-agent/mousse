@@ -15,6 +15,11 @@ export const REFUSAL_CODES = [
   'ceiling_exceeded',
   /** A read-only subagent called a tool that changes something. */
   'read_only',
+  /**
+   * The thread lists the tool but this turn does not hold a capability it needs (§1.3 "Lacks"): `lacks` names it and
+   * `fix` what would give it. The older code it was refused under stays in `data.reason`.
+   */
+  'lacks_capability',
   /** The target is not in a state to take the call now; `data.conflict` names which state. */
   'conflict',
   /** The tool cannot be used in this turn (no browser bound to it, a feature switched off, a missing argument the turn needs). */
@@ -63,6 +68,7 @@ const DEFAULT_RETRY: Readonly<Record<RefusalCode, RefusalRetry>> = {
   scope_denied: 'never',
   ceiling_exceeded: 'never',
   read_only: 'never',
+  lacks_capability: 'after_change',
   conflict: 'after_change',
   unavailable: 'after_change',
   not_granted: 'after_change',
@@ -154,6 +160,11 @@ export function remoteRefusal(code: string, message: string, data: Record<string
  * details kept under `data` with `reason` naming the older code, as the JSON-RPC error's `data` had them.
  */
 export function legacyRefusal(code: string, message: string, details: Record<string, unknown> = {}): { text: string; isError: true } {
+  // A capability the turn lacks (the authority compiler names it): `lacks_capability`, retried after a change.
+  if (typeof details.lacks === 'string') {
+    const { lacks, fix, ...rest } = details
+    return refused('lacks_capability', message, { lacks, ...(typeof fix === 'string' ? { fix } : {}), data: { ...rest, reason: code } })
+  }
   const mapped = LEGACY_CODES[code] ?? 'failed'
   const conflict = typeof details.conflict === 'string' ? details.conflict : undefined
   const retryAfterMs = typeof details.retryAfterMs === 'number' ? details.retryAfterMs : undefined

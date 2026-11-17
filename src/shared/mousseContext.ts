@@ -17,6 +17,7 @@ export type MousseNoticeKind =
   | 'subagent_question'
   | 'subagent_stopped'
   | 'bot_wake'
+  | 'bot_action'
   | 'work_wait'
   | 'job_update'
   | 'bot_message'

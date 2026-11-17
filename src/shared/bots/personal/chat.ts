@@ -100,6 +100,8 @@ export interface BotActionCard {
 /** One row of a bot's chat (`bot_messages`). */
 export interface BotChatMessage {
   action?: BotActionCard
+  /** Only an expired held call of a schedule; adjacent ones fold in chat, rows remain stored. */
+  expiredActionSchedule?: string
   /** Sent action instant; formatted in the client clock. */
   actionSentAt?: string
   /** Only delivered text reminders carry snooze replies; older services omit it. */

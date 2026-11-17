@@ -606,7 +606,7 @@ describe('ToolRegistry read-only gate', () => {
     ['reads', true], ['readsOthers', true], ['safe', true], ['acts', false], ['writes', false], ['starts', false]
   ])('%s is %s for a read-only caller', async (name, allowed) => {
     if (allowed) await expect(call(name, 'child')).resolves.toMatchObject({ text: 'ok' })
-    else expect(await denied(call(name, 'child'))).toMatchObject({ code: 'mousse_read_only', refused: { code: 'read_only', retry: 'never' } })
+    else expect(await denied(call(name, 'child'))).toMatchObject({ code: 'mousse_read_only', refused: { code: 'lacks_capability', retry: 'after_change', lacks: name === 'starts' ? 'threads.start' : name === 'writes' ? 'threads.write' : 'edit' } })
   })
 
   it.each(['reads', 'readsOthers', 'safe', 'acts', 'writes', 'starts'])('%s works for any other caller', async (name) => {

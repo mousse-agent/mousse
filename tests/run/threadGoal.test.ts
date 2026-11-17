@@ -302,7 +302,7 @@ describe('a thread goal', () => {
     const d = boot(newHome(), piAdapter(() => 'reply'))
     const { id } = thread(d)
     const tool = goalTools(d.orch.mcpToolHost())[0]!
-    const turn = { threadId: id, subagent: false, discovery: false } as never
+    const turn = { threadId: id, subagent: false } as never
     expect(tool.available!(turn)).toMatch(/no goal/)
     const outcome = await report(d, { threadId: id, runId: 'run:none' }, { status: 'met', reason: 'Done.' })
     expect(outcome).toMatchObject({ isError: true })

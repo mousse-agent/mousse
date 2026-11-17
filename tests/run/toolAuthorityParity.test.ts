@@ -1,6 +1,6 @@
 /**
- * What every kind of turn holds of every Mousse tool, pinned to a snapshot taken before the authority compiler
- * (docs/plans/tool-api.md §4, PR 2a): the thread's list (`tools/list`), Pi's per-turn list and its user MCP tools, the
+ * What every kind of turn holds of every Mousse tool, pinned to a snapshot first taken before the authority compiler
+ * (docs/plans/tool-api.md §4, PR 2a) and changed since only where §1.3 changes who holds a tool (PR 2b): the thread's list (`tools/list`), Pi's per-turn list and its user MCP tools, the
  * "usable now" line of the turn preamble, and what a call does before its handler (runs, asks first, or is refused with
  * which code and words). Each turn is registered as the daemon registers that kind of turn; every handler is a stub, so
  * only the gate is read. A change to this snapshot is a change to who holds a tool.
@@ -69,7 +69,8 @@ const userMcpTool = (name: string): McpToolDescriptor => ({
 /** One kind of turn as the daemon registers it, and what the thread's owner says about the thread. */
 interface TurnKind {
   turn: Partial<AppToolTurn>
-  thread?: { readOnly?: boolean; ceiling?: ModeCeiling; botRole?: 'activation' | 'subagent' }
+  /** `subagent`: its lineage says it is a Mousse subagent; `liveCeiling`: what its ancestors' running turns narrow it to. */
+  thread?: { readOnly?: boolean; ceiling?: ModeCeiling; botRole?: 'activation' | 'subagent'; subagent?: boolean; liveCeiling?: ModeCeiling }
   permissionMode?: PermissionMode
   credential?: { modeCeiling?: ModeCeiling; binding?: McpTurnBinding; provider?: string }
 }
@@ -93,10 +94,11 @@ const KINDS: Record<string, () => TurnKind> = {
   'person, browser bound without vision': () => ({ turn: { browser: BROWSER }, permissionMode: 'ask' }),
   'plan turn': () => ({ turn: { mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, modeCeiling: 'plan' }, permissionMode: 'ask', credential: { modeCeiling: 'plan' } }),
   'build-mode turn': () => ({ turn: { mode: 'build', modeFacts: { readOnly: false, agent: false, build: true } }, permissionMode: 'edit' }),
-  'delegated subagent': () => ({ turn: {}, permissionMode: 'edit', thread: { ceiling: 'default' } }),
+  'delegated subagent': () => ({ turn: { subagent: true }, permissionMode: 'edit', thread: { ceiling: 'default', subagent: true } }),
+  'subagent while its parent plans': () => ({ turn: { subagent: true }, permissionMode: 'edit', thread: { ceiling: 'default', subagent: true, liveCeiling: 'plan' } }),
   'read-only subagent': () => ({
-    turn: { mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, modeCeiling: 'plan', toolAccess: createAgentToolAccess({ version: 1, workspace: 'shared', access: 'read-only' }, process.cwd()) },
-    permissionMode: 'ask', thread: { readOnly: true, ceiling: 'plan' }, credential: { modeCeiling: 'plan' }
+    turn: { subagent: true, mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, modeCeiling: 'plan', toolAccess: createAgentToolAccess({ version: 1, workspace: 'shared', access: 'read-only' }, process.cwd()) },
+    permissionMode: 'ask', thread: { readOnly: true, ceiling: 'plan', subagent: true }, credential: { modeCeiling: 'plan' }
   }),
   'bot chat': () => ({ turn: { bot: botAuthority('activation', CHAT_BOT_TOOLS), approvals: 'never' }, permissionMode: 'ask', thread: { botRole: 'activation' } }),
   'bot chat, catalogue': () => ({ turn: { bot: botAuthority('activation', { ...CHAT_BOT_TOOLS, catalogue: 'use_tool' }), approvals: 'never' }, permissionMode: 'ask', thread: { botRole: 'activation' } }),
@@ -129,6 +131,8 @@ async function snapshotOf(kind: TurnKind) {
       readOnlyThread: () => kind.thread?.readOnly === true,
       threadCeiling: () => kind.thread?.ceiling ?? 'default',
       botRole: () => kind.thread?.botRole,
+      subagentThread: () => kind.thread?.subagent === true,
+      liveCeiling: () => kind.thread?.liveCeiling,
       permissionModeFor: () => kind.permissionMode,
       askApproval: async (_threadId, _questions, { approval }) => {
         asked.push(`${approval.permissionKey}${approval.reason ? ' (Full access only)' : ''}`)
@@ -215,7 +219,7 @@ async function snapshotOf(kind: TurnKind) {
 }
 
 describe('who holds each Mousse tool, by kind of turn', () => {
-  it('matches what each kind of turn held before the authority compiler', async () => {
+  it('matches the pinned table', async () => {
     const table: Record<string, Awaited<ReturnType<typeof snapshotOf>>> = {}
     for (const [name, kind] of Object.entries(KINDS)) table[name] = await snapshotOf(kind())
     await expect(`${JSON.stringify(table, null, 1)}\n`).toMatchFileSnapshot('./__snapshots__/toolAuthorityParity.json')

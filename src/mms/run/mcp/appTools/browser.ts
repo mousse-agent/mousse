@@ -61,6 +61,10 @@ export function browserTools(host: AppToolHost): MousseTool[] {
             ? 'Browser tools are not bound for this turn. Root must supply a trusted execution context.'
             : 'Browser runtime is not bound. Call setBrowserRuntime before dispatching browser tools.'
         if (!turn.trusted && !turn.settingsEnabled(name)) return disabledInSettings(name)
+        // A screenshot cannot reach a model without image input: the turn does not hold it, so neither the turn's
+        // "usable now" line nor a call offers it.
+        if (name === 'browser_screenshot' && !turn.browser.vision)
+          return 'Browser screenshots require a model with image input support. Use browser_observe or browser_find instead.'
         return true
       },
       offered: (turn) => Boolean(turn.browser) && turn.settingsEnabled(name) &&

@@ -1,3 +1,4 @@
+import { canonicalJson, shortHash } from '../integrations/revision'
 import { guardMemoryText } from '../bots/memory/guard'
 import { randomUUID } from 'node:crypto'
 import type { BotModelPick, BotSchedule } from '../../shared/bots/personal/definition'
@@ -84,6 +85,8 @@ export function botJobName(prompt: string): string {
 /** One of a bot's schedules, as the bot, its chat and its About read it. */
 export interface BotScheduleEntry {
   jobId: string
+  /** Digest of saved instructions and timing, independent of scheduler ticks. */
+  revision: string
   botId: string
   scheduleId: string
   when: BotSchedule['when']
@@ -184,6 +187,7 @@ export class BotScheduleBook {
     if (!job.bot || !when) return undefined
     return {
       jobId: job.id,
+      revision: shortHash(canonicalJson({ prompt: job.prompt, schedule: job.schedule, expiresAt: job.expiresAt, model: job.bot.model, pick: job.bot.pick, say: job.bot.say, enabled: job.enabled, paused: job.state === 'paused' }), 64),
       botId: job.bot.botId,
       scheduleId: job.bot.scheduleId,
       when,

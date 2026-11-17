@@ -377,12 +377,12 @@ describe('an ACP session carries the turn prompter\'s approvals to client file w
   })
 })
 
-describe('Mousse tools that wait for the user are not offered under `never`', () => {
-  it('the registry offers them only when the run may ask', () => {
+describe('Mousse tools that wait for the user are not usable under `never`', () => {
+  it('the registry holds them only when the run may ask', () => {
     const fixture = fakeAppToolHost()
     const quickActions = new QuickActionTools(async () => true, () => {})
     const { registry: tools } = createAppToolRegistry({ host: { ...fixture.host, quickActions } })
-    const offered = (approvals?: 'never') => tools.offeredFor({ ...appTurn({ threadId: 'thread-1', runId: 'run-1', ...(approvals ? { approvals } : {}) }), turnToken: '' } as AppToolTurn).map((tool) => tool.name)
+    const offered = (approvals?: 'never') => tools.usableNow({ ...appTurn({ threadId: 'thread-1', runId: 'run-1', ...(approvals ? { approvals } : {}) }), turnToken: '' } as AppToolTurn)
     expect(offered()).toEqual(expect.arrayContaining(['ask_user', 'create_quick_action']))
     expect(offered('never')).not.toContain('ask_user')
     expect(offered('never')).not.toContain('create_quick_action')

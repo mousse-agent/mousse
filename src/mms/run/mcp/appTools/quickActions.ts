@@ -47,10 +47,12 @@ export function quickActionTools(host: AppToolHost): MousseTool[] {
     // registry holds every call of a bot's turn to that grant, and nothing asks again.
     asksUser: 'approval',
     botGrantAnswers: true,
+    // A button in the owner's own Actions list: an owner preference, which never passes down to a subagent.
+    capabilities: ['quick_actions'],
     botDescription: 'Add a quick action for your owner: a button in their Actions list that sends a message (send-current, send-new-chat) or runs a shell command (bash) when they press it. Your owner allowed "add quick actions", so nothing asks first; add one only when they ask for it, and say what you added.',
     listed: () => Boolean(host.quickActions),
     available: (turn) => (turn.settingsEnabled(tool.name) ? true : disabledInSettings(tool.name)),
-    offered: (turn) => !turn.subagent && turn.settingsEnabled(tool.name) && Boolean(host.quickActions),
+    offered: (turn) => turn.settingsEnabled(tool.name) && Boolean(host.quickActions),
     describe: () => `Quick action ${tool.name}`,
     handler: async (args, ctx) => {
       const quickActions = host.quickActions

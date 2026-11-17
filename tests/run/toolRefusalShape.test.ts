@@ -64,9 +64,10 @@ describe('a refused Mousse tool call', () => {
   }
 
   // One row per older shape: what the call is, the code it now has, and fields kept beside it.
-  const rows: Array<{ shape: string; tool: string; args: Record<string, unknown>; ceiling?: 'plan'; code: string; retry: string; data?: Record<string, unknown> }> = [
+  const rows: Array<{ shape: string; tool: string; args: Record<string, unknown>; ceiling?: 'plan'; code: string; retry: string; lacks?: string; data?: Record<string, unknown> }> = [
     { shape: 'a thrown scope refusal (was JSON-RPC -32003)', tool: 'thread_read', args: { threadId: 'no-such-thread' }, code: 'scope_denied', retry: 'never', data: { reason: 'mousse_scope_denied' } },
-    { shape: 'a thrown ceiling refusal (was JSON-RPC -32004)', tool: 'thread_fork', args: {}, ceiling: 'plan', code: 'ceiling_exceeded', retry: 'never', data: { reason: 'mousse_ceiling_exceeded' } },
+    // A capability the turn lacks names it and what would give it (§1.3); the older code stays in data.reason.
+    { shape: 'a thrown ceiling refusal (was JSON-RPC -32004)', tool: 'thread_fork', args: {}, ceiling: 'plan', code: 'lacks_capability', retry: 'after_change', lacks: 'threads.start', data: { reason: 'mousse_ceiling_exceeded' } },
     {
       shape: 'a conflict with data.conflict (was JSON-RPC -32006)', tool: 'thread_wait', args: { threadId: 'thread-b', runId: 'run-elsewhere' }, code: 'conflict', retry: 'after_change',
       data: { reason: 'mousse_conflict', conflict: 'run_not_found', expectedRunId: 'run-elsewhere' }
@@ -83,6 +84,7 @@ describe('a refused Mousse tool call', () => {
     expect(REFUSAL_CODES).toContain(refusal.refused.code)
     expect(refusal.refused).toMatchObject({ code: row.code, retry: row.retry, message: expect.any(String) })
     expect(refusal.refused.message).not.toMatch(/^mousse_/)
+    if (row.lacks) expect(refusal.refused).toMatchObject({ lacks: row.lacks, fix: expect.stringMatching(/Agent turn/) })
     if (row.data) expect(refusal.data).toMatchObject(row.data)
     else expect(refusal.data).toBeUndefined()
 
