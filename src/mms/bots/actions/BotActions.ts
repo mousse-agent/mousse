@@ -1,3 +1,4 @@
+import { notice, quoted } from '../../../shared/mousseContext'
 /** Longest an accepted Send may wait before transport dispatch, counted from the owner's tap. */
 export const APPROVED_SEND_WINDOW_MS = 10 * 60_000
 import { MAX_SAME_WAKES } from '../../../shared/bots/personal/wakes'
@@ -157,7 +158,12 @@ export interface ActionRow {
   answered_at: string | null; ran_at: string | null; args_json: string; card_json: string | null; message_id: string; expires_at: string; result_json: string | null
 }
 /** Stored outcomes are timed updates, assembled with all other work updates at dispatch. */
-export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'> & Partial<Pick<ActionRow, 'card_json'>>): string {
+export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'> & Partial<Pick<ActionRow, 'card_json'>>, scheduled = false): string {
+  if (scheduled) {
+    const text = actionContinuation(action)
+    const split = text.indexOf('\n')
+    return notice({ kind: 'bot_action' }, split < 0 ? [text] : [text.slice(0, split), quoted('held call outcome', text.slice(split + 1))])
+  }
   const result = action.result_json ? JSON.parse(action.result_json) as BotMcpCallOutcome : undefined
   if (JSON.parse(action.card_json ?? '{}').ownerRemoved) return 'Your owner removed this request. Do not ask for it again unless they write.'
   const forgotten = result?.text === '[forgotten]'
