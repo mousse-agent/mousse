@@ -1,4 +1,6 @@
 import { compareLaunched, launchedActive, launchedGoing, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
+import { guardTextCharacters } from '../../../shared/bots/personal/modelSlots'
+import { botGroupTime } from './messageGroups'
 import { askNoticeText } from '../../../shared/bots/personal/askText'
 
 /**
@@ -120,7 +122,14 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
   const marks = new Map<string, OwnerMarks>()
   let lastOwner: string | undefined
   let expired: { schedule: string; count: number; row: Extract<BotChatRow, { kind: 'system' }> } | undefined
+  const latestAction = new Map<string, string>()
+  for (const message of messages) if (message.action) latestAction.set(message.action.actionId, message.id)
   for (const message of messages) {
+    if (message.action && latestAction.get(message.action.actionId) !== message.id) {
+      const name = guardTextCharacters(message.action.title).replace(/\s+/g, ' ')
+      rows.push({ kind: 'system', id: message.id, at: message.at, of: message.id, text: `${name} · Asked ${botGroupTime(message.at)}` })
+      continue
+    }
     if (message.expiredActionSchedule) {
       if (expired?.schedule === message.expiredActionSchedule) {
         expired.count++
