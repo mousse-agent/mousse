@@ -456,8 +456,8 @@ export interface AppToolHost extends DelegationToolsHost {
   /** The thread tools on threads launched on other computers; absent without Bridge's run engine. */
   remoteThreads?: RemoteThreadsHost
   /**
-   * Adds a note row to the thread's transcript (the creator's: what it launched, and on which model). `launched` names
-   * the thread it started, which the transcript draws as a chip.
+   * Adds a note row to the thread's record (the creator's: what it launched, and on which model). `launched` names
+   * the thread it started. The chat does not show the note.
    */
   noteOnThread?(threadId: string, text: string, launched?: { threadId: string; summary?: string }): void
   /**

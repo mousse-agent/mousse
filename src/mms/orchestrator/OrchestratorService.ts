@@ -5244,8 +5244,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * The launcher's note of a thread it launched on another computer, once it exists there: drawn as a chip with the
-   * thread's live status, named by its qualified id. Written once, by the call or by the pass that finished the launch.
+   * The launcher's note of a thread it launched on another computer, once it exists there, named by its qualified id.
+   * Written once, by the call or by the pass that finished the launch.
    */
   private noteRemoteLaunch(record: RemoteLaunchRecord): void {
     if (!record.remoteThreadId) return
@@ -5261,8 +5261,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * A row on the creator's thread saying what it launched: where, on which model, in which mode (the person watching sees
-   * the agent's choice). `launched` names the new thread, which the transcript draws as a chip that opens it.
+   * A row in the creator's thread's record saying what it launched: where, on which model, in which mode. `launched`
+   * names the new thread. The chat does not show the row; the new thread shows its own model and mode.
    */
   private noteAgentLaunch(creatorThreadId: string, text: string, launched?: { threadId: string; summary?: string }): void {
     const session = this.getOrCreateSession(creatorThreadId)
@@ -10936,8 +10936,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `kind` `warning`: a line the thread shows, quiet, as Mousse's own (`ThreadNotice`); so is one with `launchedThread`
-   * (with the thread as a chip). Others are not shown.
+   * `kind` `warning`: a line the thread shows, quiet, as Mousse's own (`ThreadNotice`). Others are not shown, the note
+   * of a launched thread (`launchedThread`) among them.
    */
   private addSystemMessage(content: string, end?: { turnId?: string; turnEnd: TurnEnd }, kind?: 'warning', launchedThread?: ChatMessage['launchedThread']): void {
     const msg: ChatMessage = {

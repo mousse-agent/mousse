@@ -2124,7 +2124,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         }
         if (!created.replayed) {
           showAction(host, created.threadId, actor, 'created this thread')
-          // The person watching this thread sees what its agent launched, and on which model.
+          // The thread's record says what its agent launched, and on which model (the chat does not show it).
           try {
             const model = created.model ? `${created.model.instanceId} / ${created.model.model}${created.model.effort ? ` (${created.model.effort} reasoning)` : ''}` : 'the default model'
             const summary = `${model}, ${created.permissionMode} mode, ${created.runsIn === 'own_worktree' ? 'a worktree of its own' : 'the project folder'}${created.firstMessage ? created.firstMessage.sent ? ', first message sent' : ', first message not sent' : ''}`
