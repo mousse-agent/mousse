@@ -40,6 +40,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },
   { title: 'Code font', section: 'appearance', anchor: 'appearance-code-font', keywords: ['monospace', 'typeface', 'terminal', 'editor'] },
   { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },
+  { title: 'Reply previews', section: 'appearance', anchor: 'appearance-reply-previews', keywords: ['sidebar', 'last message', 'latest reply', 'preview', 'threads', 'bots'] },
   { title: 'Conversation', section: 'chat', anchor: 'chat-conversation', keywords: ['transcript', 'replies'] },
   { title: 'Chat width', section: 'chat', anchor: 'chat-width', keywords: ['wide', 'full', 'narrow', 'column', 'layout', 'transcript', 'conversation'] },
   { title: 'Render math', section: 'chat', anchor: 'chat-render-math', keywords: ['latex', 'equations'] },

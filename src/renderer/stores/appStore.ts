@@ -205,6 +205,15 @@ export function withNewerTimes(incoming: Thread[], held: readonly Thread[]): Thr
   return out ?? incoming
 }
 
+/** Whether two rows count the same pull requests, each in the same state. */
+function samePullRequestRows(left: Thread, right: Thread): boolean {
+  if (left.pullRequest?.url !== right.pullRequest?.url) return false
+  const a = left.pullRequests ?? []
+  const b = right.pullRequests ?? []
+  return a.length === b.length && a.every((entry, index) =>
+    entry.url === b[index].url && entry.state === b[index].state && entry.isDraft === b[index].isDraft && entry.title === b[index].title)
+}
+
 /** Skip sidebar updates when a protocol event/reconciliation returns the same list. */
 export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
   if (a === b) return true
@@ -239,7 +248,10 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.goal?.setAt !== right.goal?.setAt ||
       left.goal?.updatedAt !== right.goal?.updatedAt ||
       // Hidden or shown again (`Thread.hidden`) is saved without touching `updatedAt` too.
-      left.hidden !== right.hidden
+      left.hidden !== right.hidden ||
+      // So are the reply preview and the pull requests a row shows (`Thread.lastReply`, `Thread.pullRequests`).
+      left.lastReply !== right.lastReply ||
+      !samePullRequestRows(left, right)
     ) {
       return false
     }

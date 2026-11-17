@@ -125,6 +125,21 @@ describe('the Bots section', () => {
     expect(host.textContent).not.toContain('No bots yet')
   })
 
+  it('shows an idle bot\'s latest reply in place of Idle, a busy bot what it does, and Idle again with reply previews off', async () => {
+    const { setReplyPreviews } = await import('../../src/renderer/lib/replyPreviewSetting')
+    await show([
+      summary('a', { name: 'Inbox helper', lastReply: 'Sorted 12 emails into Later.' }),
+      summary('b', { name: 'Garden', state: 'working', stateText: 'Working…', lastReply: 'Watered the tomatoes.' })
+    ])
+    expect([stateLine('Inbox helper'), stateLine('Garden')].map((line) => line.textContent)).toEqual(['Sorted 12 emails into Later.', 'Working…'])
+    try {
+      act(() => setReplyPreviews(false))
+      expect(stateLine('Inbox helper').textContent).toBe('Idle')
+    } finally {
+      act(() => setReplyPreviews(true))
+    }
+  })
+
   it('lets an idle bot sleep, at full colour with its z, while a paused bot sleeps faded and a busy one stays awake', async () => {
     await show([summary('a', { name: 'Resting' }), summary('b', { name: 'Off', state: 'paused', stateText: 'Paused' }), summary('c', { name: 'Busy', state: 'working', stateText: 'Working…' })])
     const face = (name: string) => button(`Message ${name}`)!.querySelector<SVGElement>('.bot-face')!

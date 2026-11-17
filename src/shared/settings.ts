@@ -69,6 +69,8 @@ export interface AppearanceSettings {
   codeFont: FontChoice
   /** How cards in the Threads tab show their project's color. */
   threadProjectColors: ThreadProjectColorStyle
+  /** Thread rows and the Bots list show the latest reply under each title, on one muted line. */
+  replyPreviews: boolean
   /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
   threadPathInTitleBar: boolean
   /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
@@ -888,6 +890,7 @@ export function getDefaultSettings(): MousseSettings {
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
       threadProjectColors: 'fill',
+      replyPreviews: true,
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
@@ -1032,6 +1035,7 @@ export function normalizeAppearance(
         : raw.threadProjectColors === true ? 'fill'
           : raw.threadProjectColors === 'off' || raw.threadProjectColors === 'outline' || raw.threadProjectColors === 'fill' || raw.threadProjectColors === 'gradient'
             ? raw.threadProjectColors : defaults.threadProjectColors,
+    replyPreviews: typeof raw.replyPreviews === 'boolean' ? raw.replyPreviews : defaults.replyPreviews,
     threadPathInTitleBar:
       typeof raw.threadPathInTitleBar === 'boolean' ? raw.threadPathInTitleBar : defaults.threadPathInTitleBar,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,

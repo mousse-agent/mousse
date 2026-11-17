@@ -1639,6 +1639,17 @@ export interface Thread {
   worktreeBaseBranch?: string
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
   pullRequest?: ThreadPullRequestLink
+  /**
+   * Every pull request the thread has been linked to, oldest first, with its state as last read, for the sidebar's count.
+   * Written when a link is made and when the app reads, merges or closes one of them. Read through `threadPullRequestsOf`,
+   * which counts the `pullRequest` of a thread linked before this list was kept.
+   */
+  pullRequests?: import('./pullRequests').ThreadPullRequestSummary[]
+  /**
+   * The latest reply of the thread's agent as one clipped line of plain text (`replyPreviewText`), for its sidebar row.
+   * Written when a turn ends; absent until the first turn that ends with this field known.
+   */
+  lastReply?: string
   /** The thread's goal (`/goal`): Mousse keeps starting turns while it is working. Set by the daemon. */
   goal?: import('./threadGoal').ThreadGoal
   /** Explicit sidebar position within this thread's project (or standalone group). */

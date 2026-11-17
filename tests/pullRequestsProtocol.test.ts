@@ -590,6 +590,39 @@ describe('pull request methods through the daemon protocol', () => {
     await vi.waitFor(() => expect(events.filter((event) => event.type === 'threads.updated').length).toBeGreaterThan(before))
   })
 
+  it('lists every pull request a thread was linked to, with its state as the app last read it, for the sidebar\'s count', async () => {
+    const detail = detailSpy()
+    const project = mms.projects.openProject(f.repo)
+    const thread = mms.threads.createThread('Task A', project.id)
+    const listed = async () => (await client.request<{ threads: Thread[] }>('threads.list')).threads.find((entry) => entry.id === thread.id)!.pullRequests
+    const url = (number: number) => `https://github.com/acme/app/pull/${number}`
+
+    await client.request('pullRequests.link', { threadId: thread.id, number: 7 })
+    expect(await listed()).toEqual([{ number: 7, url: url(7), nameWithOwner: 'acme/app', title: 'Add the retry button', state: 'open' }])
+
+    // Another link joins the list; the first stays.
+    detail.mockResolvedValue(detailOf({ number: 12, url: url(12), title: 'Fix the typo', isDraft: true }))
+    await client.request('pullRequests.link', { threadId: thread.id, number: 12 })
+    expect((await listed())?.map((entry) => [entry.number, entry.state, entry.isDraft])).toEqual([[7, 'open', undefined], [12, 'open', true]])
+
+    // A merge from the app and a lookup that finds one of them closed both change the state shown, on disk too.
+    vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValue('squash')
+    vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ number: 7, url: url(7), state: 'merged' }))
+    await client.request('pullRequests.merge', { threadId: thread.id, number: 7 })
+    lookupSpy({ state: 'found', pullRequest: info({ number: 12, url: url(12), title: 'Fix the typo', state: 'closed' }) })
+    await client.request('pullRequests.get', { threadId: thread.id, branch: 'feature' })
+    expect((await listed())?.map((entry) => [entry.number, entry.state, entry.isDraft])).toEqual([[7, 'merged', undefined], [12, 'closed', undefined]])
+    const meta = JSON.parse(readFileSync(join(mms.threads.getThreadDir(thread.id), 'meta.json'), 'utf8')) as Thread
+    expect(meta.pullRequests?.map((entry) => entry.state)).toEqual(['merged', 'closed'])
+
+    // A pull request the thread was never linked to is not added by a read.
+    lookupSpy({ state: 'found', pullRequest: info({ number: 99, url: url(99) }) })
+    await client.request('pullRequests.get', { threadId: thread.id, branch: 'feature' })
+    // Unlinking takes the unlinked pull request out of the count.
+    await client.request('pullRequests.unlink', { threadId: thread.id })
+    expect((await listed())?.map((entry) => entry.number)).toEqual([7])
+  })
+
   it('links a pull request from a fork, with its head and base repositories, whichever branch the thread is on', async () => {
     detailSpy(detailOf({ number: 12, headRepository: 'forker/app', isCrossRepository: true, headRefName: 'fix-typo' }))
     const project = mms.projects.openProject(f.repo)

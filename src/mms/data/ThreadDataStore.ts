@@ -51,7 +51,7 @@ import { ThreadStorageMigration } from './ThreadStorageMigration'
 import { ThreadTrashService, type LegacyTrashDiagnostic } from './ThreadTrashService'
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
-import type { ThreadPullRequestLink } from '../../shared/pullRequests'
+import { pullRequestSummaryFields, summaryOfLink, threadPullRequestsOf, withThreadPullRequest, type GitPullRequestInfo, type ThreadPullRequestLink } from '../../shared/pullRequests'
 import type { ThreadGoal } from '../../shared/threadGoal'
 import { registerThreadLifecycleGate, withThreadLifecyclePath, withThreadLifecyclePaths } from '../queue/ThreadLifecycleAdmission'
 import { FileLockBusyError, withFileLock } from '../scheduled/fileLock'
@@ -244,6 +244,21 @@ function retryOnceWhenListBusy<T>(write: () => T): T {
     if (!(error instanceof ThreadListBusyError)) throw error
     return write()
   }
+}
+
+/** What the host said about a pull request a link is made for. */
+type PullRequestInfo = Partial<Pick<GitPullRequestInfo, 'title' | 'state' | 'isDraft'>>
+
+/**
+ * The thread's pull request list after its link is written: a new link joins it (or updates its entry), an unlink takes
+ * the unlinked pull request out. A thread linked before the list was kept starts it from its old link.
+ */
+function linkedPullRequests(base: Thread, link: ThreadPullRequestLink | undefined, info: PullRequestInfo | undefined): Pick<Thread, 'pullRequests'> {
+  const list = threadPullRequestsOf(base)
+  if (link) return { pullRequests: withThreadPullRequest(list, { ...summaryOfLink(link), ...pullRequestSummaryFields(info ?? {}) }) }
+  const unlinked = base.pullRequest?.url.toLowerCase()
+  const kept = unlinked ? list.filter((entry) => entry.url.toLowerCase() !== unlinked) : list
+  return { pullRequests: kept.length ? kept : undefined }
 }
 
 /** Refuses a conditional change of a thread's model or mode when its settings revision is no longer `ifRevision`. */
@@ -1624,7 +1639,7 @@ export class ThreadDataStore extends EventEmitter {
   updateThreadMeta(
     id: string,
     partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'workspaceBinding' | 'pullRequest' | 'goal' | 'expiresAt' | 'expiryStopsRun'>>,
-    opts: { touch?: boolean; ifRevision?: number } = {}
+    opts: { touch?: boolean; ifRevision?: number; pullRequestInfo?: PullRequestInfo } = {}
   ): Thread {
     const thread = this.getThread(id)
     if (!thread) {
@@ -1640,6 +1655,7 @@ export class ThreadDataStore extends EventEmitter {
       return {
         ...base,
         ...partial,
+        ...('pullRequest' in partial ? linkedPullRequests(base, partial.pullRequest, opts.pullRequestInfo) : {}),
         // Every write of the model or the permission mode, by any route, moves the revision on (`ifRevision`).
         ...('modelOverride' in partial || 'permissionMode' in partial ? { settingsRevision: (base.settingsRevision ?? 0) + 1 } : {}),
         updatedAt: opts.touch === false ? base.updatedAt : now
@@ -1653,6 +1669,54 @@ export class ThreadDataStore extends EventEmitter {
     this.patchListCache(updated)
     this.emit('updated', updated)
     return updated
+  }
+
+  /**
+   * Keeps the preview of the thread's latest reply (`Thread.lastReply`) for its sidebar row. Not activity: `updatedAt`
+   * stays. Writes and announces the list only when the preview changed; a missing thread is left alone.
+   */
+  setThreadLastReply(id: string, lastReply: string | undefined): boolean {
+    const thread = this.getThread(id)
+    if (!thread || thread.lastReply === lastReply) return false
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base }
+      if (lastReply) next.lastReply = lastReply
+      else delete next.lastReply
+      return next
+    })
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
+    this.emit('list-changed', { id })
+    return true
+  }
+
+  /**
+   * What the host just said about pull requests, kept on every thread whose list holds one of them (matched by URL), so
+   * the sidebar's count shows their state. Threads whose entries already say so are not written. Returns the threads written.
+   */
+  notePullRequestStates(infos: ReadonlyArray<Pick<GitPullRequestInfo, 'url' | 'title' | 'state' | 'isDraft'>>): string[] {
+    const byUrl = new Map(infos.filter((info) => info.url).map((info) => [info.url.toLowerCase(), info]))
+    if (!byUrl.size) return []
+    const written: string[] = []
+    for (const thread of this.listAllThreads()) {
+      const list = threadPullRequestsOf(thread)
+      let next = list
+      for (const entry of list) {
+        const info = byUrl.get(entry.url.toLowerCase())
+        if (info) next = withThreadPullRequest(next, { ...summaryOfLink(entry), ...pullRequestSummaryFields(info) })
+      }
+      if (next === list || JSON.stringify(next) === JSON.stringify(list)) continue
+      try {
+        const updated = this.writeThreadMeta(thread, (base) => ({ ...base, pullRequests: next }))
+        if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+        this.patchListCache(updated)
+        written.push(thread.id)
+      } catch {
+        // A thread that cannot be written now keeps its older state until the next read.
+      }
+    }
+    if (written.length) this.emit('list-changed', written.length === 1 ? { id: written[0] } : {})
+    return written
   }
 
   /**
