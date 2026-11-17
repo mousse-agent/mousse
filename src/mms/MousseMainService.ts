@@ -255,7 +255,8 @@ export class MousseMainService extends MmsProfileServices {
           if (!engine.botIds().includes(botId)) throw new BotDefinitionError('bot_not_found', 'This bot is gone.')
         },
         store: services.botDeviceAccess,
-        devices: async () => services.botReach?.devices()
+        devices: async () => services.botReach?.devices(),
+        changed: (botId) => engine.reachChanged(botId)
       }
     })
     // Each bot's own browser, as its owner sees it (`bots.browser.*`).

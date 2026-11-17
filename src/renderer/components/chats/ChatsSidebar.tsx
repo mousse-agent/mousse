@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ChevronRight, Globe, Plus, X } from '../../lib/icons'
+import { ChevronRight, Globe, Lock, Plus, X } from '../../lib/icons'
 import type { ChatSummary } from '../../../shared/chats'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { useAppStore } from '../../stores/appStore'
@@ -34,6 +34,12 @@ function SectionHeading({ title, open, onToggle, children }: { title: string; op
   </div>
 }
 
+/** A walled bot's lock tooltip: who reaches it. */
+const BOT_WALLED_TIP: Record<'this_computer' | 'chosen', string> = {
+  this_computer: 'Only this computer reaches this bot. Change it in About.',
+  chosen: 'Only the devices picked in About reach this bot.'
+}
+
 /** The latest a bot said or was told, else when it was made: the Bots list's order and its time. */
 const botActivityAt = (bot: BotSummary) => bot.last?.at ?? bot.createdAt
 
@@ -48,10 +54,13 @@ function BotRow({ bot, active, happyUntil, onOpen }: { bot: BotSummary; active: 
   const preview = line.resting && replyPreviews ? bot.lastReply : undefined
   const time = bot.last ? formatMessageTime(bot.last.at) : undefined
   const unread = active ? 0 : bot.unread
+  // Held from some of the owner's devices (About's Devices): a lock before its name.
+  const walled = bot.reach !== undefined && bot.reach !== 'all'
   return <button type="button" className="bot-row" aria-current={active || undefined} title={bot.stateText && bot.state !== 'idle' ? `${bot.name}: ${bot.stateText}` : bot.name} aria-label={`Message ${bot.name}`} onClick={onOpen}>
     <BotFace look={bot.look} state={botFaceState(bot, happyUntil)} sleep={line.resting} size={36} view="head" />
     <span className="bot-row-text">
       <span className="bot-row-head">
+        {walled && <span className="bot-row-lock" role="img" aria-label="Private" title={BOT_WALLED_TIP[bot.reach as 'this_computer' | 'chosen']}><Lock size={11} /></span>}
         <span className="bot-row-name">{bot.name}</span>
         {unread > 0 && <span className="bot-row-unread" aria-label={`${unread} unread`}>{unread}</span>}
         {time && <span className="bot-row-time">{time}</span>}

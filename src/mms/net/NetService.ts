@@ -52,6 +52,7 @@ import type {
 import type { PermissionMode } from '../../shared/permissionMode'
 import { routedVersions } from '../../shared/bridge/routed'
 import { bridgeRemoteMethodNames } from '../bridge/remote/capabilities'
+import { remoteBotVersions } from '../bridge/remote/RemoteBots'
 import type { AgentReach, NodePolicy } from './store/nodePolicy'
 import type {
   AddonRecordStore,
@@ -713,7 +714,10 @@ export class NetService {
           // and says "update Mousse" for the one action that needs more. Absent: an older computer.
           routed: routedVersions(),
           // The methods a phone may call here, so it offers only the actions this computer has. Absent: an older computer.
-          remote: bridgeRemoteMethodNames()
+          remote: bridgeRemoteMethodNames(),
+          // The version of each bot method a device may call here, so it sends only keys this computer knows (a choice
+          // of reach for a bot it makes). Absent: an older computer.
+          bots: remoteBotVersions()
         })
       })
       this.state = {

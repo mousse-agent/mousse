@@ -4,6 +4,7 @@ import { modelPickProblem, modelRowsProblem } from '../../shared/bots/personal/m
 import { MAX_CHOICE_LABEL_CHARS } from '../../shared/bots/personal/questions'
 import { isAbsolutePath } from '../../shared/bots/personal/manifest'
 import type { BotLook } from '../../shared/bots/personal/look'
+import { isNewBotAccess, type NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
 import { BotEngineError } from './activation/BotEngine'
 import type { BotChatService } from './chat/BotChatService'
@@ -20,7 +21,7 @@ type Params = Record<string, unknown>
 
 const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.personal.list': [],
-  'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model', 'slots', 'image'],
+  'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model', 'slots', 'image', 'access'],
   'bots.get': ['botId'],
   'bots.update': ['botId', 'name', 'look', 'description'],
   'bots.personal.pause': ['botId'],
@@ -127,6 +128,8 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (p.slots !== undefined) slots(p.slots, { all: true })
       if (p.slots !== undefined && p.model !== undefined) throw new DomainRpcError('invalid_params', 'Give the models as slots or as one model, not both')
       if (p.image !== undefined) imagePick(p.image)
+      // New bot offers every device or this computer alone; picking devices one by one is About's.
+      if (p.access !== undefined && !isNewBotAccess(p.access)) throw new DomainRpcError('invalid_params', 'A new bot reaches every device or only this computer')
       break
     case 'bots.model.setImage':
       if (p.pick === undefined) throw new DomainRpcError('invalid_params', 'Give the pick, or null')
@@ -243,7 +246,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
   const botId = p.botId as string
   switch (method) {
     case 'bots.personal.list': return bots.list()
-    case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string, ...(typeof p.model === 'string' ? { model: p.model.trim() } : {}), ...(p.slots !== undefined ? { slots: p.slots as BotModelSlots } : {}), ...(p.image !== undefined ? { image: p.image as BotModelPick } : {}) })
+    case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string, ...(typeof p.model === 'string' ? { model: p.model.trim() } : {}), ...(p.slots !== undefined ? { slots: p.slots as BotModelSlots } : {}), ...(p.image !== undefined ? { image: p.image as BotModelPick } : {}), ...(p.access !== undefined ? { access: p.access as NewBotAccess } : {}) })
     case 'bots.get': return bots.get(botId)
     case 'bots.update': return bots.update(botId, { ...(p.name !== undefined ? { name: p.name as string } : {}), ...(p.look !== undefined ? { look: p.look as BotLook } : {}), ...(p.description !== undefined ? { description: p.description as string | null } : {}) })
     case 'bots.personal.pause': return bots.pause(botId)

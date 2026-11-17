@@ -24,7 +24,7 @@ import { validateHubParams } from './hub/validation'
 import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
 import { LISTS_STREAM_THREAD_ID, MmsListsSource, readerListsKey, readerOfListsKey } from './remote/MmsListsSource'
-import { accountDevices, createBotReach } from './remote/botReach'
+import { accountDevices, createBotReach, keepMakerInReach } from './remote/botReach'
 import type { BotReachPort } from '../protocol/botReachPort'
 import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
 import { remoteListMethods } from './remote/RemoteLists'
@@ -508,13 +508,9 @@ export class BridgeProfileService {
       refusal: () => botsSharing.refusal(),
       // The device's own limit here: what a bot does with threads in a turn its message started is held to it.
       deviceLimit: botDeviceLimitFrom(rt.policy),
-      // Which bots the calling device reaches; a bot it made stays within its reach.
+      // Which bots the calling device reaches; a bot it made stays within its reach, unless a choice was saved for it.
       reach,
-      madeBy: (botId, node) => {
-        const held = access.get(botId).access
-        if (reach.canReach(botId, node) || !reach.deviceOn(node)) return
-        access.set(botId, { mode: 'chosen', nodes: [...(held.mode === 'chosen' ? held.nodes : []), node] })
-      }
+      madeBy: keepMakerInReach(access, reach, (botId) => services.personalBots?.reachChanged(botId))
     }))
       rt.rpc.register({
         ...method,

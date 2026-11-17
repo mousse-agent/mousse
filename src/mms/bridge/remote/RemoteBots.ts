@@ -11,6 +11,7 @@ import type { PermissionMode } from '../../../shared/permissionMode'
 import { canonicalJson } from '../../net/sync/codec'
 import { isBotId } from '../../bots/definitions/BotDefinitionStore'
 import type { BotReachPort } from '../../protocol/botReachPort'
+import { REMOTE_BOT_REACH, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 
 /**
  * The personal-bot methods of the user's other devices (phones and other computers): a bot's chat and its images, its
@@ -49,6 +50,17 @@ export const REMOTE_BOT_METHODS = {
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
 export type RemoteBotMethod = keyof typeof REMOTE_BOT_METHODS
 
+/**
+ * The version of each method above that this computer accepts, as `net.info` reports it (`bots`), so a device sends only
+ * keys this computer knows: an older one refuses any other key. 2 for `bots.create`: `reach` (`RemoteBotReach`). An
+ * older computer reports none, and a device offers no choice of reach for a bot it makes there.
+ */
+export function remoteBotVersions(): Record<RemoteBotMethod, number> {
+  const out = {} as Record<RemoteBotMethod, number>
+  for (const name of Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]) out[name] = name === 'bots.create' ? 2 : 1
+  return out
+}
+
 /** What the remote methods use of the profile's bots (`BotChatService`). */
 export interface RemoteBotsPort {
   list(): { bots: BotSummary[] }
@@ -66,7 +78,7 @@ export interface RemoteBotsPort {
   answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }>
   pause(botId: string): { bot: BotSummary }
   resume(botId: string): Promise<{ bot: BotSummary }>
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string }): Promise<{ bot: BotSummary }>
+  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; access?: BotDeviceAccess }): Promise<{ bot: BotSummary }>
   update(botId: string, change: { name?: string; look?: BotLook }): { bot: BotSummary }
   reminderSnooze(botId: string, messageId: string, choice: import('../../../shared/bots/personal/chat').BotSnoozeChoice): BotChatMessage
   reminderCancel(botId: string, reminderId: string): BotDetail
@@ -94,7 +106,7 @@ const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: re
   'bots.questions.answer': { required: ['botId', 'questionId', 'choice', 'clientRequestId'] },
   'bots.personal.pause': { required: ['botId'] },
   'bots.personal.resume': { required: ['botId'] },
-  'bots.create': { required: ['look', 'description', 'clientRequestId'], optional: ['name'] },
+  'bots.create': { required: ['look', 'description', 'clientRequestId'], optional: ['name', 'reach'] },
   'bots.update': { required: ['botId'], optional: ['name', 'look'] },
   'bots.reminders.snooze': { required: ['botId', 'messageId', 'choice'] },
   'bots.reminders.cancel': { required: ['botId', 'reminderId'] },
@@ -242,6 +254,7 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
       ok(lookOf(p.look))
       ok(text(p.description, MAX_BOT_DESCRIPTION_CHARS))
       if (p.name !== undefined) ok(typeof p.name === 'string' && p.name.length <= MAX_BOT_NAME_CHARS)
+      if (p.reach !== undefined) ok((REMOTE_BOT_REACH as readonly unknown[]).includes(p.reach))
       break
     case 'bots.update':
       ok(p.name !== undefined || p.look !== undefined)
@@ -284,7 +297,8 @@ export function remoteBotError(error: BotError): BotError {
 
 /** A bot as another device sees it. */
 export function remoteBotSummary(bot: BotSummary): BotSummary {
-  const { error, ...rest } = bot
+  // Which devices reach the bot is set and shown on its own computer only.
+  const { error, reach: _reach, ...rest } = bot
   return { ...rest, ...(error ? { error: remoteBotError(error) } : {}) }
 }
 
@@ -443,7 +457,8 @@ export function remoteBotMethods(options: {
   reach?: Pick<BotReachPort, 'canReach' | 'deviceOn'> & Partial<Pick<BotReachPort, 'hiddenFor'>>
   /**
    * A bot a device just made: it is kept within reach of that device (its choice gains the device), so the device is not
-   * locked out of what it made. No other bot changes.
+   * locked out of what it made. A bot with a choice of its own saved (asked for at creation, or set since) is left as it
+   * is (`keepMakerInReach`). No other bot changes.
    */
   madeBy?(botId: string, node: string): void
 }): RpcMethod[] {
@@ -637,11 +652,16 @@ export function remoteBotMethods(options: {
     method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),
     method('bots.create', async (p, port, context) => {
       const before = new Set(port.list().bots.map((bot) => bot.id))
+      // What the device asked for is saved before the bot is published (`BotChatService.create`): "home and maker" is
+      // this computer and the calling device alone, so no other device lists the bot even for a moment.
+      const access: BotDeviceAccess | undefined =
+        p.reach === 'home_and_maker' ? { mode: 'chosen', nodes: [context.caller.node] } : p.reach === 'all' ? { mode: 'all' } : undefined
       const { bot } = await port.create({
         look: p.look as BotLook,
         ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}),
         description: p.description as string,
-        clientRequestId: p.clientRequestId as string
+        clientRequestId: p.clientRequestId as string,
+        ...(access ? { access } : {})
       })
       remember(context.execution, bot.id)
       // The device that made it keeps it within reach; a request id that names a bot made before is answered only if the

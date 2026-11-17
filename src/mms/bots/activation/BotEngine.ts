@@ -89,6 +89,7 @@ import {
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { allPinned, copyPick, customSlotsOf, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
+import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, keepsWorking, openQuestionAnswerNote, questionWorkKeepsWorkingText, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
@@ -328,6 +329,11 @@ export interface BotEngineHost {
   computerName?(): string
   /** The person's other computers (About lists them; a bot runs on the computer that holds it). */
   otherComputers?(): Array<{ node: string; name: string; online: boolean }>
+  /**
+   * Which devices reach each bot (`BotDeviceAccessStore`): a new bot's choice is saved here before the bot is published,
+   * and the Bots list shows it. Absent: no bot is given a choice when it is made, and none is listed with one.
+   */
+  deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget'>
   /**
    * Whether the skill or MCP tool an ask names exists here: a run never asks the owner for one that
    * does not (the card would show the bot's own words). Absent: every name is taken as it is.
@@ -843,7 +849,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(host.runsOnNote ? { runsOnNote: host.runsOnNote } : {}),
       ...(host.images ? { images: host.images } : {}),
       ...(host.computerName ? { computerName: host.computerName } : {}),
-      ...(host.otherComputers ? { otherComputers: host.otherComputers } : {})
+      ...(host.otherComputers ? { otherComputers: host.otherComputers } : {}),
+      ...(host.deviceAccess ? { deviceAccess: host.deviceAccess } : {})
     })
     try {
       for (const thread of host.store.allThreads()) this.known.set(thread.threadId, { botId: thread.botId, role: thread.role })
@@ -7609,6 +7616,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return oneShot({ selection: resolved.selection, prompt, signal })
     })().catch(() => undefined)
     return Promise.race([call, timedOut])
+  }
+
+  /** Which devices reach the bot changed (About's Devices, Make private): the Bots list reads it again for its lock. */
+  reachChanged(botId: string): void {
+    this.changed({ botId })
   }
 
   /** `bots.personal.pause`: the owner pauses the bot's schedules. Chat still works. */

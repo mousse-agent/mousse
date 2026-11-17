@@ -22,8 +22,10 @@ import { atomicWriteJsonSync } from '../../data/AtomicFs'
  *   it aside (`device-access.json.corrupt-<time>`) and writes `missing: "this_computer"`, so the other bots stay there
  *   until the owner picks for them.
  *
- * Only this computer's own window (About) and its command line change it, through `bots.devices.set`, and the bot that
- * a device makes (so the device that made it can reach it). Mousse's own data is closed to a bot's file tools.
+ * Only this computer's own window (About) and its command line change it, through `bots.devices.set`; a new bot's choice
+ * (New bot, or what the device that made it asked for) is saved before the bot is published, so no device outside it
+ * ever lists the bot; and the bot that a device makes without asking gains that device. Mousse's own data is closed to
+ * a bot's file tools.
  */
 export const BOT_DEVICE_ACCESS_FILE = 'device-access.json'
 
@@ -72,6 +74,14 @@ export class BotDeviceAccessStore {
     return { access: copyOf(state.missing), unreadable: state.broken }
   }
 
+  /**
+   * Whether the bot has a choice of its own stored (one that can't be read counts): a choice made on New bot, in About,
+   * or for the device that made it. A bot without one has what every such bot has.
+   */
+  saved(botId: string): boolean {
+    return this.read().bots.has(botId)
+  }
+
   /** Every stored choice, and what a bot without one has: enough to tell quickly that no bot is held from anyone. */
   choices(): { others: BotDeviceAccess; bots: BotDeviceAccess[] } {
     const state = this.read()
@@ -111,6 +121,30 @@ export class BotDeviceAccessStore {
     if (!changed) return false
     this.write({ version: 1, bots, ...(state.missing.mode !== 'all' ? { missing: 'this_computer' } : {}) })
     return true
+  }
+
+  /**
+   * Takes the choices of bots that were never made off the file (`known` says which bots exist, deleted ones too): a
+   * new bot's choice is saved before the bot itself, so a crash between the two leaves one behind. Nothing is written when
+   * nothing changes, nor while the file can't be read.
+   */
+  dropBots(known: (botId: string) => boolean): boolean {
+    const state = this.read()
+    if (state.broken) return false
+    const bots: Record<string, BotDeviceAccess> = {}
+    for (const [id, entry] of state.bots) if (known(id)) bots[id] = copyOf(entry.access)
+    if (Object.keys(bots).length === state.bots.size) return false
+    this.write({ version: 1, bots, ...(state.missing.mode !== 'all' ? { missing: 'this_computer' } : {}) })
+    return true
+  }
+
+  /** Takes one bot's choice off the file: a new bot whose choice was saved but which could not be made. */
+  forget(botId: string): void {
+    const state = this.read()
+    if (state.broken || !state.bots.has(botId)) return
+    const bots: Record<string, BotDeviceAccess> = {}
+    for (const [id, entry] of state.bots) if (id !== botId) bots[id] = copyOf(entry.access)
+    this.write({ version: 1, bots, ...(state.missing.mode !== 'all' ? { missing: 'this_computer' } : {}) })
   }
 
   /** Called after every change this store makes. */
