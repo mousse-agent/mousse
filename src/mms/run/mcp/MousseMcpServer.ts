@@ -57,6 +57,18 @@ export interface McpAttachmentProvider {
   revokeThread(threadId: string): void
 }
 
+/**
+ * Notices a running turn gets with the result of one of its Mousse tool calls (docs/plans/tool-api.md §2.2): its
+ * pending subagent results and requests, on a runtime that has no native steer. `release` gives them back when the
+ * result never reached the model.
+ */
+export interface McpToolBoundary {
+  deliver(caller: { threadId: string; runId: string }): { text: string; release(): void } | null
+}
+
+/** The line that opens the notices a tool result carries, so they are never read as the tool's own output. */
+export const BOUNDARY_NOTICE_HEADER = 'Mousse notices that arrived while you were working (not part of the tool result above):'
+
 /** JSON-RPC error codes the server uses (implementation-defined range). */
 export const MCP_ERROR_CODES: Record<McpToolErrorCode | 'mousse_unauthorized', number> = {
   mousse_unauthorized: -32001,
@@ -93,6 +105,8 @@ export class MousseMcpServer implements McpAttachmentProvider {
       registry: ToolRegistry
       /** The MCP relay served at `RELAY_PATH`; absent: that path is not found. */
       relay?: RelayHandler
+      /** Notices handed over with `mousse` tool results; relayed tools carry none. Absent: none are. */
+      boundary?: McpToolBoundary
       /** Defaults to `127.0.0.1`. */
       host?: string
       /** Defaults to 0 (a random free port). */
@@ -216,9 +230,12 @@ export class MousseMcpServer implements McpAttachmentProvider {
     }
     const request = new AbortController()
     this.track(credential.threadId, request)
-    const server = relay ? this.relayServer(relay, credential, request.signal) : this.mcpServer(credential, request.signal)
+    // Notices handed over with a result that was never written out go back to pending.
+    const handedOver: Array<() => void> = []
+    const server = relay ? this.relayServer(relay, credential, request.signal) : this.mcpServer(credential, request.signal, handedOver)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
     res.once('close', () => {
+      if (!res.writableFinished) for (const release of handedOver) release()
       request.abort(new Error('The MCP request closed'))
       this.untrack(credential.threadId, request)
       void transport.close().catch(() => undefined)
@@ -229,7 +246,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
   }
 
   /** One SDK server per request, bound to the credential the request's token resolved to. */
-  private mcpServer(resolved: CredentialRecord, requestSignal: AbortSignal): Server {
+  private mcpServer(resolved: CredentialRecord, requestSignal: AbortSignal, handedOver: Array<() => void> = []): Server {
     const { registry, credentials } = this.options
     // A bot's thread gets no orchestration guidance: it names delegation and thread tools no bot can hold.
     const server = new Server(
@@ -246,11 +263,32 @@ export class MousseMcpServer implements McpAttachmentProvider {
       const toolCallId = typeof clientRequestId === 'string' && clientRequestId.trim()
         ? `mcp:${clientRequestId.trim()}`
         : `mcp:${randomUUID()}`
-      return this.tracked(resolved, (authority) =>
-        registry.call(request.params.name, args, { credential: authority, toolCallId, signal: AbortSignal.any([requestSignal, extra.signal]) })
-      )
+      const signal = AbortSignal.any([requestSignal, extra.signal])
+      return this.tracked(resolved, async (authority) => {
+        const outcome = await registry.call(request.params.name, args, { credential: authority, toolCallId, signal })
+        return this.withBoundaryNotices(outcome, authority, signal, handedOver)
+      })
     })
     return server
+  }
+
+  /**
+   * A `mousse` tool's outcome, followed by the caller's pending notices as a separate text block when its runtime has
+   * no native steer (`McpToolBoundary`). Never inside the tool's own text, and never for a call whose request is gone.
+   */
+  private withBoundaryNotices(outcome: ToolOutcome, authority: McpCredentialAuthority, signal: AbortSignal, handedOver: Array<() => void>): McpOutcome {
+    const boundary = this.options.boundary
+    if (!boundary || signal.aborted) return outcome
+    let delivered: ReturnType<McpToolBoundary['deliver']>
+    try {
+      delivered = boundary.deliver({ threadId: authority.threadId, runId: authority.runId })
+    } catch (error) {
+      console.warn('notices could not be handed over with a tool result', { threadId: authority.threadId, error: error instanceof Error ? error.message : String(error) })
+      return outcome
+    }
+    if (!delivered) return outcome
+    handedOver.push(delivered.release)
+    return { ...outcome, notices: `${BOUNDARY_NOTICE_HEADER}\n\n${delivered.text}` }
   }
 
   /**
@@ -289,7 +327,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
    * ceiling and relay grant), counted as received and running for the drained-turn check; a
    * refusal becomes a JSON-RPC error.
    */
-  private async tracked(resolved: CredentialRecord, run: (authority: McpCredentialAuthority) => Promise<ToolOutcome>) {
+  private async tracked(resolved: CredentialRecord, run: (authority: McpCredentialAuthority) => Promise<McpOutcome>) {
     const { credentials } = this.options
     const record = credentials.current(resolved.tokenHash) ?? resolved
     credentials.callReceived(record.tokenHash, record.runId)
@@ -329,12 +367,16 @@ export class MousseMcpServer implements McpAttachmentProvider {
   }
 }
 
-/** A tool outcome as MCP content: its text, then its images. */
-function toolContent(outcome: ToolOutcome) {
+/** A tool's outcome and the notices handed over with it (`McpToolBoundary`). */
+type McpOutcome = ToolOutcome & { notices?: string }
+
+/** A tool outcome as MCP content: its text, then its images, then any notices handed over with it as a block of their own. */
+function toolContent(outcome: McpOutcome) {
   return {
     content: [
       { type: 'text' as const, text: outcome.text },
-      ...(outcome.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
+      ...(outcome.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType })),
+      ...(outcome.notices ? [{ type: 'text' as const, text: outcome.notices }] : [])
     ],
     ...(outcome.isError ? { isError: true } : {})
   }

@@ -155,13 +155,27 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
 
-    it('refuses a subagent, whose parent reaches it with continue_subagent', async () => {
-      const { call, denied, fx, callerRun, threads, host } = await world()
+    it('to the caller\'s own subagent it is the follow-up continue_subagent starts, under the same call id; another thread\'s subagent is refused', async () => {
+      const { call, denied, fx, callerRun, targetRun, threads, host } = await world()
       const child = await fx.delegate(callerRun.runId, 'call-1')
       threads.set(child.childThreadId, thread(child.childThreadId))
-      const error = await denied(call('thread_send', { threadId: child.childThreadId, content: 'x' }))
+      const delegation = (host.delegation as unknown as () => { continueSubagent: ReturnType<typeof vi.fn> })()
+      delegation.continueSubagent.mockResolvedValueOnce({ delegationId: 'd2', childThreadId: child.childThreadId, childRunId: 'run:child:2', title: 'Helper', status: 'queued', note: 'busy' })
+      const sent = JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })).text)
+      expect(delegation.continueSubagent).toHaveBeenCalledWith({ subagent: child.childThreadId, prompt: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })
+      expect(sent).toMatchObject({ threadId: child.childThreadId, runId: 'run:child:2', delivery: 'queued', queued: true, delegationId: 'd2', subagent: true })
+      // A refusal (the subagent waits for an answer) comes back as continue_subagent gives it.
+      delegation.continueSubagent.mockResolvedValueOnce({ started: false, code: 'needs_answer', message: 'answer it first' })
+      expect(JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'more' })).text)).toMatchObject({ started: false, code: 'needs_answer' })
+      // Nothing went the untracked way.
+      expect(host.sendToThread).not.toHaveBeenCalled()
+
+      const theirs = await fx.delegate(targetRun.runId, 'call-2')
+      threads.set(theirs.childThreadId, thread(theirs.childThreadId))
+      const error = await denied(call('thread_send', { threadId: theirs.childThreadId, content: 'x' }))
       expect(error!.code).toBe('mousse_scope_denied')
-      expect(error!.message).toContain('continue_subagent')
+      expect(error!.message).toContain('only its parent')
+      expect(delegation.continueSubagent).toHaveBeenCalledTimes(2)
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
 

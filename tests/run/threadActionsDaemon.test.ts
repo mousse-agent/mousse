@@ -16,7 +16,7 @@ import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, T
 import { AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
 import { AGENT_REPEAT_WINDOW_MS } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import { BOUNDARY_NOTICE_HEADER, MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { ChatMessage } from '../../src/shared/types'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
@@ -142,7 +142,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     const d = phase6Daemon(home, [adapter])
     created = d
     const credentials = new McpCredentials(d.engine.store)
-    const server = new MousseMcpServer({ credentials, registry: d.orch.mcpToolRegistry() })
+    const server = new MousseMcpServer({ credentials, registry: d.orch.mcpToolRegistry(), boundary: d.orch.mcpToolBoundary() })
     stops.push(async () => {
       d.orch.setMcpAttachment(null)
       await server.stop()
@@ -1035,6 +1035,104 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(seen.send!.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_ceiling_exceeded })
       expect(parse(seen.wait!)).toMatchObject({ status: 'idle' })
       expect(w.d.engine.listRuns(w.other.id)).toEqual([])
+    })
+  })
+
+  describe('a parent and its own subagent', () => {
+    const isChild = (w: { parent: { id: string }; other: { id: string } }, threadId: string) => threadId !== w.parent.id && threadId !== w.other.id
+
+    it('thread_send to your own subagent is a tracked follow-up that shares continue_subagent\'s retry key; search finds the subagent; another thread may not send to it', async () => {
+      const seen: Record<string, unknown> = {}
+      const w = world(async (input, mcp, d) => {
+        if (isChild(w, input.threadId)) return `helper did: ${input.prompt.includes('second job') ? 'second' : 'first'}`
+        if (input.threadId === w.other.id) {
+          seen.foreign = await call(mcp!, 'thread_send', { threadId: (seen.child as { childThreadId: string }).childThreadId, content: 'do my job instead' })
+          return 'tried'
+        }
+        const child = parse(await call(mcp!, 'delegate_task', { prompt: 'first job', title: 'Helper', workspace: 'shared', role: 'research', instanceId: 'claude' })) as { childRunId: string; childThreadId: string }
+        seen.child = child
+        await waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed', 'the first task')
+        seen.send = parse(await call(mcp!, 'thread_send', { threadId: child.childThreadId, content: 'second job', clientRequestId: 'next-1' }))
+        // The same request under the other name starts nothing new.
+        seen.retry = parse(await call(mcp!, 'continue_subagent', { subagent: 'Helper', prompt: 'second job', clientRequestId: 'next-1' }))
+        seen.search = parse(await call(mcp!, 'thread_search', { query: 'Helper' }))
+        return 'sent'
+      })
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      const child = seen.child as { childThreadId: string }
+      const send = seen.send as { runId: string; subagent: boolean; delegationId: string; title: string }
+      expect(send).toMatchObject({ threadId: child.childThreadId, subagent: true, title: 'Helper' })
+      expect(seen.retry).toMatchObject({ childRunId: send.runId, delegationId: send.delegationId, replayed: true })
+      await waitFor(() => w.d.engine.getRun(send.runId)?.status === 'completed', 'the follow-up')
+      // One follow-up turn, tracked as a task of the parent: two tasks in all.
+      expect(w.turnsOf(child.childThreadId).filter((turn) => turn.prompt.includes('second job'))).toHaveLength(1)
+      expect(w.d.engine.delegations.listForParentThread(w.parent.id)).toHaveLength(2)
+      expect(w.d.engine.getRun(send.runId)).toMatchObject({ source: 'delegation' })
+      const hits = (seen.search as { results: Array<{ threadId: string; subagent?: boolean; parentThreadId?: string }> }).results
+      expect(hits.find((hit) => hit.threadId === child.childThreadId)).toMatchObject({ subagent: true, parentThreadId: w.parent.id })
+
+      await w.d.orch.send('poke', false, { threadId: w.other.id, clientRequestId: 'poke' })
+      expect((seen.foreign as Awaited<ReturnType<typeof rpc>>).error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied, message: expect.stringContaining('only its parent') })
+      expect(w.turnsOf(child.childThreadId)).toHaveLength(2)
+    })
+
+    it('a parent waiting on its subagent hears the subagent\'s question at once, answers it, and then gets the result (#657)', async () => {
+      const seen: Record<string, unknown> = {}
+      const w = world(async (input, mcp) => {
+        if (isChild(w, input.threadId)) {
+          const answer = JSON.parse((await call(mcp!, 'ask_user', { questions: [{ id: 'which', prompt: 'A or B?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] })).result!.content![0].text) as Record<string, unknown>
+          return `picked ${String(answer.which)}`
+        }
+        const child = parse(await call(mcp!, 'delegate_task', { prompt: 'Pick one', title: 'Asker', workspace: 'shared', role: 'research', instanceId: 'claude' })) as { childRunId: string; childThreadId: string }
+        const started = Date.now()
+        const asked = await call(mcp!, 'thread_wait', { threadId: child.childThreadId, runId: child.childRunId, timeoutMs: 60_000 })
+        seen.waitedMs = Date.now() - started
+        seen.asked = parse(asked)
+        seen.status = parse(await call(mcp!, 'task_status', { subagent: 'Asker' }))
+        const requestId = (seen.asked as { pendingRequests: Array<{ requestId: string }> }).pendingRequests[0].requestId
+        seen.answer = parse(await call(mcp!, 'answer_subagent', { subagent: 'Asker', requestId, answers: { which: 'b' }, clientRequestId: 'answer-1' }))
+        seen.done = parse(await call(mcp!, 'thread_wait', { threadId: child.childThreadId, runId: child.childRunId, timeoutMs: 60_000 }))
+        return 'answered'
+      })
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      expect(seen.waitedMs).toBeLessThan(30_000)
+      expect(seen.asked).toMatchObject({
+        status: 'needs_input',
+        needsInput: true,
+        pendingRequests: [{ questions: [expect.objectContaining({ id: 'which', prompt: 'A or B?' })] }],
+        hint: expect.stringContaining('answer_subagent')
+      })
+      expect(seen.status).toMatchObject({ needsInput: true, pendingQuestion: expect.anything() })
+      expect(seen.done).toMatchObject({ status: 'finished', resultText: 'picked b' })
+    })
+
+    it('a busy parent on a runtime that steers by restarting gets its subagent\'s result with its next Mousse tool call, as a separate block, once', async () => {
+      const seen: Record<string, Awaited<ReturnType<typeof rpc>>> = {}
+      const w = world(async (input, mcp, d) => {
+        if (isChild(w, input.threadId)) return 'the zebra report'
+        if (input.prompt !== GO) return 'woken'
+        const child = parse(await call(mcp!, 'delegate_task', { prompt: 'Report', title: 'Reporter', workspace: 'shared', role: 'research', instanceId: 'claude', wake: 'always' })) as { childRunId: string }
+        await waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed' && d.engine.inbox.listPending(w.parent.id).length === 1, 'the result row')
+        seen.first = await call(mcp!, 'list_subagents')
+        seen.second = await call(mcp!, 'list_subagents')
+        return 'busy work done'
+      })
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      // The tool's own result stays the first block and parses as before; the notice follows it.
+      expect(parse(seen.first)).toMatchObject([expect.objectContaining({ title: 'Reporter' })])
+      expect(seen.first.result!.content).toHaveLength(2)
+      expect(seen.first.result!.content![1].text.startsWith(BOUNDARY_NOTICE_HEADER)).toBe(true)
+      expect(seen.first.result!.content![1].text).toContain('the zebra report')
+      expect(seen.second.result!.content).toHaveLength(1)
+      // The parent's run read it: acknowledged when the run completed, and no wake turn follows.
+      const parentRun = w.latestRun(w.parent.id)
+      expect(w.d.engine.getRun(parentRun.runId)?.status).toBe('completed')
+      expect(w.d.engine.inbox.listForThread(w.parent.id).map((row) => row.status)).toEqual(['acknowledged'])
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(w.turnsOf(w.parent.id)).toHaveLength(1)
     })
   })
 })

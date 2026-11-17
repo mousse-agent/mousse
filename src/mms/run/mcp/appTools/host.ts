@@ -403,9 +403,13 @@ export interface AppToolHost extends DelegationToolsHost {
    * (which threads the caller may see) and `titlesOnly` are applied before the limit and before any
    * transcript is read.
    */
-  searchThreads?(query: string, limit: number, options?: Pick<ThreadSearchOptions, 'allow' | 'titlesOnly' | 'maxMessageThreads'>): ThreadSearchHit[] | Promise<ThreadSearchHit[]>
+  searchThreads?(query: string, limit: number, options?: Pick<ThreadSearchOptions, 'allow' | 'titlesOnly' | 'maxMessageThreads' | 'hideSubagents'>): ThreadSearchHit[] | Promise<ThreadSearchHit[]>
   /** The thread's visible transcript. */
   threadMessages?(threadId: string): ChatMessage[]
+  /** The questions and approvals the thread's run waits on now (not the open questions it asked without waiting). */
+  pendingRequests?(threadId: string): PendingUserQuestions[]
+  /** Calls `listener` with the thread each time a question or approval is asked; returns the function that stops it. */
+  onRequestPending?(listener: (threadId: string) => void): () => void
   /** What waits on a thread: its queued messages and unanswered questions. */
   threadActivity?(threadId: string): { queuedCount: number; pendingQuestions: PendingUserQuestions[] }
   /** Records a change an agent made to another thread: an `agent.action` event and a transcript row. */

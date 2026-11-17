@@ -17,7 +17,7 @@ import {
   type InboxRecord,
   type WakeTurnPayload
 } from '../types'
-import { formatWakeNotice } from './notice'
+import { formatWakeNotice, type PlannedNotice } from './notice'
 import { isQuestionAnswerRow } from '../OpenQuestions'
 
 /** Provider capabilities of the adapter that serves a thread's selected model; null when unknown. */
@@ -303,6 +303,70 @@ function steeredRows(rows: InboxRecord[], strategy: ReturnType<typeof steerStrat
   if (strategy === 'native' && rows.every((row) => wantsSteer(row, delegations))) return rows
   if (strategy === 'native' || strategy === 'interrupt_restart') return rows.filter(isQuestionAnswerRow)
   return []
+}
+
+/** Notices handed to a running turn with a Mousse tool's result (`deliverAtToolBoundary`). */
+export interface BoundaryDelivery {
+  /** The `turn.steer` effect recorded as done that owns the rows: a failed or cut-off run gives them back. */
+  effectId: string
+  text: string
+  inboxIds: string[]
+}
+
+/**
+ * Boundary delivery (docs/plans/tool-api.md §2.2): on a provider that steers by restarting its reply
+ * (`interrupt_restart`), a run that is busy calling Mousse tools gets its pending notices with the
+ * result of its next Mousse tool call, instead of only when the run ends. The rows are delivered by a
+ * `turn.steer` effect recorded as done and read by the run (`steerTakenBy`), as a native steer's are:
+ * acknowledged when the run completes, pending again when it fails or is cut off
+ * (`restoreUndeliveredRows`), released when the call's result never reached the model
+ * (`releaseToolBoundary`). Like a native steer, it takes every pending row or none (`wantsSteer`).
+ * Nothing is delivered to a run that is not the thread's active one, is being stopped, or steers
+ * natively (that run gets its notices from rule 4). One transaction.
+ */
+export function deliverAtToolBoundary(
+  store: RunStore,
+  outbox: EffectOutbox,
+  input: {
+    threadId: string
+    runId: string
+    caps: ProviderCapabilities | null
+    /** Drops rows not worth delivering any more (a question nobody can answer now). */
+    prepare?: (rows: InboxRecord[]) => InboxRecord[]
+    plan: (rows: readonly InboxRecord[]) => PlannedNotice
+  }
+): BoundaryDelivery | null {
+  const { threadId, runId, caps } = input
+  if (!caps) return null
+  return store.db.transaction(() => {
+    const active = store.getActiveRun(threadId)
+    if (!active || active.runId !== runId || active.outcome?.stopRequested) return null
+    if (steerStrategy(caps, active) !== 'interrupt_restart') return null
+    const inbox = new Inbox(store)
+    const pending = inbox.listPending(threadId).filter((row) => !isRetiredInboxRow(row))
+    const rows = input.prepare ? input.prepare(pending) : pending
+    if (rows.length === 0) return null
+    const delegations = new Delegations(store, inbox)
+    if (!rows.every((row) => wantsSteer(row, delegations))) return null
+    const planned = input.plan(rows)
+    const inboxIds = rows.map((row) => row.inboxId)
+    const effect = outbox.recordDone({ threadId, runId, kind: 'turn.steer', payload: { runId, threadId, text: planned.text, inboxIds, boundary: true } })
+    inbox.markDelivered(inboxIds, effect.effectId)
+    inbox.markSteerTaken(inboxIds, effect.effectId)
+    inbox.recordNoticeVisibility(rows, planned.items)
+    store.appendEvent({ threadId, runId, type: 'reconcile.boundary_delivery', payload: { effectId: effect.effectId, inboxIds } })
+    return { effectId: effect.effectId, text: planned.text, inboxIds }
+  })
+}
+
+/** The tool result that carried a boundary delivery never reached the model: its rows are pending again, not counted as an attempt. */
+export function releaseToolBoundary(store: RunStore, delivery: Pick<BoundaryDelivery, 'effectId' | 'inboxIds'>): string[] {
+  const inbox = new Inbox(store)
+  return store.db.transaction(() => {
+    const moved = inbox.release(delivery.inboxIds, delivery.effectId)
+    for (const id of moved) inbox.patchPayload(id, { steerTakenBy: null })
+    return moved
+  })
 }
 
 /** Rows without a delegation (notices) steer; a child result follows its delegation. */
