@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
 import { agentMessageText, botMessageText, isPersonMessage, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools'
-import { BOT_JOB_NEXT, BOT_NOTIFY_NEXT, THREAD_CREATE_MAX_PER_RUN, THREAD_MESSAGE_MAX_CHARS, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { BOT_JOB_NEXT, BOT_NOTIFY_NEXT, THREAD_MESSAGE_MAX_CHARS } from '../../src/mms/run/mcp/appTools/thread'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest, isBotThreadTool } from '../../src/shared/bots/personal/manifest'
 import { BOT_THREADS_NOT_OWNER_TEXT } from '../../src/shared/bots/personal/walls'
 import { botCatalogueGroup, botCoreTool } from '../../src/shared/bots/personal/catalogue'
@@ -105,7 +105,6 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       botRole: (id) => (id === 'home' ? options.role ?? 'activation' : id === 'other-bot' ? 'activation' : undefined),
       threadModels: () => [{ instanceId: 'claude', entry: 'Claude', model: 'opus', name: 'Opus' }],
       createThread: vi.fn(async (request) => ({ threadId: 'new-1', projectId: request.projectId, title: request.title ?? 'New Thread', workspace: 'project' as const, runsIn: 'project_folder' as const, model: null, permissionMode: 'full' as const, replayed: false })),
-      creationStarted: vi.fn(() => false),
       sendToThread: vi.fn(async () => ({ runId: 'run-x', sequence: 1, queued: false, replayed: false })),
       stopRun: vi.fn(async (_threadId, runId) => ({ status: 'accepted' as const, runId, sequence: 1, replayed: false })),
       setThreadArchived: vi.fn(async (_threadId, archived) => ({ status: 'accepted' as const, archived, changed: true })),
@@ -293,16 +292,6 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(vi.mocked(host.createThread!).mock.calls[0]![1].clientRequestId).toMatch(/^thread_create:home:act-1:/)
   })
 
-  it(`a bot is not held to the thread agents' counts per run: one run starts more than ${THREAD_CREATE_MAX_PER_RUN} threads and sends more than ${THREAD_SEND_MAX_PER_RUN} messages`, async () => {
-    const { text, host } = await world({ threads: 'all' })
-    for (let index = 0; index <= THREAD_CREATE_MAX_PER_RUN; index += 1)
-      expect((await text('thread_create', { projectId: 'p1', title: `Fix ${index}`, firstMessage: 'Look.' })).error, `start ${index}`).toBe(false)
-    for (let index = 0; index <= THREAD_SEND_MAX_PER_RUN; index += 1)
-      expect((await text('thread_send', { threadId: 'mine', content: `Next ${index}.` })).error, `message ${index}`).toBe(false)
-    expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
-    expect(host.sendToThread).toHaveBeenCalledTimes(THREAD_SEND_MAX_PER_RUN + 1)
-  })
-
   it('notify is a wake on the thread: the bot carries on in its chat when it finishes; one that can\'t be set says why, and the message stays sent', async () => {
     const add = vi.fn(async () => ({ wakeId: 'rem_1', dueAt: NOW, label: '' }))
     const { text, host } = await world({ threads: 'all', wakes: { add } })
@@ -342,13 +331,13 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(open).toHaveBeenCalledTimes(2)
   })
 
-  it('a bot reads its own description of thread_create and thread_send, with no per-run counts or in-a-row limit; an ordinary thread reads the agents\' one', async () => {
+  it('a bot reads its own description of thread_create and thread_send, with no in-a-row limit; an ordinary thread reads the agents\' one', async () => {
     const { registry, runId } = await world({ threads: 'all' })
     const described = (threadId: string, name: string) => registry.listForThread(threadId, 'default', runId).find((tool) => tool.name === name)?.description ?? ''
     for (const name of ['thread_create', 'thread_send']) {
       expect(described('home', name)).toMatch(/no count per turn, per run or per day/)
-      expect(described('home', name)).not.toMatch(/per run \(a personal bot|agent messages in a row without a person/)
-      expect(described('mine', name)).toMatch(/per run \(a personal bot has no such count\)/)
+      expect(described('home', name)).not.toMatch(/agent messages in a row without a person/)
+      expect(described('mine', name)).toMatch(/agent messages in a row without a person/)
     }
     expect(described('home', 'thread_create')).toMatch(/no limit on how many work at once/)
   })

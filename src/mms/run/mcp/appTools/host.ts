@@ -427,11 +427,6 @@ export interface AppToolHost extends DelegationToolsHost {
    */
   sendToThread?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentSendResult>
   /**
-   * The first result of a send that `clientRequestId` already made to the thread, found without admitting anything; undefined
-   * when the key made none. A retry past the send cap is answered with it.
-   */
-  earlierSend?(threadId: string, clientRequestId: string): AgentSendResult | undefined
-  /**
    * Watches the message `messageKey` sent to `targetThreadId` (`notify` on `thread_send` and `thread_create`): Mousse
    * tells the sending thread when the work it started waits on a person (once) and when it ends (SPEC §15.1). Once per
    * message: a retry keeps its watch. With `targetNode`, `targetThreadId` is a thread this caller launched on that
@@ -446,11 +441,6 @@ export interface AppToolHost extends DelegationToolsHost {
    * or returns that one thread, whatever the caller's run or the settings look like by then.
    */
   createThread?(input: AgentThreadRequest, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentCreatedThread>
-  /**
-   * The key has a stored creation already: a retry finishes that one thread (or its first message) and does not use up a place
-   * under the caller's cap on new threads.
-   */
-  creationStarted?(clientRequestId: string): boolean
   /**
    * `thread_create` with `computer` (issue #1160): a top-level thread on another of the user's computers, in its project
    * that is the caller's repository. The launch is recorded before any call (`remote_launches`), every call is marked as
