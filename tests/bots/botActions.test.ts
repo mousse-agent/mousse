@@ -465,10 +465,10 @@ it('master refuses schedule recreation at the actual scheduled-run tool handlers
   expect(f.book.list(t.botId)).toHaveLength(1)
 })
 // One persisted starting chat activation, many pieces of work: no private store rows or slot bypasses.
-async function fanOut(on: boolean, owner: boolean, count: number, different: boolean) {
+async function fanOut(on: boolean, owner: boolean, count: number, different: boolean, originKey?: string) {
   const t = await setup(on)
   await finish(f, t.work.payload)
-  const origin = await f.bots.enqueueChat(t.botId, owner ? 'chat:fan-out-owner' : 'wake:fan-out', 'Prepare the mail')
+  const origin = await f.bots.enqueueChat(t.botId, originKey ?? (owner ? 'chat:fan-out-owner' : 'wake:fan-out'), 'Prepare the mail')
   const chat = await start(f, origin.id)
   const works: Array<{ id: string; run: Awaited<ReturnType<typeof start>> }> = []
   for (let n = 0; n < count; n++) {
@@ -502,6 +502,49 @@ it.each([false, true])('switch off preserves all twenty unattended calls, differ
   expect(t.calls).toHaveLength(20)
   expect(t.results.every(result => !result.isError)).toBe(true)
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+})
+it.each(['create:fan-out', 'question:fan-out', 'bot-message:fan-out', 'answer:fan-out'])('persisted %s origin keeps the correct approval scope', async originKey => {
+  const t = await fanOut(true, false, 5, true, originKey)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(originKey.startsWith('answer:') ? 5 : 3)
+})
+it.each(['declined', 'expired', 'forgotten'] as const)('unattended %s history follows work into a new piece of work', async settled => {
+  const t = await fanOut(true, false, 1, false)
+  const first = t.works[0]!
+  await finish(f, first.run.payload)
+  const a = f.bots.actions.forWork(first.id)!
+  if (settled === 'declined') await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  else if (settled === 'expired') { f.clock.now = Date.parse(a.expires_at); await f.bots.actions.reconcile() }
+  else {
+    const memory = new BotMemoryStore({ db: f.store.db })
+    const seq = memory.append({ botId: t.botId, sourceKey: 'bm:' + a.message_id, kind: 'notice', who: 'bot', text: 'call' })!
+    memory.forget(t.botId, { refs: ['j' + seq], by: 'owner_ui' })
+  }
+  const { workId } = await f.bots.tools.work.start(t.botId, t.origin.id, { title: 'Again', brief: 'Send it again', key: 'terminal-again' })
+  const run = await start(f, workId)
+  expect(await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'again', signal: new AbortController().signal })).toMatchObject({ isError: true })
+  expect(f.bots.actions.forWork(workId)).toBeUndefined()
+})
+it('a non-waiting question tap still lifts the unattended cap', async () => {
+  const t = await fanOut(true, false, 4, true)
+  const last = t.works.at(-1)!
+  expect(t.results.at(-1)?.isError).toBe(true)
+  expect(f.bots.askOwner(t.botId, last.id, { question: 'May I carry on?', choices: [{ label: 'Yes' }, { label: 'No' }], other: true, wait: false }).asked).toBe(true)
+  const q = f.store.workQuestion(last.id)!
+  const before = f.store.ownerLastWroteSeq(t.botId)
+  await f.bots.service.answerQuestion({ botId: t.botId, questionId: q.id, choice: 'Yes', clientRequestId: 'unattended-cap-tap' })
+  expect(f.store.ownerLastWroteSeq(t.botId)).toBeGreaterThan(before)
+  const result = await callForBot({ bot: last.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'After owner tap' }, toolCallId: 'after-tap', signal: new AbortController().signal })
+  expect(result.isError).not.toBe(true)
+})
+it('scheduled and unattended work share the same pending-card cap', async () => {
+  const t = await fanOut(true, false, 3, true)
+  f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send another email' }, 'owner')
+  f.clock.now += 5 * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const run = await start(f, due.inserted[0]!)
+  const result = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'From the schedule' }, toolCallId: 'scheduled-cap', signal: new AbortController().signal })
+  expect(result).toMatchObject({ isError: true, text: expect.stringContaining('three cards') })
+  expect(f.bots.actions.forWork(due.inserted[0]!)).toBeUndefined()
 })
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
