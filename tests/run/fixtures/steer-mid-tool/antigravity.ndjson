@@ -5,7 +5,7 @@
 {"dir":"in","frame":{"kind":"response","result":{"sessionId":"replay-session","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"replay-model","options":[{"value":"replay-model","name":"Replay Model"}]}]}}}
 {"dir":"out","frame":{"kind":"request","method":"session/set_config_option","params":{"sessionId":"replay-session","configId":"model","value":"replay-model"}}}
 {"dir":"in","frame":{"kind":"response","result":{"configOptions":[]}}}
-{"dir":"out","frame":{"kind":"request","method":"session/prompt","params":{"sessionId":"replay-session","prompt":[{"type":"text","text":"Run the tests"}]}}}
+{"dir":"out","frame":{"kind":"request","method":"session/prompt","params":{"sessionId":"replay-session","prompt":[{"type":"text","text":"<mousse_orchestration_instructions>\nYour last reply of a turn is the only one the person sees. Put every answer they asked for in it, including ones you gave earlier in the turn.\n</mousse_orchestration_instructions>\n\nRun the tests"}]}}}
 {"dir":"in","frame":{"kind":"update","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"npm test","kind":"execute","status":"in_progress"}}}
 {"dir":"cue","frame":{"action":"steer","text":"Use pnpm","exclusive":true}}
 {"dir":"in","frame":{"kind":"update","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"12 passed"}}]}}}

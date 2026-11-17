@@ -5,6 +5,6 @@
 {"dir":"in","frame":{"kind":"response","result":{"sessionId":"replay-session","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"replay-model","options":[{"value":"replay-model","name":"Replay Model"}]}]}}}
 {"dir":"out","frame":{"kind":"request","method":"session/set_config_option","params":{"sessionId":"replay-session","configId":"model","value":"replay-model"}}}
 {"dir":"in","frame":{"kind":"response","result":{"configOptions":[]}}}
-{"dir":"out","frame":{"kind":"request","method":"session/prompt","params":{"sessionId":"replay-session","prompt":[{"type":"text","text":"Summarise the repository"}]}}}
+{"dir":"out","frame":{"kind":"request","method":"session/prompt","params":{"sessionId":"replay-session","prompt":[{"type":"text","text":"<mousse_orchestration_instructions>\nYour last reply of a turn is the only one the person sees. Put every answer they asked for in it, including ones you gave earlier in the turn.\n</mousse_orchestration_instructions>\n\nSummarise the repository"}]}}}
 {"dir":"in","frame":{"kind":"update","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Partial"}}}}
 {"dir":"in","frame":{"kind":"error","message":"Upstream overloaded"}}
