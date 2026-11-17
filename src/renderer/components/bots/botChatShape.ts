@@ -123,12 +123,15 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
   let lastOwner: string | undefined
   let expired: { schedule: string; count: number; row: Extract<BotChatRow, { kind: 'system' }> } | undefined
   const latestAction = new Map<string, BotChatMessage>()
-  for (const message of messages) if (message.action) latestAction.set(message.action.actionId, message)
+  for (const message of messages) if (message.action) {
+    const first = latestAction.get(message.action.actionId)
+    latestAction.set(message.action.actionId, { ...message, action: { ...message.action, askedAt: message.action.askedAt ?? first?.action?.askedAt ?? first?.at ?? message.at } })
+  }
   const foldedActions = new Set(messages.filter(message => message.expiredActionSchedule && message.action).map(message => message.action!.actionId))
   const nudgeOf = (message: BotChatMessage) => Boolean(message.action && /^bm_action_.*_n[12]$/.test(message.id))
   const earlierLine = (message: BotChatMessage): Extract<BotChatRow, { kind: 'system' }> => ({
     kind: 'system', id: message.id, at: message.at, of: message.id,
-    text: `${guardTextCharacters(message.action!.title).replace(/\s+/g, ' ')} · Asked ${botGroupTime(message.at)}`
+    text: `${guardTextCharacters(message.action!.title).replace(/\s+/g, ' ')} · ${nudgeOf(message) ? 'Reminded' : 'Asked'} ${botGroupTime(message.at)}`
   })
   for (const message of messages) {
     const nudge = nudgeOf(message)
@@ -198,7 +201,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
         continue
       }
     }
-    rows.push({ kind: 'message', message })
+    rows.push({ kind: 'message', message: message.action ? latestAction.get(message.action.actionId)! : message })
     const answered = message.ask ? askAnsweredLine(botName, message.ask) : undefined
     if (answered) {
       const tip = answerTip?.(message)

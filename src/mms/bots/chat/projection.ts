@@ -449,7 +449,7 @@ export class BotChatProjection {
     const validAt = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value))
     const at = [metadata.settledAt, row.ran_at, row.answered_at].find(validAt)
     return {
-      actionId: row.id, digest: row.args_digest,
+      actionId: row.id, digest: row.args_digest, askedAt: row.created_at,
       title: typeof metadata.title === 'string' ? metadata.title : readableActionTitle(JSON.parse(row.target_json).tool),
       serverName: typeof metadata.serverName === 'string' ? metadata.serverName : 'Your service', args,
       hasHiddenValues: !forgotten && metadata.hasHiddenValues === true, hiddenPaths,

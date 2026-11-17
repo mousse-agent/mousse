@@ -81,6 +81,7 @@ export type BotSnoozeChoice = '10m' | '1h' | 'tomorrow'
 /** Mousse's review of a held call, from its stored masked copy. */
 export interface BotActionCard {
   actionId: string
+  askedAt?: string
   digest: string
   title: string
   serverName: string

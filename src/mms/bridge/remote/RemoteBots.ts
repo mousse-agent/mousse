@@ -360,7 +360,7 @@ function fitted(message: RemoteBotMessage, budget = RESULT_BYTES): RemoteBotMess
     // Never send a partially reviewable card with a live Send button. Not now still names this row.
     const action = message.action
     message = { ...message, text: 'This action is too large to send from here. Open it on the computer.', action: {
-      actionId: action.actionId, digest: action.digest, title: action.title, serverName: action.serverName,
+      actionId: action.actionId, digest: action.digest, ...(action.askedAt ? { askedAt: action.askedAt } : {}), title: action.title, serverName: action.serverName,
       args: null, hasHiddenValues: action.hasHiddenValues, hiddenPaths: [], status: action.status,
       ...(action.previous ? { previous: action.previous } : {}), ...(action.at ? { at: action.at } : {}),
       ...(action.result?.notSentInTime ? { result: { text: action.result.text, notSentInTime: true } }

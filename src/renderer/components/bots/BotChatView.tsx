@@ -214,7 +214,7 @@ function ReplyButton({ onReply }: { onReply(): void }) {
 
 /** The time in a bubble's corner; "Sending…" while the message is on its way. */
 function BubbleTime({ message, pending = false }: { message: BotChatMessage; pending?: boolean }) {
-  return pending ? <span className="bot-bubble-time">Sending…</span> : <time className="bot-bubble-time" dateTime={message.at}>{message.action?.status === 'open' && 'Asked · '}{botGroupTime(message.at)}</time>
+  return pending ? <span className="bot-bubble-time">Sending…</span> : <time className="bot-bubble-time" dateTime={message.action?.askedAt ?? message.at}>{message.action?.status === 'open' && 'Asked · '}{botGroupTime(message.action?.askedAt ?? message.at)}</time>
 }
 
 /**
