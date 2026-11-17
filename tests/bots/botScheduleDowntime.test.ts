@@ -160,7 +160,7 @@ describe('bot schedules after downtime', () => {
     await f.bots.maintain(new Date(f.clock.now))
     await flush()
     const label = `${new Date(due).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(iso(due))}`
-    expect(f.store.dispatch(inserted[0]!, 1)!.prompt.text).toContain(`This run was due at ${label}; this computer was off or asleep.`)
+    expect(f.store.dispatch(inserted[0]!, 1)!.prompt.text).toContain(`This run was due at ${clockTime(iso(due))}; this computer was off or asleep.`)
     await runDispatch(f, inserted[0]!, 1, { text: 'All checked.' })
     expect(chatOf(f, botId).find((row) => row.kind === 'run_report' && row.activationId === inserted[0])!.text).toBe(`(Due ${label}, this computer was off or asleep) All checked.`)
   })

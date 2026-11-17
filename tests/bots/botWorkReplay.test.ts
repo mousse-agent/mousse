@@ -60,7 +60,7 @@ describe('work_start through the production registry', () => {
     for (const title of ['First', 'Second', 'Third']) await call({ ...request, title })
     const queued = await call()
     const repeated = await call()
-    expect(repeated).toMatchObject({ workId: queued.workId, status: 'running', replayed: true, note: expect.stringMatching(/already in progress/i) })
+    expect(repeated).toMatchObject({ workId: queued.workId, status: 'started', replayed: true, note: expect.stringMatching(/already in progress/i) })
     expect(rollUpChips([{ tool: 'work_start', input: request, result: repeated }])).toMatchObject([{ text: 'already on it' }])
   })
 
@@ -143,10 +143,10 @@ describe('work_start through the production registry', () => {
       f.clock.now += 1
       await park((await call({ ...request, title: `Other job ${n}` })).workId)
     }
-    expect(f.store.activation(first.workId)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(f.store.activation(first.workId)).toMatchObject({ status: 'failed', endReason: 'queue_full' })
     const retry = await call()
     expect(retry.workId).not.toBe(first.workId)
-    expect(retry.status).toBe('running')
+    expect(retry.status).toBe('started')
     expect((await call()).workId).toBe(retry.workId)
   })
 
