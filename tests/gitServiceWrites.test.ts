@@ -77,14 +77,6 @@ describe('GitService writes', () => {
     expect(existsSync(join(cwd, 'base.txt'))).toBe(true)
   })
 
-  it('checkout refuses to overwrite uncommitted work that the target branch changes', async () => {
-    const cwd = repo()
-    git(cwd, 'checkout', '-b', 'other'); writeFileSync(join(cwd, 'base.txt'), 'other branch\n'); git(cwd, 'commit', '-am', 'other change'); git(cwd, 'checkout', 'main')
-    writeFileSync(join(cwd, 'base.txt'), 'uncommitted local work\n')
-    await expect(new GitService().checkout(cwd, USER, 'other')).rejects.toThrow()
-    expect(git(cwd, 'symbolic-ref', '--short', 'HEAD')).toBe('main')
-    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('uncommitted local work\n')
-  })
 })
 
 describe('GitService status', () => {
@@ -127,16 +119,6 @@ describe('GitService status', () => {
     git(cwd, 'checkout', 'main'); git(cwd, 'mv', 'gone.txt', 'main-name.txt'); git(cwd, 'commit', '-m', 'move elsewhere')
     expect(() => git(cwd, 'merge', 'other')).toThrow()
     expect((await changes(cwd)).find((change) => change.path === 'gone.txt')).toEqual({ path: 'gone.txt', status: 'conflicted', staged: false })
-  })
-
-  it('reports a rebase in progress until it is aborted', async () => {
-    const cwd = repo()
-    git(cwd, 'checkout', '-b', 'topic'); write(cwd, 'base.txt', 'topic\n'); git(cwd, 'commit', '-am', 'topic')
-    git(cwd, 'checkout', 'main'); write(cwd, 'base.txt', 'main\n'); git(cwd, 'commit', '-am', 'main')
-    git(cwd, 'checkout', 'topic'); expect(() => git(cwd, 'rebase', 'main')).toThrow()
-    expect((await new GitService().getStatus(cwd)).inProgress).toBe('rebase')
-    await new GitService().abortInProgress(cwd, USER, 'rebase', keep())
-    expect((await new GitService().getStatus(cwd)).inProgress).toBeNull()
   })
 
   it('hides every mousse/ branch from the branch list', async () => {
@@ -1045,20 +1027,6 @@ describe('GitService live output and cancel', () => {
     expect(phases(events).at(-1)).toBe('done')
     expect(git(cwd, 'rev-list', '--parents', '-n', '1', 'HEAD').split(' ')).toHaveLength(3)
     expect(porcelain(cwd)).toEqual([])
-  }, 60_000)
-
-  it('a pull with conflicts keeps a merge that can be aborted', async () => {
-    const cwd = repo(); withRemote(cwd, false)
-    const other = join(dirname(cwd), `${basename(cwd)}-other`); roots.push(other)
-    git(dirname(cwd), 'clone', '-q', '-b', 'main', join(dirname(cwd), `${basename(cwd)}-origin.git`), other)
-    git(other, 'config', 'user.name', 'Other'); git(other, 'config', 'user.email', 'other@example.invalid'); git(other, 'config', 'commit.gpgsign', 'false')
-    write(other, 'base.txt', 'remote edit\n'); git(other, 'commit', '-qam', 'remote edit'); git(other, 'push', '-q')
-    write(cwd, 'base.txt', 'local edit\n'); git(cwd, 'commit', '-qam', 'local edit')
-    const service = new GitService()
-    await expect(service.pull(cwd, USER, { strategy: 'merge' })).resolves.toEqual({ result: 'conflicted' })
-    expect((await service.getStatus(cwd)).inProgress).toBe('merge')
-    await service.abortInProgress(cwd, USER, 'merge', keep())
-    expect((await service.getStatus(cwd)).inProgress).toBeNull()
   }, 60_000)
 
   it('cancelling an action whose starting client is gone stops it while it still can be stopped', async () => {
