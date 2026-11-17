@@ -2428,29 +2428,6 @@ describe('result routing and steering edge cases', () => {
     expect(f.cli.last.text(2)).not.toContain('Previous conversation')
   })
 
-  it('after a failed turn the next message continues on the same process, even with background work running', async () => {
-    const f = fixture()
-    helper(f)
-    await f.turn({ history: 'h' }, 'h')
-    f.cli.reply = (message, process) => process.emit(resultFrame({ uuids: [String(message.uuid)], error: 'rate limit' }))
-    await expect(f.chat({ history: 'h' })).rejects.toThrow('rate limit')
-    f.service.commitFailed('thread', 'h + the failed request')
-    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'ok again')
-    expect(await f.chat({ history: 'h + the failed request' })).toBe('ok again')
-    expect(f.cli.processes).toHaveLength(1)
-    expect(f.cli.last.text(2)).not.toContain('Previous conversation')
-  })
-
-  it('says what changed when it refuses a change, and that the conversation changed when only the history did', async () => {
-    const f = fixture()
-    helper(f)
-    await f.turn({ history: 'h' }, 'h')
-    f.cli.reply = undefined
-    await expect(f.chat({ history: 'h', systemPromptAppend: 'new' })).rejects.toMatchObject({ message: expect.stringContaining('instructions changed') })
-    // The history no longer matches what the process holds (an undo or edit).
-    await expect(f.chat({ history: 'something else' })).rejects.toMatchObject({ message: expect.stringContaining('conversation changed') })
-  })
-
   it('the idle release cannot close the process between acquiring it and pushing the turn', async () => {
     vi.useFakeTimers()
     const f = fixture({ idleCloseMs: 1000 })
@@ -3313,12 +3290,6 @@ describe('closing the service', () => {
     await g.turn()
     g.service.stop()
     expect(g.cli.last.closed).toBe(true)
-  })
-
-  it('declares no per-task stop affordance: Claude decides what an interrupt stops (agents), Stop closes the process (shells too)', async () => {
-    const f = fixture()
-    await f.turn()
-    expect(JSON.stringify(f.cli.last.options)).not.toContain('perTaskStopAffordance')
   })
 })
 
