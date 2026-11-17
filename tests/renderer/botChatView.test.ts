@@ -2500,7 +2500,11 @@ it.each([
   ['bot_action_closed', 'This action can no longer be sent.', 'withdrawn', 'This action can no longer be sent.']
 ])('shows the locally mapped refusal for %s and refreshes the actual row', async (code, text, status, expected) => {
   fake.chats.inbox = [held()]
-  Object.assign(fake.client, { answerAction: vi.fn(async () => { fake.chats.inbox = [held({ status })]; throw Object.assign(new Error(text), { code }) }) })
+  Object.assign(fake.client, { answerAction: vi.fn(async () => {
+    fake.chats.inbox = [held({ status })]
+    const refusal = code === 'bot_action_closed' ? { code } : { code: 'conflict', details: { reason: code } }
+    throw Object.assign(new Error(text), refusal)
+  }) })
   await open()
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
   const card = host.querySelector('[aria-label="Action to review"]')!
