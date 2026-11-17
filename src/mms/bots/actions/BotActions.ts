@@ -408,9 +408,9 @@ export class BotActions {
     }
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
-  /** Read-only admission check; answer repeats it with lifecycle settlement enabled. */
+  /** Admission may retire stale lifecycle state; it never approves or dispatches the call. */
   check(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): void {
-    this.checked(input, false)
+    this.checked(input, true)
   }
   private checked(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }, settle: boolean): ActionRow {
     const action = this.get(input.actionId)
@@ -429,7 +429,7 @@ export class BotActions {
       if (settle) this.host.store.db.transaction(() => {
         if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent; carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(action))
       })
-      throw changed()
+      throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_withdrawn')
     }
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
     return action
