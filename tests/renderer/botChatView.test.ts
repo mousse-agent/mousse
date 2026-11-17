@@ -2717,3 +2717,19 @@ it('a chat digest line separates expired-card folds and leaves the waiting row v
   expect(transcript().textContent).not.toContain('3 expired · not sent')
   expect(transcript().textContent).toContain('Waiting for your answer')
 })
+
+it('keeps only the newest review after two nudges, with earlier copies reduced to named asked-time lines', async () => {
+  const copies = ['bm_action_one', 'bm_action_one_n1', 'bm_action_one_n2'].map((id, n) => message(n + 1, { id, at: new Date(Date.parse(AT) + n * 3600_000).toISOString(), text: 'Legacy review', action: action(), ...(n ? { replyTo: { id: 'bm_action_one', author: 'bot' as const, text: 'Original review' } } : {}) }))
+  fake.chats.inbox = copies
+  await open()
+  expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+  const latest = transcript().querySelector('[data-message-id="bm_action_one_n2"]')!
+  expect(latest.querySelector('[aria-label="Everything it will send"]')).toBeTruthy()
+  expect(button('Send', latest)).toBeTruthy()
+  const earlier = [...transcript().querySelectorAll('[role="note"]')].filter(item => item.textContent?.includes('Asked'))
+  expect(earlier).toHaveLength(2)
+  for (const line of earlier) { expect(line.textContent).toContain('Send an email'); expect(line.querySelector('button, details, dl')).toBeNull() }
+  await act(async () => fake.emit.message('inbox', { ...copies[2]!, action: { ...copies[2]!.action!, status: 'done', at: AT } }))
+  expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+  expect(button('Send', transcript())).toBeUndefined()
+})
