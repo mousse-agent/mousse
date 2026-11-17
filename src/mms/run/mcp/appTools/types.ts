@@ -90,7 +90,8 @@ export interface AppToolTurn {
   modeCeiling: ModeCeiling
   /**
    * The permission mode the turn runs in; an MCP turn's is
-   * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent: no tool asks.
+   * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent, nothing runs unasked that a
+   * known mode would have asked for.
    */
   permissionMode?: PermissionMode
   /**
