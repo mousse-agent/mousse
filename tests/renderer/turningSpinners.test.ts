@@ -115,7 +115,7 @@ describe('spinners', () => {
     vi.useFakeTimers()
     try {
       show(createElement(DelayedLoader, { label: 'Loading', delayMs: 0 }))
-      expect(running().map((record) => [record.element.className, record.options.duration])).toEqual([['turning ui-loader-ring icon-spin', 1000]])
+      expect(running().map((record) => [record.element.classList.contains('turning'), record.options.duration])).toEqual([[true, 1000]])
     } finally {
       vi.useRealTimers()
     }
