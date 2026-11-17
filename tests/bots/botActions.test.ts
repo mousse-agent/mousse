@@ -426,7 +426,7 @@ it.each(['held', 'stopped', 'switch_off'] as const)('R1 summaries and lists surv
   const summary = f.bots.service.list().bots.find(b => b.id === t.botId)!
   expect(() => f.bots.service.get(t.botId)).not.toThrow()
   if (state === 'stopped') expect(summary.needsOwner).not.toBe(true)
-  else expect(summary).toMatchObject({ needsOwner: true, stateText: 'Wants to send: Mail · send' })
+  else expect(summary).toMatchObject({ needsOwner: true, stateText: state === 'switch_off' ? 'Wants to send: Mail · send' : 'Wants to send: Send · Mail' })
 })
 it.each(['plain', 'note', 'permission'] as const)('R2 carries the action outcome beside %s continuation context', async context => {
   const t = await setup(true)
