@@ -69,6 +69,7 @@ export const NET_LOCAL_METHODS = [
   'bridge.policy',
   'bridge.connect',
   'bridge.disconnect',
+  'bridge.access.there',
   'bridge.workOnThreads',
   'bridge.shareBots',
   'bridge.editorServer',
@@ -156,6 +157,36 @@ export interface BridgeNodePolicy {
    */
   work?: boolean
 }
+
+/**
+ * `bridge.access.mine`, a call one computer makes on another of its user's: what the computer that answers lets the
+ * caller do there now. Each field is the result of the same checks a real call from the caller meets there (connected
+ * there, the block, the grant, "Let my other computers work here", the per-device switches, Share bots). A caller that
+ * is not connected there is refused (`forbidden`, reason `not_connected`).
+ */
+export interface BridgeAccessMine {
+  v: 1
+  /** Every Bridge call from the caller is refused there. */
+  blocked: boolean
+  /** Reads threads there. */
+  threads: boolean
+  /** Starts and works on threads there, up to `maxPermissionMode`. */
+  work: boolean
+  terminal: boolean
+  editor: boolean
+  /** Reaches that computer's bots (each bot's own Devices choice still applies). */
+  bots: boolean
+  maxPermissionMode: PermissionMode
+  agentReach: AgentReach
+}
+/**
+ * `bridge.access.there { node }`: `bridge.access.mine` asked of `node`. `not_connected`: that computer has not connected
+ * this one. `unknown`: it could not answer now (`offline`), or runs a build without the call (`older`).
+ */
+export type BridgeAccessThere =
+  | { state: 'known'; access: BridgeAccessMine }
+  | { state: 'not_connected' }
+  | { state: 'unknown'; reason: 'offline' | 'older' }
 
 /** What a device's agents may change on this computer (`net_node_policy.agent_reach`). */
 export type AgentReach = 'none' | 'launched' | 'all'

@@ -84,6 +84,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots', 'agentReach', 'work'],
   'bridge.connect': ['node'],
   'bridge.disconnect': ['node'],
+  'bridge.access.there': ['node'],
   'bridge.workOnThreads': ['enabled'],
   'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']
@@ -256,6 +257,7 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       'bridge.policy',
       'bridge.connect',
       'bridge.disconnect',
+      'bridge.access.there',
       'net.editor.probe',
       'net.authority.transfer'
     ].includes(method) &&

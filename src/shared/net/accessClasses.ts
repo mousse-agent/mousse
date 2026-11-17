@@ -33,6 +33,8 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
   'net.info': 'view',
   'net.direct.endpoints': 'view',
   'net.direct.webrtc.offer': 'view',
+  // What this computer lets the caller do here: the caller's own access, read back.
+  'bridge.access.mine': 'view',
   // Moving the keeper role: signed by the user's own keys, and never a thread's or a bot's.
   'authority.transfer.ready': 'view',
   'authority.transfer.import': 'view',
