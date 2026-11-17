@@ -8,7 +8,7 @@
 import { act, createElement, useMemo, useRef } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { TurnProgressContext, type TurnProgressState } from '../../src/renderer/chat/components/agent-elements/turn-progress'
 import { countRender, startRenderCounts, stopRenderCounts } from '../../src/renderer/chat/components/agent-elements/render-counts'
@@ -258,8 +258,16 @@ describe('the end of a thought', () => {
     expect(counts.TurnProgressRow).toBe(1)
     expect(headline()).toBe('Plan')
     expect(tooltip()).toBe('Part one. Part two. Part three. The end.')
-    // The turn ends: its work folds; opened, one row, its text once.
-    act(() => root.render(createElement(Transcript, { progress: { phase: 'completed' } as TurnProgressState, status: 'ready' })))
+    // The turn ends: its work folds as motion; opened, one row, its text once.
+    vi.useFakeTimers()
+    try {
+      act(() => root.render(createElement(Transcript, { progress: { phase: 'completed' } as TurnProgressState, status: 'ready' })))
+      // Two frames drawn open, then the close.
+      act(() => vi.advanceTimersByTime(500))
+      act(() => vi.advanceTimersByTime(500))
+    } finally {
+      vi.useRealTimers()
+    }
     expect(thoughtRows()).toHaveLength(0)
     openWork()
     expect(thoughtRows()).toHaveLength(1)

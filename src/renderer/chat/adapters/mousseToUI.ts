@@ -482,6 +482,13 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     if (isToolTimelineMessage(msg) && msg.toolCall) {
       const activity = msg.activity
       const part = toolPart(msg, msg.id)
+      // When a generic call (an MCP tool) started and when its result arrived: one that waits on the person
+      // (`secret_request`) waited that long. A subagent's call joins its root's message below, so the message's own
+      // time is not the call's. Typed cards keep their shape.
+      if (activity?.kind === 'generic' && activity.endedAt && activity.status !== 'running') {
+        part.startedAt = activity.startedAt
+        part.endedAt = activity.endedAt
+      }
       lastAssistantText = null
 
       // Work a subagent started renders under its row: the part joins the root subagent's message

@@ -479,7 +479,7 @@ export type FoldRow = {
   kind: TurnSegment["kind"];
   /** Tool calls and thoughts only. */
   toolsOnly?: boolean;
-  /** A reply row with text (narration, or the answer); on a `toolsOnly` row, text written beside its calls. */
+  /** A reply row with text (narration, or the answer), calls written beside the text included. */
   text?: boolean;
   /** A person's message steered into the turn. */
   steer?: boolean;
@@ -491,34 +491,153 @@ export type FoldRow = {
 };
 
 /**
- * Which segments of a finished turn fold behind its "Worked for" line: the work (thoughts, tool groups, narration),
- * not the answer. The answer is the last reply row with no work after it; a turn cut off before it wrote one folds
- * all of its work. What needs the person stays in view: errors and failures the agent did not get past, questions,
- * approvals, notices, Mousse's own markers, steered messages and the replies written before them, and subagent
- * cards, finished or not, so every subagent shows where it was started.
+ * The parts of a finished turn that each get their own fold line, as ranges of its rows: the rows before the first
+ * steered message ("Worked for"), then each steered message with the rows after it ("Continued for"). A turn nobody
+ * steered is one part.
+ */
+export function turnFoldParts(rows: ReadonlyArray<Pick<FoldRow, "steer">>): Array<{ from: number; to: number }> {
+  const parts: Array<{ from: number; to: number }> = [];
+  let from = 0;
+  rows.forEach((row, index) => {
+    if (!row.steer || index === 0) return;
+    parts.push({ from, to: index });
+    from = index;
+  });
+  parts.push({ from, to: rows.length });
+  return parts;
+}
+
+/**
+ * Which rows of a finished turn fold behind their part's line (see `turnFoldParts`): the work (thoughts, tool groups,
+ * narration). Each part's last reply row stays below its line, whether it is the answer, a reply to a steered message
+ * or the last thing a stopped turn said: what was said to the person is never hidden. What needs the person stays in
+ * view too: errors and failures the agent did not get past, questions, approvals, notices, Mousse's own markers,
+ * steered messages, and subagent cards, finished or not, so every subagent shows where it was started.
  */
 export function foldTurnWork(rows: FoldRow[]): boolean[] {
-  let answer = -1;
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index]!;
-    if (row.kind === "tools") break;
-    if (row.kind === "cards") continue;
-    if (row.steer || row.toolsOnly) break;
-    if (row.keep) continue;
-    if (row.text) answer = index;
-    break;
+  const folded = rows.map(() => false);
+  for (const { from, to } of turnFoldParts(rows)) {
+    let reply = -1;
+    for (let index = to - 1; index >= from; index -= 1) {
+      const row = rows[index]!;
+      if (row.kind === "message" && row.text && !row.toolsOnly && !row.keep && !row.steer) {
+        reply = index;
+        break;
+      }
+    }
+    for (let index = from; index < to; index += 1) {
+      const row = rows[index]!;
+      if (row.kind === "cards" || row.steer || row.keep || index === reply) continue;
+      folded[index] = true;
+    }
   }
-  let lastSteer = -1;
-  rows.forEach((row, index) => {
-    if (row.steer) lastSteer = index;
+  return folded;
+}
+
+/** Time the agent waited on the person (an approval, a question, a secret); `to` is null while it still waits. */
+export type WaitSpan = { from: number; to: number | null };
+
+/** The span from `from` to `to` less the time in `waits` (overlaps count once): how long the agent worked in it. */
+export function activeMs(from: number, to: number, waits: readonly WaitSpan[]): number {
+  const clipped = waits
+    .map((wait) => ({ from: Math.max(from, wait.from), to: Math.min(to, wait.to ?? to) }))
+    .filter((wait) => wait.to > wait.from)
+    .sort((a, b) => a.from - b.from);
+  let waited = 0;
+  let reach = from;
+  for (const wait of clipped) {
+    const start = Math.max(wait.from, reach);
+    if (wait.to > start) waited += wait.to - start;
+    reach = Math.max(reach, wait.to);
+  }
+  return Math.max(0, to - from - waited);
+}
+
+/**
+ * Each part's own working time (see `turnFoldParts`), not the time since the prompt. The parts tile the turn: a part
+ * starts when its prompt or steered message was sent and runs until the next steered message was sent (the agent
+ * worked the whole time; a command running when the steer came in has not ended yet), the last one until its newest
+ * message ended. Time spent waiting on the person does not count. Null when nothing says when the turn started.
+ */
+export function partWorkTimes(
+  parts: ReadonlyArray<{ startedAt: number | null; endedAt: number | null }>,
+  waits: readonly WaitSpan[],
+): Array<number | null> {
+  let previousEnd: number | null = null;
+  return parts.map((part, index) => {
+    const start: number | null =
+      part.startedAt == null ? previousEnd : previousEnd == null ? part.startedAt : Math.max(part.startedAt, previousEnd);
+    if (start == null) return null;
+    const next = parts[index + 1]?.startedAt ?? null;
+    const end = Math.max(next ?? part.endedAt ?? start, start);
+    previousEnd = end;
+    return activeMs(start, end, waits);
   });
-  return rows.map((row, index) => {
-    if (row.kind === "tools") return !row.keep;
-    if (row.kind === "cards") return false;
-    if (row.steer || row.keep || index === answer) return false;
-    if (row.toolsOnly) return true;
-    return !(row.text && index < lastSteer);
+}
+
+
+const PERMISSION_PART = "data-permission-request";
+const SECRET_PART = "data-secret-request";
+
+function timeOf(value: unknown): number | null {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : null;
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const ms = typeof value === "number" ? value : Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Mousse's `secret_request` call, however the runtime names it (`mcp__mousse__secret_request`, a bare
+ * `secret_request`, or the name an ACP agent leaves in the call's summary).
+ */
+function isSecretRequestCall(part: Record<string, unknown>): boolean {
+  if (typeof part.type !== "string" || !part.type.startsWith("tool-")) return false;
+  const bare = (name: string) => name.trim().split("__").pop() === "secret_request";
+  const summary = isRecord(part.input) && typeof part.input.summary === "string" ? part.input.summary : "";
+  return bare(part.type.slice(5)) || bare(summary);
+}
+
+/**
+ * When a turn's messages say the agent waited on the person: an approval from when it was asked until it was answered
+ * (still waiting while pending), a secret request while it is open, and a question until its answers when nothing
+ * ran in between (a question asked without waiting lets the agent go on, so its time counts). A `secret_request`
+ * call blocks until the person answers, declines or an hour passes, so once it ended its wait runs from the call to
+ * its saved end (`endedAt`, when its result arrived), which stays after the open request is gone. A call saved
+ * without its end (an older transcript) counts only while its request is open.
+ */
+export function turnWaitSpans(messages: ReadonlyArray<SettleTurnMessage & { createdAt?: unknown }>): WaitSpan[] {
+  const spans: WaitSpan[] = [];
+  messages.forEach((message, index) => {
+    const at = timeOf(message.createdAt);
+    for (const part of message.parts ?? []) {
+      if (!isRecord(part)) continue;
+      if (part.type === PERMISSION_PART && isRecord(part.data)) {
+        if (at == null) continue;
+        if (part.data.status === "pending") spans.push({ from: at, to: null });
+        else {
+          const to = timeOf(part.data.settledAt);
+          if (to != null) spans.push({ from: at, to });
+        }
+      } else if (part.type === SECRET_PART && isRecord(part.data)) {
+        const from = at ?? timeOf(part.data.createdAt);
+        if (from != null) spans.push({ from, to: null });
+      } else if (isSecretRequestCall(part)) {
+        const from = timeOf(part.startedAt) ?? at;
+        const to = timeOf(part.endedAt);
+        if (from != null && to != null && to > from) spans.push({ from, to });
+      } else if (part.type === "tool-Question" && at != null) {
+        const next = messages[index + 1];
+        const answered = next?.parts?.some((p) => isRecord(p) && p.type === "tool-QuestionAnswers");
+        if (answered) {
+          const to = timeOf(next!.createdAt);
+          if (to != null) spans.push({ from: at, to });
+        } else if (index === messages.length - 1 && (part.state === "input-streaming" || part.state === "input-available")) {
+          spans.push({ from: at, to: null });
+        }
+      }
+    }
   });
+  return spans;
 }
 
 /**
