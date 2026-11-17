@@ -1921,9 +1921,15 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_archive',
-      description: 'Archive this thread when your turn ends, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. Only when the user asks you to settle or archive this thread once its work is done (merged, or dropped), never on your own. Call it last, in the turn that finishes the work, and only when nothing is outstanding: no subagent, launched thread, background command, pending check or question to the user. It happens after your reply, and only if the turn ends well: a failed or stopped turn leaves the thread open. Your own thread only; a subagent cannot.',
+      description: 'Archive a thread, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. Only when the user asks you to settle or archive a thread once its work is done (merged, or dropped), never on your own. Without threadId it archives this thread when your turn ends: call it last, in the turn that finishes the work, and only when nothing is outstanding (no subagent, launched thread, background command, pending check or question to the user); a failed or stopped turn leaves the thread open. With threadId it archives that thread now, or unarchives it with archived: false; a thread that is still working is refused. Needs a turn the user started, in a thread that is not a subagent.',
       botDescription: 'Archive one of your owner\'s threads when its work is merged or dropped and your owner asks you to tidy it away, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. archived: false unarchives it again. A thread that is still working is refused: stop it first with thread_interrupt.',
-      inputSchema: { type: 'object', properties: {} },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string', description: 'Another thread to archive now; omit to archive this thread when your turn ends.' },
+          archived: { type: 'boolean', description: 'Defaults to true; false unarchives the thread named by threadId.' }
+        }
+      },
       botInputSchema: {
         type: 'object',
         properties: {
@@ -1932,16 +1938,36 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         },
         required: ['threadId']
       },
+      // One rule (§1.5): `person` (a bot: its grant), and `threads.manage` for another thread, as every thread tool reaches it.
       access: 'managesOthers',
+      needsPerson: true,
       class: 'mutation',
       offered: () => false,
       handler: async (args, ctx) => {
         const bot = botThreadCall(bots, ctx)
+        if (!bot && args.threadId !== undefined && args.threadId !== ctx.caller.threadId) {
+          const threadId = requiredId(args, 'threadId')
+          if (args.archived !== undefined && typeof args.archived !== 'boolean') throw new Error('archived must be true or false')
+          const archived = args.archived !== false
+          if (!host.setThreadArchived) return notAvailable('thread_archive')
+          assertNotBotThread(host, threadId, 'thread_archive')
+          const actor = actorOf(ctx)
+          const result = await host.setThreadArchived(threadId, archived, { actor })
+          if (result.status === 'rejected')
+            throw new McpToolError('mousse_conflict', `Thread ${threadId} is still working, so it was not archived. If the user wants it archived anyway, stop it first with thread_interrupt, then archive it.`, { conflict: result.reason, threadId })
+          if (result.changed) showAction(host, threadId, actor, archived ? 'archived this thread' : 'unarchived this thread')
+          return json({
+            threadId,
+            link: threadLink(threadId),
+            title: titleOf(threadId) ?? null,
+            archived,
+            changed: result.changed,
+            note: archived ? 'It is in Archived now; thread_archive with archived: false brings it back.' : 'It is back in the thread list.'
+          })
+        }
         if (!bot) {
-          // A thread's agent archives its own thread only, when its turn ends.
-          if (args.threadId !== undefined && args.threadId !== ctx.caller.threadId)
-            throw new McpToolError('mousse_scope_denied', 'thread_archive archives your own thread only; the user archives other threads.')
-          if (args.archived === false) throw new McpToolError('mousse_scope_denied', 'thread_archive cannot unarchive; the user unarchives threads.')
+          // This thread: archived when its turn ends.
+          if (args.archived === false) throw new Error('archived: false unarchives another thread (threadId); this thread is not archived.')
           if (!host.archiveOwnThreadAfterTurn) return notAvailable('thread_archive')
           const result = host.archiveOwnThreadAfterTurn({ actor: actorOf(ctx) })
           if (result.status === 'rejected') {

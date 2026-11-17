@@ -232,8 +232,7 @@ describe('a bot uses what a thread\'s agent can', () => {
         pause: vi.fn(),
         trigger: vi.fn(),
         wake: vi.fn(),
-        limits: () => ({ permissionCeiling: 'full' as const }),
-        startedByPerson: () => false
+        limits: () => ({ permissionCeiling: 'full' as const })
       } as unknown as AgentScheduleHost
       return { schedules, jobs }
     }

@@ -1,6 +1,6 @@
 /**
  * What every kind of turn holds of every Mousse tool, pinned to a snapshot first taken before the authority compiler
- * (docs/plans/tool-api.md §4, PR 2a) and changed since only where §1.3 changes who holds a tool (PR 2b): the thread's list (`tools/list`), Pi's per-turn list and its user MCP tools, the
+ * (docs/plans/tool-api.md §4, PR 2a) and changed since only where §1.3 or §2.4 changes who holds a tool (PR 2b): the thread's list (`tools/list`), Pi's per-turn list and its user MCP tools, the
  * "usable now" line of the turn preamble, and what a call does before its handler (runs, asks first, or is refused with
  * which code and words). Each turn is registered as the daemon registers that kind of turn; every handler is a stub, so
  * only the gate is read. A change to this snapshot is a change to who holds a tool.
@@ -69,6 +69,8 @@ const userMcpTool = (name: string): McpToolDescriptor => ({
 /** One kind of turn as the daemon registers it, and what the thread's owner says about the thread. */
 interface TurnKind {
   turn: Partial<AppToolTurn>
+  /** The owner says a person started the run (`personHeld`); the registry adds that a subagent never holds `person`. */
+  person?: boolean
   /** `subagent`: its lineage says it is a Mousse subagent; `liveCeiling`: what its ancestors' running turns narrow it to. */
   thread?: { readOnly?: boolean; ceiling?: ModeCeiling; botRole?: 'activation' | 'subagent'; subagent?: boolean; liveCeiling?: ModeCeiling }
   permissionMode?: PermissionMode
@@ -89,13 +91,14 @@ const JOB_BOT_TOOLS: CompileInput['botTools'] = {
 const SUBAGENT_BOT_TOOLS: CompileInput['botTools'] = { escalate: false, consult: false, subagent: true, threads: 'all', profiler: true, tasks: true }
 
 const KINDS: Record<string, () => TurnKind> = {
-  'person, Ask': () => ({ turn: {}, permissionMode: 'ask' }),
-  'person, Full access': () => ({ turn: {}, permissionMode: 'full' }),
-  'person, browser bound without vision': () => ({ turn: { browser: BROWSER }, permissionMode: 'ask' }),
-  'plan turn': () => ({ turn: { mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, modeCeiling: 'plan' }, permissionMode: 'ask', credential: { modeCeiling: 'plan' } }),
-  'build-mode turn': () => ({ turn: { mode: 'build', modeFacts: { readOnly: false, agent: false, build: true } }, permissionMode: 'edit' }),
-  'delegated subagent': () => ({ turn: { subagent: true }, permissionMode: 'edit', thread: { ceiling: 'default', subagent: true } }),
-  'subagent while its parent plans': () => ({ turn: { subagent: true }, permissionMode: 'edit', thread: { ceiling: 'default', subagent: true, liveCeiling: 'plan' } }),
+  'person, Ask': () => ({ turn: {}, person: true, permissionMode: 'ask' }),
+  'person, Full access': () => ({ turn: {}, person: true, permissionMode: 'full' }),
+  'person, browser bound without vision': () => ({ turn: { browser: BROWSER }, person: true, permissionMode: 'ask' }),
+  'plan turn': () => ({ turn: { mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, modeCeiling: 'plan' }, person: true, permissionMode: 'ask', credential: { modeCeiling: 'plan' } }),
+  'build-mode turn': () => ({ turn: { mode: 'build', modeFacts: { readOnly: false, agent: false, build: true } }, person: true, permissionMode: 'edit' }),
+  // A subagent of a person's turn: the owner reads its run as the person's, and the registry still never lets `person` pass down.
+  'delegated subagent': () => ({ turn: { subagent: true }, person: true, permissionMode: 'edit', thread: { ceiling: 'default', subagent: true } }),
+  'subagent while its parent plans': () => ({ turn: { subagent: true }, person: true, permissionMode: 'edit', thread: { ceiling: 'default', subagent: true, liveCeiling: 'plan' } }),
   'read-only subagent': () => ({
     turn: { subagent: true, mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, modeCeiling: 'plan', toolAccess: createAgentToolAccess({ version: 1, workspace: 'shared', access: 'read-only' }, process.cwd()) },
     permissionMode: 'ask', thread: { readOnly: true, ceiling: 'plan', subagent: true }, credential: { modeCeiling: 'plan' }
@@ -118,7 +121,7 @@ const KINDS: Record<string, () => TurnKind> = {
   }),
   'scheduled or automation turn': () => ({ turn: { approvals: 'never' }, permissionMode: 'edit' }),
   'remote-started turn': () => ({ turn: {}, permissionMode: 'ask' }),
-  'Pi turn': () => ({ turn: { attemptToken: 'attempt-1' }, permissionMode: 'ask', credential: { binding: 'per_call', provider: 'pi' } })
+  'Pi turn': () => ({ turn: { attemptToken: 'attempt-1' }, person: true, permissionMode: 'ask', credential: { binding: 'per_call', provider: 'pi' } })
 }
 
 /** What one kind of turn holds of every tool. */
@@ -133,6 +136,7 @@ async function snapshotOf(kind: TurnKind) {
       botRole: () => kind.thread?.botRole,
       subagentThread: () => kind.thread?.subagent === true,
       liveCeiling: () => kind.thread?.liveCeiling,
+      personHeld: () => kind.person === true,
       permissionModeFor: () => kind.permissionMode,
       askApproval: async (_threadId, _questions, { approval }) => {
         asked.push(`${approval.permissionKey}${approval.reason ? ' (Full access only)' : ''}`)

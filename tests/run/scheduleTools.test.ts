@@ -52,7 +52,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     const state = {
       /** Whether the person allowed the caller's thread (Allow on its first ask); read at every call. */
       allowed: true,
-      /** Whether a person started the calling run (`startedByPerson`); the real rule is tested against a daemon. */
+      /** Whether the calling run holds `person` (`personHeld`); the real rule is tested against a daemon. */
       person: true,
       limits: { permissionCeiling: 'full' as PermissionMode },
       /** The limits on agent jobs a person set (`scheduled.agentJob*`): read at every call. */
@@ -73,7 +73,6 @@ describe('the schedule tools (SPEC §15.1)', () => {
       list: vi.fn(() => jobs.listJobs()),
       get: vi.fn((id: string) => jobs.getJob(id)),
       validate: vi.fn((): { selection?: never; threadId?: string } => ({})),
-      startedByPerson: vi.fn(() => state.person),
       limits: vi.fn(() => state.limits),
       create: vi.fn((input: Parameters<ScheduledJobStore['createJob']>[0]) => jobs.createJob(input)),
       update: vi.fn((id: string, patch: Partial<ScheduledJob>) => jobs.updateJob(id, patch)),
@@ -83,7 +82,10 @@ describe('the schedule tools (SPEC §15.1)', () => {
       wake: woke
     } satisfies AgentScheduleHost
     const recordAgentAction = vi.fn()
+    const personHeld = vi.fn((_caller: { threadId: string; runId: string }) => state.person)
     const fake = fakeAppToolHost({
+      personHeld,
+      subagentThread: (id) => fx!.engine.delegations.getLineage(id)?.relationship === 'subagent',
       threadMeta: (id) => threads.get(id),
       botRole: (id) => (botThreads.has(id) ? 'activation' : undefined),
       readOnlyThread: (id) => readOnly.has(id),
@@ -106,7 +108,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     /** A job another thread's agent made. */
     const otherJob = (extra: Partial<Parameters<ScheduledJobStore['createJob']>[0]> = {}) =>
       jobs.createJob({ name: 'By another agent', prompt: 'Do it', schedule: { kind: 'manual' }, createdBy: { threadId: 'someone-else', runId: 'r' }, ...extra })
-    return { fx, jobs, state, threads, botThreads, readOnly, schedules, woke, recordAgentAction, registry, request, turns, callerRun, call, as, denied, result, create, stored, personJob, otherJob, ...fake }
+    return { fx, jobs, state, threads, botThreads, readOnly, schedules, personHeld, woke, recordAgentAction, registry, request, turns, callerRun, call, as, denied, result, create, stored, personJob, otherJob, ...fake }
   }
 
   describe('the first ask and the listing', () => {
@@ -156,7 +158,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       state.person = false
       const name = label.split(' ')[0]
       const error = await denied(call(name, args(job.id)))
-      expect(error?.refused.code, label).toBe('scope_denied')
+      expect(error?.refused, label).toMatchObject({ code: 'lacks_capability', lacks: 'person' })
       expect(error!.code).toBe('mousse_scope_denied')
       expect(error!.message).toMatch(/only for a turn a person started/)
       expect(stored(job.id)).toEqual(before)
@@ -167,14 +169,14 @@ describe('the schedule tools (SPEC §15.1)', () => {
     })
 
     it('asks the owner who started the run, with the caller as it is', async () => {
-      const { call, create, schedules, callerRun } = await world()
+      const { create, personHeld, callerRun } = await world()
       await create()
-      expect(schedules.startedByPerson).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'caller', runId: callerRun.runId }))
+      expect(personHeld).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'caller', runId: callerRun.runId }))
     })
 
     it('refuses when the owner cannot say, and when it throws', async () => {
-      const { call, denied, schedules, jobs } = await world()
-      schedules.startedByPerson.mockImplementation(() => { throw new Error('the run engine is closed') })
+      const { call, denied, personHeld, jobs } = await world()
+      personHeld.mockImplementation(() => { throw new Error('the run engine is closed') })
       expect((await denied(call('schedule_create', CREATE)))!.code).toBe('mousse_scope_denied')
       expect(jobs.listJobs()).toEqual([])
     })
@@ -879,18 +881,15 @@ describe('the schedule tools (SPEC §15.1)', () => {
       ])
     })
 
-    it('every job a subagent asks for is asked of the person, even where its thread and its parent were allowed', async () => {
+    it('a subagent of a person\'s turn creates and starts no job: `person` never passes down (§1.3)', async () => {
       const w = await world()
       const child = await w.fx.delegate(w.callerRun.runId, 'call-a')
       w.threads.set(child.childThreadId, thread(child.childThreadId))
       const asChild = await liveCaller(w, child.childThreadId, child.childRunId)
-      expect(w.state.allowed).toBe(true)
-      for (const key of ['first', 'second']) {
-        const answer = JSON.parse((await asChild('schedule_create', { ...CREATE, clientRequestId: key })).text)
-        expect(answer, key).toMatchObject({ waiting: true })
-      }
-      expect(w.schedules.askFirst).toHaveBeenCalledTimes(2)
-      expect(w.schedules.askFirst).toHaveBeenCalledWith(expect.objectContaining({ threadId: child.childThreadId }))
+      expect(w.state.person).toBe(true)
+      expect(await w.denied(asChild('schedule_create', CREATE))).toMatchObject({ refused: { code: 'lacks_capability', lacks: 'person' } })
+      expect(w.registry.listForThread(child.childThreadId).map((tool) => tool.name)).not.toContain('schedule_create')
+      expect(w.schedules.askFirst).not.toHaveBeenCalled()
       expect(w.schedules.create).not.toHaveBeenCalled()
       // Its parent, allowed, still adds one at once.
       expect((await w.create()).id).toEqual(expect.any(String))

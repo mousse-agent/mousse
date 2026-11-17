@@ -16,17 +16,19 @@ import { McpToolError, type AppToolTurn, type FamilyRelation, type McpCaller, ty
  * a run holds of each Mousse tool. The thread's list (`tools/list`), Pi's per-turn list, the turn preamble's "usable
  * now" line and every call's dispatch read what it compiles, from five inputs:
  * 1. provenance: who started the run (`holdsPerson`, from the run's source and its binding's origin); unknown
- *    provenance grants no person authority;
+ *    provenance grants no person authority, and a subagent never holds `person` (`MousseTool.needsPerson`);
  * 2. lineage: whether the thread is a read-only child, whether it is a subagent (`AppToolTurn.subagent`, from the
  *    thread's lineage: the owner's own preferences never pass down to one), and its role when it is a personal bot's;
  * 3. the stored ceiling the thread's delegations gave it (`ToolRegistryOptions.threadCeiling`);
  * 4. narrowing: the ceiling of the turn's credential, the turn's mode, and an ancestor's running Plan turn, read again
- *    at every call (`ToolRegistryOptions.liveCeiling`);
+ *    at every call (`ToolRegistryOptions.liveCeiling`), which also makes the turn's mode facts a Plan turn's
+ *    (`plannedFromAbove`); what that takes from a turn that held it is `revoked`;
  * 5. the run's request policy (`approvals`, its permission mode) and its request channel (a bot's grant or owner).
  *
  * Each tool's declaration is read here and nowhere else (`toolNeeds`). What a call holds is `held`, `ask_first` (it
  * asks the person before it runs) or `lacks`: a listed tool the turn does not hold a capability of is refused with
- * `lacks_capability`, naming it. The turn's "usable now" line and dispatch read the same checks
+ * `lacks_capability`, naming it; a subagent's first such refusal for each capability is reported up its tree (§2.4,
+ * `parentHolds`, `ToolRegistryOptions.reportLacks`). The turn's "usable now" line and dispatch read the same checks
  * (`heldBeforeArguments`); a tool held only for some arguments (a bot grant's variants) is usable, and the call's
  * own arguments decide.
  */
@@ -75,6 +77,9 @@ export interface ToolNeeds {
   owner?: 'themes' | 'quick_actions'
   /** A plan ceiling refuses it, and why. */
   planRefuses?: 'starts threads' | 'changes settings'
+  /** The variants that need `person` (§1.3 "Provenance"); `personAlways`: every call does. */
+  person?(args: Record<string, unknown>): boolean
+  personAlways: boolean
   /** What a call waits for: the person's approval or their answer to a question. */
   waitsFor?: 'approval' | 'question'
   /** Who answers it on a personal bot's turn: its grant, or its owner in the bot's own chat. */
@@ -101,6 +106,7 @@ const WRITE_CAPABILITY: Readonly<Record<ToolAccess, string>> = {
 const READ_ONLY_FIX = 'This thread is a read-only subagent: its parent can do this, or start a subagent that is not read-only.'
 const PLAN_FIX = 'A Plan turn, and a subagent of one, does not hold this; an Agent turn does.'
 const OWNER_FIX = 'Only the thread\'s own agent changes the owner\'s preferences: tell your parent what you need.'
+const PERSON_FIX = 'Only a turn the person started holds this: the person asks for it in their own turn of a thread that is not a subagent.'
 
 /** A tool's needs, read from its declaration: the only reader of its access flags. */
 export function toolNeeds(tool: MousseTool): ToolNeeds {
@@ -120,6 +126,8 @@ export function toolNeeds(tool: MousseTool): ToolNeeds {
     messages: tool.messageIntent !== undefined,
     ...(owner ? { owner } : {}),
     ...(starts ? { planRefuses: 'starts threads' as const } : tool.access === 'changesSettings' ? { planRefuses: 'changes settings' as const } : {}),
+    ...(tool.needsPerson ? { person: tool.needsPerson === true ? () => true : tool.needsPerson } : {}),
+    personAlways: tool.needsPerson === true,
     ...(tool.asksUser ? { waitsFor: tool.asksUser } : {}),
     ...(tool.botGrantAnswers ? { botAnswers: 'grant' as const } : tool.botAsksOwner ? { botAnswers: 'owner' as const } : {}),
     ...(edits ? { asksFirst: (args: Record<string, unknown>) => tool.runsWithoutAsking?.(args) ?? 'edit' } : {}),
@@ -165,8 +173,10 @@ export function listsTool(tool: MousseTool, listing: ToolListing): boolean {
   const needs = toolNeeds(tool)
   if (listing.readOnly && !needs.readOnlyChild && !needs.messages) return false
   if (listing.modeCeiling === 'plan' && needs.planRefuses) return false
-  // A subagent's thread never holds the owner's own preferences, so it never lists them.
+  // A subagent's thread never holds the owner's own preferences, nor `person`, so it never lists them (a bot's thread
+  // is held to its grant instead).
   if (listing.subagent && needs.owner) return false
+  if (listing.subagent && needs.personAlways && listing.botRole === undefined) return false
   // A bot's main thread lists the thread tools its grant allows: "use your threads" is what lets it use them. Only
   // those its turn holds now are listed (none without the permission, with the switch off, or in a turn that only
   // reads), and every call is held to it again. A consult never has them. The profiler's tools likewise follow "use
@@ -192,6 +202,8 @@ export interface AuthorityInputs {
   ceiling: ModeCeiling
   /** 5. The permission mode the run enforces, read only when a call would ask; unknown is Ask (it fails closed). */
   permissionMode(): PermissionMode | undefined
+  /** 1. Provenance: the turn holds `person` (a person started it and it is not a subagent's); read only when a call needs it. */
+  person(): boolean
 }
 
 /** What a call that asks first asks for: the mode that would let it run unasked, and whether nobody can answer. */
@@ -218,6 +230,8 @@ export interface CompiledTool {
   authorize(actor: McpCaller, args: Record<string, unknown>, targets: ToolAccessPolicy | undefined): ToolScope | undefined
   /** What the turn lacks for it whatever the arguments, after the targets: an error result, or undefined. */
   lacks(): ToolOutcome | undefined
+  /** The refusal of a variant that needs `person` in a turn that does not hold it, or undefined. A bot's grant answers instead. */
+  personRefusal(args: Record<string, unknown>): ToolOutcome | undefined
   /**
    * A personal bot's grant's refusal of this variant of the call, or undefined (and always for a turn that is not a
    * bot's). Nobody is asked: a list cached before a narrower revision cannot reach a removed tool. Dispatch checks it
@@ -245,6 +259,10 @@ export function compileTool(tool: MousseTool, inputs: AuthorityInputs): Compiled
       return tool.authorize?.(actor, args, targets) ?? scope
     },
     lacks: () => (lacks ??= { outcome: turnLacks(tool, needs, turn) }).outcome,
+    personRefusal: (args) => {
+      if (turn.bot || !needs.person?.(args) || inputs.person()) return undefined
+      return refused('lacks_capability', personLacks(tool.name), { lacks: 'person', fix: PERSON_FIX, data: { reason: 'mousse_scope_denied' } })
+    },
     grantRefusal: (args) => {
       if (!turn.bot) return undefined
       const refusal = botAppToolRefusal(turn.bot, tool.name, args)
@@ -374,12 +392,58 @@ function botThreadScope(tool: MousseTool, needs: ToolNeeds, args: Record<string,
  * turn's "usable now" line is the thread's list less what this refuses; a call is then checked in full, its arguments
  * included (a bot grant's variants, the thread it names), and a tool that asks first is usable.
  */
-export function heldBeforeArguments(tool: MousseTool, turn: AppToolTurn, inputs: { readOnly: boolean; ceiling: ModeCeiling }): boolean {
+export function heldBeforeArguments(tool: MousseTool, turn: AppToolTurn, inputs: { readOnly: boolean; ceiling: ModeCeiling; person?(): boolean }): boolean {
   const needs = toolNeeds(tool)
   if (needs.readOnlyLacks && inputs.readOnly && !needs.messages) return false
   if (needs.planRefuses && inputs.ceiling === 'plan') return false
   if (turnLacks(tool, needs, turn)) return false
+  // A tool every call of which needs `person`; one only some variants need stays usable.
+  if (needs.personAlways && !turn.bot && inputs.person?.() !== true) return false
   return botTurnOffers(turn.bot, tool.name)
+}
+
+/** What a turn that lacks `person` is told for `tool`. */
+function personLacks(tool: string): string {
+  return `${tool} is only for a turn a person started. This run was started by a job, an agent's message, a wake, a continuation or a remote send, is a subagent's, or its origin cannot be read.`
+}
+
+/**
+ * The turn as a thread above it narrows it now (§1.3 "Subagents"): a Plan turn, read-only in its mode facts, so what a
+ * Plan turn lacks is refused at the next call, whatever the mode the turn started in.
+ */
+export function plannedFromAbove(turn: AppToolTurn): AppToolTurn {
+  return { ...turn, mode: 'plan', modeCeiling: 'plan', modeFacts: { readOnly: true, agent: false, build: false } }
+}
+
+/** What a thread holds now, as far as a capability its child lacks is concerned (`parentHolds`). */
+export interface HolderState {
+  /** A read-only (`shared`) subagent. */
+  readOnly: boolean
+  /** Its ceiling now, narrowed from above. */
+  ceiling: ModeCeiling
+  subagent: boolean
+  /** Its turn holds `person`. */
+  person: boolean
+}
+
+/**
+ * Whether a thread in `state` holds the capability `lacks` that its subagent was refused (§2.4): its parent is then told,
+ * and otherwise the root names what would give it.
+ */
+export function parentHolds(lacks: string, state: HolderState): boolean {
+  switch (lacks) {
+    case 'person':
+      return state.person && !state.subagent
+    case 'themes':
+    case 'quick_actions':
+      return !state.subagent
+    case 'threads.start':
+    case 'settings':
+    case 'edit':
+      return !state.readOnly && state.ceiling !== 'plan'
+    default:
+      return !state.readOnly
+  }
 }
 
 /**

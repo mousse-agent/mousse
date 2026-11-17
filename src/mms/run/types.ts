@@ -472,6 +472,22 @@ export interface ChildQuestionPayload {
   delegationId?: string
 }
 
+/**
+ * Payload of a `reconcile_notice` row that tells a thread a subagent below it was refused a capability it lacks
+ * (docs/plans/tool-api.md §2.4): its parent when the parent holds it (`to: 'parent'`), else the root of its tree, which
+ * is told what would give it (`fix`). Written once per capability of the subagent's work.
+ */
+export interface ChildLacksPayload {
+  kind: 'child_lacks'
+  childThreadId: string
+  childRunId: string
+  tool: string
+  lacks: string
+  fix?: string
+  to: 'parent' | 'root'
+  delegationId?: string
+}
+
 export function isChildQuestionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'child_question'
 }
