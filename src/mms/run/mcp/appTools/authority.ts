@@ -88,6 +88,8 @@ export interface ToolNeeds {
   asksFirst?(args: Record<string, unknown>): 'edit' | 'full'
   /** A `managesOthers` tool that keeps the `launched` scope for a thread the caller launched. */
   launchedScope: boolean
+  /** The browser right a call needs (§2.6 "Rights"): a Plan ceiling and a read-only child lack `browser.act`. */
+  browser?(args: Record<string, unknown>): 'browser.read' | 'browser.act'
 }
 
 /** The capability (§1.3) a tool of each access needs that a read-only child does not hold. */
@@ -122,7 +124,8 @@ export function toolNeeds(tool: MousseTool): ToolNeeds {
     readOnlyChild,
     callable: tool.callable !== 'in_process',
     starts,
-    ...(readOnlyChild ? {} : { readOnlyLacks: starts ? 'threads.start' : WRITE_CAPABILITY[tool.access] }),
+    ...(readOnlyChild ? {} : { readOnlyLacks: starts ? 'threads.start' : tool.browserRight?.({}) ?? WRITE_CAPABILITY[tool.access] }),
+    ...(tool.browserRight ? { browser: tool.browserRight } : {}),
     messages: tool.messageIntent !== undefined,
     ...(owner ? { owner } : {}),
     ...(starts ? { planRefuses: 'starts threads' as const } : tool.access === 'changesSettings' ? { planRefuses: 'changes settings' as const } : {}),
@@ -306,11 +309,13 @@ function centralScope(tool: MousseTool, needs: ToolNeeds, args: Record<string, u
   const family = intent ? familyMessageScope(tool, intent, args, caller, targets?.family ? (actor, threadId) => targets.family!(actor, threadId) : undefined) : undefined
   if (family) return family
   if (needs.readOnlyLacks && inputs.readOnly)
-    throw new McpToolError('mousse_read_only', `${tool.name} can change threads or the workspace; a read-only subagent cannot call it.`, { lacks: needs.readOnlyLacks, fix: READ_ONLY_FIX })
+    throw new McpToolError('mousse_read_only', `${tool.name} can change threads or the workspace; a read-only subagent cannot call it.`, { lacks: needs.browser?.(args) ?? needs.readOnlyLacks, fix: READ_ONLY_FIX })
   // Scope before any approval: a call refused for naming another thread must not prompt the user first.
   if (needs.access === 'writesThreads' || needs.access === 'editsWorkspace') callerThreadOnly(args, caller)
   if (needs.planRefuses && inputs.ceiling === 'plan')
     throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} ${needs.planRefuses}; a plan ceiling cannot.`, { lacks: needs.starts ? 'threads.start' : 'settings', fix: PLAN_FIX })
+  if (needs.browser?.(args) === 'browser.act' && readsPagesOnly(inputs.turn, inputs.ceiling))
+    throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} acts in the browser; a Plan turn only reads pages.`, { lacks: 'browser.act', fix: PLAN_FIX })
   return needs.access === 'readsOthers' || needs.access === 'managesOthers' ? othersScope(tool, needs, args, caller, targets) : undefined
 }
 
@@ -396,10 +401,19 @@ export function heldBeforeArguments(tool: MousseTool, turn: AppToolTurn, inputs:
   const needs = toolNeeds(tool)
   if (needs.readOnlyLacks && inputs.readOnly && !needs.messages) return false
   if (needs.planRefuses && inputs.ceiling === 'plan') return false
+  if (needs.browser?.({}) === 'browser.act' && readsPagesOnly(turn, inputs.ceiling)) return false
   if (turnLacks(tool, needs, turn)) return false
   // A tool every call of which needs `person`; one only some variants need stays usable.
   if (needs.personAlways && !turn.bot && inputs.person?.() !== true) return false
   return botTurnOffers(turn.bot, tool.name)
+}
+
+/**
+ * A turn that holds `browser.read` but not `browser.act` (§2.6 "Rights"): under a Plan ceiling or in a read-only mode,
+ * which includes a turn narrowed from above (`plannedFromAbove`) at its next call.
+ */
+function readsPagesOnly(turn: AppToolTurn, ceiling: ModeCeiling): boolean {
+  return ceiling === 'plan' || turn.modeFacts.readOnly
 }
 
 /** What a turn that lacks `person` is told for `tool`. */

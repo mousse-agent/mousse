@@ -1394,9 +1394,9 @@ export class OrchestratorService extends EventEmitter {
 
   private browserRuntime?: BrowserRuntimePort
   private mainAgentBrowser?: BrowserExecutionBinding
-  private mainBrowserFactory?: (turn: { threadId: string; turnId: string; source?: string; mode: ChatMode }) => BrowserExecutionBinding | undefined
+  private mainBrowserFactory?: (turn: { threadId: string; turnId: string; runId?: string; source?: string; mode: ChatMode }) => BrowserExecutionBinding | undefined
 
-  setMainAgentBrowserFactory(factory: (turn: { threadId: string; turnId: string; source?: string; mode: ChatMode }) => BrowserExecutionBinding | undefined): void {
+  setMainAgentBrowserFactory(factory: (turn: { threadId: string; turnId: string; runId?: string; source?: string; mode: ChatMode }) => BrowserExecutionBinding | undefined): void {
     this.mainBrowserFactory = factory
   }
 
@@ -13895,14 +13895,16 @@ export class OrchestratorService extends EventEmitter {
       // Every runtime owns its loop, context and tools and receives prior turns as a prompt preamble.
       const modelOverride = opts?.modelOverride ?? session.modelOverride
       const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
-      // Runtimes with their own loop get the browser through Mousse's MCP server.
+      // Every thread turn is admitted to its task tree's browser grant, so a subagent on another runtime still finds the
+      // tree its own runs came from; runtimes with their own loop get the browser through Mousse's MCP server.
+      const treeBrowser = opts?.bot ? undefined : this.mainBrowserFactory?.({ threadId: session.threadId, turnId, ...(engineRunId ? { runId: engineRunId } : {}), source: opts?.source, mode })
       const browserExecution = !mcpAttachable(instance.caps)
         ? undefined
         : opts?.bot
           // A bot's browser is its own (`BotBrowsers`), never the GUI's or the profile's.
           ? opts.bot.browser?.binding
         : this.mainBrowserFactory
-          ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
+          ? treeBrowser
           : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
       const planning: { failed: boolean; nativeFork?: boolean } = { failed: false }
       // An edited prompt's first turn: the model is told the files were not rewound, and which ones differ.

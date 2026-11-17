@@ -3,6 +3,7 @@ import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../../.
 import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import {
   BROWSER_READ_TOOLS,
+  browserToolEffect,
   dispatchBrowserTool,
   getBrowserToolDefinitions,
   resolveTrustedBrowserTarget
@@ -53,6 +54,8 @@ export function browserTools(host: AppToolHost): MousseTool[] {
       definition: (turn) => definitions(turn).find((tool) => tool.name === name) ?? listed,
       access: 'actsAsCaller',
       class: BROWSER_READ_TOOLS.has(name as BrowserAutomationTool) ? 'read' : 'mutation',
+      // `browser.read` observes; `browser.act` opens, acts and changes tabs (listing them only reads).
+      browserRight: (args) => browserToolEffect(name as BrowserAutomationTool, args) === 'read' ? 'browser.read' : 'browser.act',
       listed: () => Boolean(host.browserRuntime?.()),
       available: (turn) => {
         const runtime = runtimeFor(host, turn)

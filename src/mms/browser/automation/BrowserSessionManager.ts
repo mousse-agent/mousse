@@ -303,9 +303,10 @@ export class BrowserSessionManager {
   }
 
   async tabs(context: BrowserToolContext, sessionId: string, input: { operation?: 'list' | 'new' | 'switch' | 'close'; tabId?: string; url?: string }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser_tabs', 'browser.session', 'external', { sessionId, ...input })
-    this.requireOwned(sessionId, context)
     const operation = input.operation ?? 'list'
+    // Listing tabs only reads (`browser.read`); opening, switching and closing one acts.
+    this.authorize(context, 'browser_tabs', 'browser.session', operation === 'list' ? 'read' : 'external', { sessionId, ...input })
+    this.requireOwned(sessionId, context)
     const method = operation === 'list' ? 'tabs.list' : `tabs.${operation}`
     const result = await this.call(context.execution.profileId, method as Parameters<BrowserBroker['call']>[0]['method'], { sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.url ? { url: input.url } : {}) }, this.signal(context))
     const payload = result as { tabs?: BrowserTab[]; id?: unknown; title?: unknown; url?: unknown; navigation?: BrowserNavigation }
@@ -617,6 +618,9 @@ export class BrowserSessionManager {
     if (!entry || entry.record.lifecycle === 'closed') throw new BrowserAutomationError({ code: 'session_closed', message: 'Browser session is unavailable' })
     const refusal = keptFrom(entry, context.keeper)
     if (refusal) throw new BrowserAutomationError({ code: 'policy_denied', message: refusal })
+    // A tab has one driver: another agent's session is refused, naming the thread that drives it.
+    if (entry.record.profileId === execution.profileId && entry.owner.threadId !== undefined && entry.owner.threadId !== execution.threadId)
+      throw new BrowserAutomationError({ code: 'browser_busy', message: `This browser session is driven by another agent (thread ${entry.owner.threadId}). Open your own with browser_open.` })
     if (!this.ownedBy(entry.record, execution) || entry.owner.threadId !== execution.threadId || (!!entry.owner.runId && entry.owner.runId !== execution.runId)) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser session is owned by another execution context' })
     return entry
   }
