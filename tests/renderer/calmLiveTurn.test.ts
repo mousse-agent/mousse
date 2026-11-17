@@ -202,4 +202,18 @@ describe('a running turn, streamed step by step', () => {
     expect(groupLines()).toHaveLength(1)
     expect(groupLines()[0]!.textContent).toContain('Ran ls')
   })
+
+  it("keyboard focus on the live row's chevron moves to the run's group line when the reply starts", () => {
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'running')], activeThreadId: 'thread-1' })
+    render(TOOL)
+    act(() => toggle()!.focus())
+    expect(document.activeElement).toBe(toggle())
+    stream(bash('c2', 2, 'npm test', 'ok'))
+    expect(document.activeElement).toBe(toggle())
+    render(STREAMING)
+    stream({ id: 'reply', role: 'assistant', content: 'Two files.', timestamp: at(3), streaming: true })
+    expect(toggle()).toBeNull()
+    expect(groupLines()).toHaveLength(1)
+    expect(document.activeElement).toBe(groupLines()[0])
+  })
 })

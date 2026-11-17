@@ -2675,7 +2675,7 @@ const TurnRow = memo(function TurnRow({
             const calls = grouped.filter((item) => item.part.type !== "tool-Thinking");
             // A run of one call says what that call does, as its own row would.
             const title = !heading.thought && calls.length === 1 && isV5ToolPart(calls[0]!.part)
-              ? callTitle(calls[0]!.part)
+              ? callTitle(calls[0]!.part, failedNow(calls[0]!))
               : heading.title;
             // Keyed by the run's first message, so the line stays one element while the run grows.
             const group = grouped.length === 0 ? null : (

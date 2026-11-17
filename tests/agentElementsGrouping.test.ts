@@ -37,6 +37,11 @@ describe('thoughtHeadline', () => {
     ['untitled text after untitled text: the first sentence of the newest paragraph', 'Old idea.\n\nFirst look at the store. Then the list.', 'First look at the store.'],
     ['untitled text before a title is headed by the title once it arrives', 'Old idea.\n\n## Fix', 'Fix'],
     ['a bold phrase inside a sentence is no title', 'This is **very** slow. Next.', 'This is very slow.'],
+    // Code in a fence is not a title.
+    ['a heading inside a fence', 'Run the script.\n\n```sh\n# install deps\nnpm ci\n```\n\nThen check the log. Done.', 'Then check the log.'],
+    ['bold inside a fence', 'Look at it.\n\n~~~md\n**Not a title**\n~~~\n\nThe file is fine. Next.', 'The file is fine.'],
+    ['a real title above a fence, prose after it: the title wins', '**Checking the setup**\n\n```py\n# Load the config\nload()\n```\n\nIt reads the file twice.', 'Checking the setup'],
+    ['a fence still being written', '**Checking the setup**\n\n```sh\n# not a title', 'Checking the setup'],
     ['a sentence still being written is shown as far as it goes', 'Looking at the sto', 'Looking at the sto'],
     ['a question ends a sentence', 'Why does it remount? The key changes.', 'Why does it remount?'],
     ['a closing quote stays with its sentence', 'He said "stop." Then left.', 'He said "stop."'],

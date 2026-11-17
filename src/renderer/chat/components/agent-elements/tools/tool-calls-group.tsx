@@ -1,7 +1,7 @@
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ToolRowBase } from "./tool-row-base";
-import { useToolOpen, useToolOpenOf } from "./tool-open-state";
+import { takeLiveRunFocus, useToolOpen, useToolOpenOf } from "./tool-open-state";
 import { countRender } from "../render-counts";
 import "./tool-calls-group.css";
 
@@ -61,6 +61,11 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
     if (!box || !live || !atEndRef.current) return;
     box.scrollTop = box.scrollHeight;
   }, [count, live, expanded]);
+  // The run's live row had keyboard focus on its chevron when this line replaced it: the focus moves here.
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (takeLiveRunFocus(openKey)) toggleRef.current?.focus();
+  }, [openKey]);
 
   return (
     <ToolRowBase
@@ -83,6 +88,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
         setExpanded((prev) => !prev);
       }}
       itemCount={count}
+      toggleRef={toggleRef}
     >
       <div
         ref={scrollRef}

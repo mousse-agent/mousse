@@ -120,6 +120,25 @@ function plainLine(text: string): string {
   return stripInlineMarkdown(text).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
 }
 
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/**
+ * Which of `lines` belong to a fenced code block, its fence lines included. A fence still open at the end (being
+ * written) runs to the last line.
+ */
+function fencedLines(lines: readonly string[]): boolean[] {
+  let fence: string | null = null;
+  return lines.map((line) => {
+    const match = FENCE_LINE.exec(line);
+    if (fence === null) {
+      if (match) fence = match[1]!;
+      return fence !== null;
+    }
+    if (match && match[1]![0] === fence[0] && match[1]!.length >= fence.length && !match[2]!.trim()) fence = null;
+    return true;
+  });
+}
+
 /** `text` cut to `max` code points (never inside a surrogate pair), with an ellipsis when cut. */
 function cutCodePoints(text: string, max: number): string {
   const points = Array.from(text);
@@ -167,7 +186,10 @@ function firstSentenceEnd(text: string): number {
 export function thoughtHeadline(content: string | undefined): string {
   if (!content?.trim()) return "";
   const allLines = content.split("\n");
+  const code = fencedLines(allLines);
   for (let index = allLines.length - 1; index >= 0; index -= 1) {
+    // A `# comment` or a bold line in a code block is code, not a title.
+    if (code[index]) continue;
     const title = titleOf(allLines[index]!);
     if (title) return cutCodePoints(title, HEADLINE_MAX);
   }

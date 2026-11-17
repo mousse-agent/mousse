@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { UIMessage } from "ai";
 import { Collapse } from "../../../components/ui/Collapse";
-import { LiveRunBodyContext, useToolOpen } from "./tools/tool-open-state";
+import { LiveRunBodyContext, liveRunToggleFocus, useToolOpen } from "./tools/tool-open-state";
 import { IconChevronRight } from "../../../lib/icons";
 import { useReplyPacing } from "../../../lib/replyPacingSetting";
 import type { TurnPhase, TurnStep } from "../../../../shared/types";
@@ -537,6 +537,8 @@ export function TurnProgressRow({
         event.stopPropagation();
         toggle();
       }}
+      onFocus={(event) => liveRunToggleFocus(run.openKey, true, event.currentTarget)}
+      onBlur={(event) => liveRunToggleFocus(run.openKey, false, event.currentTarget)}
     >
       <IconChevronRight className="ui-collapse-chevron an-row-chevron" data-open={open || undefined} aria-hidden="true" />
     </button>

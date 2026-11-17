@@ -64,5 +64,32 @@ export function useRowOpenState(initial: boolean): [boolean, (update: boolean | 
   return [own, setOwn];
 }
 
+/**
+ * The open key of the live row whose chevron has keyboard focus. When the run ends, its group line replaces the live
+ * row under the same key and takes the focus (`takeLiveRunFocus`), so it does not drop to the page.
+ */
+let focusedLiveRun: string | null = null;
+
+/** The live row's chevron for `key` took focus, or lost it to something else while it stays on the page. */
+export function liveRunToggleFocus(key: string | undefined, focused: boolean, toggle: HTMLElement): void {
+  if (!key) return;
+  if (focused) {
+    focusedLiveRun = key;
+    return;
+  }
+  // A chevron taken off the page may still report a blur: only one still on the page lost focus to something else.
+  queueMicrotask(() => {
+    if (toggle.isConnected && focusedLiveRun === key) focusedLiveRun = null;
+  });
+}
+
+/** Whether the group line for `key` should take focus from the live row it replaced (focus is on nothing now). */
+export function takeLiveRunFocus(key: string | undefined): boolean {
+  if (!key || focusedLiveRun !== key) return false;
+  focusedLiveRun = null;
+  const active = typeof document === "undefined" ? null : document.activeElement;
+  return !active || active === document.body || !active.isConnected;
+}
+
 /** Set inside an opened live row (the turn's current run): the thought still being written there shows open. */
 export const LiveRunBodyContext = createContext(false);

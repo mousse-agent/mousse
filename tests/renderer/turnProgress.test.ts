@@ -399,6 +399,32 @@ describe('the line under Working', () => {
     expect(line()!.querySelector('.turn-progress-badge')).toBeNull()
   })
 
+  it('5b. a call that ended with `success: false` failed too: counted after a thought, cleared by a retry that works', () => {
+    const marked = (messages: UIMessage[]) => markRecoveredFailures(structuredClone(messages))
+    const failed = reply('c1', { ...tool('Bash', 'output-available', { command: 'pnpm vitest run tests/auth' }, 'c1'), output: { success: false, stdout: '' } })
+    const next = reply('t2', { ...thought('input-available', 'Try npx instead.'), toolCallId: 'th2' })
+    render(marked([ask(), failed, next]), 'streaming', { phase: 'thinking' })
+    expectLive('Thinking…')
+    expect(line()!.querySelector('.turn-progress-badge')!.textContent).toBe('· 1 failed')
+    const retry = reply('c2', tool('Bash', 'output-available', { command: 'npx vitest run tests/auth' }, 'c2'))
+    render(marked([ask(), failed, { ...next, parts: [{ ...next.parts[0]!, state: 'output-available' }] } as UIMessage, retry]), 'streaming', { phase: 'thinking' })
+    expectLive('Ran')
+    expect(line()!.querySelector('.turn-progress-badge')).toBeNull()
+  })
+
+  it('5c. a run of one call that failed, closed by a step that is not text, is titled as failed', () => {
+    const marked = (messages: UIMessage[]) => markRecoveredFailures(structuredClone(messages))
+    const failed = reply('c1', { ...tool('Bash', 'output-error', { command: 'pnpm vitest run tests/auth' }, 'c1'), errorText: 'exit 1' })
+    // A plan being written closes the run without getting past the failure.
+    const plan = reply('p1', tool('PlanWrite', 'input-available', { plan: 'Fix the auth setup.' }, 'p1'))
+    render(marked([ask(), failed, plan]), 'streaming', { phase: 'tool_running' })
+    const lineOfRun = groupHeader('Failed')
+    expect(lineOfRun).not.toBeNull()
+    expect(lineOfRun!.textContent).toContain('pnpm vitest run tests/auth')
+    expect(lineOfRun!.textContent).toContain('· 1 failed')
+    expect(groupHeader('Ran')).toBeNull()
+  })
+
   it('6. between tool calls: the last one, in the past tense, until something new starts', () => {
     const calls = [reply('c1', tool('Read', 'output-available', { file_path: 'src/a.ts' }, 'r1')), reply('c2', tool('Grep', 'output-available', { pattern: 'expiresIn' }, 'g1'))]
     render([ask(), ...calls], 'streaming', { phase: 'thinking' })
