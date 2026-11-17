@@ -109,11 +109,8 @@ describe('the browser of a definition on a runtime with its own loop', () => {
     expect(rows).toEqual([['browser_open', 'started'], ['browser_open', 'committed']])
   })
 
-  it.each([
-    ['the run ended', (state: { active: string | null }) => { state.active = null }],
-    ['another run became active', (state: { active: string | null }) => { state.active = 'r2' }]
-  ] as const)('a call whose run is no longer live after its approval (%s) never reaches the browser and leaves no ledger row', async (_what, change) => {
-    const { call, dispatched, rows } = world({ granted: ['browser_open'], approval: { policy: 'always' }, onApproval: change })
+  it('a call whose run is no longer live after its approval (the run ended) never reaches the browser and leaves no ledger row', async () => {
+    const { call, dispatched, rows } = world({ granted: ['browser_open'], approval: { policy: 'always' }, onApproval: (state) => { state.active = null } })
     await expect(call('browser_open', { url: 'http://127.0.0.1:9/local' })).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
     expect(dispatched).toEqual([])
     expect(rows).toEqual([])

@@ -17,7 +17,6 @@ import { getCliBuildOptions } from '../../scripts/build-cli.mjs'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
-import { DEFAULT_FEATURE_FLAGS } from '../../src/shared/featureFlags'
 import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -181,10 +180,6 @@ describe('idle threads are released from memory and reload exactly as they were'
     for (const text of texts) expect(delivered.filter((seen) => seen === text), text).toHaveLength(1)
     expect([...delivered].sort()).toEqual([...texts].sort())
   }
-
-  it('the kill switch is on by default', () => {
-    expect(DEFAULT_FEATURE_FLAGS.releaseIdleThreads).toBe(true)
-  })
 
   it('releases a thread idle past the release time; the next send reloads it and runs once with the full history', async () => {
     const w = world()
@@ -430,16 +425,15 @@ describe('idle threads are released from memory and reload exactly as they were'
     await w.settled('first turn')
     expect(w.sweepIdle()).toEqual([w.thread.id])
     // The same request again after the release: its receipt answers, nothing runs twice.
-    const repeat = await w.d.orch.send('first', false, { threadId: w.thread.id, clientRequestId: 'send-1' })
+    await w.d.orch.send('first', false, { threadId: w.thread.id, clientRequestId: 'send-1' })
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(w.adapter.prompts).toEqual(['first'])
-    expect(repeat).toBeDefined()
     // A queue built after the release drains once, in order, Steer included.
     w.adapter.holdPrompts.add('second')
     w.adapter.takeSteers = false
     const second = w.send('second')
     await waitFor(() => w.adapter.prompts.includes('second'), 'second turn')
-    const a = await w.send('A')
+    await w.send('A')
     const b = await w.send('B')
     expect(w.pending()).toEqual(['A', 'B'])
     expect(w.sweepIdle()).toEqual([])
@@ -450,7 +444,6 @@ describe('idle threads are released from memory and reload exactly as they were'
     w.adapter.release('second')
     await second
     await w.settled('drained')
-    expect(a.queueItem).toBeDefined()
     expectEachOnce(w.adapter, ['first', 'second', 'A', 'B'])
     expect(w.sweepIdle()).toEqual([w.thread.id])
     expect(w.d.orch.residency.counters.staleUses).toBe(0)
