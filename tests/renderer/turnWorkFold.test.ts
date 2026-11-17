@@ -214,7 +214,7 @@ describe('a running turn', () => {
     expect(text).not.toContain('Read 2 files and ran 2 commands')
     expect(answerOf(0).querySelector('.an-tool-group-rows')).toBeNull()
     const live = host.querySelector<HTMLElement>('[data-turn-live]')!
-    expect(answerOf(0).lastElementChild).toBe(live)
+    expect(answerOf(0).lastElementChild!.previousElementSibling).toBe(live)
     expect(live.querySelector('[data-turn-progress]')!.textContent).toBe('Running Bash…npm test')
   })
 })

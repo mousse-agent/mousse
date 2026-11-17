@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { TextShimmer } from "../text-shimmer";
 import { IconChevronRight } from "../../../../lib/icons";
@@ -30,8 +30,9 @@ export type ToolRowBaseProps = {
   /** Classes for the detail (a command shows in mono). */
   detailClassName?: string;
   /**
-   * Whether a running row's label shimmers (it paints every frame). A thinking row turns its icon instead. A row that
-   * shimmers also shows its icon's state: a gentle pulse while it runs, dimmed once done, the danger colour on failure.
+   * Whether a running row's label shimmers (it paints every frame). A thinking row pulses its own icon instead. A row
+   * that shimmers also shows its icon's state: a gentle pulse while it runs, dimmed once done, the danger colour on
+   * failure.
    */
   shimmer?: boolean;
   /** Short status after the detail (a failure count); never truncated. */
@@ -41,6 +42,11 @@ export type ToolRowBaseProps = {
   expanded?: boolean;
   defaultOpen?: boolean;
   onToggleExpand?: () => void;
+  /**
+   * Fires when the row opens after it was shown closed, once its panel is in the document: whether the panel mounted
+   * again or was still there, closing. A row that mounts open does not fire it.
+   */
+  onOpen?: () => void;
   /** Rows in the panel when it is a list; a long one opens without the per-row stagger. */
   itemCount?: number;
   children?: ReactNode;
@@ -63,6 +69,7 @@ export function ToolRowBase({
   expanded,
   defaultOpen = false,
   onToggleExpand,
+  onOpen,
   itemCount,
   children,
 }: ToolRowBaseProps) {
@@ -73,6 +80,11 @@ export function ToolRowBase({
   const [ownOpen, setOwnOpen] = useState(defaultOpen);
   const kept = useToolOpen(expanded === undefined ? openKey : undefined, defaultOpen);
   const isExpanded = expanded ?? (kept ? kept[0] : ownOpen);
+  const wasExpanded = useRef(isExpanded);
+  useLayoutEffect(() => {
+    if (isExpanded && !wasExpanded.current) onOpen?.();
+    wasExpanded.current = isExpanded;
+  }, [isExpanded, onOpen]);
   const canToggle = expandable && (isComplete || isExpanded || isAnimating);
   const loudFailure = failed && !isAnimating && !recovered;
   const quietFailure = failed && !isAnimating && recovered;
@@ -129,12 +141,9 @@ export function ToolRowBase({
         {trailingContent}
       </div>
       {expandable && (isComplete || isExpanded || isAnimating) && (
-        <div>
-          <IconChevronRight
-            className="ui-collapse-chevron shrink-0 text-muted-foreground size-[18px]"
-            data-open={isExpanded || undefined}
-          />
-        </div>
+        <span className="an-row-chevron-box" aria-hidden="true">
+          <IconChevronRight className="ui-collapse-chevron an-row-chevron" data-open={isExpanded || undefined} />
+        </span>
       )}
       <ToolRowTime at={at} />
     </div>

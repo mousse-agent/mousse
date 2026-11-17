@@ -1,8 +1,8 @@
 /* The live row at the end of a running turn (turn-progress.tsx): the current thought's headline, then what the turn
    does now. Each line is laid out like a tool row (18px icon box, 14px label on a 22px line) and is one line high
-   whatever its text, so the row keeps its height while the turn works. Its motion is the thinking icon's turn while
+   whatever its text, so the row keeps its height while the turn works. Its motion is the thinking icon's pulse while
    the turn thinks (thinking-icon.css), a running call's icon pulse, or the dots below: transform and opacity only,
-   which the compositor draws. */
+   which the compositor draws. Each holds still while no one can see it (lib/offscreenMotion.ts). */
 
 .turn-live {
   gap: 2px;
@@ -70,7 +70,6 @@
   border: 0;
   border-radius: 4px;
   background: none;
-  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
   cursor: pointer;
 }
 
@@ -138,6 +137,11 @@
 
 .turn-progress-dots > span:nth-child(3) {
   animation-delay: calc(0.4s * var(--ui-motion-scale, 1));
+}
+
+/* Out of view or in a hidden window, the dots hold still (lib/offscreenMotion.ts marks the box, not each dot). */
+.turn-progress-dots[data-offscreen] > span {
+  animation-play-state: paused;
 }
 
 @keyframes turn-progress-dot {

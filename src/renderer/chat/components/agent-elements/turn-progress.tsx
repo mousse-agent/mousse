@@ -16,6 +16,7 @@ import { commandLabel } from "../../../../shared/agentActivity";
 import { useLiveThought } from "../../../stores/liveTextStore";
 import { ThinkingIcon } from "../../../lib/icons";
 import { ToolIcon } from "./tools/tool-icon";
+import { useOffscreenPause } from "../../../lib/offscreenMotion";
 import { countRender } from "./render-counts";
 import "./turn-progress.css";
 
@@ -361,6 +362,60 @@ function describeProgress({ state, messages, stepSince, awaitingSubagents, spawn
   return { kind: "thinking", label: "Thinking…" };
 }
 
+/** How often the live row's status region speaks at most: a step that changes sooner is said once this has passed. */
+export const ANNOUNCE_EVERY_MS = 2000;
+
+/**
+ * What a screen reader hears for a step of the live row: a few calm words, never the thought's headline or a
+ * countdown. "Thinking", "Running Bash npm test", "Ran npm test", "Retrying"; nothing when the row has nothing to say.
+ */
+export function announcementOf(progress: TurnProgress | null): string {
+  if (!progress) return "";
+  switch (progress.kind) {
+    case "starting":
+    case "waiting":
+    case "thinking":
+    case "finishing":
+      return "Thinking";
+    case "retrying":
+      return "Retrying";
+    case "writing":
+      return "Writing";
+    case "stopping":
+      return "Stopping";
+    case "compacting":
+      return "Compacting context";
+    case "subagents":
+      return "Waiting for subagents";
+  }
+  const words = progress.label.replace(/…$/, "");
+  return progress.detail ? `${words} ${progress.detail}` : words;
+}
+
+/**
+ * Writes `text` into the live region `ref` at most once every ANNOUNCE_EVERY_MS: a change sooner waits for the end of
+ * that interval, and only the latest text by then is said. The region's text is set directly, so a step change
+ * renders nothing more than it did. An empty text clears it at once and does not count as speaking.
+ */
+function useCalmAnnouncement(ref: { current: HTMLElement | null }, text: string): void {
+  const saidAt = useRef(-Infinity);
+  useEffect(() => {
+    const region = ref.current;
+    if (!region || region.textContent === text) return;
+    const say = () => {
+      region.textContent = text;
+      if (text) saidAt.current = Date.now();
+    };
+    const wait = text ? saidAt.current + ANNOUNCE_EVERY_MS - Date.now() : 0;
+    if (wait <= 0) {
+      say();
+      return;
+    }
+    const timer = window.setTimeout(say, wait);
+    return () => window.clearTimeout(timer);
+  }, [ref, text]);
+}
+
 /**
  * The turn's current run of work (its thoughts and calls since the last text), which the live row stands for while it
  * runs: no group line is drawn for it until it ends.
@@ -385,16 +440,21 @@ export type LiveRun = {
  *   (`thoughtHeadline`), one line cut at its width. It changes only when the thought starts a new section or
  *   paragraph; the thought's latest paragraph is its tooltip.
  * - Line 2: what the turn does now (`describeTurnProgress`), details in its tooltip, and "· 1 failed" while a call of
- *   the run failed and nothing has got past it. The thinking icon turns while the turn thinks; a running call's icon
+ *   the run failed and nothing has got past it. The thinking icon pulses while the turn thinks; a running call's icon
  *   pulses; a call that just finished shows its icon still; anything else (a retry, a stop) shows three small dots.
- *   All move by transform or opacity only, so the row costs no layout or paint while it animates.
+ *   All move by opacity or transform only, so the row costs no layout or paint while it animates, and each holds
+ *   still while no one can see it (scrolled away, or the window hidden: lib/offscreenMotion.ts).
  * - A chevron opens the run's rows under it, in the box a group uses, under the group's open-state key. Open, the box
  *   keeps its newest row in view as rows arrive and as the thought being written grows; that thought shows open.
  *
  * With nothing to say and closed it is hidden, not removed, so it comes back as the same element. A streamed thought
  * delta renders this row alone (it reads the thought's live text, liveTextStore), and the thought's own row too while
- * the run is open. It reads the thread's turn from context, so a memoised turn row still follows it. The two lines are
- * a `role="status"` region; the opened rows are not part of it.
+ * the run is open. It reads the thread's turn from context, so a memoised turn row still follows it.
+ *
+ * Screen readers hear a calm summary from a hidden status region beside the row, not the lines themselves:
+ * "Thinking" when the turn thinks (not each headline), what a call does as it starts or ends, and "Retrying" once
+ * rather than every second of a countdown (`announcementOf`). It speaks at most once every ANNOUNCE_EVERY_MS, saying
+ * the latest step. It stays outside the row, so it is there when the row hides and comes back.
  */
 export function TurnProgressRow({
   messages,
@@ -462,6 +522,10 @@ export function TurnProgressRow({
     return () => window.clearInterval(timer);
   }, [until]);
   const failed = run && progress?.kind !== "failed-tool" ? run.failed : 0;
+  const statusRef = useRef<HTMLSpanElement>(null);
+  useCalmAnnouncement(statusRef, announcementOf(progress));
+  const dots = !!progress && !THINKING_KINDS.has(progress.kind) && !progress.tool;
+  const pauseDots = useOffscreenPause<HTMLSpanElement>(dots);
   // The chevron follows the two lines, level with the first: one element whichever lines show, so focus stays on it.
   const chevron = run && run.count > 0 ? (
     <button
@@ -474,13 +538,14 @@ export function TurnProgressRow({
         toggle();
       }}
     >
-      <IconChevronRight className="ui-collapse-chevron shrink-0 size-[18px]" data-open={open || undefined} aria-hidden="true" />
+      <IconChevronRight className="ui-collapse-chevron an-row-chevron" data-open={open || undefined} aria-hidden="true" />
     </button>
   ) : null;
   return (
+    <>
     <div className="turn-live flex flex-col min-w-0 max-w-full" data-find-ignore data-turn-live
       data-until-text={untilText || undefined} hidden={!headline && !progress && !open}>
-      <div className="turn-live-lines flex items-start gap-1 min-w-0 max-w-full select-none" role="status"
+      <div className="turn-live-lines flex items-start gap-1 min-w-0 max-w-full select-none"
         data-toggles={chevron ? "" : undefined} onClick={chevron ? toggle : undefined}>
       <div className="turn-live-text flex flex-col min-w-0 max-w-full">
       {headline && (
@@ -502,7 +567,7 @@ export function TurnProgressRow({
             <ToolIcon type={progress.tool} state={progress.kind === "failed-tool" ? "failed" : progress.kind === "ran-tool" ? "done" : "running"} />
           ) : (
             // Retrying, stopping, writing, subagents: no thought, so no thinking icon.
-            <span className="turn-progress-dots" aria-hidden="true">
+            <span ref={pauseDots} className="turn-progress-dots" aria-hidden="true">
               <span />
               <span />
               <span />
@@ -535,5 +600,8 @@ export function TurnProgressRow({
         </Collapse>
       )}
     </div>
+    {/* What screen readers hear (useCalmAnnouncement writes it); Find skips it. */}
+    <span ref={statusRef} className="sr-only" role="status" data-live-announce data-find-ignore />
+    </>
   );
 }

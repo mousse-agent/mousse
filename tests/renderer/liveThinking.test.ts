@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * A thought's streamed text lives in its own slice (liveTextStore), as a reply's does: a delta that only adds text
- * to the thought being written renders its row (or the header of the group it ends), never the transcript, the
- * message list or the store. Its start, its end and any other change go to the store, and its final text takes
+ * to the thought being written renders the turn's live row (and the thought's own row while the run is open), never
+ * the transcript, the message list or the store. Its start, its end and any other change go to the store, and its final text takes
  * over once.
  */
 import { act, createElement, useMemo, useRef } from 'react'

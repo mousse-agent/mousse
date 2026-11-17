@@ -1,7 +1,8 @@
-import { forwardRef, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
+import { forwardRef, useCallback, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
 import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/react'
 import '../styles/thinking-icon.css'
 import { turnable } from './turning'
+import { useOffscreenPause } from './offscreenMotion'
 import Activity01Icon from '@hugeicons/core-free-icons/Activity01Icon'
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AddSquareIcon from '@hugeicons/core-free-icons/AddSquareIcon'
@@ -391,11 +392,28 @@ export interface ThinkingIconProps extends IconProps {
   active?: boolean
 }
 
-/** The chat's thinking icon (Hugeicons Brain 03). It pulses while `active` (thinking-icon.css). */
+/**
+ * The chat's thinking icon (Hugeicons Brain 03). It pulses while `active` (thinking-icon.css), and holds still while no
+ * one can see it (lib/offscreenMotion.ts).
+ */
 export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIconProps>(function ThinkingIcon(
   { size = 16, stroke, strokeWidth, active = false, className = '', ...props },
   ref,
 ) {
+  const pause = useOffscreenPause<SVGSVGElement>(active)
+  const setRef = useCallback((element: SVGSVGElement | null) => {
+    const forward = (value: SVGSVGElement | null) => {
+      if (typeof ref === 'function') ref(value)
+      else if (ref) ref.current = value
+    }
+    forward(element)
+    const stop = pause(element)
+    // A ref that returns a cleanup is not called again with null: the cleanup clears the forwarded ref itself.
+    return () => {
+      stop?.()
+      forward(null)
+    }
+  }, [ref, pause])
   const width = strokeWidth === undefined ? (typeof stroke === 'number' ? stroke : 1.5) : Number(strokeWidth)
   const color = typeof stroke === 'string' ? stroke : 'currentColor'
   const shapes = Brain03Icon as unknown as Array<[string, Record<string, string>]>
@@ -405,7 +423,7 @@ export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIc
   }
   return (
     <svg
-      ref={ref}
+      ref={setRef}
       xmlns="http://www.w3.org/2000/svg"
       width={size}
       height={size}

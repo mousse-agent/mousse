@@ -16,8 +16,9 @@ import { useAppStore } from './appStore'
  * changes, its live text is dropped and the transcript's text is shown, the same text Copy, Find
  * and the model read.
  *
- * A thought being written streams the same way: text added to it goes here, and only its row (and
- * the header of the group it ends) reads it. A thought is live while the transcript holds it as
+ * A thought being written streams the same way: text added to it goes here, and only the turn's
+ * live row (its headline) and, while the person has the run open, the thought's own row read it. A
+ * thought is live while the transcript holds it as
  * processing, and while nothing follows it: the moment a message lands after it, its live text is
  * written to the transcript (`handOverLiveThoughts`), so what reads the transcript's thoughts (a
  * group's title) sees all of it.

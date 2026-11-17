@@ -1,4 +1,4 @@
-import { memo, useContext, useLayoutEffect, useRef } from "react";
+import { memo, useCallback, useContext, useLayoutEffect, useRef } from "react";
 import { LiveRunBodyContext } from "./tool-open-state";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
@@ -40,9 +40,23 @@ export function ThinkingCollapsed({
   // In an opened live row the thought being written shows open, so it can be read in full as it grows.
   const inLiveRun = useContext(LiveRunBodyContext);
   const startsOpen = defaultOpen ?? (inLiveRun && isAnimating);
-  const boxRef = useRef<HTMLDivElement>(null);
+  const boxRef = useRef<HTMLDivElement | null>(null);
   const atEndRef = useRef(true);
-  // While it is written, its box keeps its newest words in view, unless the person scrolled up in it.
+  // Each time it opens while it is written (by hand, or as the live row opens), its box goes to its newest words and
+  // follows them again: also when it reopens before its close has finished, so its box is still there, scrolled up.
+  // A finished thought opens at its start.
+  const onOpen = useCallback(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    if (!isAnimating) {
+      box.scrollTop = 0;
+      return;
+    }
+    atEndRef.current = true;
+    box.scrollTop = box.scrollHeight;
+  }, [isAnimating]);
+  // While it is written, its box keeps its newest words in view, unless the person scrolled up in it. This also puts a
+  // box that mounts open (the row itself mounting open) at its end.
   useLayoutEffect(() => {
     const box = boxRef.current;
     if (box && isAnimating && atEndRef.current) box.scrollTop = box.scrollHeight;
@@ -53,13 +67,14 @@ export function ThinkingCollapsed({
       icon={<ThinkingIcon size={18} active={isAnimating} />}
       completeLabel={heading || "Thinking"}
       labelTitle={liveThoughtText(step.thoughtContent) || undefined}
-      // The icon turns; a shimmering label would paint every frame.
+      // The icon pulses; a shimmering label would paint every frame.
       shimmer={false}
       isAnimating={isAnimating}
       expandable={!!step.thoughtContent}
       defaultOpen={startsOpen}
       expanded={expanded}
       onToggleExpand={onToggleExpand}
+      onOpen={onOpen}
     >
       <div
         ref={boxRef}
