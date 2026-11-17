@@ -176,6 +176,7 @@ function withdrawalCode(action: Pick<ActionRow, 'card_json' | 'result_json'>): B
   if (text.includes('tool') && text.includes('changed')) return 'bot_action_permission_changed'
   return 'bot_action_withdrawn'
 }
+const EXPIRED_WORK_TEXT = 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.'
 /** Stored outcomes are timed updates, assembled with all other work updates at dispatch. */
 export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'> & Partial<Pick<ActionRow, 'card_json'>>, scheduled = false): string {
   if (scheduled) {
@@ -185,7 +186,7 @@ export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_js
   }
   const result = action.result_json ? JSON.parse(action.result_json) as BotMcpCallOutcome : undefined
   if (JSON.parse(action.card_json ?? '{}').ownerRemoved) return 'Your owner removed this request. Do not ask for it again unless they write.'
-  if (action.status === 'expired' && result?.text !== '[forgotten]') return result?.text ?? 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.'
+  if (action.status === 'expired' && result?.text !== '[forgotten]') return EXPIRED_WORK_TEXT
   const forgotten = result?.text === '[forgotten]'
   if (action.status === 'withdrawn') return forgotten ? `${botActionRefusalText(withdrawalCode({ card_json: action.card_json ?? null, result_json: action.result_json }))} The saved details of this outcome were removed.` : result?.text ?? 'Nothing was sent. Carry on without it.'
   const card = JSON.parse(action.card_json ?? '{}')
@@ -298,7 +299,7 @@ export class BotActions {
   }
   expireDue(): void {
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'open' AND expires_at <= ?", this.host.store.now())) {
-      if (this.transition(String(a.id), String(a.status), 'expired', { text: 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' })) this.finish(a as unknown as ActionRow)
+      if (this.transition(String(a.id), String(a.status), 'expired', { text: EXPIRED_WORK_TEXT })) this.finish(a as unknown as ActionRow)
     }
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'approved'") as unknown as ActionRow[])
       if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) this.sendTimeout(action)
