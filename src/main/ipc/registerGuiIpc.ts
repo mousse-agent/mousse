@@ -52,6 +52,7 @@ import {
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
 import { openLocalPath, saveFileCopy, showFileInFolder } from '../localFiles'
+import { startFileDrag } from './fileDragIpc'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
 import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { askForEditorAccess } from '../remoteEditorAsk'
@@ -3329,6 +3330,16 @@ export function registerGuiIpc(
   registerHandler('localFiles:showInFolder', async (_e, path: unknown) => { await showFileInFolder(path) })
   registerHandler('localFiles:saveCopy', async (event, path: unknown) =>
     saveFileCopy(path, BrowserWindow.fromWebContents(event.sender) ?? getWindow(), app.getPath('downloads')))
+  // A file dragged out of the window into Finder, Explorer or another app (fileDrag.ts): the window names it, this
+  // process checks that it belongs to the thread and starts the system's drag.
+  registerHandler('files:startDrag', async (event, request: unknown) => startFileDrag(event.sender, request, {
+    temp: app.getPath('temp'),
+    filesRoot: async (scope) => (await guiMms.request<{ root?: string }>('files.root', scope)).root,
+    messageTexts: async (threadId) => {
+      const snapshot = await guiMms.request<{ messages?: Array<{ content?: unknown }> }>('thread.snapshot', { threadId, newest: 200 })
+      return (snapshot.messages ?? []).flatMap((message) => (typeof message.content === 'string' ? [message.content] : []))
+    }
+  }))
   // A thread of another computer: its folder opens in an editor of this one over SSH. The window names the
   // thread only; the folder is the one the owner answers, and the SSH address is read here from this
   // computer's own records.
