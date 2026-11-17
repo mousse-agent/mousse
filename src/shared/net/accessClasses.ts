@@ -100,10 +100,10 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
   'bots.chat.stop': 'bots_chat',
   'bots.work.stop': 'bots_chat',
   'bots.chat.markRead': 'bots_chat',
-  'bots.actions.answer': 'bots_chat',
+  'bots.actions.answer': 'bots_manage',
   'bots.questions.answer': 'bots_chat',
   'bots.reminders.snooze': 'bots_chat',
-  // Allow on an ask grants the bot a permission.
+  // Both choices on a permission ask or held external action require Work; reading the cards stays bots_chat.
   'bots.asks.answer': 'bots_manage',
   'bots.personal.pause': 'bots_manage',
   'bots.personal.resume': 'bots_manage',

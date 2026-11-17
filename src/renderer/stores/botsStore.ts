@@ -1,3 +1,4 @@
+import { botActionRefusal } from '../../shared/bots/personal/actionRefusal'
 import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { BotChatMessage, BotChatQuote, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
@@ -30,6 +31,8 @@ function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T
   delete next[key]
   return next
 }
+
+export interface BotActionRefusal { reason: string; text: string }
 
 export const BOT_CHAT_PAGE = 50
 /** How long the face plays "done" after a working bot goes idle with a good outcome. */
@@ -165,6 +168,7 @@ interface BotsState {
    * The owner taps one of a question's answers: it is their reply to the question, which the bot answers. False when it
    * was not sent (the error says why, or the service has no buttons for questions).
    */
+  answerAction(botId: string, actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotActionRefusal | null>
   answerQuestion(botId: string, questionId: string, choice: string): Promise<boolean>
   /**
    * The owner's reaction on one of the bot's messages: shown at once, and put back as it was when the service refuses
@@ -610,6 +614,23 @@ export const useBotsStore = create<BotsState>((set, get) => {
         else fail(owner, cause, botId)
         void get().loadChat(botId)
         return false
+      }
+    },
+    async answerAction(botId, actionId, digest, answer) {
+      const card = get().chats[botId]?.messages.find(message => message.action?.actionId === actionId)?.action
+      const names = { botName: get().bots.find(bot => bot.id === botId)?.name, serverName: card?.serverName }
+      const owner = epoch
+      try {
+        await bots().answerAction(actionId, digest, answer)
+        if (owner === epoch) { await get().loadChat(botId); void get().refresh() }
+        return null
+      } catch (cause) {
+        if (owner !== epoch) throw cause
+        await get().loadChat(botId)
+        const refusal = botActionRefusal(cause, names)
+        // A gone row unmounts its card, so its refusal belongs in the chat's existing notice.
+        if (owner === epoch && !get().chats[botId]?.messages.some(message => message.action?.actionId === actionId)) fail(owner, refusal ? { message: refusal.text } : cause, botId)
+        return refusal ?? { reason: String((cause as { code?: unknown } | null)?.code ?? 'request_failed'), text: errorText(cause) }
       }
     },
     async answerQuestion(botId, questionId, choice) {

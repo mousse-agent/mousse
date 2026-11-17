@@ -4,6 +4,8 @@ import type { BotChatMessage } from '../../../shared/bots/personal/chat'
 import type { FindTurn } from '../../chat/components/agent-elements/find/find-index'
 import type { RevealNavigation } from '../../chat/components/agent-elements/find/reveal'
 import { useThreadFind, type ThreadFind } from '../../chat/components/agent-elements/find/use-thread-find'
+import { actionStatus, actionTitle } from './BotActionCard'
+import { botGroupTime } from './messageGroups'
 import { useBotsStore } from '../../stores/botsStore'
 import type { BotChatRow } from './botChatShape'
 
@@ -19,6 +21,10 @@ const ROW_MARGIN = 16
  * its words, which then stop where their plain copy starts (as BotChatView draws them).
  */
 export function botFindText(message: BotChatMessage): string {
+  // Only the always-visible title and status are indexed; arguments and the replaced fallback never count.
+  const action = message.action
+  if (action) return [actionTitle(action), actionStatus(action)].filter(Boolean).join('\n\n')
+  if (message.actionSentAt) return `Sent · ${botGroupTime(message.actionSentAt)}`
   if (message.plainFrom !== undefined && (message.question || message.cards?.length)) return message.text.slice(0, message.plainFrom).trimEnd()
   return message.text
 }
@@ -29,7 +35,11 @@ const asFind = new WeakMap<BotChatMessage, UIMessage>()
 function findMessageOf(message: BotChatMessage): UIMessage {
   let found = asFind.get(message)
   if (!found) {
-    found = { id: message.id, role: 'assistant', parts: [{ type: 'text', text: botFindText(message) }] }
+    // Escaped plain text prevents argument-like Markdown in a title from changing the search index.
+    const escape = (text: string) => text.replace(/[!-/:-@[-`{-~]/g, '\\$&')
+    found = { id: message.id, role: 'assistant', parts: message.action
+      ? [actionTitle(message.action), actionStatus(message.action)].map((text) => ({ type: 'text' as const, text: escape(text) }))
+      : [{ type: 'text', text: botFindText(message) }] }
     asFind.set(message, found)
   }
   return found

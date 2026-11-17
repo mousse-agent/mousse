@@ -458,3 +458,41 @@ it('formats stored telling hours in the window’s clock format', async () => {
   expect(host.textContent).toContain(`Tells you when it needs you · Quiet ${from} to ${to} · can wake you`)
   expect(host.textContent).not.toContain(fake.details.b1.telling)
 })
+
+it.each([true, false])('keeps whole-service controls with asks-first projection %s', async (asking) => {
+  fake.details.b1.permissions = [{ id: 'mail', title: 'use Mail', enabled: true, grantedAt: AT, note: asking ? 'Asks you first before actions that can send or change things.' : 'Use the connected Mail service.', ...(asking ? { mark: 'Asks first' } : {}) }]
+  await show()
+  expect(host.textContent?.includes('Asks first')).toBe(asking)
+  const title = [...host.querySelectorAll('span')].find((item) => item.title.includes(asking ? 'Asks you first' : 'connected Mail'))
+  expect(title).toBeTruthy()
+  const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="use Mail"]')!
+  await click(toggle())
+  expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', false])
+  await click(toggle())
+  expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', true])
+  await click(button('Remove use Mail'))
+  expect(fake.calls).toContainEqual(['revokePermission', 'b1', 'mail'])
+  expect(toggle()).toBeNull()
+})
+
+it('keeps chat usage and the service asks-first row together with whole-service controls', async () => {
+  fake.details.b1 = { ...fake.details.b1, usage: { turns: 12, inputPerTurn: 18_400, outputPerTurn: 640, cachedShare: 0.72 }, permissions: [{
+    id: 'mail', title: 'use your Mail tools', note: 'Asks you first before actions that can send or change things.', enabled: true, mark: 'Asks first', asksFirst: true, grantedAt: AT
+  }] }
+  await show()
+  const usage = () => host.querySelector<HTMLElement>('[data-testid="bot-about-usage"]')!
+  const service = () => [...host.querySelectorAll('.bot-about-permission')].find(element => element.textContent?.includes('Use your Mail tools'))!
+  expect(usage().textContent).toBe('18k tokens a turn · 72% from cache')
+  expect(usage().title).toContain('Chat turns in the last 7 days: 12')
+  expect(service().textContent).toContain('Asks first')
+  expect(service().contains(usage())).toBe(false)
+  const toggle = service().querySelector<HTMLButtonElement>('[role="switch"]')!
+  expect(toggle.getAttribute('aria-label')).toBe('use your Mail tools')
+  await click(toggle)
+  expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', false])
+  expect(usage().textContent).toContain('72% from cache')
+  await click(button('Remove use your Mail tools'))
+  expect(fake.calls).toContainEqual(['revokePermission', 'b1', 'mail'])
+  expect(service()).toBeUndefined()
+  expect(usage().textContent).toContain('18k tokens a turn')
+})

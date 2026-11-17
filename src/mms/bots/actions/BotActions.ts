@@ -9,12 +9,16 @@ import type { BotMcpTool } from '../../../shared/bots/personal/authority'
 import type { BotActivationRow, BotStore } from '../store/BotStore'
 import { canonicalJson, shortHash } from '../../integrations/revision'
 import { maskMemoryCredentials } from '../memory/guard'
-import type { BotMcpCallOutcome } from '../mcp/BotMcp'
+import { plainText, type BotMcpCallOutcome } from '../mcp/BotMcp'
 import type { ToolOutcome } from '../../run/mcp/appTools/types'
 
 /** The sole feature-switch read. No UI sets it until the complete feature ships. */
 export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): boolean {
   return settings?.experimental.botAsksFirst === true
+}
+export function readableActionTitle(name: string): string {
+  const words = plainText(name, 160).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_ .:/-]+/g, ' ').trim()
+  return words ? words[0]!.toUpperCase() + words.slice(1) : 'Send this action'
 }
 export const actionDigest = (value: unknown): string => shortHash(canonicalJson(value), 64)
 const hiddenKey = (key: string): boolean => /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, ''))
@@ -227,6 +231,13 @@ export class BotActions {
   }
   /** Erase call content without erasing owner intervention facts or the run-once key. */
   forgetText(botId: string, actionId?: string): void {
+    for (const action of this.host.store.all('SELECT message_id FROM bot_actions WHERE bot_id = ? AND (? IS NULL OR id = ?)', botId, actionId ?? null, actionId ?? null)) {
+      const source = `bm:${action.message_id}`
+      const statusPrefix = `${source}:status:`
+      this.host.store.run(`UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = COALESCE(redacted_at, ?)
+        WHERE bot_id = ? AND (source_key IN (?, ?) OR substr(source_key, 1, ?) = ?)`,
+      '[removed at your request]', this.host.store.now(), botId, `${source}_n1`, `${source}_n2`, statusPrefix.length, statusPrefix)
+    }
     this.host.store.run(`UPDATE bot_actions SET args_json = ?, args_digest = '[forgotten]',
       card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0),
         'toolReportedError', COALESCE(json_extract(result_json, '$.toolReportedError'), json_extract(card_json, '$.toolReportedError')),
@@ -294,7 +305,11 @@ export class BotActions {
     if (!this.host.enabled()) return { text: 'Asks first is off.', isError: true }
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
-    const existing = this.host.store.get('SELECT id FROM bot_actions WHERE call_key = ?', callKey)
+    const existing = this.host.store.get('SELECT id, args_digest, target_json FROM bot_actions WHERE call_key = ?', callKey)
+    if (existing?.args_digest === '[forgotten]' && existing.target_json === JSON.stringify({ server: tool.server, tool: tool.tool }))
+      return { text: 'This call id belongs to a forgotten call. Nothing new was held or sent.' }
+    if (existing && (existing.args_digest !== actionDigest(args) || existing.target_json !== JSON.stringify({ server: tool.server, tool: tool.tool })))
+      return { text: 'This call id was already used for a different call. Nothing was held for this call.', isError: true }
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
     const origin = this.host.origin(row)
@@ -330,7 +345,7 @@ export class BotActions {
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
-      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues, serverName: tool.serverName }), messageId,
+      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: readableActionTitle(tool.tool), serverName: tool.serverName }), messageId,
       new Date(Date.parse(this.host.store.now()) + this.host.lifetime(row)).toISOString(), this.host.store.now())
       this.host.park(row)
       this.host.post(row, messageId, `${tool.serverName} · ${tool.tool}\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)
@@ -391,26 +406,37 @@ export class BotActions {
     }
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
-  async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
+  /** Admission may retire stale lifecycle state; it never approves or dispatches the call. */
+  check(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): void {
+    this.checked(input, true)
+  }
+  private checked(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }, settle: boolean): ActionRow {
     const action = this.get(input.actionId)
     if (!action) throw new BotActionChanged("This can't be sent any more.", 'bot_action_gone')
     if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(JSON.parse(action.result_json).text, 'bot_action_unreachable')
     if (action.status === 'expired') throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
-    if (action.status === 'withdrawn') throw new BotActionChanged(action.result_json && JSON.parse(action.result_json).text?.includes('changed since') ? 'This changed since you saw it. Nothing was sent.' : 'No longer needed, so nothing was sent.', 'bot_action_withdrawn')
+    if (action.status === 'withdrawn') {
+      if (action.result_json && JSON.parse(action.result_json).text?.includes('changed since')) throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
+      throw new BotActionChanged('No longer needed, so nothing was sent.', 'bot_action_withdrawn')
+    }
     if (action.status !== 'open') throw new BotActionChanged('This was already answered.', 'bot_action_settled')
     if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
-      this.expireDue()
+      if (settle) this.expireDue()
       throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
     }
     if (action && input.answer === 'send' && this.host.store.registry(action.bot_id)?.pausedReason === 'owner') throw new BotActionChanged(`Resume ${this.host.name(action.bot_id)} to send this.`, 'bot_action_paused')
     const row = this.host.store.activation(action.activation_id)
     if (row?.trigger.kind === 'schedule' && this.host.obsolete(action)) {
-      this.host.store.db.transaction(() => {
+      if (settle) this.host.store.db.transaction(() => {
         if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent; carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(action))
       })
-      throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_withdrawn')
+      throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
     }
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
+    return action
+  }
+  async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
+    const action = this.checked(input, true)
     if (input.answer === 'not_now') {
       this.host.store.db.transaction(() => {
         if (!this.transition(action.id, 'open', 'declined', { text: 'Your owner chose not to send this: carry on without it and say what you skipped.' })) throw changed()

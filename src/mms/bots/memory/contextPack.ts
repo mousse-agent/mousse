@@ -1,3 +1,4 @@
+import { notice as mousseNotice, quoted } from '../../../shared/mousseContext'
 import { dataFrame } from '../../../shared/bots/personal/dataFrames'
 import {
   BOT_CHAT_DIGEST,
@@ -211,7 +212,14 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
   // What the bot's work reported (its run report, or a message it posted from work) is marked as data on its own line:
   // work reads web pages and files, so its words may carry text written to steer the bot.
   // A work report is held to the report cap (`BOT_REPORT_MAX_CHARS`), as a thread's notice is: memory_read shows the rest.
-  const windowLine = (row: BotJournalRow) => `[j${row.seq} · ${timeLabel(row.at, zone())}] ${fromWork(row) ? `${WORK_REPORT_SPEAKER}: ${capReport(packText(row), `memory_read j${row.seq} shows it all`).text}` : `${speaker(row)}: ${packText(row)}`}`
+  // Every review copy is outside data. Frame it here without changing the stored held-call text.
+  const actionContextText = (row: BotJournalRow): string => {
+    const text = packText(row)
+    if (row.redactedAt) return text
+    if (!/^bm:bm_action_[a-zA-Z0-9-]+(?:_n[12]|:status:[a-z]+)?$/.test(row.sourceKey)) return text
+    return mousseNotice({ kind: 'bot_action', ref: row.sourceKey.slice(3) }, row.sourceKey.includes(':status:') ? [text] : [quoted('held action', text)])
+  }
+  const windowLine = (row: BotJournalRow) => `[j${row.seq} · ${timeLabel(row.at, zone())}] ${fromWork(row) ? `${WORK_REPORT_SPEAKER}: ${capReport(packText(row), `memory_read j${row.seq} shows it all`).text}` : `${speaker(row)}: ${actionContextText(row)}`}`
 
   /**
    * The ledger block: the bot's newest jobs (`since`: only those changed after it), one line each, and when the newest

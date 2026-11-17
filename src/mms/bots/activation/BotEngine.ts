@@ -1,5 +1,5 @@
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
-import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData } from '../actions/BotActions'
+import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours, settingCompactionPoint } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
@@ -90,10 +90,10 @@ import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } f
 import { allPinned, copyPick, customSlotsOf, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
-import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, keepsWorking, openQuestionAnswerNote, questionWorkKeepsWorkingText, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
+import { defaultChatInput, defaultWorkLine, lateWorkNote, DEFAULT_NUDGE_AFTER_MINUTES, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, keepsWorking, openQuestionAnswerNote, questionWorkKeepsWorkingText, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
-import { nudgeSlot } from './questionFollowUps'
+import { nudgeSlot, actionNudgeId, type ActionNudgeFollowUp } from './questionFollowUps'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
 import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
@@ -660,7 +660,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     },
     name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
-    publish: id => { this.chat.republish(id) },
+    publish: id => {
+      // State changes are new Mousse facts for resumed chat epochs, not another chat turn or the bot's words.
+      const action = this.store.get('SELECT bot_id, activation_id, status, args_digest FROM bot_actions WHERE message_id = ?', id)
+      if (action && action.args_digest !== '[forgotten]' && ['done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn'].includes(String(action.status))) this.store.db.transaction(() => this.host.journal?.appendInTx(this.store.db, {
+        botId: String(action.bot_id), activationId: String(action.activation_id), lane: 'run', kind: 'notice', who: 'mousse', external: true,
+        sourceKey: `bm:${id}:status:${action.status}`,
+        text: `Held action: ${action.status === 'done' ? 'Sent' : action.status === 'uncertain' ? "Couldn't tell if it went through" : action.status === 'running' ? 'Sending' : action.status === 'approved' ? 'Waiting for the service' : action.status === 'expired' ? 'Expired · not sent' : action.status === 'failed' ? 'Failed; check the card for its outcome' : 'Not sent'}`
+      }))
+      this.chat.republish(id)
+      for (const suffix of ['_n1', '_n2']) if (this.store.message(`${id}${suffix}`)) this.chat.republish(`${id}${suffix}`)
+    },
     ownerAnswered: row => {
       this.resetWorkWaitChain(row.id)
       const last = this.store.get('SELECT MAX(rowid) AS n FROM bot_reminders WHERE work_id = ?', row.id)
@@ -749,6 +759,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly reminderRetryAt = new Map<string, number>()
   /** The same for a question's follow-up (a nudge or a default) that failed. */
   private readonly questionRetryAt = new Map<string, number>()
+  private followUpNudgeBudget: { at: number; times: Map<string, number[]> } | undefined
   /** When each waiting wake on a pull request last read it (`PR_WAKE_READ_MS`). */
   private readonly wakeReadAt = new Map<string, number>()
   /** The bots' background commands (`watch_start`), each a wake on a `watcher` event; they end with this process. */
@@ -819,6 +830,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(host.setTimer ? { setTimer: host.setTimer } : {})
     })
     this.chat = new BotChatProjection({
+      asksFirst: () => botAsksFirst(this.host.settings?.get()),
       store: host.store,
       ...(host.journal ? { journal: host.journal } : {}),
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
@@ -828,8 +840,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.tellings.read()
         this.armDue()
       },
-      tellAt: (botId, tell, at, messageId) => tell === 'soon' && !this.ownerActive() && !this.canWake(botId, messageId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
+      tellAt: (botId, tell, at, messageId) => actionNudgeId(messageId) ? new Date(this.followUpTime(botId, Date.parse(at))).toISOString() : tell === 'soon' && !this.ownerActive() && !this.canWake(botId, messageId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
       classify: (message, input) => {
+        const actionId = actionNudgeId(message.id)
+        if (actionId && botAsksFirst(this.host.settings?.get())) return this.actions.get(actionId)?.status === 'open' ? 'soon' : null
         const activation = message.activationId ? this.store.activation(message.activationId) : undefined
         const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
         const botId = this.store.message(message.id)!.botId
@@ -8918,6 +8932,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const event = data as { botId?: unknown; message?: BotChatMessage; quiet?: unknown } | null
     if (typeof event?.botId !== 'string' || typeof event.message?.id !== 'string') return
     this.tellings.noteLegacy(event.botId, event.message, event.quiet === true)
+    if (!botAsksFirst(this.host.settings?.get())) return
+    const messageId = event.message.id
+    const id = actionNudgeId(messageId) ?? (messageId.startsWith('bm_action_') ? messageId.slice(3) : undefined)
+    if (!id || this.actions.get(id)?.status !== 'open' || !this.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', event.botId, `cursor:telling-legacy:${messageId}`)) return
+    this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT DO NOTHING', event.botId, `cursor:action-told:${messageId}`, this.store.now())
+    this.armDue()
   }
 
   private ownerActive(): boolean { return this.host.ownerActive?.() ?? false }
@@ -8938,9 +8958,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** Only future tell_at on a soon row denotes a hold; no additional stored state. */
   quietHoursChanged(): void {
     const now = this.now()
-    for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND tell_at > at")) {
+    for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND (tell_at > at OR id GLOB 'bm_action_*_n[12]')")) {
       const botId = String(row.bot_id)
-      const end = !this.ownerActive() && !this.canWake(botId, String(row.id)) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
+      const end = (actionNudgeId(String(row.id)) || !this.ownerActive() && !this.canWake(botId, String(row.id))) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
       this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(end ?? Math.max(now, Date.parse(String(row.at)) + 1)).toISOString(), String(row.id))
     }
     // Reconstruct the normal due time from the saved bubble/last nudge, so an old quiet-hours end
@@ -8956,7 +8976,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (source) {
           at = Math.max(now, Date.parse(source.at) + (question.nudges ? NUDGE_AGAIN_MS : question.follow.afterMs))
           if (question.follow.kind === 'nudge') at = nudgeSlot(at,
-            this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map(time => Date.parse(time)))
+            this.nudgeTimes(question.botId, at))
         }
       }
       at = this.followUpTime(question.botId, at)
@@ -9002,6 +9022,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
       () => this.actions.nextDueAt(botId),
+      () => {
+        const times = this.actionNudgeFollowUps(botId).map(row => Math.max(row.at, forTimer ? this.questionRetryAt.get(row.id) ?? 0 : 0))
+        return times.length ? Math.min(...times) : undefined
+      },
       () => this.tellings.next(botId),
       () => {
         const row = this.store.nextReminder(botId)
@@ -9066,6 +9090,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Never synchronous: the pass is held below before any of it runs, so its end always lets go of it.
       await Promise.resolve()
       try {
+        this.followUpNudgeBudget = { at: now.getTime(), times: new Map() }
         this.actions.expireDue()
         // Reminders cancelled, forgotten or purged since they failed are no longer tried.
         for (const id of this.reminderRetryAt.keys()) if (this.store.reminder(id)?.status !== 'waiting') this.reminderRetryAt.delete(id)
@@ -9081,8 +9106,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           }
         }
         // Questions answered, withdrawn or purged since their follow-up failed are no longer tried.
-        for (const id of this.questionRetryAt.keys()) if (this.store.question(id)?.status !== 'open') this.questionRetryAt.delete(id)
-        for (const question of this.store.dueQuestions(now.toISOString())) {
+        for (const id of this.questionRetryAt.keys()) if (this.store.question(id)?.status !== 'open' && this.actions.get(id)?.status !== 'open') this.questionRetryAt.delete(id)
+        for (const question of [...this.store.dueQuestions(now.toISOString()), ...this.actionNudgeFollowUps(undefined, now.getTime()).filter(row => row.at <= now.getTime())]) {
           if ((this.questionRetryAt.get(question.id) ?? 0) > now.getTime()) continue
           try {
             await this.followUpQuestion(question, now)
@@ -9092,10 +9117,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             console.warn('a bot question could not be followed up; trying again in a minute', { questionId: question.id, error: error instanceof Error ? error.message : String(error) })
           }
         }
+        if (botAsksFirst(this.host.settings?.get())) {
+          for (const row of this.store.all("SELECT id, bot_id FROM bot_messages WHERE id GLOB 'bm_action_*_n[12]' AND tell = 'soon' AND told_at IS NULL")) {
+            const allowed = this.followUpTime(String(row.bot_id), now.getTime())
+            if (allowed > now.getTime()) this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(allowed).toISOString(), String(row.id))
+          }
+        }
         this.tellings.release(now.getTime())
       } finally {
         if (this.delivering === pass) this.delivering = undefined
-        this.armDue()
+        try { this.armDue() } finally { this.followUpNudgeBudget = undefined }
       }
     })()
     this.delivering = pass
@@ -9202,6 +9233,59 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // survive a restart; only an open question is ever followed up, so one the owner answered or moved on from, or that
   // was withdrawn or forgotten, never is.
 
+  /** Questions and held actions share the same bot-wide spacing and daily budget. */
+  private nudgeTimes(botId: string, at: number): number[] {
+    const cached = this.followUpNudgeBudget?.times.get(botId)
+    if (cached) return cached
+    const since = new Date((this.followUpNudgeBudget?.at ?? at) - 24 * 60 * 60_000).toISOString()
+    const actions = botAsksFirst(this.host.settings?.get()) ? this.store.all(`SELECT m.at FROM bot_messages m JOIN bot_actions a
+      ON m.id = 'bm_' || a.id || '_n1' OR m.id = 'bm_' || a.id || '_n2'
+      WHERE m.bot_id = ? AND m.at > ?`, botId, since) : []
+    const times = [...this.store.nudgeTimes(botId, since).map(time => Date.parse(time)), ...actions.map(row => Date.parse(String(row.at)))]
+    this.followUpNudgeBudget?.times.set(botId, times)
+    return times
+  }
+
+  /** Durable nudge rows carry the count; telling receipts carry the clock, never executable arguments. */
+  private actionNudgeFollowUps(botId?: string, now = this.now()): ActionNudgeFollowUp[] {
+    if (!botAsksFirst(this.host.settings?.get())) return []
+    const rows = this.store.all(`SELECT a.id, a.bot_id, a.activation_id, a.message_id, a.expires_at FROM bot_actions a
+      JOIN bot_registry b ON b.bot_id = a.bot_id JOIN bot_messages m ON m.id = a.message_id
+      WHERE a.status = 'open' AND a.args_digest <> '[forgotten]' AND b.deleted_at IS NULL
+      AND (? IS NULL OR a.bot_id = ?)`, botId ?? null, botId ?? null)
+    const budgets = this.followUpNudgeBudget?.times ?? new Map<string, number[]>()
+    return rows.flatMap(row => {
+      const id = String(row.id), bot = String(row.bot_id), messageId = String(row.message_id)
+      if (this.store.messageForgotten(bot, messageId) || this.store.message(`bm_${id}_n2`)) return []
+      const first = this.store.message(`bm_${id}_n1`)
+      if (first && this.store.messageForgotten(bot, first.id)) return []
+      const source = first ?? this.store.message(messageId)!
+      const legacy = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', bot, `cursor:action-told:${source.id}`)
+      const toldAt = legacy?.value ?? source.toldAt
+      if (typeof toldAt !== 'string') return []
+      const due = Math.max(now, Date.parse(toldAt) + (first ? NUDGE_AGAIN_MS : DEFAULT_NUDGE_AFTER_MINUTES * 60_000))
+      let history = budgets.get(bot)
+      if (!history) { history = this.nudgeTimes(bot, now); budgets.set(bot, history) }
+      const at = this.followUpTime(bot, nudgeSlot(due, history))
+      if (!Number.isFinite(at) || at >= Date.parse(String(row.expires_at))) return []
+      return [{ id, actionId: id, botId: bot, activationId: String(row.activation_id), messageId, count: first ? 2 : 1, at }]
+    })
+  }
+
+  private nudgeAction(question: ActionNudgeFollowUp, now: Date): void {
+    const live = this.actionNudgeFollowUps(question.botId, now.getTime()).find(row => row.id === question.id)
+    if (!live || live.at > now.getTime()) return
+    this.store.db.transaction(() => {
+      const action = this.actions.get(live.actionId)
+      if (!action || action.status !== 'open') return
+      const title = JSON.parse(action.card_json ?? '{}').title ?? readableActionTitle(JSON.parse(action.target_json).tool)
+      this.chat.post({ id: `bm_${live.actionId}_n${live.count}`, botId: live.botId, author: 'bot', kind: 'notice',
+        text: `Wants to ${title[0]?.toLowerCase() ?? ''}${title.slice(1)}`, external: true, replyTo: live.messageId, activationId: live.activationId, lane: 'run' })
+    })
+    this.followUpNudgeBudget?.times.get(live.botId)?.push(now.getTime())
+    this.changed({ botId: live.botId })
+  }
+
   /** When a question's first follow-up is due, its bubble shown at `shownAt`: the time the bot gave after that. */
   private firstFollowUpAt(question: Pick<BotQuestionRow, 'follow' | 'botId'>, shownAt: string): string | null {
     if (!question.follow) return null
@@ -9212,7 +9296,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A question whose follow-up is due, at any hour: Mousse nudges the owner, or the bot goes with its default. A bot that
    * is gone, or a question with nothing to follow up, is left be.
    */
-  private async followUpQuestion(question: BotQuestionRow, now: Date): Promise<void> {
+  private async followUpQuestion(question: BotQuestionRow | ActionNudgeFollowUp, now: Date): Promise<void> {
+    if ('actionId' in question) { this.nudgeAction(question, now); return }
     const registry = this.store.registry(question.botId)
     if (!registry || registry.deletedAt || !question.follow) {
       this.store.setQuestionNext(question.id, null)
@@ -9239,7 +9324,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private nudge(question: BotQuestionRow, now: Date): void {
     const at = now.getTime()
-    const slot = nudgeSlot(at, this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map((time) => Date.parse(time)))
+    const slot = nudgeSlot(at, this.nudgeTimes(question.botId, at))
     if (slot > at) {
       this.moveFollowUp(question, slot)
       return
@@ -9260,6 +9345,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return true
     })
     if (!posted) return
+    this.followUpNudgeBudget?.times.get(question.botId)?.push(at)
     // The rows before it hand their answers to it: they show them again in every window, without the buttons.
     for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot' && row.id !== `bm_${question.id}_n${count}`) this.chat.republish(row.id)
     this.changed({ botId: question.botId })

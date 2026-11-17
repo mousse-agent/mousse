@@ -542,3 +542,32 @@ function listsServices(fixture: BotFixture, botReach: BotReachPort): ListsServic
     botReach
   } as unknown as ListsServices
 }
+
+it.each(['send', 'not_now'] as const)('held-action %s rechecks real bot Reach and its saved-result scope before reaching the backend', async answer => {
+  const { botId } = await createBot(f, { reply: 'Ready.' })
+  const { reach, switchOff } = reachOver(store)
+  store.set(botId, { mode: 'chosen', nodes: [PHONE] })
+  const card = { seq: 500, id: 'bm_action_one', at: '2026-11-07T09:00:00.000Z', author: 'bot' as const, kind: 'notice' as const, text: 'Mail review', chips: [], action: {
+    actionId: 'action-one', digest: 'shown', title: 'Send email', serverName: 'Mail', args: { to: 'one@example.test' }, hasHiddenValues: false, hiddenPaths: [], status: 'open' as const
+  } }
+  // The backend is scripted: this case proves the bridge's authorization boundary, not execution of an email.
+  vi.spyOn(f.bots.service, 'actionMessage').mockReturnValue(card)
+  const admission = vi.spyOn(f.bots.service, 'actionCheck').mockImplementation(() => {})
+  const backend = vi.spyOn(f.bots.service, 'answerAction').mockResolvedValue({ status: answer === 'send' ? 'done' : 'declined' })
+  const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'accept_edits' })
+  const params = { botId, actionId: 'action-one', digest: 'shown', answer }
+  const context = { ...as(PHONE), execution: 'execution-action-one' } as RpcContext
+  expect(await outcome(methods, 'bots.actions.answer', params, context)).toEqual({ ok: true })
+  expect(backend).toHaveBeenCalledExactlyOnceWith(params)
+  expect(admission).toHaveBeenCalledExactlyOnceWith(params)
+  const method = methods.find(method => method.method === 'bots.actions.answer')!
+  store.set(botId, { mode: 'chosen', nodes: [LAPTOP] })
+  expect(await outcome(methods, 'bots.actions.answer', params, context)).toMatchObject({ code: 'stream_unknown' })
+  expect(() => method.authorizeResult!('execution-action-one', context.caller)).toThrow(NetError)
+  // Taking Reach away after admission is checked in the real handler too.
+  await expect(method.handle(params, context)).rejects.toMatchObject({ code: 'stream_unknown' })
+  store.set(botId, { mode: 'chosen', nodes: [PHONE] })
+  switchOff(PHONE)
+  expect(await outcome(methods, 'bots.actions.answer', params, context)).toMatchObject({ code: 'forbidden', details: { reason: 'setting_off' } })
+  expect(backend).toHaveBeenCalledTimes(1)
+})

@@ -122,6 +122,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       return next
     })),
     // A tap: the owner's reply (the label) to the question's bubble, and the bubble answered.
+    answerAction: vi.fn(async () => ({ status: 'done' })),
     answerQuestion: vi.fn((botId, questionId, choice, clientRequestId) => record('answerQuestion', [botId, questionId, choice], () => {
       const rows = fake.chats[botId] ?? []
       const bubble = rows.find((entry) => entry.question?.questionId === questionId)

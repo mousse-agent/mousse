@@ -18,6 +18,7 @@ import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
 import { BotReactionBadge, BotReactionBar } from './BotReactions'
 import { replyImages } from './botReplyImages'
 import { BotEmojiButton } from './BotEmoji'
+import { BotActionCard } from './BotActionCard'
 import { BotAskReplies } from './BotAskReplies'
 import { BotReminderReplies } from './BotReminderReplies'
 import { BotQuestionReplies } from './BotQuestionReplies'
@@ -213,7 +214,7 @@ function ReplyButton({ onReply }: { onReply(): void }) {
 
 /** The time in a bubble's corner; "Sending…" while the message is on its way. */
 function BubbleTime({ message, pending = false }: { message: BotChatMessage; pending?: boolean }) {
-  return pending ? <span className="bot-bubble-time">Sending…</span> : <time className="bot-bubble-time" dateTime={message.at}>{botGroupTime(message.at)}</time>
+  return pending ? <span className="bot-bubble-time">Sending…</span> : <time className="bot-bubble-time" dateTime={message.action?.askedAt ?? message.at}>{message.action?.status === 'open' && 'Asked · '}{botGroupTime(message.action?.askedAt ?? message.at)}</time>
 }
 
 /**
@@ -380,16 +381,16 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
       <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
         <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
-        {message.actionSentAt ? <p className="bot-question-settled" role="note">Sent · <time dateTime={message.actionSentAt}>{botGroupTime(message.actionSentAt)}</time></p> : media.text && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={media.text} className="bot-markdown" /></div>}
+        {message.action ? <BotActionCard card={message.action} botId={bot.id} botName={bot.name} messageId={message.id} /> : message.actionSentAt ? <p className="bot-question-settled" role="note" data-find-text data-message-id={message.id} data-part-index="0">Sent · <time dateTime={message.actionSentAt}>{botGroupTime(message.actionSentAt)}</time></p> : media.text && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={media.text} className="bot-markdown" /></div>}
         {cards && <BotCards cards={cards} botId={bot.id} />}
         {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
         {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} />}
         {stepsOpen && <BotSteps chips={steps} />}
-        {(steps.length > 0 || time) && <div className="bot-bubble-foot">
+        {(steps.length > 0 || time && (!message.action || message.action.status === 'open')) && <div className="bot-bubble-foot">
           {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
-          {time && <BubbleTime message={message} />}
+          {time && (!message.action || message.action.status === 'open') && <BubbleTime message={message} />}
         </div>}
         {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
       </div>
@@ -846,7 +847,12 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           const index = start + drawn
           const place = places[index]!
           const day = place.day && <div className="bot-day" role="separator" aria-label={place.day}><span>{place.day}</span></div>
-          if (row.kind === 'system') return <Fragment key={row.id}>{day}{row.cut ? <BotCutReply text={row.text} starts={place.starts} /> : <SystemLine row={row} />}</Fragment>
+          if (row.kind === 'system') return <Fragment key={row.id}>{day}{row.expiredReviews?.length
+            ? <details className="bot-expired-actions" aria-label="Expired action reviews" data-turn-key={row.id}>
+              <summary><span role="note">{row.text}</span></summary>
+              {row.expiredReviews.map(message => <BotMessage key={message.id} bot={bot} message={message} onAction={act} quote={false} starts={true} time={false} onReply={reply} onApplet={openApplet} />)}
+            </details>
+            : row.cut ? <BotCutReply text={row.text} starts={place.starts} /> : <SystemLine row={row} />}</Fragment>
           const message = row.message
           const sending = index >= rows.length
           // A reply shows what it answers unless that is the message right above it.

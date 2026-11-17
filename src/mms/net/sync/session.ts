@@ -1,3 +1,4 @@
+import { isBotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type {
   BlobId,
@@ -183,12 +184,20 @@ const equalKey = (a: string, b: string): boolean => {
 }
 /** Why a routed call was refused; the only detail of a refusal that crosses the wire. */
 const FORBIDDEN_REASON_PREFIX = 'forbidden.'
+const APPLICATION_REASON_PREFIX = 'application.'
 function wireError(error: unknown): WireError {
   const code = error instanceof NetError ? error.code : 'internal'
   // Do not serialize arbitrary provider/OS messages, credentials or payloads. A refusal of a routed
   // call says which kind it was (a fixed word), in the cause slot older peers already accept.
   const reason =
     error instanceof NetError && code === 'forbidden' ? forbiddenReason(error.details) : undefined
+  // Like forbidden reasons: only a known application code crosses, never names or error text.
+  const actionReason = code === 'conflict' && error instanceof NetError
+    ? (error.details as { reason?: unknown } | undefined)?.reason : undefined
+  if (isBotActionRefusalCode(actionReason)) return {
+    code, message: NET_ERRORS[code].message, retryable: NET_ERRORS[code].retryable,
+    cause: [{ code: APPLICATION_REASON_PREFIX + actionReason, message: NET_ERRORS[code].message }]
+  }
   return {
     code,
     message: NET_ERRORS[code].message,
@@ -201,6 +210,11 @@ function wireError(error: unknown): WireError {
   }
 }
 const remoteError = (error: WireError): NetError => {
+  const actionReason = error.code === 'conflict'
+    ? error.cause?.find(entry => entry.code?.startsWith(APPLICATION_REASON_PREFIX))?.code?.slice(APPLICATION_REASON_PREFIX.length)
+    : undefined
+  if (isBotActionRefusalCode(actionReason))
+    return new NetError('conflict', undefined, { details: { reason: actionReason } })
   const reason =
     error.code === 'forbidden'
       ? error.cause

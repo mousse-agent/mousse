@@ -208,3 +208,12 @@ it.each([false, true])('a single can-wake automation keeps its reports soon and 
   expect(events.filter(e => e.sound)).toHaveLength(1)
   expect(events.at(-1)?.rows).toHaveLength(5)
 })
+
+// An owner who asks for only "needs you" still hears open actions; settled actions never tell again.
+it.each(['open', 'approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn'] as const)('C4 needs-you telling for an action that is %s', status => {
+  const message: import('../../src/shared/bots/personal/chat').BotChatMessage = {
+    id: 'bm_action_review', seq: 1, at: '2026-11-16T10:00:00.000Z', author: 'bot', kind: 'notice', text: 'Send this', chips: [],
+    action: { actionId: 'action_review', digest: 'digest', title: 'Send', serverName: 'Mail', args: {}, hasHiddenValues: false, hiddenPaths: [], status }
+  }
+  expect(tellingClass({ message, tellMe: 'needs_you', level: 'fyi', ownerTurn: false, reminder: false, quiet: false })).toBe(status === 'open' ? 'soon' : null)
+})

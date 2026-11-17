@@ -78,8 +78,29 @@ export type BotMessageKind = 'text' | 'run_report' | 'notice' | 'error'
 
 export type BotSnoozeChoice = '10m' | '1h' | 'tomorrow'
 
+/** Mousse's review of a held call, from its stored masked copy. */
+export interface BotActionCard {
+  actionId: string
+  askedAt?: string
+  digest: string
+  title: string
+  serverName: string
+  args: unknown
+  hasHiddenValues: boolean
+  hiddenPaths: string[][]
+  status: 'open' | 'approved' | 'running' | 'done' | 'failed' | 'uncertain' | 'declined' | 'expired' | 'withdrawn'
+  at?: string
+  result?: { text?: string; toolReportedError?: boolean; notSentInTime?: boolean }
+  note?: string
+  previous?: { status: 'done' | 'uncertain' | 'failed'; at: string }
+  tooLarge?: boolean
+  /** The stored review was erased by the owner; only its outcome remains. */
+  forgotten?: true
+}
+
 /** One row of a bot's chat (`bot_messages`). */
 export interface BotChatMessage {
+  action?: BotActionCard
   /** Only an expired held call of a schedule; adjacent ones fold in chat, rows remain stored. */
   expiredActionSchedule?: string
   /** Sent action instant; formatted in the client clock. */
@@ -299,6 +320,8 @@ export interface BotWorkItem {
 
 /** One thing a bot may use, in About → Can use. `id` is the permission's fingerprint. */
 export interface BotPermissionItem {
+  /** At least one granted tool of this service asks first. */
+  asksFirst?: true
   /** Absent on older services, which cannot switch permissions. */
   enabled?: boolean
   /** Devices need Full access to allow this permission. */

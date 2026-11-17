@@ -455,6 +455,15 @@ export class BotChatService {
     return this.engine.chat.toMessage(message)
   }
 
+  actionCheck(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId: string }): void {
+    const action = this.engine.actions.get(input.actionId)
+    if (action && action.bot_id !== input.botId) throw new BotEngineError('bot_action_gone', "This can't be sent any more.")
+    try { this.engine.actions.check(input) } catch (error) {
+      if (error instanceof BotActionChanged) throw new BotEngineError(error.code, error.message)
+      throw error
+    }
+  }
+
   async answerAction(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId?: string }): Promise<{ status: string }> {
     const action = this.engine.actions.get(input.actionId)
     if (input.botId && action?.bot_id !== input.botId) throw new BotEngineError('not_found', 'No held action here.')

@@ -9,13 +9,14 @@ import type { ThreadNotificationEvent } from '../../settings'
  * a forgotten memory's blanked text) announce nothing. Chips never notify: they are not rows.
  */
 export function botNotificationKind(
-  message: Pick<BotChatMessage, 'author' | 'at' | 'ask' | 'question' | 'systemLine'>,
+  message: Pick<BotChatMessage, 'author' | 'at' | 'ask' | 'question' | 'systemLine' | 'action'>,
   now = Date.now(),
   maxAgeMs = 10 * 60_000
 ): ThreadNotificationEvent | null {
   if (message.author !== 'bot' || message.systemLine) return null
   const at = Date.parse(message.at)
   if (Number.isFinite(at) && now - at > maxAgeMs) return null
+  if (message.action) return message.action.status === 'open' ? 'question' : null
   if (message.ask) return message.ask.status === 'open' ? 'question' : null
   // A bot's question with answers to tap (`ask_owner`) is announced as a question, as an ask is.
   if (message.question) return message.question.status === 'open' ? 'question' : null
@@ -25,9 +26,10 @@ export function botNotificationKind(
 /** The words of a bot notification: the bot's name as the title, then what it wants or said. */
 export function botNotificationContent(
   botName: string | undefined,
-  message: Pick<BotChatMessage, 'text' | 'ask' | 'error' | 'question' | 'plainFrom' | 'replyTo'>
+  message: Pick<BotChatMessage, 'text' | 'ask' | 'error' | 'question' | 'plainFrom' | 'replyTo' | 'action'>
 ): { title: string; body: string } {
   const title = botName?.trim() || 'Your bot'
+  if (message.action) return { title, body: `Wants to ${message.action.title[0]?.toLowerCase() ?? ''}${message.action.title.slice(1)}` }
   if (message.ask) return { title, body: `Wants to ${message.ask.title}` }
   if (message.error) return { title, body: message.error.text }
   // A question: its words and its answers, "Which flat? — Flat A / Flat B". A nudge names the question it reminds of,

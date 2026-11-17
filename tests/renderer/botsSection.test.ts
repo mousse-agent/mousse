@@ -353,3 +353,23 @@ describe('the poll', () => {
     root = createRoot(host)
   })
 })
+
+it('keeps an open MCP review in needs-you words when its chat opens beside background work', async () => {
+  const stateText = 'Waiting for you: Send email · Mail'
+  const bot = summary('mail-review', { name: 'Mail helper', state: 'needs_you', needsOwner: true, stateText,
+    work: [{ id: 'other-work', title: 'Organising mail', status: 'running', startedAt: '2026-11-07T09:00:00.000Z' }] })
+  fake.chats[bot.id] = [message(1, { id: 'bm_action_mail', text: 'Mail · send_email\nPrivate body', action: {
+    actionId: 'action_mail', digest: 'shown', title: 'Send email', serverName: 'Mail', args: { to: 'recipient@example.test', body: 'Review this email' }, hasHiddenValues: false, hiddenPaths: [], status: 'open'
+  } })]
+  await show([bot])
+  expect(stateLine(bot.name).textContent).toBe(stateText)
+  await click(button(`Message ${bot.name}`))
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[aria-label="Action summary"]')?.textContent).toBe('Send email · Mail')
+  expect([...card.querySelectorAll('button')].map(element => element.textContent)).toEqual(['Send', 'Not now'])
+  expect(stateLine(bot.name).textContent).toBe(stateText)
+  expect(button(`Message ${bot.name}`)?.title).toBe(`${bot.name}: ${stateText}`)
+  expect(button(`Message ${bot.name}`)?.textContent).not.toContain('Typing')
+  expect(button(`Message ${bot.name}`)?.textContent).not.toContain('send_email')
+  expect(card.textContent).not.toContain('send_email')
+})

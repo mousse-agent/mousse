@@ -1,4 +1,6 @@
 import { compareLaunched, launchedActive, launchedGoing, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
+import { guardTextCharacters } from '../../../shared/bots/personal/modelSlots'
+import { botGroupTime } from './messageGroups'
 import { askNoticeText } from '../../../shared/bots/personal/askText'
 
 /**
@@ -47,10 +49,10 @@ export function workSignalsOf(message: BotChatMessage): { titles: string[]; queu
  */
 export type BotChatRow =
   | { kind: 'message'; message: BotChatMessage }
-  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string; note?: 'info' | 'error'; cut?: true }
+  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string; note?: 'info' | 'error'; cut?: true; expiredReviews?: BotChatMessage[]; actionHistory?: BotChatMessage[] }
 
 /** A row of this window only: a `/` command's line, or (`cut`) the words of a reply its turn stopped before finishing. */
-export interface BotWindowLine { id: string; at: string; text: string; error?: true; cut?: true }
+export interface BotWindowLine { id: string; at: string; text: string; error?: true; cut?: true; expiredReviews?: BotChatMessage[]; actionHistory?: BotChatMessage[] }
 
 /**
  * `rows` with this window's own lines (`notes`, oldest first: the owner's `/` commands, replies cut off) among them by
@@ -120,19 +122,46 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
   const marks = new Map<string, OwnerMarks>()
   let lastOwner: string | undefined
   let expired: { schedule: string; count: number; row: Extract<BotChatRow, { kind: 'system' }> } | undefined
+  const latestAction = new Map<string, BotChatMessage>()
+  for (const message of messages) if (message.action) {
+    const first = latestAction.get(message.action.actionId)
+    latestAction.set(message.action.actionId, { ...message, action: { ...message.action, askedAt: message.action.askedAt ?? first?.action?.askedAt ?? first?.at ?? message.at } })
+  }
+  const foldedActions = new Set(messages.filter(message => message.expiredActionSchedule && message.action).map(message => message.action!.actionId))
+  const nudgeOf = (message: BotChatMessage) => Boolean(message.action && /^bm_action_.*_n[12]$/.test(message.id))
+  const earlierLine = (message: BotChatMessage): Extract<BotChatRow, { kind: 'system' }> => ({
+    kind: 'system', id: message.id, at: message.at, of: message.id,
+    text: `${guardTextCharacters(message.action!.title).replace(/\s+/g, ' ')} · ${nudgeOf(message) ? 'Reminded' : 'Asked'} ${botGroupTime(message.at)}`
+  })
   for (const message of messages) {
-    if (message.expiredActionSchedule) {
-      if (expired?.schedule === message.expiredActionSchedule) {
-        expired.count++
-        expired.row.text = `${expired.count} expired · not sent`
-      } else {
+    const nudge = nudgeOf(message)
+    if (nudge && message.action && foldedActions.has(message.action.actionId)) {
+      // The newest review is represented inside its schedule fold. Earlier nudge copies stay quiet here.
+      // All history for this call belongs inside its expired review.
+      continue
+    }
+    if (!nudge && message.expiredActionSchedule) {
+      if (expired?.schedule === message.expiredActionSchedule) expired.count++
+      else {
         const line: Extract<BotChatRow, { kind: 'system' }> = { kind: 'system', id: message.id, at: message.at, text: 'Expired · not sent', of: message.id }
         expired = { schedule: message.expiredActionSchedule, count: 1, row: line }
         rows.push(line)
       }
+      if (message.action) {
+        const newest = latestAction.get(message.action.actionId) ?? message
+        ;(expired.row.expiredReviews ??= []).push({ ...newest, action: { ...message.action, askedAt: message.action.askedAt ?? message.at } })
+      }
+      const reviews = expired.row.expiredReviews
+      const names = reviews?.map(review => guardTextCharacters(review.action!.title).replace(/\s+/g, ' '))
+      const name = names?.length === expired.count && names.every(title => title === names[0]) ? `: ${names[0]}` : ''
+      expired.row.text = `${expired.count === 1 ? 'Expired' : `${expired.count} expired`} · not sent${name}`
       continue
     }
-    expired = undefined
+    if (!nudge) expired = undefined
+    if (message.action && latestAction.get(message.action.actionId)?.id !== message.id) {
+      rows.push(earlierLine(message))
+      continue
+    }
     if (message.author === 'owner') lastOwner = message.id
     // A tapped answer is the bot's own label, so it reads as a quiet line, as an answered ask does.
     if (message.author === 'owner' && message.answers?.tapped) {
@@ -171,7 +200,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
         continue
       }
     }
-    rows.push({ kind: 'message', message })
+    rows.push({ kind: 'message', message: message.action ? latestAction.get(message.action.actionId)! : message })
     const answered = message.ask ? askAnsweredLine(botName, message.ask) : undefined
     if (answered) {
       const tip = answerTip?.(message)
