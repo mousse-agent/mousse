@@ -24,6 +24,8 @@ export type FileAttachmentProps = {
   /** A pasted text kept as a file: a button puts it into the message box instead. */
   onInsertText?: () => void;
   onRemove?: () => void;
+  /** Makes the chip draggable: dragged out of the window, it drops the file. */
+  onDragStart?: (event: React.DragEvent<HTMLDivElement>) => void;
   className?: string;
   display?: "chip" | "image-only";
   /**
@@ -127,6 +129,7 @@ export function FileAttachment({
   onOpen,
   onInsertText,
   onRemove,
+  onDragStart,
   className,
   display = "chip",
   enableImagePreview = true,
@@ -159,6 +162,8 @@ export function FileAttachment({
         className,
       )}
       title={isImageOnly ? filename : undefined}
+      draggable={onDragStart ? true : undefined}
+      onDragStart={onDragStart}
     >
       {isImageOnly ? (
         <PreviewTarget
