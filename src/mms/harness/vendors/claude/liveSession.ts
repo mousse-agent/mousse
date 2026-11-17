@@ -948,7 +948,8 @@ export class LiveSession<Turn = unknown> {
    *   that cannot be moved (the call throws, answers false or does not answer in time) is reported
    *   (`options.notMovable`) and the steer is not pushed: it waits for that subagent. Right before the push,
    *   `options.mayCut` is asked again; a tool that started meanwhile keeps the steer waiting.
-   * - `options.forced` (Send now): pushed at once, with no move; then the foreground tools are stopped, since an
+   * - `options.forced` (a person's steer, or Send now): foreground subagents are moved as above, then the steer is
+   *   pushed; then the foreground tools left (commands, and a subagent that could not be moved) are stopped, since an
    *   immediate message waits for a running command on Claude Code (spike S1). Each is stopped as its task
    *   (`stopTask`) when Claude Code reported one for every call (`task_started`, about 3 s after a command starts);
    *   otherwise the turn is interrupted, which ends the command and leaves the pushed steer queued, so it runs once.
@@ -966,15 +967,14 @@ export class LiveSession<Turn = unknown> {
     if (!query || run.settled || run.abandoned || this.dead) return false
     run.steerInFlight++
     try {
-      if (!options.forced) {
-        for (const callId of options.subagents ?? []) {
-          if (await this.moveToBackground(query, callId)) {
-            options.moved?.(callId)
-            continue
-          }
-          options.notMovable?.(callId)
-          return false
+      for (const callId of options.subagents ?? []) {
+        if (await this.moveToBackground(query, callId)) {
+          options.moved?.(callId)
+          continue
         }
+        options.notMovable?.(callId)
+        // Sent now: a subagent that stays in the foreground is stopped with the turn's commands below.
+        if (!options.forced) return false
       }
       // The turn's result may have arrived while the foreground work moved; settling waited for this
       // steer, but a steer never starts a turn the run no longer owns: it is the next queued turn.
