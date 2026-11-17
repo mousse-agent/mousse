@@ -2810,3 +2810,16 @@ it('omits a common action name when the expired schedule reviews describe differ
   await click(fold.querySelector('summary'))
   expect([...fold.querySelectorAll('[aria-label="Action summary"]')].map(item => item.textContent)).toEqual(['Send an email · Mail', 'Delete a draft · Mail'])
 })
+
+it('keeps an expiry fold closed to Send while a newer nudge still has its pre-expiry snapshot', async () => {
+  const original = message(1, { id: 'bm_action_race', expiredActionSchedule: 'mail', action: action({ actionId: 'action_race', status: 'expired', at: AT }) })
+  fake.chats.inbox = [original, message(2, { id: 'bm_action_race_n1', action: action({ actionId: 'action_race', status: 'open' }), replyTo: { id: original.id, author: 'bot', text: 'Review' } })]
+  await open()
+  const fold = host.querySelector<HTMLDetailsElement>('details[aria-label="Expired action reviews"]')!
+  await click(fold.querySelector('summary'))
+  const card = fold.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[role="status"]')?.textContent).toContain('Expired · not sent')
+  expect(button('Send', card)).toBeUndefined()
+  expect(card.querySelector('summary')?.textContent).toBe('What it would have sent')
+  expect(fold.querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+})
