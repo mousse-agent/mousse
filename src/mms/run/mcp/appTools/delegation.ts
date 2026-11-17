@@ -1,6 +1,7 @@
 import { Type, type JsonObject, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
 import { recordSubagentCall } from '../../../../shared/subagentTools'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
+import { hostingTurn } from '../../nativeHelpers'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
   McpToolError,
@@ -86,7 +87,8 @@ export interface DelegationToolHost {
   /** `mode: 'plan'` (from `thread_send`) runs the follow-up as a plan turn whatever the subagent's ceiling. */
   continueSubagent(input: { subagent: string; prompt: string; mode?: 'plan' }, call: DelegationToolCall): Promise<unknown>
   answerSubagent(input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }, call: DelegationToolCall): Promise<unknown> | unknown
-  taskStatus(input: SubagentRef): Promise<unknown> | unknown
+  /** `acknowledge: false`: the read is not the thread's own turn (a native helper's call), so the result stays unacknowledged. */
+  taskStatus(input: SubagentRef, options?: { acknowledge?: false }): Promise<unknown> | unknown
   taskCancel(input: SubagentRef): Promise<unknown>
   listDelegations(): unknown
   listSubagents(): unknown
@@ -337,8 +339,10 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
       if (ctx.transport === 'mcp') before?.(args, ctx.caller)
       // In process, only a turn the host gave delegation tools runs them (a trusted definition never
       // has them); over MCP the thread owner builds them for the caller.
-      const delegation = ctx.turn.delegation ?? (ctx.transport === 'mcp' ? host.delegation(ctx.caller) : undefined)
-      if (!delegation) throw new Error(`Unknown tool: ${definition.name}`)
+      const own = ctx.turn.delegation ?? (ctx.transport === 'mcp' ? host.delegation(ctx.caller) : undefined)
+      if (!own) throw new Error(`Unknown tool: ${definition.name}`)
+      // A native helper's call is not the thread's own turn: what it reads never acknowledges the thread's notices (§2.7).
+      const delegation = hostingTurn(ctx.turn) === ctx.turn ? own : Object.assign(Object.create(own) as DelegationToolHost, { taskStatus: (ref: SubagentRef) => own.taskStatus(ref, { acknowledge: false }) })
       // Tool arguments arrive as parsed JSON (MCP or Pi), so they are JSON values.
       const call: ToolCall = { type: 'toolCall', id: ctx.toolCallId, name: definition.name, arguments: args as JsonObject }
       return { text: await dispatchWithTimeline(delegation, call, ctx) }

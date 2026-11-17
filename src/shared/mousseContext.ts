@@ -24,6 +24,7 @@ export type MousseNoticeKind =
   | 'bot_subagent'
   | 'question_answered'
   | 'question_dismissed'
+  | 'agent_note'
 
 export type MousseReply = 'if-needed' | 'required'
 

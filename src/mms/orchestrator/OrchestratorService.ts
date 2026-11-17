@@ -87,7 +87,7 @@ import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '.
 import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
-import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
+import { steerReleaseWindow, steerStrategy, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
 import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
@@ -4471,6 +4471,11 @@ export class OrchestratorService extends EventEmitter {
     return this.relayHandlerImpl
   }
 
+  /** The thread waits on a person's answer to a question or an approval (rule 4 holds agent notes until it comes). */
+  awaitsAnswer(threadId: string): boolean {
+    return this.questions.listPendingForThread(threadId).length > 0 || (this.runEngine?.approvals.listPending(threadId).length ?? 0) > 0
+  }
+
   /**
    * Notices handed to a running turn with its Mousse tool results (docs/plans/tool-api.md §2.2), on a runtime that
    * steers by restarting its reply: the turn's pending subagent results and requests reach it at its next Mousse tool
@@ -4485,6 +4490,7 @@ export class OrchestratorService extends EventEmitter {
           threadId,
           runId,
           caps: this.capabilitiesForThread(threadId),
+          awaitsAnswer: this.awaitsAnswer(threadId),
           prepare: (rows) => this.dropStaleQuestionRows(rows),
           plan: (rows) => planWakeNotice(rows, this.noticeContext())
         })
@@ -4593,6 +4599,10 @@ export class OrchestratorService extends EventEmitter {
       archiveOwnThreadAfterTurn: (options) => this.archiveOwnThreadAfterTurn(options),
       setThreadHidden: (threadId, hidden, options) => this.setThreadHiddenAsAgent(threadId, hidden, options),
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
+      steerStrategyOf: (threadId) => {
+        const caps = this.capabilitiesForThread(threadId)
+        return caps ? steerStrategy(caps, this.runEngine?.getActiveRun(threadId) ?? null) : null
+      },
       approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
       answerApproval: (threadId, requestId, answers, options) => this.answerApprovalAsAgent(threadId, requestId, answers, options),
       automations: () => this.automationTools,
@@ -7811,7 +7821,7 @@ export class OrchestratorService extends EventEmitter {
       delegateTask,
       continueSubagent,
       answerSubagent: (input) => this.answerSubagent(parentThreadId, parentRunId, input),
-      taskStatus: (ref) => this.taskStatus(parentThreadId, ref),
+      taskStatus: (ref, options) => this.taskStatus(parentThreadId, ref, options),
       taskCancel: (ref) => this.taskCancel(parentThreadId, ref),
       listDelegations,
       listSubagents: () => this.listSubagents(parentThreadId),
@@ -8540,13 +8550,13 @@ export class OrchestratorService extends EventEmitter {
     return { ok: true as const, delegation: pick }
   }
 
-  private taskStatus(parentThreadId: string, ref: SubagentRef) {
+  private taskStatus(parentThreadId: string, ref: SubagentRef, options?: { acknowledge?: false }) {
     const engine = this.requireRunEngine()
     const task = this.resolveTask(parentThreadId, ref)
     if (!task.ok) return task.refusal
     const delegationId = task.delegation.delegationId
     let delegation = task.delegation
-    if (delegation.status === 'result_available' || delegation.status === 'failed') delegation = engine.acknowledgeDelegation(delegationId)
+    if (options?.acknowledge !== false && (delegation.status === 'result_available' || delegation.status === 'failed')) delegation = engine.acknowledgeDelegation(delegationId)
     const row = this.subagentView(parentThreadId).find((subagent) => subagent.childThreadId === delegation.childThreadId)
     const pending = this.questions.listPendingForThread(delegation.childThreadId)
     const workspaceResult = delegation.result ? this.delegationResultReport(delegation) : undefined

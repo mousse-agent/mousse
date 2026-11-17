@@ -1,12 +1,15 @@
 import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import type { PermissionMode } from '../../../../shared/permissionMode'
-import { isLocalOnlyThread, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
-import type { QueuedMessage, Thread, UserQuestionAnswers } from '../../../../shared/types'
+import { isLocalOnlyThread, isNativeHelperThread, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
+import type { QueuedMessage, Thread, ThreadNativeHelper, UserQuestionAnswers } from '../../../../shared/types'
 import { describeApprovalRefusal } from '../../approvalRights'
 import { QueueAccessError, QueueConflictError } from '../../../queue/ThreadMessageQueue'
 import { readRunResultText } from '../../delegation/hold'
+import { hostingTurn } from '../../nativeHelpers'
 import type { RunEngine } from '../../RunEngine'
-import { TERMINAL_RUN_STATUSES, type AgentActor, type DelegationRecord, type RunRecord, type ThreadEvent } from '../../types'
+import { TERMINAL_RUN_STATUSES, type AgentActor, type AgentNotePayload, type DelegationRecord, type RunRecord, type ThreadEvent } from '../../types'
+import { familyRelation, threadFamily } from './family'
+import { noteDelivery, noteFrom, postNote, runtimeOwnedResult, type SendDelivery } from './threadNotes'
 import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunCommandResult, AgentThreadRequest, AppToolHost, ApprovalRequestInfo } from './host'
 import type { BotAppToolDeps } from './bots'
 import { threadLink } from '../../../../shared/threadLink'
@@ -1136,6 +1139,93 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     }
     return json({ threadId: target.threadId, computer: target.computer, runId: result.runId })
   })
+  /** The thread when it is a native helper's mirror (docs/plans/tool-api.md §2.7), whose runtime owns its turns. */
+  const mirrorOf = (threadId: string): (Thread & { native: ThreadNativeHelper }) | undefined => {
+    const meta = host.threadMeta?.(threadId)
+    return meta?.native && isNativeHelperThread(meta) ? (meta as Thread & { native: ThreadNativeHelper }) : undefined
+  }
+  /**
+   * Steers the running run `runId` of another thread with `text` as the caller's message (`thread_steer`, and a note to
+   * a thread outside the caller's family): today's rules, a subagent only from its own lineage and never a run looser
+   * than the caller's.
+   */
+  const steerAsAgent = async (threadId: string, runId: string, text: string, args: Record<string, unknown>, ctx: ToolCallContext, tool: 'thread_steer' | 'thread_send'): Promise<{ runId: string; sequence: number; replayed: boolean }> => {
+    const bot = botThreadCall(bots, ctx)
+    if (bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
+    assertNotBotThread(host, threadId, tool)
+    assertOwnSubagentsOnly(engine, ctx.caller, threadId, tool)
+    assertTakesWork(host, threadId)
+    const actor = actorOf(ctx)
+    const result = acceptedRunCommand(await host.steerRun!(threadId, runId, text, { clientRequestId: `${tool === 'thread_steer' ? 'thread_steer' : 'thread_send:note'}:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
+    if (!result.replayed) showAction(host, threadId, actor, bot ? 'added guidance to the turn that was running' : `steered run ${runId}`)
+    if (bot && !result.replayed) botChip(bot, tool, threadId, titleOf(threadId), text)
+    return result
+  }
+  /**
+   * A note (`thread_send` with intent `note`, docs/plans/tool-api.md §2.2): information that grants nothing. To the
+   * caller's family it is posted to the thread's inbox and delivered as any notice is: steered into a native run, handed
+   * over with the run's next Mousse tool call on a runtime that restarts its reply, or with the thread's next turn
+   * (`attention: needed` starts one on an idle thread). Outside the family it joins the running run the caller names,
+   * as a steer does. A native helper's mirror takes nothing (`runtime_owned`).
+   */
+  const sendNote = async (threadId: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => {
+    if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
+    if (args.attention !== undefined && args.attention !== 'needed' && args.attention !== 'none') throw new Error('attention must be needed or none')
+    if (args.interrupt !== undefined && typeof args.interrupt !== 'boolean') throw new Error('interrupt must be true or false')
+    if (args.runId !== undefined && (typeof args.runId !== 'string' || !args.runId.trim())) throw new Error('runId must be a non-empty string')
+    if (args.mode !== undefined || args.notify !== undefined) throw new Error('mode and notify apply to work only: a note starts no work of its own')
+    const content = args.content
+    const attention = (args.attention as 'needed' | 'none' | undefined) ?? 'needed'
+    const interrupt = args.interrupt === true
+    const runId = args.runId as string | undefined
+    if (threadId === ctx.caller.threadId) throw new Error('thread_send is for other threads; use queue_enqueue to queue a message on your own thread.')
+    if (isQualifiedId(threadId)) {
+      if (!runId) throw new McpToolError('mousse_conflict', 'A note to a thread on another computer joins its running turn: pass the runId you read.', { conflict: 'run_needed' })
+      return steerOnComputer(threadId, { ...args, text: content }, ctx)
+    }
+    const mirror = mirrorOf(threadId)
+    if (mirror) return json(runtimeOwnedResult(mirror, ctx.caller.threadId))
+    const relation = ctx.turn.bot ? null : familyRelation(threadFamily(host, engine), ctx.caller.threadId, threadId)
+    if (relation === null || relation === 'native') {
+      // Outside the family: today's rules. The note joins the running turn the caller read, as a steer does.
+      if (interrupt) throw new McpToolError('mousse_scope_denied', 'interrupt is for a note to your own subagent.')
+      if (!runId) throw new McpToolError('mousse_conflict', `Thread ${threadId} is outside your family, so a note joins its running turn: pass the runId you read (thread_list, thread_read). To give it work, send intent "work".`, { conflict: 'run_needed' })
+      if (!host.steerRun) return notAvailable('thread_send with a note')
+      const result = await steerAsAgent(threadId, runId, content, args, ctx, 'thread_send')
+      return json({ threadId, intent: 'note', delivery: 'presented' satisfies SendDelivery, ...result })
+    }
+    assertNotBotThread(host, threadId, 'thread_send')
+    const waiting = (host.pendingRequests?.(threadId).length ?? 0) > 0 || engine.approvals.listPending(threadId).length > 0
+    if (interrupt) {
+      if (relation !== 'child') throw new McpToolError('mousse_scope_denied', 'interrupt is for a note to your own subagent: only its direct parent restarts its running reply.')
+      // A steer settles a waiting request today, so a restart never reaches a thread that waits on a person.
+      if (waiting)
+        throw new McpToolError('mousse_conflict', `Thread ${threadId} waits on a question or an approval; interrupting it now would settle that request. Send the note without interrupt: it arrives after the answer.`, { conflict: 'waiting_on_request' })
+      const active = engine.getActiveRun(threadId)
+      if (active && host.steerRun && host.steerStrategyOf?.(threadId) === 'interrupt_restart') {
+        const result = await steerAsAgent(threadId, active.runId, content, args, ctx, 'thread_send')
+        return json({ threadId, intent: 'note', delivery: 'presented' satisfies SendDelivery, interrupted: true, ...result })
+      }
+    }
+    const requestKey = `thread_send:note:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+    const payload: AgentNotePayload = {
+      kind: 'agent_note',
+      senderThreadId: ctx.caller.threadId,
+      senderRunId: ctx.caller.runId,
+      senderTitle: titleOf(ctx.caller.threadId) ?? null,
+      senderAccess: host.readOnlyThread?.(ctx.caller.threadId) ? 'read_only' : ctx.caller.modeCeiling === 'plan' ? 'plan' : 'agent',
+      from: noteFrom(relation),
+      text: content,
+      attention
+    }
+    const { row, replayed } = postNote(engine, requestKey, payload, threadId)
+    if (!replayed) showAction(host, threadId, actorOf(ctx), 'sent a note')
+    // A message never answers, dismisses or replaces a request: the note waits until the person answers.
+    const decided = waiting && !replayed
+      ? { delivery: 'after_answer' as const, runId: engine.getActiveRun(threadId)?.runId ?? null }
+      : await noteDelivery(engine, { threadId, inboxId: row.inboxId, attention, strategy: () => host.steerStrategyOf?.(threadId) ?? null, signal: ctx.signal })
+    return json({ threadId, intent: 'note', attention, ...decided, inboxId: row.inboxId, replayed })
+  }
   /**
    * `thread_interrupt` of a run of a thread this thread launched on another computer. That computer stops it only when an
    * agent of this computer started it, and leaves a thread a person took over.
@@ -1544,14 +1634,18 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Sent to your own subagent, it is a follow-up task as continue_subagent starts (the same clientRequestId never starts it twice under either name, and Mousse sends you the result without notify); another thread's subagent is reached only through its parent. ${REMOTE_REACH} A message there is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; status uncertain means that computer did not confirm it (call again with the same clientRequestId: it is never sent twice); notify works there too: Mousse follows that computer's run and tells you when it settles.`,
+      description: `Send a message to another thread, as work (the default) or as a note. A note (intent "note") is information that grants nothing: you may send one to any thread of your family (your parent, siblings, your subagents and those below them), from a read-only subagent too. It arrives labelled with your thread and what you may do, never as the user's words, and returns delivery: presented (it reached the running turn), waiting_on_command (the runtime injects it when the running command ends), waiting_for_boundary (it arrives with that turn's next Mousse tool call, otherwise at its next turn), started (an idle thread got a turn for it), queued (attention "none": it waits for the thread's next turn) or after_answer (the thread waits on a question or approval; a note never answers one). interrupt: true restarts your own subagent's running reply with the note on a runtime that cannot inject it; it is refused (waiting_on_request) while that thread waits on a person. A note to a thread outside your family joins the running turn you name with runId, as thread_steer does. Work is a new assignment: within your family only a thread's direct parent sends it; send a note to anyone else there. To a thread that mirrors a helper its runtime started, nothing is sent: delivery runtime_owned names the agent id and the runtime's own message tool. Work runs as follows. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Sent to your own subagent, it is a follow-up task as continue_subagent starts (the same clientRequestId never starts it twice under either name, and Mousse sends you the result without notify); another thread's subagent is reached only through its parent. ${REMOTE_REACH} A message there is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; status uncertain means that computer did not confirm it (call again with the same clientRequestId: it is never sent twice); notify works there too: Mousse follows that computer's run and tells you when it settles.`,
       botDescription: `Send a message to one of your owner's threads. Its model receives it labelled as a message from you, not from your owner, and runs it in that thread's own mode; its approvals and questions wait for your owner. It starts a turn when the thread is idle and queues behind the running turn otherwise. Refused while the thread waits for your owner to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from you or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, and when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes; each refusal says why (data.conflict). Send as many messages as the work needs: there is no count per turn, per run or per day, and no limit on messages in a row. Each message you send is a job in your ledger (or joins the job the thread still works on): you are told here in your chat when the thread finishes or waits for a person, with its report and link, so end your turn instead of waiting; use thread_wait only when this turn can't go on without the answer. Returns the run it created and delivery: started or queued.`,
       inputSchema: {
         type: 'object',
         properties: {
           threadId: { type: 'string', description: 'The thread to send to; not your own (use queue_enqueue for that).' },
           content: { type: 'string' },
-          mode: { type: 'string', enum: ['agent', 'plan'], description: 'Defaults to agent.' },
+          intent: { type: 'string', enum: ['work', 'note'], description: 'work (default): a new assignment, which starts a turn or queues behind the running one. note: information for the thread, delivered into its running turn.' },
+          attention: { type: 'string', enum: ['needed', 'none'], description: 'Notes only. needed (default): an idle thread gets a turn for it. none: it waits for the thread\'s next turn.' },
+          runId: { type: 'string', description: 'Notes to a thread outside your family: the running run to join, as you last read it.' },
+          interrupt: { type: 'boolean', description: 'Notes to your own subagent only: restart its running reply now with the note, on a runtime that cannot inject it (Claude Code, Cursor, ACP).' },
+          mode: { type: 'string', enum: ['agent', 'plan'], description: 'Work only. Defaults to agent.' },
           notify: NOTIFY_SCHEMA,
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         },
@@ -1561,16 +1655,25 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       class: 'mutation',
       offered: () => false,
       target: localTarget,
+      // A note reaches the caller's family from any of it, a read-only subagent too; work only from the direct parent.
+      messageIntent: (args) => (isQualifiedId(args.threadId) ? undefined : args.intent === 'note' ? 'note' : args.intent === undefined || args.intent === 'work' ? 'work' : undefined),
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
+        if (args.intent !== undefined && args.intent !== 'work' && args.intent !== 'note') throw new Error('intent must be work or note')
+        if (args.intent === 'note') return sendNote(threadId, args, ctx)
+        for (const key of ['attention', 'runId', 'interrupt'] as const)
+          if (args[key] !== undefined) throw new Error(`${key} applies to notes only (intent "note")`)
         if (isQualifiedId(threadId)) return sendOnComputer(threadId, args, ctx)
         if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
         if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
         const mode = (args.mode as 'agent' | 'plan' | undefined) ?? 'agent'
         const notify = notifyArg(args)
+        if (threadId === ctx.caller.threadId) throw new Error('thread_send is for other threads; use queue_enqueue to queue a message on your own thread.')
+        // A native helper's mirror: nothing is sent, and the result names the runtime's own way to reach it (§2.7).
+        const mirror = mirrorOf(threadId)
+        if (mirror) return json(runtimeOwnedResult(mirror, ctx.caller.threadId))
         if (!host.sendToThread) return notAvailable('thread_send')
         if (notify && !ctx.turn.bot && !host.watchSettle) return notAvailable('thread_send with notify')
-        if (threadId === ctx.caller.threadId) throw new Error('thread_send is for other threads; use queue_enqueue to queue a message on your own thread.')
         if (mode === 'agent' && ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only send plan turns.')
         // A personal bot reaches only what it may (`botThreadReach`: never a subagent, a bot's, a private thread or the
         // Automation manager's).
@@ -1750,7 +1853,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           const resultText = fullView ? readRunResultText(engine.store, threadId, now.runId) : undefined
           // The caller's own subagent: the result read here is acknowledged as task_status does, so its notice is not
           // handed over again.
-          if (resultText !== undefined && !bot) {
+          // A native helper's call is not the thread's own turn: it never acknowledges the thread's notices (§2.7).
+          if (resultText !== undefined && !bot && hostingTurn(ctx.turn) === ctx.turn) {
             const task = engine.delegations.listForChildThread(threadId)
               .find((entry) => entry.parentThreadId === ctx.caller.threadId && (entry.childRunId === now.runId || entry.childRunId === continuedFrom))
             if (task) engine.acknowledgeDelegation(task.delegationId)
@@ -1954,16 +2058,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (!host.steerRun) return notAvailable('thread_steer')
         if (threadId === ctx.caller.threadId) throw new Error('thread_steer is for other threads.')
         // A personal bot reaches only what it may (`botThreadReach`), and steers as its messages go: labelled as its words.
-        const bot = botThreadCall(bots, ctx)
-        if (bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
-        assertNotBotThread(host, threadId, 'thread_steer')
-        assertOwnSubagentsOnly(engine, ctx.caller, threadId, 'thread_steer')
-        assertTakesWork(host, threadId)
-        const actor = actorOf(ctx)
-        const result = acceptedRunCommand(await host.steerRun(threadId, runId, args.text, { clientRequestId: `thread_steer:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
-        if (!result.replayed) showAction(host, threadId, actor, bot ? 'added guidance to the turn that was running' : `steered run ${runId}`)
-        if (bot && !result.replayed) botChip(bot, 'thread_steer', threadId, titleOf(threadId), args.text)
-        return json({ threadId, ...result })
+        return json({ threadId, ...(await steerAsAgent(threadId, runId, args.text, args, ctx, 'thread_steer')) })
       }
     },
     {

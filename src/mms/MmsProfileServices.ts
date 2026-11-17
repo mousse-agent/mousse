@@ -2726,6 +2726,7 @@ export class MmsProfileServices {
       outbox: engine.outbox,
       tools: engine.tools,
       capabilitiesFor: (threadId) => this.orchestrator.capabilitiesForThread(threadId),
+      awaitsAnswer: (threadId) => this.orchestrator.awaitsAnswer(threadId),
       credentials: this.mcpCredentials
     })
     this.runEffectWorker = worker
