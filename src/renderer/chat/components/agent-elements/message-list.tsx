@@ -268,15 +268,6 @@ function savedWorkEndedAt(assistants: UIMessage[]): number | null {
   return end;
 }
 
-/** Whether keyboard focus is in the work of the same turn that part `part`'s line folds (`turn-fold-part-N`). */
-function focusInFoldPart(toggle: HTMLElement | null, part: number): boolean {
-  const active = typeof document === "undefined" ? null : document.activeElement;
-  const turn = toggle?.closest("[data-turn-key]");
-  if (!turn || !active || active === document.body) return false;
-  const fold = active.closest(`.turn-fold-part-${part}`);
-  return fold != null && fold.closest("[data-turn-key]") === turn;
-}
-
 function TurnWorkStatus({
   active,
   startedAt,
@@ -302,7 +293,7 @@ function TurnWorkStatus({
    * A finished turn whose work folds behind this line: the line is the control that opens it ("Worked for 32s ›"),
    * and `open` says whether the work shows.
    */
-  fold?: { open: boolean; onToggle: () => void; hiddenRuns?: readonly string[]; part?: number };
+  fold?: { open: boolean; onToggle: () => void; hiddenRuns?: readonly string[] };
   /** How many replies with text the fold hides, said on a finished turn's line so an earlier answer is not missed. */
   foldedReplies?: number;
   /** While the turn runs: when it waited on the person, which its time does not count. */
@@ -310,16 +301,14 @@ function TurnWorkStatus({
   /** The line after a steered message: "Continued for …", the time of the work that answered it. */
   continued?: boolean;
 }) {
-  // Focus in work the turn's end folds away moves to the line that opens it, in the commit the line appears: the live
-  // row's chevron (gone in this commit), or a row still drawn in the fold that is about to close (inert, then gone).
+  // The live row's chevron, or the run's group line that took its focus, had focus when the turn ended and folded that
+  // run away: the line that opens it takes focus. Both leave in the commit this line appears, even while the fold still
+  // draws its work for the close: moving into the fold's Collapse remounts every row it holds.
   const foldToggleRef = useRef<HTMLButtonElement>(null);
   const hiddenRuns = fold?.hiddenRuns?.join("\n") ?? "";
-  const foldPart = fold?.part ?? 0;
   useLayoutEffect(() => {
-    if (!hiddenRuns) return;
-    const toggle = foldToggleRef.current;
-    if (hiddenRuns.split("\n").some(takeLiveRunFocus) || focusInFoldPart(toggle, foldPart)) toggle?.focus();
-  }, [hiddenRuns, foldPart]);
+    if (hiddenRuns && hiddenRuns.split("\n").some(takeLiveRunFocus)) foldToggleRef.current?.focus();
+  }, [hiddenRuns]);
   if (active) {
     return (
       <div className="turn-work" data-find-ignore>
@@ -2869,7 +2858,7 @@ const TurnRow = memo(function TurnRow({
           };
           const foldOf = (k: number) =>
             partFolds[k]!.has
-              ? { open: open.has(k), onToggle: () => onToggleWork(turnKey, k), hiddenRuns: hiddenRunsOf(k), part: k }
+              ? { open: open.has(k), onToggle: () => onToggleWork(turnKey, k), hiddenRuns: hiddenRunsOf(k) }
               : undefined;
           // The rows in order, a part's line under its steered message, and each run of folded rows in one fold that
           // closes as motion (a turn that just ended draws its work open first: `foldingIn`).
@@ -2884,7 +2873,7 @@ const TurnRow = memo(function TurnRow({
             const flush = () => {
               if (run.length === 0) return;
               drawn.push(
-                <Collapse key={`fold-${runKey}`} open={open.has(k) || foldingIn} className={`turn-fold-part-${k} flex flex-col gap-3`}>
+                <Collapse key={`fold-${runKey}`} open={open.has(k) || foldingIn} className="flex flex-col gap-3">
                   {run}
                 </Collapse>,
               );

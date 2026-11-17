@@ -367,6 +367,18 @@ describe('what you opened in a thread', () => {
     expect(groupLine().getAttribute('aria-expanded')).toBe('true')
   })
 
+  it('gives the focus on a live run to "Worked for" when the run joins the thought before it as the turn ends', () => {
+    const live = (messages: UIMessage[], status: 'ready' | 'streaming') =>
+      act(() => root.render(createElement(MessageList, { key: 'thread-d', threadId: 'thread-d', messages, status })))
+    live([...turn(4, 0).slice(0, 5), call('b4', 'tool-Bash', { command: 'node test.js' }, 6, 'input-available')], 'streaming')
+    act(() => host.querySelector<HTMLButtonElement>('[data-turn-live] button.turn-live-toggle')!.focus())
+    // The run's line is keyed by the thought it joins, not by the run's first call, which keyed the live row.
+    live([...turn(4, 0).slice(0, 5), call('b4', 'tool-Bash', { command: 'node test.js' }, 6)], 'ready')
+    expect(host.querySelector('[data-turn-live]')).toBeNull()
+    expect(document.activeElement).toBe(toggles()[0])
+    expect(toggles()[0]!.getAttribute('aria-expanded')).toBe('false')
+  })
+
   it('is forgotten when the thread is deleted', () => {
     expect(hasThreadOpenMemory('thread-a')).toBe(true)
     forgetThreadOpenMemory(['thread-a'])
