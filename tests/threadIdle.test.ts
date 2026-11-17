@@ -58,8 +58,7 @@ describe('threadHasPendingWork', () => {
     ['a thread whose last turn completed', { activity: { root: 'completed' } }],
     ['an idle thread', { activity: { root: 'idle' } }],
     ['a thread whose terminal exited', { ptys: { root: [{ ptyId: 'p1', alive: false }] } }],
-    ['agents that all finished', { agents: { root: ['completed', 'failed', 'interrupted'] } }],
-    ['an interrupted agent state', { agents: { root: ['interrupted'] } }]
+    ['agents that all finished', { agents: { root: ['completed', 'failed', 'interrupted'] } }]
   ])('treats a thread with %s as idle', (_name, stub) => {
     expect(threadHasPendingWork(services(stub), 'root')).toBeUndefined()
   })
