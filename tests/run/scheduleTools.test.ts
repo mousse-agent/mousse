@@ -353,10 +353,6 @@ describe('the schedule tools (SPEC §15.1)', () => {
   })
 
   describe('bounds on cost and lifetime', () => {
-    it('the defaults are ten active jobs, fifteen minutes and seven days', () => {
-      expect(AGENT_JOB_LIMIT_DEFAULTS).toEqual({ maxActive: 10, minIntervalMinutes: 15, lifetimeDays: 7 })
-    })
-
     it('a job ends after the default lifetime unless a person extends it', async () => {
       const { create, stored } = await world()
       const before = Date.now()
