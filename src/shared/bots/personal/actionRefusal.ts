@@ -28,6 +28,6 @@ export function botActionRefusal(error: unknown, names: BotActionRefusalNames = 
   const value = error as { code?: unknown; details?: { reason?: unknown } } | null | undefined
   const code = isBotActionRefusalCode(value?.code) ? value.code : value?.code === 'conflict' ? value.details?.reason : undefined
   if (isBotActionRefusalCode(code)) return { reason: code, text: botActionRefusalText(code, names) }
-  if (value?.code === 'conflict') return { reason: 'conflict', text: 'This could not be sent. Nothing was sent. Open it on the computer for the reason.' }
+  if (value?.code === 'conflict') return { reason: 'conflict', text: 'This could not be sent from here. Open it on the computer to see what happened.' }
   return undefined
 }
