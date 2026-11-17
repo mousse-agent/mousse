@@ -593,7 +593,7 @@ export class NetService {
             // A device of this user's list that is not connected here gets the keeper's control calls only, every
             // family and the calls with none alike; read on every call and on every lookup of a saved result.
             if (!CONTROL_METHOD.test(method.method) && !this.connectedHere(peer))
-              throw new NetError('forbidden', undefined, { details: { reason: 'not_connected' } })
+              throw notConnected()
             // Read on every call, so a block takes effect on the device's next request, and
             // on the lookup of a result it asked for earlier.
             if (
