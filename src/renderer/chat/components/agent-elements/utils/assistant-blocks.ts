@@ -601,9 +601,9 @@ function isSecretRequestCall(part: Record<string, unknown>): boolean {
  * When a turn's messages say the agent waited on the person: an approval from when it was asked until it was answered
  * (still waiting while pending), a secret request while it is open, and a question until its answers when nothing
  * ran in between (a question asked without waiting lets the agent go on, so its time counts). A `secret_request`
- * call blocks until the person answers, declines or an hour passes, so its wait runs from the call to the turn's next
- * message: that is also when an answered request's wait ends once the open request is gone. It includes the moment
- * the agent takes to start again after the answer.
+ * call blocks until the person answers, declines or an hour passes, so once it ended its wait runs from the call to
+ * its saved end (`endedAt`, when its result arrived), which stays after the open request is gone. A call saved
+ * without its end (an older transcript) counts only while its request is open.
  */
 export function turnWaitSpans(messages: ReadonlyArray<SettleTurnMessage & { createdAt?: unknown }>): WaitSpan[] {
   const spans: WaitSpan[] = [];
@@ -621,10 +621,10 @@ export function turnWaitSpans(messages: ReadonlyArray<SettleTurnMessage & { crea
       } else if (part.type === SECRET_PART && isRecord(part.data)) {
         const from = at ?? timeOf(part.data.createdAt);
         if (from != null) spans.push({ from, to: null });
-      } else if (at != null && isSecretRequestCall(part)) {
-        const next = messages.slice(index + 1).map((later) => timeOf(later.createdAt)).find((time) => time != null && time >= at);
-        if (next != null) spans.push({ from: at, to: next });
-        else if (part.state === "input-streaming" || part.state === "input-available") spans.push({ from: at, to: null });
+      } else if (isSecretRequestCall(part)) {
+        const from = timeOf(part.startedAt) ?? at;
+        const to = timeOf(part.endedAt);
+        if (from != null && to != null && to > from) spans.push({ from, to });
       } else if (part.type === "tool-Question" && at != null) {
         const next = messages[index + 1];
         const answered = next?.parts?.some((p) => isRecord(p) && p.type === "tool-QuestionAnswers");

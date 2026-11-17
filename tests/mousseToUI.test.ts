@@ -695,6 +695,16 @@ describe('typed activity items', () => {
     expect(partOf(mousseToUIMessages([mcp])[0]!).type).toBe('tool-mcp__myserver__my_tool')
   })
 
+  it('gives a finished call its start and end, which a running call does not have yet', () => {
+    const secret = (status: 'running' | 'done') => row(
+      's',
+      { ...activityBase, id: 's', callId: 's', toolName: 'secret_request', kind: 'generic', server: 'mousse', status, ...(status === 'done' ? { endedAt: '2026-01-01T00:05:00.000Z' } : {}) },
+      { toolCall: { title: 'Called mousse.secret_request', summary: 'ok', details: ['Server: mousse', 'Tool: secret_request'], status: status === 'done' ? 'complete' : 'processing', toolName: 'secret_request' } }
+    )
+    expect(partOf(mousseToUIMessages([secret('done')])[0]!)).toMatchObject({ startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:05:00.000Z' })
+    expect(partOf(mousseToUIMessages([secret('running')])[0]!).endedAt).toBeUndefined()
+  })
+
   it('treats an unknown kind as generic and never throws', () => {
     const future = row(
       'x',
