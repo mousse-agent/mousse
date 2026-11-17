@@ -157,24 +157,23 @@ function firstSentenceEnd(text: string): number {
 
 /**
  * A thought's headline: one still line that stands for it, used wherever a thought is summarised (the live line, a
- * finished thought's row, a group's heading). It is the headline of the thought's newest paragraph: the paragraph's
- * title (a `**Title**` or `# Heading` line) when it has one, or the title just above it when that title stands alone
- * as its own paragraph; otherwise its first sentence. Plain text, cut by code point.
+ * finished thought's row, a group's heading). A thought written in titled sections reads as its latest title: a
+ * `**Title**` or `# Heading` line heads every paragraph after it, until the next title. Text with no title above it
+ * reads as its newest paragraph's first sentence. Plain text, cut by code point.
  *
- * So the line changes only when a new paragraph starts (and while a paragraph's first words are still arriving): a
- * long thought moves on paragraph by paragraph, and never reflows with every word.
+ * So the line changes only when a new section or a new untitled paragraph starts (and while a paragraph's first words
+ * are still arriving): a long thought moves on section by section, and never reflows with every word.
  */
 export function thoughtHeadline(content: string | undefined): string {
   if (!content?.trim()) return "";
+  const allLines = content.split("\n");
+  for (let index = allLines.length - 1; index >= 0; index -= 1) {
+    const title = titleOf(allLines[index]!);
+    if (title) return cutCodePoints(title, HEADLINE_MAX);
+  }
   const paragraphs = content.split(/\n\s*\n/).filter((block) => block.trim());
   const newest = paragraphs[paragraphs.length - 1]!;
   const lines = newest.split("\n").map((line) => line.trim()).filter(Boolean);
-  const own = titleOf(lines[0]!);
-  if (own) return cutCodePoints(own, HEADLINE_MAX);
-  // A title written as its own paragraph heads the paragraph after it (summaries arrive as "**Title**\n\nbody").
-  const before = paragraphs.length > 1 ? paragraphs[paragraphs.length - 2]!.trim() : "";
-  const above = before && !before.includes("\n") ? titleOf(before) : undefined;
-  if (above) return cutCodePoints(above, HEADLINE_MAX);
   // List markers and quote marks are not words of the sentence.
   const body = lines
     .map((line) => line.replace(/^>\s?/, "").replace(/^(?:[-*+]|\d+[.)])\s+/, ""))

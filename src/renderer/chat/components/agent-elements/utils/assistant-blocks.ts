@@ -437,16 +437,20 @@ export function workGroupTitle(items: AssistantToolItem[]): string {
 }
 
 /**
- * A group's header: the headline of the thought that led to its first call, with a short tag of what the calls did
- * (`summary`: "Ran 1 command", or "8 actions" for a mix); otherwise what the calls did (`workGroupTitle`) and no
- * summary. That thought says why the calls ran, which a count does not. The title is set once: thoughts written after
- * the first call (taken into the group as the turn goes on) do not change it, so a running group never retitles.
- * `thought` is set when a thought is the title, so the row shows the thinking icon beside it.
+ * A group's header: the headline of the run's latest thought before its last call (the headline the person last saw
+ * while the run was live), with a short tag of what the calls did (`summary`: "Ran 1 command", or "8 actions" for a
+ * mix); otherwise what the calls did (`workGroupTitle`) and no summary. A thought after the last call is about what
+ * comes next, not about this run. A running run is shown by the live row, not as a group, so a group line is drawn
+ * only once its run has ended and never changes. `thought` is set when a thought is the title, so the row shows the
+ * thinking icon beside it.
  */
 export function workGroupHeading(items: AssistantToolItem[]): { title: string; summary?: string; thought?: true } {
   const title = workGroupTitle(items);
-  const firstCall = items.findIndex((item) => workKindOf(item.part.type) !== "thought");
-  const thought = firstCall > 0 ? latestThoughtTitle(items.slice(0, firstCall)) : "";
+  let lastCall = -1;
+  items.forEach((item, index) => {
+    if (workKindOf(item.part.type) !== "thought") lastCall = index;
+  });
+  const thought = lastCall > 0 ? latestThoughtTitle(items.slice(0, lastCall)) : "";
   if (!thought) return { title };
   // Short beside a thought: one kind keeps its phrase ("Ran 3 commands"), a mix counts its calls ("8 actions").
   const kinds = tallyKinds(items).filter((tally) => tally.kind !== "thought").length;

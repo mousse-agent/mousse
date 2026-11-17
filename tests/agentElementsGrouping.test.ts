@@ -26,13 +26,17 @@ const tool = (type: string, toolCallId: string, extra: Record<string, unknown> =
 
 describe('thoughtHeadline', () => {
   it.each([
-    // The newest paragraph's title line wins.
+    // The latest title heads every paragraph after it.
     ['a bold title', '**Checking the auth flow**\n\nThe token is read twice.', 'Checking the auth flow'],
     ['a title with a colon', '__Plan:__\nRead the file first.', 'Plan'],
     ['a markdown heading', '## Plan of attack\nStart with the store.', 'Plan of attack'],
     ['a title alone above the body', '**Two**\n\nmore body', 'Two'],
-    ['the newest paragraph, not the first', '**One**\n\nbody\n\n__Two__\n\nmore body', 'Two'],
-    ['else the first sentence of the newest paragraph', 'Old idea.\n\nFirst look at the store. Then the list.', 'First look at the store.'],
+    ['a title heads its whole section, not just the paragraph under it', '**Finding why the test is slow**\n\nThe file runs twice. I should time it.\n\nThen I can compare it with one file.', 'Finding why the test is slow'],
+    ['the latest title, not the first', '**One**\n\nbody\n\n__Two__\n\nmore body\n\neven more body', 'Two'],
+    ['a title written mid-paragraph heads what follows', 'Some notes first.\n**Next step**\nRead the file.', 'Next step'],
+    ['untitled text after untitled text: the first sentence of the newest paragraph', 'Old idea.\n\nFirst look at the store. Then the list.', 'First look at the store.'],
+    ['untitled text before a title is headed by the title once it arrives', 'Old idea.\n\n## Fix', 'Fix'],
+    ['a bold phrase inside a sentence is no title', 'This is **very** slow. Next.', 'This is very slow.'],
     ['a sentence still being written is shown as far as it goes', 'Looking at the sto', 'Looking at the sto'],
     ['a question ends a sentence', 'Why does it remount? The key changes.', 'Why does it remount?'],
     ['a closing quote stays with its sentence', 'He said "stop." Then left.', 'He said "stop."'],
@@ -435,8 +439,9 @@ describe('workGroupHeading', () => {
 
   it.each([
     ['a thought before the calls titles them, what they did follows', [thought('Find the config'), run()], { title: 'Find the config', summary: 'Ran 1 command', thought: true }],
-    ['the thought that led to the first call titles the group, and later thoughts leave it', [thought('Look around'), read('a.ts'), thought('Run the tests'), run()], { title: 'Look around', summary: '2 actions', thought: true }],
+    ['the latest thought before the last call titles the group: the headline last seen while it ran', [thought('Look around'), read('a.ts'), thought('Run the tests'), run()], { title: 'Run the tests', summary: '2 actions', thought: true }],
     ['of the thoughts before the first call, the latest one', [thought('Look around'), thought('Read it'), read('a.ts')], { title: 'Read it', summary: 'Read 1 file', thought: true }],
+    ['a thought between calls with none before the first still titles the group', [read('a.ts'), thought('Now run it'), run()], { title: 'Now run it', summary: '2 actions', thought: true }],
     ['a thought after the last call is about what comes next: the count stays the title', [run(), thought('Now the fix')], { title: 'Ran 1 command' }],
     ['no thought: the count is the title', [run(), run()], { title: 'Ran 2 commands' }],
     ['thoughts alone: the latest one, no count', [thought('Look around'), thought('Check the order')], { title: 'Check the order' }],
