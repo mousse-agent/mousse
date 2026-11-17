@@ -36,6 +36,7 @@ import {
 import { MMS_PROTOCOL_MAX_TEXT_LENGTH } from '../../mms/protocol/types'
 import { attachedFilesIn, formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
+import { withSteersOnTheWay } from '../lib/steersOnTheWay'
 import { nextSteerableQueueItem } from '../lib/queuedContent'
 import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
 import { historyTokens as historyTokensOf } from '../lib/promptCache'
@@ -496,7 +497,9 @@ export function OrchestratorChat() {
   // Permission requests show inline in the turn that asked them, with the answer they got; agent questions keep the dialog.
   const permissionRequests = usePermissionRequests(activeThreadId, setSendError, describeAnswerOutcome)
   const placePermissionRequests = permissionRequests.place
-  const uiMessages = useMemo(() => mousseToUIMessages(messages, turnSenders), [messages, turnSenders])
+  // Steers sent here show in the reply from the click, until the copy the service writes there arrives.
+  const transcript = useMemo(() => withSteersOnTheWay(messages, queue.steersOnTheWay, queue.threadId), [messages, queue.steersOnTheWay, queue.threadId])
+  const uiMessages = useMemo(() => mousseToUIMessages(transcript, turnSenders), [transcript, turnSenders])
   // Placed in a separate pass, so a permission request arriving or being answered does not convert the transcript again.
   // Messages a delta did not change stay the same objects, so only the turn that changed renders again.
   const shownMessagesRef = useRef<UIMessage[]>([])
@@ -987,6 +990,8 @@ export function OrchestratorChat() {
       const promptThread = optimisticMessageId ? targetThreadId : null
       if (promptThread) promptsOnTheWay.current.set(promptThread, onTheWay + 1)
       if (steer) setSteersOnTheWay((current) => new Set(current).add(requestId))
+      // A steer queued first shows in the reply from now on, not only once it is sent now.
+      const steerRow = steer && queuesNow && targetThreadId === queue.threadId ? queue.beginComposerSteer(request.content, images) : null
       if (optimisticMessageId) {
         useAppStore.getState().addMessage({
           id: optimisticMessageId,
@@ -1050,7 +1055,9 @@ export function OrchestratorChat() {
         }
         // Steered while the turn could not take it: the queued message is sent now, by its id, so it joins the turn
         // as soon as it can (or goes first), and never twice.
-        if (steer && result.queued && result.queueItem && targetThreadId === queue.threadId) void queue.steer(result.queueItem.id)
+        if (steer && result.queued && result.queueItem && targetThreadId === queue.threadId) void queue.steer(result.queueItem.id, result.queueItem)
+        // Sent now: the queue paints it from here (the same render, so it never leaves the reply).
+        if (steerRow) queue.endComposerSteer(steerRow, false)
         // A message the service queued (a turn started meanwhile, or a run is paused by a usage limit) waits in the
         // queue: it is shown there, not also in the transcript.
         if (result.queued && optimisticMessageId) {
@@ -1143,6 +1150,7 @@ export function OrchestratorChat() {
         return false
       } finally {
         if (steer) setSteersOnTheWay((current) => { const next = new Set(current); next.delete(requestId); return next })
+        if (steerRow) queue.endComposerSteer(steerRow, false)
         if (promptThread) {
           const left = (promptsOnTheWay.current.get(promptThread) ?? 1) - 1
           if (left > 0) promptsOnTheWay.current.set(promptThread, left)
@@ -1150,7 +1158,7 @@ export function OrchestratorChat() {
         }
       }
     },
-    [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, setLoading, queue.threadId, queue.items.length, queue.steer]
+    [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, setLoading, queue.threadId, queue.items.length, queue.steer, queue.beginComposerSteer, queue.endComposerSteer]
   )
 
   const handleStop = useCallback(async () => {
@@ -1388,6 +1396,8 @@ export function OrchestratorChat() {
       clearComposer(false)
       const steerThread = activeThreadId
       const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
+      // It shows in the reply at once, as sent, until the copy the service writes there arrives.
+      const steerRow = steerThread && steerThread === queue.threadId ? queue.beginComposerSteer(trimmed) : null
       let steered: boolean | 'queued' | 'uncertain'
       try {
         steered = await window.mousse.orchestrator.steer(trimmed, steerThread ?? undefined)
@@ -1396,6 +1406,7 @@ export function OrchestratorChat() {
         // read again, and the text comes back to the composer only if it did not arrive.
         steered = 'uncertain'
       }
+      if (steerRow) queue.endComposerSteer(steerRow, steered === true)
       if (steered === 'uncertain') {
         setSendError(STEER_UNCONFIRMED)
         if (steerThread) {
