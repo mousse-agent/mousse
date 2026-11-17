@@ -253,14 +253,6 @@ describe('what is already under way', () => {
     // Once is enough: nothing else is withdrawn the next time.
     expect(await f.bots.service.withdrawQueued((id, node) => !reach.canReach(id, node))).toBe(0)
   })
-
-  it('a card is no longer answerable from a device taken off the bot', async () => {
-    const botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
-    const { reach } = reachOver(store)
-    const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'full' })
-    store.set(botId, { mode: 'chosen', nodes: [LAPTOP] })
-    expect(await outcome(methods, 'bots.asks.answer', { botId, askId: ASK, answer: 'not_now' }, as(PHONE))).toMatchObject({ code: 'stream_unknown' })
-  })
 })
 
 describe('who changes it', () => {

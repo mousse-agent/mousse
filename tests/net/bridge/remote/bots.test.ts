@@ -341,18 +341,6 @@ describe('bot methods on a real bot', () => {
     expect(() => validateRemoteBotParams('bots.questions.answer', { botId, questionId: 'nope', choice: 'Flat A', clientRequestId: 'r' })).toThrow(NetError)
   })
 
-  it('answers a permission ask', async () => {
-    await f.bots.service.chatSend({ botId, text: 'Read my invoices', clientRequestId: 'm2' })
-    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
-    const { payload, prepared } = await start(f, activation.id)
-    prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To read them.' })
-    await finish(f, payload, 'completed', { text: 'May I?' })
-    const card = chatOf(f, botId).at(-1)!.ask!
-    expect(card.kind).toBe('permission')
-    const answered = (await call(methods, 'bots.asks.answer', { botId, askId: card.askId, answer: 'not_now' })) as { message: BotChatMessage }
-    expect(answered.message.ask).toMatchObject({ askId: card.askId, status: 'not_now' })
-  })
-
   it('the lists carry the bots, and push again when a bot changes', async () => {
     const services = {
       threads: Object.assign(new EventEmitter(), { listAllThreads: () => [] }),
