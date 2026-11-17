@@ -85,8 +85,8 @@ describe('path overlap', () => {
     expect(ranked.map((row: { number: number }) => row.number)).toEqual([4, 2, 1, 3])
     const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ number: i }))
     const results = [
-      { search: { term: 'bots', kind: 'PR', state: 'closed' }, rows: rows(TERM_CEILING) },
-      { search: { term: 'bots', kind: 'issue', state: 'open' }, rows: rows(TERM_CEILING - 1) },
+      { search: { term: 'bots', kind: 'PR', state: 'closed' }, rows: rows(TERM_CEILING + 1) },
+      { search: { term: 'bots', kind: 'issue', state: 'open' }, rows: rows(TERM_CEILING) },
       { search: { term: 'tools', kind: 'issue', state: 'closed' }, rows: rows(20) }
     ]
     const notes = ceilingNotes(results)
@@ -94,6 +94,9 @@ describe('path overlap', () => {
     expect(notes[0]).toContain('"bots"')
     expect(notes[0]).toContain(String(TERM_CEILING))
     expect(ceilingNotes(results.slice(1))).toEqual([])
+    // Exactly the ceiling is a complete search; one more row proves there were more.
+    expect(ceilingNotes([results[1]])).toEqual([])
+    expect(ceilingNotes([results[0]])).toHaveLength(1)
   })
 
   it('lets incomplete coverage outrank hits in the verdict and the exit status', () => {

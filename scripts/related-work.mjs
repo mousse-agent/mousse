@@ -28,7 +28,7 @@ Options:
 Exit codes: 0 checked completely (hits or clear), 1 NOT CHECKED (any gh/git failure, or the open PR list hit its
 limit), 2 usage error, 3 INCOMPLETE (ran, but coverage was cut short; candidates are still printed and this takes
 precedence over hits). CLEAR is printed only when every check completed and found nothing.
-Each term search pages through results up to 300 per search; only a search that hits that ceiling is
+Each term search fetches up to 301 rows; only a search with more than 300 matches is
 incomplete. The report shows a short ranked list (12 lines), not everything retrieved.`;
 
 const ROOT_LIKE = /^(\.|\.\/|\/|\*{1,2})$/;
@@ -59,7 +59,7 @@ export function rankTermHits(hits, terms) {
 
 /** One note per search that reached the ceiling, naming its term; none when every search was exhausted. */
 export function ceilingNotes(results, ceiling = TERM_CEILING) {
-  return results.filter(({ rows }) => rows.length >= ceiling)
+  return results.filter(({ rows }) => rows.length > ceiling)
     .map(({ search }) => `term "${search.term}": more than ${ceiling} ${search.state} ${search.kind === 'PR' ? 'PRs' : 'issues'} matched; only the newest ${ceiling} were ranked`);
 }
 const MAX_FILES_SHOWN = 5;
@@ -207,10 +207,10 @@ export async function check({ terms, paths, days, self, repo: repoArg, fetch = t
 
   const sort = ' sort:updated-desc';
   const searches = terms.flatMap((term) => [
-    { term, kind: 'issue', state: 'open', args: ['issue', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(TERM_CEILING), '--json', 'number,title,updatedAt'] },
-    { term, kind: 'issue', state: 'closed', args: ['issue', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(TERM_CEILING), '--json', 'number,title,updatedAt'] },
-    { term, kind: 'PR', state: 'open', args: ['pr', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(TERM_CEILING), '--json', 'number,title,updatedAt'] },
-    { term, kind: 'PR', state: 'closed', args: ['pr', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(TERM_CEILING), '--json', 'number,title,updatedAt,mergedAt'] },
+    { term, kind: 'issue', state: 'open', args: ['issue', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(TERM_CEILING + 1), '--json', 'number,title,updatedAt'] },
+    { term, kind: 'issue', state: 'closed', args: ['issue', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(TERM_CEILING + 1), '--json', 'number,title,updatedAt'] },
+    { term, kind: 'PR', state: 'open', args: ['pr', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(TERM_CEILING + 1), '--json', 'number,title,updatedAt'] },
+    { term, kind: 'PR', state: 'closed', args: ['pr', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(TERM_CEILING + 1), '--json', 'number,title,updatedAt,mergedAt'] },
   ]);
 
   const [openPrs, searchResults] = await Promise.all([
@@ -224,7 +224,7 @@ export async function check({ terms, paths, days, self, repo: repoArg, fetch = t
   const termHits = [];
   const seen = new Set();
   for (const { search, rows } of searchResults) {
-    for (const row of rows) {
+    for (const row of rows.slice(0, TERM_CEILING)) {
       const key = `${search.kind}#${row.number}`;
       if (seen.has(key)) continue;
       seen.add(key);
