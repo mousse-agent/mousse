@@ -97,3 +97,8 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     expect(botInstructions({ name: 'A', description: 'B' })).not.toContain('home folder is')
   })
 })
+
+it('run instructions allow a nonwaiting owner question to keep working', () => {
+  const text = botInstructions({ name: 'Pip', description: 'Help', lane: 'run' })
+  expect(text).toContain('Then end your turn, unless you asked with wait: false: you carry on here with their answer.')
+})
