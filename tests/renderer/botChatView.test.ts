@@ -2823,3 +2823,15 @@ it('keeps an expiry fold closed to Send while a newer nudge still has its pre-ex
   expect(card.querySelector('summary')?.textContent).toBe('What it would have sent')
   expect(fold.querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
 })
+
+it('keeps one labelled asked time on an open review and replaces it with the settled outcome time', async () => {
+  fake.chats.inbox = [held()]
+  await open()
+  const times = () => [...host.querySelectorAll('[data-message-id="held-message"] time')]
+  expect(times()).toHaveLength(1)
+  expect(times()[0]?.textContent).toContain('Asked')
+  await act(async () => fake.emit.message('inbox', { ...held(), action: action({ status: 'done', at: AT }) } as never))
+  expect(times()).toHaveLength(1)
+  expect(times()[0]?.textContent).not.toContain('Asked')
+  expect(host.querySelector('[data-message-id="held-message"] [role="status"]')?.textContent).toContain('Sent')
+})
