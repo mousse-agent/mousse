@@ -360,7 +360,7 @@ export class MousseMainService extends MmsProfileServices {
     const runtime: BrowserRuntimePort = {
       capabilities: (context) => {
         if (context.profileId !== services.profileId) return undefined
-        const target = context.source === 'gui' ? services.platform.browser.selectedTarget(context.threadId) : { backend: 'managed-chromium' as const }
+        const target = context.source === 'gui' ? services.platform.browser.targetFor(context) : { backend: 'managed-chromium' as const }
         return services.platform.browser.sessions.listThreadSessions({ profileId: context.profileId, threadId: context.threadId })
           .find((session) => session.backend === target?.backend && session.runId === context.runId && session.lifecycle !== 'closed' && session.lifecycle !== 'disconnected')?.capabilities
       },
@@ -376,7 +376,7 @@ export class MousseMainService extends MmsProfileServices {
       resolveTarget: (context) => {
         if (context.profileId !== services.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
         if (context.source !== 'gui') return { backend: 'managed-chromium' }
-        const selected = services.platform.browser.selectedTarget(context.threadId)
+        const selected = services.platform.browser.targetFor(context)
         if (!selected) throw new BrowserAutomationError({ code: 'setup_required', message: 'No available in-app browser tab is connected. Open a browser tab and retry.' })
         return selected
       },

@@ -304,6 +304,11 @@ export interface MousseTool {
    */
   capabilities?: readonly ToolCapability[]
   /**
+   * The browser right a call needs (docs/plans/tool-api.md §2.6 "Rights"): `browser.read` to observe, `browser.act` to
+   * open, act or change tabs, read from the arguments. A Plan ceiling and a read-only child do not hold `browser.act`.
+   */
+  browserRight?(args: Record<string, unknown>): 'browser.read' | 'browser.act'
+  /**
    * The call needs `person` (docs/plans/tool-api.md §1.3 "Provenance"): only a turn a person started holds it, and it
    * never passes down to a subagent. `true` for every call, or the variants that need it, read from the arguments. A bot's
    * turn is held to its grant instead.
