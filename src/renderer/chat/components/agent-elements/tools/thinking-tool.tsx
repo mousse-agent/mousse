@@ -42,15 +42,17 @@ export function ThinkingCollapsed({
   const startsOpen = defaultOpen ?? (inLiveRun && isAnimating);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const atEndRef = useRef(true);
-  // Opened while it is written (in the opened live row, or by hand), its box starts at its newest words. A finished
-  // thought opens at its start.
-  const followRef = useCallback((box: HTMLDivElement | null) => {
-    boxRef.current = box;
+  // Each time it opens while it is written (by hand, or as the live row opens), its box goes to its newest words and
+  // follows them again: also when it reopens before its close has finished, so its box is still there, scrolled up.
+  // A finished thought opens where it was.
+  const onOpen = useCallback(() => {
+    const box = boxRef.current;
     if (!box || !isAnimating) return;
     atEndRef.current = true;
     box.scrollTop = box.scrollHeight;
   }, [isAnimating]);
-  // While it is written, its box keeps its newest words in view, unless the person scrolled up in it.
+  // While it is written, its box keeps its newest words in view, unless the person scrolled up in it. This also puts a
+  // box that mounts open (the row itself mounting open) at its end.
   useLayoutEffect(() => {
     const box = boxRef.current;
     if (box && isAnimating && atEndRef.current) box.scrollTop = box.scrollHeight;
@@ -68,9 +70,10 @@ export function ThinkingCollapsed({
       defaultOpen={startsOpen}
       expanded={expanded}
       onToggleExpand={onToggleExpand}
+      onOpen={onOpen}
     >
       <div
-        ref={followRef}
+        ref={boxRef}
         className="max-h-[175px] overflow-y-auto"
         onScroll={(event) => {
           const box = event.currentTarget;

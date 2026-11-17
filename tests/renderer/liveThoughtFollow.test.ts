@@ -11,7 +11,7 @@
 import { act, createElement, useMemo, useRef } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { TurnProgressContext, type TurnProgressState } from '../../src/renderer/chat/components/agent-elements/turn-progress'
 import { countRender, startRenderCounts, stopRenderCounts } from '../../src/renderer/chat/components/agent-elements/render-counts'
@@ -135,6 +135,7 @@ describe('an opened thought follows its newest words', () => {
     act(() => root.render(createElement(Transcript)))
     act(() => liveRow().querySelector<HTMLButtonElement>('button.turn-live-toggle')!.click())
     stream(80)
+    scrollTo(40)
     act(() => thoughtButton().click())
     // Closed, its words unmount once the close has played.
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, COLLAPSE_CLOSE_MS + 80)) })
@@ -145,5 +146,31 @@ describe('an opened thought follows its newest words', () => {
     // And it keeps following.
     stream(110)
     expect(fromEnd()).toBe(0)
+  })
+
+  it('reopened before its close has finished (its box still there, scrolled up), it goes to its end and follows again', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      useAppStore.setState({ messages: [{ id: 'u', role: 'user', content: 'Why?', timestamp: at(0), turnId: 't-u' }, read('r1', 1), thinking(5, `**Checking the build**\n\n${words(30)}`)], activeThreadId: 'thread-1' })
+      act(() => root.render(createElement(Transcript)))
+      act(() => liveRow().querySelector<HTMLButtonElement>('button.turn-live-toggle')!.click())
+      stream(80)
+      scrollTo(40)
+      const scrolledUp = box()
+      act(() => thoughtButton().click())
+      act(() => { vi.advanceTimersByTime(COLLAPSE_CLOSE_MS / 2) })
+      act(() => thoughtButton().click())
+      // The same box, never unmounted: it was closing.
+      expect(box()).toBe(scrolledUp)
+      expect(fromEnd()).toBe(0)
+      stream(110)
+      expect(fromEnd()).toBe(0)
+      act(() => { vi.advanceTimersByTime(1000) })
+      stream(140)
+      expect(box()).toBe(scrolledUp)
+      expect(fromEnd()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

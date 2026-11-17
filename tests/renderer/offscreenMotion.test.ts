@@ -7,7 +7,7 @@
  * jsdom has no layout or animation: an IntersectionObserver stub reports what is in view, and the paused motion itself
  * is checked by hand in the app (a trace with the live row scrolled away and with the window hidden).
  */
-import { act, createElement } from 'react'
+import { StrictMode, act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -15,6 +15,7 @@ import { MessageList } from '../../src/renderer/chat/components/agent-elements/m
 import { TurnProgressContext, type TurnProgressState } from '../../src/renderer/chat/components/agent-elements/turn-progress'
 import { IconSpinner } from '../../src/renderer/chat/components/agent-elements/icons'
 import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
+import { offscreenWatchForTests } from '../../src/renderer/lib/offscreenMotion'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -169,5 +170,46 @@ describe('a spinner pauses its turn while no one can see it', () => {
     expect(calls).toEqual(['pause', 'play', 'pause', 'play'])
     act(() => root.render(createElement('div')))
     expect(calls.at(-1)).toBe('cancel')
+  })
+
+  it('first shown in a hidden window, it starts paused and plays once the window shows', () => {
+    const calls: string[] = []
+    ;(HTMLElement.prototype as { animate?: unknown }).animate = function () {
+      return { cancel: () => calls.push('cancel'), pause: () => calls.push('pause'), play: () => calls.push('play') }
+    }
+    visibility = 'hidden'
+    act(() => root.render(createElement(IconSpinner, { className: 'w-4 h-4 animate-spin shrink-0' })))
+    expect(calls).toEqual(['pause'])
+    expect(paused(host.querySelector('span.turning')!)).toBe(true)
+    windowShown(true)
+    expect(calls).toEqual(['pause', 'play'])
+  })
+})
+
+describe('watching survives StrictMode', () => {
+  it("each indicator is watched once through StrictMode's detach and re-attach, and nothing is left after unmount", () => {
+    ;(HTMLElement.prototype as { animate?: unknown }).animate = function () {
+      return { cancel() {}, pause() {}, play() {} }
+    }
+    const turn = createElement(TurnProgressContext.Provider, { value: { phase: 'tool_running' } satisfies TurnProgressState },
+      createElement(MessageList, { messages: [ask(), reply('a1', thought('output-available', 'Running the tests first.'), bash('b1', 'npm test'))], status: 'streaming' }))
+    act(() => root.render(createElement(StrictMode, null, turn, createElement(IconSpinner, { className: 'w-4 h-4 animate-spin shrink-0' }))))
+    act(() => host.querySelector<HTMLButtonElement>('button.turn-live-toggle')!.click())
+    const looping = [...host.querySelectorAll('.an-tool-icon[data-state="running"], svg.thinking-icon.is-thinking, .turn-progress-dots, .an-text-shimmer--active, span.turning')]
+    expect(looping.length).toBeGreaterThanOrEqual(3)
+    expect(offscreenWatchForTests()).toEqual({ elements: looping.length, observing: true })
+    const io = watcherOf(looping[0]!)!
+    for (const element of looping) expect(watcherOf(element)).toBe(io)
+    expect(io.targets.size).toBe(looping.length)
+    // Each still pauses and resumes.
+    inView(looping, false)
+    expect(looping.every(paused)).toBe(true)
+    inView(looping, true)
+    expect(looping.some(paused)).toBe(false)
+
+    act(() => root.unmount())
+    expect(offscreenWatchForTests()).toEqual({ elements: 0, observing: false })
+    expect(io.disconnected).toBe(true)
+    root = createRoot(host)
   })
 })

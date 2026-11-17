@@ -71,6 +71,11 @@ export function watchOffscreen(element: Element, onChange?: (offscreen: boolean)
   }
 }
 
+/** For tests: how many elements are watched, and whether the observer is up. */
+export function offscreenWatchForTests(): { elements: number; observing: boolean } {
+  return { elements: watched.size, observing: observer !== null }
+}
+
 /** A ref for an element whose animation loops while `active`: it pauses while no one can see it (watchOffscreen). */
 export function useOffscreenPause<T extends Element>(active: boolean): (element: T | null) => (() => void) | undefined {
   return useCallback((element: T | null) => {

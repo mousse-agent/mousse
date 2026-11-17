@@ -48,11 +48,12 @@ const ask = (): UIMessage => ({ id: 'u1', role: 'user', parts: [{ type: 'text', 
 const reply = (id: string, ...parts: unknown[]): UIMessage => ({ id, role: 'assistant', parts, createdAt } as unknown as UIMessage)
 const thought = (id: string, state: 'input-available' | 'output-available', content: string) =>
   ({ type: 'tool-Thinking', toolCallId: id, state, input: { thought: content }, ...(state === 'output-available' ? { output: content } : {}) })
+const text = (value: string) => ({ type: 'text', text: value })
 const bash = (id: string, command: string, done = false) =>
   ({ type: 'tool-Bash', toolCallId: id, state: done ? 'output-available' : 'input-available', input: { command }, ...(done ? { output: { stdout: 'ok' } } : {}) })
 
-function render(messages: UIMessage[], state: TurnProgressState | null) {
-  act(() => root.render(createElement(TurnProgressContext.Provider, { value: state }, createElement(MessageList, { messages, status: 'streaming' }))))
+function render(messages: UIMessage[], state: TurnProgressState | null, status: 'streaming' | 'ready' = 'streaming') {
+  act(() => root.render(createElement(TurnProgressContext.Provider, { value: state }, createElement(MessageList, { messages, status }))))
 }
 
 const region = () => document.querySelector<HTMLElement>('[data-live-announce]')
@@ -70,8 +71,8 @@ function wait(ms: number) {
     listen()
   }
 }
-function step(messages: UIMessage[], state: TurnProgressState | null) {
-  render(messages, state)
+function step(messages: UIMessage[], state: TurnProgressState | null, status: 'streaming' | 'ready' = 'streaming') {
+  render(messages, state, status)
   listen()
 }
 
@@ -134,5 +135,46 @@ describe('the live row speaks calmly', () => {
     expect(row.querySelectorAll('.an-tool-group-rows button').length).toBeGreaterThan(0)
     expect(row.querySelector('[role="status"], [aria-live], [role="log"], [role="alert"]')).toBeNull()
     expect(region()!.getAttribute('role')).toBe('status')
+  })
+})
+
+describe('the live row says nothing out of turn', () => {
+  /** Thread A's turn: "Thinking" said at 0, and a command started at 0.5 s whose announcement waits until 2 s. */
+  function pendingAnnouncement() {
+    heard.length = 0
+    step([ask(), reply('a1', thought('t1', 'output-available', '**Reading**\n\nOk'))], { phase: 'thinking' })
+    wait(500)
+    step([ask(), reply('a1', thought('t1', 'output-available', '**Reading**\n\nOk'), bash('b1', 'npm test'))], { phase: 'tool_running' })
+    expect(region()!.textContent).toBe('Thinking')
+  }
+
+  it('unmounted with an announcement waiting, it writes nothing later and leaves no timer behind', () => {
+    pendingAnnouncement()
+    const said = region()!
+    act(() => root.unmount())
+    expect(vi.getTimerCount()).toBe(0)
+    act(() => { vi.advanceTimersByTime(5000) })
+    expect(said.textContent).toBe('Thinking')
+    root = createRoot(host)
+  })
+
+  it("switched to another thread mid-turn, the first thread's waiting step is never said", () => {
+    pendingAnnouncement()
+    const other: UIMessage[] = [
+      { id: 'u9', role: 'user', parts: [{ type: 'text', text: 'Rename the file' }], createdAt } as unknown as UIMessage,
+      reply('a9', text('Renamed it.')),
+    ]
+    step(other, null, 'ready')
+    wait(5000)
+    expect(heard.map((said) => said.text)).toEqual(['Thinking'])
+    expect(region()?.textContent ?? '').toBe('')
+  })
+
+  it('a finished turn mounts saying nothing', () => {
+    heard.length = 0
+    step([ask(), reply('a1', thought('t1', 'output-available', '**Reading**\n\nOk'), bash('b1', 'npm test', true), text('Fixed.'))], null, 'ready')
+    wait(3000)
+    expect(heard).toEqual([])
+    expect(region()?.textContent ?? '').toBe('')
   })
 })

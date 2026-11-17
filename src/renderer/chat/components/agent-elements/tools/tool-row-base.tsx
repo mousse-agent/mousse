@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { TextShimmer } from "../text-shimmer";
 import { IconChevronRight } from "../../../../lib/icons";
@@ -42,6 +42,11 @@ export type ToolRowBaseProps = {
   expanded?: boolean;
   defaultOpen?: boolean;
   onToggleExpand?: () => void;
+  /**
+   * Called each time the row goes from closed to open, after its panel is in the document: whether the panel mounted
+   * again or was still there, closing, when it reopened.
+   */
+  onOpen?: () => void;
   /** Rows in the panel when it is a list; a long one opens without the per-row stagger. */
   itemCount?: number;
   children?: ReactNode;
@@ -64,6 +69,7 @@ export function ToolRowBase({
   expanded,
   defaultOpen = false,
   onToggleExpand,
+  onOpen,
   itemCount,
   children,
 }: ToolRowBaseProps) {
@@ -74,6 +80,11 @@ export function ToolRowBase({
   const [ownOpen, setOwnOpen] = useState(defaultOpen);
   const kept = useToolOpen(expanded === undefined ? openKey : undefined, defaultOpen);
   const isExpanded = expanded ?? (kept ? kept[0] : ownOpen);
+  const wasExpanded = useRef(isExpanded);
+  useLayoutEffect(() => {
+    if (isExpanded && !wasExpanded.current) onOpen?.();
+    wasExpanded.current = isExpanded;
+  }, [isExpanded, onOpen]);
   const canToggle = expandable && (isComplete || isExpanded || isAnimating);
   const loudFailure = failed && !isAnimating && !recovered;
   const quietFailure = failed && !isAnimating && recovered;
