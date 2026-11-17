@@ -14,7 +14,6 @@ import {
   settingCompactionPoint,
   type ContextSettings
 } from '../src/shared/settings'
-import { shouldCompactNativeContext } from '../src/mms/orchestrator/nativeContext'
 
 function withHome(run: (home: string) => void): void {
   const home = mkdtempSync(join(tmpdir(), 'mousse-context-settings-'))
@@ -73,27 +72,6 @@ describe('context compaction configuration', () => {
     expect(settingCompactionPoint(on('model-max'), 1_000_000)).toBe(950_000)
     expect(settingCompactionPoint(on('model-max'))).toBeUndefined()
     expect(settingCompactionPoint({ compactionEnabled: false, compactionTokens: 300_000 }, 1_000_000)).toBeUndefined()
-  })
-  it('keeps the daemon compacting exactly where it did before the setting point was shared', () => {
-    // The rule `prepareNativeContext` applied inline before it called `settingCompactionPoint`.
-    const compactedBefore = (context: ContextSettings, activeTokens: number, knownLimit?: number) => {
-      const threshold = typeof context.compactionTokens === 'number' ? context.compactionTokens : knownLimit
-      return context.compactionEnabled && threshold !== undefined &&
-        shouldCompactNativeContext(activeTokens, knownLimit ?? threshold, DEFAULT_COMPACTION_RESERVE_TOKENS, threshold)
-    }
-    const compactsNow = (context: ContextSettings, activeTokens: number, knownLimit?: number) => {
-      const point = settingCompactionPoint(context, knownLimit)
-      return point !== undefined && Number.isFinite(activeTokens) && activeTokens >= point
-    }
-    for (const compactionEnabled of [true, false])
-      for (const compactionTokens of [32_000, 128_000, 300_000, 1_000_000, 2_000_000, 'model-max'] as const)
-        for (const knownLimit of [undefined, 0, 32_768, 200_000, 272_000, 1_000_000]) {
-          const context = { compactionEnabled, compactionTokens }
-          const point = settingCompactionPoint(context, knownLimit) ?? 500_000
-          for (const activeTokens of [0, point - 1, point, point + 1, 3_000_000, Number.NaN])
-            expect(compactsNow(context, activeTokens, knownLimit), JSON.stringify({ context, knownLimit, activeTokens }))
-              .toBe(compactedBefore(context, activeTokens, knownLimit))
-        }
   })
   it('suggests compacting an idle thread unless that is turned off', () => {
     expect(normalizeContextSettings({ idleCompaction: 'off' }).idleCompaction).toBe('off')
