@@ -306,6 +306,8 @@ export class BotActions {
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
     const existing = this.host.store.get('SELECT id, args_digest, target_json FROM bot_actions WHERE call_key = ?', callKey)
+    if (existing?.args_digest === '[forgotten]' && existing.target_json === JSON.stringify({ server: tool.server, tool: tool.tool }))
+      return { text: 'This call id belongs to a forgotten call. Nothing new was held or sent.' }
     if (existing && (existing.args_digest !== actionDigest(args) || existing.target_json !== JSON.stringify({ server: tool.server, tool: tool.tool })))
       return { text: 'This call id was already used for a different call. Nothing was held for this call.', isError: true }
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
