@@ -63,3 +63,6 @@ ehthumbs.db
 
 # Screenshots saved in the repo root while checking the app
 /*.png
+
+# Per-worktree task record written by scripts/verify.mjs, related-work.mjs and work-claim.mjs
+.task-notes.json
