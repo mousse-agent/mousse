@@ -401,7 +401,7 @@ the prompt sizes the runtime reports.
   again only when it changed outside the conversation (the Memory dialog, work, a forget), then the situation.
 - Every chat turn is offered the same tools (#1360), and the system text does not change between turns, so what the
   runtime sent last time is byte for byte the start of its next request and stays in the cache. A tool a turn may not use
-  (acting on threads, their jobs, `watch_start` outside the owner's own turn) is refused at the call.
+  (acting on threads or their jobs from a turn another bot's message started) is refused at the call.
 - The epoch is kept in `bot_memory_state` (`chat_epoch`); each of its turns names it as `context_gen` in `bot_turn_usage`.
 
 **When an epoch ends** (the next turn starts a new one, `chatEpochEnd`):

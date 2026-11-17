@@ -149,12 +149,14 @@ describe('a card on a message', () => {
     expect(report.text).toBe('The Q7 wins.\n\nSteps\n[x] Find prices\n[-] Read reviews')
   })
 
-  it('holds at most 3 cards; a 4th is refused with what to do', async () => {
+  it('holds as many cards as fit in 8 KB; one past that is refused with what to do', async () => {
     const turn = await chatTurn('More.', 'm')
-    for (let i = 0; i < 3; i += 1) expect((await tool('show_card', turn.prepared, turn.payload.threadId, { card: SPECS })).isError).toBeFalsy()
-    expect(await tool('show_card', turn.prepared, turn.payload.threadId, { card: SPECS })).toMatchObject({ isError: true, text: expect.stringContaining(CARDS_FULL_TEXT) })
-    await finish(f, turn.payload, 'completed', { text: 'Three.' })
-    expect(chatOf(f, botId).at(-1)?.cards).toHaveLength(3)
+    for (let i = 0; i < 5; i += 1) expect((await tool('show_card', turn.prepared, turn.payload.threadId, { card: SPECS })).isError).toBeFalsy()
+    const big = { type: 'facts', title: 'Long', rows: Array.from({ length: 12 }, (_, i) => ({ label: `Row ${i}`, value: 'x'.repeat(300) })) }
+    expect((await tool('show_card', turn.prepared, turn.payload.threadId, { card: big })).isError).toBeFalsy()
+    expect(await tool('show_card', turn.prepared, turn.payload.threadId, { card: big })).toMatchObject({ isError: true, text: expect.stringContaining(CARDS_FULL_TEXT) })
+    await finish(f, turn.payload, 'completed', { text: 'Six.' })
+    expect(chatOf(f, botId).at(-1)?.cards).toHaveLength(6)
   })
 
   it('a malformed card is refused and nothing is shown', async () => {

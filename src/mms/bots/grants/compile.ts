@@ -103,7 +103,7 @@ export interface CompileInput {
     /** Only the main turn of a scheduled run ends its own schedule. Never grantable. */
     scheduled?: boolean
     frontDesk?: boolean
-    /** Only a chat turn the owner's own message started may start an unsandboxed background command. */
+    /** A chat turn may start an unsandboxed background command. */
     watcherStart?: boolean
     /**
      * What "use your threads" gives this turn, when the grant holds it: `read` (list, search, read, wait: work, a

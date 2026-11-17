@@ -52,7 +52,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
 
   /**
    * A bot whose chat thread is `home`, holding a live run. `threads` is the turn's lane: `all` (a run, or a chat turn its
-   * owner started), `read` (the bot's first message, another bot's message), or none (a consult). `disabled` is the
+   * owner started), `read` (another bot's message), or none (a consult). `disabled` is the
    * owner's switch as the engine reads it at each call (`BotEngine.permissionOff`).
    */
   const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; catalogue?: 'search' | 'use_tool'; stillHolds?: () => string | undefined; wakes?: { add: (...args: unknown[]) => Promise<unknown> }; jobs?: { open: (...args: unknown[]) => { jobId: string } } } = {}) => {

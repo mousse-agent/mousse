@@ -7,7 +7,7 @@ import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/per
 import { BOT_CARD_TOOL, BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
 import { DEFAULT_ANSWER_AFTER_MINUTES, DEFAULT_NUDGE_AFTER_MINUTES, MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_FOLLOW_UP_MINUTES, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MIN_FOLLOW_UP_MINUTES, MIN_QUESTION_CHOICES, QUESTION_NOT_OFFERED_TEXT, questionFollowOf, questionSpecOf } from '../../../../shared/bots/personal/questions'
-import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CARDS_PER_MESSAGE, MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_TEXT_CHARS, MAX_FACT_LABEL_CHARS, MAX_FACT_ROWS, MAX_FACT_VALUE_CHARS, MAX_GALLERY_CAPTION_CHARS, MAX_GALLERY_FILES, MAX_PROGRESS_LABEL_CHARS, MAX_PROGRESS_NOTE_CHARS } from '../../../../shared/bots/personal/cards'
+import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_TEXT_CHARS, MAX_FACT_LABEL_CHARS, MAX_FACT_ROWS, MAX_FACT_VALUE_CHARS, MAX_GALLERY_CAPTION_CHARS, MAX_GALLERY_FILES, MAX_PROGRESS_LABEL_CHARS, MAX_PROGRESS_NOTE_CHARS } from '../../../../shared/bots/personal/cards'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem, schedulePrompt } from '../../../scheduled/botJobs'
@@ -185,7 +185,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'work_start',
-    description: 'Start work that takes more than a moment, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. You do it beside this chat, and when you finish, your report reaches the owner by itself, as a reply to their message. Up to 3 pieces of work run at once, so a quick lookup can start beside a long job; more wait their turn. While you work on it you see your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
+    description: 'Start work that takes more than a moment, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. You do it beside this chat, and when you finish, your report reaches the owner by itself, as a reply to their message. A quick lookup can start beside a long job: each piece of work runs at once. While you work on it you see your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
     parameters: Type.Object({
       title: Type.String({ description: 'A few words the owner will recognise, like "Vacuum comparison".' }),
       brief: Type.String({ description: 'The whole task, standing on its own.' }),
@@ -295,7 +295,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'watch_start',
-    description: `Run a command in the background only in a chat turn your owner's own message started, and wake up here when it is done, instead of waiting or checking again and again: for example a build, a test run, \`gh run watch\` on a nightly. It runs in a shell (${process.platform === 'win32' ? 'cmd on Windows' : 'sh'}) from your files folder, as your commands do, and needs "run commands". You wake when it exits (with its exit code), when a line of its output matches match (a regular expression; it is stopped then), or when it reaches its time limit (minutes, default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}; it is stopped then); you get the line that matched and the end of its output. brief is what you will do then, standing on its own. It counts as a wake-up, so the same command with the same brief started again and again before your owner writes is refused as a loop. Run as many as you need at once; a restart of Mousse stops them, and you are told. Tell your owner in a few words what you are waiting on.`,
+    description: `Run a command in the background, and wake up here when it is done, instead of waiting or checking again and again: for example a build, a test run, \`gh run watch\` on a nightly. It runs in a shell (${process.platform === 'win32' ? 'cmd on Windows' : 'sh'}) from your files folder, as your commands do, and needs "run commands". You wake when it exits (with its exit code), when a line of its output matches match (a regular expression; it is stopped then), or when it reaches its time limit (minutes, default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}; it is stopped then); you get the line that matched and the end of its output. brief is what you will do then, standing on its own. It counts as a wake-up, so the same command with the same brief started again and again before your owner writes is refused as a loop. Run as many as you need at once; a restart of Mousse stops them, and you are told. Tell your owner in a few words what you are waiting on.`,
     parameters: Type.Object({
       command: Type.String({ description: 'The command line.' }),
       brief: Type.String({ description: 'What you will do when it ends, standing on its own, as a note to yourself.' }),
@@ -351,7 +351,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_CARD_TOOL,
-    description: `Show a small card with your next message: facts (keys and values), a checklist, progress, or a gallery of pictures from your files folder. Use one when it reads better than prose, such as specs to compare, steps and where each stands, or pictures you made or saved. Don't repeat what the card says in your words. At most ${MAX_CARDS_PER_MESSAGE} cards per message. Text only: no HTML, and never a web address for a picture.`,
+    description: `Show a small card with your next message: facts (keys and values), a checklist, progress, or a gallery of pictures from your files folder. Use one when it reads better than prose, such as specs to compare, steps and where each stands, or pictures you made or saved. Don't repeat what the card says in your words. Text only: no HTML, and never a web address for a picture.`,
     parameters: Type.Object({ card: card() })
   },
   {

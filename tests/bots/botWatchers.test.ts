@@ -2,7 +2,7 @@
  * A bot's background commands (`watch_start`), over a real engine, a real `bots.db` and real processes (a small Node
  * script run through the shell, as a bot's command is). Each ends one way and wakes the bot once in its chat with what
  * happened; one stopped, or whose bot is paused, wakes nothing and leaves no process behind; a restart wakes the bot to
- * say it stopped it. Only a chat turn the owner's own message started, of a bot holding "run commands", starts one.
+ * say it stopped it. Any chat turn of a bot holding "run commands" starts one, whatever started the turn.
  *
  * Ends: exit (code and output), a matching line, the time limit, Stop by the bot, Stop by the owner, the bot paused,
  * a restart. Refusals: no "run commands", work instead of the chat, a match that could run long, too many at once.
@@ -178,11 +178,10 @@ describe('a watcher stopped wakes nothing and leaves no process', () => {
 })
 
 describe('who may start one', () => {
-  // The owner's message is covered by the real-command cases above. Every other chat start must refuse before the
-  // process boundary or a wake row, even with "run commands" already granted. Each is offered the same tools as the
-  // owner's own turn (#1360): the refusal is at the call.
+  // The owner's message is covered by the real-command cases above. Every other chat start may start one too, with
+  // the same tools as the owner's own turn (#1360).
   it.each(['wake:w1', 'create:c1', 'question:q1:default', 'answer:a1', 'botmsg:other:m1'])(
-    '%s cannot start a background command', async (idempotencyKey) => {
+    '%s can start a background command', async (idempotencyKey) => {
       await allowCommands()
       const owner = await chat('Watch the build', 'owner')
       await finish(f, owner.payload, 'completed', { text: 'OK.' })
@@ -194,12 +193,9 @@ describe('who may start one', () => {
       await f.bots.pump(botId)
       const turn = await start(f, id)
       const spawn = vi.spyOn(BotWatchers.prototype, 'start').mockImplementation(() => {})
-      const before = f.store.waitingReminders(botId)
       try {
-        expect(() => f.bots.tools.watchers!.start(botId, id, { command: 'make test', brief: 'Report results.' }))
-          .toThrow(/can't start a background command.*owner's own message.*work.*sandbox/i)
-        expect(spawn).not.toHaveBeenCalled()
-        expect(f.store.waitingReminders(botId)).toEqual(before)
+        expect(f.bots.tools.watchers!.start(botId, id, { command: 'make test', brief: 'Report results.' })).toMatchObject({ watcherId: expect.any(String) })
+        expect(spawn).toHaveBeenCalledOnce()
         expect([...turn.prepared.policy.tools!.allow!].sort()).toEqual(ownerTools)
       } finally {
         spawn.mockRestore()

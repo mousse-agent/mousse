@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BOT_OFFLINE_WATCH_MS, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_JOURNAL_ERROR, BOT_OFFLINE_WATCH_MS, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { botFilesFolder, botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
@@ -384,18 +384,17 @@ describe('activation and dispatch', () => {
     expect(store.openAsks('site-editor')).toMatchObject([{ mode: 'ask', kind: 'budget', permission: { budget: { key: 'maxActiveMs' } } }])
   })
 
-  it('three runs of a bot run at a time; the next starts when one ends', async () => {
+  it('runs of a bot run at once, with no count; one ending leaves the others running', async () => {
     const first = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
-    for (const id of ['c2', 'c3']) expect(await bots.activate({ botId: 'site-editor', input: id, clientRequestId: id })).toMatchObject({ status: 'running' })
-    const fourth = await bots.activate({ botId: 'site-editor', input: 'four', clientRequestId: 'c4' })
-    expect(fourth).toMatchObject({ status: 'queued', threadId: null })
+    const others = []
+    for (const id of ['c2', 'c3', 'c4', 'c5']) others.push(await bots.activate({ botId: 'site-editor', input: id, clientRequestId: id }))
+    for (const other of others) expect(other).toMatchObject({ status: 'running', threadId: expect.any(String) })
     const payload = turnStart(store.dispatch(first.id, 1)!.runId!)
     bots.prepare(payload)
     finish(payload.runId, 'failed')
     bots.settle(payload, {})
     expect(bots.getActivation(first.id)).toMatchObject({ status: 'failed', endReason: 'failed' })
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(bots.getActivation(fourth.id).status).toBe('running')
+    for (const other of others) expect(bots.getActivation(other.id).status).toBe('running')
   })
 
   it('a tool call cut off without an outcome pauses the activation until the owner checks it', async () => {
@@ -419,7 +418,8 @@ describe('activation and dispatch', () => {
 
   it('stopping a queued activation ends it; stopping a running one stops its thread', async () => {
     const first = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
-    for (const id of ['c2', 'c3']) await bots.activate({ botId: 'site-editor', input: id, clientRequestId: id })
+    // Nothing starts while the bot's journal cannot be written, so the second waits.
+    store.setError('site-editor', { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c4' })
     expect(second.status).toBe('queued')
     await expect(bots.stop(second.id)).resolves.toMatchObject({ status: 'cancelled', endReason: 'stopped' })
@@ -442,17 +442,19 @@ describe('activation and dispatch', () => {
     store = new BotStore({ profileHome: profile, clock: () => clock })
   })
 
-  it('keeps at most 20 runs, running ones counted; the oldest waiting one is dropped', async () => {
-    await bots.activate({ botId: 'site-editor', input: 'running', clientRequestId: 'run' })
+  it('keeps at most 20 waiting runs, running ones not counted; the oldest waiting one is dropped', async () => {
+    const running = await bots.activate({ botId: 'site-editor', input: 'running', clientRequestId: 'run' })
+    // Nothing starts while the bot's journal cannot be written, so the rest wait.
+    store.setError('site-editor', { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     const waiting = []
     for (let index = 0; index < 21; index += 1) {
       clock += 1
       waiting.push(await bots.activate({ botId: 'site-editor', input: `q${index}`, clientRequestId: `q${index}` }))
     }
-    // Three run (the first, q0 and q1); of the 19 that waited, the two oldest are dropped.
-    expect(bots.listActivations('site-editor').filter((row) => row.status === 'running')).toHaveLength(3)
-    for (const index of [2, 3]) expect(bots.getActivation(waiting[index].id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
-    expect(bots.listActivations('site-editor').filter((row) => row.status === 'queued')).toHaveLength(17)
+    // Of the 21 that waited, the oldest is dropped; the running one is kept and not counted.
+    expect(bots.getActivation(running.id).status).toBe('running')
+    expect(bots.getActivation(waiting[0].id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(bots.listActivations('site-editor').filter((row) => row.status === 'queued')).toHaveLength(20)
   })
 
   it('deleting the bot cancels its activations, revokes its grant and archives its threads (Bot Phase 1 §5.3.3)', async () => {

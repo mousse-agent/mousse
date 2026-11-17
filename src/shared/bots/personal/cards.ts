@@ -71,10 +71,6 @@ export interface BotChatGalleryCard extends Omit<BotGalleryCard, 'files'> {
 /** A card on a chat message, as the app draws it. */
 export type BotChatCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotChatGalleryCard | BotAutomationCard | BotWatcherCard
 
-/** The card types Mousse makes for a bot's message; the bot can't (`cardOf`), and they don't count toward its limit. */
-export const MOUSSE_CARD_TYPES = ['automation', 'watcher'] as const
-const isMousseCard = (card: { type: string }): boolean => (MOUSSE_CARD_TYPES as readonly string[]).includes(card.type)
-
 export const BOT_CARD_TYPES = ['facts', 'checklist', 'progress', 'gallery'] as const
 export const BOT_CHECKLIST_STATES: readonly BotChecklistState[] = ['done', 'doing', 'todo', 'skipped']
 
@@ -90,14 +86,13 @@ export const MAX_PROGRESS_TOTAL = 1_000_000
 export const MAX_GALLERY_FILES = 8
 export const MAX_GALLERY_CAPTION_CHARS = 120
 export const MAX_GALLERY_PATH_CHARS = 1024
-/** At most this many cards on one message, and this many bytes of them as JSON. */
-export const MAX_CARDS_PER_MESSAGE = 3
+/** At most this many bytes of cards on one message, as JSON. */
 export const MAX_CARDS_JSON_BYTES = 8 * 1024
 
 /** `show_card`'s answer once the card is kept: it shows under the turn's next message. */
 export const CARD_SHOWN_TEXT = 'Shown with your next message. Don\'t repeat what it says in your words.'
-/** Over `MAX_CARDS_PER_MESSAGE` or `MAX_CARDS_JSON_BYTES` for one message. */
-export const CARDS_FULL_TEXT = `Your next message already has as many cards as it can hold (${MAX_CARDS_PER_MESSAGE}, ${MAX_CARDS_JSON_BYTES / 1024} KB). Say the rest in words.`
+/** Over `MAX_CARDS_JSON_BYTES` for one message. */
+export const CARDS_FULL_TEXT = `Your next message already has as many cards as it can hold (${MAX_CARDS_JSON_BYTES / 1024} KB). Say the rest in words.`
 
 const FIELDS: Record<Exclude<BotCard['type'], 'automation' | 'watcher'>, readonly string[]> = {
   facts: ['type', 'title', 'rows'],
@@ -216,9 +211,8 @@ export function keptCardOf(value: unknown): BotCard | undefined {
   return 'problem' in card ? undefined : card
 }
 
-/** Why `cards` can't go on one message (too many of the bot's own, or too large), or undefined when they can. */
+/** Why `cards` can't go on one message (too large), or undefined when they can. */
 export function cardsProblem(cards: readonly BotCard[]): string | undefined {
-  if (cards.filter((card) => !isMousseCard(card)).length > MAX_CARDS_PER_MESSAGE) return CARDS_FULL_TEXT
   if (new TextEncoder().encode(JSON.stringify(cards)).length > MAX_CARDS_JSON_BYTES) return CARDS_FULL_TEXT
   return undefined
 }
