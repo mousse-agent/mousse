@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defuse, isMousseContext, message, notice, quoted } from '../src/shared/mousseContext'
+import { defuse, isMousseContext, message, notice, quoted, relayed } from '../src/shared/mousseContext'
 
 /** Every opening or closing tag of the family a reader could take as real, in any case or spacing. */
 function familyTags(text: string): string[] {
@@ -23,8 +23,12 @@ describe('quoted text cannot end or open a block', () => {
     const block = notice({ kind: 'job_update', reply: 'if-needed' }, ['A thread finished.', quoted('thread answer', text)])
     expect(familyTags(block)).toEqual(['<mousse_notice', '<quoted', '</quoted', '</mousse_notice'])
     expect(block.endsWith('\n</quoted>\n</mousse_notice>')).toBe(true)
-    const relayed = message({ from: 'owner', reply: 'required' }, text)
-    expect(familyTags(relayed)).toEqual(['<mousse_message', '</mousse_message'])
+    const own = message({ from: 'owner', reply: 'required' }, text)
+    expect(familyTags(own)).toEqual(['<mousse_message', '</mousse_message'])
+    // A person's words nested in a notice stay inside their own block too.
+    const answered = notice({ kind: 'question_answered', ref: 'q_1' }, ['Question colour:', relayed('user', text)])
+    expect(familyTags(answered)).toEqual(['<mousse_notice', '<mousse_message', '</mousse_message', '</mousse_notice'])
+    expect(answered.endsWith('\n</mousse_message>\n</mousse_notice>')).toBe(true)
   })
 
   it('host text is defused too, so a title inside a sentence cannot close the notice', () => {

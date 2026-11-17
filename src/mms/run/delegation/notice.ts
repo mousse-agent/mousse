@@ -1,4 +1,4 @@
-import { notice, quoted, type NoticePart } from '../../../shared/mousseContext'
+import { notice, quoted, relayed, type NoticePart } from '../../../shared/mousseContext'
 import type { SubagentNoticeItem } from '../../../shared/subagents'
 import { isQuestionAnswerRow, type QuestionAnswerPayload } from '../OpenQuestions'
 import { isChildQuestionRow, type ChildQuestionPayload, type ChildResultPayload, type InboxRecord } from '../types'
@@ -123,19 +123,25 @@ function questionNotice(payload: ChildQuestionPayload, context: NoticeContext): 
 }
 
 /**
- * What the agent is told when the person answers (or dismisses) a question it asked without waiting: the question's id,
- * and each question by its id with the answer. An answer the person typed is quoted as their words.
+ * What the agent is told when the person answers (or dismisses) a question it asked without waiting: a notice with the
+ * question's id as its `ref`, then each question by its id, with what the person chose and typed as their own words
+ * (`<mousse_message from="user">`).
  */
 function questionAnswerNotice(payload: QuestionAnswerPayload): string {
   if (payload.dismissed)
-    return `The user dismissed your open question ${payload.requestId} without answering it. Decide it yourself, and say what you chose.`
-  const lines = payload.answered.map((answer, index) => {
+    return notice({ kind: 'question_dismissed', ref: payload.requestId }, [`The user dismissed your open question ${payload.requestId} without answering it. Decide it yourself, and say what you chose.`])
+  const parts: NoticePart[] = [`The user answered your open question ${payload.requestId}.`]
+  payload.answered.forEach((answer, index) => {
     const id = payload.questionIds[index] ?? String(index + 1)
-    const parts = [...answer.chosen.map((label) => JSON.stringify(label))]
-    if (answer.reply?.trim()) parts.push(`in their words: ${JSON.stringify(answer.reply.trim())}`)
-    return `- ${id} (${JSON.stringify(head(answer.prompt))}): ${parts.join('; ') || 'no answer'}`
+    const said = [
+      ...(answer.chosen.length ? [`Chose ${answer.chosen.map((label) => JSON.stringify(label)).join(', ')}.`] : []),
+      ...(answer.reply?.trim() ? [answer.reply.trim()] : [])
+    ]
+    const question = `Question ${id} (${JSON.stringify(head(answer.prompt))})`
+    if (!said.length) parts.push(`${question}: no answer.`)
+    else parts.push(`${question}:`, relayed('user', said.join('\n')))
   })
-  return `The user answered your open question ${payload.requestId}:\n${lines.join('\n')}`
+  return notice({ kind: 'question_answered', ref: payload.requestId }, parts)
 }
 
 /** One line per inbox row; server-authored, never model-supplied. */

@@ -21,6 +21,8 @@ export type MousseNoticeKind =
   | 'job_update'
   | 'bot_message'
   | 'bot_subagent'
+  | 'question_answered'
+  | 'question_dismissed'
 
 export type MousseReply = 'if-needed' | 'required'
 
@@ -31,8 +33,15 @@ export interface QuotedPart {
   readonly text: string
 }
 
-/** One part of a notice: Mousse's own words, or quoted outside text. */
-export type NoticePart = string | QuotedPart
+/** A person's own words inside a notice (`<mousse_message>`): they keep the authority of who wrote them. */
+export interface RelayedPart {
+  readonly relayed: true
+  readonly from: string
+  readonly text: string
+}
+
+/** One part of a notice: Mousse's own words, quoted outside text, or a person's relayed words. */
+export type NoticePart = string | QuotedPart | RelayedPart
 
 const TAGS = 'mousse_notice|mousse_message|quoted'
 /** An opening or closing tag of this family, any case, with optional whitespace or slash after the `<`. */
@@ -56,8 +65,14 @@ export function quoted(from: string, text: string): QuotedPart {
   return { quoted: true, from, text }
 }
 
+/** A person's words for a notice, relayed as they wrote them. */
+export function relayed(from: string, text: string): RelayedPart {
+  return { relayed: true, from, text }
+}
+
 function part(value: NoticePart): string {
   if (typeof value === 'string') return defuse(value)
+  if ('relayed' in value) return message({ from: value.from }, value.text)
   return `<quoted from="${attr(value.from) || 'outside'}">\n${defuse(value.text)}\n</quoted>`
 }
 

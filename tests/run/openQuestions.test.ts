@@ -157,8 +157,9 @@ describe('a question asked without waiting (ask_user wait: false)', () => {
     expect(w.d.questions.listShownForThread(w.thread.id)).toEqual([])
     expect(w.deliver().steers).toHaveLength(1)
     await waitFor(() => w.adapter.steers.length === 1, 'the steer to be taken')
-    expect(w.adapter.steers[0]).toContain(`The user answered your open question ${id}`)
-    expect(w.adapter.steers[0]).toContain('colour ("Which colour for the badge?"): "Green"')
+    // A Mousse notice about the question, with the person's choice as their own words.
+    expect(w.adapter.steers[0]).toContain(`<mousse_notice kind="question_answered" ref="${id}">\nThe user answered your open question ${id}.`)
+    expect(w.adapter.steers[0]).toContain('Question colour ("Which colour for the badge?"):\n\n<mousse_message from="user">\nChose "Green".\n</mousse_message>')
 
     w.adapter.release('build the badge')
     await w.idle()
@@ -180,8 +181,8 @@ describe('a question asked without waiting (ask_user wait: false)', () => {
     expect(w.deliver().wakes).toHaveLength(1)
     await waitFor(() => w.adapter.prompts.length === 2, 'the answer turn')
     await w.idle()
-    expect(w.adapter.prompts[1]).toContain(`The user answered your open question ${id}`)
-    expect(w.adapter.prompts[1]).toContain('"Blue"')
+    expect(w.adapter.prompts[1]).toContain(`<mousse_notice kind="question_answered" ref="${id}">`)
+    expect(w.adapter.prompts[1]).toContain('<mousse_message from="user">\nChose "Blue".\n</mousse_message>')
     expect(w.answerRows()).toHaveLength(1)
     expect(w.answerRows()[0]!.subagentNotice![0]!.answers).toEqual([{ prompt: 'Which colour for the badge?', chosen: ['Blue'] }])
   })
@@ -200,7 +201,7 @@ describe('a question asked without waiting (ask_user wait: false)', () => {
     w.deliver()
     await waitFor(() => w.adapter.prompts.length === 2, 'the answer turn')
     await w.idle()
-    expect(w.adapter.prompts[1]).toContain('in their words: "Teal, with a white border"')
+    expect(w.adapter.prompts[1]).toContain('<mousse_message from="user">\nTeal, with a white border\n</mousse_message>')
     // The answers row is recorded when the answer is given, once; the message that delivers it carries no second one.
     expect(w.messages().filter((message) => message.questionAnswers)).toEqual([expect.objectContaining({ questionAnswers: [{ prompt: 'Which colour for the badge?', chosen: [], reply: 'Teal, with a white border' }] })])
     expect(w.answerRows()).toHaveLength(1)
@@ -221,7 +222,8 @@ describe('a question asked without waiting (ask_user wait: false)', () => {
     w.deliver()
     await waitFor(() => w.adapter.prompts.length === 2, 'the answer turn')
     await w.idle()
-    expect(w.adapter.prompts[1]).toMatch(/Image attached: \//)
+    // The saved path, on any platform, inside the person's words.
+    expect(w.adapter.prompts[1]).toMatch(/<mousse_message from="user">\nlike this one\n\[Image attached: [^\]\n]+\.png\]\n<\/mousse_message>/)
   })
 
   it('several open at once: each answer reaches the agent tagged with its own question', async () => {
@@ -239,9 +241,9 @@ describe('a question asked without waiting (ask_user wait: false)', () => {
     w.d.questions.settle(colour, { colour: 'blue' }, USER)
     w.deliver()
     await waitFor(() => w.adapter.steers.length === 2, 'the second answer')
-    expect(w.adapter.steers[0]).toContain(`question ${icon}`)
+    expect(w.adapter.steers[0]).toContain(`ref="${icon}"`)
     expect(w.adapter.steers[0]).toContain('"Star"')
-    expect(w.adapter.steers[1]).toContain(`question ${colour}`)
+    expect(w.adapter.steers[1]).toContain(`ref="${colour}"`)
     expect(w.adapter.steers[1]).toContain('"Blue"')
     w.adapter.release('build the badge')
     await w.idle()
@@ -273,7 +275,7 @@ describe('a question asked without waiting (ask_user wait: false)', () => {
     w.deliver()
     await waitFor(() => w.adapter.prompts.length === 2, 'the dismissal turn')
     await w.idle()
-    expect(w.adapter.prompts[1]).toContain(`The user dismissed your open question ${id}`)
+    expect(w.adapter.prompts[1]).toContain(`<mousse_notice kind="question_dismissed" ref="${id}">\nThe user dismissed your open question ${id} without answering it.`)
   })
 
   it('withdrawn by the agent: the card goes, nothing is delivered, and a late answer is refused', async () => {
@@ -328,7 +330,7 @@ describe('a question asked without waiting (ask_user wait: false)', () => {
     expect(deliver().wakes).toHaveLength(1)
     await waitFor(() => adapter.prompts.length === 1, 'the answer turn after the restart')
     await w.idle(d)
-    expect(adapter.prompts[0]).toContain(`The user answered your open question ${id}`)
+    expect(adapter.prompts[0]).toContain(`<mousse_notice kind="question_answered" ref="${id}">\nThe user answered your open question ${id}.`)
     expect(w.answerRows(d)).toHaveLength(1)
   })
 })
