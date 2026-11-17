@@ -11,7 +11,7 @@ import type { AttachedFile } from '../components/ChatComposer'
 import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
 import { keepEqualById } from '../lib/keepEqual'
 import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
-import { clearBotLiveReplies, noteBots, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
+import { clearBotLiveReplies, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
@@ -570,6 +570,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     async stop(botId) {
       const owner = epoch
+      noteBotStopAsked(botId)
       try { await bots().stop(botId); if (owner === epoch) void get().refresh() } catch (cause) { fail(owner, cause, botId) }
     },
 

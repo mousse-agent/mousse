@@ -1047,9 +1047,49 @@ describe('a reply as it is written', () => {
     expect(transcript().textContent).not.toContain('No response requested')
   })
 
-  it('a turn that ends without its message (a Stop) leaves its words muted and marked Stopped, never as a sent message', async () => {
+  /** The chat's turn ends (the service's summary no longer names it), and its settle wait passes. */
+  async function endTurn(before: () => void = () => {}) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await act(async () => before())
+      fake.bots = [{ ...writer, state: 'idle', stateText: '', chat: undefined }]
+      await act(async () => { await useBotsStore.getState().refresh() })
+      expect(stopped()).toBeNull()
+      await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_MS + 50) })
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  it('a quiet turn’s silent marker never shows, and a turn that ends with no message leaves nothing behind', async () => {
+    await openWriting()
+    await write('[SIL')
+    await write('[SILENT]')
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)) })
+    expect(live()).toBeNull()
+    expect(transcript().textContent).not.toContain('SIL')
+    // Words it showed, then a turn that ends with nothing posted and no Stop or failure: no "Stopped" reply.
+    await write('Checked the build.\n\n')
+    expect(live()?.textContent).toBe('Checked the build.')
+    await endTurn()
+    expect(live()).toBeNull()
+    expect(stopped()).toBeNull()
+  })
+
+  it('a turn that fails before its message keeps its words marked Stopped beside the error', async () => {
+    await openWriting()
+    await write('The first drive is faster.\n\n')
+    await endTurn(() => fake.emit.message('inbox', message(2, { kind: 'error', text: '', error: { text: 'Claude stopped answering.' }, activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    expect(stopped()?.querySelector('.bot-markdown')?.textContent).toBe('The first drive is faster.')
+    expect(stopped()?.querySelector('.bot-cut-mark')?.textContent).toBe('Stopped')
+    expect(transcript().textContent).toContain('Claude stopped answering.')
+  })
+
+  it('a turn the owner stops before its message leaves its words muted and marked Stopped, never as a sent message', async () => {
     await openWriting()
     await write('The first drive is faster.\n\nThe second')
+    await act(async () => { await useBotsStore.getState().stop('inbox') })
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       fake.bots = [{ ...writer, state: 'idle', stateText: '', chat: undefined }]

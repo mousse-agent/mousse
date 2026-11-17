@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react'
 import type { BotChatMessage, BotSummary } from '../../shared/bots/personal/chat'
+import { SILENT_REPLY } from '../../shared/bots/personal/wakes'
 import type { ChatMessage } from '../../shared/types'
 import { assistantDisplayText } from '../chat/adapters/mousseToUI'
 
@@ -17,9 +18,11 @@ import { assistantDisplayText } from '../chat/adapters/mousseToUI'
  *
  * How it ends:
  * - its message is posted (a bot message of the same activation, after the reply began): it goes at once;
- * - the chat's turn ends with no such message within `SETTLE_MS` (a Stop, a failure): what it had stays in this window
- *   only as a stopped reply (`cuts`), muted and marked so, never stored or sent, as a thread keeps a stopped reply. A
- *   message of that activation that still comes later takes its place.
+ * - the chat's turn ends with no such message within `SETTLE_MS`: if it was stopped (this window asked its Stop) or
+ *   failed (its error came), what it had stays in this window only as a stopped reply (`cuts`), muted and marked so,
+ *   never stored or sent, as a thread keeps a stopped reply; a message of that activation that still comes later takes
+ *   its place. Any other turn that ends with no message meant to post nothing (a silent turn), so its reply just goes:
+ *   when this window cannot tell how a turn ended, it never claims a Stop.
  */
 
 interface LiveReply {
@@ -34,6 +37,8 @@ interface LiveReply {
   afterSeq: number
   /** The chat's turn has ended and its message has not come yet. */
   ended?: boolean
+  /** This window asked the bot to stop while it was being written. */
+  stopAsked?: true
 }
 
 /** A reply its turn never finished: kept in this window only, shown muted and marked stopped. */
@@ -78,7 +83,12 @@ function botOfThread(threadId: string): BotSummary | undefined {
 
 /** What of a home-thread reply the chat may show: its words, without a Stop's mark, an applet's source or the runtime's placeholder. */
 export function liveReplyText(content: string): string {
-  let text = assistantDisplayText(content)
+  // A turn that stays quiet writes only the silent marker, and nothing is posted (`withoutSilentMarker`): it never
+  // shows, nor its first characters while it is being written.
+  const lines = assistantDisplayText(content).split('\n').filter((line) => line.trim() !== SILENT_REPLY)
+  const last = lines.at(-1)?.trim() ?? ''
+  if (last.startsWith('[') && SILENT_REPLY.startsWith(last)) lines.pop()
+  let text = lines.join('\n')
   // An applet is shown from what the turn published, once its message is posted: its source never shows.
   const applet = text.search(/^ {0,3}(`{3,}|~{3,})[ \t]*mousse-applet/m)
   if (applet >= 0) text = text.slice(0, applet)
@@ -144,7 +154,11 @@ export function noteThreadMessage(threadId: string, message: ChatMessage | undef
   }
   if (!isReplyText(message)) return
   const text = liveReplyText(message.content)
-  if (!text) return
+  if (!text) {
+    // Its words became nothing to show (the silent marker): what it showed goes.
+    if (replies.get(bot.id)?.messageId === message.id || held.get(bot.id)?.messageId === message.id) drop(bot.id)
+    return
+  }
   held.set(bot.id, { messageId: message.id, text })
   schedule()
 }
@@ -180,12 +194,25 @@ function lateAnswer(botId: string, cut: BotCutReply): boolean {
   return sources.messages(botId).some((message) => message.author === 'bot' && message.kind !== 'error' && message.activationId === cut.activationId && Date.parse(message.at) >= Date.parse(cut.at))
 }
 
+/** Whether `reply`'s turn failed or stopped short: the service posted its error (`failActivation`, `stoppedRow`). */
+function failed(botId: string, reply: LiveReply): boolean {
+  return reply.activationId !== undefined && sources.messages(botId).some((message) => message.author === 'bot' && message.kind === 'error' &&
+    message.seq > reply.afterSeq && message.activationId === reply.activationId)
+}
+
+/** This window asked `botId` to stop: a reply it is writing, if its message does not come, is a stopped one. */
+export function noteBotStopAsked(botId: string): void {
+  if (held.has(botId)) flush()
+  const reply = replies.get(botId)
+  if (reply && !reply.stopAsked) replies.set(botId, { ...reply, stopAsked: true })
+}
+
 function settle(botId: string, messageId: string): void {
   timers.delete(botId)
   const reply = replies.get(botId)
   if (!reply || reply.messageId !== messageId) return
   replies.delete(botId)
-  if (!answered(botId, reply)) cuts.set(botId, [...(cuts.get(botId) ?? []), { id: `cut:${reply.messageId}`, at: reply.startedAt, text: reply.text, ...(reply.activationId ? { activationId: reply.activationId } : {}) }])
+  if (!answered(botId, reply) && (reply.stopAsked || failed(botId, reply))) cuts.set(botId, [...(cuts.get(botId) ?? []), { id: `cut:${reply.messageId}`, at: reply.startedAt, text: reply.text, ...(reply.activationId ? { activationId: reply.activationId } : {}) }])
   notify(botId)
 }
 
