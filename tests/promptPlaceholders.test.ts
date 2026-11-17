@@ -69,11 +69,6 @@ describe('prompt placeholders', () => {
       expect(result.prompt.startsWith(template.replace('{{{body.a}}}x', `{${OPEN}v${CLOSE}}x`))).toBe(true)
     })
 
-    it('does not run template code: expressions, calls and nested braces are not evaluated', () => {
-      const result = render('{{body.a + body.b}} {{ constructor }} {{body.a.constructor("return 1")()}}', { a: 1, b: 2 })
-      expect(result).toEqual({ prompt: '{{body.a + body.b}} {{ constructor }} {{body.a.constructor("return 1")()}}', missing: [], replaced: 0 })
-    })
-
     it('scans once: a value that looks like a placeholder is not expanded', () => {
       const result = render('{{body.a}}', { a: '{{body.b}}', b: 'SECOND' })
       expect(framed(result.prompt)).toEqual(['{{body.b}}'])

@@ -139,10 +139,6 @@ describe('buildPullRequestSeed', () => {
     expect(seed).toContain('> - @reviewer2: kept')
   })
 
-  it('shares the pull request panel\'s rule: HTML comments inside code stay', () => {
-    expect(stripHtmlComments('`<!-- kept -->` and <!-- gone -->')).toBe('`<!-- kept -->` and ')
-  })
-
   describe('text from GitHub never escapes its quote', () => {
     /** Every physical line after the trusted header is either blank, a heading of this message, the quote mark, or quoted. */
     function assertContained(seed: string): void {

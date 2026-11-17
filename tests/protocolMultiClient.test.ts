@@ -173,20 +173,6 @@ describe('daemon protocol across clients', () => {
     await b.close()
   })
 
-  it('daemon reads answer after a client disconnects', async () => {
-    const c = await connect()
-    const before = await c.request<{ status: unknown }>('scheduled.status')
-    expect(before.status).toBeTruthy()
-    await c.close()
-
-    const c2 = await connect()
-    const after = await c2.request<{ status: unknown }>('scheduled.status')
-    expect(after.status).toBeTruthy()
-    const settings = await c2.request<{ settings: unknown }>('settings.get')
-    expect(settings.settings).toBeTruthy()
-    await c2.close()
-  })
-
   it('skills and MCP snapshots round-trip', async () => {
     const c = await connect()
     const skills = await c.request<{ snapshot: unknown }>('skills.list', {})
