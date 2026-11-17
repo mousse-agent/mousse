@@ -305,7 +305,7 @@ describe('P5 member real TLS admission, replica and durable sender', () => {
     )
     expect(f.store.getById(f.channel, id)).toBeDefined()
   })
-  it('denies altered signed membership receipts and bounds the durable pending queue', async () => {
+  it('bounds the durable pending queue and stamps queued events with the current meta position', async () => {
     const f = await setup()
     await f.client.join(f.client.prepareJoin(f.host.host.invite(f.space.space).text))
     await f.client.connect(f.space.space)
