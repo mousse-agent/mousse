@@ -408,6 +408,7 @@ export interface ResolvedSelection {
  */
 export interface HarnessInstances {
   snapshots(scope: ProviderScope): Promise<InstanceSnapshot[]>
+  refreshStaleModelsOnDesktopOpen(): void
   /**
    * The plan usage of every enabled, signed-in instance whose runtime reports any (`DriverRuntime.usage`),
    * for the usage page: keyed by the instance and named like it. An instance that cannot be read
@@ -636,6 +637,8 @@ export const MODEL_REFRESH_INTERVAL_MS = 3 * 60 * 60_000
 export const MODEL_REFRESH_STARTUP_DELAY_MS = 2 * 60_000
 /** Model refreshes running at once (Claude Code and Codex start a CLI each). */
 const MODEL_REFRESH_CONCURRENCY = 2
+/** Coalesce nearby desktop opens, including retries of an unsuccessful refresh. */
+const DESKTOP_MODEL_REFRESH_INTERVAL_MS = 5 * 60_000
 /** Test-only: replaces `MODEL_REFRESH_INTERVAL_MS`, in milliseconds. */
 const MODEL_REFRESH_INTERVAL_ENV = 'MOUSSE_MODEL_REFRESH_INTERVAL_MS'
 /** A one-shot request ends with `timeout` after this long without a provider event. */
@@ -942,6 +945,7 @@ export class Harness implements HarnessGateway {
    * schedule, a probe that saw a new program, a click) joins it instead of starting another.
    */
   private readonly modelRefreshes = new Map<string, Promise<void>>()
+  private lastDesktopModelRefresh = -Infinity
   private modelSlots = 0
   private readonly modelWaiting: Array<() => void> = []
   private modelSchedule?: { interval: ReturnType<typeof setInterval>; startup: ReturnType<typeof setTimeout>; latest: ReturnType<typeof setInterval>; intervalMs: number }
@@ -973,6 +977,7 @@ export class Harness implements HarnessGateway {
       .catch(() => {})
     this.instances = {
       snapshots: (scope) => this.snapshots(scope),
+      refreshStaleModelsOnDesktopOpen: () => this.refreshStaleModelsOnDesktopOpen(),
       usage: (scope, options) => this.usage(scope, options),
       usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => ({ id: instanceId, label: this.displayName(this.record(instanceId, { allowDisabled: true })), ...(signedOut ? { signedOut: true as const } : {}) })),
       useLimitReset: async (scope, instanceId, creditId) => {
@@ -3770,7 +3775,7 @@ export class Harness implements HarnessGateway {
    * at once). A refresh that fails is recorded on the instance, never thrown. When `when` is set,
    * the instance is checked again once its turn comes and is left alone if it no longer qualifies.
    */
-  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' }): Promise<void> {
+  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' | 'desktop' }): Promise<void> {
     const running = this.modelRefreshes.get(instanceId)
     if (running) return running
     const job = this.withModelSlot(async () => {
@@ -3840,23 +3845,33 @@ export class Harness implements HarnessGateway {
     if (this.stopped || this.modelSchedule) return
     const override = Number(process.env[MODEL_REFRESH_INTERVAL_ENV])
     const intervalMs = Number.isFinite(override) && override > 0 ? override : MODEL_REFRESH_INTERVAL_MS
-    const pass = (minAgeMs: number) => {
-      if (this.stopped) return
-      for (const [instanceId, entry] of Object.entries(this.instanceMap.list())) {
-        if (!entry.enabled || entry.driver === 'pi') continue
-        // The first pass leaves a list younger than the interval alone; later ones also take lists
-        // the previous pass refreshed just under an interval ago.
-        void this.refreshModelsOf(instanceId, { minAgeMs, reason: 'schedule' }).catch((error) => console.warn('[harness] scheduled model refresh failed', { instanceId, error: errorText(error) }))
-      }
-    }
-    const interval = setInterval(() => pass(intervalMs / 2), intervalMs)
-    const startup = setTimeout(() => pass(intervalMs), Math.min(MODEL_REFRESH_STARTUP_DELAY_MS, intervalMs))
+    // The first pass leaves lists younger than the interval alone. Later passes also pick up
+    // lists the previous pass refreshed just under an interval ago.
+    const interval = setInterval(() => this.refreshModelPass(intervalMs / 2, 'schedule'), intervalMs)
+    const startup = setTimeout(() => this.refreshModelPass(intervalMs, 'schedule'), Math.min(MODEL_REFRESH_STARTUP_DELAY_MS, intervalMs))
     // Newest published versions, for the update button: the cache decides when a lookup is due.
     const latest = setInterval(() => this.refreshLatest(Object.keys(this.instanceMap.list())), LATEST_CHECK_INTERVAL_MS)
     interval.unref?.()
     startup.unref?.()
     latest.unref?.()
     this.modelSchedule = { interval, startup, latest, intervalMs }
+  }
+
+  /** A desktop can start while its profile and the service have been running for hours. */
+  private refreshStaleModelsOnDesktopOpen(): void {
+    const now = this.now()
+    if (now - this.lastDesktopModelRefresh < DESKTOP_MODEL_REFRESH_INTERVAL_MS) return
+    this.lastDesktopModelRefresh = now
+    this.refreshModelPass(DESKTOP_MODEL_REFRESH_INTERVAL_MS, 'desktop')
+  }
+
+  private refreshModelPass(minAgeMs: number, reason: 'schedule' | 'desktop'): void {
+    if (this.stopped) return
+    for (const [instanceId, entry] of Object.entries(this.instanceMap.list())) {
+      // Pi already refreshes independently on the shared catalog's five-minute cycle.
+      if (!entry.enabled || entry.driver === 'pi') continue
+      void this.refreshModelsOf(instanceId, { minAgeMs, reason }).catch((error) => console.warn('[harness] background model refresh failed', { instanceId, reason, error: errorText(error) }))
+    }
   }
 
   /** A probe found another program than before: list its models now, when the instance qualifies. */
