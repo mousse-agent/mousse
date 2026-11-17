@@ -104,6 +104,7 @@ import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { CommandInfoNotice, GoalNotice } from '../chat/components/GoalNotice'
+import { ChainHoldNotice } from '../chat/components/ChainHoldNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
 import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
@@ -1873,6 +1874,8 @@ export function OrchestratorChat() {
           : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
         <PromptUndoNotice />
         <PausedRunNotice threadId={activeThreadId} />
+        {/* Held agent messages are decided on the computer that runs the thread (`threads.chainHold` is not routed). */}
+        <ChainHoldNotice threadId={newChat || remoteNode ? null : activeThreadId} />
         {/* A goal is the computer's that runs the thread (`threads.goal` is not routed): none for another computer's thread. */}
         <GoalNotice threadId={newChat || remoteNode ? null : activeThreadId} />
         {commandInfo && <CommandInfoNotice message={commandInfo} onDismiss={() => setCommandInfo(null)} />}

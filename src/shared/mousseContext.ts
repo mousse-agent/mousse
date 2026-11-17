@@ -26,6 +26,7 @@ export type MousseNoticeKind =
   | 'question_answered'
   | 'question_dismissed'
   | 'agent_note'
+  | 'chain_hold'
 
 export type MousseReply = 'if-needed' | 'required'
 

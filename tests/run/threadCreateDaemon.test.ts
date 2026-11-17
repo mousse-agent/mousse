@@ -26,6 +26,7 @@ import { adapterDriver } from '../../src/mms/run/testkit/harness'
 import type { DriverRuntime } from '../../src/mms/harness/driver'
 import { refusalOfResponse } from './appToolsFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
+import { spendChain } from './chainFixture'
 
 /**
  * A fault a test puts before every atomic JSON write: the store writes a project thread's first `meta.json` directly
@@ -462,42 +463,42 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(branches).toEqual([expect.stringMatching(/^mousse\/fix-the-login-redirect/)])
     })
 
-    it('an agent message in a row counts: a creation at the hop limit is refused before anything is made, and so is one from a run that carries on that chain', async () => {
-      const seen: { refused?: Rpc; bare?: AgentCreatedThread; hopsOf?: Record<string, number | undefined>; continued?: { threadId: string; runId: string } } = {}
+    it('a first message is one step of the creator\'s chain: at the chain\'s budget the thread is made and the message held for the person, a provider continuation carries the chain on, and Continue sends what waits', async () => {
+      const seen: { made?: AgentCreatedThread; bare?: AgentCreatedThread; rootRunId?: string } = {}
       const w = world(async (input, mcp, d) => {
-        const hops = d.engine.getRun(input.runId)?.outcome?.agentHops ?? 0
-        if (hops < 3) {
-          // Two agents pass work back and forth: the runs they start have 1, 2 and 3 agent messages behind them.
-          const target = input.threadId === w.parent.id ? w.other.id : w.parent.id
-          await call(mcp!, 'thread_send', { threadId: target, content: `hop from a run with ${hops}` })
-          return 'sent'
-        }
-        seen.continued = { threadId: input.threadId, runId: input.runId }
-        seen.refused = await w.create(mcp!, { firstMessage: 'one more', clientRequestId: 'chain-3' })
-        // The limit is on agent messages: a thread made without one is no hop.
-        seen.bare = parse<AgentCreatedThread>(await w.create(mcp!, { clientRequestId: 'bare-3' }))
+        if (input.threadId !== w.parent.id || input.prompt !== GO) return 'ok'
+        seen.rootRunId = input.runId
+        // This run's chain has already spent its budget, as twelve earlier messages would have.
+        spendChain(d.engine, `chain:${input.runId}`, w.parent.id, w.other.id)
+        seen.made = parse<AgentCreatedThread>(await w.create(mcp!, { firstMessage: 'one more', clientRequestId: 'chain-1' }))
+        // The budget is on agent messages: a thread made without one is no step.
+        seen.bare = parse<AgentCreatedThread>(await w.create(mcp!, { clientRequestId: 'bare-1' }))
         return 'end'
       })
       await w.attach()
       await w.run(w.parent.id, GO, 'go')
-      await waitFor(() => seen.bare !== undefined, 'the chain to reach the limit', 30_000)
+      const chainId = `chain:${seen.rootRunId}`
+      const made = seen.made!.threadId
+      expect(seen.made!.firstMessage).toMatchObject({ sent: false, held: { chainId, rootThreadId: w.parent.id, targetThreadId: made, replayed: false } })
+      expect(w.launchedBy(w.parent.id).map((entry) => entry.id).sort()).toEqual([made, seen.bare!.threadId].sort())
+      expect(w.d.engine.listRuns(made)).toEqual([])
 
-      expect(refusalOfResponse(seen.refused!)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' } })
-      // Refused before the receipt and before any thread: the only thread the run at the limit made is the bare one.
-      expect(w.launchedBy(seen.continued!.threadId).map((entry) => entry.id)).toEqual([seen.bare!.threadId])
-      expect(w.d.engine.store.getReceipt(`thread_create:${seen.continued!.threadId}:mcp:chain-3`)).toBeNull()
-
-      // A provider's own continuation of that run, a wake that delivers a subagent's result and the resume after a usage pause
-      // carry the count on: they are the same chain of agent work, so a creation from them is refused too.
-      const continuation = await w.d.engine.dispatch({ kind: 'send', threadId: seen.continued!.threadId, clientRequestId: 'continuation:hops', source: 'provider-continuation' })
+      // A provider's own continuation of that run (as a wake and a resume) is the same chain of agent work: its first
+      // message waits behind the one already held.
+      const continuation = await w.d.engine.dispatch({ kind: 'send', threadId: w.parent.id, clientRequestId: 'continuation:chain', source: 'provider-continuation' })
       if (continuation.status !== 'accepted') throw new Error('the continuation was not accepted')
-      expect(w.d.engine.getRun(continuation.runId)?.outcome).toMatchObject({ agentHops: 3 })
+      expect(w.d.engine.getRun(continuation.runId)?.outcome).toMatchObject({ agentChain: chainId })
       expect(w.d.engine.getRun(continuation.runId)?.outcome?.sentByAgent).toBeUndefined()
-      await expect(w.d.orch.mcpToolHost().createThread!({ projectId: w.project.id, workspace: 'project', firstMessage: 'again' }, {
+      const again = await w.d.orch.mcpToolHost().createThread!({ projectId: w.project.id, workspace: 'project', firstMessage: 'again' }, {
         clientRequestId: 'chain-continued',
-        actor: { kind: 'agent', threadId: seen.continued!.threadId, runId: continuation.runId, toolCallId: 'mcp:chain-continued' }
-      })).rejects.toMatchObject({ code: 'agent_hops_exceeded' })
-      expect(w.d.engine.store.getReceipt('chain-continued')).toBeNull()
+        actor: { kind: 'agent', threadId: w.parent.id, runId: continuation.runId, toolCallId: 'mcp:chain-continued' }
+      })
+      expect(again.firstMessage).toMatchObject({ sent: false, held: { chainId } })
+      expect(w.d.engine.chains.heldFor(chainId).map((hold) => hold.targetThreadId)).toEqual([made, again.threadId])
+
+      await expect(w.d.orch.answerChainHold(w.parent.id, chainId, 'continue')).resolves.toMatchObject({ sent: 2, failed: 0 })
+      await waitFor(() => w.d.engine.listRuns(made).length === 1 && w.d.engine.listRuns(again.threadId).length === 1, 'the held first messages to run')
+      expect(w.d.engine.listRuns(made)[0].outcome).toMatchObject({ sentByAgent: true, agentChain: chainId })
     })
   })
 

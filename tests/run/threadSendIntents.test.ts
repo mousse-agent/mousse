@@ -9,6 +9,7 @@ import type { Thread } from '../../src/shared/types'
 import type { AgentRunCommandResult } from '../../src/mms/run/mcp/appTools'
 import type { SteerStrategy } from '../../src/mms/run/CommandPolicy'
 import { planWakeNotice } from '../../src/mms/run/delegation/notice'
+import { AgentMessageHeld } from '../../src/mms/run/AgentChains'
 import type { AgentNotePayload, ThreadEvent } from '../../src/mms/run/types'
 import { appToolRegistry, appTurn, denied, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -96,6 +97,23 @@ describe('thread_send intents', () => {
     const work = await denied(send(child1, { threadId: 'parent', content: 'fix it' }))
     expect(work).toMatchObject({ code: 'mousse_scope_denied', message: expect.stringContaining('only a thread\'s direct parent sends it work') })
     expect(host.sendToThread).not.toHaveBeenCalled()
+  })
+
+  it('a note that asks for attention is a step of the sender\'s chain: past its budget it is held for the person and not posted; a quiet note is not counted', async () => {
+    const { send, result, notes, child1, child2, host } = await family()
+    const admitted: string[] = []
+    host.admitAgentNote = (threadId, requestKey) => {
+      admitted.push(requestKey)
+      throw new AgentMessageHeld({ holdId: 'hold:1', chainId: 'chain:x', rootThreadId: 'parent', targetThreadId: threadId, replayed: false })
+    }
+    const held = await result(send(child1, { threadId: child2, content: 'Look at this', intent: 'note' }))
+    expect(held).toMatchObject({ threadId: child2, intent: 'note', status: 'held', delivery: 'held_for_person', holdId: 'hold:1', chainId: 'chain:x', rootThreadId: 'parent' })
+    expect(String(held.note)).toContain('Nothing was dropped.')
+    expect(notes(child2)).toEqual([])
+    // `attention: none` starts no turn, so it cannot drive a loop: it is posted, uncounted.
+    await result(send(child1, { threadId: child2, content: 'FYI', intent: 'note', attention: 'none' }))
+    expect(admitted).toHaveLength(1)
+    expect(notes(child2).map((row) => (row.payload as AgentNotePayload).text)).toEqual(['FYI'])
   })
 
   it('a note reaches siblings and subagents further down; only one from above is worded as direction', async () => {

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Thread, ThreadNativeHelper } from '../../../../shared/types'
+import { heldMessageNote, type HeldMessage } from '../../AgentChains'
 import type { SteerStrategy } from '../../CommandPolicy'
 import type { RunEngine } from '../../RunEngine'
 import type { AgentNotePayload, InboxRecord, ThreadEvent } from '../../types'
@@ -9,9 +10,25 @@ import type { FamilyRelation } from './types'
  * What became of a message `thread_send` delivered (docs/plans/tool-api.md §2.2): a turn started with it, it was put in
  * front of the running turn, it waits for that turn's next Mousse tool call or for a running command, it waits in the
  * queue or for the thread's next turn, it waits until the person answers what the thread asked, or nothing was sent
- * because the thread is a native helper's that its runtime owns.
+ * because the thread is a native helper's that its runtime owns, or it is held for the person because its chain of agent
+ * messages reached its budget (issue #1443).
  */
-export type SendDelivery = 'started' | 'presented' | 'waiting_for_boundary' | 'queued' | 'after_answer' | 'waiting_on_command' | 'runtime_owned'
+export type SendDelivery = 'started' | 'presented' | 'waiting_for_boundary' | 'queued' | 'after_answer' | 'waiting_on_command' | 'runtime_owned' | 'held_for_person'
+
+/** The result of a `thread_send` held at its chain's budget: kept, not sent, and the person decides. */
+export function heldResult(threadId: string, intent: 'work' | 'note', held: HeldMessage): Record<string, unknown> {
+  return {
+    threadId,
+    intent,
+    status: 'held',
+    delivery: 'held_for_person' satisfies SendDelivery,
+    holdId: held.holdId,
+    chainId: held.chainId,
+    rootThreadId: held.rootThreadId,
+    replayed: held.replayed,
+    note: heldMessageNote(held)
+  }
+}
 
 /** How long a note's sender waits to see the note reach a running turn, or start a notice turn, before it is told where the note waits. */
 export const NOTE_PRESENT_WAIT_MS = 1_500
