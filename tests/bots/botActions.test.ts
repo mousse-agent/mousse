@@ -2929,3 +2929,67 @@ it.each(['open', 'done'] as const)('review2 Forget redacts nudge and status cont
   expect(context.text).not.toContain('Wants to send')
   expect(context.text).not.toContain('Held action:')
 })
+
+it('review10 reads shared action nudge history once per bot per read or upkeep pass', async () => {
+  const t = await fanOut(true, true, 5, true)
+  f.bots.setTellingWindows(1); await f.bots.deliverDueReminders()
+  const reads = vi.spyOn(f.store, 'all')
+  const expensive = () => reads.mock.calls.filter(([sql]) => sql.includes('SELECT m.at FROM bot_messages m JOIN bot_actions'))
+  f.bots.nextDueAt(t.botId)
+  expect(expensive()).toHaveLength(1)
+  reads.mockClear()
+  await f.bots.deliverDueReminders()
+  // One pass snapshot plus one fresh timer read after the pass; never one scan per open card.
+  expect(expensive().length).toBeLessThanOrEqual(2)
+})
+
+it('review12 pending unattended cap does not claim its open cards were declined or already sent', async () => {
+  const t = await fanOut(true, false, 4, true)
+  const result = t.results.at(-1)!
+  expect(result.isError).toBe(true)
+  expect(result.text).toContain('waiting')
+  expect(result.text).not.toContain('were not sent')
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(3)
+  expect(t.calls).toEqual([])
+})
+
+it('review12 scheduled cards follow the same first-told nudge clock and stop at their stored expiry', async () => {
+  const t = await scheduledCall(true, 180)
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  f.bots.setTellingWindows(1); await f.bots.deliverDueReminders()
+  const told = f.store.message(a.message_id)!.toldAt!
+  f.clock.now = Date.parse(told) + 60 * 60_000 - 1
+  await f.bots.deliverDueReminders()
+  expect(f.store.message(`${a.message_id}_n1`)).toBeUndefined()
+  f.clock.now++
+  await f.bots.deliverDueReminders()
+  expect(f.store.message(`${a.message_id}_n1`)).toBeDefined()
+  expect(f.bots.service.chatList(t.botId).messages.find(row => row.id === `${a.message_id}_n1`)!.action?.actionId).toBe(a.id)
+  f.clock.now = Date.parse(a.expires_at)
+  await f.bots.deliverDueReminders()
+  expect(f.bots.actions.get(a.id)!.status).toBe('expired')
+  expect(f.store.message(`${a.message_id}_n2`)).toBeUndefined()
+})
+
+it.each([true, false])('review12 settled repeat warns while a second open duplicate is refused, owner=%s', async owner => {
+  const t = await fanOut(true, owner, 1, false)
+  const first = t.works[0]!
+  await finish(f, first.run.payload)
+  const a = f.bots.actions.forWork(first.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const later = async (key: string) => {
+    const { workId } = await f.bots.tools.work.start(t.botId, t.origin.id, { title: key, brief: 'Same mail', key })
+    const run = await start(f, workId)
+    const result = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: key, signal: new AbortController().signal })
+    return { workId, result }
+  }
+  const repeat = await later('repeat-after-send')
+  expect(repeat.result.isError).not.toBe(true)
+  const b = f.bots.actions.forWork(repeat.workId)!
+  expect(f.bots.service.actionMessage(t.botId, b.id).action?.previous).toMatchObject({ status: 'done' })
+  const duplicate = await later('while-repeat-open')
+  expect(duplicate.result).toMatchObject({ isError: true, text: expect.stringContaining('already waiting') })
+  expect(f.bots.actions.forWork(duplicate.workId)).toBeUndefined()
+  expect(t.calls).toEqual([t.args])
+})
