@@ -145,6 +145,16 @@ async function dial(from: NetService, link: string) {
     ): Promise<{ channel: SecureChannel; transport: ProfileTransports }>
   }).dialLink(parseLink(link), from.runtime().keys.tlsCredentials())
 }
+/** Runs `then` once the maker answered `net`'s claim with an invitation, before `net` redeems it. */
+function afterClaim(net: NetService, then: () => void) {
+  const target = net as unknown as { fetchFromLink(...args: unknown[]): Promise<unknown> },
+    fetch = target.fetchFromLink.bind(net)
+  target.fetchFromLink = async (...args) => {
+    const answer = await fetch(...args)
+    then()
+    return answer
+  }
+}
 
 describe('making a link', () => {
   it('on a fresh computer creates the identity, named after it, and asks for a passphrase once where the keychain refuses', async () => {
@@ -202,6 +212,39 @@ describe('the offer path', () => {
     const refused = await rejection(paste(second, link, { name: 'Laptop' }))
     expect(refused).toMatchObject({ code: 'invite_invalid', details: { reason: 'stale' } })
     expect(second.status().self).toBeUndefined()
+    expect(await rosterSize(a.net)).toBe(1)
+  }, 60_000)
+
+  it('refuses an invitation still live on a cancelled link, as a stop between cancelling and revoking would leave it', async () => {
+    const a = await keeper()
+    const { link } = await make(a.net)
+    const offer = parseLink(link).offer
+    const b = service(directory())
+    afterClaim(b, () => {
+      a.net.runtime().db.database.prepare("UPDATE net_link_offers SET state='cancelled' WHERE id=?").run(offer)
+    })
+    expect(await rejection(paste(b, link, { name: 'Laptop' }))).toMatchObject({ code: 'invite_invalid' })
+    expect(invites(a.net)).toEqual(['active'])
+    expect(await rosterSize(a.net)).toBe(1)
+  }, 60_000)
+
+  it('ends an invitation with its link, and refuses it once the link has expired', async () => {
+    const a = await keeper()
+    const { link } = await make(a.net)
+    const offer = parseLink(link).offer,
+      db = a.net.runtime().db.database
+    // Claimed a minute before the link ends.
+    const deadline = systemClock.now() + 60_000
+    db.prepare('UPDATE net_link_offers SET expires=? WHERE id=?').run(deadline, offer)
+    const b = service(directory())
+    let issuedUntil = Infinity
+    afterClaim(b, () => {
+      issuedUntil = Number((db.prepare('SELECT expires FROM net_enrollment_invites').get() as { expires: number }).expires)
+      // The link ends before the invitation is redeemed.
+      db.prepare('UPDATE net_link_offers SET expires=? WHERE id=?').run(systemClock.now() - 1, offer)
+    })
+    expect(await rejection(paste(b, link, { name: 'Laptop' }))).toMatchObject({ code: 'invite_invalid' })
+    expect(issuedUntil).toBeLessThanOrEqual(deadline)
     expect(await rosterSize(a.net)).toBe(1)
   }, 60_000)
 
@@ -283,6 +326,28 @@ describe('a computer that came in by a link', () => {
     await a.net.request('bridge.revoke', { node: c.node })
     expect(await device(a.net, c.node)).toBeUndefined()
   }, 120_000)
+
+  it('is not connected by a plain connect, which skips choosing what it may do here', async () => {
+    const a = await keeper(),
+      b = await joiner(a, 'Laptop')
+    expect(await rejection(a.net.request('bridge.connect', { node: b.node }))).toMatchObject({
+      code: 'conflict',
+      details: { reason: 'held' }
+    })
+    expect(await device(a.net, b.node)).toMatchObject({ connection: 'held' })
+  }, 60_000)
+
+  it('takes Allow again after its answer was lost, and keeps what was changed since', async () => {
+    const a = await keeper(),
+      b = await joiner(a, 'Laptop')
+    await a.net.request('bridge.allow', { node: b.node })
+    await a.net.request('bridge.policy', { node: b.node, terminal: true })
+    expect(await a.net.request('bridge.allow', { node: b.node })).toMatchObject({
+      connection: 'connected',
+      policy: { terminal: true, work: true }
+    })
+    expect(await device(a.net, b.node)).toMatchObject({ connection: 'connected', policy: { terminal: true } })
+  }, 60_000)
 
   it('collects its lost result after a new link and a maker restart, then both restart and a normal call works', async () => {
     let a = await keeper()

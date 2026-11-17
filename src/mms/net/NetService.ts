@@ -10,6 +10,7 @@ import {
 } from './hosted'
 import type { NodeInviteInput, PreparedNodeJoin } from './enrollment/service'
 import {
+  LINK_INVITE_TTL_MS,
   LINK_TTL_MS,
   LinkOffers,
   claimOffer,
@@ -629,13 +630,11 @@ export class NetService {
         onJoined: (inviter, link) =>
           connections.set(inviter, link ? 'held' : 'connected', link ? 'link' : 'join')
       })
-      // A restart stops every link that can still take a new claim; a consumed one keeps answering.
-      for (const invite of links.cancelOpen())
-        try {
-          enrollment.revokeInvite(invite)
-        } catch {
-          // Not the keeper any more: the invitation lapses with its expiry.
-        }
+      // A restart stops every link that can still take a new claim, with its invitation; a consumed one keeps
+      // answering. Not the keeper any more, nothing was issued here that this computer could still redeem.
+      links.cancelOpen((invite) => {
+        if (identity.self()?.isAuthority) enrollment.revokeInvite(invite)
+      })
       const policy = new SqliteNodePolicy(db, this.clock)
       // A store from before this record: every device listed now counts as connected, once, and before any session
       // work, so nothing that worked stops. A list that cannot be read now is left for the next start; until then
@@ -1284,6 +1283,11 @@ export class NetService {
           } catch {
             throw new NetError('bad_request', 'Unknown device.')
           }
+          // A held device is connected only by Allow, which also writes what it may do here.
+          if (method === 'bridge.connect' && rt.connections.state(node) === 'held')
+            throw new NetError('conflict', 'This device waits for Allow. Use Allow (mousse-cli bridge allow) instead.', {
+              details: { reason: 'held' }
+            })
           rt.connections.set(
             node,
             method === 'bridge.connect' ? 'connected' : 'disconnected',
@@ -1303,14 +1307,19 @@ export class NetService {
           } catch {
             throw new NetError('bad_request', 'Unknown device.')
           }
-          if (rt.connections.state(node) !== 'held')
+          const state = rt.connections.state(node)
+          // Allow again after its answer was lost: it already happened, and what was changed since stays.
+          const done = state === 'connected' && rt.connections.source(node) === 'allow'
+          if (state !== 'held' && !done)
             throw new NetError('conflict', 'This device isn’t waiting for Allow.')
-          const preset = ACCESS_PRESETS.find((row) => row.id === 'work')!
-          rt.db.transaction(() => {
-            rt.policy.set(node, { ...preset.fields })
-            rt.connections.set(node, 'connected', 'person')
-          })
-          this.emit()
+          if (!done) {
+            const preset = ACCESS_PRESETS.find((row) => row.id === 'work')!
+            rt.db.transaction(() => {
+              rt.policy.set(node, { ...preset.fields })
+              rt.connections.set(node, 'connected', 'allow')
+            })
+            this.emit()
+          }
           return {
             connection: connectionView(rt.connections.state(node)),
             policy: policyView(rt.policy.get(node))
@@ -3664,13 +3673,14 @@ export class NetService {
       throw new NetError('route_unreachable', 'This computer has no address another computer can reach.', {
         details: { reason: 'no_listener' }
       })
-    const made = rt.links.make(add ? 'add' : 'connect', LINK_TTL_MS)
-    for (const invite of made.revoke)
-      try {
-        rt.enrollment.revokeInvite(invite)
-      } catch {
-        // Not the keeper: nothing was issued from it.
-      }
+    // Not the keeper: nothing was issued from it to revoke.
+    const made = rt.links.make(
+      add ? 'add' : 'connect',
+      (invite) => {
+        if (rt.identity.self()?.isAuthority) rt.enrollment.revokeInvite(invite)
+      },
+      LINK_TTL_MS
+    )
     try {
       const link = formatLink({
         add,
@@ -3933,12 +3943,15 @@ export class NetService {
           const self = rt.identity.self()!
           return { node: self.node, keeper: self.isAuthority }
         },
-        issue: (claimer) => {
+        issue: (claimer, until) => {
           const issued = rt.enrollment.issueNodeInvite({
             kind: 'computer',
             caps: [...COMPUTER_NODE_CAPABILITIES],
             joinerTransportFingerprint: claimer,
-            emptyRoutes: true
+            emptyRoutes: true,
+            // The usual ten minutes, but never past the link's own end.
+            ttlMs: LINK_INVITE_TTL_MS,
+            endsBy: until
           })
           return { text: issued.text, invite: issued.invite }
         },

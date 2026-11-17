@@ -47,6 +47,8 @@ export interface ConnectLink {
 export const LINK_PREFIX = 'ml1_'
 /** How long a new link accepts a first claim. */
 export const LINK_TTL_MS = 30 * 60_000
+/** How long an invitation issued on a claim lasts, capped at the link's own expiry. */
+export const LINK_INVITE_TTL_MS = 10 * 60_000
 const MAX_LINK_ROUTES = 8
 const MAX_LINK_BYTES = 4096
 const LINK_TRANSPORTS = new Set(['direct', 'cloudflared'])
@@ -215,8 +217,11 @@ interface OfferRow {
 export interface LinkClaimHandlers {
   /** This computer: its node, and whether it keeps the list (only the keeper adds a computer). */
   self(): { node: NodeId; keeper: boolean }
-  /** An invitation for a computer, pinned to the claimer's transport fingerprint, with empty routes allowed. */
-  issue(claimer: string): { text: string; invite: InviteId }
+  /**
+   * An invitation for a computer, pinned to the claimer's transport fingerprint, with empty routes allowed, that
+   * ends no later than `until` (the link's expiry).
+   */
+  issue(claimer: string, until: number): { text: string; invite: InviteId }
   revoke(invite: InviteId): void
   /** The device of this list whose current transport key is `transportKey`, if any. */
   listed(transportKey: string): NodeId | undefined
@@ -253,24 +258,26 @@ export class LinkOffers {
       | undefined
   }
   /**
-   * Stops every offer that can still take a new claim, and returns the invitations issued on claimed ones, for the
-   * caller to revoke. A consumed offer is left as it is.
+   * Stops every offer that can still take a new claim, and revokes the invitations issued on claimed ones in the
+   * same transaction, so no stop can leave a cancelled offer with a live invitation. A consumed offer is left as it
+   * is.
    */
-  cancelOpen(): InviteId[] {
-    const open = this.db.database
-      .prepare("SELECT id,invite FROM net_link_offers WHERE state IN ('unused','claimed')")
-      .all() as Array<{ id: OfferId; invite: InviteId | null }>
-    if (!open.length) return []
+  cancelOpen(revoke: (invite: InviteId) => void): void {
+    let open: Array<{ id: OfferId; invite: InviteId | null }> = []
     this.db.transaction(() => {
+      open = this.db.database
+        .prepare("SELECT id,invite FROM net_link_offers WHERE state IN ('unused','claimed')")
+        .all() as typeof open
+      if (!open.length) return
       this.db.charge(open.length)
       this.db.database
         .prepare(
           "UPDATE net_link_offers SET state='cancelled' WHERE state IN ('unused','claimed')"
         )
         .run()
+      for (const row of open) if (row.invite) revoke(row.invite)
     })
     this.forget(open.map((row) => row.id))
-    return open.flatMap((row) => (row.invite ? [row.invite] : []))
   }
   /** Drops offers' keys; with the key store locked they stay, unused, since the row decides. */
   private forget(offers: readonly OfferId[]): void {
@@ -281,14 +288,17 @@ export class LinkOffers {
         // Locked: the row is what stops a claim.
       }
   }
-  /** A new offer; every earlier open one is cancelled first (their invitations are returned to revoke). */
-  make(mode: OfferMode, ttlMs = LINK_TTL_MS): {
+  /** A new offer; every earlier open one is cancelled first, with its invitation revoked (`cancelOpen`). */
+  make(
+    mode: OfferMode,
+    revoke: (invite: InviteId) => void,
+    ttlMs = LINK_TTL_MS
+  ): {
     offer: OfferId
     key: Buffer
     expiresAt: number
-    revoke: InviteId[]
   } {
-    const revoke = this.cancelOpen()
+    this.cancelOpen(revoke)
     this.prune()
     const offer = newId('offer'),
       key = randomBytes(32),
@@ -308,7 +318,7 @@ export class LinkOffers {
         )
         .run(offer, mode, now, expiresAt)
     })
-    return { offer, key, expiresAt, revoke }
+    return { offer, key, expiresAt }
   }
   /** Consumed offers older than a pass lasts are forgotten, with their keys. */
   private prune(): void {
@@ -326,16 +336,21 @@ export class LinkOffers {
     return this.row(offer)?.state
   }
   /**
-   * In the transaction that enrolls `node` with `invite`: when the invitation was issued on a claimed offer made
-   * here, that offer is consumed and the device came in by a link (it is held until Allow).
+   * In the transaction that enrolls `node` with `invite`: when the invitation was issued on an offer made here, that
+   * offer must still be claimed and unexpired; it is consumed and the device came in by a link (held until Allow).
+   * An invitation of a cancelled, consumed or expired offer is refused, which rolls the enrollment back, so no stop
+   * between cancelling an offer and revoking its invitation can leave one usable. False for a raw invitation.
    */
   redeemed(invite: InviteId, node: NodeId): boolean {
-    const changed = this.db.database
-      .prepare(
-        "UPDATE net_link_offers SET state='consumed',node=? WHERE invite=? AND state='claimed'"
-      )
-      .run(node, invite)
-    return Number(changed.changes) > 0
+    const row = this.db.database
+      .prepare('SELECT * FROM net_link_offers WHERE invite=?')
+      .get(invite) as OfferRow | undefined
+    if (!row) return false
+    if (row.state !== 'claimed' || this.clock.now() >= row.expires) return stale()
+    this.db.database
+      .prepare("UPDATE net_link_offers SET state='consumed',node=? WHERE id=?")
+      .run(node, row.id)
+    return true
   }
   /**
    * Answers one claim on the offer path. Nothing is read beyond the offer row and nothing is written until the
@@ -391,29 +406,26 @@ export class LinkOffers {
       (row.state === 'claimed' && row.claimer !== claimer)
     )
       return stale()
-    // The same joiner asking again (its answer was lost) gets a fresh invitation; the earlier one stops working.
-    const issued = handlers.issue(claimer)
-    let kept = false
-    try {
-      this.db.transaction(() => {
-        const current = this.row(row.id)
-        if (
-          !current ||
-          current.state !== row.state ||
-          current.invite !== row.invite ||
-          (current.state === 'claimed' && current.claimer !== claimer)
-        )
-          stale()
-        this.db.charge(1)
-        this.db.database
-          .prepare("UPDATE net_link_offers SET state='claimed',claimer=?,invite=? WHERE id=?")
-          .run(claimer, issued.invite, row.id)
-        kept = true
-      })
-    } finally {
-      if (!kept) handlers.revoke(issued.invite)
-    }
-    if (row.invite) handlers.revoke(row.invite)
+    // The same joiner asking again (its answer was lost) gets a fresh invitation; the earlier one stops working. The
+    // invitation, the claim and the revocation of the earlier one commit together, and the invitation ends when the
+    // link does.
+    let issued!: { text: string; invite: InviteId }
+    this.db.transaction(() => {
+      const current = this.row(row.id)
+      if (
+        !current ||
+        current.state !== row.state ||
+        current.invite !== row.invite ||
+        (current.state === 'claimed' && current.claimer !== claimer)
+      )
+        stale()
+      issued = handlers.issue(claimer, row.expires)
+      this.db.charge(1)
+      this.db.database
+        .prepare("UPDATE net_link_offers SET state='claimed',claimer=?,invite=? WHERE id=?")
+        .run(claimer, issued.invite, row.id)
+      if (row.invite) handlers.revoke(row.invite)
+    })
     return { t: 'link.result', invite: issued.text }
   }
 }

@@ -72,6 +72,8 @@ export interface NodeInviteInput {
    * published route record, since the joiner already reached this computer. A raw invitation still needs a route.
    */
   emptyRoutes?: boolean
+  /** The latest the invitation may end (a connect link's own expiry); `ttlMs` still bounds it. */
+  endsBy?: number
 }
 export type NodeKind = 'computer' | 'phone'
 export interface NodeInviteAuthorization {
@@ -489,7 +491,7 @@ export class EnrollmentService {
       throw new NetError('route_unreachable')
     const token = randomBytes(32),
       invite = newId('invite'),
-      expiresAt = Math.min(now + ttl, delegation.delegation.expiresAt)
+      expiresAt = Math.min(now + ttl, delegation.delegation.expiresAt, input.endsBy ?? Infinity)
     return {
       token,
       authorization: {

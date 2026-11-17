@@ -13,10 +13,10 @@ import { CONNECTIONS_MARKER, type NetDatabase } from './database'
  */
 export type ConnectionState = 'none' | 'connected' | 'disconnected' | 'held' | 'other'
 /**
- * What wrote a record: a person here, an invitation either side, a connect link either side, Mousse ID, or the
- * one-time step for older stores.
+ * What wrote a record: a person here, Allow for a held device, an invitation either side, a connect link either
+ * side, Mousse ID, or the one-time step for older stores.
  */
-export type ConnectionSource = 'person' | 'invite' | 'join' | 'link' | 'account' | 'migration'
+export type ConnectionSource = 'person' | 'allow' | 'invite' | 'join' | 'link' | 'account' | 'migration'
 type Written = 'connected' | 'disconnected' | 'held'
 
 export interface ConnectionEvent {
@@ -44,6 +44,11 @@ export class SqliteConnections {
   }
   connected(node: NodeId): boolean {
     return this.states.get(node) === 'connected'
+  }
+  /** What wrote the device's record, or undefined with none. */
+  source(node: NodeId): string | undefined {
+    const row = this.db.database.prepare('SELECT source FROM net_connections WHERE node=?').get(node)
+    return row ? String(row.source) : undefined
   }
   /** The one-time step for a store from before this record: done, or not yet. */
   migrated(): boolean {
