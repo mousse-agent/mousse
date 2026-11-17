@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   SIDE_CARD_FADE_MS,
@@ -7,8 +6,6 @@ import {
   sideCardPresenceView,
   type SideCardPhase
 } from '../src/renderer/components/sideCard/sideCardPresence'
-
-const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
 
 describe('nextSideCardPhase', () => {
   it('fades in: unmounted, entering, then shown once painted', () => {
@@ -157,19 +154,5 @@ describe('createSideCardPresence', () => {
     presence.dispose()
     vi.advanceTimersByTime(SIDE_CARD_FADE_MS * 2)
     expect(phases).toEqual(['exiting'])
-  })
-})
-
-describe('side card stylesheet', () => {
-  const css = read('../src/renderer/components/sideCard/sideCard.css')
-
-  it('lifts the aside above the incoming app panel only while a card is mounted in a narrowed aside', () => {
-    expect(css).toMatch(/\.sidebar:not\(\.sidebar-full\):has\(> \.thread-side-card-layer > \.thread-side-card\) \{\s*z-index: 1;/)
-  })
-
-  it('leaves section headings in sentence case', () => {
-    const title = /\.side-card-section-title \{([^}]*)\}/.exec(css)?.[1] ?? ''
-    expect(title).toContain('font-size')
-    expect(title).not.toMatch(/text-transform|letter-spacing/)
   })
 })

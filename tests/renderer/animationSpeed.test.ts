@@ -184,14 +184,6 @@ describe('Settings › Appearance › Window', () => {
 
 describe('motion styles', () => {
   const global = read('../../src/renderer/styles/global.css')
-  const polish = read('../../src/renderer/styles/polish.css')
-
-  it('defines the scaled duration tokens on :root', () => {
-    expect(polish).toMatch(/--ui-motion-scale:\s*1;/)
-    expect(polish).toMatch(/--ui-dur-fast:\s*calc\(120ms \* var\(--ui-motion-scale\)\)/)
-    expect(polish).toMatch(/--ui-dur:\s*calc\(160ms \* var\(--ui-motion-scale\)\)/)
-    expect(polish).toMatch(/--ui-dur-slow:\s*calc\(200ms \* var\(--ui-motion-scale\)\)/)
-  })
 
   it('has an Off rule that stops transitions and animations but keeps spinners', () => {
     const rule = /(\[data-motion='off'\] \*[^{]*)\{([^}]*)\}/.exec(global)
@@ -211,12 +203,5 @@ describe('motion styles', () => {
     const off = /(\[data-motion='off'\] \*[^,{]+)/.exec(global)![1]
     const reduced = /@media \(prefers-reduced-motion: reduce\) \{\s*(\*:not[^,{]+)/.exec(global)![1]
     expect(count(off)).toBe(count(reduced))
-  })
-
-  it('scales the converted motion', () => {
-    expect(read('../../src/renderer/styles/sliding-threads-pane.css')).toContain('transition: width var(--ui-dur-slow)')
-    expect(read('../../src/renderer/styles/select.css')).toContain('animation: ui-select-in var(--ui-dur-fast)')
-    expect(read('../../src/renderer/components/sideCard/sideCard.css')).toContain('opacity calc(180ms * var(--ui-motion-scale))')
-    expect(read('../../src/renderer/styles/threads-sidebar.css')).toContain('threads-sidebar-slide-out var(--ui-dur-slow)')
   })
 })

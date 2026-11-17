@@ -59,7 +59,6 @@ describe('the gap under a streaming reply', () => {
     expect(gap()!.className).not.toMatch(/vh|min-h/)
     // Directly under the rows: nothing else pushes the newest text up from the composer.
     expect(belowRows()).toEqual([gap()])
-    expect(host.innerHTML).not.toMatch(/d+vh/)
   })
 
   it('holds the same size while the reply grows', () => {

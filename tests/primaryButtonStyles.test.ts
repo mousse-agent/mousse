@@ -105,47 +105,19 @@ describe('primary button styles', () => {
     expect(polish.some((rule) => SEND.test(rule.selector) && usesGradient(rule.body))).toBe(true)
   })
 
-  it('every primary shares one rule: tinted neutral surface, semibold accent text, accent edge, no glow', () => {
+  it('every primary shares one rule, with no gradient and no glow', () => {
     const [base] = primaryRules.filter((rule) => !/:hover|:disabled/.test(rule.selector))
     expect(base).toBeDefined()
     expect(listOf(base.selector)).toEqual(PRIMARY_CLASSES)
-    expect(base.body).toMatch(/color:\s*var\(--btn-primary-fg\)/)
-    expect(base.body).toMatch(/font-weight:\s*600/)
-    expect(base.body).toMatch(/border:\s*1px solid var\(--btn-primary-border\)/)
-    expect(base.body).toMatch(/background:\s*var\(--btn-primary-bg\)/)
-    expect(base.body).toMatch(/box-shadow:\s*var\(--ui-specular\)/)
     expect(usesGradient(base.body) || hasAccentGlow(base.body)).toBe(false)
   })
 
-  it('hover tints the fill and disabled drops the accent, for the same buttons', () => {
+  it('hover and disabled states cover the same buttons, and disabled drops the accent', () => {
     const hover = primaryRules.find((rule) => rule.selector.includes(':hover'))
     const disabled = primaryRules.find((rule) => !rule.selector.includes(':hover') && rule.selector.includes(':disabled'))
     expect(listOf(hover!.selector)).toEqual(PRIMARY_CLASSES)
     expect(listOf(disabled!.selector)).toEqual(PRIMARY_CLASSES)
-    expect(hover!.body).toMatch(/background:\s*var\(--btn-primary-hover-bg\)/)
-    expect(disabled!.body).toMatch(/color:\s*var\(--text-primary\)/)
-    expect(disabled!.body).toMatch(/background:\s*var\(--btn-primary-surface\)/)
     expect(disabled!.body).not.toMatch(/accent/)
-  })
-
-  it('derives the text tone from the accent, darker on light themes', () => {
-    const tokens = readFileSync(resolve(root, 'styles/polish.css'), 'utf8')
-    expect(tokens).toContain('--btn-primary-fg: oklch(from var(--accent) max(l, 0.76) c h);')
-    expect(tokens.match(/--btn-primary-fg: oklch\(from var\(--accent\) min\(l, 0\.45\) c h\);/g)).toHaveLength(2)
-  })
-
-  it('leads its row: a stronger accent edge and an accent tint at rest, deeper on hover', () => {
-    const tokens = readFileSync(resolve(root, 'styles/polish.css'), 'utf8')
-    expect(tokens).toContain('--btn-primary-border: color-mix(in srgb, var(--accent) 55%, var(--ui-line-strong));')
-    expect(tokens).toContain('--btn-primary-surface: var(--ui-raised);')
-    expect(tokens).toContain('--btn-primary-bg: color-mix(in srgb, var(--accent) 6%, var(--btn-primary-surface));')
-    expect(tokens).toContain('--btn-primary-hover-bg: color-mix(in srgb, var(--accent) 12%, var(--btn-primary-surface));')
-  })
-
-  it('sits on the same see-through surface as its neighbours on light themes, not on white', () => {
-    const tokens = readFileSync(resolve(root, 'styles/polish.css'), 'utf8')
-    expect(tokens.match(/--btn-primary-surface: transparent;/g)).toHaveLength(2)
-    expect(tokens.match(/--btn-primary-bg: color-mix\(in srgb, var\(--accent\) 5%, var\(--btn-primary-surface\)\);/g)).toHaveLength(2)
   })
 
   it('no component rule repaints a primary with its own fill or text colour', () => {

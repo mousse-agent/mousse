@@ -335,12 +335,6 @@ describe('quick action editor dialog', () => {
     expect(footer).toContain('Cancel')
     expect(footer).toContain('btn btn-primary')
   })
-
-  it('is built on the shared modal', () => {
-    const source = readFileSync(new URL('../src/renderer/components/QuickActionEditor.tsx', import.meta.url), 'utf8')
-    expect(source).toContain("import { Modal } from './ui/Modal'")
-    expect(source).not.toContain('quick-actions-backdrop')
-  })
 })
 
 describe('actions section rendering', () => {

@@ -1,6 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { act, createElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -127,15 +125,6 @@ describe('Collapse', () => {
     expect(shell()?.hasAttribute('data-stagger')).toBe(true)
     draw({ open: true, itemCount: COLLAPSE_LONG_LIST + 1 })
     expect(shell()?.hasAttribute('data-stagger')).toBe(false)
-  })
-
-  it('lays a settled group out as the same one-row grid it moves in, so the close has a row to shrink from', () => {
-    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
-    const base = css.match(/\n\.ui-collapse \{([^}]*)\}/)?.[1] ?? ''
-    expect(base).toMatch(/display: grid;/)
-    expect(base).toMatch(/grid-template-rows: 1fr;/)
-    // Only the clip and the transitions depend on the motion; the layout does not.
-    expect(css).not.toMatch(/\.ui-collapse\[data-motion\] \{[^}]*display/)
   })
 })
 

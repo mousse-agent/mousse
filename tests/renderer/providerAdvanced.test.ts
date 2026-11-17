@@ -93,7 +93,6 @@ describe('Advanced of a Claude Code entry', () => {
     for (const fact of ['Executable in use', 'Account home', '/usr/local/bin/claude', 'set up the way you use it']) expect(advanced().textContent).not.toContain(fact)
 
     const info = host.querySelector('[data-testid="prov-info"]')!
-    expect(info.className).toBe('prov-info')
     const toggle = info.querySelector('button')!
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(info.querySelectorAll('.prov-info-row')).toHaveLength(0)

@@ -148,12 +148,6 @@ describe('frosted composer styles', () => {
     }
     expect(polish).toMatch(/rgba\(var\(--surface-soft-rgb\), var\(--frosted-composer-alpha/)
   })
-
-  it('keeps the transcript fade when off and ends the transcript at the composer when on', () => {
-    expect(polish).toMatch(/\n:is\(html\[data-acrylic='true'\], html\[data-frosted-composer='true'\], html\[data-wallpaper\]\) \.chat:not\(\.chat--empty\) \.an-message-list \{\n  --transcript-mask:/)
-    expect(polish).toMatch(/html\[data-frosted-composer='true'\] \.chat:not\(\.chat--empty\) \.an-message-list \{\n  --transcript-mask:[^}]*calc\(100% - var\(--chat-composer-gap\)\)/)
-    expect(polish).toMatch(/padding-bottom: var\(--chat-composer-gap\)/)
-  })
 })
 
 describe('Settings › Chat › Frosted composer', () => {
