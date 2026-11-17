@@ -150,6 +150,18 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       expect(own.body.result.content[1]).toEqual({ type: 'text', text: `${BOUNDARY_NOTICE_HEADER}\n\na subagent finished` })
     })
 
+    it('never holds person, in a run a person started; the run\'s own call does', async () => {
+      const archiveOwnThreadAfterTurn = vi.fn(() => ({ status: 'scheduled' as const }))
+      const attribute = attribution({ toolu_h: { kind: 'helper', agentId: 'toolu_A' } })
+      const { server, attachment } = await setup({ personHeld: () => true, archiveOwnThreadAfterTurn }, { attribute })
+      const helper = await rpc(server.url, attachment.token, withMeta(1, 'thread_archive', { 'claudecode/toolUseId': 'toolu_h' }, { threadId: 'thread-a' }))
+      expect(refusalOfResponse(helper.body)).toMatchObject({ refused: { code: 'lacks_capability', lacks: 'person' } })
+      expect(archiveOwnThreadAfterTurn).not.toHaveBeenCalled()
+      const own = await rpc(server.url, attachment.token, withMeta(2, 'thread_archive', { 'claudecode/toolUseId': 'toolu_own' }, { threadId: 'thread-a' }))
+      expect(JSON.parse(own.body.result.content[0].text)).toMatchObject({ threadId: 'thread-a', archived: 'after_this_turn' })
+      expect(archiveOwnThreadAfterTurn).toHaveBeenCalledTimes(1)
+    })
+
     it('an attribution that fails holds delegable authority only', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
       const { server, attachment } = await setup({}, { attribute: async () => { throw new Error('lost') } })
