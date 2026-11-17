@@ -205,15 +205,21 @@ describe('a turn that waited on a secret', () => {
   const label = () => host.querySelector('.turn-work-label')!.textContent
 
   it('leaves out the whole wait when another call ran in the same step, after the answer and after a reload', () => {
-    vi.useFakeTimers({ toFake: ['Date'] })
+    // The live line reads the clock on its one-second tick.
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
     try {
       // Open, with a call the agent started in the same step done long before the answer.
       vi.setSystemTime(T0 + 60_000)
       render([...mousseToUIMessages([prompt, thinking, secretCall(10), bash('d0', 11)]), openRequest(12)], 'streaming')
-      // Answered five minutes later: the open request is gone, and the work goes on.
-      vi.setSystemTime(T0 + 315_000)
+      // The line says what it waits for, in place of a running time.
+      expect(label()).toBe('Waiting for a secret')
+      // Answered five minutes later: the open request is gone, and the work goes on. A second on, the running time
+      // leaves the wait out: 10s before it, 1s after.
+      vi.setSystemTime(T0 + 311_000)
       const answered = [prompt, thinking, secretCall(10, 310), bash('d0', 11), bash('d1', 311)]
       render(mousseToUIMessages(answered), 'streaming')
+      act(() => vi.advanceTimersByTime(1000))
+      expect(label()).toBe('Working · 11s')
       // Finished: ten seconds of work before the wait and ten after.
       vi.setSystemTime(T0 + 320_000)
       render(mousseToUIMessages([...answered, reply(320)]), 'ready')
