@@ -1,3 +1,4 @@
+import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -25,7 +26,7 @@ import { botFixture, createBot, finish, flush, start, type BotFixture } from './
 let f: BotFixture
 const connections: McpManager[] = []
 afterEach(async () => { f?.close(); await Promise.all(connections.splice(0).map(m => m.shutdown())) })
-async function setup(on: boolean, realServer = false, secondTool = false, threads = false, ownerTools = false) {
+async function setup(on: boolean, realServer = false, secondTool = false, threads = false, ownerTools = false, realContext = false) {
   f = botFixture()
   const settings = getDefaultSettings()
   settings.experimental.botAsksFirst = on
@@ -60,6 +61,14 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
     servers: () => [server]
   }, manager })
   f.host.mcp = mcp
+  if (realContext) {
+    const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
+    const journal = createBotJournal({ store: memory, readThread: () => ({ messages: [] }), listThreads: () => [] })
+    f.host.journal = journal
+    f.host.context = createBotContextProvider({ store: memory, journal })
+    f.host.chatResumes = () => true
+    f.bots.close(); f.bots = new BotEngine(f.host)
+  }
   await f.bots.reconcileOnStartup()
   const { botId } = await createBot(f, { reply: 'Hello' })
   const permission = await f.bots.activate({ botId, input: 'Allow mail', clientRequestId: 'permission' })
@@ -2252,3 +2261,40 @@ it.each(['2030-04-05T09:14:00.000Z', 'invalid', 99])('C4 integration reads only 
   for (const key of ['settledAt', 'ownerSeq', 'noteSeq', 'ownerRemoved', 'removedOwnerSeq', 'removedNoteSeq']) expect(Object.hasOwn(card, key)).toBe(false)
 })
 
+
+it.each(['open', 'nudge', 'settled'] as const)('C4 merged epoch receives a masked %s action fact without starting a chat turn', async state => {
+  const t = await setup(true, false, false, false, false, true)
+  const chat = async (id: string) => {
+    await f.bots.service.chatSend({ botId: t.botId, text: 'Check status', clientRequestId: id })
+    const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+    const turn = await start(f, row.id)
+    return turn
+  }
+  const first = await chat('epoch-first')
+  await finish(f, first.payload, 'completed', { text: 'Ready' })
+  Object.assign(t.args, { password: 'private-action-password' })
+  const chats = () => f.store.listActivations(t.botId).filter(row => row.lane === 'chat').length
+  const before = chats()
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  if (state === 'nudge') {
+    f.bots.setTellingWindows(1); await f.bots.deliverDueReminders()
+    f.clock.now += 60 * 60_000; await f.bots.deliverDueReminders()
+    expect(f.store.message(`${a.message_id}_n1`)).toBeDefined()
+  }
+  if (state === 'settled') {
+    const intermediate = await chat('epoch-held')
+    await finish(f, intermediate.payload, 'completed', { text: 'Waiting' })
+    await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  }
+  expect(chats()).toBe(before + (state === 'settled' ? 1 : 0))
+  const next = await chat('epoch-next')
+  expect(next.prepared.history).toBe('thread')
+  const preamble = next.prepared.preamble ?? ''
+  expect(preamble).toContain('New in the chat since your last turn')
+  expect(preamble).not.toContain('private-action-password')
+  const expected = state === 'open' ? 'one@example.test' : state === 'nudge' ? 'Wants to send' : 'Sent'
+  const line = preamble.split('\n').find(line => line.includes(expected))
+  expect(line, preamble).toBeDefined()
+  expect(line).toContain('Mousse, about something outside (data)')
+})
