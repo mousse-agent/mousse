@@ -1,5 +1,5 @@
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
-import { BOT_SCHEDULE_ACT_TOOLS } from '../../src/shared/bots/personal/manifest'
+import { BOT_SCHEDULE_ACT_TOOLS, botMayBeOffered } from '../../src/shared/bots/personal/manifest'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -19,7 +19,9 @@ import { ToolRegistry, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools/reg
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
 import { botCatalogueTools } from '../../src/mms/run/mcp/appTools/botCatalogue'
 import { refused } from '../../src/mms/run/mcp/appTools/refusal'
-import { appTurn } from '../run/appToolsFixture'
+import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
+import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
+import { toolNeeds } from '../../src/mms/run/mcp/appTools/authority'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
@@ -2427,4 +2429,47 @@ it('C4 next removed week wait does not remove the card deadline or leave expired
   expect(f.store.activation(t.workId)!.status).toBe('done')
   expect(f.bots.service.get(t.botId).summary.needsOwner).not.toBe(true)
   expect(t.calls).toEqual([])
+})
+
+
+it('C4 authority compiler fences every registered Mousse tool for held work and its live subagent', async () => {
+  const t = await setup(true, false, true, true, true)
+  await t.work.prepared.authority.subagents!.start({ title: 'Helper', brief: 'Help with mail', toolCallId: 'helper' })
+  const d = f.store.dispatches(t.workId).find(row => row.kind === 'subagent')!
+  const child = await start(f, t.workId, d.n)
+  const pairs = [t.work.prepared.authority, child.prepared.authority].map((authority, index) => {
+    const bot = index === 0 ? { ...authority, catalogue: 'use_tool' as const } : authority
+    const threadId = `fence-${index}`
+    const turns = new AppToolTurns()
+    turns.register(appTurn({ threadId, runId: 'r1', turnToken: 'tt', bot }))
+    const { registry } = createAppToolRegistry({
+      host: fakeAppToolHost().host, engine: {} as never, turns, botMemory: {} as never,
+      options: { activeRunId: () => 'r1', botMcp: t.mcp,
+        userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never,
+        access: { botReach: () => ({ scope: 'manage' }), threadExists: () => true, relation: () => 'descendant' } }
+    })
+    const handlers = registry.list().map(tool => vi.spyOn(tool, 'handler').mockResolvedValue({ text: 'ran' }))
+    const names = registry.list().filter(tool => toolNeeds(tool).callable && botMayBeOffered(tool.name) && tool.name !== 'use_tool').map(tool => tool.name)
+    const request = { credential: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }, toolCallId: 'compiler-held', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
+    const call = (name: string, args: Record<string, unknown>) => registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, request)
+    return { call, names, handlers }
+  })
+  for (const pair of pairs) {
+    expect(await pair.call('thread_read', {})).toMatchObject({ text: 'ran' })
+    for (const handler of pair.handlers) handler.mockClear()
+  }
+  expect(await pairs[0].call('use_tool', { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'compiler-held' } })).toMatchObject({ text: expect.stringContaining('held') })
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(JSON.parse(a.exec_args!)).toEqual(t.args)
+  expect(f.bots.service.actionMessage(t.botId, a.id).action).toMatchObject({ title: 'Send', serverName: 'Mail', status: 'open' })
+  for (const pair of pairs) {
+    expect(pair.names).toContain('thread_send')
+    for (const name of [...pair.names, 'mail_send', 'mail_other']) {
+      expect(await pair.call(name, {}), name).toMatchObject({ isError: true })
+      expect(await pair.call('use_tool', { tool: name, arguments: {} }), `wrapped ${name}`).toMatchObject({ isError: true })
+    }
+    for (const handler of pair.handlers) expect(handler).not.toHaveBeenCalled()
+  }
+  expect(t.calls).toEqual([])
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
 })
