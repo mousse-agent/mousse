@@ -1,3 +1,5 @@
+import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
+import { botActionRefusalText, type BotActionRefusalCode } from '../../src/shared/bots/personal/actionRefusal'
 import { foldChatSummary } from '../../src/mms/bots/memory/chatSummary'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS, botMayBeOffered } from '../../src/shared/bots/personal/manifest'
@@ -3186,4 +3188,39 @@ it('C9 a failed action startup reconciliation still reconciles other activations
   vi.spyOn(f.bots.actions, 'reconcile').mockRejectedValue(new Error('action store unavailable'))
   await expect(f.bots.reconcileOnStartup()).resolves.toBeUndefined()
   expect(f.store.lastMainDispatch(t.workId)!.n).toBe(2)
+})
+
+it.each([
+  ['stop', 'bot_action_work_ended', 'This work ended. Nothing was sent.'],
+  ['pause', 'bot_action_owner_paused', 'This bot was paused, so nothing was sent.'],
+  ['permission', 'bot_action_permission_changed', 'This tool or its permission changed, so nothing was sent.'],
+  ['switch', 'bot_action_disabled', 'This could not wait for your owner after all, so nothing was sent.'],
+  ['forget', 'bot_action_owner_removed', 'You removed this request, so nothing was sent.'],
+  ['binding', 'bot_action_binding_changed', 'This changed since you saw it. Nothing was sent.']
+] as const)('C9 %s withdrawal tells each audience its real cause', async (path, code, ownerText) => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
+  if (path === 'pause') { f.bots.actions.transition(a.id, 'open', 'approved'); f.bots.pauseBot(t.botId) }
+  if (path === 'permission') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  if (path === 'switch') { f.host.settings!.get().experimental.botAsksFirst = false; f.bots.quietHoursChanged() }
+  if (path === 'forget') {
+    const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
+    const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'card' })!
+    memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  }
+  if (path === 'binding') {
+    vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.descriptor.inputSchema = { type: 'object', required: ['changed'] } as never })
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  }
+  const settled = f.bots.actions.get(a.id)!
+  const text = actionContinuation(settled)
+  expect(text).not.toContain('No longer needed')
+  expect(text).not.toContain('[forgotten]')
+  if (path !== 'forget') expect(text).toContain(ownerText)
+  else expect(text).toContain('Your owner removed this request')
+  expect(() => f.bots.actions.check({ actionId: a.id, digest: a.args_digest, answer: 'send' })).toThrow(expect.objectContaining({ code, message: ownerText }))
+  expect(botActionRefusalText(code as BotActionRefusalCode)).toBe(ownerText)
+  expect(t.calls).toEqual([])
 })
