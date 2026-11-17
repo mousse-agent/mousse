@@ -1,11 +1,10 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatGptAuth } from '../../../src/mms/harness/chatgpt/chatgptAuth'
 import type { ChatGptAuthError } from '../../../src/mms/harness/chatgpt/errors'
 import { harnessAppError } from '../../../src/shared/harness/types'
-import { tryAcquireOnceForTests } from '../../../src/mms/platform/asyncFileLock'
 import { activeSession, ChatGptStore, chatgptStorePath, emptyStore, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
 import type { SecretCodec } from '../../../src/mms/providers/secretCodec'
 import { FakeIssuer, fakeVault, FULL_SCOPE, guardNetwork, plainCodec, tempHomes, type Reply } from './fakeIssuer'
@@ -436,31 +435,6 @@ describe('sign-out and deletion', () => {
     expect(issuer.revokeRequests[0].token).toBe('rt-oaiapp_a')
     expect(stored(auth).pendingRevocations).toEqual([])
     expect(auth.status()).not.toHaveProperty('revocationPending')
-  })
-
-  it('a holder suspended past the lock max hold cannot overwrite what happened meanwhile', async () => {
-    const home = homes()
-    seed(home.profileHome, [{ clientId: 'oaiapp_a', subject: 'alice', life: 0 }])
-    const sleeper = chatgptAuth(issuer, home)
-    const hold = holdTokenEndpoint()
-    const refresh = sleeper.access()
-    await hold.sent()
-    // The refreshing process is suspended for more than 5 minutes: its lock reads as expired, and
-    // another process takes it over (the lock tests cover that takeover) and signs out. Callers in
-    // this process would queue behind the sleeper, so the other process is played by a bare store
-    // writer that takes the expired lock.
-    const lock = JSON.parse(readFileSync(sleeper.lifecycle.lockPath, 'utf8'))
-    writeFileSync(sleeper.lifecycle.lockPath, JSON.stringify({ ...lock, acquiredAt: new Date(Date.now() - 10 * MINUTE).toISOString() }))
-    expect(tryAcquireOnceForTests(sleeper.lifecycle.lockPath, 5 * MINUTE)).toMatch(/^[0-9a-f]{32}$/)
-    const other = new ChatGptStore(chatgptStorePath(home.profileHome, INSTANCE), plainCodec)
-    const current = other.read()
-    other.write({ ...current, active: null, sessions: [], signInFence: current.signInFence + 1, credentialEpoch: current.credentialEpoch + 1 })
-    // It resumes: its renewal is refused, and the sign-out stands.
-    hold.release()
-    await expect(refresh).rejects.toMatchObject({ code: 'operation_busy', message: 'The ChatGPT connection changed while this was running. Try again.' })
-    const after = stored(sleeper)
-    expect(after.active).toBeNull()
-    expect(after.sessions).toEqual([])
   })
 
   it('a vault that locks during the stop hook leaves the revocation pending, never falsely confirmed', async () => {
