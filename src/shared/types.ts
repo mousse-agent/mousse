@@ -1098,6 +1098,8 @@ export interface OrchestratorResponse {
   message: string
   /** With `error`, on a bot's turn whose work goes on (it reached its runtime's turn cap): the words it said last. */
   partial?: string
+  /** On a bot's turn: a steer cut it and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
+  steerUnanswered?: boolean
   actions: OrchestratorAction[]
   /**
    * When true, the send was accepted onto the thread queue instead of starting a turn.
@@ -1341,6 +1343,12 @@ export interface ContextUsageSnapshot {
    * new thread, or the history changed since, which starts a fresh session).
    */
   promptCache?: ContextPromptCache
+  /**
+   * A runtime that reports no context (an ACP agent, Cursor): Mousse's estimate of the history the next send
+   * carries, sent with `promptCache` so the composer can still suggest compacting once it goes cold. The gauge
+   * itself stays empty.
+   */
+  historyEstimate?: number
 }
 
 export interface ContextPromptCache {
@@ -1676,6 +1684,8 @@ export interface TurnPause {
   autoResume: boolean
   /** The reset passed while Mousse was off for more than a day: the timer was dropped and only Resume now (or a message) continues the run. */
   stale?: true
+  /** The paused run was itself the continue turn of an earlier pause: resuming ran into the limit again. */
+  again?: true
 }
 
 export interface TurnState {
@@ -1744,12 +1754,6 @@ export type TurnStep =
    * nothing back in time (its own retry, outside the attempt count).
    */
   | { kind: 'retrying'; attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: true }
-  /**
-   * The turn has not started: the profile runs `running` turns of the `limit` it runs at once, and this one starts when
-   * one of them ends. `keptForPeople`: set on a background turn (a subagent, a wake, a resume), which waits while every
-   * slot but those kept for people's turns is taken. Only with phase `queued`. `limit` is absent from an older daemon.
-   */
-  | { kind: 'waiting_slot'; running: number; limit?: number; keptForPeople?: number }
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'

@@ -28,8 +28,12 @@ export const LIVE_IDLE_RELEASE_MS = 30 * 60_000
  * turn that is in flight.
  */
 export const LIVE_MAX_PIN_MS = 4 * 60 * 60_000
-/** Live Claude processes across threads. Beyond it a turn runs as a one-shot query, as before. */
-export const LIVE_MAX_SESSIONS = 4
+/**
+ * Idle live Claude processes with no background work kept across threads. When a new process starts and more than this
+ * many sit idle, the least recently used idle one is closed early (its thread resumes the session on its next turn).
+ * Busy processes and ones holding background work never count and are never closed for it.
+ */
+export const LIVE_MAX_IDLE_SESSIONS = 8
 /** A task finished and Claude never started its own turn: the wake ends after this long. */
 export const WAKE_TURN_START_DEADLINE_MS = 2 * 60_000
 /** How long a task the next turn cleared on a guess (its wake never came) is remembered, in case the wake still comes. */
@@ -51,7 +55,13 @@ export interface LiveTimings {
   idleCloseMs: number
   idleReleaseMs: number
   maxPinMs: number
+  /**
+   * Live processes across threads; at it a turn runs as a one-shot query unless an idle one can be closed. Unlimited by
+   * default: every thread that wants a live process gets one. 0 makes every turn a one-shot query (tests).
+   */
   maxSessions: number
+  /** See `LIVE_MAX_IDLE_SESSIONS`. */
+  maxIdleSessions: number
   wakeDeadlineMs: number
   backgroundMoveMs: number
   /** How long one step of a cancel (an interrupt and its receipt) may take before the process is given up. */
@@ -68,7 +78,8 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
   idleCloseMs: LIVE_IDLE_CLOSE_MS,
   idleReleaseMs: LIVE_IDLE_RELEASE_MS,
   maxPinMs: LIVE_MAX_PIN_MS,
-  maxSessions: LIVE_MAX_SESSIONS,
+  maxSessions: Number.POSITIVE_INFINITY,
+  maxIdleSessions: LIVE_MAX_IDLE_SESSIONS,
   wakeDeadlineMs: WAKE_TURN_START_DEADLINE_MS,
   backgroundMoveMs: STEER_BACKGROUND_MOVE_MS,
   noticeDelayMs: 1_000,
@@ -947,9 +958,10 @@ export class LiveSession<Turn = unknown> {
    *
    * Pushed is not read, and taken (`run.read`, a `started` lifecycle) is not read either: `run.answered` and `onRead`
    * say when the model answers it, and `unreadFate` what became of one it had not answered when the turn ended.
-   * `pushed` is told the id at the moment of the push, before anything else can run.
+   * `pushed` is told the id at the moment of the push, before anything else can run. `content` is the steer's text, or
+   * its text and images as content blocks.
    */
-  async steer(run: LiveRun, text: string, pushed?: (id: string) => void, options: SteerOptions = {}): Promise<string | false> {
+  async steer(run: LiveRun, content: SDKUserMessage['message']['content'], pushed?: (id: string) => void, options: SteerOptions = {}): Promise<string | false> {
     const query = this.query
     if (!query || run.settled || run.abandoned || this.dead) return false
     run.steerInFlight++
@@ -976,7 +988,7 @@ export class LiveSession<Turn = unknown> {
         try {
           id = this.push(run, {
             type: 'user',
-            message: { role: 'user', content: text },
+            message: { role: 'user', content },
             parent_tool_use_id: null,
             priority: 'now',
             session_id: this.sessionId ?? ''

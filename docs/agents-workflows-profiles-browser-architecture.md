@@ -308,7 +308,7 @@ Rollback before any v2 writes restores the legacy manifest and roots. After v2 w
 
 The **Agents** tab of the Automations workspace opens a workspace with **Agents** and **Workflows** subtabs. The Agents library includes a prominent **New agent** button, search, tags, provider/model filter, favorites, and sort by name/recently edited/last run. Cards show orb thumbnail, name, short purpose, model, enabled state, and any missing dependencies.
 
-Selecting a card opens the Agent Editor. Back returns to the same filter and scroll position. Built-in templates can be duplicated into editable definitions. Runtime sessions are reached from thread tool cards and the thread's Lineage section; the former AgentsPanel and AgentsTasksView were removed. A definition's run history links to the thread of each run.
+Selecting a card opens the Agent Editor. Back returns to the same filter and scroll position. Built-in templates can be duplicated into editable definitions. Runtime sessions are reached from thread tool cards and the thread's Nest section; the former AgentsPanel and AgentsTasksView were removed. A definition's run history links to the thread of each run.
 
 The **Workflows** subtab has its own list/card library with **New workflow**, Import, search, tags, profile/project scope, and draft/published/invalid status filters. Listings show name, purpose, slash command, published revision, dependency health, last-run status, and last edited time. Clicking a listing opens its node editor; New workflow offers blank and sample templates. Back restores the library's filters and scroll position. A separate run-history action opens executions without replacing the editable definition.
 

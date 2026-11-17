@@ -354,6 +354,11 @@
   opacity: 0.5;
 }
 
+/* A thread a bot keeps out of the sidebar, listed while the eye shows hidden threads: quieter title. */
+.threads-sidebar-thread.hidden-thread :is(.threads-sidebar-thread-name, .threads-sidebar-card-title) {
+  opacity: 0.55;
+}
+
 /* No bottom margin: it sits inside the Collapse, so it would add to the project's own 8px instead of
    merging with it (polish.css and compact-shell.css follow the same rule). */
 .threads-sidebar-children {

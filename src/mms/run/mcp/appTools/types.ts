@@ -209,6 +209,11 @@ export interface ToolListing {
    * so a bot is shown what it can call in that turn; with no turn running, none.
    */
   botTurnTools?: ReadonlySet<string>
+  /**
+   * A bot thread's turn reaches its tool catalogue so (`BotAuthority.catalogue`): `use_tool` lists the core set only
+   * (docs/plans/bot-context.md §15). Absent or `search`: every tool it may be offered, as before.
+   */
+  botCatalogue?: 'search' | 'use_tool'
 }
 
 export interface MousseTool {

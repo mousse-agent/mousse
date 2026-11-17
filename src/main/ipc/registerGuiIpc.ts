@@ -51,7 +51,7 @@ import {
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
-import { copyImageFile, openLocalPath, saveFileCopy, showFileInFolder } from '../localFiles'
+import { openLocalPath, saveFileCopy, showFileInFolder } from '../localFiles'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
 import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { askForEditorAccess } from '../remoteEditorAsk'
@@ -90,7 +90,7 @@ import {
 } from '../../shared/settings'
 import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
-import { showCopyMenu } from '../contextMenu'
+import { showCopyMenu, writePngToClipboard } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
 import { stageBotAttachment, stageThreadAttachment } from './botAttachments'
 import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
@@ -3329,7 +3329,6 @@ export function registerGuiIpc(
   registerHandler('localFiles:showInFolder', async (_e, path: unknown) => { await showFileInFolder(path) })
   registerHandler('localFiles:saveCopy', async (event, path: unknown) =>
     saveFileCopy(path, BrowserWindow.fromWebContents(event.sender) ?? getWindow(), app.getPath('downloads')))
-  registerHandler('localFiles:copyImage', async (_e, path: unknown) => { await copyImageFile(path) })
   // A thread of another computer: its folder opens in an editor of this one over SSH. The window names the
   // thread only; the folder is the one the owner answers, and the SSH address is read here from this
   // computer's own records.
@@ -3806,6 +3805,7 @@ export function registerGuiIpc(
   registerHandler('clipboard:showCopyMenu', (_e, x: number, y: number, text: string) => {
     showCopyMenu(getWindow, x, y, text)
   })
+  registerHandler('clipboard:writeImage', (_e, png: unknown) => { writePngToClipboard(png) })
 
   return { syncDaemonTurnSnapshot }
 }

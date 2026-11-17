@@ -96,7 +96,7 @@ import { isMousseTempEntry } from '../../../data/closedPlaces'
 import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig, codexOneShotRunsOn } from './oneShot'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
-import type { ChildTurnPolicy } from '../../adapter'
+import type { ChildTurnPolicy, PlanWindowUse } from '../../adapter'
 import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
 import { harnessAppError } from '../../../../shared/harness/types'
 import { QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
@@ -376,6 +376,17 @@ function defaultKillTree(process: CodexProcess): void {
 
 export type CodexToolEvent = ProviderToolEvent
 
+/** A rate-limit snapshot's windows as `ProviderMetrics.quota` names them; undefined when it has none. */
+export function quotaOf(snapshot: RateLimitSnapshot | undefined): PlanWindowUse[] | undefined {
+  if (!snapshot) return undefined
+  const windows = (['primary', 'secondary'] as const).flatMap((kind) => {
+    const window = snapshot[kind]
+    if (!window || typeof window.usedPercent !== 'number' || !Number.isFinite(window.usedPercent)) return []
+    return [{ kind, usedPercent: window.usedPercent, ...(typeof window.resetsAt === 'number' ? { resetsAt: window.resetsAt } : {}) }]
+  })
+  return windows.length ? windows : undefined
+}
+
 export interface CodexTurnUsage {
   input: number
   output: number
@@ -386,6 +397,8 @@ export interface CodexTurnUsage {
   reasoning: number
   /** Prompt side of the last model call (the thread's context size) and the model's window. */
   context?: { input: number; cacheRead: number; cacheWrite: number; contextWindow?: number }
+  /** The plan's usage windows of the latest rate-limit snapshot the server reported while the run was open. */
+  quota?: PlanWindowUse[]
 }
 
 export type CodexChatInput = {
@@ -453,7 +466,7 @@ export type CodexChatInput = {
    * `drainSteer` that also says whether the text is a person's (`cut`): see `TurnControl.drainSteerEntry`. With
    * `expect`, it takes only when the decision now is one of those deliveries.
    */
-  drainSteerEntry?: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => { text: string; token?: string; cut?: boolean } | undefined
+  drainSteerEntry?: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => { text: string; token?: string; cut?: boolean; images?: ChatImageAttachment[] } | undefined
   /**
    * The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. With it, the turn drains
    * only what it can deliver now: a cut, or a native steer (`turn/steer`, or the next turn at a boundary).
@@ -480,15 +493,38 @@ export type CodexChatInput = {
   onHeartbeat?: () => void
 }
 
-/** A steer `chat` drained; `token` names its drain (`drainSteerEntry`), when it had one. */
+/** A steer `chat` drained, with the images sent with it; `token` names its drain (`drainSteerEntry`), when it had one. */
 interface DrainedSteer {
   text: string
   token?: string
+  images?: ChatImageAttachment[]
+}
+
+/** The images Codex takes: JPEG, PNG, GIF or WebP up to 10 MiB. */
+function codexTakesImage(image: ChatImageAttachment): boolean {
+  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) && Buffer.byteLength(image.data, 'base64') <= 10 * 1024 * 1024
+}
+
+function codexImageInput(image: ChatImageAttachment): UserInput {
+  return { type: 'image', url: `data:${image.mimeType};base64,${image.data}` }
+}
+
+/**
+ * Steers as Codex input: their text, one per line, then their images. An image Codex does not take is left out with a
+ * warning: the text still goes in now, and the transcript keeps the image.
+ */
+function steerInput(entries: readonly DrainedSteer[]): UserInput[] {
+  const images = entries.flatMap((entry) => entry.images ?? [])
+  const taken = images.filter(codexTakesImage)
+  if (taken.length < images.length) console.warn('[codex] a steer image Codex does not take was left out', { left: images.length - taken.length })
+  return [textInput(entries.map((entry) => entry.text).join('\n')), ...taken.map(codexImageInput)]
 }
 
 export interface CodexChatResult {
   text: string
   codexThreadId: string
+  /** The saved thread could not be resumed and the turn ran in a new one (`ProviderMetrics.resumeLost`). */
+  resumeLost?: true
   turnId: string
   /** The model Codex ran (resolves `default`). */
   model: string
@@ -833,7 +869,8 @@ class TurnRun {
       output: turn.outputTokens ?? 0,
       reasoning: turn.reasoningOutputTokens ?? 0,
       totalTokens: turn.totalTokens ?? 0,
-      context: { ...context, ...(this.usageEnd.window ? { contextWindow: this.usageEnd.window } : {}) }
+      context: { ...context, ...(this.usageEnd.window ? { contextWindow: this.usageEnd.window } : {}) },
+      ...(quotaOf(this.rateLimits) ? { quota: quotaOf(this.rateLimits)! } : {})
     }
   }
 
@@ -2809,7 +2846,7 @@ export class CodexProviderService {
     conn: CodexConnection,
     input: CodexChatInput,
     signal: AbortSignal
-  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean; botSandbox?: CodexBotSandbox }> {
+  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean; botSandbox?: CodexBotSandbox; resumeLost?: true }> {
     const cwd = resolve(input.cwd)
     const instructionsHash = input.developerInstructions ? historyKey(input.developerInstructions).slice(0, 32) : undefined
     const saved = this.settings.threads?.[input.threadId]
@@ -2921,6 +2958,11 @@ export class CodexProviderService {
       try {
         const resumed = pinnedProvider(this.modelProvider, await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.set(resumed.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
+        // A resume answered with another thread holds none of the conversation: the history goes in the prompt.
+        if (resumed.thread.id !== saved.codexThreadId) {
+          console.warn('[codex] Codex was asked to resume a thread and opened another one', { threadId: input.threadId })
+          return { codexThreadId: resumed.thread.id, model: resumed.model, continued: false, botSandbox, resumeLost: true }
+        }
         return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true, botSandbox }
       } catch (error) {
         signal.throwIfAborted()
@@ -2928,7 +2970,7 @@ export class CodexProviderService {
         if (!(error instanceof CodexRpcError)) throw error
         const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
         this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
-        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
+        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox, resumeLost: true }
       }
     }
     const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
@@ -2971,9 +3013,8 @@ export class CodexProviderService {
           errorInfo: { category: 'unavailable', retryable: false }
         })
       const images = (input.images ?? []).map((image): UserInput => {
-        if (!['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) || Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024)
-          throw new Error(`Codex cannot send image ${image.name}; use JPEG, PNG, GIF or WebP under 10 MiB`)
-        return { type: 'image', url: `data:${image.mimeType};base64,${image.data}` }
+        if (!codexTakesImage(image)) throw new Error(`Codex cannot send image ${image.name}; use JPEG, PNG, GIF or WebP under 10 MiB`)
+        return codexImageInput(image)
       })
       const conn = await this.verifiedConnection(signal)
       await abortable(this.ensureTreeMode(conn), signal)
@@ -3052,7 +3093,7 @@ export class CodexProviderService {
             return
           }
           try {
-            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: [textInput(entry.text)] }, { signal })
+            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: steerInput([entry]) }, { signal })
           } catch (error) {
             // A Stop or a dead process: the entry stays in flight, and the chat's end hands it back.
             if (!(error instanceof CodexRpcError)) throw error
@@ -3113,7 +3154,7 @@ export class CodexProviderService {
       const holds = Boolean(input.peekSteer && input.drainSteerEntry)
       const collectSteer = (): void => {
         if (signal.aborted) return
-        let entry: { text: string; token?: string; cut?: boolean } | undefined
+        let entry: { text: string; token?: string; cut?: boolean; images?: ChatImageAttachment[] } | undefined
         let asCut: boolean
         if (holds) {
           const delivery = input.peekSteer!()?.delivery
@@ -3130,7 +3171,7 @@ export class CodexProviderService {
         }
         const steer = (entry ? entry.text : holds ? undefined : input.drainSteer?.())?.trim()
         if (!steer) return
-        const drainedSteer = { text: steer, ...(entry?.token ? { token: entry.token } : {}) }
+        const drainedSteer: DrainedSteer = { text: steer, ...(entry?.token ? { token: entry.token } : {}), ...(entry?.images?.length ? { images: entry.images } : {}) }
         if (asCut) return cut(drainedSteer)
         deliver(drainedSteer)
       }
@@ -3232,7 +3273,9 @@ export class CodexProviderService {
           // process lists it, the helpers seen in the items of the thread and its helpers otherwise. Stop interrupts
           // them and ends the wait; a steer that arrives meanwhile starts a turn; helpers silent for
           // too long are abandoned.
-          const treeMode = this.app?.conn === conn && this.app.tree === 'on'
+          // A bot's turn runs with Codex's subagents off (`CODEX_BOT_FEATURES_OFF`): it has no helper tree to wait for, and
+          // its reply is not held for the tree's quiet check (two reads a quarter of a second apart).
+          const treeMode = this.app?.conn === conn && this.app.tree === 'on' && !input.bot
           if ((treeMode || current.helpers.running().length) && !abandoned) {
             pinnedSince ??= Date.now()
             const held = await this.holdChat(current, input, conn, aborted, new Promise<void>((wake) => (steerWake = wake)), pinnedSince)
@@ -3253,7 +3296,7 @@ export class CodexProviderService {
         // A cut taken while no turn was open (the run waited for its helpers) is carried by this next turn: there is
         // nothing left to cut, and cutting would end the very turn that carries it.
         cutWaiting = false
-        nextInput = [textInput(nextSteers.map((entry) => entry.text).join('\n'))]
+        nextInput = steerInput(nextSteers)
       }
       // A turn that ran after the cap (a held steer) does not wait for helpers; its own are interrupted
       // before the run ends.
@@ -3272,7 +3315,8 @@ export class CodexProviderService {
         codexThreadId,
         turnId: lastTurn.id,
         model: thread.model ?? baseId,
-        usage: current.usage()
+        usage: current.usage(),
+        ...(thread.resumeLost ? { resumeLost: true as const } : {})
       }
     } catch (error) {
       handBack()

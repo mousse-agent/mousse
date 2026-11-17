@@ -8,6 +8,7 @@ import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botAppToolRefusal, botBrowserNotAllowed, botBrowserWithheld } from '../../../../shared/bots/personal/walls'
 import { botMayBeOffered, isBotThreadTool, isBotTurnHeldTool } from '../../../../shared/bots/personal/manifest'
+import { BOT_USE_TOOL, botCoreTool } from '../../../../shared/bots/personal/catalogue'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -90,7 +91,7 @@ export interface ToolAccessPolicy {
    * Where a personal bot's thread tool ("use your threads") may reach: the scope for a thread (`botThreadReach`, the
    * rule its list and search follow too) or a project, or the refusal's words. Absent: a bot reaches nothing.
    */
-  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }): { scope: ToolScope } | { refused: string }
+  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }, options?: { read?: boolean }): { scope: ToolScope } | { refused: string }
 }
 
 export interface ToolRegistryOptions {
@@ -209,6 +210,26 @@ function notLive(message: string): McpToolError {
   return new McpToolError('mousse_caller_not_live', message)
 }
 
+/** A tool as a personal bot's thread reads it: its `botDescription` and `botInputSchema` where it has them. */
+function asBotTool(tool: MousseTool): MousseTool {
+  return tool.botDescription || tool.botInputSchema
+    ? { ...tool, ...(tool.botDescription ? { description: tool.botDescription } : {}), ...(tool.botInputSchema ? { inputSchema: tool.botInputSchema } : {}) }
+    : tool
+}
+
+/**
+ * The tool a `use_tool` call names and its arguments, with the `clientRequestId` a retry gives taken out of them as
+ * Mousse's MCP server takes it out of a direct call; or why the call is malformed.
+ */
+function useToolCall(args: Record<string, unknown>): { name: string; args: Record<string, unknown>; clientRequestId?: string } | { refused: string } {
+  const name = typeof args.tool === 'string' ? args.tool.trim().replace(/^mcp__mousse__/, '') : ''
+  if (!name) return { refused: 'use_tool needs tool: the name of a tool from tool_catalogue.' }
+  const given = args.arguments ?? {}
+  if (typeof given !== 'object' || given === null || Array.isArray(given)) return { refused: 'use_tool needs arguments as an object: the arguments of the tool it names.' }
+  const { clientRequestId, ...rest } = given as Record<string, unknown>
+  return { name, args: rest, ...(typeof clientRequestId === 'string' && clientRequestId.trim() ? { clientRequestId: clientRequestId.trim() } : {}) }
+}
+
 /**
  * Tool name → schema, access class, availability and handler, for both transports (PR 2 §2): the
  * Mousse MCP server lists and calls through it with a credential's authority, and the pi loop calls
@@ -271,6 +292,9 @@ export class ToolRegistry {
       if (botHeldTool && (listing.botRole === 'context' || !listing.botTurnTools?.has(tool.name))) return false
       // A bot's thread lists only what a bot can hold: the model is never shown delegation, queues or tools it can't use.
       if (listing.botRole && !botMayBeOffered(tool.name)) return false
+      // A catalogue turn on Codex or Pi (docs/plans/bot-context.md §15) lists the core set only: the rest is looked up with
+      // `tool_catalogue` and called through `use_tool`, so the list never changes with what the bot looks up.
+      if (listing.botCatalogue === 'use_tool' && !botCoreTool(tool.name)) return false
       return tool.listed?.(listing) ?? true
     })
   }
@@ -294,12 +318,27 @@ export class ToolRegistry {
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
       ...bot,
-      ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools } : {})
+      ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools, ...(turn.bot.catalogue ? { botCatalogue: turn.bot.catalogue } : {}) } : {})
     })
     // A bot's thread reads each tool as a bot uses it.
-    return bot.botRole
-      ? listed.map((tool) => (tool.botDescription || tool.botInputSchema ? { ...tool, ...(tool.botDescription ? { description: tool.botDescription } : {}), ...(tool.botInputSchema ? { inputSchema: tool.botInputSchema } : {}) } : tool))
-      : listed
+    return bot.botRole ? listed.map(asBotTool) : listed
+  }
+
+  /**
+   * The tools of a bot turn's catalogue it holds now, as a bot reads them (`tool_catalogue`): every tool of `names` the
+   * thread would list without the catalogue, in the order given.
+   */
+  catalogued(threadId: string, turn: AppToolTurn, names: readonly string[]): MousseTool[] {
+    const bot = this.botListing(threadId)
+    if (!bot.botRole || !turn.bot) return []
+    const listed = new Map(this.listFor({
+      threadId,
+      readOnly: this.options.readOnlyThread?.(threadId) === true,
+      modeCeiling: this.options.threadCeiling?.(threadId) ?? 'default',
+      ...bot,
+      botTurnTools: turn.bot.appTools
+    }).map((tool) => [tool.name, asBotTool(tool)]))
+    return names.flatMap((name) => listed.get(name) ?? [])
   }
 
   /**
@@ -410,7 +449,25 @@ export class ToolRegistry {
     if (!tool && (registered || !this.options.userMcp)) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
     const { threadId, active, turn, args, caller, boundToken } = await this.admit(rawArgs, request)
     const { credential } = request
-    if (!tool) return this.callUserMcp(name, args, { threadId, active, turn, credential, boundToken, request })
+    const site: CallSite = { threadId, active, turn, credential, boundToken, request }
+    // A catalogue turn's call of a catalogued tool (docs/plans/bot-context.md §15): the tool it names runs exactly as if
+    // it were called directly, through every check below.
+    if (name === BOT_USE_TOOL && turn.bot?.catalogue === 'use_tool') {
+      const inner = useToolCall(args)
+      if ('refused' in inner) return { text: inner.refused, isError: true }
+      const named = this.tools.get(inner.name)
+      if (!named || named.hidden || inner.name === BOT_USE_TOOL || !botMayBeOffered(inner.name))
+        return { text: `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`, isError: true }
+      const innerRequest = inner.clientRequestId ? { ...request, toolCallId: `mcp:${inner.clientRequestId}` } : request
+      return this.callAdmitted(inner.name, named, inner.args, caller, { ...site, request: innerRequest })
+    }
+    if (!tool) return this.callUserMcp(name, args, site)
+    return this.callAdmitted(name, tool, args, caller, site)
+  }
+
+  /** A call of the app tool `tool`, admitted (`admit`): the bot's grant, scope, availability, approvals, then its handler. */
+  private async callAdmitted(name: string, tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
+    const { threadId, active, turn, credential, boundToken, request } = site
     // A bot's thread tool ("use your threads"): its grant first, which this turn holds only in the lanes that may use the
     // tool and only while this computer allows it (a refusal there is the bot's ask, never a scope error), then where the
     // call may reach, decided by the bot's rules.
@@ -669,7 +726,8 @@ export class ToolRegistry {
       throw new McpToolError('mousse_scope_denied', 'threadId must be a non-empty string.')
     let reach: { scope: ToolScope } | { refused: string }
     try {
-      reach = policy.botReach(caller, target)
+      // A tool that only reads reaches the subagents below the owner's threads too (#1365).
+      reach = policy.botReach(caller, target, { read: tool.class === 'read' })
     } catch {
       reach = { refused: target.threadId ? `Thread ${target.threadId} is not available to you.` : `${tool.name} is not available for this project.` }
     }

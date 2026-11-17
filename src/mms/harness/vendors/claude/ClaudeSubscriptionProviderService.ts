@@ -77,6 +77,8 @@ import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type 
 import type { ChildTurnPolicy } from '../../adapter'
 import type { ContinuationInfo, OneShotSpec, ProviderTaskEnd } from '../../driver'
 import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type SessionTurn } from './sessionCuts'
+import { claudeMaskedToolOutput } from './secretOutput'
+import type { SecretMasker } from '../../../secrets/secretMasking'
 
 /**
  * How long a Claude Code process closed by Stop may take to exit by itself before its tree is killed. Claude Code ends
@@ -90,6 +92,11 @@ const CLAUDE_STOP_GRACE_MS = 1_000
  * steers it has not been seen reading are handed back. Longer than the grace, so a process `reapClosed` kills is gone by then.
  */
 const ONE_SHOT_STOP_DRAIN_MS = 1_500
+/**
+ * How long a one-shot query that answered may take to exit on its own (Claude Code writes its session and closes, about
+ * half a second) before it is closed. The turn does not wait for it; the thread's next start does (`oneShotExits`).
+ */
+const ONE_SHOT_EXIT_WAIT_MS = 15_000
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 /**
@@ -206,6 +213,8 @@ export type ClaudeSubscriptionChatInput = {
   threadId: string
   /** Provider instance running the turn; a saved session resumes only on the same instance. */
   instanceId?: string
+  /** The thread's secret masker, read at each tool result: Claude Code's tool results are masked before it keeps them. */
+  secretMasker?: () => SecretMasker | undefined
   cwd: string
   model: string
   prompt: string
@@ -282,6 +291,8 @@ export type ClaudeSubscriptionChatInput = {
   returnSteer?: (text: string, token?: string) => void
   /** The turn ended at the aborted result of Send now's interrupt (`LiveRun.sendNowAbort`): what it wrote is all it says. */
   onSendNowCut?: () => void
+  /** A one-shot turn restarted with a steer ended with no words of the model's after it (`TurnResult.steerUnanswered`). */
+  onSteerUnanswered?: () => void
   /** A drained steer was pushed to Claude: its token is spent. */
   steerTaken?: (token?: string) => void
   /**
@@ -289,7 +300,7 @@ export type ClaudeSubscriptionChatInput = {
    * rows. With `expect`, it takes only when the orchestrator's decision is that one (`TurnControl.drainSteerEntry`);
    * `forced`: Send now asked for it, so the running tool is stopped.
    */
-  drainSteerEntry?: (opts?: { expect?: 'cut' }) => { text: string; token: string; forced?: boolean } | undefined
+  drainSteerEntry?: (opts?: { expect?: 'cut' }) => { text: string; token: string; forced?: boolean; images?: ChatImageAttachment[] } | undefined
   /** What a drain now would do, without taking anything (`TurnControl.peekSteer`): only `cut` is drained here. */
   peekSteer?: () => { delivery: 'cut' | 'native' | 'hold' } | undefined
   /** The check right before the cut is sent (`TurnControl.mayCut`): false hands the drain back, and the hold resumes. */
@@ -803,6 +814,9 @@ export function claudeSubscriptionEnvironment(source: NodeJS.ProcessEnv = proces
 }
 
 /** Variables that send Claude Code's requests to a cloud provider, billed per token. */
+/** What a bot turn's Claude Code runs with so it always loads Mousse's tools on demand (docs/plans/bot-context.md §15). */
+export const CLAUDE_BOT_TOOL_SEARCH_ENV = { ENABLE_TOOL_SEARCH: 'true' } as const
+
 const CLAUDE_CLOUD_ROUTES = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
 /**
  * The client name (`CLAUDE_CODE_ENTRYPOINT`) Claude Code reports for every process Mousse starts. Without one it
@@ -966,6 +980,8 @@ export class ClaudeSubscriptionProviderService {
   private settingsFrozen = false
   private stopped = false
   private readonly queries = new Map<string, Query>()
+  /** One-shot queries that answered and are still exiting, by thread: the thread's next start waits for its exit. */
+  private readonly oneShotExits = new Map<string, { query: Query; exited: Promise<void> }>()
   /** Live queries by thread: the Claude processes that outlive a turn. Null disables them (one query per turn). */
   private readonly live = new Map<string, LiveSession<TurnContext>>()
   private readonly liveConfig: LiveTimings | null
@@ -1817,6 +1833,31 @@ export class ClaudeSubscriptionProviderService {
       throw error
     }
   }
+  /**
+   * A one-shot query that answered: what it still writes is read (and dropped) until it exits on its own, or it is closed
+   * after `ONE_SHOT_EXIT_WAIT_MS`. Never rejects. The thread's next start waits for it (`oneShotExits`).
+   */
+  private awaitOneShotExit(threadId: string, query: Query, output: AsyncIterator<SDKMessage>): Promise<void> {
+    const exited = (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const expired = new Promise<'expired'>((resolve) => { timer = setTimeout(() => resolve('expired'), ONE_SHOT_EXIT_WAIT_MS) })
+      try {
+        for (;;) {
+          const next = await Promise.race([output.next().catch((): IteratorResult<SDKMessage> => ({ done: true, value: undefined })), expired])
+          if (next === 'expired' || next.done) break
+        }
+      } finally {
+        clearTimeout(timer)
+        const target = claudeQueryProcess(query)
+        query.close()
+        this.reapClosed(threadId, target)
+      }
+    })().catch(() => undefined)
+    const entry = { query, exited }
+    this.oneShotExits.set(threadId, entry)
+    void exited.then(() => { if (this.oneShotExits.get(threadId) === entry) this.oneShotExits.delete(threadId) })
+    return exited
+  }
   /** Closes a query that never started its turn, and ends its process tree as the other closes do (`reapClosed`). */
   private closeUnstarted(query: Query, threadId: string): void {
     const target = claudeQueryProcess(query)
@@ -2310,13 +2351,16 @@ export class ClaudeSubscriptionProviderService {
     this.live.clear()
     this.liveCommits.clear()
   }
+  /** Live processes that are idle with no background work: the only ones Mousse closes early. A busy or pinned one never is. */
+  private idleLive(): LiveSession<TurnContext>[] {
+    return [...this.live.values()].filter(
+      (live) => !live.dead && !live.busy && live.pendingRuns === 0 && live.obligations.size === 0 && !this.activeThreads.has(live.threadId)
+    )
+  }
   /** Closes the least recently used idle process with no background work; false when every one is needed. */
   private evictIdleLive(): boolean {
     let victim: LiveSession<TurnContext> | undefined
-    for (const live of this.live.values()) {
-      if (live.dead || live.busy || live.pendingRuns > 0 || live.obligations.size > 0 || this.activeThreads.has(live.threadId)) continue
-      if (!victim || live.lastUsed < victim.lastUsed) victim = live
-    }
+    for (const live of this.idleLive()) if (!victim || live.lastUsed < victim.lastUsed) victim = live
     if (!victim) return false
     victim.close('idle')
     this.live.delete(victim.threadId)
@@ -2340,8 +2384,8 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * The thread's live query for this turn: the open one when it is still the right one, a new one
-   * otherwise, or undefined when the turn has to run as a one-shot query (live queries are at their
-   * cap). The open one switches to the turn's model and effort in place (issue #359), and takes a Mousse credential
+   * otherwise, or undefined when the turn has to run as a one-shot query (live queries are off, or at
+   * a cap set for tests). The open one switches to the turn's model and effort in place (issue #359), and takes a Mousse credential
    * renewed for the same tools in place (#358); one that cannot is replaced. A new one has its MCP servers before it is
    * returned (`launch`). A query that has background work is never replaced silently: a change that needs a new
    * process is refused, naming the change, because it would end that work.
@@ -2424,6 +2468,9 @@ export class ClaudeSubscriptionProviderService {
       this.live.delete(threadId)
     }
     if (this.live.size >= timings.maxSessions && !this.evictIdleLive()) return undefined
+    // No cap on busy or pinned processes; only idle ones past a generous count close early, oldest first.
+    let excess = this.idleLive().length - timings.maxIdleSessions
+    while (excess-- > 0) this.evictIdleLive()
     const created = new LiveSession<TurnContext>(
       threadId,
       {
@@ -2625,9 +2672,14 @@ export class ClaudeSubscriptionProviderService {
                 if (event.hook_event_name === 'PostToolUse') {
                   turnOf().locked?.committed(event.tool_use_id)
                   await turnOf().editCounter.success(event.tool_use_id, event.tool_response)
+                  // A secret the thread may use is hidden in the result before the model sees it and before Claude
+                  // Code saves it in its session file (a read of the secret's own file included).
+                  const masked = claudeMaskedToolOutput(event.tool_response, turnOf().input.secretMasker?.())
+                  const rewrite = masked === undefined ? {} : { updatedToolOutput: masked }
                   // A bot's file read is framed as data, like its thread and MCP results.
                   if (turnOf().locked && CLAUDE_FILE_TEXT_TOOLS.has(event.tool_name))
-                    return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: CLAUDE_BOT_FILE_DATA_NOTE } }
+                    return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: CLAUDE_BOT_FILE_DATA_NOTE, ...rewrite } }
+                  if (masked !== undefined) return { hookSpecificOutput: { hookEventName: 'PostToolUse', ...rewrite } }
                 }
                 return {}
               }
@@ -2817,6 +2869,12 @@ export class ClaudeSubscriptionProviderService {
   }
   private async chatTurn(input: ClaudeSubscriptionChatInput, branching: boolean): Promise<string> {
     input.signal?.throwIfAborted()
+    // The thread's last one-shot query answered but may still be writing its session: it is resumed once it has exited.
+    const previousExit = this.oneShotExits.get(input.threadId)
+    if (previousExit) {
+      await previousExit.exited
+      input.signal?.throwIfAborted()
+    }
     if (this.checkDue()) {
       // Reserve the thread while the sign-in check runs so a second turn cannot slip in.
       if (this.activeThreads.has(input.threadId))
@@ -2871,7 +2929,9 @@ export class ClaudeSubscriptionProviderService {
         ? claudeSignInEnvironment(ownerEnv, {}, lockedEnv({ platform: process.platform, base: ownerEnv, driver: 'claude', credential: 'subscription', scratch: locked.authority.workspace?.scratch ?? locked.cwd }))
         : ownerEnv
     const entrypoint = this.entrypointEnv(baseEnv)
-    const turnEnv: NodeJS.ProcessEnv = { ...this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint }), ...(locked ? { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' } : {}) }
+    // A bot turn always defers Mousse's tools behind Claude Code's tool search (the bot's tool catalogue, docs/plans/
+    // bot-context.md §15): its tool list stays names only, whatever the size of the list or Claude Code's own default.
+    const turnEnv: NodeJS.ProcessEnv = { ...this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint }), ...(locked ? { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1', ...CLAUDE_BOT_TOOL_SEARCH_ENV } : {}) }
     // A bot turn's commands (Linux): Claude Code keeps its temporary files in a private folder, and
     // the shared one, which holds every session's command output, is closed to them (`claudeBotTemp`).
     const botTemp = locked ? claudeBotTemp(locked.authority, turnEnv, locked.cwd) : undefined
@@ -2886,6 +2946,8 @@ export class ClaudeSubscriptionProviderService {
     const controller = new AbortController()
     this.controllers.add(controller)
     let query: Query | undefined
+    /** A one-shot query that answered and is still exiting (`awaitOneShotExit`): what it uses is let go after it exits. */
+    let exiting: Promise<void> | undefined
     let live: LiveSession<TurnContext> | undefined
     let liveRun: LiveRun | undefined
     /** The turn failed with a usage limit: its request is in the session, whatever evidence classified it. */
@@ -2977,7 +3039,7 @@ export class ClaudeSubscriptionProviderService {
     const withTurn = (sessionId: string): SessionTurn[] =>
       [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
     /**
-     * A one-shot query's steers (no live session: a turn past the live-process cap, or a bot's turn, which takes its
+     * A one-shot query's steers (no live session: live queries turned off, or a bot's turn, which takes its
      * owner's notes and its pack after a compaction this way; nobody else steers a bot's thread), collected and waiting
      * to go in as the prompt of the query that restarts the turn. Taken, not accepted: Claude Code has not seen them.
      */
@@ -3069,6 +3131,8 @@ export class ClaudeSubscriptionProviderService {
       const drained = input.drainSteerEntry ? input.drainSteerEntry(holds ? { expect: 'cut' } : undefined) : undefined
       const steer = (drained ? drained.text : holds ? undefined : input.drainSteer?.())?.trim()
       if (!steer) return
+      // A steer sent with images goes in with them.
+      const images = drained?.images ?? []
       const forced = drained?.forced === true
       // The check at dispatch, right before the cut is sent: a tool announced meanwhile keeps the steer waiting. On a
       // bot's turn, so does a call its gate let start that Mousse has not seen announced yet (`ClaudeLockedGate.busy`).
@@ -3089,7 +3153,7 @@ export class ClaudeSubscriptionProviderService {
           pushedSteers.set(id, { text: steer, ...(drained ? { token: drained.token } : {}), steered, settled: false, placed: false })
           frames.atNextMessage(() => steerPlace(id))
         }
-        void live.steer(liveRun, steer, pushed, {
+        void live.steer(liveRun, steerContent(steer, images), pushed, {
           forced,
           subagents: frames.foregroundSubagents(),
           // Moved once: a later steer does not ask again.
@@ -3114,7 +3178,7 @@ export class ClaudeSubscriptionProviderService {
       }
       // Taken, not accepted: it is accepted only once the restarted query reads it, and handed back if the turn ends first.
       input.steerTaken?.(drained?.token)
-      steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), steered })
+      steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), ...(images.length ? { images } : {}), steered })
       if (query && !interruptRequested) {
         interruptRequested = true
         // From the cut's check to the interrupt landing, a bot's gate lets no call start: none is cut mid-run.
@@ -3161,13 +3225,21 @@ export class ClaudeSubscriptionProviderService {
     const releaseBotTemp = botTemp ? holdClaudeBotTemp(botTemp.dir) : undefined
     // The folder of the turn's settings file (`claudeLockedSettingsFile`), removed when it ends.
     let lockedSettingsFolder: string | undefined
+    /**
+     * The sign-in check (`claude auth status`). A bot's turn (a one-shot query) starts Claude Code while it runs, and its
+     * prompt waits for it; any other turn waits for it here. A signed-out reading fails the turn with how to sign in.
+     */
+    let signIn: Promise<void> | undefined
     try {
-      const signedIn = await this.authenticated(controller.signal, env)
-      if (!signedIn)
-        throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+      signIn = this.authenticated(controller.signal, env).then((signedIn) => {
+        if (!signedIn)
+          throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+      })
+      // A bot's process starts while the reading runs: one that says signed out ends it before it is given the prompt.
+      signIn.catch(() => { if (locked) cancel() })
+      if (!locked) await signIn
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
-      controller.signal.throwIfAborted()
       const chosen = claudeSpeedOf(input.model)
       const selected = parseThinkingSuffixFromModelId(chosen.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
@@ -3205,21 +3277,8 @@ export class ClaudeSubscriptionProviderService {
           (!resume && !branch && !reuse && input.history
             ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
             : '') + input.prompt
-        const built: SDKUserMessage['message']['content'] = [
-          { type: 'text', text: prompt || '(image attachment)' }
-        ]
-        for (const image of input.images ?? []) {
-          if (
-            !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) ||
-            Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024
-          )
-            throw new Error(`Unsupported Claude image: ${image.name}`)
-          built.push({
-            type: 'image',
-            source: { type: 'base64', media_type: image.mimeType as 'image/png', data: image.data }
-          })
-        }
-        return built
+        for (const image of input.images ?? []) if (!claudeTakesImage(image)) throw new Error(`Unsupported Claude image: ${image.name}`)
+        return [{ type: 'text', text: prompt || '(image attachment)' }, ...claudeImageBlocks(input.images ?? [])]
       }
       // A process that holds this history already is the conversation; nothing is cut. A new process started
       // in its place (`acquireLive` could not switch its model) is told again below.
@@ -3465,8 +3524,9 @@ export class ClaudeSubscriptionProviderService {
           const failure = sendNowCut ? usageLimitFromResult(result, liveRun.rateLimits) : claudeResultFailure(result, liveRun.rateLimits)
           if (failure) throw failure
           if (sendNowCut) input.onSendNowCut?.()
-          if (frames.segmentEmpty && 'result' in result) {
-            frames.text += result.result
+          const resultText = 'result' in result ? frames.resultText(result.result) : ''
+          if (frames.segmentEmpty && resultText) {
+            frames.text += resultText
             input.onText(frames.text)
           }
         } else if (liveRun.rateLimits.hold) {
@@ -3491,7 +3551,21 @@ export class ClaudeSubscriptionProviderService {
         // A one-shot query: the prompt ends with the turn, which ends the process.
         startSteering()
         promptId = randomUUID()
-        let nextPrompt: AsyncIterable<SDKUserMessage> = messages()
+        const checked = signIn
+        let nextPrompt: AsyncIterable<SDKUserMessage> = (async function* (): AsyncGenerator<SDKUserMessage> {
+          try {
+            await checked
+          } catch {
+            return
+          }
+          yield* messages()
+        })()
+        /** The query that answered, still exiting (`awaitOneShotExit`). */
+        let detached: Promise<void> | undefined
+        /** The query runs on a steer: the turn restarted with it. */
+        let resumedWithSteer = false
+        /** The last query ran on a steer and ended with no words of the model's after it (`onSteerUnanswered`). */
+        let steerUnanswered = false
         const options = locked ? lockedOptions(controller, () => turn) : buildOptions(controller, () => turn, false)
         /**
          * Stop ended a query whose prompt carries steers it had not been seen reading, and sent its process SIGTERM
@@ -3549,11 +3623,19 @@ export class ClaudeSubscriptionProviderService {
                   !(interruptRequested && steers.length)
                 )
                   throw claudeResultFailure(message, frames.rateLimits)
-                if (frames.text.length === turnTextLength && 'result' in message) {
-                  frames.text += message.result
+                const resultText = 'result' in message ? frames.resultText(message.result) : ''
+                if (frames.text.length === turnTextLength && resultText) {
+                  frames.text += resultText
                   input.onText(frames.text)
                 }
+                steerUnanswered = resumedWithSteer && !frames.text.slice(turnTextLength).trim()
                 success = true
+                // The answer is complete. Claude Code still writes its session and exits, which the turn does not wait
+                // for: the thread's next start does. A steer taken meanwhile restarts the query once it has exited.
+                if (!steers.length && !interruptRequested) {
+                  detached = exiting = this.awaitOneShotExit(input.threadId, query, output)
+                  break
+                }
               }
             }
           } catch (error) {
@@ -3569,8 +3651,13 @@ export class ClaudeSubscriptionProviderService {
           const completed = query
           query = undefined
           collectSteer()
-          completed.close()
-          if (!steers.length) break
+          if (!detached) completed.close()
+          if (!steers.length) {
+            if (steerUnanswered) input.onSteerUnanswered?.()
+            break
+          }
+          if (detached) await detached
+          detached = undefined
           controller.signal.throwIfAborted()
           const sessionId = frames.sessionId
           if (!sessionId) throw new Error('Claude steering could not identify the active session')
@@ -3584,7 +3671,7 @@ export class ClaudeSubscriptionProviderService {
           const sending = [...(carried?.steers ?? []), ...steers.splice(0)]
           const guidanceId = randomUUID()
           carried = { id: guidanceId, steers: sending }
-          const guidance = sending.map((steer) => steer.text).join('\n')
+          const guidance = steerContent(sending.map((steer) => steer.text).join('\n'), sending.flatMap((steer) => steer.images ?? []))
           nextPrompt = (async function* (): AsyncGenerator<SDKUserMessage> {
             yield {
               type: 'user',
@@ -3597,11 +3684,15 @@ export class ClaudeSubscriptionProviderService {
           interruptRequested = false
           turn.locked?.cut(false)
           success = false
+          resumedWithSteer = true
+          steerUnanswered = false
           if (frames.text) frames.text += '\n\n'
         }
       }
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
+      // A turn whose sign-in check failed ends with that, whatever Claude Code did without its prompt.
+      await signIn
       const sessionId = frames.sessionId
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
@@ -3614,6 +3705,8 @@ export class ClaudeSubscriptionProviderService {
       input.onSession?.({ sessionId, ...(promptId ? { promptId } : {}) })
       return frames.text
     } catch (error) {
+      // The sign-in check's failure is the turn's: Claude Code may have ended without the prompt it held back.
+      await signIn
       if (readUsageLimit(error)) usageLimited = true
       // Claude Code could not open the cut (its file or entry is gone) and started nothing.
       if (branch && !frames.text && cutRefused(error)) throw new CutRefused(error instanceof Error ? error.message : String(error), branch.fork)
@@ -3646,18 +3739,27 @@ export class ClaudeSubscriptionProviderService {
       this.queries.delete(input.threadId)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
-      releaseBotTemp?.()
-      // Claude Code read the settings when it started; nothing reads them once the turn ended.
-      if (lockedSettingsFolder) {
-        try {
-          rmSync(lockedSettingsFolder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-        } catch (error) {
-          console.warn('[claude] the settings file of a bot turn could not be removed', error instanceof Error ? error.message : String(error))
+      const settingsFolder = lockedSettingsFolder
+      const release = (): void => {
+        releaseBotTemp?.()
+        // Claude Code read the settings when it started; nothing reads them once the turn ended.
+        if (settingsFolder) {
+          try {
+            rmSync(settingsFolder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+          } catch (error) {
+            console.warn('[claude] the settings file of a bot turn could not be removed', error instanceof Error ? error.message : String(error))
+          }
         }
       }
+      if (exiting) void exiting.then(release)
+      else release()
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', cancel)
-      const report = metrics.report()
+      const quota = (liveRun?.rateLimits ?? frames.rateLimits).planUse()
+      // Asked to resume a session, Claude Code ran the turn in another one: the conversation it held is not there.
+      const resumeLost = resume !== undefined && frames.sessionId !== undefined && frames.sessionId !== resume
+      if (resumeLost) console.warn('[claude-subscription] Claude Code was asked to resume a session and started another one', { threadId: input.threadId })
+      const report = { ...metrics.report(), ...(quota.length ? { quota } : {}), ...(resumeLost ? { resumeLost: true as const } : {}) }
       try {
         const baseline = metrics.snapshot()
         const sessionId = frames.sessionId
@@ -3760,14 +3862,39 @@ export class ClaudeSubscriptionProviderService {
       this.questions.dismissAllForThread(threadId)
     }
     this.queries.clear()
+    for (const { query } of this.oneShotExits.values()) query.close()
     for (const threadId of this.live.keys()) this.questions.dismissAllForThread(threadId)
     this.closeLive()
     this.readyToCommit.clear()
   }
 }
 
-/** A steer a one-shot query took: its text, its drain's token when it had one, and its acceptance. */
-type OneShotSteer = { text: string; token?: string; steered: () => void }
+/** A steer a one-shot query took: its text and images, its drain's token when it had one, and its acceptance. */
+type OneShotSteer = { text: string; token?: string; images?: ChatImageAttachment[]; steered: () => void }
+
+/** The images Claude takes: JPEG, PNG, GIF or WebP up to 10 MiB. */
+function claudeTakesImage(image: ChatImageAttachment): boolean {
+  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) && Buffer.byteLength(image.data, 'base64') <= 10 * 1024 * 1024
+}
+
+/** Images as Claude's base64 image blocks (each one `claudeTakesImage` accepts). */
+function claudeImageBlocks(images: readonly ChatImageAttachment[]): Exclude<SDKUserMessage['message']['content'], string> {
+  return images.filter(claudeTakesImage).map((image) => ({
+    type: 'image' as const,
+    source: { type: 'base64' as const, media_type: image.mimeType as 'image/png', data: image.data }
+  }))
+}
+
+/**
+ * A steer's message content: its text alone, or its text and its images as blocks. An image Claude does not take is
+ * left out with a warning: the text still goes in now, and the transcript keeps the image.
+ */
+export function steerContent(text: string, images: readonly ChatImageAttachment[]): SDKUserMessage['message']['content'] {
+  if (!images.length) return text
+  const blocks = claudeImageBlocks(images)
+  if (blocks.length < images.length) console.warn('[claude] a steer image Claude does not take was left out', { left: images.length - blocks.length })
+  return blocks.length ? [{ type: 'text', text }, ...blocks] : text
+}
 
 /**
  * The model answered the prompt a one-shot query was started with (`id`): it streams or writes a message, Claude Code's

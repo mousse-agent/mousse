@@ -179,6 +179,7 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
         // The task id and the background flag let the card follow a background agent to its end.
         input: compact({
           subagent_type: activity.agentType,
+          model: activity.model,
           description: activity.description,
           run_in_background: activity.background ? true : undefined,
           task_id: activity.nativeId,

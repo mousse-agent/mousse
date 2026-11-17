@@ -254,6 +254,15 @@ describe('About this bot', () => {
     expect(button('Remove use your GitHub tools')).toBeDefined()
   })
 
+  it('says what a chat turn costs in one quiet line once turns reported usage, and nothing before', async () => {
+    await show()
+    expect(host.querySelector('[data-testid="bot-about-usage"]')).toBeNull()
+    fake.details.b1 = { ...fake.details.b1, usage: { turns: 12, inputPerTurn: 18_400, outputPerTurn: 640, cachedShare: 0.72 } }
+    await act(async () => { await useBotsStore.getState().loadDetail('b1') })
+    const line = host.querySelector<HTMLElement>('[data-testid="bot-about-usage"]')!
+    expect(line.textContent).toBe('18k tokens a turn · 72% from cache')
+    expect(line.title).toContain('Chat turns in the last 7 days: 12')
+  })
   it('lists its runs and removes one', async () => {
     await show()
     expect(rows('RUNS')).toEqual(['Every weekday · 09:00'])

@@ -86,7 +86,7 @@ describe('the bot changelog in the pack', () => {
     expect(pack).toContain('watch_start')
     expect(pack).toMatch(/only.*chat turn.*owner.*own message/i)
     expect(pack).toMatch(/wake-up.*work.*sandbox/i)
-    expect(pack).toMatch(/tell your owner what to start/i)
+    expect(pack).not.toMatch(/tell your owner what to start/i)
   })
 
   it('tells a new bot nothing: it has no history to correct', async () => {

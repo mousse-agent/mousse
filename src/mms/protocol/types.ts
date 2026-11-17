@@ -24,6 +24,14 @@ export const MMS_PROTOCOL_LOGIN_TIMEOUT_MS = 15 * 60_000
 export const MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS = 30 * 60_000
 /** Git mutations can wait on hooks, credential helpers or a slow remote; Git itself decides when they are stuck. */
 export const MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS = 30 * 60_000
+/** How long `/compact` waits for a runtime's own compaction; after it the compaction stops and the full history stays. */
+export const CONTEXT_COMPACTION_TIME_LIMIT_MS = 5 * 60_000
+/**
+ * `threads.compact` answers once the compaction ended, which the service limits to `CONTEXT_COMPACTION_TIME_LIMIT_MS`
+ * plus Mousse's own cut when the runtime's failed. The caller waits that long and a little more, so it never gives up
+ * on a compaction that is still running.
+ */
+export const MMS_PROTOCOL_COMPACT_TIMEOUT_MS = CONTEXT_COMPACTION_TIME_LIMIT_MS + 2 * 60_000
 export const MMS_PROTOCOL_REPLAY_RING_SIZE = 512
 /**
  * The most a profile's replay ring holds, by its size estimate. Past it the oldest events leave, and a client that

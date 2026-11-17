@@ -153,7 +153,7 @@ describe('idleness (no caller outside tests yet)', () => {
 
   it.each([
     ['running', false], ['queued', false], ['paused', false], ['subagents', false], ['needs_input', false],
-    ['idle', true], ['done', true], ['failed', true], ['stopped', true]
+    ['on_hold', true], ['idle', true], ['done', true], ['failed', true], ['stopped', true]
   ] as const)('agrees with the summary for a launched thread that is %s', (status, idle) => {
     const thread: BotLaunchedThread = { threadId: 'launched', title: 'Check.', status, startedAt: at(0), updatedAt: at(0) }
     const home = f.store.registry(botId)!.homeThreadId!

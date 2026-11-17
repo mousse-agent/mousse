@@ -36,13 +36,14 @@ export function useBotFiles(): BotFilesHost | null {
 const IMAGE_FILE = /\.(?:png|jpe?g|gif|webp)$/i
 /** Inline code this long or shorter, without spaces, never breaks inside. */
 const WHOLE_CODE = 40
-const reason = (error: unknown) => String((error as { message?: string })?.message ?? error).replace(/^Error invoking remote method '[^']*':\s*(?:Error:\s*)?/, '')
+/** What a failed action says, without the bridge's "Error invoking remote method" prefix. */
+export const reason = (error: unknown) => String((error as { message?: string })?.message ?? error).replace(/^Error invoking remote method '[^']*':\s*(?:Error:\s*)?/, '')
 
 /**
  * The actions on a file of this computer (localFiles in the preload): Show in folder selects it in File Explorer,
- * Finder or the Files app; Save as… copies it where the owner picks; Copy image puts a picture on the clipboard. A
- * refusal ("Can't find notes.md. It may have been moved or deleted.") is said through `failed`. `open` is a chip's
- * click on a full path: a file goes to `show` (the Files pane), a folder opens in the file manager.
+ * Finder or the Files app; Save as… copies it where the owner picks. A refusal ("Can't find notes.md. It may have
+ * been moved or deleted.") is said through `failed`. `open` is a chip's click on a full path: a file goes to `show`
+ * (the Files pane), a folder opens in the file manager.
  */
 export const fileActions = {
   open: (path: string, show: (path: string) => void, failed?: (message: string) => void) => {
@@ -51,8 +52,7 @@ export const fileActions = {
     void window.mousse.localFiles.open(path).then((kind) => { if (kind === 'file') show(path) }).catch((error) => failed?.(reason(error)))
   },
   showInFolder: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.showInFolder(path).catch((error) => failed?.(reason(error))) },
-  saveAs: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.saveCopy(path).catch((error) => failed?.(reason(error))) },
-  copyImage: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.copyImage(path).catch((error) => failed?.(reason(error))) }
+  saveAs: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.saveCopy(path).catch((error) => failed?.(reason(error))) }
 }
 
 /** One file the bot named: its name, a click to open it here, and Show in folder. A picture also shows above the reply. */

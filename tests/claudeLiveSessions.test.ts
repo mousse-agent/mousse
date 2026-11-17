@@ -1274,32 +1274,51 @@ describe('idle release and the cap on live processes', () => {
     expect(f.host.backgroundWork).toHaveBeenLastCalledWith('thread', false)
   })
 
-  it('caps live processes: the least recently used idle one is closed, and a turn with none to close runs as a one-shot query', async () => {
-    const f = fixture({ maxSessions: 2 })
-    await f.turn({ threadId: 'a' })
-    await f.turn({ threadId: 'b' })
-    await f.turn({ threadId: 'c' })
-    expect(f.cli.processes[0].closed).toBe(true)
-    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c'])
+  it('every busy thread gets its own live process: six turns at once all run live, none as a one-shot query', async () => {
+    const f = fixture()
+    silent(f.cli)
+    const threads = ['a', 'b', 'c', 'd', 'e', 'f']
+    const running = threads.map((threadId) => f.chat({ threadId, prompt: `work ${threadId}`, history: '' }))
+    await vi.waitFor(() => expect(f.cli.processes.filter((process) => process.inputs.length > 0)).toHaveLength(threads.length))
+    expect(f.service.liveThreadIds().sort()).toEqual(threads)
+    for (const [index, process] of f.cli.processes.entries()) process.answer(process.uuid(0), `done ${threads[index]}`)
+    expect(await Promise.all(running)).toEqual(threads.map((threadId) => `done ${threadId}`))
+    // A one-shot query's prompt ends with its turn; every one of these stays open for the thread's next turn.
+    for (const process of f.cli.processes) {
+      expect(process.inputEnded).toBe(false)
+      expect(process.closed).toBe(false)
+    }
+    expect(f.cli.processes).toHaveLength(threads.length)
+  })
 
-    // Both remaining threads are needed: b has background work, c a turn in flight.
+  it('closes idle processes past the idle count, oldest first, and never a busy one or one holding background work', async () => {
+    const f = fixture({ maxIdleSessions: 1 })
+    await f.turn({ threadId: 'a' })
+    // b holds background work, c has a turn in flight.
     f.cli.reply = (message, process) => {
       process.emit(roster({ id: 'bash-1' }))
       process.answer(String(message.uuid), 'started')
     }
     await f.turn({ threadId: 'b' })
-    f.cli.reply = undefined
+    silent(f.cli)
     const running = f.chat({ threadId: 'c', prompt: 'busy', history: '' })
-    const [, , busy] = f.cli.processes
-    await vi.waitFor(() => expect(busy.inputs).toHaveLength(2))
-    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'one-shot')
-    const before = f.cli.processes.length
-    expect(await f.turn({ threadId: 'd' })).toBe('one-shot')
-    expect(f.cli.processes).toHaveLength(before + 1)
-    // A one-shot query's prompt ends with its turn, which ends the process.
-    await vi.waitFor(() => expect(f.cli.last.inputEnded).toBe(true))
-    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c'])
-    busy.answer(busy.uuid(1), 'busy done')
+    await vi.waitFor(() => expect(f.cli.processes).toHaveLength(3))
+    const [oldest, pinned, busy] = f.cli.processes
+    await vi.waitFor(() => expect(busy.inputs).toHaveLength(1))
+
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'live')
+    // One idle process (a) is within the count.
+    expect(await f.turn({ threadId: 'd' })).toBe('live')
+    expect(oldest.closed).toBe(false)
+    // Two idle (a, d): the oldest closes when e starts, then d when f starts.
+    expect(await f.turn({ threadId: 'e' })).toBe('live')
+    expect(oldest.closed).toBe(true)
+    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'd', 'e'])
+    expect(await f.turn({ threadId: 'f' })).toBe('live')
+    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'e', 'f'])
+    expect(pinned.closed).toBe(false)
+    expect(busy.closed).toBe(false)
+    busy.answer(busy.uuid(0), 'busy done')
     expect(await running).toBe('busy done')
   })
 })
@@ -1868,6 +1887,26 @@ describe('result routing and steering edge cases', () => {
     await inputs(f.cli, 2)
     expect(steerTaken).toHaveBeenCalledExactlyOnceWith('drain-1')
     const process = f.cli.last
+    process.emit(resultFrame({ uuids: [process.uuid(0), process.uuid(1)], text: 'ok' }))
+    await turn
+  })
+
+  it('a steer sent with an image reaches Claude Code with the image', async () => {
+    const f = fixture()
+    silent(f.cli)
+    const data = Buffer.from('png bytes').toString('base64')
+    const turn = f.chat({
+      drainSteer: () => undefined,
+      drainSteerEntry: vi.fn<NonNullable<ClaudeSubscriptionChatInput['drainSteerEntry']>>()
+        .mockReturnValueOnce({ text: 'look at this', token: 'drain-1', images: [{ mimeType: 'image/png', data, name: 'shot.png' }] })
+        .mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    const process = f.cli.last
+    expect(process.inputs[1]!.message.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'look at this' }),
+      expect.objectContaining({ type: 'image', source: expect.objectContaining({ type: 'base64', media_type: 'image/png', data }) })
+    ])
     process.emit(resultFrame({ uuids: [process.uuid(0), process.uuid(1)], text: 'ok' }))
     await turn
   })

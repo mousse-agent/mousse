@@ -201,6 +201,20 @@ export function stillPose(state: BotFaceState): FacePose {
   return new FaceMotion(state, () => 0.5, 3).frame(0.6, 0, true)
 }
 
+/**
+ * A head that rolls past its idle sway (`HEAD_ROLL_SWAY`), asleep or stuck, leans out of the head view's frame: the
+ * view follows it, panning `HEAD_ROLL_PAN` of the side per radian of roll the way it leans and widening by
+ * `HEAD_ROLL_ROOM` of the field of view per radian, so both ears stay in. An upright head keeps `HEAD_FOV`, centred.
+ */
+export const HEAD_FOV = 1.45
+export const HEAD_ROLL_SWAY = 0.05
+export const HEAD_ROLL_PAN = 0.45
+export const HEAD_ROLL_ROOM = 1.4
+
+function rollPast(hroll: number): number {
+  return Math.sign(hroll) * Math.max(0, Math.abs(hroll) - HEAD_ROLL_SWAY)
+}
+
 /** Below this size (CSS pixels) the whiskers turn to noise and are dropped. */
 export const WHISKER_MIN_SIZE = 56
 
@@ -225,6 +239,8 @@ export interface FaceUniforms {
   uV: [number, number, number, number]
   /** Kind (`BOT_KINDS` index), eye shape (`BOT_EYES` index), and 1 when the Mousse's eyes are white. */
   uK: [number, number, number]
+  /** How far the picture moves in its square, as a share of the side (x right, y up): the view following a leaning head. */
+  pan: [number, number]
 }
 
 /** Metal accessories get the bright specular. */
@@ -249,6 +265,7 @@ export function mousseEyesWhite(hex: string): boolean {
 
 export function faceUniforms(look: KnownBotLook, pose: FacePose, view: FaceView): FaceUniforms {
   const head = view.view === 'head'
+  const lean = head ? rollPast(pose.hroll) : 0
   const accessory = BOT_ACCESSORY_HEX[look.accessory]
   return {
     uCol: hexToRgb(BOT_COLOUR_HEX[look.colour]),
@@ -259,11 +276,12 @@ export function faceUniforms(look: KnownBotLook, pose: FacePose, view: FaceView)
     uH2: [pose.earR, pose.armL, pose.armR, pose.laptop],
     uE: [pose.open, pose.closed, pose.arc, pose.worried],
     uE2: [pose.lookX, pose.lookY, pose.es, pose.sweat],
-    uV: [head ? 0.8 : 0.32, head ? 1.45 : 2.1, view.samples, view.size < WHISKER_MIN_SIZE ? 1 : 0],
+    uV: [head ? 0.8 : 0.32, head ? HEAD_FOV * (1 + HEAD_ROLL_ROOM * Math.abs(lean)) : 2.1, view.samples, view.size < WHISKER_MIN_SIZE ? 1 : 0],
     uK: [
       BOT_KINDS.indexOf(botKindOf(look)),
       BOT_EYES.indexOf(botEyesOf(look)),
       mousseEyesWhite(BOT_COLOUR_HEX[look.colour]) ? 1 : 0
-    ]
+    ],
+    pan: [HEAD_ROLL_PAN * lean, 0]
   }
 }

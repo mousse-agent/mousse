@@ -1,6 +1,6 @@
 /**
  * Issue #920: a steer into a Claude Code turn that runs as one query with no live session, driven here through a bot's
- * locked turn (the app does not steer bot threads; a person's turn past the live-process cap takes the same path, see
+ * locked turn (the app does not steer bot threads; a person's turn with live queries turned off takes the same path, see
  * `tests/claudeOneShotSteerStop.test.ts`). A steer interrupts the query and goes in as the prompt of a query that
  * restarts the turn. The steer is accepted only once that query reads it; a Stop before then hands it back, once, by
  * its drain's token.

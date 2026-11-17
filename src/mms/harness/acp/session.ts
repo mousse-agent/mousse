@@ -93,6 +93,23 @@ const PROMPT_WORK_UPDATES = new Set(['agent_message_chunk', 'agent_thought_chunk
 interface DrainedSteer {
   text: string
   token?: string
+  /** The images sent with it: the prompt that carries the text carries them too. */
+  images?: ChatImageAttachment[]
+}
+
+/** An image as an ACP image block, or undefined when agents are not sent it (BMP, JPEG, PNG or WebP up to 10 MiB). */
+function acpImageBlock(image: ChatImageAttachment): { type: 'image'; data: string; mimeType: string } | undefined {
+  const mimeType = image.mimeType.toLowerCase()
+  if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024) return undefined
+  return { type: 'image', data: image.data, mimeType }
+}
+
+/** The image blocks of steers. An image an agent is not sent is left out with a warning: the text still goes in now. */
+function steerImageBlocks(steers: readonly DrainedSteer[]): Array<{ type: 'image'; data: string; mimeType: string }> {
+  const images = steers.flatMap((steer) => steer.images ?? [])
+  const blocks = images.flatMap((image) => acpImageBlock(image) ?? [])
+  if (blocks.length < images.length) console.warn('[acp] a steer image the agent is not sent was left out', { left: images.length - blocks.length })
+  return blocks
 }
 
 /** How long a steer waits for a cancelled prompt's own completion before sending the next one. */
@@ -219,7 +236,7 @@ export interface AcpChatInput {
    * one of those deliveries. A drain is taken (`steerTaken`, then `onSteer` with its token) only once the prompt that
    * carries it reached the agent, and handed back (`returnSteer`) when that never happens.
    */
-  drainSteerEntry?: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => { text: string; token: string } | undefined
+  drainSteerEntry?: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => { text: string; token: string; images?: ChatImageAttachment[] } | undefined
   /** The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. */
   peekSteer?: () => { delivery: 'cut' | 'native' | 'hold' } | undefined
   /** The check right before `session/cancel` for a drained steer (`TurnControl.mayCut`): false hands it back. */
@@ -865,11 +882,9 @@ export class AcpSessions {
       if (!quirks.modelConfigId) await this.selectMode(active, input.mode)
       input.signal?.throwIfAborted()
       const imageBlocks = (input.images ?? []).map((image) => {
-        const mimeType = image.mimeType.toLowerCase()
-        if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024) {
-          throw new Error(`${label} cannot send image ${image.name}; use BMP, JPEG, PNG, or WebP under 10 MiB`)
-        }
-        return { type: 'image' as const, data: image.data, mimeType }
+        const block = acpImageBlock(image)
+        if (!block) throw new Error(`${label} cannot send image ${image.name}; use BMP, JPEG, PNG, or WebP under 10 MiB`)
+        return block
       })
       let cancelSent = false
       const turnProcess = active
@@ -892,7 +907,7 @@ export class AcpSessions {
           const entry = drain()
           const steer = entry?.text.trim()
           if (!entry || !steer) return
-          const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}) }
+          const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}), ...(entry.images?.length ? { images: entry.images } : {}) }
           // The check at dispatch: a tool that started since the decision is not cancelled for this steer.
           if (prompting && !cancelSent && drained.token && input.mayCut && !input.mayCut(drained.token)) {
             input.returnSteer?.(drained.text, drained.token)
@@ -959,6 +974,8 @@ export class AcpSessions {
           const guidance = 'Additional guidance:\n' + steers.map((entry) => entry.text).join('\n')
           if (commandTurn) blocks = [blocks[0], blocks[1] ? `${blocks[1]}\n\n${guidance}` : guidance]
           else blocks = [`${blocks[0]}\n\n${guidance}`]
+          // The steers' images join the prompt they ride in.
+          attachments = [...attachments, ...steerImageBlocks(steers)]
         }
         prompting = true
         // A boundary the previous prompt's end reported is over.
@@ -1029,7 +1046,7 @@ export class AcpSessions {
         carried.push(...steers)
         blocks = [steers.map((entry) => entry.text).join('\n')]
         commandTurn = false
-        attachments = []
+        attachments = steerImageBlocks(steers)
         if (text) text += '\n\n'
       }
       for (const [callId, title] of toolTitles) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })

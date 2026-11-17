@@ -133,8 +133,6 @@ html:not(.platform-darwin) .app {
 /* Agent chat lists share the same density without changing the transcript. */
 .app .chats-sidebar-content { padding: 0 4px 8px; }
 .app .chat-section-heading { margin: 8px 6px 6px; }
-.app .chat-roster { gap: 8px; padding: 0 6px 5px; }
-.app .chat-roster button { gap: 4px; }
 .app .chats-sidebar-content .chat-avatar { width: 28px; height: 28px; border-radius: 7px; font-size: 12px; }
 .app .chat-list-row { gap: 8px; padding: 6px; border-radius: 5px; }
 .app .chat-list-row.active { background: rgba(var(--accent-rgb), 0.07); }

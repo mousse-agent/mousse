@@ -190,7 +190,7 @@ describe('tabs', () => {
   it('make a bot from the + next to Bots in the Agents tab, which no longer opens Automations', async () => {
     const { ChatsSidebar } = await vi.importActual<typeof import('../../src/renderer/components/chats/ChatsSidebar')>('../../src/renderer/components/chats/ChatsSidebar')
     const html = renderToStaticMarkup(createElement(ChatsSidebar))
-    expect(html).toContain('<h2>Bots</h2>')
+    expect(html).toMatch(/<h2>(?:(?!<\/h2>).)*>Bots<(?:(?!<\/h2>).)*<\/h2>/)
     expect(html).toContain('aria-label="New bot"')
     expect(html).not.toContain('aria-label="Open Automations"')
     expect(html).not.toContain('Roster')

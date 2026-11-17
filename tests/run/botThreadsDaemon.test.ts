@@ -5,7 +5,8 @@
  * bot's thread that may not start, message or stop threads, whatever let the call get this far. The tools' side (lanes,
  * the listing, who the bot may reach, what it reads) is in botThreadTools.test.ts.
  */
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -14,11 +15,14 @@ import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { AGENT_MESSAGE_MAX_HOPS } from '../../src/mms/orchestrator/OrchestratorService'
 import type { PermissionMode } from '../../src/shared/permissionMode'
+import type { RunSettings } from '../../src/shared/settings'
+import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
+import { ThreadJournal } from '../../src/mms/data/ThreadJournal'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from '../../src/shared/bots/personal/manifest'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { AgentActor } from '../../src/mms/run/types'
 import type { EventEmitter } from 'node:events'
-import { launchedThreadsOf, watchLaunchedThreads } from '../../src/mms/bots/launchedThreads'
+import { launchedThreadsIn, watchLaunchedThreads } from '../../src/mms/bots/launchedThreads'
 import { launchedActive } from '../../src/shared/bots/personal/chat'
 import { appTurn } from './appToolsFixture'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
@@ -41,13 +45,13 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
    * tools (a chat turn its owner's message started holds them all). `owner`: what the bot's records say of the turn (its
    * owner's message started it, from a device held to `limit`); null, a turn no message of the owner's started.
    */
-  const world = (options: { held?: readonly string[]; role?: 'activation' | 'context'; owner?: { limit?: PermissionMode } | null; script?: (input: { threadId: string; prompt: string }) => string | Promise<string> } = {}) => {
+  const world = (options: { held?: readonly string[]; role?: 'activation' | 'context'; owner?: { limit?: PermissionMode } | null; script?: (input: { threadId: string; prompt: string; signal: AbortSignal }) => string | Promise<string>; runs?: Partial<RunSettings> } = {}) => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-bot-threads-'))
     previousHome ??= process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     homes.push(home)
     const pi = piAdapter((input) => options.script ? options.script(input) : `done: ${input.prompt.length}`)
-    const d = phase6Daemon(home, [pi])
+    const d = phase6Daemon(home, [pi], options.runs ? { runs: options.runs } : {})
     daemons.push(d)
     d.settings.permissions = { ...d.settings.permissions, defaultMode: 'ask' }
     mkdirSync(join(home, 'project'))
@@ -89,7 +93,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const hide = (threadId: string, hidden = true) => orch.setThreadHiddenAsAgent(threadId, hidden, { actor })
     const runMode = (runId: string) => d.engine.bindingForRun(runId)?.policy.permissionMode
     const settled = (runId: string) => waitFor(() => ['completed', 'failed', 'cancelled', 'interrupted'].includes(d.engine.getRun(runId)?.status ?? ''), `run ${runId}`)
-    return { d, pi, project, chat, get actor() { return actor }, orch, create, send, stop, archive, hide, runMode, settled, turnRun }
+    return { home, d, pi, project, chat, get actor() { return actor }, orch, create, send, stop, archive, hide, runMode, settled, turnRun }
   }
 
   it('a thread it starts is an ordinary thread in Full access, launched by its chat thread, on the default model unless it names one, and its first message is the bot\'s', async () => {
@@ -389,13 +393,8 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): unknown[] }
     const changed: string[] = []
     const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, threads: w.d.store, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
-    const listed = () => launchedThreadsOf({
-      creators: new Set([w.chat.id]),
-      threads: w.d.store.listAllThreads(),
-      activeRuns: w.d.engine.store.listNonTerminalRuns(),
-      lastRun: (id) => w.d.engine.store.listRuns(id, { limit: 1 })[0],
-      asks: () => false
-    }).map((thread) => [thread.title, thread.hidden ?? false])
+    const listed = () => launchedThreadsIn({ threads: w.d.store, engine: w.d.engine, asks: () => false }, new Set([w.chat.id]))
+      .map((thread) => [thread.title, thread.hidden ?? false])
     const actions = (threadId: string) => w.d.engine.store.listEvents(threadId).filter((event) => event.type === 'agent.action').map((event) => (event.payload as { action: string }).action)
     const made = await w.create('h1', { title: 'Quick check', hidden: true })
     const visible = await w.create('h2', { title: 'Big refactor' })
@@ -482,15 +481,13 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const w = world({ script: (input) => (input.prompt.includes('Look at the login page.') ? new Promise<string>((resolve) => { release = () => resolve('done') }) : 'done') })
     const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): Array<{ requestId: string }>; dismiss(requestId: string): boolean }
     const changed: string[] = []
-    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
-    const managed = (creators: string[]) => launchedThreadsOf({
-      creators: new Set(creators),
-      threads: w.d.store.listAllThreads(),
-      activeRuns: w.d.engine.store.listNonTerminalRuns(),
-      lastRun: (id) => w.d.engine.store.listRuns(id, { limit: 1 })[0],
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, threads: w.d.store as unknown as EventEmitter, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
+    const managed = (creators: string[]) => launchedThreadsIn({
+      threads: w.d.store,
+      engine: w.d.engine,
       asks: (id) => questions.listPendingForThread(id).length > 0,
       projectName: (id) => (id === w.project.id ? 'Shop' : undefined)
-    })
+    }, new Set(creators))
     const made = await w.create('c1')
     await waitFor(() => release !== undefined, 'the launched thread\'s turn')
     expect(managed([w.chat.id])).toEqual([{ threadId: made.threadId, title: 'Fix login', project: 'Shop', status: 'running', startedAt: expect.any(String), updatedAt: expect.any(String) }])
@@ -515,6 +512,152 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     await w.settled((made.firstMessage as { runId: string }).runId)
     expect(managed([w.chat.id]).map((thread) => [thread.threadId, thread.status, launchedActive(thread)])).toEqual([[made.threadId, 'done', false]])
     expect(changed.length).toBeGreaterThan(seen)
+
+    // A queued run with no turn.start yet waits on the message queue: the bot still manages it. Once its turn.start
+    // came and went and nothing started it, the thread sits idle, so the bot does not manage it.
+    const stray = await w.d.engine.dispatch({ kind: 'send', threadId: made.threadId, clientRequestId: 'stray-send', source: 'mcp' })
+    const strayRunId = (stray as { runId: string }).runId
+    expect(w.d.engine.getRun(strayRunId)!.status).toBe('queued')
+    expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['queued', true]])
+    const start = w.d.engine.outbox.enqueue({ threadId: made.threadId, runId: strayRunId, kind: 'turn.start', payload: {} })
+    expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['queued', true]])
+    w.d.engine.outbox.cancel(start.effectId, new Date().toISOString(), 'test: the start died')
+    expect(w.d.engine.getRun(strayRunId)!.status).toBe('queued')
+    expect(managed([w.chat.id]).map((thread) => [thread.threadId, launchedActive(thread)])).toEqual([[made.threadId, false]])
+
+    // A question left open would keep it busy, until the thread is archived: an archived thread is never managed,
+    // whatever it left behind, and archiving it tells the chat thread.
+    void w.orch.questions.requestAnswers([{ id: 'q2', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], made.threadId, {}).catch(() => undefined)
+    expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['needs_input', true]])
+    seen = changed.length
+    await w.archive(made.threadId)
+    expect(w.d.store.getThread(made.threadId)?.settledAt).toBeTruthy()
+    expect(managed([w.chat.id]).map((thread) => [thread.threadId, launchedActive(thread)])).toEqual([[made.threadId, false]])
+    expect(changed.length).toBeGreaterThan(seen)
+    unwatch()
+  })
+  it('a thread it starts that a usage limit paused keeps it busy while the pause ends by itself, and is on hold for the owner, not managed, once only Resume now ends it; each change tells its chat thread', async () => {
+    let limited = true
+    const w = world({
+      runs: { resumeAfterUsageLimit: true },
+      script: (input) => {
+        if (!input.prompt.includes('Look at the login page.') || !limited) return 'done'
+        throw usageLimitError({ provider: 'openai', resetsAt: new Date(Date.now() + 3_600_000).toISOString(), estimated: false, limitKind: 'five_hour' })
+      }
+    })
+    const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): unknown[] }
+    const changed: string[] = []
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, threads: w.d.store as unknown as EventEmitter, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
+    const managed = () => launchedThreadsIn({ threads: w.d.store, engine: w.d.engine, asks: (id) => questions.listPendingForThread(id).length > 0 }, new Set([w.chat.id]))
+      .map((thread) => [thread.title, thread.status, launchedActive(thread)])
+    const made = await w.create('c1')
+    const first = (made.firstMessage as { runId: string }).runId
+    await waitFor(() => w.d.engine.getRun(first)?.status === 'paused', 'the usage limit to pause the run')
+    // Its timer resumes it at the reset: it still works, and so does the owner's message waiting behind the pause.
+    expect(managed()).toEqual([['Fix login', 'paused', true]])
+    const behind = await w.d.orch.send('And the signup page.', false, { threadId: made.threadId, clientRequestId: 'owner-behind' })
+    expect(behind).toMatchObject({ queued: true, heldByPause: true })
+    expect(managed()).toEqual([['Fix login', 'paused', true]])
+
+    // Mousse was off past the reset: the timer is dropped and only Resume now continues it. On hold, not managed.
+    let seen = changed.length
+    w.d.engine.endPause(first, 'stale')
+    expect(managed()).toEqual([['Fix login', 'on_hold', false]])
+    expect(changed.length).toBeGreaterThan(seen)
+
+    // Resume now: it works again, and once the continue turn and the waiting message have run it is done.
+    limited = false
+    seen = changed.length
+    w.d.engine.requestResume(first, true)
+    w.d.orch.notifyEffects()
+    expect(managed()).toEqual([['Fix login', 'paused', true]])
+    await waitFor(() => !w.d.engine.store.hasNonTerminalRun(made.threadId), 'the resumed thread to finish')
+    expect(managed()).toEqual([['Fix login', 'done', false]])
+    expect(changed.length).toBeGreaterThan(seen)
+
+    // With automatic resume off, a usage limit puts a new thread straight on hold.
+    w.d.settings.runs = { ...w.d.settings.runs, resumeAfterUsageLimit: false }
+    limited = true
+    const second = await w.create('c2', { title: 'Fix signup' })
+    await waitFor(() => w.d.engine.getRun((second.firstMessage as { runId: string }).runId)?.status === 'paused', 'the second thread to pause')
+    expect(managed()).toEqual([['Fix signup', 'on_hold', false], ['Fix login', 'done', false]])
+    unwatch()
+  })
+
+  it('a thread it starts whose owner pressed Stop with a message waiting is on hold for the owner, not managed, until the message is sent', async () => {
+    let release: (() => void) | undefined
+    const w = world({
+      script: (input) => input.prompt.includes('Look at the login page.')
+        ? new Promise<string>((resolve) => { release = () => resolve('done'); input.signal.addEventListener('abort', () => resolve(''), { once: true }) })
+        : 'done'
+    })
+    const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): unknown[] }
+    const changed: string[] = []
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, threads: w.d.store as unknown as EventEmitter, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
+    const managed = () => launchedThreadsIn({ threads: w.d.store, engine: w.d.engine, asks: () => false }, new Set([w.chat.id]))
+      .map((thread) => [thread.status, launchedActive(thread)])
+    const made = await w.create('c1')
+    const first = (made.firstMessage as { runId: string }).runId
+    await waitFor(() => release !== undefined, 'the launched thread\'s turn')
+    const waiting = await w.d.orch.send('And the signup page.', false, { threadId: made.threadId, clientRequestId: 'owner-queued' })
+    expect(waiting.queued).toBe(true)
+    expect(managed()).toEqual([['running', true]])
+
+    // The owner's Stop holds the waiting message for Send now: nothing in the thread moves by itself.
+    const seen = changed.length
+    await w.d.orch.stopThread(made.threadId, 'user')
+    await w.settled(first)
+    expect(w.d.engine.getRun(waiting.runId!)?.status).toBe('queued')
+    expect(w.d.store.loadMessageQueue(made.threadId).find((item) => item.runId === waiting.runId)?.heldAfterStop).toBe(true)
+    expect(managed()).toEqual([['on_hold', false]])
+    expect(changed.length).toBeGreaterThan(seen)
+
+    // Send now: the message runs, and the thread is done.
+    expect(w.d.orch.promoteQueueItem(made.threadId, waiting.queueItem!.id)).toEqual({ ok: true })
+    await w.settled(waiting.runId!)
+    expect(managed()).toEqual([['done', false]])
+    unwatch()
+  })
+
+  it('a thread it starts whose worktree waits on recovery, with messages queued behind its turn, is on hold for the owner, not managed, and the line says so once the queue stops', async () => {
+    let release: (() => void) | undefined
+    let dirOf: (threadId: string) => string = () => ''
+    // The turn ends with an Undo of Mousse's own left unfinished: the thread waits on workspace recovery.
+    const w = world({
+      script: async (input) => {
+        if (!input.prompt.includes('Look at the login page.')) return 'done'
+        await new Promise<void>((resolve) => { release = resolve })
+        new ThreadJournal(dirOf(input.threadId)).append({ operationId: 'undo-1', operationType: 'undo', state: 'recovery_required', details: { error: 'Error: the undo stopped' } })
+        return 'done'
+      }
+    })
+    dirOf = (id) => w.d.store.getThreadDir(id)
+    const repo = join(w.home, 'repo')
+    mkdirSync(repo)
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'ignore' })
+    git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.test')
+    writeFileSync(join(repo, 'README'), 'base\n'); git('add', '.'); git('commit', '-qm', 'base')
+    const project = w.d.projects.openProject(repo)
+    const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): unknown[] }
+    const managed = () => launchedThreadsIn({ threads: w.d.store, engine: w.d.engine, asks: () => false }, new Set([w.chat.id]))
+      .map((thread) => [thread.status, launchedActive(thread)])
+    // What the bot's summary reads at each refresh.
+    const refreshes: unknown[][] = []
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, threads: w.d.store as unknown as EventEmitter, thread: (id) => w.d.store.getThread(id), changed: () => refreshes.push(managed()) })
+    const made = await w.create('c1', { projectId: project.id, workspace: 'new_worktree' })
+    await waitFor(() => release !== undefined, 'the launched thread\'s turn')
+    const second = await w.d.orch.send('Second', false, { threadId: made.threadId, clientRequestId: 'owner-second' })
+    const third = await w.d.orch.send('Third', false, { threadId: made.threadId, clientRequestId: 'owner-third' })
+    expect([second.queued, third.queued]).toEqual([true, true])
+    release!()
+    await w.settled((made.firstMessage as { runId: string }).runId)
+    // The next message's turn is refused and goes back to the queue, which stops there; both runs stay queued.
+    await waitFor(() => w.d.engine.outbox.listForRun(second.runId!).some((effect) => effect.kind === 'turn.start' && !['pending', 'running'].includes(effect.status)), 'the refused turn')
+    await waitFor(() => w.d.store.loadMessageQueue(made.threadId).every((item) => item.state === 'pending'), 'the message back in the queue')
+    expect([w.d.engine.getRun(second.runId!)?.status, w.d.engine.getRun(third.runId!)?.status]).toEqual(['queued', 'queued'])
+    expect(managed()).toEqual([['on_hold', false]])
+    // The refused turn changes no run's status: the summary is read again when the queue stops.
+    await waitFor(() => JSON.stringify(refreshes.at(-1)) === JSON.stringify([['on_hold', false]]), 'a refresh once the queue stopped')
     unwatch()
   })
 })

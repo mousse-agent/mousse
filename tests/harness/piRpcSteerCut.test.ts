@@ -95,6 +95,37 @@ describe('Pi RPC engine with the real Pi child: a steer cuts in', () => {
   }, 60_000)
 })
 
+/** A valid 1x1 PNG: Pi decodes an image before it sends it on. */
+const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+
+describe('Pi RPC engine with the real Pi child: a steer’s image', () => {
+  it('a person’s steer with an image cuts in, and the model’s next request carries the image with the steer', async () => {
+    const { engine, recorder, project } = await setup(cleanups, {
+      models: (url) => [{ id: 'mock-model', name: 'Mock model', api: 'openai-completions', provider: 'mock', baseUrl: `${url}/v1`, reasoning: false, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096, compat: { supportsStore: false, supportsDeveloperRole: false } }]
+    })
+    recorder.respond(slowThenQuick('Looked.'))
+    const turn = harness(project)
+    const record = onHold(turn)
+    let images: Array<{ name: string; mimeType: string; data: string }> = []
+    const drain = turn.ctl.drainSteerEntry!
+    turn.ctl.drainSteerEntry = (opts) => {
+      const entry = drain(opts)
+      return entry && { ...entry, images: images.splice(0) }
+    }
+    const running = engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    await vi.waitFor(() => expect(record.shown.at(-1) ?? '').toMatch(/word3/), { timeout: 20_000, interval: 20 })
+    images = [{ name: 'shot.png', mimeType: 'image/png', data: PNG_1X1 }]
+    record.pending.push('see the screenshot')
+    expect((await running).aborted).toBeFalsy()
+    expect(recorder.requests).toHaveLength(2)
+    const messages = (JSON.parse(recorder.requests[1].body) as { messages: Array<{ role: string; content: unknown }> }).messages
+    const last = messages.at(-1)!
+    expect(last.role).toBe('user')
+    expect(JSON.stringify(last.content)).toContain('see the screenshot')
+    expect(JSON.stringify(last.content)).toContain(`data:image/png;base64,${PNG_1X1}`)
+  }, 60_000)
+})
+
 /** The first request ends with two `bash` calls; the second streams slowly until the client goes away; later ones answer at once. */
 function batchThenSlow(answer: string) {
   let index = 0

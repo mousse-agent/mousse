@@ -1967,6 +1967,55 @@ export const MessageList = memo(function MessageList({
     });
   }, [messageRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
 
+  // `revealSubagent` from Nest: a runtime's own subagent has no thread, so its card is what opens. The request
+  // waits in the store while its turn lands, so the folded group and the card open themselves as they mount.
+  const subagentRequest = useChatNavigationStore((state) => state.subagent);
+  const takenSubagentRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!subagentRequest || takenSubagentRef.current === subagentRequest.seq) return;
+    const { settleSubagent } = useChatNavigationStore.getState();
+    if (isStale(subagentRequest)) {
+      settleSubagent(subagentRequest.seq);
+      return;
+    }
+    const { toolCallId, seq } = subagentRequest;
+    let messageId: string | null = null;
+    const index = turns.findIndex((turn) =>
+      turn.assistantMsgs.some((message) => {
+        const found = (message.parts as Array<{ toolCallId?: unknown }> | undefined)?.some((part) => part?.toolCallId === toolCallId);
+        if (found) messageId = message.id;
+        return Boolean(found);
+      }),
+    );
+    const container = chatContainerRef.current;
+    const rows = rowsRef.current;
+    const virtualization = virtualizationRef.current;
+    if (index < 0 || !messageId || !container || !rows || !virtualization) return;
+    takenSubagentRef.current = seq;
+    dispatchFollow({ type: "navigate" });
+    const navigation = virtualization.beginNavigation();
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(toolCallId) : toolCallId.replace(/["\\]/g, "\\$&");
+    void revealMessage(
+      {
+        turnKey: resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current),
+        messageId,
+        element: (root) => root.querySelector<HTMLElement>(`[data-native-subagent="${escaped}"]`),
+      },
+      navigation,
+      {
+        container,
+        rows,
+        scrollToKey: windowed ? (key, target) => virtualization.scrollToKey(key, target, navigation) : undefined,
+        onProgrammaticScroll: markProgrammaticScroll,
+      },
+    ).then((element) => {
+      settleSubagent(seq);
+      if (!element) return;
+      flashLocated(element);
+      element.querySelector<HTMLButtonElement>("button.subagent-card")?.focus({ preventScroll: true });
+    });
+  }, [subagentRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
+
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
     const lastMessage = normalizedMessages[normalizedMessages.length - 1];

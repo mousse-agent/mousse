@@ -135,3 +135,38 @@ describe('a steer the running turn could not take', () => {
     expect(host.querySelector<HTMLTextAreaElement>('.composer-input')!.value).toBe('')
   })
 })
+
+describe('a steer with an image', () => {
+  it('goes into the running reply with its image: queued with it and sent now by its id, never as text alone', async () => {
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: () => 'blob:shot', revokeObjectURL: () => undefined }))
+    orchestrator.isTurnActive = vi.fn(async () => true)
+    orchestrator.steer = vi.fn(async () => true)
+    const queueItem = { id: 'q-shot', threadId: 'thread-a', content: 'Look at this', state: 'pending', intent: 'normal', enqueuedAt: new Date().toISOString(), order: 0 }
+    orchestrator.sendToThread = vi.fn(async () => ({ message: '', actions: [], queued: true, queueItem }))
+    await mount()
+    const bridge = (window as unknown as { mousse: Record<string, Record<string, unknown>> }).mousse
+    const promoteToSteer = vi.fn(async () => ({ ok: true }))
+    bridge.queue.promoteToSteer = promoteToSteer
+    bridge.queue.list = vi.fn(async () => [])
+
+    // A screenshot pasted into the composer.
+    const input = host.querySelector<HTMLTextAreaElement>('.composer-input')!
+    const shot = new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' })
+    const paste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(paste, 'clipboardData', { value: { items: [{ kind: 'file', getAsFile: () => shot }], files: [], getData: () => '' } })
+    await act(async () => { input.dispatchEvent(paste) })
+    await settle()
+    await send('Look at this', { ctrlKey: true })
+    await settle(20)
+
+    // The text-only steer would drop the image: not used.
+    expect(orchestrator.steer).not.toHaveBeenCalled()
+    expect(orchestrator.sendToThread).toHaveBeenCalledTimes(1)
+    const [threadId, request] = (orchestrator.sendToThread as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { content: string; images?: Array<{ mimeType: string; data: string }> }]
+    expect(threadId).toBe('thread-a')
+    expect(request.content).toBe('Look at this')
+    expect(request.images).toEqual([expect.objectContaining({ mimeType: 'image/png', data: 'iVBORw==' })])
+    // Sent into the reply now, by the queued message's id.
+    expect(promoteToSteer).toHaveBeenCalledWith('thread-a', 'q-shot')
+  })
+})

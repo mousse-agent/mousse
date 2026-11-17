@@ -316,6 +316,9 @@ interface AppState {
   /** Side card sections the user collapsed (true) or expanded (false) by hand, by section key; a missing key uses the section's default. */
   sideCardCollapsed: Record<string, boolean>
   setSideCardSectionCollapsed: (key: string, collapsed: boolean) => void
+  /** Chats sidebar sections (Bots, Groups, Recent) the user folded (true) or opened (false); a missing key is open. */
+  chatsSidebarCollapsed: Record<string, boolean>
+  setChatsSidebarSectionCollapsed: (key: string, collapsed: boolean) => void
   activeThreadId: string | null
   projects: Project[]
   threads: Thread[]
@@ -603,7 +606,7 @@ const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
-  'openedSurfaceKinds', 'sideCardCollapsed',
+  'openedSurfaceKinds', 'sideCardCollapsed', 'chatsSidebarCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'lastThreadListView', 'threadFeedOrder',
   'reviewIgnoreWhitespace', 'queueEditDrafts', 'lastNewThreadProjectId'
 ] as const
@@ -714,6 +717,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   sideCardFits: null,
   sideCardOverlayOpen: false,
   sideCardCollapsed: {},
+  chatsSidebarCollapsed: {},
   activeThreadId: null,
   projects: [],
   threads: [],
@@ -895,6 +899,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setSideCardFits: (sideCardFits) => set({ sideCardFits }),
   setSideCardOverlayOpen: (sideCardOverlayOpen) => set({ sideCardOverlayOpen }),
   setSideCardSectionCollapsed: (key, collapsed) => set((s) => ({ sideCardCollapsed: { ...s.sideCardCollapsed, [key]: collapsed } })),
+  setChatsSidebarSectionCollapsed: (key, collapsed) => set((s) => ({ chatsSidebarCollapsed: { ...s.chatsSidebarCollapsed, [key]: collapsed } })),
   setTurnState: (state) => set((s) => {
     const request = s.stopRequests[state.threadId]
     if (!request) {
@@ -1157,6 +1162,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       threadsSidebarOpen: true,
       mainAreaOpen: false,
       sideCardCollapsed: {} as Record<string, boolean>,
+      chatsSidebarCollapsed: {} as Record<string, boolean>,
       chatMode: DEFAULT_CHAT_MODE
     }
     if (typeof window !== 'undefined') {

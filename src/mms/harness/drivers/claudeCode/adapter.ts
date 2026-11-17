@@ -182,6 +182,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     let toolStarted = false
     // The turn ended at Send now's cut (`onSendNowCut`): with no text, it has no reply to show.
     let sendNowCut = false
+    // A steer cut the turn and the model wrote nothing after it (`onSteerUnanswered`).
+    let steerUnanswered = false
     const progress = (): void => {
       progressed = true
       sink.progress()
@@ -192,6 +194,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       onSendNowCut: () => {
         sendNowCut = true
       },
+      onSteerUnanswered: () => {
+        steerUnanswered = true
+      },
       // A bot turn asks about every call, whatever the thread's or the entry's default.
       permissionMode: locked ? 'ask' : input.permissionMode,
       child: input.child,
@@ -199,6 +204,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       continuationId: input.continuationId,
       threadId: input.threadId,
       instanceId: input.instanceId,
+      ...(host.tools.secretMasker ? { secretMasker: host.tools.secretMasker } : {}),
       cwd,
       model: input.model,
       prompt: input.prompt,
@@ -286,7 +292,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
           tokensPerSecond: report.tokensPerSecond,
           usage: report.usage ?? undefined,
           context: report.context,
-          ...(report.promptCache ? { promptCache: report.promptCache } : {})
+          ...(report.promptCache ? { promptCache: report.promptCache } : {}),
+          ...(report.quota?.length ? { quota: report.quota } : {}),
+          ...(report.resumeLost ? { resumeLost: true } : {})
         })
         if (report.usage)
           sink.usage({
@@ -341,7 +349,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       contextModelKey: contextKey,
       nativeMessages: [],
       providerRef,
-      ...(sendNowCut ? { noReply: true } : {})
+      ...(sendNowCut ? { noReply: true } : {}),
+      ...(steerUnanswered ? { steerUnanswered: true } : {})
     }
   }
 

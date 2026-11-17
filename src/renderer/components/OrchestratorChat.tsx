@@ -38,7 +38,7 @@ import { attachedFilesIn, formatAttachedFilesMarker } from '../../shared/attache
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
 import { nextSteerableQueueItem } from '../lib/queuedContent'
 import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
-import { contextTokens } from '../lib/promptCache'
+import { historyTokens as historyTokensOf } from '../lib/promptCache'
 import { cachedContextUsage, contextUsageKey, rememberContextUsage } from '../lib/threadContextUsage'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
@@ -56,6 +56,8 @@ import { createTurnActions, type TurnActions } from '../chat/components/agent-el
 import { countRender } from '../chat/components/agent-elements/render-counts'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
+import { useSubagents } from '../hooks/useSubagents'
+import { isWorkingSubagent } from '../../shared/subagents'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromTurn, reuseUIMessages } from '../chat/adapters/mousseToUI'
@@ -89,7 +91,7 @@ import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/message
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
 import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerListsModel, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
-import { errorText, readableError, sendErrorLine } from '../lib/errorText'
+import { compactNowFailureLine, errorText, isRequestTimeout, readableError, sendErrorLine } from '../lib/errorText'
 import { showToast } from './ui/Toast'
 import { editablePrompt, PromptUndoNotice } from './PromptUndoControls'
 import { invalidateThreadActionHistory, readThreadActionHistory } from '../utils/threadActionHistory'
@@ -442,7 +444,7 @@ export function OrchestratorChat() {
     [messages]
   )
   // The history Send now keeps when it skips the compaction ("182K"), from the context snapshot.
-  const historyTokens = contextTokens(contextUsage) || undefined
+  const historyTokens = historyTokensOf(contextUsage) || undefined
   const queueHold = useMemo(() => (compactionRunning ? { historyTokens } : null), [compactionRunning, historyTokens])
   // An unsaved edit of a queued message that started meanwhile goes to its thread's composer (shown or not) with the
   // message's images, browser elements and references. Files are kept by thread here, like a paste.
@@ -1219,15 +1221,25 @@ export function OrchestratorChat() {
 
   // Compact now (the composer's chip, the context popover): it starts at once and runs while the person types.
   // Until the daemon's compaction row arrives, and while the request is out, the chip reads Compacting….
+  // Never offered beside work in progress: a running turn, or working subagents whose results come back to this thread.
+  const subagentsWorking = useSubagents(newChat ? null : activeThreadId).some(isWorkingSubagent)
   const [compactingThread, setCompactingThread] = useState<string | null>(null)
   const handleCompactNow = useCallback(() => {
     const threadId = activeThreadId
-    if (!threadId) return
+    if (!threadId || turnActive || loading || subagentsWorking) return
     setCompactingThread(threadId)
+    // The compaction rows already in the conversation: a new one means this compaction started, and its row says how it ended.
+    const compactionRows = () => useAppStore.getState().messages.filter((message) => message.kind === 'context_compaction').map((message) => message.id)
+    const rowsBefore = new Set(compactionRows())
     void window.mousse.threads.compact(threadId)
-      .catch((error: unknown) => setSendError(error instanceof Error ? error.message : String(error)))
+      .catch((error: unknown) => {
+        // Only a refusal before the compaction started is said here, and only on the thread that asked.
+        const line = compactNowFailureLine(error)
+        if (!line) console.warn('[compact] Compact now got no answer', { threadId, error: errorText(error) })
+        else if (useAppStore.getState().activeThreadId === threadId && compactionRows().every((id) => rowsBefore.has(id))) setSendError(line)
+      })
       .finally(() => setCompactingThread((current) => (current === threadId ? null : current)))
-  }, [activeThreadId])
+  }, [activeThreadId, turnActive, loading, subagentsWorking])
 
   // What composer commands act on: this thread (none yet on a blank chat) and whether a turn is running.
   const slashCommandEnv = (hasAttachments: boolean): SlashCommandEnv => ({
@@ -1239,7 +1251,15 @@ export function OrchestratorChat() {
     steer: (text) => window.mousse.orchestrator.steer(text, activeThreadId ?? undefined),
     newThread: async (title) => { await window.mousse.threads.createAndSelect(title) },
     clearContext: async (threadId) => { await window.mousse.threads.clearContext(threadId) },
-    compact: async (threadId, focus) => { await window.mousse.threads.compact(threadId, focus) },
+    // A compaction that got no answer in time may still be running; its row in the conversation says how it ends.
+    compact: async (threadId, focus) => {
+      try {
+        await window.mousse.threads.compact(threadId, focus)
+      } catch (error) {
+        if (!isRequestTimeout(error)) throw error
+        console.warn('[compact] /compact got no answer', { threadId, error: errorText(error) })
+      }
+    },
     fork: async (threadId) => { await window.mousse.threads.fork(threadId) },
     rename: async (threadId, title) => { await window.mousse.threads.rename(threadId, title) },
     // The sidebar cancels the event when it opened the thread's rename box.
@@ -1357,6 +1377,10 @@ export function OrchestratorChat() {
       // A /steer no turn took: next-turn guidance, sent as an ordinary message.
       text = command.text
       if (command.adoptGoal) goalToAdopt = command.text
+    } else if (options?.steer && !skillMode && images.length > 0 && !trimmed.startsWith('/')) {
+      // A steer with images: the text-only steer call cannot carry them, so the message is queued with them and sent
+      // into the reply by its id (`queue.steer`), as a steer the turn could not take yet is. The images go with it.
+      steerQueued = true
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
       // Steer (Ctrl/Cmd+Enter) during a run: the text goes into the running turn instead of the queue. The composer
       // clears at once, as a send does: what is typed while this steer is on its way is the next message, and a clear
@@ -1909,7 +1933,7 @@ export function OrchestratorChat() {
                 contextCompactionSetting,
                 contextOpen,
                 onContextOpenChange: setContextOpen,
-                ...(!newChat && activeThreadId ? { onCompactNow: handleCompactNow } : {}),
+                ...(!newChat && activeThreadId && !subagentsWorking ? { onCompactNow: handleCompactNow } : {}),
                 compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId),
                 ...(activeThread?.botOwned ? { contextHidden: true } : {})
               }}

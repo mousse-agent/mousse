@@ -212,14 +212,18 @@ export interface OneShotSpec {
   onActivity(): void
 }
 
-/** What a one-shot writes on the title model: a chat title, a pull request draft or a commit message. */
-export type OneShotTask = 'title' | 'pull_request' | 'commit_message'
+/**
+ * What a one-shot writes: a chat title, a pull request draft or a commit message on the title model, or the digest of a
+ * bot's chat on the bot's own model.
+ */
+export type OneShotTask = 'title' | 'pull_request' | 'commit_message' | 'chat_digest'
 
 /** What each one-shot task does, for a refusal that names it ("… cannot name chats"). */
 export const ONE_SHOT_TASK_TEXT: Readonly<Record<OneShotTask, string>> = {
   title: 'name chats',
   pull_request: 'draft pull requests',
-  commit_message: 'write commit messages'
+  commit_message: 'write commit messages',
+  chat_digest: "summarise a bot's chat"
 }
 
 /**

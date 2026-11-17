@@ -49,6 +49,11 @@ export interface SteerEntry {
   botSteer?: string
 }
 
+/** The images a drain's steers carry, in the order they were steered: they go to the model with the joined text. */
+export function steerImages(entries: readonly SteerEntry[]): ChatImageAttachment[] {
+  return entries.flatMap((entry) => entry.images ?? [])
+}
+
 export interface ActiveTurnControl {
   abort: AbortController
   /** The Run Engine run this turn executes, so a Stop aimed at one run cannot abort a later turn of the thread. */

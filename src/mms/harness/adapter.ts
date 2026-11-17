@@ -257,6 +257,26 @@ export interface ProviderMetrics {
    * requests wrote (absent when they wrote none or the provider does not say).
    */
   promptCache?: { at?: number; ttlMs?: number }
+  /**
+   * The plan's usage windows as the runtime last reported them during the turn (Claude Code's rate-limit events,
+   * Codex's rate-limit snapshot): how much of each is used, 0-100, and when it resets (epoch seconds). Absent when the
+   * runtime reports none (Pi, an API key).
+   */
+  quota?: PlanWindowUse[]
+  /**
+   * The turn was to continue the runtime's saved conversation, and the runtime ran it in a new one instead (Claude Code
+   * answered a resume with another session, Codex's resume gave another thread or failed). What the conversation held
+   * is not in the new one, unless the turn's prompt carried the history.
+   */
+  resumeLost?: true
+}
+
+/** How much of one plan usage window is used (`ProviderMetrics.quota`). */
+export interface PlanWindowUse {
+  /** The window as the runtime names it (`five_hour`, `seven_day`, `primary`, `secondary`). */
+  kind: string
+  usedPercent: number
+  resetsAt?: number
 }
 
 export interface TurnControl {
@@ -272,8 +292,10 @@ export interface TurnControl {
    * hand back several: `returnSteer(text, token)` then restores what that drain took and nothing else.
    * `cut`: the drain holds a person's message, which the model must read now. A provider whose own steer
    * waits for the current reply or command to end cuts the reply instead and continues with the text.
+   * `images`: the images the drained messages carry, in order, for a provider whose steer can take them; one that
+   * cannot sends the text alone. The orchestrator keeps them with the drain, so the transcript shows them either way.
    */
-  drainSteerEntry?(opts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut?: boolean; forced?: boolean } | undefined
+  drainSteerEntry?(opts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut?: boolean; forced?: boolean; images?: ChatImageAttachment[] } | undefined
   /**
    * What a drain now would do, without taking anything; undefined when nothing is pending
    * (docs/design/steer-and-interruptions.md §2.2). An adapter on the hold (`steerBoundary` not `none`)
@@ -337,6 +359,11 @@ export interface TurnResult {
    * text has no reply to show: the thread gets no "Done." placeholder.
    */
   noReply?: boolean
+  /**
+   * A steer cut the turn and was read, and the model wrote nothing after it: the runtime closed the turn with a line of
+   * its own (Claude Code's "No response requested."), so what the steer said was never answered.
+   */
+  steerUnanswered?: boolean
 }
 
 /**
@@ -363,6 +390,11 @@ export interface ToolHost {
   browser?: BrowserExecutionBinding
   /** Whether the turn's run is still its thread's active run; an app tool call after that is refused. */
   runActive?: () => boolean
+  /**
+   * What hides the secrets the thread may use (and ones removed while it runs), read at each tool result: a runtime that
+   * runs its own tools masks their results with it before its model sees them or its session file keeps them.
+   */
+  secretMasker?: () => ((text: string) => string) | undefined
 }
 
 /** One compaction of the thread's transcript: the compacted context to (re)send. */

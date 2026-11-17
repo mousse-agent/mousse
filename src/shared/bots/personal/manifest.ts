@@ -4,6 +4,7 @@ import { isNeutralTool, type NeutralTool } from '../../harness/tools'
 import { DEFAULT_BOT_ACTIVE_MS, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
+import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
@@ -303,7 +304,9 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_QUESTION_ANSWER_TOOL,
   BOT_CARD_TOOL,
   ...BOT_MESSAGE_TOOLS,
-  'list_skills', 'load_skill', 'escalate', 'consult'
+  'list_skills', 'load_skill', 'escalate', 'consult',
+  // The tool catalogue (docs/plans/bot-context.md §15): looking up a group, and calling its tools on Codex and Pi.
+  BOT_CATALOGUE_TOOL, BOT_USE_TOOL
 ])
 
 /** Whether a bot's turn can ever be offered the Mousse app tool `name` (`BOT_OFFERABLE_APP_TOOLS`). */

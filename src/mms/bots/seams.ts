@@ -1,3 +1,5 @@
+import type { BotChatContext, BotChatContextInput } from './memory/contextPack'
+import type { BotChatEpochEnd } from './memory/contextBudget'
 import type { BotChip } from '../../shared/bots/personal/chat'
 import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
@@ -163,6 +165,15 @@ export interface BotToolHost {
     add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
   }
   /**
+   * The ledger (docs/plans/bot-context.md §16): a job the turn `from` handed to one of the owner's threads, by sending it
+   * `sent` (a first message, or a message to a thread it already had). Kept in `bots.db` with who asked and what; the bot
+   * is told in its chat when the thread finishes or waits for a person. A thread still working on an earlier job of the
+   * bot keeps that job. Absent: no ledger here.
+   */
+  jobs?: {
+    open(botId: string, from: string, input: { threadId: string; title: string; project?: string; sent: string }): { jobId: string }
+  }
+  /**
    * Background commands (`watch_start`, `watch_list`, `watch_stop`): a command that runs beside the bot and wakes it in its
    * chat when it exits, prints a line matching `match`, or reaches its time limit (`minutes`). `from` is the chat turn that
    * starts it. Throws, with why in words for the bot, when it can't start. Absent: none here.
@@ -254,6 +265,18 @@ export type BotDispatchEnd = 'settled' | 'wall' | 'reload' | 'stopped' | 'failed
 export interface BotContextProvider {
   /** The chat pack, placed in `turnPreamble` right after `clearConversationContext(homeThreadId)`. */
   chatPreamble(input: { botId: string; activationId: string }): Promise<string>
+  /**
+   * With chat epochs on (docs/plans/bot-context.md §14): the chat turn's pack, the base of a new epoch (`fresh`: the
+   * engine clears the home context first) or the delta of the running one (the turn resumes the thread's conversation).
+   */
+  chatContext?(input: BotChatContextInput): Promise<BotChatContext>
+  /**
+   * The whole chat pack, built now and not frozen: what a turn on a running epoch is given again after its runtime
+   * compacted the conversation (its own pack holds only what was new).
+   */
+  chatPackNow?(input: { botId: string; activationId: string }): string
+  /** Ends the chat's epoch: its next turn starts from a cleared context (`/clear`, a runtime compaction). */
+  endChatEpoch?(botId: string, reason: BotChatEpochEnd): void
   /** The run brief. `scheduleId` absent: a manual run. */
   runPreamble(input: { botId: string; activationId: string; scheduleId?: string; input: string }): Promise<string>
   /**

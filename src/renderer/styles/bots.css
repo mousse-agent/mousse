@@ -1,13 +1,22 @@
 /* Bots in the Chats tab (bot-ui §4). Only the app's own tokens; the rest is the Chats surface's CSS (chats.css). */
 
-/* The Bots row. The face stands on its own: no tile behind it. */
-.chats-sidebar-content .bot-roster { padding-top: 6px; }
-.chat-roster button.bot-roster-active > span:last-child { color: var(--text-primary); }
-/* The open bot: a subtle tint, no edge marks. A bot with unread messages: a small dot by its face. */
-.chat-roster button.bot-roster-active, .app .chat-roster button.bot-roster-active { background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised, transparent)); }
-.app .chat-roster button.bot-roster-active:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, var(--ui-raised, transparent)); }
-.bot-roster button { position: relative; }
-.bot-roster .bot-roster-unread { position: absolute; top: 4px; right: 3px; z-index: 1; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-primary, #000); pointer-events: none; }
+/* The Bots list: a row per bot, the one that spoke last first. The face stands on its own (no tile); beside it the name
+   and the time, and under them what it does now, in words coloured by state: working purple, waiting on the owner
+   amber, the rest grey. The open bot: a subtle tint, no edge marks. Unread messages: a count by the time. */
+.bot-list { display: flex; flex-direction: column; gap: 1px; padding: 2px 0 4px; }
+.bot-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 6px 8px; border-radius: 9px; text-align: left; color: var(--text-primary); }
+.bot-row > .bot-face { flex: none; }
+.bot-row:hover { background: color-mix(in srgb, var(--text-secondary) 11%, transparent); }
+.bot-row[aria-current='true'] { background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised, transparent)); }
+.bot-row[aria-current='true']:hover { background: color-mix(in srgb, var(--accent) 12%, var(--ui-raised, transparent)); }
+.bot-row-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.bot-row-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.bot-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; line-height: 1.3; }
+.bot-row-time { flex: none; font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.bot-row-unread { flex: none; align-self: center; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; color: var(--ui-on-accent, #141218); background: var(--accent); }
+.bot-row-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.35; color: var(--text-secondary); }
+.bot-row-state[data-tone='working'] { color: var(--bot-state-working, #b49cf0); }
+.bot-row-state[data-tone='needs'] { color: var(--warning, #d4b06a); }
 
 /* Header: the face with its activity sticker, the name with its presence under it (what it does is in About); one menu. */
 .bot-header-about { position: relative; flex: none; display: grid; place-items: center; color: inherit; border-radius: 9px; }

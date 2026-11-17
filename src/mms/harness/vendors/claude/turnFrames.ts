@@ -48,6 +48,9 @@ export interface TurnFrameSink {
  * session id. Both ways of running a turn (a one-shot query and a live one) feed their frames here;
  * what a result means stays with the caller.
  */
+/** The model Claude Code names on a message it made up itself, with no request to the model. */
+const SYNTHETIC_MODEL = '<synthetic>'
+
 export class TurnFrames {
   text = ''
   thinking = ''
@@ -80,6 +83,12 @@ export class TurnFrames {
   private readonly inputComplete = new Set<string>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
+  /**
+   * What Claude Code wrote as the model's words without asking the model (`<synthetic>` assistant messages, such as the
+   * "No response requested." it writes on resuming an interrupted session). A result that only repeats one of them is
+   * not the model's answer (`resultText`).
+   */
+  private readonly syntheticTexts = new Set<string>()
   /** The turn was stopped (the caller's cancel): a call a Stop's aborted result drops reads as stopped. */
   stopped: () => boolean = () => false
   /** The plan windows Claude Code rejected during this turn (a one-shot query; a live run keeps its own). */
@@ -186,6 +195,14 @@ export class TurnFrames {
     this.segmentStart = this.text.length
   }
 
+  /**
+   * A result's text when it may fill in a segment that streamed nothing: never one that only repeats a message Claude
+   * Code made up itself, which would reach the reader as the model's answer.
+   */
+  resultText(result: string): string {
+    return this.syntheticTexts.has(result.trim()) ? '' : result
+  }
+
   /** The turn streamed no text of its own since the last break. */
   get segmentEmpty(): boolean {
     return this.text.length === this.segmentStart
@@ -249,6 +266,10 @@ export class TurnFrames {
           ...(parent ? { parentCallId: parent } : {})
         })
       }
+    }
+    if (message.type === 'assistant' && (message.message as { model?: unknown }).model === SYNTHETIC_MODEL && Array.isArray(message.message.content)) {
+      const said = message.message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('').trim()
+      if (said) this.syntheticTexts.add(said)
     }
     // A tool_use block's arguments are complete only in the assistant message that holds it.
     if (message.type === 'assistant' && Array.isArray(message.message.content))
