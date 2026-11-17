@@ -1,3 +1,4 @@
+import { foldChatSummary } from '../../src/mms/bots/memory/chatSummary'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS, botMayBeOffered } from '../../src/shared/bots/personal/manifest'
 import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
@@ -2917,7 +2918,13 @@ it.each(['open', 'done'] as const)('review2 Forget redacts nudge and status cont
   if (status === 'done') await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
   const seq = Number(f.store.get('SELECT seq FROM bot_journal WHERE bot_id = ? AND source_key = ?', t.botId, `bm:${a.message_id}`)!.seq)
+  // A later deterministic fold may contain the copies without the older original card row.
+  const later = memory.windowRows(t.botId, seq + 1).filter(row => row.sourceKey.startsWith(`bm:${a.message_id}`))
+  memory.write(() => memory.setState(t.botId, 'chat_summary', { ...foldChatSummary(later, { lines: [] }, 'UTC', f.store.now()), throughSeq: later.at(-1)!.seq }))
   memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  const summary = memory.getState<{ text: string }>(t.botId, 'chat_summary')!
+  expect(summary.text).not.toContain('Wants to send')
+  expect(summary.text).not.toContain('Held action:')
   const copies = f.store.all('SELECT source_key, text, redacted_at FROM bot_journal WHERE bot_id = ? AND source_key LIKE ?', t.botId, `bm:${a.message_id}%`)
   expect(copies.length).toBeGreaterThan(2)
   expect(copies.filter(row => !row.redacted_at)).toEqual([])
