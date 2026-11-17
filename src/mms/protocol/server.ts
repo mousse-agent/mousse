@@ -1392,9 +1392,6 @@ export class MmsProtocolServer {
     session.subscribeState = 'active'
     session.lastSeq = currentSeq
     this.refreshTellingWindows()
-    this.refreshKeepAwakeHolders()
-    // The app that just attached learns how many runs work now; it holds the blocker from here on.
-    if (session.capabilities.has(KEEP_AWAKE_CAPABILITY)) this.keepAwake?.announce()
 
     // Flush events that landed during buffering with sequence after the boundary.
     const buffered = session.eventBuffer
@@ -1404,6 +1401,11 @@ export class MmsProtocolServer {
       if (ev.sequence <= currentSeq) continue
       this.deliverEventToClient(session, ev)
     }
+
+    this.refreshKeepAwakeHolders()
+    // The app that just attached learns how many runs work now, after the events it was owed, so the numbering stays in
+    // order; it holds the blocker from here on.
+    if (session.capabilities.has(KEEP_AWAKE_CAPABILITY) && !session.closed) this.keepAwake?.announce()
 
     return res
   }
