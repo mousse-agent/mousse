@@ -214,7 +214,7 @@ function ReplyButton({ onReply }: { onReply(): void }) {
 
 /** The time in a bubble's corner; "Sending…" while the message is on its way. */
 function BubbleTime({ message, pending = false }: { message: BotChatMessage; pending?: boolean }) {
-  return pending ? <span className="bot-bubble-time">Sending…</span> : <time className="bot-bubble-time" dateTime={message.at}>{botGroupTime(message.at)}</time>
+  return pending ? <span className="bot-bubble-time">Sending…</span> : <time className="bot-bubble-time" dateTime={message.at}>{message.action?.status === 'open' && 'Asked · '}{botGroupTime(message.at)}</time>
 }
 
 /**
@@ -388,9 +388,9 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
         {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} />}
         {stepsOpen && <BotSteps chips={steps} />}
-        {(steps.length > 0 || time && !message.action) && <div className="bot-bubble-foot">
+        {(steps.length > 0 || time && (!message.action || message.action.status === 'open')) && <div className="bot-bubble-foot">
           {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
-          {time && !message.action && <BubbleTime message={message} />}
+          {time && (!message.action || message.action.status === 'open') && <BubbleTime message={message} />}
         </div>}
         {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
       </div>
