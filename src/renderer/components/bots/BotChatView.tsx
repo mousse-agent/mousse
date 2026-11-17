@@ -847,7 +847,13 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           const index = start + drawn
           const place = places[index]!
           const day = place.day && <div className="bot-day" role="separator" aria-label={place.day}><span>{place.day}</span></div>
-          if (row.kind === 'system') return <Fragment key={row.id}>{day}{row.cut ? <BotCutReply text={row.text} starts={place.starts} /> : <SystemLine row={row} />}</Fragment>
+          if (row.kind === 'system') return <Fragment key={row.id}>{day}{row.expiredReviews?.length
+            ? <details className="bot-expired-actions" aria-label="Expired action reviews" data-turn-key={row.id}>
+              <summary><span role="note">{row.text}</span></summary>
+              {row.actionHistory?.map(message => <SystemLine key={message.id} row={{ kind: 'system', id: message.id, at: message.at, of: message.id, text: `${message.action!.title} · Asked ${botGroupTime(message.at)}` }} />)}
+              {row.expiredReviews.map(message => <BotMessage key={message.id} bot={bot} message={message} onAction={act} quote={false} starts={true} time={false} onReply={reply} onApplet={openApplet} />)}
+            </details>
+            : row.cut ? <BotCutReply text={row.text} starts={place.starts} /> : <SystemLine row={row} />}</Fragment>
           const message = row.message
           const sending = index >= rows.length
           // A reply shows what it answers unless that is the message right above it.
