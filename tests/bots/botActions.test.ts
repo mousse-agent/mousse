@@ -3026,3 +3026,21 @@ it('review12 a later scheduled occurrence warns about the earlier sent call', as
   expect(f.bots.service.actionMessage(t.botId, b.id).action?.previous).toMatchObject({ status: 'done' })
   expect(t.calls).toEqual([t.args])
 })
+
+it.each(['overdue', 'obsolete'] as const)('review5 preflight retires an %s card before refusing without dispatch', async kind => {
+  const t = kind === 'overdue' ? await setup(true) : await scheduledCall()
+  await t.call()
+  const runtime = 'run' in t ? t.run : t.work
+  const workId = 'id' in t ? t.id : t.workId
+  await finish(f, runtime.payload)
+  const a = f.bots.actions.forWork(workId)!
+  if (kind === 'overdue') f.clock.now = Date.parse(a.expires_at) + 1
+  else {
+    const current = f.host.schedules!.get.bind(f.host.schedules)
+    vi.spyOn(f.host.schedules!, 'get').mockImplementation((bot, id) => { const entry = current(bot, id); return entry ? { ...entry, revision: 'missed-edit' } : undefined })
+  }
+  expect(() => f.bots.service.actionCheck({ botId: t.botId, actionId: a.id, digest: a.args_digest, answer: 'send' }))
+    .toThrow(expect.objectContaining({ code: kind === 'overdue' ? 'bot_action_expired' : 'bot_action_withdrawn' }))
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: kind === 'overdue' ? 'expired' : 'withdrawn', exec_args: null })
+  expect(t.calls).toEqual([])
+})
