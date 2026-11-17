@@ -165,6 +165,7 @@ import { buildAutomationIndex, mergeRemoteAutomations } from './automations/Auto
 import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAutomations'
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
 import { usedWallpapers, WallpaperStore } from './appearance/WallpaperStore'
+import { ThemeRestoreStore } from './appearance/ThemeRestoreStore'
 import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
 import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
 import type { AutomationIndex, ManagerTurn } from '../shared/automations'
@@ -1150,7 +1151,8 @@ export class MmsProfileServices {
       threads: this.threads
     })
     this.agentJobAsks = new AgentJobAskStore(homeDir)
-    this.wallpapers = new WallpaperStore(homeDir, { used: () => usedWallpapers(this.settings.get().appearance.userThemes) })
+    this.themeRestore = new ThemeRestoreStore(homeDir)
+    this.wallpapers = new WallpaperStore(homeDir, { used: () => this.usedWallpaperIds() })
     // The agents' theme tools: a change is saved like one made in Settings and reaches every window of the profile.
     this.orchestrator.setAppearanceTools({
       get: () => this.settings.get().appearance,
@@ -1160,7 +1162,8 @@ export class MmsProfileServices {
         return settings.appearance
       },
       // An agent's path: never a network share (signing in to a host the agent named would hand it the person's credentials).
-      importWallpaper: (path) => this.wallpapers.importFile(path, { network: false })
+      importWallpaper: (path) => this.wallpapers.importFile(path, { network: false }),
+      restorePoint: this.themeRestore
     })
     this.orchestrator.setScheduledJobs({
       // A thread whose first ask the person allowed; a profile that turned the old switch on lets every thread add them.
@@ -1932,6 +1935,15 @@ export class MmsProfileServices {
   /** The profile's wallpaper images (`<profileHome>/wallpapers`); settings name them by id only. */
   wallpapers!: WallpaperStore
 
+  /** The theme from before agents changed it, which `theme_set { restore: true }` puts back. */
+  themeRestore!: ThemeRestoreStore
+
+  /** The wallpaper images to keep: the user themes', and those of the themes a restore would put back. */
+  private usedWallpaperIds(): Set<string> {
+    const kept = Object.values(this.themeRestore?.get()?.themes ?? {}).filter((theme) => theme !== null)
+    return usedWallpapers([...this.settings.get().appearance.userThemes, ...kept])
+  }
+
   /**
    * Answers an agent's first-creation ask. Allow makes the automation as the agent asked, ending after the lifetime
    * limit from now and counted against the active limit, and lets that thread add more; Not now closes the ask.
@@ -2573,7 +2585,7 @@ export class MmsProfileServices {
     // Threads still on JSON files move to thread.db in the background, one at a time.
     this.threads.startBackgroundImport()
     // Wallpaper images no theme has used for a week go, in the background.
-    void this.wallpapers.collect(usedWallpapers(this.settings.get().appearance.userThemes)).catch(() => 0)
+    void this.wallpapers.collect(this.usedWallpaperIds()).catch(() => 0)
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
