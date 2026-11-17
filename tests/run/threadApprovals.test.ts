@@ -662,6 +662,23 @@ describe('saved approval requests: the store and the question service', () => {
       expect((await probe(f, BASH('npm test'))).asked).toBe(false)
     })
 
+    it('a native helper\'s request asks the person in the hosting thread, names the helper, and no rule answers it or is offered', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      const shown: PendingUserQuestions[] = []
+      f.questions.on('pending', (payload: PendingUserQuestions) => shown.push(payload))
+      const helper = request(f, BASH('npm test'), { helper: { agentId: 'helper-1' } })
+      expect(helper.asked).toBe(true)
+      expect(helper.optionIds).toEqual(['allow', 'reject'])
+      expect(shown.at(-1)).toMatchObject({ requestId: helper.requestId, helper: { agentId: 'helper-1' } })
+      expect(f.questions.listPendingForThread('t').at(-1)).toMatchObject({ requestId: helper.requestId, helper: { agentId: 'helper-1' } })
+      expect(eventTypes(f, 'approval.rule_applied')).toHaveLength(0)
+      f.questions.dismissAllForThread('t')
+      await helper.promise
+      // The run's own identical request is still answered by its rule.
+      expect((await probe(f, BASH('npm test'))).asked).toBe(false)
+    })
+
     it('is not offered, made or matched when the run\'s binding records no permission mode', async () => {
       const f = await asking()
       await allowAlways(f, BASH('npm test'))

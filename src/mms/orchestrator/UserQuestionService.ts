@@ -74,6 +74,11 @@ export interface ApprovalTag {
   tool?: { name: string; input: unknown; cwd?: string }
   /** Why the provider asks, when that is not obvious (Claude Code's own safety check under Full access). */
   reason?: string
+  /**
+   * The native helper whose action this is (docs/plans/tool-api.md §2.7): the request is the hosting run's own, and is
+   * shown on the helper's mirror thread as well. No standing rule answers it: individual approvals do not pass to a helper.
+   */
+  helper?: { agentId: string }
 }
 
 /** What the profile knows about the run that is asking, found by the thread it runs on. */
@@ -339,7 +344,7 @@ export class UserQuestionService extends EventEmitter {
       // ask the mode would have made.
       // Only a turn a person started: a scheduled, webhook, delegated, bot, workflow or agent-sent turn asks as
       // before, since no one watches it and "the same command" does not mean "the same effect".
-      const eligible = Boolean(context?.runId && fingerprint && !approval.reason && context.approvals === 'ask' && context.startedByPerson && context.permissionMode)
+      const eligible = Boolean(context?.runId && fingerprint && !approval.reason && !approval.helper && context.approvals === 'ask' && context.startedByPerson && context.permissionMode)
       if (eligible && context && fingerprint) {
         try {
           const rule = binding.store.matchRule(threadId, approval.permissionKey, fingerprint, context.currentMode ?? context.permissionMode ?? 'ask')
@@ -382,6 +387,7 @@ export class UserQuestionService extends EventEmitter {
       }
     }
     const durable = record !== null
+    if (options.approval?.helper) this.noteHelper(requestId, options.approval.helper)
     // A person in the chat can take as long as they need; nobody watches an unattended run.
     const timeoutMs = options.timeoutMs ?? (durable ? (context && context.origin !== 'interactive' ? QUESTION_TIMEOUT_MS : undefined) : QUESTION_TIMEOUT_MS)
 
@@ -418,7 +424,7 @@ export class UserQuestionService extends EventEmitter {
         ...(options.onAttachments && !shown.approval ? { onAttachments: options.onAttachments } : {})
       })
       // One `pending` event per request: a client that resubscribes reads the snapshot, not a replay.
-      this.emit('pending', record ? this.viewOf(record) : ({ requestId, threadId, questions: shown.questions } satisfies PendingUserQuestions & { threadId: string }))
+      this.emit('pending', record ? this.viewOf(record) : ({ requestId, threadId, questions: shown.questions, ...this.helperOf(requestId) } satisfies PendingUserQuestions & { threadId: string }))
     })
   }
 
@@ -644,8 +650,22 @@ export class UserQuestionService extends EventEmitter {
         answerPath: record.answerPath,
         ...(record.uncertain ? { uncertain: true, uncertainTools: record.uncertainTools ?? [] } : {}),
         ...(progress ? { answered: progress.answered, total: progress.total } : {})
-      }
+      },
+      ...this.helperOf(record.requestId)
     }
+  }
+
+  /** Requests a native helper's action made, by request id; bounded, oldest first out. */
+  private readonly helperRequests = new Map<string, { agentId: string }>()
+
+  private noteHelper(requestId: string, helper: { agentId: string }): void {
+    this.helperRequests.set(requestId, { agentId: helper.agentId })
+    if (this.helperRequests.size > 256) this.helperRequests.delete(this.helperRequests.keys().next().value as string)
+  }
+
+  private helperOf(requestId: string): { helper?: { agentId: string } } {
+    const helper = this.helperRequests.get(requestId)
+    return helper ? { helper } : {}
   }
 
   private contextOf(binding: ApprovalBinding, threadId: string): ApprovalContext | null {
@@ -661,7 +681,7 @@ export class UserQuestionService extends EventEmitter {
     const out: Array<PendingUserQuestions & { threadId: string }> = []
     for (const [requestId, p] of this.pending) {
       if (p.threadId === threadId && !p.durable) {
-        out.push({ requestId, threadId, questions: p.questions })
+        out.push({ requestId, threadId, questions: p.questions, ...this.helperOf(requestId) })
       }
     }
     return [...this.savedPending(threadId), ...out]
@@ -686,7 +706,7 @@ export class UserQuestionService extends EventEmitter {
   listAllPending(): Array<PendingUserQuestions & { threadId: string }> {
     const out: Array<PendingUserQuestions & { threadId: string }> = []
     for (const [requestId, p] of this.pending) {
-      if (!p.durable) out.push({ requestId, threadId: p.threadId, questions: p.questions })
+      if (!p.durable) out.push({ requestId, threadId: p.threadId, questions: p.questions, ...this.helperOf(requestId) })
     }
     return [...this.savedPending(), ...out, ...this.openRecords().map(openView)]
   }
