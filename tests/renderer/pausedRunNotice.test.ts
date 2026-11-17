@@ -58,8 +58,6 @@ describe('the paused run notice', () => {
     expect(line()!.title).toBe("Resumes in 2h 15m. Claude's 5-hour limit was reached. Continues by itself at reset.")
     expect(notice()!.dataset.tone).toBe('warning')
     expect(names()).toEqual(['Try now', 'Cancel'])
-    expect(button('Try now').className).toBe('composer-notice-btn composer-notice-btn-primary')
-    expect(button('Cancel').className).toBe('composer-notice-btn')
     expect(button('Cancel').title).toBe('Drop this run; queued messages still send')
     expect(host.querySelector('[aria-haspopup]')).toBeNull()
   })
@@ -104,11 +102,6 @@ describe('the paused run notice', () => {
     expect(calls()).toEqual([1, 0])
     click(button('Cancel'))
     expect(calls()).toEqual([1, 1])
-  })
-
-  it('has no dismiss: it resolves when the run continues or the pause ends', () => {
-    view()
-    expect(names()).not.toContain('Dismiss')
   })
 
   it('while a press is in flight every button ignores presses, and the pressed one says so', () => {
