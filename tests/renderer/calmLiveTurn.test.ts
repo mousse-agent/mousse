@@ -238,6 +238,22 @@ describe('a running turn, streamed step by step', () => {
     expect(document.activeElement).toBe(document.body)
   })
 
+  it('focus the group line took from the live chevron moves to "Worked for" when the turn ends a moment later and folds it', () => {
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'running')], activeThreadId: 'thread-1' })
+    render(TOOL)
+    act(() => toggle()!.focus())
+    stream(bash('c2', 2, 'npm test', 'ok'))
+    // A short reply closes the run (its group line takes focus), then the turn ends and folds the run away.
+    render(STREAMING)
+    stream({ id: 'reply', role: 'assistant', content: 'Done.', timestamp: at(3), streaming: true })
+    expect(document.activeElement).toBe(groupLines()[0])
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'ok'), { id: 'reply', role: 'assistant', content: 'Done.', timestamp: at(3) }] })
+    render(null, 'ready')
+    const worked = host.querySelector<HTMLButtonElement>('button.turn-work-toggle')!
+    expect(worked.getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(worked)
+  })
+
   it('focus the person moved elsewhere before the turn ended stays there', () => {
     const composer = document.createElement('textarea')
     document.body.append(composer)

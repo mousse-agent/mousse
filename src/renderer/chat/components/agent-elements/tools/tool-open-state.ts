@@ -69,9 +69,15 @@ export function useRowOpenState(initial: boolean): [boolean, (update: boolean | 
  * row under the same key and takes the focus (`takeLiveRunFocus`), or, when the finished turn folds the run away, the
  * turn's "Worked for" line does; so focus does not drop to the page. Whatever takes it does so as it mounts, in the
  * commit that removes the chevron; the live row then drops the hand-off (`dropLiveRunFocus`), so nothing that mounts
- * later (a fold opened afterwards) takes focus.
+ * later (a fold opened afterwards) takes focus. A group line that holds focus as the fold hides it hands it on the same
+ * way (`passRunFocus`): reply text often closes the run a moment before the turn ends and folds it.
  */
 let focusedLiveRun: string | null = null;
+
+/** The line for `key` is leaving the page with keyboard focus on it: what replaces it in this commit takes the focus. */
+export function passRunFocus(key: string | undefined, toggle: HTMLElement | null): void {
+  if (key && toggle && typeof document !== "undefined" && document.activeElement === toggle) focusedLiveRun = key;
+}
 
 /** The live row's chevron for `key` took focus, or lost it to something else while it stays on the page. */
 export function liveRunToggleFocus(key: string | undefined, focused: boolean, toggle: HTMLElement): void {

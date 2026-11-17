@@ -1,7 +1,7 @@
-import { memo, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ToolRowBase } from "./tool-row-base";
-import { takeLiveRunFocus, useToolOpen, useToolOpenOf } from "./tool-open-state";
+import { dropLiveRunFocus, passRunFocus, takeLiveRunFocus, useToolOpen, useToolOpenOf } from "./tool-open-state";
 import { countRender } from "../render-counts";
 import "./tool-calls-group.css";
 
@@ -65,7 +65,12 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
   const toggleRef = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
     if (takeLiveRunFocus(openKey)) toggleRef.current?.focus();
+    // Leaving with focus (the finished turn folds the run away): the "Worked for" line takes it in the same commit,
+    // before the line is taken off the page; after that commit, nothing does.
+    const toggle = toggleRef.current;
+    return () => passRunFocus(openKey, toggle);
   }, [openKey]);
+  useEffect(() => () => dropLiveRunFocus(openKey), [openKey]);
 
   return (
     <ToolRowBase
