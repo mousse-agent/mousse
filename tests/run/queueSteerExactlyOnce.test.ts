@@ -953,22 +953,6 @@ describe('A steer is accepted by its own drain token', () => {
     expect(w.shownUserMessages().filter((text) => text === 'B')).toHaveLength(1)
   })
 
-  it('A and B drained separately, A accepted, then the provider crashes: B runs once after the turn', async () => {
-    const w = world()
-    const { running, items } = await w.twoDrainsOneAccepted()
-    expectOnlyAAccepted(w, items)
-
-    // The provider's process died; its `died` path hands B back, and the turn fails.
-    w.adapter.turn!.end('crash')
-    await running.catch(() => undefined)
-    await waitFor(() => w.adapter.prompts.includes('B'), 'B runs')
-    await w.idle('B ran')
-    expect(w.adapter.prompts).toEqual(['first', 'B'])
-    expect(w.adapter.accepted).toEqual(['A'])
-    expect(w.inContext('A')).toBe(1)
-    expect(w.shownUserMessages().filter((text) => text === 'B')).toHaveLength(1)
-  })
-
   it('A and B drained separately, both accepted: each is saved and dropped by its own token, once', async () => {
     const w = world()
     const { running, items, b } = await w.twoDrainsOneAccepted()

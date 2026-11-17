@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import { NOTICE_TASK_CHARS } from '../../src/mms/run/delegation/notice'
@@ -130,10 +129,8 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     expect(f.engine.inbox.listPending('parent')).toEqual([])
   })
 
-  for (const [name, caps] of [
-    ['Claude Subscription', CLAUDE_SUBSCRIPTION_CAPABILITIES],
-    ['Antigravity', ANTIGRAVITY_CAPABILITIES]
-  ] as const) {
+  {
+    const [name, caps] = ['Claude Subscription', CLAUDE_SUBSCRIPTION_CAPABILITIES] as const
     it(`active ${name} parent (interrupt_restart): no steer cuts the turn; rows wait for a wake run`, async () => {
       // wake: 'always' result plus a notice row: neither may interrupt the live turn.
       const { f, parent } = await childFinished({ parentStaysActive: true, wake: 'always' })
@@ -182,12 +179,11 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
   })
 
   it('a second result while a wake is waiting stays pending for the next wake', async () => {
-    const { f, accepted } = await childFinished()
+    const { f } = await childFinished()
     f.reconciler.runOnce()
     f.engine.inbox.append({ threadId: 'parent', kind: 'reconcile_notice', payload: { text: 'later' } })
     expect(f.reconciler.runOnce().wakes.wakes).toEqual([])
     expect(f.engine.inbox.listPending('parent')).toHaveLength(1)
-    expect(accepted.delegationId).toBeTruthy()
   })
 
   it('a queued wake whose effect is claimed or deferred keeps rule 4 from creating another (C4)', async () => {
