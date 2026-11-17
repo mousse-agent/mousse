@@ -1,4 +1,5 @@
 import { SETTLE_NOTICE_RESULT_CHARS, SETTLE_WATCH_TTL_MS, type SettleNoticeItem } from '../../shared/settleNotice'
+import { notice, quoted, type NoticePart } from '../../shared/mousseContext'
 import { threadLink } from '../../shared/threadLink'
 import { qualifyId } from '../../shared/threadRef'
 import type { RunEngine } from '../run/RunEngine'
@@ -360,21 +361,22 @@ export function planSettleNotice(input: {
   const thread = `thread "${titleLine(input.title)}"${input.computer ? ` on ${input.computer}` : ''} (${threadLink(watch.targetThreadId)})`
   const base: SettleNoticeItem = { watchId: watch.watchId, threadId: watch.targetThreadId, title: input.title, event, ...(run ? { runId: run.runId } : {}) }
   const hops = run?.hops ?? 0
-  const header = '[Mousse notice, not from the user or any agent: about the message you sent with notify.]'
+  // About the message the sender sent with notify; Mousse's words, with the run's reply quoted.
+  const about = `The work your message (sent with notify) started in ${thread}`
   if (event === 'needs_input') {
     return {
       item: base,
       hops,
-      text: `${header}\nThe work your message started in ${thread} is waiting for a person to answer a question or an approval there. Mousse will tell you again when it ends; do not call thread_wait or thread_read to check.`
+      text: notice({ kind: 'thread_watch' }, [`${about} is waiting for a person to answer a question or an approval there. Mousse will tell you again when it ends; do not call thread_wait or thread_read to check.`])
     }
   }
   if (event === 'expired') {
     return {
       item: base,
       hops,
-      text: input.computer
-        ? `${header}\nMousse stopped watching ${thread} for you after 24 hours. The work your message started there had not ended when Mousse last reached ${input.computer}; read it with thread_read when you need it.`
-        : `${header}\nMousse stopped watching ${thread} for you after 24 hours. The work your message started there is still going; read it with thread_read when you need it.`
+      text: notice({ kind: 'thread_watch' }, [input.computer
+        ? `Mousse stopped watching ${thread} for you after 24 hours. The work your message started there had not ended when Mousse last reached ${input.computer}; read it with thread_read when you need it.`
+        : `Mousse stopped watching ${thread} for you after 24 hours. The work your message started there is still going; read it with thread_read when you need it.`])
     }
   }
   const status = watch.endStatus ?? 'completed'
@@ -383,10 +385,10 @@ export function planSettleNotice(input: {
   const shown = reply.slice(0, SETTLE_NOTICE_RESULT_CHARS)
   const total = Math.max(reply.length, input.resultChars ?? 0)
   const cut = shown.length > 0 && shown.length < total
-  const phrase = endPhrase(status, run?.error, input.computer)
-  const said = `${phrase}${run && !unreachable && status !== 'removed' && status !== 'deleted' ? ` (run ${run.runId})` : ''}`
-  const lines = [`${header}\nThe work your message started in ${thread} ${said}${said.endsWith('.') ? '' : '.'}`]
-  if (shown) lines.push(`Its reply:\n${shown}`)
-  if (cut) lines.push(`[The reply is cut at ${SETTLE_NOTICE_RESULT_CHARS.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} characters; read the rest with thread_read on thread ${watch.targetThreadId}.]`)
-  return { item: { ...base, status: unreachable ? 'unreachable' : status, ...(cut ? { cut: true } : {}) }, hops, text: lines.join('\n') }
+  const said = endPhrase(status, run?.error, input.computer)
+  const ref = run && !unreachable && status !== 'removed' && status !== 'deleted' ? run.runId : undefined
+  const parts: NoticePart[] = [`${about} ${said}${said.endsWith('.') ? '' : '.'}`]
+  if (shown) parts.push(quoted('its reply', shown))
+  if (cut) parts.push(`The reply is cut at ${SETTLE_NOTICE_RESULT_CHARS.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} characters; read the rest with thread_read on thread ${watch.targetThreadId}.`)
+  return { item: { ...base, status: unreachable ? 'unreachable' : status, ...(cut ? { cut: true } : {}) }, hops, text: notice({ kind: 'thread_watch', ...(ref ? { ref } : {}) }, parts) }
 }

@@ -1,5 +1,6 @@
 import { MAX_BOT_MEMORY_TEXT_CHARS } from '../../../shared/bots/personal/memory'
 import type { BotMemoryStore } from './BotMemoryStore'
+import { isMousseContext } from '../../../shared/mousseContext'
 
 /**
  * The missed-wish fallback: when the owner tells the bot in the chat how it should behave from now
@@ -34,12 +35,11 @@ const STYLE = new RegExp(String.raw`\b(` + [
 ].join('|') + String.raw`)\b`)
 /** A single occasion: the message is about this once, not about how the bot behaves. */
 const ONE_OFF = /\b(this|that) (one|email|message|time|thread|file|run|task|page|doc(ument)?)\b|\b(right now|for now|just now|today|tonight|tomorrow|yesterday|this (morning|afternoon|evening|week)|next week|yet|until|never mind|nevermind)\b/
-const MOUSSE_NOTICE = /^\[Mousse /
 
 /** Whether an owner message is a lasting instruction about the bot's behaviour or style. */
 export function isStandingWish(message: string): boolean {
   const text = message.trim()
-  if (text.length < 8 || text.length > MAX_WISH_CHARS || MOUSSE_NOTICE.test(text)) return false
+  if (text.length < 8 || text.length > MAX_WISH_CHARS || isMousseContext(text)) return false
   if (text.includes('?') || text.split(/\n\s*\n/).length > 1) return false
   if ((text.match(/[.!](\s|$)/g) ?? []).length > 2) return false
   const lower = text.toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')

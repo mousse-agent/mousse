@@ -50,7 +50,7 @@ describe('a queued result that runs directly (issue #142)', () => {
     if (recordFails) vi.spyOn(w.d.orch as any, 'enqueueTurnStart').mockImplementation(() => { throw new Error('outbox unavailable') })
     session.turnAdmitted = false
     const drain = () => (w.d.orch as any).scheduleQueueDrain(session)
-    const noticeTurns = () => w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith('Subagent'))
+    const noticeTurns = () => w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith('<mousse_notice kind="subagent_result"'))
     return { ...w, row, session, drain, noticeTurns }
   }
 
@@ -77,7 +77,7 @@ describe('a queued result that runs directly (issue #142)', () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const w = await queued(async (input) => {
-      if (input.prompt.startsWith('Subagent')) await gate
+      if (input.prompt.startsWith('<mousse_notice kind="subagent_result"')) await gate
       return 'Parent done.'
     })
     w.drain()
@@ -121,7 +121,7 @@ describe('a queued result that runs directly (issue #142)', () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const w = await queued(async (input) => {
-      if (input.prompt.startsWith('Subagent')) await gate
+      if (input.prompt.startsWith('<mousse_notice kind="subagent_result"')) await gate
       return 'Parent done.'
     }, { recordFails: false })
     const redirect = vi.spyOn(w.d.engine.inbox, 'redirectDelivery').mockImplementationOnce(() => { throw new Error('inbox unavailable') })

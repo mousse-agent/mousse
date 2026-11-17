@@ -17,6 +17,7 @@ import type {
 import { contextCompactionPoint, DEFAULT_COMPACTION_RESERVE_TOKENS } from '../../shared/settings'
 import { STEER_MARKER_CLOSE, STEER_MARKER_OPEN } from './steer'
 import { estimateMessageTokens, MESSAGE_OVERHEAD, withoutMissingImages } from './contextEstimate'
+import { isMousseContext } from '../../shared/mousseContext'
 
 // Shared with Settings, which shows where a thread compacts.
 export { DEFAULT_COMPACTION_RESERVE_TOKENS, EXACT_COMPACTION_USAGE_RATIO } from '../../shared/settings'
@@ -459,7 +460,7 @@ function extractDirective(message: Message): NativeCompactionDirective[] {
     ? message.content.trim()
     : message.content.filter((block): block is TextContent => block.type === 'text').map((block) => block.text).join('').trim()
   if (!text) return []
-  if (text.startsWith('[Mousse ')) return []
+  if (isMousseContext(text)) return []
   if (text.includes(STEER_MARKER_OPEN)) {
     const start = text.indexOf(STEER_MARKER_OPEN) + STEER_MARKER_OPEN.length
     const end = text.indexOf(STEER_MARKER_CLOSE, start)

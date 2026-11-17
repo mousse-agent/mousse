@@ -111,7 +111,7 @@ function toolResultsSinceUser(context: Context) {
 }
 const toolCall = (id: string, name: string, args: Record<string, unknown>) => providerResponse([{ type: 'toolCall', id, name, arguments: args }], 'toolUse')
 const text = (value: string) => providerResponse([{ type: 'text', text: value }], 'stop')
-const DELEGATION_ID = /finished task (delegation:[0-9a-f-]+)/
+const DELEGATION_ID = /kind="subagent_result" ref="(delegation:[0-9a-f-]+)"/
 const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 
 // Phase 4 (SPEC §14): create_subagent is a wrapper over delegate_task. The parent no longer blocks
