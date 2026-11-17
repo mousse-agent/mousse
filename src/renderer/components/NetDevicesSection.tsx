@@ -890,7 +890,7 @@ export function NetDevicesSection() {
 
     {addStep === 'link' && <MakeLinkDialog name={self ? undefined : name} onMade={reloadQuietly} onClose={closeAdd} />}
     {addStep === 'paste' && (
-      <PasteLinkDialog name={self ? undefined : name} onPasted={reloadQuietly} onMakeInstead={() => setAddStep('link')} onClose={closeAdd} />
+      <PasteLinkDialog name={self ? undefined : name} onPasted={reloadQuietly} onMakeInstead={() => setAddStep('link')} onNotNow={(node) => setNotNow((list) => [...list, node])} onClose={closeAdd} />
     )}
 
     {addStep === 'invite' && (

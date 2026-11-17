@@ -149,12 +149,14 @@ const ROW_ACTION: Record<Exclude<NetLinkCheck['row'], 'refused'>, string> = {
  * Paste a connect link: what it does here is read from the link with no network call, then Join, Connect, or Start
  * over and join. A join through a link ends on Allow or Not now for the computer that made it.
  */
-export function PasteLinkDialog({ name, onPasted, onMakeInstead, onClose }: {
+export function PasteLinkDialog({ name, onPasted, onMakeInstead, onNotNow, onClose }: {
   /** This computer's name, for a computer that has no network identity yet. */
   name?: string
   onPasted: () => void
   /** Close this and make a link on this computer instead. */
   onMakeInstead: () => void
+  /** Not now for the computer just joined: the page puts its own Allow notice for it away too; it stays held. */
+  onNotNow: (node: string) => void
   onClose: () => void
 }) {
   const { busy, failure, setFailure, run } = useLinkCall()
@@ -194,7 +196,7 @@ export function PasteLinkDialog({ name, onPasted, onMakeInstead, onClose }: {
   }
   if (pasted) return (
     <Modal open title="Paste a link" onClose={onClose}>
-      <AllowStep pasted={pasted} busy={busy} onAllow={() => void allow()} onNotNow={onClose} />
+      <AllowStep pasted={pasted} busy={busy} onAllow={() => void allow()} onNotNow={() => { onNotNow(pasted.node); onClose() }} />
       {failure && <p role="alert" className="chat-error">{linkErrorWords(failure, 'paste')}</p>}
     </Modal>
   )

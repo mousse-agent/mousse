@@ -214,4 +214,22 @@ describe('Allow', () => {
     await click(button('Allow'))
     expect(calls('bridge.allow')).toEqual([{ node: 'node_a' }])
   })
+
+  it('Not now after a join puts the page’s own notice for that computer away too', async () => {
+    daemon.answers['net.link.check'] = () => ({ row: 'join', add: true })
+    daemon.answers['net.link.paste'] = () => {
+      daemon.status = member
+      daemon.nodes = [row('node_b', 'Laptop', { self: true, connection: 'connected' }), row('node_a', 'Studio Mac', { keeper: true, connection: 'held', routeHeld: true })]
+      return { row: 'join', node: 'node_a', name: 'Studio Mac', connection: 'held', connected: true }
+    }
+    await mount()
+    await choose('add-paste')
+    await type(dialog()!.querySelector<HTMLTextAreaElement>('textarea')!, link)
+    await click(button('Join'))
+    await click(button('Not now', dialog()!))
+    expect(dialog()).toBeNull()
+    expect(host.querySelector('[data-device-node="node_a"]')).not.toBeNull()
+    expect(host.textContent).not.toContain('Allow Studio Mac to work here?')
+    expect(calls('bridge.allow')).toEqual([])
+  })
 })
