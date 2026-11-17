@@ -215,6 +215,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
   // Every review copy is outside data. Frame it here without changing the stored held-call text.
   const actionContextText = (row: BotJournalRow): string => {
     const text = packText(row)
+    if (row.redactedAt) return text
     if (!/^bm:bm_action_[a-zA-Z0-9-]+(?:_n[12]|:status:[a-z]+)?$/.test(row.sourceKey)) return text
     return mousseNotice({ kind: 'bot_action', ref: row.sourceKey.slice(3) }, row.sourceKey.includes(':status:') ? [text] : [quoted('held action', text)])
   }
