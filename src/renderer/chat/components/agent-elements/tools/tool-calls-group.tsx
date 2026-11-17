@@ -9,7 +9,7 @@ export type ToolCallsGroupProps = {
   count: number;
   /** The icon of the calls' kind, or a wrench for a mix. */
   icon?: ReactNode;
-  /** The latest thought in the group, or what the calls did ("Read 3 files and ran 2 commands"): `workGroupHeading`. */
+  /** The run's latest thought before its last call, or what the calls did ("Read 3 files and ran 2 commands"): `workGroupHeading`. */
   title: string;
   /** What the calls did, after a thought title: a short dim tag that is never cut. */
   summary?: string;
@@ -27,9 +27,10 @@ export type ToolCallsGroupProps = {
 };
 
 /**
- * One still line for consecutive tool calls, titled with what they did, closed until clicked. A running turn keeps
- * its calls folded here; the turn's live line under them says what runs now. Open, the rows sit in a box capped at
- * about 18rem that scrolls on its own, with soft edges where more rows are (tool-calls-group.css).
+ * One still line for consecutive tool calls, titled with what they did, closed until clicked. A running turn's
+ * current run is its live row (turn-progress.tsx), which opens the same way under the same key; the run takes this
+ * line when it ends. Open, the rows sit in a box capped at about 18rem that scrolls on its own, with soft edges where
+ * more rows are (tool-calls-group.css).
  */
 export const ToolCallsGroup = memo(function ToolCallsGroup({
   count,

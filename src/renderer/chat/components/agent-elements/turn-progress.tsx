@@ -1,12 +1,19 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { UIMessage } from "ai";
+import { Collapse } from "../../../components/ui/Collapse";
+import { LiveRunBodyContext, useToolOpen } from "./tools/tool-open-state";
+import { IconChevronRight } from "../../../lib/icons";
+import { useReplyPacing } from "../../../lib/replyPacingSetting";
 import type { TurnPhase, TurnStep } from "../../../../shared/types";
 import { isWaitingPermissionRequest } from "./tools/permission-request";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import type { SubagentCardModel } from "../../adapters/subagentCards";
 import { parseMcpToolType } from "./tools/tool-registry";
 import { mousseToolLabels, mousseToolOf } from "./tools/mousse-tools";
-import { isCompactionRow } from "./utils/assistant-blocks";
+import { isCompactionRow, thoughtSourceOf, thoughtTextFromPart, type ToolPartBase } from "./utils/assistant-blocks";
+import { liveThoughtText, thoughtHeadline } from "./utils/format-tool";
+import { commandLabel } from "../../../../shared/agentActivity";
+import { useLiveThought } from "../../../stores/liveTextStore";
 import { ThinkingIcon } from "../../../lib/icons";
 import { ToolIcon } from "./tools/tool-icon";
 import { countRender } from "./render-counts";
@@ -50,6 +57,8 @@ export type TurnProgressKind =
   | "writing"
   | "preparing-tool"
   | "running-tool"
+  | "ran-tool"
+  | "failed-tool"
   | "subagents"
   | "retrying"
   | "stopping"
@@ -61,11 +70,13 @@ export type TurnProgress = {
   label: string;
   /** More about it, for the tooltip. */
   title?: string;
-  /** What the running call works on (its command, file or query), shown dim after the label. */
+  /** What the call works on (its command, file or query), shown dim after the label. */
   detail?: string;
+  /** Other calls running beside the one named: "+2 running". */
+  more?: number;
   /** A retry's start (ms): the label counts down to it. */
   until?: number;
-  /** The running tool's part type: the line shows its icon, pulsing, instead of the dots. */
+  /** The call's part type: the line shows its icon (pulsing while it runs) instead of the dots. */
   tool?: string;
 };
 
@@ -111,13 +122,67 @@ function inputDetail(input: unknown): string | undefined {
   return undefined;
 }
 
+function isCall(part: Part | undefined): part is Part & { type: string } {
+  return typeof part?.type === "string" && part.type.startsWith("tool-") && !NOT_TOOLS.has(part.type);
+}
+
 function isRunningTool(part: Part): boolean {
-  return (
-    typeof part.type === "string" &&
-    part.type.startsWith("tool-") &&
-    !NOT_TOOLS.has(part.type) &&
-    (part.state === "input-streaming" || part.state === "input-available")
-  );
+  return isCall(part) && (part.state === "input-streaming" || part.state === "input-available");
+}
+
+/** A call the provider ran on behalf of another (a subagent's): named by its parent's line, not counted beside it. */
+function isNestedCall(part: Part): boolean {
+  return typeof part.toolCallId === "string" && part.toolCallId.includes(":");
+}
+
+const FILE_TYPES = new Set(["tool-Read", "tool-Edit", "tool-MultiEdit", "tool-Write", "tool-NotebookEdit"]);
+const EDIT_TYPES = new Set(["tool-Edit", "tool-MultiEdit", "tool-Write", "tool-NotebookEdit"]);
+
+/** What a call works on, in a few words: a command as run (no shell wrapper), a file's name, a query. */
+function callDetail(part: Part & { type: string }): string | undefined {
+  const input = part.input && typeof part.input === "object" ? (part.input as Record<string, unknown>) : undefined;
+  if (part.type === "tool-Bash" && typeof input?.command === "string" && input.command.trim()) {
+    const line = commandLabel(input.command);
+    return line.length > 120 ? `${line.slice(0, 117)}…` : line;
+  }
+  if (FILE_TYPES.has(part.type)) {
+    const path = input?.file_path ?? input?.path ?? input?.notebook_path;
+    if (typeof path === "string" && path.trim()) return path.trim().split(/[\\/]/).pop();
+  }
+  return inputDetail(part.input);
+}
+
+/**
+ * One call in a few words, in its tense: "Running npm test", "Ran npm test", "Bash failed" with "npm test" as its
+ * detail. The live row says a call that just finished this way, and a run of one call is titled with it.
+ */
+export function callPhrase(part: Part & { type: string }, tense: "running" | "done" | "failed"): { label: string; detail?: string } {
+  const detail = callDetail(part);
+  const mousseTool = mousseToolOf(part.type);
+  if (mousseTool) {
+    const labels = mousseToolLabels(mousseTool);
+    return { label: tense === "running" ? labels.running : tense === "done" ? labels.done : labels.failed, detail };
+  }
+  const name = toolName(part.type);
+  if (tense === "failed") return { label: part.type === "tool-Bash" ? "Failed" : `${name} failed`, detail };
+  const running = tense === "running";
+  if (part.type === "tool-Bash") return { label: running ? "Running" : "Ran", detail };
+  if (part.type === "tool-Read") return { label: running ? "Reading" : "Read", detail };
+  if (EDIT_TYPES.has(part.type)) return { label: running ? "Editing" : "Edited", detail };
+  if (part.type === "tool-Grep" || part.type === "tool-Glob") return { label: running ? "Searching" : "Searched", detail };
+  if (part.type === "tool-WebSearch") return { label: running ? "Searching the web" : "Searched the web", detail };
+  if (part.type === "tool-WebFetch") return { label: running ? "Fetching" : "Fetched", detail };
+  if (part.type === "tool-Task" || part.type === "tool-Agent" || part.type === "tool-Subagent") {
+    return { label: running ? "Running subagent" : "Ran subagent", detail };
+  }
+  return { label: running ? `Running ${name}` : `Used ${name}`, detail };
+}
+
+/** A call's phrase as one line: a run of one call is titled with it. */
+export function callTitle(part: { type: string; state?: string; input?: unknown }, failed = false): string {
+  const tense = failed ? "failed" : isRunningTool(part) ? "running" : "done";
+  const { label, detail } = callPhrase(part, tense);
+  return detail ? `${label} ${detail}` : label;
 }
 
 function toolProgress(part: Part): TurnProgress {
@@ -173,6 +238,7 @@ const THINKING_KINDS: ReadonlySet<TurnProgressKind> = new Set(["thinking", "star
 /** The turn's start and the wait for the model's first output say nothing more than that it thinks: the tooltip says which. */
 const STARTING: TurnProgress = { kind: "starting", label: "Thinking…", title: "Starting the agent and its tools" };
 const WAITING: TurnProgress = { kind: "waiting", label: "Thinking…", title: "Waiting for the model's first output" };
+const WRITING: TurnProgress = { kind: "writing", label: "Writing…" };
 
 function hasContent(messages: readonly UIMessage[]): boolean {
   return messages.some((message) =>
@@ -184,11 +250,24 @@ function hasContent(messages: readonly UIMessage[]): boolean {
   );
 }
 
+/** Whether the turn's latest reply ends on text with words in it: the text being written is what shows. */
+function textOnScreen(messages: readonly UIMessage[]): boolean {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role !== "assistant") continue;
+    const parts = (message.parts ?? []) as Part[];
+    const end = parts[parts.length - 1];
+    return end?.type === "text" && Boolean(end.text?.trim());
+  }
+  return false;
+}
+
 /**
- * The line under a running turn's Working: what the turn does now, in a few words. Null where
- * something else in the turn already says it (an approval waiting, a compaction running, an answer
- * the agent waits for, which the header shows, or a thought streaming, whose row is the live line).
- * Starting, waiting for the model and finishing all read "Thinking…", with what it is in the tooltip.
+ * What a running turn does now, in a few words: the second line of the turn's live row. Null where something else in
+ * the turn already says it (an approval waiting, a compaction running, an answer the agent waits for, which the header
+ * shows, or text being written, which is on screen). A call that just finished is said in the past tense until
+ * something new starts. Starting, waiting for the model and finishing all read "Thinking…", with what it is in the
+ * tooltip.
  */
 export function describeTurnProgress(input: TurnProgressInput): TurnProgress | null {
   const progress = describeProgress(input);
@@ -236,25 +315,37 @@ function describeProgress({ state, messages, stepSince, awaitingSubagents, spawn
     return { kind: "preparing-tool", label: spawningSubagents === 1 ? "Starting subagent…" : `Starting ${spawningSubagents} subagents…` };
   }
 
-  // What the end of the turn shows live: its last part, or any tool still running.
+  // What runs now: the latest call still running (the end of the turn's last message first), and how many others run
+  // beside it.
   const parts = (last?.parts ?? []) as Part[];
   const tail = parts[parts.length - 1];
-  if (tail && isRunningTool(tail)) return toolProgress(tail);
-  // A thought that streams: its row (or its group's header) says Thinking with the thought's latest line.
-  if (tail?.type === "tool-Thinking" && tail.state === "input-available") return null;
-  for (let m = messages.length - 1; m >= 0; m -= 1) {
-    const own = (messages[m]!.parts ?? []) as Part[];
-    for (let p = own.length - 1; p >= 0; p -= 1) if (isRunningTool(own[p]!)) return toolProgress(own[p]!);
+  const running: Part[] = [];
+  for (const message of messages) for (const part of (message.parts ?? []) as Part[]) if (isRunningTool(part)) running.push(part);
+  if (running.length > 0) {
+    const named = tail && isRunningTool(tail) ? tail : running[running.length - 1]!;
+    const others = running.filter((part) => part !== named && !isNestedCall(part)).length;
+    const progress = toolProgress(named);
+    return others > 0 ? { ...progress, more: others } : progress;
+  }
+  // A thought being written: the row above this line shows its headline.
+  if (tail?.type === "tool-Thinking" && tail.state === "input-available") return { kind: "thinking", label: "Thinking…" };
+  if (step?.kind === "reasoning") return { kind: "thinking", label: "Thinking…" };
+  // The latest call finished and nothing new started: say what it did, not that something still runs.
+  if (isCall(tail) && (tail.state === "output-available" || tail.state === "output-error") && !tail.subagentTool) {
+    const failed = tail.state === "output-error" || (tail as { output?: { success?: unknown } }).output?.success === false;
+    const { label, detail } = callPhrase(tail, failed ? "failed" : "done");
+    return { kind: failed ? "failed-tool" : "ran-tool", label, detail, title: detail, tool: tail.type };
   }
 
   if (step?.kind === "starting") return STARTING;
   if (step?.kind === "waiting") return WAITING;
-  if (step?.kind === "reasoning") return { kind: "thinking", label: "Thinking…" };
 
   const content = hasContent(messages);
   switch (phase) {
     case "streaming":
-      return { kind: "writing", label: "Writing…" };
+      // Text being written is on screen already (a steer may sit under it): nothing to add. Before its first words
+      // show, say so.
+      return textOnScreen(messages) ? null : { kind: "writing", label: "Writing…" };
     case "tool_running":
       return { kind: "running-tool", label: "Running tools…" };
     case "finalizing":
@@ -271,57 +362,178 @@ function describeProgress({ state, messages, stepSince, awaitingSubagents, spawn
 }
 
 /**
- * The live line at the end of a running turn, under its Working: a short label for what the turn does
- * now, details in its tooltip. While the turn thinks it shows the thinking icon; while a tool runs, that tool's
- * icon, pulsing; for anything else (a retry, a stop), three small dots. Both move by transform or opacity only, so the line
- * costs no layout or paint while it animates. It reads the thread's turn from context,
- * so a memoised turn row still follows it.
+ * The turn's current run of work (its thoughts and calls since the last text), which the live row stands for while it
+ * runs: no group line is drawn for it until it ends.
+ */
+export type LiveRun = {
+  /** The open-state key of the group line the run becomes, so a run opened here is open there too. */
+  openKey: string;
+  /** How many rows it has. */
+  count: number;
+  /** Calls in it that failed and that nothing has got past yet. */
+  failed: number;
+  /** Its rows, as its group would show them. */
+  rows: ReactNode;
+};
+
+/**
+ * The live row at the end of a running turn, under its Working: one element for the whole turn, which changes its
+ * text and never its place. It is the turn's current run of work (`run`): that run has no group line of its own while
+ * it runs, and takes one (its only change of shape) when text starts or the turn ends.
+ *
+ * - Line 1, while the current run has a thought (`thought`, its latest): the thinking icon and the thought's headline
+ *   (`thoughtHeadline`), one line cut at its width. It changes only when the thought starts a new section or
+ *   paragraph; the thought's latest paragraph is its tooltip.
+ * - Line 2: what the turn does now (`describeTurnProgress`), details in its tooltip, and "· 1 failed" while a call of
+ *   the run failed and nothing has got past it. The thinking icon turns while the turn thinks; a running call's icon
+ *   pulses; a call that just finished shows its icon still; anything else (a retry, a stop) shows three small dots.
+ *   All move by transform or opacity only, so the row costs no layout or paint while it animates.
+ * - A chevron opens the run's rows under it, in the box a group uses, under the group's open-state key. Open, the box
+ *   keeps its newest row in view as rows arrive and as the thought being written grows; that thought shows open.
+ *
+ * With nothing to say and closed it is hidden, not removed, so it comes back as the same element. A streamed thought
+ * delta renders this row alone (it reads the thought's live text, liveTextStore), and the thought's own row too while
+ * the run is open. It reads the thread's turn from context, so a memoised turn row still follows it. The two lines are
+ * a `role="status"` region; the opened rows are not part of it.
  */
 export function TurnProgressRow({
   messages,
   awaitingSubagents,
   standalone,
+  thought,
+  run,
 }: {
   messages: readonly UIMessage[];
   awaitingSubagents?: boolean;
   standalone?: boolean;
+  /** The latest thought of the turn's current run of work, if it has one. */
+  thought?: ToolPartBase;
+  /** The turn's current run of work, if one runs. */
+  run?: LiveRun;
 }) {
   countRender("TurnProgressRow");
   const state = useTurnProgressState();
   const spawningSubagents = countSpawningSubagents(messages, useSubagentCards());
+  // The thought as it is written (see liveTextStore), or as the transcript holds it.
+  const liveThought = useLiveThought(thought ? thoughtSourceOf(thought) : undefined);
+  const thoughtText = liveThought || (thought ? thoughtTextFromPart(thought) : "");
+  const headline = thoughtHeadline(thoughtText);
+  const [ownOpen, setOwnOpen] = useState(false);
+  const kept = useToolOpen(run?.openKey, false);
+  const open = Boolean(run && run.count > 0) && (kept ? kept[0] : ownOpen);
+  const toggle = () => {
+    if (kept) kept[1](!kept[0]);
+    else setOwnOpen((value) => !value);
+  };
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
+  // Whether the open box shows its end: rows that arrive, and a thought that grows, then keep it in view.
+  const atEndRef = useRef(true);
+  const count = run?.count ?? 0;
+  useLayoutEffect(() => {
+    const box = scrollRef.current;
+    if (!box || !open || !atEndRef.current) return;
+    box.scrollTop = box.scrollHeight;
+  }, [count, open]);
+  useEffect(() => {
+    const box = scrollRef.current;
+    const rows = rowsRef.current;
+    if (!open || !box || !rows || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (atEndRef.current) box.scrollTop = box.scrollHeight;
+    });
+    observer.observe(rows);
+    return () => observer.disconnect();
+  }, [open]);
   // The clock is read as the line renders, so a countdown that starts shows its right second at once; the timer
   // only renders the line again each second while one runs.
   const [, setTick] = useState(0);
   const now = Date.now();
-  const progress = describeTurnProgress({ state, messages, stepSince: stepSeenAt(state, now), awaitingSubagents, spawningSubagents, standalone, now });
+  const described = describeTurnProgress({ state, messages, stepSince: stepSeenAt(state, now), awaitingSubagents, spawningSubagents, standalone, now });
+  // Paced, reply text reaches the screen a finished block at a time, so text in the reply may not show yet: the row
+  // still says "Writing…", and turn-progress.css hides it once the reply above it shows text.
+  const paced = useReplyPacing();
+  const untilText = !described && paced && state?.phase === "streaming" && textOnScreen(messages);
+  const progress = untilText ? WRITING : described;
   const until = progress?.until;
   useEffect(() => {
     if (until == null) return;
     const timer = window.setInterval(() => setTick((tick) => tick + 1), 1000);
     return () => window.clearInterval(timer);
   }, [until]);
-  if (!progress) return null;
+  const failed = run && progress?.kind !== "failed-tool" ? run.failed : 0;
+  // The chevron follows the two lines, level with the first: one element whichever lines show, so focus stays on it.
+  const chevron = run && run.count > 0 ? (
+    <button
+      type="button"
+      className="turn-live-toggle"
+      aria-expanded={open}
+      aria-label={open ? "Hide this run's steps" : "Show this run's steps"}
+      onClick={(event) => {
+        event.stopPropagation();
+        toggle();
+      }}
+    >
+      <IconChevronRight className="ui-collapse-chevron shrink-0 size-[18px]" data-open={open || undefined} aria-hidden="true" />
+    </button>
+  ) : null;
   return (
-    <div
-      className="turn-progress flex items-center gap-2 min-w-0 max-w-full select-none"
-      role="status" data-find-ignore data-turn-progress={progress.kind} title={progress.title}>
-      {THINKING_KINDS.has(progress.kind) ? (
-        <span className="turn-progress-icon" aria-hidden="true">
-          <ThinkingIcon size={18} active />
-        </span>
-      ) : progress.tool ? (
-        // A tool running: its own icon, pulsing gently.
-        <ToolIcon type={progress.tool} state="running" />
-      ) : (
-        // Retrying, stopping, writing, subagents: no thought, so no thinking icon.
-        <span className="turn-progress-dots" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </span>
+    <div className="turn-live flex flex-col min-w-0 max-w-full" data-find-ignore data-turn-live
+      data-until-text={untilText || undefined} hidden={!headline && !progress && !open}>
+      <div className="turn-live-lines flex items-start gap-1 min-w-0 max-w-full select-none" role="status"
+        data-toggles={chevron ? "" : undefined} onClick={chevron ? toggle : undefined}>
+      <div className="turn-live-text flex flex-col min-w-0 max-w-full">
+      {headline && (
+        <div className="turn-live-thought flex items-center gap-2 min-w-0" title={liveThoughtText(thoughtText) || headline}>
+          <span className="turn-progress-icon" aria-hidden="true">
+            <ThinkingIcon size={18} />
+          </span>
+          <span className="turn-live-headline">{headline}</span>
+        </div>
       )}
-      <span className="turn-progress-label">{progress.label}</span>
-      {progress.detail && <span className="turn-progress-detail">{progress.detail}</span>}
+      {progress && (
+        <div className="turn-progress flex items-center gap-2 min-w-0 max-w-full" data-turn-progress={progress.kind} title={progress.title}>
+          {THINKING_KINDS.has(progress.kind) ? (
+            <span className="turn-progress-icon" aria-hidden="true">
+              <ThinkingIcon size={18} active />
+            </span>
+          ) : progress.tool ? (
+            // A call: its own icon, pulsing gently while it runs, still once it finished.
+            <ToolIcon type={progress.tool} state={progress.kind === "failed-tool" ? "failed" : progress.kind === "ran-tool" ? "done" : "running"} />
+          ) : (
+            // Retrying, stopping, writing, subagents: no thought, so no thinking icon.
+            <span className="turn-progress-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          )}
+          <span className={progress.kind === "failed-tool" ? "turn-progress-label turn-progress-failed" : "turn-progress-label"}>{progress.label}</span>
+          {progress.detail && <span className="turn-progress-detail">{progress.detail}</span>}
+          {progress.more ? <span className="turn-progress-more">+{progress.more} running</span> : null}
+          {failed > 0 ? <span className="turn-progress-failed turn-progress-badge">· {failed} failed</span> : null}
+        </div>
+      )}
+      </div>
+      {chevron}
+      </div>
+      {run && (
+        <Collapse open={open} className="overflow-hidden pt-2" itemCount={run.count}>
+          <div
+            ref={scrollRef}
+            className="an-tool-group-scroll"
+            data-tool-group-scroll
+            onScroll={(event) => {
+              const box = event.currentTarget;
+              atEndRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
+            }}
+          >
+            <div ref={rowsRef} className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
+              <LiveRunBodyContext.Provider value>{run.rows}</LiveRunBodyContext.Provider>
+            </div>
+          </div>
+        </Collapse>
+      )}
     </div>
   );
 }

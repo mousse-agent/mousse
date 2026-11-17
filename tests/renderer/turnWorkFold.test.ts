@@ -201,7 +201,7 @@ describe('a turn whose end the window learned late', () => {
 })
 
 describe('a running turn', () => {
-  it('folds finished calls into their group lines and ends on one live line', () => {
+  it('shows its current run as one live line, with no group line for it', () => {
     const running = [
       ...turn(1, 0).slice(0, 6),
       call('b2', 'tool-Bash', { command: 'npm test' }, 7, 'input-available')
@@ -210,11 +210,11 @@ describe('a running turn', () => {
     expect(toggles()).toHaveLength(0)
     const text = visible(0)
     expect(text).toContain("I'll read how the key is built 1.")
-    expect(text).toContain('Read 2 files and ran 2 commands')
-    // No call row shows on its own; the line under the work names what runs.
+    // The current run has no group line: the live row is the run, and the line under the work names what runs.
+    expect(text).not.toContain('Read 2 files and ran 2 commands')
     expect(answerOf(0).querySelector('.an-tool-group-rows')).toBeNull()
-    const live = host.querySelector<HTMLElement>('[data-turn-progress]')!
+    const live = host.querySelector<HTMLElement>('[data-turn-live]')!
     expect(answerOf(0).lastElementChild).toBe(live)
-    expect(live.textContent).toBe('Running Bash…npm test')
+    expect(live.querySelector('[data-turn-progress]')!.textContent).toBe('Running Bash…npm test')
   })
 })

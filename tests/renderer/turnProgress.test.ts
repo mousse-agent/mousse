@@ -9,6 +9,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
+import { markRecoveredFailures } from '../../src/renderer/chat/adapters/mousseToUI'
+import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
 import {
   TurnProgressContext,
   describeTurnProgress,
@@ -34,6 +36,8 @@ beforeEach(() => {
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
+  // Words show as they come; the test of a paced reply turns pacing on itself.
+  setReplyPacing(false)
 })
 
 afterEach(() => {
@@ -42,6 +46,7 @@ afterEach(() => {
   window.matchMedia = realMatchMedia
   globalThis.ResizeObserver = realResizeObserver
   vi.useRealTimers()
+  setReplyPacing(true)
 })
 
 type Status = 'ready' | 'submitted' | 'streaming'
@@ -61,9 +66,20 @@ function render(messages: UIMessage[], status: Status, state: TurnProgressState 
   act(() => root.render(createElement(TurnProgressContext.Provider, { value: state }, createElement(MessageList, { messages, status }))))
 }
 
-/** The last turn's header and the live line under it. */
+/** The last turn's header, its live row, and the row's line saying what the turn does now. */
 const header = () => [...host.querySelectorAll<HTMLElement>('.turn-work-label')].at(-1)?.textContent ?? null
+const liveRow = () => host.querySelector<HTMLElement>('[data-turn-live]')
+/** The live row's first line: the headline of the current run's thought. */
+const headline = () => liveRow()?.querySelector('.turn-live-headline')?.textContent ?? null
 const line = () => host.querySelector<HTMLElement>('[data-turn-progress]')
+/**
+ * The live row shows nothing: hidden, or, with reply pacing, saying "Writing…" right under reply text that is on
+ * screen, which turn-progress.css hides (\`data-until-text\`).
+ */
+const rowQuiet = () => {
+  const row = liveRow()!
+  return row.hidden || (row.dataset.untilText !== undefined && Boolean(row.previousElementSibling?.querySelector('.an-markdown')))
+}
 /** The line's label; what a running call works on follows it, dim (`.turn-progress-detail`). */
 const lineText = () => line()?.querySelector('.turn-progress-label')?.textContent ?? ''
 const lineDetail = () => line()?.querySelector('.turn-progress-detail')?.textContent ?? null
@@ -89,9 +105,9 @@ function expectLive(label: string | RegExp) {
   expect(lineText()).not.toBe('')
   if (typeof label === 'string') expect(lineText()).toBe(label)
   else expect(lineText()).toMatch(label)
-  // The line ends the turn's answer, under the Working header.
+  // The live row ends the turn's answer, under the Working header.
   const answer = line()!.closest('.turn-answer')!
-  expect(answer.lastElementChild).toBe(line())
+  expect(answer.lastElementChild).toBe(liveRow())
   expect(answer.previousElementSibling?.classList.contains('turn-work')).toBe(true)
 }
 
@@ -138,7 +154,7 @@ describe('the line under Working', () => {
     for (const [messages, state] of [
       [[ask()], { phase: 'thinking', step: { kind: 'retrying', attempt: 1 } }],
       [[ask(), reply('c1', tool('Bash', 'input-available', { command: 'npm test' }))], { phase: 'tool_running', stopping: true }],
-      [[ask(), reply('a1', text('The'))], { phase: 'streaming' }]
+      [[ask(), reply('a1', text(''))], { phase: 'streaming' }]
     ] as Array<[UIMessage[], TurnProgressState]>) {
       render(messages, 'streaming', state)
       expect(line()!.querySelector('svg.thinking-icon')).toBeNull()
@@ -151,88 +167,66 @@ describe('the line under Working', () => {
     expectLive('Thinking…')
   })
 
-  it('3. a thought that streams: its row is the live line, with the thought as it is written', () => {
+  it('3. a thought that streams: the live row shows its headline over Thinking…, and no row of its own', () => {
     render([ask(), reply('t1', thought('input-available', '**Reading the test**\n\nThe output says the'))], 'streaming', { phase: 'thinking' })
-    expect(header()).toMatch(/^Working/)
-    // No second line under it.
-    expect(line()).toBeNull()
-    expect(liveRows()).toEqual(['The output says the'])
-    expect(host.querySelector('.turn-answer svg.thinking-icon.is-thinking')).not.toBeNull()
-    // It follows the thought as it streams.
+    expectLive('Thinking…')
+    expect(headline()).toBe('Reading the test')
+    // The newest paragraph whole is the headline's tooltip.
+    expect(liveRow()!.querySelector<HTMLElement>('.turn-live-thought')!.title).toBe('The output says the')
+    expect(liveRows()).toEqual([])
+    expect(reasoningRows()).toHaveLength(0)
+    // Its two lines are a status region: a screen reader hears the headline when it changes, not every word.
+    expect(liveRow()!.querySelector('.turn-live-lines')!.getAttribute('role')).toBe('status')
     render([ask(), reply('t1', thought('input-available', '**Reading the test**\n\nThe output says the reminder starts twice.'))], 'streaming', { phase: 'thinking' })
-    expect(liveRows()).toEqual(['The output says the reminder starts twice.'])
+    expect(headline()).toBe('Reading the test')
   })
 
-  it('3. a thought followed by text is done: its row is still and titled with its latest block', () => {
+  it('3. a thought followed by text is done: its row is still and titled with its headline, and the live row has nothing to add', () => {
     const live = reply('t1', thought('input-available', '**Reading the test**\n\nIt starts both.'))
     render([ask(), live, reply('a1', text('The test is'))], 'streaming', { phase: 'streaming' })
-    expect(liveRows()).toEqual([])
     expect(reasoningRow('Reading the test').querySelector('svg.thinking-icon.is-thinking')).toBeNull()
-    expectLive('Writing…')
+    expect(rowQuiet()).toBe(true)
   })
 
-  it('3. a long thought is the row while it is written, showing its end, and folds to its opening once it ends', () => {
-    const long = `**Planning** ${'word '.repeat(200)}and the newest words`
+  it('3. a long thought moves on paragraph by paragraph, one still line each, and a finished one shows its newest', () => {
+    const long = `${'word '.repeat(300)}and the newest words`
     render([ask(), reply('t1', thought('input-available', long))], 'streaming', { phase: 'thinking' })
-    const [row] = liveRows()
-    // Its words take the label's place: no "Thinking" once there is text.
-    expect(row!.startsWith('Thinking')).toBe(false)
-    expect(row!.endsWith('and the newest words')).toBe(true)
-    expect(row!.length).toBeLessThan(700)
-    expect(row).toContain('…')
-    // The words sit in a box that keeps its last lines (agent-ui.css), so a long thought hides its
-    // oldest words, never the newest; the whole paragraph is the tooltip and what a screen reader gets.
-    const words = host.querySelector<HTMLElement>('.turn-answer .an-live-thought')!
-    expect(words.textContent!.endsWith('and the newest words')).toBe(true)
-    expect(words.title).toBe(`Planning ${'word '.repeat(200)}and the newest words`.replace(/\s+/g, ' '))
-    expect(words.getAttribute('aria-label')).toBe(words.title)
-
-    // The next step starts: the thought folds to one row of its opening paragraph, whole (the row cuts it at its
-    // width), and the box under the label goes.
-    const opening = `**Planning** the lighthouse simulator with a canvas, a lamp switch and a power failure button`
-    render([ask(), reply('t1', { ...thought('output-available', `${opening}\n\nSecond paragraph.`), toolCallId: 'th1' }), reply('r1', { type: 'text', text: 'Here is the plan.' })], 'streaming', { phase: 'writing' })
-    expect(host.querySelector('.turn-answer .an-live-thought')).toBeNull()
-    expect(host.querySelector('.turn-answer')!.textContent).toContain('Planning the lighthouse simulator with a canvas, a lamp switch and a power failure button')
-    expect(host.querySelector('.turn-answer')!.textContent).not.toContain('Second paragraph.')
+    // A first sentence still arriving shows its words so far, cut well before the row would grow.
+    expect(Array.from(headline()!).length).toBeLessThanOrEqual(200)
+    expect(headline()!.endsWith('…')).toBe(true)
+    render([ask(), reply('t1', thought('input-available', `${long}.\n\nNow the clock. It drifts`))], 'streaming', { phase: 'thinking' })
+    expect(headline()).toBe('Now the clock.')
+    // The next step starts: the finished thought is one still row with the same headline.
+    render([ask(), reply('t1', { ...thought('output-available', `${long}.\n\nNow the clock. It drifts.`), toolCallId: 'th1' }), reply('r1', text('Here is the plan.'))], 'streaming', { phase: 'streaming' })
+    expect(reasoningRow('Now the clock.')).not.toBeNull()
   })
 
   it('3. a thought being written does not shimmer: only its icon turns (no paint every frame)', () => {
     render([ask(), reply('t1', thought('input-available', '**Reading**\n\nThe output says'))], 'streaming', { phase: 'thinking' })
     expect(host.querySelector('.turn-answer .an-text-shimmer--active')).toBeNull()
     expect(host.querySelector('.turn-answer svg.thinking-icon.is-thinking')).not.toBeNull()
-    // Nor a group's header while a call in it runs: the header is still, the live line under it names the call.
+    // Nor while a call runs: the live row keeps the headline still and names the call under it.
     const first = reply('t1', { ...thought('output-available', '**Reading the test**\n\nIt starts both.'), toolCallId: 'th1' })
     render([ask(), first, reply('c1', tool('Bash', 'input-available', { command: 'npm test' }))], 'streaming', { phase: 'tool_running' })
     expect(host.querySelector('.turn-answer .an-text-shimmer--active')).toBeNull()
-    expect(groupHeader('Reading the test')!.textContent).toContain('· Ran 1 command')
+    expect(headline()).toBe('Reading the test')
+    expectLive('Running Bash…')
   })
 
-  it('3. a thought being written is read out now and then, not with every word', () => {
-    const say = () => host.querySelector('.turn-answer [role="status"].sr-only')?.textContent ?? ''
-    render([ask(), reply('t1', thought('input-available', '**Reading**\n\nThe output'))], 'streaming', { phase: 'thinking' })
-    expect(say()).toBe('Thinking: The output')
-    render([ask(), reply('t1', thought('input-available', '**Reading**\n\nThe output says the reminder'))], 'streaming', { phase: 'thinking' })
-    expect(say()).toBe('Thinking: The output')
-    act(() => { vi.advanceTimersByTime(5000) })
-    expect(say()).toBe('Thinking: The output says the reminder')
-    // The announcement is not part of the row's button, whose name stays the row's text.
-    expect(host.querySelector('.turn-answer [role="status"].sr-only')!.closest('button')).toBeNull()
-  })
-
-  it('3. a thought with no text yet shows only Thinking', () => {
+  it('3. a thought with no text yet shows only Thinking…', () => {
     render([ask(), reply('t1', thought('input-available', ''))], 'streaming', { phase: 'thinking' })
-    expect(liveRows()).toEqual(['Thinking'])
-    expect(line()).toBeNull()
+    expectLive('Thinking…')
+    expect(headline()).toBeNull()
     // And with no thought row at all (an empty thinking block), the line says it.
     render([ask()], 'streaming', { phase: 'thinking', step: { kind: 'reasoning' } })
     expectLive('Thinking…')
     expect(host.querySelector('.turn-answer')!.textContent).toBe('Thinking…')
   })
 
-  it('3. one thought is titled by its first line, as before; opened, it shows all of it', () => {
+  it('3. one thought is titled with its newest paragraph\'s headline; opened, it shows all of it', () => {
     const blocks = '**Checking the order**\n\nEqual due times are taken by id.\n\n**Planning the fix**\n\nMake the first one due earlier.'
     render([ask(), reply('t1', thought('output-available', blocks)), reply('a1', text('The test is flaky.'))], 'streaming', { phase: 'streaming' })
-    const row = reasoningRow('Checking the order')
+    const row = reasoningRow('Planning the fix')
     act(() => { row.click() })
     const opened = row.parentElement!.textContent!
     expect(opened.indexOf('Equal due')).toBeLessThan(opened.indexOf('Make the first one'))
@@ -251,25 +245,23 @@ describe('the line under Working', () => {
     expect(opened.indexOf('Checking the order')).toBeLessThan(opened.lastIndexOf('Planning the fix'))
   })
 
-  it('3. a thought written after calls stays out of their group: the group is a still summary, the thought the live line', () => {
+  it('3. a thought written after calls heads the live row, which is the run; the run takes a still group line when text starts', () => {
     const first = reply('t1', { ...thought('output-available', '**Reading the test**\n\nIt starts both.'), toolCallId: 'th1' })
     const call = reply('c1', tool('Bash', 'output-available', { command: 'ls' }))
     const live = reply('t2', { ...thought('input-available', '**Planning the fix**\n\nMake A due earlier'), toolCallId: 'th2' })
     render([ask(), first, call, live], 'streaming', { phase: 'thinking' })
-    expect(line()).toBeNull()
-    const group = groupHeader('Reading the test')!
-    expect(group.textContent).toContain('· Ran 1 command')
-    expect(group.getAttribute('aria-expanded')).toBe('false')
-    expect(group.textContent).not.toContain('Make A due earlier')
-    expect(liveRows()).toEqual(['Make A due earlier'])
+    expectLive('Thinking…')
+    expect(headline()).toBe('Planning the fix')
+    // The run has no group line while it runs: the live row stands for it.
+    expect(groupHeader('Reading the test')).toBeNull()
     // The turn moves on to writing. The provider still marks the thought as streaming (it closes it at the turn's
     // end), but with text after it it is done: it joins the group, which keeps its title and stays one row.
     const still = reply('t2', { ...thought('input-available', '**Planning the fix**\n\nMake A due earlier.'), toolCallId: 'th2' })
     render([ask(), first, call, still, reply('a1', text('Fixed by'))], 'streaming', { phase: 'streaming' })
-    expect(liveRows()).toEqual([])
     expect(reasoningRows()).toHaveLength(0)
     expect(groupHeader('Reading the test')!.getAttribute('aria-expanded')).toBe('false')
-    expectLive('Writing…')
+    // The text being written says the rest: the live row has nothing to add.
+    expect(rowQuiet()).toBe(true)
     act(() => { groupHeader('Reading the test')!.click() })
     const opened = groupHeader('Reading the test')!.parentElement!.textContent!
     for (const piece of ['Reading the test', 'ls', 'Planning the fix']) expect(opened).toContain(piece)
@@ -280,9 +272,31 @@ describe('the line under Working', () => {
     expectLive('Thinking…')
   })
 
-  it('4. text streaming: Writing…', () => {
-    render([ask(), reply('a1', text('The test fails because'))], 'streaming', { phase: 'streaming' })
+  it('4. text streaming: Writing… until its first words show, then the text says it', () => {
+    render([ask(), reply('a1', text(''))], 'streaming', { phase: 'streaming' })
     expectLive('Writing…')
+    const row = liveRow()
+    setReplyPacing(true)
+    // Paced, the first words wait for their block to finish: nothing of the reply shows yet, so the row still says it.
+    render([ask(), reply('a1', text('The test fails because'))], 'streaming', { phase: 'streaming' })
+    expect(host.querySelector('.turn-answer .an-markdown')).toBeNull()
+    expectLive('Writing…')
+    expect(rowQuiet()).toBe(false)
+    // A finished paragraph shows: the reply says it, and the row is hidden by the style rule that reads its mark.
+    render([ask(), reply('a1', text('The test fails because the clock drifts.\n\nThe fix'))], 'streaming', { phase: 'streaming' })
+    expect(host.querySelector('.turn-answer .an-markdown')).not.toBeNull()
+    expect(rowQuiet()).toBe(true)
+    expect(readFileSync('src/renderer/chat/components/agent-elements/turn-progress.css', 'utf8')).toMatch(/\.turn-answer > :has\(\.an-markdown\) \+ \.turn-live\[data-until-text\] \{\s*display: none;/)
+    // Not paced, the words show as they come: the row is hidden at once. Hidden, not removed: it is the same row.
+    setReplyPacing(false)
+    try {
+      render([ask(), reply('a1', text('The test fails because'))], 'streaming', { phase: 'streaming' })
+      expect(line()).toBeNull()
+      expect(liveRow()).toBe(row)
+      expect(row!.hidden).toBe(true)
+    } finally {
+      setReplyPacing(true)
+    }
   })
 
   it('5. a tool call being prepared: Preparing <tool>…', () => {
@@ -299,9 +313,14 @@ describe('the line under Working', () => {
     render([ask(), reply('c1', tool('Bash', 'input-available', { command: 'npm test -- --run slow.test.ts' }))], 'streaming', { phase: 'tool_running' })
     expectLive('Running Bash…')
     expect(line()!.title).toBe('npm test -- --run slow.test.ts')
-    // The command follows the label, dim; the call itself is folded into a still summary above the line.
+    // The command follows the label, dim. The call has no row above: the live row is its run, and opens to show it.
     expect(lineDetail()).toBe('npm test -- --run slow.test.ts')
-    expect(groupHeader('Ran 1 command')!.getAttribute('aria-expanded')).toBe('false')
+    expect(groupHeader('Running npm test')).toBeNull()
+    const toggle = liveRow()!.querySelector<HTMLButtonElement>('button.turn-live-toggle')!
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    act(() => { toggle.click() })
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(liveRow()!.querySelector('.an-tool-group-rows')!.textContent).toContain('npm test -- --run slow.test.ts')
   })
 
   it('5. while a steer waits for the command, the line still reads Running <tool>…, and its tooltip says when the steer goes in', () => {
@@ -343,14 +362,54 @@ describe('the line under Working', () => {
     expect(label({})?.label).toBe('Loading tools…')
   })
 
-  it('5. a tool result arrived, the model reads it: Thinking…', () => {
+  it('5. a call finished and nothing new started: what it did, in the past tense', () => {
     render([ask(), reply('c1', tool('Bash', 'output-available', { command: 'ls' }))], 'streaming', { phase: 'thinking' })
+    expectLive('Ran')
+    expect(lineDetail()).toBe('ls')
+    expect(line()!.querySelector('.an-tool-icon[data-state="done"] svg')).not.toBeNull()
+    // The model reasons about it: Thinking…
+    render([ask(), reply('c1', tool('Bash', 'output-available', { command: 'ls' }))], 'streaming', { phase: 'thinking', step: { kind: 'reasoning' } })
     expectLive('Thinking…')
   })
 
-  it('6. between tool calls, in a collapsed group: Thinking…', () => {
-    render([ask(), reply('c1', tool('Read', 'output-available', {}, 'r1')), reply('c2', tool('Grep', 'output-available', {}, 'g1'))], 'streaming', { phase: 'thinking' })
+  it('5. a call failed: the failure, in the danger colour, under the thought that led to it', () => {
+    // As the chat gets them: a failure with nothing after it in a running turn is marked got past, so its row is quiet.
+    const marked = (messages: UIMessage[]) => markRecoveredFailures(structuredClone(messages))
+    const lead = reply('t1', { ...thought('output-available', 'Run the auth tests.'), toolCallId: 'th1' })
+    const failed = reply('c1', { ...tool('Bash', 'output-error', { command: 'pnpm vitest run tests/auth' }), errorText: 'exit 1' })
+    render(marked([ask(), lead, failed]), 'streaming', { phase: 'thinking' })
+    expectLive('Failed')
+    expect(lineDetail()).toBe('pnpm vitest run tests/auth')
+    expect(line()!.querySelector('.turn-progress-failed')).not.toBeNull()
+    expect(headline()).toBe('Run the auth tests.')
+    expect(groupHeader('Run the auth tests.')).toBeNull()
+    // The agent thinks on: the line says so, and still names the failure nothing has got past.
+    const next = reply('t2', { ...thought('input-available', 'Try npx instead.'), toolCallId: 'th2' })
+    render(marked([ask(), lead, failed, next]), 'streaming', { phase: 'thinking' })
     expectLive('Thinking…')
+    expect(line()!.querySelector('.turn-progress-badge')!.textContent).toBe('· 1 failed')
+    // A retry that works: the failure is got past and the line stops naming it.
+    const retry = reply('c2', tool('Bash', 'output-available', { command: 'npx vitest run tests/auth' }, 'c2'))
+    render(marked([ask(), lead, failed, { ...next, parts: [{ ...next.parts[0]!, state: 'output-available' }] } as UIMessage, retry]), 'streaming', { phase: 'thinking' })
+    expectLive('Ran')
+    expect(line()!.querySelector('.turn-progress-badge')).toBeNull()
+  })
+
+  it('6. between tool calls: the last one, in the past tense, until something new starts', () => {
+    const calls = [reply('c1', tool('Read', 'output-available', { file_path: 'src/a.ts' }, 'r1')), reply('c2', tool('Grep', 'output-available', { pattern: 'expiresIn' }, 'g1'))]
+    render([ask(), ...calls], 'streaming', { phase: 'thinking' })
+    expectLive('Searched')
+    expect(lineDetail()).toBe('expiresIn')
+    render([ask(), ...calls, reply('t1', thought('input-available', 'Now the fix'))], 'streaming', { phase: 'thinking' })
+    expectLive('Thinking…')
+  })
+
+  it('6. several calls running at once: the latest, and how many others run', () => {
+    const running = (id: string, command: string) => reply(id, tool('Bash', 'input-available', { command }, id))
+    render([ask(), running('b1', 'npm run lint'), running('b2', 'npm test'), running('b3', 'npm run build')], 'streaming', { phase: 'tool_running' })
+    expectLive('Running Bash…')
+    expect(lineDetail()).toBe('npm run build')
+    expect(line()!.querySelector('.turn-progress-more')!.textContent).toBe('+2 running')
   })
 
   it('6. a tool still running behind a finished one is named', () => {
@@ -481,7 +540,7 @@ describe('the line under Working', () => {
     expectLive('Thinking…')
     expect(line()!.title).toBe("Waiting for the model's first output")
     render([ask('u1'), reply('a1', text('Looking.')), steered, reply('t2', thought('input-available'))], 'streaming', { phase: 'thinking' })
-    expect(liveRows()).toEqual(['Thinking'])
+    expectLive('Thinking…')
   })
 
   it('12. a Steer block says nothing by itself: the line follows what the turn does, and waits only by the step', () => {
@@ -492,9 +551,9 @@ describe('the line under Working', () => {
     const running = reply('c1', tool('Bash', 'input-available', { command: 'npm test' }))
     expect(label([running, block], { phase: 'tool_running' })).toBe('Running Bash…')
     expect(label([running, block], { phase: 'tool_running', step: { kind: 'waiting' } })).toBe('Running Bash…')
-    // Claude keeps writing into the reply above the block: Writing…, until the service says the model waits.
+    // Claude keeps writing into the reply above the block: the text says it, until the service says the model waits.
     const writing = reply('a1', text('Looking at the'))
-    expect(label([writing, block], { phase: 'streaming' })).toBe('Writing…')
+    expect(label([writing, block], { phase: 'streaming' })).toBeUndefined()
     expect(label([writing, block], { phase: 'streaming', step: { kind: 'waiting' } })).toBe('Thinking…')
   })
 
@@ -504,26 +563,26 @@ describe('the line under Working', () => {
     expectLive('Running Bash…')
   })
 
-  it('12. a steer while the reply is written keeps Writing… until the service says the model waits (#873)', () => {
+  it('12. a steer while the reply is written: the text says it until the service says the model waits (#873)', () => {
     const steered = ask('u2', 'Also check the lint', { steered: true })
     const messages = [ask('u1'), reply('a1', text('Looking at the')), steered]
     render(messages, 'streaming', { phase: 'streaming' })
-    expectLive('Writing…')
+    expect(rowQuiet() || lineText() === 'Writing…').toBe(true)
     render(messages, 'streaming', { phase: 'streaming', step: { kind: 'waiting' } })
     expectLive('Thinking…')
   })
 
   it('follows the turn inside a memoised row: a new step alone updates it', () => {
-    const messages = [ask(), reply('a1', text('Done with the first file.'))]
-    render(messages, 'streaming', { phase: 'streaming' })
-    expectLive('Writing…')
-    render(messages, 'streaming', { phase: 'streaming', step: { kind: 'reasoning' } })
+    const messages = [ask(), reply('c1', tool('Bash', 'output-available', { command: 'ls' }))]
+    render(messages, 'streaming', { phase: 'thinking' })
+    expectLive('Ran')
+    render(messages, 'streaming', { phase: 'thinking', step: { kind: 'reasoning' } })
     expectLive('Thinking…')
     render(messages, 'streaming', { phase: 'thinking', step: { kind: 'retrying', attempt: 1 } })
     expectLive('Retrying…')
   })
 
-  it('is never empty while a turn runs, in any phase or step', () => {
+  it('is never empty while a turn runs, in any phase or step, unless text being written is on screen', () => {
     const turns: UIMessage[][] = [
       [ask()],
       [ask(), reply('a1', text('Some text'))],
@@ -544,7 +603,10 @@ describe('the line under Working', () => {
       for (const state of states) {
         render(messages, 'streaming', state)
         expect(header()).toMatch(/^Working/)
-        expect(lineText(), JSON.stringify({ state, parts: messages.at(-1)!.parts })).not.toBe('')
+        const last = messages.at(-1)!
+        const textShown = state.phase === 'streaming' && !state.step && last.role === 'assistant' && last.parts.some((part) => part.type === 'text')
+        if (textShown) expect(rowQuiet()).toBe(true)
+        else expect(lineText(), JSON.stringify({ state, parts: messages.at(-1)!.parts })).not.toBe('')
       }
     }
   })

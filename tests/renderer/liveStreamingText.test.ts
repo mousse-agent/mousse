@@ -225,17 +225,22 @@ describe('a streamed reply with reply pacing on', () => {
 })
 
 describe('the progress and thought lines while text streams', () => {
-  it('the line under Working still reads Writing… as live text streams, and follows a thought that starts', () => {
+  it('the live row stays hidden while live text streams on screen, and comes back, the same element, for a thought that starts', () => {
     mount(thread(3, 'Some text'))
-    expect(progressLine()?.dataset.turnProgress).toBe('writing')
+    const row = host.querySelector<HTMLElement>('[data-turn-live]')!
+    // The text being written is on screen: no "Writing…" under it.
+    expect(row.hidden).toBe(true)
+    expect(progressLine()).toBeNull()
     for (let i = 0; i < 5; i += 1) stream(assistant('reply', 7, `Some text ${'more '.repeat(i + 1)}`, { streaming: true }))
-    expect(progressLine()?.dataset.turnProgress).toBe('writing')
-    // The reply ends and a thought starts: both go to the store, and the turn shows the live thought.
+    expect(row.hidden).toBe(true)
+    // The reply ends and a thought starts: both go to the store, and the live row heads with the thought.
     act(() => root.render(createElement(Transcript, { progress: { phase: 'thinking', step: { kind: 'reasoning' } } })))
     stream(assistant('reply', 7, 'Some text, done.', { streaming: false }), thinking('th', 8, 'Checking the tests', 'processing'))
-    expect(host.textContent).toContain('Checking the tests')
+    expect(host.querySelector('[data-turn-live]')).toBe(row)
+    expect(row.hidden).toBe(false)
+    expect(row.querySelector('.turn-live-headline')!.textContent).toBe('Checking the tests')
     stream(thinking('th', 8, 'Checking the tests and the build output', 'processing'))
-    expect(host.textContent).toContain('the build output')
+    expect(row.querySelector('.turn-live-headline')!.textContent).toBe('Checking the tests and the build output')
   })
 })
 
