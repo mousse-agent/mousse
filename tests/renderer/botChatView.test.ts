@@ -2770,3 +2770,25 @@ it('shows a settled card time once, trims timeout punctuation and avoids repeati
   expect(card.textContent).toContain('Expired · not sent')
   expect(card.textContent).not.toContain('This expired, so nothing was sent.')
 })
+
+it('expands adjacent expired schedule reviews inline without counting nudges or crossing a digest', async () => {
+  const expired = (seq: number, id: string) => message(seq, { id: `bm_${id}`, text: 'Expired · not sent', expiredActionSchedule: 'mail', action: action({ actionId: id, title: 'Send an email', status: 'expired', at: AT }) })
+  const first = expired(1, 'action_exp1')
+  const nudge = (seq: number, suffix: number) => ({ ...first, seq, id: `${first.id}_n${suffix}`, expiredActionSchedule: undefined, replyTo: { id: first.id, author: 'bot' as const, text: 'Send an email' } })
+  fake.chats.inbox = [first, nudge(2, 1), expired(3, 'action_exp2'), nudge(4, 2), expired(5, 'action_exp3'), message(6, { text: 'Older chat summarised', systemLine: true }), expired(7, 'action_exp4'), message(8, { id: 'waiting', text: 'Please review', action: action({ actionId: 'action_waiting' }) })]
+  await open()
+  const folds = [...transcript().querySelectorAll<HTMLDetailsElement>('details[aria-label="Expired action reviews"]')]
+  expect(folds).toHaveLength(2)
+  expect(folds[0]!.querySelector('summary')?.textContent).toBe('3 expired · not sent: Send an email')
+  expect(folds[1]!.querySelector('summary')?.textContent).toBe('Expired · not sent: Send an email')
+  expect(folds[0]!.open).toBe(false)
+  await click(folds[0]!.querySelector('summary'))
+  expect(folds[0]!.open).toBe(true)
+  const cards = [...folds[0]!.querySelectorAll('[aria-label="Action to review"]')]
+  expect(cards).toHaveLength(3)
+  for (const card of cards) { expect(card.querySelector('summary')?.textContent).toBe('What it would have sent'); expect(card.querySelector('[role="status"]')?.textContent).toContain('Expired · not sent'); expect(button('Send', card)).toBeUndefined() }
+  expect(folds[0]!.querySelectorAll('[data-message-id="bm_action_exp1_n2"] [aria-label="Action to review"]')).toHaveLength(1)
+  expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(5)
+  expect(transcript().textContent).not.toContain('4 expired · not sent')
+  expect(button('Send', transcript().querySelector('[data-message-id="waiting"]')!)).toBeTruthy()
+})
