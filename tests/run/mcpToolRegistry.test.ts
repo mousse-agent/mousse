@@ -416,7 +416,8 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     })
 
     it('thread_merge_back acts for the caller\'s own fork only, and derives its clientRequestId from the run and call', async () => {
-      const { fx, registry, ctx, run } = await setup()
+      // Accept edits, so the call reaches the tool without asking (the asking is covered below).
+      const { fx, registry, ctx, run } = await setup('default', { permissionModeFor: () => 'accept_edits' })
       const mergeBack = vi.spyOn(fx.engine, 'mergeBack')
       await expect(registry.call('thread_merge_back', { forkThreadId: 'someone-else' }, ctx())).rejects.toMatchObject({ code: 'mousse_scope_denied' })
       await expect(registry.call('thread_merge_back', { threadId: 'someone-else' }, ctx())).rejects.toMatchObject({ code: 'mousse_scope_denied' })
@@ -870,6 +871,12 @@ describe('workspace-changing tools and the permission mode', () => {
     expect(allowed.asked).toHaveLength(1)
     const dismissed = await setup('ask', 'throw')
     await expect(dismissed.call()).resolves.toMatchObject({ isError: true })
+  })
+
+  it('asks as under Ask when the host knows no permission mode', async () => {
+    const { call, asked } = await setup(undefined, 'reject')
+    await expect(call()).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
+    expect(asked).toHaveLength(1)
   })
 
   it.each(['accept_edits', 'full'] as const)('runs without asking under %s', async (mode) => {
