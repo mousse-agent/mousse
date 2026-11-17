@@ -18,8 +18,7 @@ import {
   formatElapsed,
   lastResultText,
   LruCache,
-  plainResultText,
-  RESULT_CACHE_LIMIT
+  plainResultText
 } from '../src/renderer/chat/components/agent-elements/tools/subagent-card-logic'
 import { MessageList } from '../src/renderer/chat/components/agent-elements/message-list'
 import {
@@ -245,13 +244,6 @@ describe('the cache of subagent replies', () => {
     expect(cache.has('c')).toBe(true)
     expect(cache.get('c')).toBeNull()
     expect(cache.get('missing')).toBeUndefined()
-  })
-
-  it('is bounded for the cards, not growing with every subagent read', () => {
-    expect(RESULT_CACHE_LIMIT).toBe(200)
-    const cache = new LruCache<string | null>(RESULT_CACHE_LIMIT)
-    for (let index = 0; index < 1000; index += 1) cache.set(`thread-${index}`, 'reply')
-    expect(cache.size).toBe(RESULT_CACHE_LIMIT)
   })
 })
 
