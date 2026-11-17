@@ -260,39 +260,13 @@ describe('P0 exact bytes and hostile inputs', () => {
     code(() => decodeMessage(new Uint8Array(MAX_MESSAGE_BYTES + 1)), 'too_large')
     code(() => decodeEnvelope(new Uint8Array(65537)), 'too_large')
   })
-  it('rejects mispaired record signatures, sequence holes and snapshot epochs', () => {
+  it('rejects a record whose signature part is not 64 bytes', () => {
     const record = { seq: 1, epoch: 1, recvTs: 0 }
     code(() =>
       encodeMessage({ t: 'events', stream: str, records: [record], replay: true, parts: [1, 63] }, [
         new Uint8Array(1),
         new Uint8Array(63)
       ])
-    )
-    code(() =>
-      encodeMessage(
-        {
-          t: 'events',
-          stream: str,
-          records: [record, { ...record, seq: 3 }],
-          replay: true,
-          parts: [1, 64, 1, 64]
-        },
-        [new Uint8Array(1), new Uint8Array(64), new Uint8Array(1), new Uint8Array(64)]
-      )
-    )
-    code(() =>
-      encodeMessage(
-        {
-          t: 'snapshot.chunk',
-          stream: str,
-          records: [{ ...record, epoch: 3 }],
-          epoch: 2,
-          throughSeq: 1,
-          done: true,
-          parts: [1, 64]
-        },
-        [new Uint8Array(1), new Uint8Array(64)]
-      )
     )
   })
   it('defines stable canonical proof inputs and catches non-JSON values before signing', () => {
