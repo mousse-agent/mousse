@@ -464,6 +464,45 @@ it('master refuses schedule recreation at the actual scheduled-run tool handlers
   }
   expect(f.book.list(t.botId)).toHaveLength(1)
 })
+// One persisted starting chat activation, many pieces of work: no private store rows or slot bypasses.
+async function fanOut(on: boolean, owner: boolean, count: number, different: boolean) {
+  const t = await setup(on)
+  await finish(f, t.work.payload)
+  const origin = await f.bots.enqueueChat(t.botId, owner ? 'chat:fan-out-owner' : 'wake:fan-out', 'Prepare the mail')
+  const chat = await start(f, origin.id)
+  const works: Array<{ id: string; run: Awaited<ReturnType<typeof start>> }> = []
+  for (let n = 0; n < count; n++) {
+    const { workId } = await f.bots.tools.work.start(t.botId, origin.id, { title: 'Email ' + n, brief: 'Prepare email ' + n, key: 'fan-' + n })
+    works.push({ id: workId, run: await start(f, workId) })
+  }
+  const results = []
+  for (const [n, work] of works.entries()) results.push(await callForBot({ bot: work.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: different ? { ...t.args, body: 'Message ' + n } : t.args, toolCallId: 'fan-call-' + n, signal: new AbortController().signal }))
+  return { ...t, origin, chat, works, results }
+}
+it.each([false, true])('one unattended chat starting twenty works has bounded open cards, different arguments=%s', async different => {
+  const t = await fanOut(true, false, 20, different)
+  const actions = f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")
+  expect(actions).toHaveLength(different ? 3 : 1)
+  expect(t.results.filter(result => !result.isError)).toHaveLength(different ? 3 : 1)
+  expect(t.results.at(-1)?.text).toContain(different ? 'three cards' : 'already waiting')
+  expect(t.calls).toEqual([])
+})
+it('owner-started work retains five different open cards', async () => {
+  const t = await fanOut(true, true, 5, true)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(5)
+  expect(t.results.every(result => !result.isError)).toBe(true)
+})
+it('an identical open card is refused even between owner-started pieces of work', async () => {
+  const t = await fanOut(true, true, 5, false)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(1)
+  expect(t.results.at(-1)).toMatchObject({ isError: true, text: expect.stringContaining('already waiting') })
+})
+it.each([false, true])('switch off preserves all twenty unattended calls, different arguments=%s', async different => {
+  const t = await fanOut(false, false, 20, different)
+  expect(t.calls).toHaveLength(20)
+  expect(t.results.every(result => !result.isError)).toBe(true)
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
