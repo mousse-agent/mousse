@@ -3134,3 +3134,34 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
   expect(t.calls).toEqual([])
   expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('This could not wait for your owner after all, so nothing was sent. Say so in your report.')
 })
+
+it.each(['expiry', 'nudges', 'nudge holds'] as const)('C9 failed action %s backs off without starving another bot', async step => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.store.run('UPDATE bot_actions SET expires_at = ? WHERE id = ?', f.store.now(), a.id)
+  const other = (await createBot(f)).botId
+  const reminder = f.bots.addReminder(other, 'test', { dueAt: f.store.now(), text: 'Still deliver this' })
+  f.bots.setTellingWindows(1)
+  const tells: any[] = []; f.bots.events.on('tell', event => tells.push(event))
+  f.bots.chat.post({ botId: other, author: 'bot', kind: 'text', text: 'Other bot notice' })
+  let attempts = 0
+  if (step === 'expiry') vi.spyOn(f.bots.actions, 'expireDue').mockImplementation(() => { attempts++; throw new Error('disk hiccup') })
+  if (step === 'nudges') vi.spyOn(f.bots as any, 'actionNudgeFollowUps').mockImplementation(() => { attempts++; throw new Error('nudge read hiccup') })
+  if (step === 'nudge holds') {
+    const all = f.store.all.bind(f.store)
+    vi.spyOn(f.store, 'all').mockImplementation((sql, ...args) => {
+      if (sql.includes("GLOB 'bm_action_*_n[12]' AND tell")) { attempts++; throw new Error('nudge hold hiccup') }
+      return all(sql, ...args)
+    })
+  }
+  await expect(f.bots.deliverDueReminders()).resolves.toBeUndefined()
+  expect(f.store.reminder(reminder.reminderId)?.status).toBe('delivered')
+  expect(tells.some(tell => tell.rows.some((row: any) => row.botId === other))).toBe(true)
+  expect(f.timers.at(-1)!.ms).toBeGreaterThan(0)
+  await f.bots.deliverDueReminders()
+  expect(attempts).toBe(1)
+  f.clock.now += 60_000
+  await f.bots.deliverDueReminders()
+  expect(attempts).toBe(2)
+})
