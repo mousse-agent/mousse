@@ -71,7 +71,7 @@ const showDevices = async () => {
   await act(async () => root.render(createElement(NetDevicesSection)))
   await flush()
 }
-const presets = () => [...document.querySelectorAll<HTMLElement>('[role="radiogroup"]')].filter((group) => group.querySelector('[role="radio"]')?.textContent === 'View and chat with bots')
+const presets = () => [...document.querySelectorAll<HTMLElement>('[role="radiogroup"]')].filter((group) => group.querySelector('[role="radio"]')?.textContent === 'View and chat')
 const picked = () => presets()[0]!.querySelector('[role="radio"][aria-checked="true"]')?.textContent
 const policyCalls = () => request.mock.calls.filter(([method]) => method === 'bridge.policy').map(([, params]) => params)
 
@@ -81,9 +81,9 @@ it('a computer with the defaults works on threads; each preset sets its fields a
   expect(presets()).toHaveLength(1)
   expect(picked()).toBe('Work on threads')
 
-  await click(button('View and chat with bots'))
+  await click(button('View and chat'))
   expect(policyCalls()).toEqual([{ node: 'nod_mac', work: false, terminal: false, editor: false, maxPermissionMode: 'accept_edits', agentReach: 'launched' }])
-  expect(picked()).toBe('View and chat with bots')
+  expect(picked()).toBe('View and chat')
 
   await click(button('Full control'))
   expect(policyCalls()[1]).toEqual({ node: 'nod_mac', work: true, terminal: true, editor: true, maxPermissionMode: 'full', agentReach: 'all' })

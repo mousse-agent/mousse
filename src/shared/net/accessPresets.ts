@@ -30,7 +30,7 @@ export interface AccessPreset {
 export const ACCESS_PRESETS: readonly AccessPreset[] = [
   {
     id: 'view',
-    label: 'View and chat with bots',
+    label: 'View and chat',
     line: 'Reads threads · chats with bots',
     detail:
       "Reads threads here and chats with this computer's bots, within each bot's own permissions. It can't start, send to, steer or stop threads, see files or Git, open terminals or editors, or make or change bots.",
