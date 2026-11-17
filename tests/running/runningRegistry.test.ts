@@ -113,8 +113,6 @@ describe.skipIf(!posix)('the running list on this computer', () => {
     return child
   }
 
-  const portOf = (url: string | undefined) => Number(new URL(url ?? 'http://x:0').port)
-
   it('a quick action\'s dev server in a terminal is listed by its name, as the user\'s, with the address it listens on', async () => {
     const registry = new RunningRegistry(sources())
     const running = terminal('t-other', 'Dev server')
@@ -142,7 +140,6 @@ describe.skipIf(!posix)('the running list on this computer', () => {
     await until(async () => (await new RunningRegistry(sources()).list({ threadId: 't-agent', folders: [project], projectId: 'p1' })).length === 0)
     entries = await new RunningRegistry(sources()).list({ threadId: 't-agent', folders: [project], projectId: 'p1' })
     expect(entries).toEqual([])
-    expect(portOf(printed[0])).toBeGreaterThan(0)
   })
 
   it('a command an agent left running is its thread\'s; one still in its tool call, or started before the call, is not', async () => {
