@@ -2595,7 +2595,7 @@ it('keeps a curly-quoted arrow name in one unquoted hidden-path segment', async 
   await open()
   const path = host.querySelector('[aria-label="Hidden field path"]')!
   expect(path.querySelector('q')).toBeNull()
-  expect([...path.querySelectorAll('[aria-label="Field name"]')].map(item => item.textContent)).toEqual([JSON.stringify('a” → “b'), 'token'])
+  expect([...path.querySelectorAll('[aria-label="Field name"]')].map(item => item.textContent)).toEqual(['a” → “b', 'token'])
 })
 
 it.each(['approved', 'running', 'unreachable'])('C4 integration waiting distinguishes %s from an actual send', async (state) => {
