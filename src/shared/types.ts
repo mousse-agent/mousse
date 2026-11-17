@@ -1480,6 +1480,8 @@ export interface ThreadNativeHelper {
   agentId: string
   /** The id Claude Code's SendMessage addresses the agent by, once the runtime has said it. */
   sendTo?: string
+  /** The runtime can stop this helper without stopping the run that hosts it. */
+  stoppable?: true
   /** The Mousse run that started the helper, then the latest that hosted it. */
   hostRunId: string
   state: NativeHelperState

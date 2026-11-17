@@ -112,7 +112,7 @@ describe('browser tools over MCP', () => {
     expect(dispatched[0].context.vision).toBe(false)
 
     const shot = await registry.call('browser_screenshot', { sessionId: 'session-1' }, ctx())
-    expect(shot).toMatchObject({ isError: true, text: expect.stringMatching(/does not support image input/) })
+    expect(shot).toMatchObject({ isError: true, text: expect.stringMatching(/require a model with image input support/) })
     expect(shot.images).toBeUndefined()
     expect(dispatched.map((call) => call.name)).toEqual(['browser_observe'])
     expect(screenshots).toEqual([])
@@ -224,7 +224,7 @@ describe('browser tools of a vendor turn', () => {
     await harness.instances.setModelPrefs('claude', { custom: [{ id: 'vendor-model', capabilities: { efforts: [], images: false } }] })
     await d.send('Look again')
     expect(seen[1].turn).toMatchObject({ browser: { vision: false } })
-    expect(seen[1].result).toMatchObject({ isError: true, text: expect.stringMatching(/does not support image input/) })
+    expect(seen[1].result).toMatchObject({ isError: true, text: expect.stringMatching(/require a model with image input support/) })
     // The turn preamble offers a screenshot only when it can reach the model.
     expect(vendor.bridges[0].turnPreamble).toMatch(/Usable now: .*browser_screenshot/)
     expect(vendor.bridges[1].turnPreamble).toMatch(/Usable now: .*browser_observe/)

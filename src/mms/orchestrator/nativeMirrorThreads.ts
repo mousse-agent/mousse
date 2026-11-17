@@ -1,5 +1,6 @@
 import type { NativeHelperRuntime, NativeHelperState, Thread, ThreadLineage, ThreadNativeHelper } from '../../shared/types'
 import type { StreamingLlmToolEvent } from '../harness/turnEvents'
+import { nativeHelperRules } from '../run/adapters/nativeHelperRuntimes'
 import { attributeCall, callMetaIds, nativeHelperRuntime, nativeMirrorThreadId, NativeHelperRouter, type CallAttribution, type HelperRoute } from '../run/nativeHelpers'
 
 /**
@@ -105,6 +106,7 @@ export class NativeMirrorThreads {
       agentId: route.agentId,
       hostRunId: run.runId,
       state: 'running',
+      ...(nativeHelperRules(runtime).stopsHelperAlone ? { stoppable: true as const } : {}),
       ...(partial ? { partial: true } : {})
     }
     try {
@@ -159,8 +161,8 @@ export class MirroredRun {
       if (route.kind === 'host') return
       if (route.kind === 'start') {
         const known = this.mirrors.mirrorOf(this.run.hostThreadId, route.agentId)
-        // Codex's later episode of a helper this process never saw start: the helper is older than its log here.
-        const resumed = !known && this.router.runtime === 'codex' && (event.activity as { summary?: string } | undefined)?.summary === 'More work'
+        // A later episode of a helper this process never saw start: the helper is older than its log here.
+        const resumed = !known && this.router.rules.isLaterEpisode(event)
         this.mirrors.open(this.run, this.router.runtime, { ...route, ...(resumed ? { resumed: true } : {}) })
         return
       }

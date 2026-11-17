@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { NativeHelperRuntime, NativeHelperState } from '../../shared/types'
 import type { StreamingLlmToolEvent } from '../harness/turnEvents'
 import type { AppToolTurn } from './mcp/appTools/types'
+import { nativeHelperRules, nativeHelperRuntime, type NativeHelperRules } from './adapters/nativeHelperRuntimes'
 
 /**
  * Native helpers (docs/plans/tool-api.md §2.7): the helpers a provider runtime starts on its own inside a Mousse run,
@@ -13,10 +14,7 @@ import type { AppToolTurn } from './mcp/appTools/types'
  * same. Only a call tied to the hosting run itself keeps the run's full authority.
  */
 
-/** The runtime whose helpers a provider driver reports, or undefined for one Mousse does not mirror. */
-export function nativeHelperRuntime(driver: string | undefined): NativeHelperRuntime | undefined {
-  return driver === 'codex' ? 'codex' : driver === 'claude' ? 'claude' : undefined
-}
+export { nativeHelperRuntime }
 
 /** An agent id that can end a thread id as it is: what the runtimes use (UUIDs, `toolu_…`). Anything else is not mirrored. */
 const SAFE_AGENT_ID = /^[A-Za-z0-9_-]{1,128}$/
@@ -77,7 +75,12 @@ export class NativeHelperRouter {
   private readonly startedRows = new Set<string>()
   private readonly waiters = new Set<() => void>()
 
-  constructor(readonly runtime: NativeHelperRuntime) {}
+  /** What differs between runtimes (`nativeHelperRules`). */
+  readonly rules: NativeHelperRules
+
+  constructor(readonly runtime: NativeHelperRuntime) {
+    this.rules = nativeHelperRules(runtime)
+  }
 
   /** A new run of the hosting thread starts: the calls of the last one are no longer this run's. */
   beginRun(): void {
@@ -93,14 +96,7 @@ export class NativeHelperRouter {
   private helperRow(event: StreamingLlmToolEvent): string | undefined {
     const activity = event.activity as { kind?: string; nativeId?: string; toolName?: string } | undefined
     if (!event.callId || activity?.kind !== 'subagent') return undefined
-    if (this.runtime === 'codex') {
-      // Only master's own helper rows (`helperStart`): a Mousse subagent call is an MCP call with another id.
-      if (!event.callId.startsWith('helper:')) return undefined
-      return activity.nativeId ?? event.callId.slice('helper:'.length).split('#')[0]
-    }
-    const tool = activity.toolName
-    // Claude Code's own subagent tool; Mousse's delegate_task is an MCP tool and never one of these.
-    return tool === 'Agent' || tool === 'Task' ? event.callId : undefined
+    return this.rules.helperRow(event, activity)
   }
 
   route(event: StreamingLlmToolEvent): HelperRoute {
@@ -130,10 +126,10 @@ export class NativeHelperRouter {
         }
         if (event.phase === 'complete') {
           const activity = event.activity as { background?: boolean; status?: string; summary?: string; nativeId?: string } | undefined
-          // Claude Code's launch of a background agent completes the call, not the agent: its row stays open.
-          if (this.runtime === 'claude' && activity?.background === true && !activity.status) return { kind: 'host' }
+          // The launch of a background agent completes the call, not the agent: its row stays open.
+          if (this.rules.launchOnly(activity)) return { kind: 'host' }
           this.open.delete(row)
-          const sendTo = this.runtime === 'claude' && activity?.nativeId && activity.nativeId !== row ? activity.nativeId : undefined
+          const sendTo = this.rules.sendTo(activity, row)
           return { kind: 'end', agentId: row, state: endState(event), ...(activity?.summary ? { summary: activity.summary } : {}), ...(sendTo ? { sendTo } : {}) }
         }
         return { kind: 'host' }
@@ -282,12 +278,12 @@ export const ATTRIBUTION_WAIT_MS = 1500
 export async function attributeCall(router: NativeHelperRouter | undefined, ids: CallMetaIds, waitMs = ATTRIBUTION_WAIT_MS): Promise<CallAttribution> {
   // No helper was ever seen on the thread: nobody but the run could have made the call.
   if (!router || !router.hasHelpers()) return { kind: 'host' }
-  if (ids.toolUseId && router.runtime === 'claude') {
+  if (ids.toolUseId && router.rules.attribution === 'tool_use') {
     if (router.ownerOf(ids.toolUseId) === undefined) await router.waitForCall(ids.toolUseId, waitMs)
     const owner = router.ownerOf(ids.toolUseId)
     if (owner === 'host') return { kind: 'host' }
     if (owner) return { kind: 'helper', agentId: owner.agentId }
   }
-  if (ids.codexThreadId && router.runtime === 'codex' && router.knows(ids.codexThreadId)) return { kind: 'helper', agentId: ids.codexThreadId }
+  if (ids.codexThreadId && router.rules.attribution === 'thread' && router.knows(ids.codexThreadId)) return { kind: 'helper', agentId: ids.codexThreadId }
   return router.openHelpers().length ? { kind: 'unattributed' } : { kind: 'host' }
 }

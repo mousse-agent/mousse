@@ -75,6 +75,7 @@ import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
 import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
+import { nativeHelperRules } from '../run/adapters/nativeHelperRuntimes'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
 import { deleteRunResults, readRunResultText } from '../run/delegation/hold'
 import { SettleNotices, type PlannedSettleNotice } from './settleNotices'
@@ -12515,9 +12516,7 @@ export class OrchestratorService extends EventEmitter {
     if (nativeHelper)
       throw new DomainRpcError(
         'runtime_owned',
-        nativeHelper.native.runtime === 'claude'
-          ? `Claude Code runs this helper inside its parent's run, and only that run can message it: ask the parent's agent to use SendMessage with agent ${nativeHelper.native.sendTo ?? nativeHelper.native.agentId}.`
-          : `Codex runs this helper inside its parent's run (agent ${nativeHelper.native.agentId}); write to the parent thread instead.`,
+        nativeHelperRules(nativeHelper.native.runtime).runtimeOwnedMessage(nativeHelper.native),
         { agentId: nativeHelper.native.agentId, hostThreadId: nativeHelper.hostThreadId }
       )
     const runsOn = this.threadStore?.getThread(threadId)?.runsOn
