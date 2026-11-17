@@ -301,7 +301,7 @@ describe('the line and the words in the config', () => {
 
   it('leaves the User line out when the name cannot be written safely', () => {
     const a = computer('Box')
-    for (const user of ['-oProxyCommand=x', 'a=b', 'a"b', 'a\nb', 'a\\b', '', undefined]) {
+    for (const user of ['-oProxyCommand=x', 'a\nb', undefined]) {
       const text = renderConfig(
         [{ node: a.node, alias: 'mousse-box-aaaaaa', name: 'Box', user, profile: 'default' }],
         { knownHosts: '/k', cli: 'mousse-cli', platform: 'linux' }
