@@ -3,6 +3,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, CircleCheck, Laptop, Link2, M
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
 import { InviteComputerDialog, addDeviceRoutes, type AddDeviceRouteId, type Invitation } from './devices/AddDeviceDialog'
+import { MakeLinkDialog, PasteLinkDialog } from './devices/ConnectLinkDialogs'
 import { MousseIdAccount } from './MousseIdAccount'
 import { AddPhoneDialog, EnrollmentRequestRow, useEnrollmentRequests } from './MousseIdSection'
 import { RowMenu } from './integrations/RowMenu'
@@ -22,7 +23,7 @@ import { DeviceBotsRow } from './devices/DeviceBotsRow'
 import { DevicePresetRow } from './devices/DevicePresetRow'
 import { DeviceAccessSummary } from './devices/DeviceAccessSummary'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
-import { connectedHere, connectStep, joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, deviceListLine, isComputer, isIncompatible, keeperAway, KEEPER_DETAIL, listedDevices, passLapsed, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { allowDetail, connectedHere, connectStep, heldDevices, joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, deviceListLine, isComputer, isIncompatible, keeperAway, KEEPER_DETAIL, listedDevices, passLapsed, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import { describePermissionMode } from '../../shared/permissionMode'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetStartOverCheck, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
@@ -97,7 +98,7 @@ export function NetDevicesSection() {
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
   const [sshEndpoint, setSshEndpoint] = useState(''), [sshPort, setSshPort] = useState('')
   // Add device: the choice of routes, then the invitation or join form.
-  const [addStep, setAddStep] = useState<'invite' | 'join' | 'phone'>(), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
+  const [addStep, setAddStep] = useState<'link' | 'paste' | 'invite' | 'join' | 'phone'>(), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
   const [records, setRecords] = useState<NetAddonRecords>({}), [saved, setSaved] = useState<Record<string, unknown>>({}), [notice, setNotice] = useState(''), [servePort, setServePort] = useState('47890'), [serveDialog, setServeDialog] = useState<{ wasOn: boolean }>()
   const [sshRecords, setSshRecords] = useState<SshRecordView[]>([]), [sshSetup, setSshSetup] = useState<{ setupId?: string }>(), [approving, setApproving] = useState<Device & { sshOffer: { endpoint: string } }>()
   const [recordDialog, setRecordDialog] = useState<{ kind: 'undo' | 'rename' | 'update'; record: SshRecordView; name: string }>()
@@ -110,6 +111,8 @@ export function NetDevicesSection() {
   const [joinNeedsPassphrase, setJoinNeedsPassphrase] = useState(false), [givingUp, setGivingUp] = useState(false)
   // Start over opens on what the daemon says about it: what stands in the way, or what resets.
   const [startingOver, setStartingOver] = useState<NetStartOverCheck>()
+  // Held computers whose Allow notice was put off with Not now on this computer; they stay held.
+  const [notNow, setNotNow] = useState<string[]>([])
   const nameEdited = useRef(false)
   // Asks for editor connections: the prompt host watches them for the whole window; this screen reads that list.
   const editorAsks = useEditorAskStore((s) => s.asks)
@@ -513,9 +516,12 @@ export function NetDevicesSection() {
         title="Connection"
         description={connected
           ? <span title={routeDetails(device) || undefined}>{deviceLine(device, now)}{offer ? ' · offers an SSH route' : ''}</span>
-          : 'Not connected here'}
+          : device.connection === 'held' ? 'Waits for Allow' : 'Not connected here'}
         control={<>
           {offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}
+          {device.connection === 'held' && (
+            <button type="button" className="settings-btn" data-mousse-decision="" disabled={busy} title={allowDetail(device.name, device.keeper ? 'joiner' : 'maker')} onClick={() => void action('bridge.allow', { node: device.node })}>Allow</button>
+          )}
           {/* Connected here or not is this computer's own choice, like a block. */}
           {device.connection === 'connected' && (
             <button type="button" className="settings-btn" disabled={busy} title={`Stop working with ${device.name} from this computer`} onClick={() => void action('bridge.disconnect', { node: device.node })}><Unlink size={14} />Disconnect</button>
@@ -668,6 +674,21 @@ export function NetDevicesSection() {
           <EnrollmentRequestRow key={row.id} row={row} busy={enrollment.busy} onDecide={(approve) => void enrollment.decide(row.id, approve)} />
         ))}
         {enrollment.error && <p role="alert" className="chat-error devices-error">{enrollment.error}</p>}
+        {/* A computer that came in by a link made here, or the one this computer joined through a link, waits for Allow. */}
+        {heldDevices(devices).filter(({ device }) => !notNow.includes(device.node)).map(({ device, side }) => (
+          <SettingsRow
+            key={`held-${device.node}`}
+            leading={<Laptop size={16} />}
+            title={side === 'maker' ? `${device.name} wants to connect` : `Allow ${device.name} to work here?`}
+            description={<span title={allowDetail(device.name, side)}>{side === 'maker' ? 'It came in with a link made here' : 'This computer joined it with a link'}</span>}
+            control={<>
+              {side === 'maker'
+                ? authority && <button type="button" className="settings-btn" disabled={busy} onClick={() => setRevoking(device)}>Remove…</button>
+                : <button type="button" className="settings-btn" disabled={busy} onClick={() => setNotNow((list) => [...list, device.node])}>Not now</button>}
+              <button type="button" className="settings-btn primary" data-mousse-decision="" disabled={busy} title={allowDetail(device.name, side)} onClick={() => void action('bridge.allow', { node: device.node })}>Allow</button>
+            </>}
+          />
+        ))}
         {listed.map((device) => [
           deviceRow(device),
           ...(openNode === device.node ? (device.self ? selfDetail(device) : deviceDetail(device)) : [])
@@ -865,6 +886,11 @@ export function NetDevicesSection() {
           {error && <p role="alert" className="chat-error">{error}</p>}
         </form>
       </Modal>
+    )}
+
+    {addStep === 'link' && <MakeLinkDialog name={self ? undefined : name} onMade={reloadQuietly} onClose={closeAdd} />}
+    {addStep === 'paste' && (
+      <PasteLinkDialog name={self ? undefined : name} onPasted={reloadQuietly} onMakeInstead={() => setAddStep('link')} onNotNow={(node) => setNotNow((list) => [...list, node])} onClose={closeAdd} />
     )}
 
     {addStep === 'invite' && (

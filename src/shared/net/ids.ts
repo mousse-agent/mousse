@@ -9,7 +9,8 @@ export const ID_PREFIXES = {
   execution: 'exe',
   rpc: 'rpc',
   invite: 'inv',
-  dispatch: 'dsp'
+  dispatch: 'dsp',
+  offer: 'ofr'
 } as const
 export type IdKind = keyof typeof ID_PREFIXES
 
@@ -24,6 +25,8 @@ export type ExecutionId = Prefixed<'execution'>
 export type RpcId = Prefixed<'rpc'>
 export type InviteId = Prefixed<'invite'>
 export type DispatchId = Prefixed<'dispatch'>
+/** A connect link's offer, kept on the computer that made the link. */
+export type OfferId = Prefixed<'offer'>
 /** `blb_` + lowercase hex SHA-256 of the stored (possibly encrypted) bytes. */
 export type BlobId = `blb_${string}`
 

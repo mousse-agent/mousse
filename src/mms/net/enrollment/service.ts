@@ -9,6 +9,7 @@ import type {
   NodeDelegation,
   NodeId,
   Roster,
+  Route,
   RoutesRecord,
   Signed,
   UserId
@@ -43,11 +44,14 @@ export interface EnrollmentServiceOptions {
   fault?(point: 'enroll.beforeCommit' | 'join.beforeCommit'): void
   /**
    * In the transaction that enrolls a device with an invitation made here: the device is connected here (an
-   * invitation connects whoever redeems it).
+   * invitation connects whoever redeems it), or held, when the invitation came from a connect link made here.
    */
-  onRedeemed?(node: NodeId): void
-  /** In the transaction that completes this computer's join: the computer it joined through is connected here. */
-  onJoined?(inviter: NodeId): void
+  onRedeemed?(node: NodeId, invite: InviteId): void
+  /**
+   * In the transaction that completes this computer's join: the computer it joined through is connected here, or
+   * held when this computer joined through a connect link.
+   */
+  onJoined?(inviter: NodeId, link: boolean): void
 }
 export interface NodeInviteInput {
   ttlMs?: number
@@ -63,6 +67,13 @@ export interface NodeInviteInput {
    * signed invite), so the device list can tell phones from computers; unknown reads as a computer.
    */
   kind?: NodeKind
+  /**
+   * Issued on a connect link's offer path, after the pinned offer exchange: the invitation may carry an empty
+   * published route record, since the joiner already reached this computer. A raw invitation still needs a route.
+   */
+  emptyRoutes?: boolean
+  /** The latest the invitation may end (a connect link's own expiry); `ttlMs` still bounds it. */
+  endsBy?: number
 }
 export type NodeKind = 'computer' | 'phone'
 export interface NodeInviteAuthorization {
@@ -94,6 +105,11 @@ export interface PreparedNodeJoin {
   routes: Signed
   state: 'prepared' | 'enrolled'
   rendezvous?: RelayRendezvous
+  /**
+   * The join came through a connect link: the addresses of the link the offer exchange answered on, dialled
+   * before the invitation's own routes (which may be empty) for the enrollment and its retries.
+   */
+  link?: { routes: Route[] }
 }
 export interface NodeEnrollmentResult {
   delegation: Signed
@@ -181,7 +197,10 @@ function currentNode(
     throw new NetError('bad_delegation')
   return found
 }
-function parseInvite(text: string): {
+function parseInvite(
+  text: string,
+  emptyRoutes = false
+): {
   authorization: Signed
   token: Uint8Array
   document: NodeInviteAuthorization
@@ -251,7 +270,7 @@ function parseInvite(text: string): {
     if (
       routes.node !== document.node ||
       routes.issuedAt > document.issuedAt ||
-      !routes.routes.length ||
+      (!emptyRoutes && !routes.routes.length) ||
       !equal(
         decodeBase64(document.transportFingerprint, 32),
         decodeBase64(fingerprint(decodeBase64(issued.delegation.keys.transport)), 32)
@@ -310,8 +329,8 @@ function validateRendezvous(
   )
     return invalid()
 }
-export function inviteRequiresProtection(text: string): boolean {
-  const parsed = parseInvite(text)
+export function inviteRequiresProtection(text: string, emptyRoutes = false): boolean {
+  const parsed = parseInvite(text, emptyRoutes)
   try {
     return parsed.document.rendezvous !== undefined
   } finally {
@@ -464,11 +483,15 @@ export class EnrollmentService {
       delegation.delegation.keys.sign,
       'routes'
     )
-    if (routeRecord.node !== self.node || !routeRecord.routes.length || routeRecord.issuedAt > now)
+    if (
+      routeRecord.node !== self.node ||
+      (!input.emptyRoutes && !routeRecord.routes.length) ||
+      routeRecord.issuedAt > now
+    )
       throw new NetError('route_unreachable')
     const token = randomBytes(32),
       invite = newId('invite'),
-      expiresAt = Math.min(now + ttl, delegation.delegation.expiresAt)
+      expiresAt = Math.min(now + ttl, delegation.delegation.expiresAt, input.endsBy ?? Infinity)
     return {
       token,
       authorization: {
@@ -629,8 +652,13 @@ export class EnrollmentService {
     const outcome = this.inviteOutcome(invite)
     return outcome.state === 'consumed' ? { node: outcome.node, name: outcome.name } : undefined
   }
-  async prepareNodeJoin(text: string, requestedName?: string): Promise<PreparedNodeJoin> {
-    const parsed = parseInvite(text),
+  /** `link`: the invitation came from a connect link's offer path, answered on these addresses. */
+  async prepareNodeJoin(
+    text: string,
+    requestedName?: string,
+    link?: { routes: Route[] }
+  ): Promise<PreparedNodeJoin> {
+    const parsed = parseInvite(text, link !== undefined),
       { document, authorization, token } = parsed
     try {
       const label = requestedName ?? document.name ?? 'Enrolled node'
@@ -692,7 +720,8 @@ export class EnrollmentService {
         transportFingerprint: document.transportFingerprint,
         routes: document.routes,
         state: 'prepared',
-        ...(document.rendezvous ? { rendezvous: document.rendezvous } : {})
+        ...(document.rendezvous ? { rendezvous: document.rendezvous } : {}),
+        ...(link ? { link: { routes: link.routes } } : {})
       }
       this.options.db.transaction(() => {
         if (this.join() || this.options.identity.self()) throw new NetError('conflict')
@@ -938,7 +967,7 @@ export class EnrollmentService {
       db.database
         .prepare('UPDATE net_enrollment_kinds SET node=? WHERE invite=?')
         .run(request.node, request.invite)
-      this.options.onRedeemed?.(request.node)
+      this.options.onRedeemed?.(request.node, request.invite)
       this.options.fault?.('enroll.beforeCommit')
     })
     return result
@@ -993,7 +1022,7 @@ export class EnrollmentService {
       )
       latest.claims.state = 'enrolled'
       this.saveJoin(latest)
-      this.options.onJoined?.(claims.authority)
+      this.options.onJoined?.(claims.authority, claims.link !== undefined)
       this.options.fault?.('join.beforeCommit')
     })
     return this.preparedNodeJoin()!

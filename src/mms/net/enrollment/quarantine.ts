@@ -1,6 +1,8 @@
 import type {
   EnrollRequestMessage,
   HelloMessage,
+  LinkClaimMessage,
+  LinkResultMessage,
   SpaceJoinRequestMessage,
   WireMessage
 } from '../../../shared/net'
@@ -18,6 +20,7 @@ import type { Clock, Mux, MuxMessage, SecureChannel, SyncSession } from '../cont
 import { systemClock } from '../clock'
 import { createMux } from '../link/mux'
 import type { EnrollmentService, PreparedNodeJoin } from './service'
+import { linkError } from './link'
 
 export interface GatewayNormalContext {
   initialHello: MuxMessage
@@ -44,6 +47,11 @@ export interface EnrollmentGatewayOptions {
     context: GatewayNormalContext
   ): GatewayNormalSession
   spaceJoin?: SpaceJoinAdmissionPort
+  /**
+   * The connect link's offer path: a connection whose first message is `link.claim` gets one answer and ends. No
+   * hello, no session, no Space join; the pre-auth byte and time limits of this gateway apply.
+   */
+  link?: { claim(request: LinkClaimMessage, channel: SecureChannel): LinkResultMessage }
   onEnrolled?(): void
 }
 const helloValid = (header: HelloMessage): boolean =>
@@ -78,6 +86,8 @@ export class EnrollmentGateway {
   private ackSent = false
   private requestStarted = false
   private handingOff = false
+  /** A `link.claim` was received: this connection carries nothing else. */
+  private linking = false
   private done = false
   private timer: { cancel(): void }
   private listeners: Array<() => void> = []
@@ -128,6 +138,19 @@ export class EnrollmentGateway {
   }
   private async receive(message: MuxMessage): Promise<void> {
     const h = message.header
+    if (this.linking) throw new NetError('forbidden')
+    if (!this.hello && h.t === 'link.claim' && this.options.link) {
+      this.linking = true
+      let response: LinkResultMessage
+      try {
+        response = this.options.link.claim(h, this.options.channel)
+      } catch (error) {
+        response = linkError(error)
+      }
+      await this.send(response)
+      this.finish()
+      return
+    }
     if (!this.hello) {
       if (h.t !== 'hello' || h.protoMajor !== NET_PROTO_MAJOR)
         throw new NetError('incompatible_peer')

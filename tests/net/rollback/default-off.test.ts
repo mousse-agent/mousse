@@ -42,12 +42,16 @@ it('rejects every non-opt-in Net method without composing runtime or creating an
   expect(composeRuntime).not.toHaveBeenCalled()
   for (const method of NET_LOCAL_METHODS) {
     // The editor ssh methods, the add-on list and add-on undo only read or undo, so they answer while networking is off.
+    // Making or pasting a connect link opts in, like net init and bridge join; checking one reads the link alone.
     if (
       [
         'net.status',
         'net.plus.status',
         'net.init',
         'bridge.join',
+        'net.link.make',
+        'net.link.check',
+        'net.link.paste',
         'net.transport.list',
         'net.transport.action.undo',
         'net.editor.ssh.status',

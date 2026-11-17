@@ -680,6 +680,18 @@ export const wireMessageSchemas = {
       message('enroll.result', { error: wireError })
     ]
   },
+  'link.claim': message('link.claim', {
+    offer: id('ofr'),
+    want: enumeration(['add', 'connect']),
+    proof: fixedB64(32)
+  }),
+  'link.result': {
+    oneOf: [
+      message('link.result', { invite: text(MAX_INLINE_ENVELOPE_BYTES, 5) }),
+      message('link.result', { node: id('nod'), routes: signed }),
+      message('link.result', { error: wireError })
+    ]
+  },
   'space.join.request': message('space.join.request', {
     invite: id('inv'),
     space: id('spc'),

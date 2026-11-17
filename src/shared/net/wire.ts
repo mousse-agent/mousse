@@ -6,6 +6,7 @@ import type {
   EventId,
   InviteId,
   NodeId,
+  OfferId,
   RpcId,
   SpaceId,
   StreamId,
@@ -326,6 +327,23 @@ export type EnrollResultMessage =
   | { t: 'enroll.result'; delegation: Signed; roster: Signed }
   | { t: 'enroll.result'; error: WireError }
 
+/**
+ * The first and only request on a connect link's offer path, sent before any hello. `add`: a computer with no
+ * identity asks for an invitation pinned to its TLS key. `connect`: a device of the same list asks for the maker's
+ * signed routes; nothing is enrolled.
+ */
+export interface LinkClaimMessage {
+  t: 'link.claim'
+  offer: OfferId
+  want: 'add' | 'connect'
+  /** HMAC-SHA256(linkProofKey, exporter ‖ offerId ‖ SHA-256(request without proof)), base64url. */
+  proof: Base64Url
+}
+export type LinkResultMessage =
+  | { t: 'link.result'; invite: string }
+  | { t: 'link.result'; node: NodeId; routes: Signed }
+  | { t: 'link.result'; error: WireError }
+
 /** Different-user join, allowed only in the invite-bound quarantined session. */
 export interface SpaceJoinRequestMessage {
   t: 'space.join.request'
@@ -432,6 +450,8 @@ export type WireMessage =
   | LanPortMessage
   | EnrollRequestMessage
   | EnrollResultMessage
+  | LinkClaimMessage
+  | LinkResultMessage
   | SpaceJoinRequestMessage
   | SpaceJoinResultMessage
   | SpaceDiscoveryGetMessage
