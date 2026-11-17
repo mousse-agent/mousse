@@ -714,7 +714,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(w.turnsOf(w.parent.id)).toHaveLength(1)
 
       // A person's message in the thread gives the chain its run was in a new budget.
-      await w.d.orch.send('carry on', false, { threadId: w.parent.id, clientRequestId: 'person' })
+      await w.d.orch.send('carry on', false, { threadId: w.parent.id, clientRequestId: 'person', source: 'gui' })
       expect(w.d.engine.chains.get(chainId)).toMatchObject({ used: 0 })
     })
 

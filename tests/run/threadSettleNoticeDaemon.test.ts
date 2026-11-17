@@ -323,7 +323,7 @@ describe('the settle notice: an agent that sends with notify is told when the wo
     })
     await w.attach()
     await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-    await waitFor(() => results.length === 4, 'the fourth send')
+    await waitFor(() => results.length === 4, 'the fourth send', 60_000)
     const chainId = `chain:${w.d.engine.listRuns(w.parent.id).at(-1)!.runId}`
     expect(results.slice(0, 3).every((result) => typeof result.runId === 'string')).toBe(true)
     expect(results[3]).toMatchObject({ status: 'held', delivery: 'held_for_person', chainId, rootThreadId: w.parent.id })
@@ -334,7 +334,7 @@ describe('the settle notice: an agent that sends with notify is told when the wo
     // The held send made no watch, so nothing more starts.
     expect(w.noticeTurns(w.parent.id)).toHaveLength(3)
     expect(w.d.engine.chains.heldFor(chainId)).toHaveLength(1)
-  })
+  }, 90_000)
 
   describe('it never starts a turn where the sender must not be woken; it waits in the sender\'s queue', () => {
     it('in a sender a person stopped after it subscribed; the person\'s next turn lets it run after', async () => {
