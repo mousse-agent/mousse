@@ -1,20 +1,4 @@
 {
   "version": 1,
-  "claims": [
-    {
-      "task": "refresh-models-on-desktop-start",
-      "session": "agibook-3ef2ba",
-      "machine": "agibook",
-      "branch": "refresh-models-on-desktop-start",
-      "paths": [
-        "src/mms/harness/gateway.ts",
-        "src/mms/protocol/handlers.ts",
-        "src/main/mms/GuiMmsController.ts",
-        "tests/harness/modelRefreshSchedule.test.ts",
-        "tests/guiWindowConnection.test.ts"
-      ],
-      "claimedAt": "2026-11-17T20:57:42.368Z",
-      "expiresAt": "2026-11-17T22:57:42.368Z"
-    }
-  ]
+  "claims": []
 }
