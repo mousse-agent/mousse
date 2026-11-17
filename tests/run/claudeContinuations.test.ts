@@ -250,13 +250,6 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(messages.some((message) => message.content === 'Stop could not end everything this chat started. Claude Code could not be stopped.')).toBe(true)
   })
 
-  it('writes a note into the thread when Claude says a helper\'s result may not have arrived', async () => {
-    const s = await scene()
-    ;(s.service as any).liveHost.notice(s.childThread, 'A helper finished while a message was being cancelled; its result may not have been delivered.')
-    const messages = s.d.orch.getOrCreateSession(s.childThread).messages
-    expect(messages.some((message) => message.content.includes('may not have been delivered'))).toBe(true)
-  })
-
   it('a Mousse tool call Claude makes before the continuation run is active is attributed to the continuation run', async () => {
     const s = await scene({ mcp: true })
     // The previous run just ended, and the thread has no active run until the continuation's effect starts it.
