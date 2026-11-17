@@ -7,10 +7,15 @@ import {
 import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mapPartStateToInvocationState } from '../src/renderer/chat/components/agent-elements/utils/tool-adapters'
 import {
+  activeMs,
   analyzeAssistantMessage,
   foldTurnWork,
   partitionTurnSegments,
+  partWorkTimes,
   settleFinishedTurn,
+  turnFoldParts,
+  turnWaitSpans,
+  type FoldRow,
   workGroupHeading,
   workGroupIconType,
   workGroupTitle,
@@ -286,38 +291,109 @@ describe('workGroupTitle', () => {
   })
 })
 
+/**
+ * A finished turn's rows, one letter each: T a tool group, c calls in a message of their own, m text written beside
+ * calls (work), x a reply (narration or an answer), s a steered message, k a row that stays in view whatever the fold
+ * (an error, a question, an approval, a notice, a marker, an applet), f calls holding a failure the agent did not get
+ * past, C subagent cards.
+ */
+const foldRows = (rows: string): FoldRow[] =>
+  [...rows].map((letter) => {
+    switch (letter) {
+      case 'T': return { kind: 'tools' }
+      case 'f': return { kind: 'tools', keep: true }
+      case 'c': return { kind: 'message', toolsOnly: true }
+      case 'm': return { kind: 'message', toolsOnly: true, text: true }
+      case 'x': return { kind: 'message', text: true }
+      case 's': return { kind: 'message', steer: true }
+      case 'k': return { kind: 'message', keep: true }
+      case 'C': return { kind: 'cards' }
+      default: throw new Error(letter)
+    }
+  })
+
 describe('foldTurnWork', () => {
-  const tools = { kind: 'tools' as const }
-  const text = { kind: 'message' as const, text: true }
-  const call = { kind: 'message' as const, toolsOnly: true }
-  const keep = { kind: 'message' as const, keep: true }
-  const steer = { kind: 'message' as const, steer: true }
-  const cards = { kind: 'cards' as const }
+  // Expected: "1" folds behind its part's line, "0" stays in view.
+  it.each([
+    ['a plain turn: work, then the answer', 'Tx', '10'],
+    ['an answer and no work', 'x', '0'],
+    ['narration between the work folds, the answer stays', 'xTxcTx', '111110'],
+    ['steered once: each part keeps its last reply', 'xTsTx', '01010'],
+    ['steered once, the part before the steer replied before more work', 'TxTsTx', '101010'],
+    ['steered twice', 'TxsTxsTx', '10010010'],
+    ['a steered part with no reply of its own', 'TxsT', '1001'],
+    ['stopped after narration: what it said stays', 'xT', '01'],
+    ['stopped after two notes: the last stays', 'xTxT', '1101'],
+    ['stopped before saying anything', 'T', '1'],
+    ['a failure: the error and what it said before stay', 'xTk', '010'],
+    ['calls with a failure the agent did not get past stay', 'Tfk', '100'],
+    ['a kept row between the work and the answer', 'TkTx', '1010'],
+    ['subagent cards stay where they were started', 'TCTCx', '10100'],
+    ['text written beside calls is work', 'mx', '10'],
+    ['a stopped turn whose only text was beside calls', 'm', '1'],
+  ])('%s', (_name, rows, expected) => {
+    expect(foldTurnWork(foldRows(rows)).map((folded) => (folded ? '1' : '0')).join('')).toBe(expected)
+  })
+})
 
-  it('folds the work and the narration, never the answer', () => {
-    expect(foldTurnWork([text, tools, text, call, tools, text])).toEqual([true, true, true, true, true, false])
+describe('turnFoldParts', () => {
+  it.each([
+    ['a turn nobody steered is one part', 'TxTx', [[0, 4]]],
+    ['each steered message starts a part', 'xTsTxsx', [[0, 2], [2, 5], [5, 7]]],
+    ['a steered message first in the turn starts none', 'sTx', [[0, 3]]],
+  ])('%s', (_name, rows, expected) => {
+    expect(turnFoldParts(foldRows(rows)).map(({ from, to }) => [from, to])).toEqual(expected)
+  })
+})
+
+describe('the time a turn worked, without the time it waited on the person', () => {
+  const s = (seconds: number) => seconds * 1000
+
+  it.each([
+    ['no waits', [], 10],
+    ['a wait inside the span', [{ from: s(2), to: s(5) }], 7],
+    ['overlapping waits count once', [{ from: s(2), to: s(5) }, { from: s(4), to: s(6) }], 6],
+    ['a wait still open runs to the end', [{ from: s(8), to: null }], 8],
+    ['only the part of a wait inside the span counts', [{ from: s(-5), to: s(1) }, { from: s(9), to: s(30) }], 8],
+  ] as const)('activeMs: %s', (_name, waits, seconds) => {
+    expect(activeMs(0, s(10), waits)).toBe(s(seconds))
   })
 
-  it('keeps errors, questions and notices in view, and finds the answer before them', () => {
-    expect(foldTurnWork([tools, text, keep])).toEqual([true, false, false])
-    expect(foldTurnWork([tools, keep, tools])).toEqual([true, false, true])
+  it.each([
+    ['one part', [[0, 10]], [], [10]],
+    ['each part runs until the next steered message, so the parts add up to the turn', [[0, 10], [12, 20]], [], [12, 8]],
+    ['a command still running when the steer came in counts in the part before', [[0, null], [12, 20]], [], [12, 8]],
+    ['a wait counts in its own part only', [[0, 10], [12, 30]], [[15, 25]], [12, 8]],
+    ['a last part with no messages of its own', [[0, 10], [12, null]], [], [12, 0]],
+    ['a steered message saved without its time starts where the part before ended', [[0, 10], [null, 20]], [], [10, 10]],
+  ] as const)('partWorkTimes: %s', (_name, parts, waits, seconds) => {
+    const bounds = parts.map(([start, end]) => ({ startedAt: start == null ? null : s(start), endedAt: end == null ? null : s(end) }))
+    const spans = waits.map(([from, to]) => ({ from: s(from), to: s(to) }))
+    expect(partWorkTimes(bounds, spans)).toEqual(seconds.map(s))
   })
 
-  it('keeps calls with a failure the agent did not get past in view', () => {
-    expect(foldTurnWork([tools, { kind: 'tools', keep: true }, keep])).toEqual([true, false, false])
-    expect(foldTurnWork([{ kind: 'message', toolsOnly: true, keep: true }, text])).toEqual([false, false])
+  it('has no time for a turn that does not say when it started', () => {
+    expect(partWorkTimes([{ startedAt: null, endedAt: s(4) }], [])).toEqual([null])
   })
 
-  it('folds all the work of a turn cut off before its answer', () => {
-    expect(foldTurnWork([text, tools])).toEqual([true, true])
-  })
+  const at = (seconds: number) => new Date(s(seconds)).toISOString()
+  const approval = (seconds: number, data: Record<string, unknown>) => ({ id: `p${seconds}`, role: 'assistant', createdAt: at(seconds), parts: [{ type: 'data-permission-request', data: { requestId: `r${seconds}`, ...data } }] })
+  const question = (seconds: number, state = 'output-available') => ({ id: `q${seconds}`, role: 'assistant', createdAt: at(seconds), parts: [tool('tool-Question', `q${seconds}`, { state })] })
+  const answers = (seconds: number) => ({ id: `a${seconds}`, role: 'assistant', createdAt: at(seconds), parts: [tool('tool-QuestionAnswers', `a${seconds}`)] })
+  const step = (seconds: number) => ({ id: `c${seconds}`, role: 'assistant', createdAt: at(seconds), parts: [tool('tool-Bash', `c${seconds}`)] })
 
-  it('keeps steered messages and the replies written before them in view', () => {
-    expect(foldTurnWork([text, tools, steer, tools, text])).toEqual([false, true, false, true, false])
-  })
-
-  it('keeps subagent cards in view, finished or not, and still finds the answer after them', () => {
-    expect(foldTurnWork([tools, cards, tools, cards, text])).toEqual([true, false, true, false, false])
+  it.each([
+    ['an answered approval, from when it was asked to when it was answered', [approval(5, { status: 'answered', settledAt: at(9) })], [[5, 9]]],
+    ['a cancelled approval', [approval(5, { status: 'cancelled', settledAt: at(7) })], [[5, 7]]],
+    ['an approval still waiting', [approval(5, { status: 'pending' })], [[5, null]]],
+    ['an answered approval saved without its answer time', [approval(5, { status: 'answered' })], []],
+    ['a question until its answers', [question(3), answers(20), step(21)], [[3, 20]]],
+    ['a question asked without waiting: work ran before its answers', [question(3), step(4), answers(20)], []],
+    ['a question still waiting', [step(1), question(3, 'input-available')], [[3, null]]],
+    ['a secret request still open', [{ id: 'secret:1', role: 'assistant', createdAt: at(6), parts: [{ type: 'data-secret-request', data: { requestId: '1' } }] }], [[6, null]]],
+    ['work alone', [step(1), step(2)], []],
+  ])('turnWaitSpans: %s', (_name, messages, expected) => {
+    expect(turnWaitSpans(messages).map(({ from, to }) => [from / 1000, to == null ? null : to / 1000])).toEqual(expected)
   })
 })
 
