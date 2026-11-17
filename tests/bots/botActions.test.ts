@@ -3165,3 +3165,25 @@ it.each(['expiry', 'nudges', 'nudge holds'] as const)('C9 failed action %s backs
   await f.bots.deliverDueReminders()
   expect(attempts).toBe(2)
 })
+
+it.each(['none', 'open', 'approved', 'running'] as const)('C9 startup warms tools only for %s recovery', async state => {
+  const t = await setup(true)
+  if (state !== 'none') { await t.call(); await finish(f, t.work.payload) }
+  if (state === 'approved' || state === 'running') {
+    const a = f.bots.actions.forWork(t.workId)!
+    f.bots.actions.transition(a.id, 'open', 'approved')
+    if (state === 'running') f.bots.actions.transition(a.id, 'approved', 'running')
+  }
+  const warm = vi.spyOn(t.mcp, 'warm')
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  expect(warm).toHaveBeenCalledTimes(state === 'approved' || state === 'running' ? 1 : 0)
+})
+it('C9 a failed action startup reconciliation still reconciles other activations', async () => {
+  const t = await setup(false)
+  f.runs.markTerminal(t.work.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  vi.spyOn(f.bots.actions, 'reconcile').mockRejectedValue(new Error('action store unavailable'))
+  await expect(f.bots.reconcileOnStartup()).resolves.toBeUndefined()
+  expect(f.store.lastMainDispatch(t.workId)!.n).toBe(2)
+})
