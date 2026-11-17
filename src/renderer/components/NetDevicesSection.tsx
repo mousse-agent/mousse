@@ -17,7 +17,7 @@ import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { DeviceAccessRows } from './devices/DeviceAccessRows'
 import { DeviceBotsRow } from './devices/DeviceBotsRow'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
-import { netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { joinErrorWords, netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
@@ -126,6 +126,8 @@ export function NetDevicesSection() {
   const [limits, setLimits] = useState<Device>()
   // A grant that opens this computer's threads to another is confirmed with what it opens.
   const [granting, setGranting] = useState<{ device: Device; kind: 'grant' | 'computer' }>()
+  // The keychain refused a join's keys, so the join form asks for a passphrase; Give up on an unfinished join is confirmed.
+  const [joinNeedsPassphrase, setJoinNeedsPassphrase] = useState(false), [givingUp, setGivingUp] = useState(false)
   const nameEdited = useRef(false)
   // Asks for editor connections: the prompt host watches them for the whole window; this screen reads that list.
   const editorAsks = useEditorAskStore((s) => s.asks)
@@ -166,8 +168,10 @@ export function NetDevicesSection() {
     try { const result = await window.mousse.platformRequest.request(method, params); if (!alive.current) return; capture?.(result); await reload() }
     catch (cause) {
       if (alive.current) {
-        const message = String((cause as Error)?.message ?? cause)
+        const joining = method === 'bridge.join' || method === 'net.join.retry'
+        const message = joining ? joinErrorWords(cause as { code?: unknown; details?: unknown; message?: unknown }) : String((cause as Error)?.message ?? cause)
         setError(message)
+        if (joining && (cause as { code?: unknown })?.code === 'keystore_locked') setJoinNeedsPassphrase(true)
         if (method === 'net.init' && (cause as { code?: unknown })?.code === 'keystore_locked') { setKeychainRefusal(message); await reload().catch(() => undefined) }
         if (method === 'net.disable') { setDevices([]); setManifests([]); await reload().catch(() => undefined) }
       }
@@ -253,7 +257,9 @@ export function NetDevicesSection() {
     else if (self) void action('net.init', {})
     else void action('net.init', { name: name.trim(), listen: true, ...(needsPassphrase ? { passphrase } : {}) })
   }
-  const networkingLocked = !status || (!status.enabled && (!!status.restartRequired || (self ? !unlocked : !name.trim() || (needsPassphrase && !passphrase))))
+  // A join waiting for its answer is finished or given up before this computer starts its own devices.
+  const unfinishedJoin = !self ? status?.unfinishedJoin : undefined
+  const networkingLocked = !status || (!status.enabled && (!!status.restartRequired || !!unfinishedJoin || (self ? !unlocked : !name.trim() || (needsPassphrase && !passphrase))))
   const submitNewPassphrase = (event: FormEvent) => {
     event.preventDefault()
     if (!networkingLocked && !busy) toggleNetworking(true)
@@ -280,10 +286,17 @@ export function NetDevicesSection() {
     setInvitation({ text: issued.invite, expiresAt: issued.expiresAt })
   })
   const reloadQuietly = () => void reload().catch(() => undefined)
+  // A passphrase only where the keychain refuses: these keys are otherwise protected by it, with nothing to type after a restart.
+  const joinPassphrase = joinNeedsPassphrase || !!status?.vaultUnavailable
   const submitJoin = (event: FormEvent) => {
     event.preventDefault()
-    if (!joinText.trim() || !passphrase || !name.trim() || busy) return
-    void action('bridge.join', { invite: joinText.trim(), name: name.trim(), passphrase }, () => { setJoinText(''); setAddStep(undefined) })
+    if (!joinText.trim() || (joinPassphrase && !passphrase) || !name.trim() || busy) return
+    void action('bridge.join', { invite: joinText.trim(), name: name.trim(), ...(joinPassphrase ? { passphrase } : {}) }, () => { setJoinText(''); setAddStep(undefined) })
+  }
+  const retryJoin = (event: FormEvent) => {
+    event.preventDefault()
+    if (busy || (locked && !passphrase)) return
+    void action('net.join.retry', locked ? { passphrase } : {})
   }
 
   // Mousse ID sign-in sits above This device; its Set up and Unlock bring the control it needs into view.
@@ -373,6 +386,21 @@ export function NetDevicesSection() {
         description={selfDevice?.name ? `${selfDevice.name} · ${networkingLine(status)}` : networkingLine(status)}
         control={<Switch id={`${id}-networking`} checked={!!status?.enabled} label="Networking" disabled={busy || networkingLocked} onChange={toggleNetworking} />}
       />
+      {unfinishedJoin && (
+        <SettingsRow
+          title={`Finishing the connection to ${unfinishedJoin.name ?? 'the other computer'}`}
+          anchor="devices-join"
+          htmlFor={locked ? `${id}-join-passphrase` : undefined}
+          description={locked ? 'Enter this computer’s passphrase to retry' : 'Its answer never arrived'}
+          control={
+            <form className="devices-inline-form" onSubmit={retryJoin}>
+              {locked && <input id={`${id}-join-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy} onChange={(event) => setPassphrase(event.target.value)} autoComplete="current-password" />}
+              <button type="submit" className="settings-btn" disabled={busy || (locked && !passphrase)}>Retry</button>
+              <button type="button" className="settings-btn" disabled={busy} onClick={() => setGivingUp(true)}>Give up…</button>
+            </form>
+          }
+        />
+      )}
       {status?.restartRequired && status.error === 'outcome_uncertain' && (
         <p role="status" className="settings-muted devices-note">Some work is still draining; its original records are kept.</p>
       )}
@@ -530,7 +558,12 @@ export function NetDevicesSection() {
       <SettingsAdvanced>
         {self && status.protected && !locked && (
           <SettingsGroup className="devices-group">
-            <SettingsRow anchor="devices-passphrase" title="Network keys" description="Protected on this device" />
+            <SettingsRow
+              anchor="devices-passphrase"
+              title="Network keys"
+              description={status.passphraseProtected ? 'Protected by a passphrase you enter after each restart' : 'Protected on this device'}
+              control={status.passphraseProtected && <button type="button" className="settings-btn" disabled={busy} onClick={() => void action('net.protect', {})}>Use the keychain</button>}
+            />
           </SettingsGroup>
         )}
 
@@ -652,14 +685,14 @@ export function NetDevicesSection() {
 
     {addStep === 'choose' && <AddDeviceChooser routes={routes} onChoose={chooseRoute} onClose={closeAdd} />}
 
-    {/* Joining needs the invitation, a name and a passphrase that protects this device's new keys. */}
+    {/* Joining needs the invitation and a name; a passphrase only where the keychain refused. */}
     {addStep === 'join' && (
       <Modal
         open
         title="Join with invitation"
         onClose={closeAdd}
         headerStart={<RouteBack onBack={backToRoutes} />}
-        footer={<button type="submit" form={`${id}-join`} className="settings-btn devices-dialog-btn primary" disabled={busy || !joinText.trim() || !passphrase || !name.trim()}>Join</button>}
+        footer={<button type="submit" form={`${id}-join`} className="settings-btn devices-dialog-btn primary" disabled={busy || !joinText.trim() || (joinPassphrase && !passphrase) || !name.trim()}>Join</button>}
       >
         <form id={`${id}-join`} className="devices-dialog" onSubmit={submitJoin}>
           <label className="devices-field">
@@ -670,10 +703,12 @@ export function NetDevicesSection() {
             <span>This device’s name</span>
             <input value={name} maxLength={120} onChange={(event) => { nameEdited.current = true; setName(event.target.value) }} />
           </label>
-          <label className="devices-field">
-            <span>Passphrase for this device</span>
-            <input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
-          </label>
+          {joinPassphrase && (
+            <label className="devices-field">
+              <span>Passphrase for this device</span>
+              <input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
+            </label>
+          )}
           {error && <p role="alert" className="chat-error">{error}</p>}
         </form>
       </Modal>
@@ -719,6 +754,17 @@ export function NetDevicesSection() {
         onClose={() => setServeDialog(undefined)}
         onChanged={() => void reload()}
       />
+    )}
+
+    {givingUp && (
+      <Modal
+        open
+        title={`Give up connecting to ${unfinishedJoin?.name ?? 'the other computer'}?`}
+        onClose={() => setGivingUp(false)}
+        footer={<button type="button" className="settings-btn devices-dialog-btn danger-fill" disabled={busy} onClick={() => { setGivingUp(false); void action('net.join.abandon', {}) }}>Give up</button>}
+      >
+        <p>{unfinishedJoin?.name ?? 'The other computer'} may already list this computer. If it does, remove it there.</p>
+      </Modal>
     )}
 
     {revoking && (

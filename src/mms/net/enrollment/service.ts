@@ -699,6 +699,42 @@ export class EnrollmentService {
   preparedNodeJoin(): PreparedNodeJoin | undefined {
     return structuredClone(this.join()?.claims)
   }
+  /**
+   * The join this computer has under way, if any. `unsent`: no request has left `nodeJoinRequest`,
+   * so nothing exists on the other computer and the attempt can be dropped. `sent`: a request may
+   * have reached it and its answer is unknown. `enrolled`: the answer was accepted. The journal's
+   * flags are plain JSON, so this answers with the key store locked; the other computer's name and
+   * the invitation's expiry need the authorization, which a locked store may hold.
+   */
+  joinAttempt():
+    | { phase: 'unsent' | 'sent' | 'enrolled'; authority: NodeId; name?: string; expiresAt?: number }
+    | undefined {
+    const row = this.options.db.database
+      .prepare('SELECT journal FROM net_enrollment_join WHERE singleton=1')
+      .get() as { journal: string } | undefined
+    if (!row) return undefined
+    const held = parseProtocolJson(Buffer.from(row.journal)) as {
+      attempted?: boolean
+      claims: Pick<PreparedNodeJoin, 'authority' | 'state'>
+    }
+    const phase =
+      held.claims.state === 'enrolled' ? 'enrolled' : held.attempted === false ? 'unsent' : 'sent'
+    try {
+      const document = parseProtocolJson(
+          decodeBase64(this.join()!.authorization.payload)
+        ) as NodeInviteAuthorization,
+        roster = verifyDocument<Roster>(document.roster, document.rootKey, 'roster'),
+        issuer = currentNode(roster, document.node, document.issuedAt)
+      return {
+        phase,
+        authority: held.claims.authority,
+        name: issuer.delegation.name,
+        expiresAt: document.expiresAt
+      }
+    } catch {
+      return { phase, authority: held.claims.authority }
+    }
+  }
   /** Only a request that provably never left this API can be safely discarded locally. */
   abandonPreparedJoin(): void {
     if (this.options.db.database.isTransaction)

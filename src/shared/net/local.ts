@@ -57,6 +57,8 @@ export const NET_LOCAL_METHODS = [
   'net.unlock',
   'bridge.invite',
   'bridge.join',
+  'net.join.retry',
+  'net.join.abandon',
   'bridge.nodes',
   'bridge.revoke',
   'bridge.rename',
@@ -169,6 +171,8 @@ export interface NetStatus {
     detail?: string
   }>
   protected?: boolean
+  /** The keys are protected by a passphrase; `net.protect` without one moves them to the system keychain. */
+  passphraseProtected?: boolean
   /**
    * The system keychain refused to protect network keys (it is missing, or access was denied). Until
    * Mousse restarts, only a passphrase can protect them.
@@ -180,6 +184,11 @@ export interface NetStatus {
    */
   self?: { node: NodeId; user: UserId; isAuthority: boolean; removed?: true }
   rosterState?: RosterState
+  /**
+   * A join sent to another computer whose answer never came back (no identity yet). `name` is that
+   * computer's; `net.join.retry` asks again with the same keys, `net.join.abandon` gives up.
+   */
+  unfinishedJoin?: { name?: string; expiresAt?: number }
   routes: Route[]
   peers: Array<{ node: NodeId; state: 'connecting' | 'open' | 'closed'; error?: NetErrorCode }>
   error?: NetErrorCode

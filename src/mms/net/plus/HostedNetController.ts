@@ -237,25 +237,13 @@ export class HostedNetController implements HostedNet {
     if (target) {
       if (!target.online) throw new NetError('authority_offline')
       const { transportFingerprint } = await this.host.serial(() => this.host.prepareJoin())
-      const box = generateKeyPairSync('x25519').privateKey,
-        request = await client.requestToJoin(grant, {
-          target: target.node,
-          deviceName,
-          boxPublicKey: rawPublicKey(box),
-          transportFingerprint
-        })
-      let sealed: string | undefined
-      while (!(sealed = await client.readRequest(grant, request.id))) {
-        if (this.host.clock.now() + JOIN_POLL_MS >= Math.min(request.expiresAt, grant.expiresAt))
-          throw new NetError('authority_offline')
-        await abortableDelay(JOIN_POLL_MS, this.host.signal)
+      try {
+        await this.joinTarget(grant, target.node, deviceName, transportFingerprint)
+      } catch (error) {
+        // Keys made for a request that never left this computer are not kept.
+        await this.host.dropUnsentJoin().catch(() => {})
+        throw error
       }
-      const invite = openRequestSeal(
-        sealed,
-        box.export({ type: 'pkcs8', format: 'der' }).subarray(-32),
-        request.id
-      )
-      await this.host.serial(() => this.host.joinWithInvite(invite, deviceName))
     } else await this.host.serial(() => this.host.createIdentity(deviceName))
     return this.host.serial(async () => {
       this.assertTransportCapacity()
@@ -263,6 +251,35 @@ export class HostedNetController implements HostedNet {
       await this.useHostedRelay()
       return status
     })
+  }
+
+  /** Asks the account's owner computer for an invitation pinned to these keys, then joins with it. */
+  private async joinTarget(
+    grant: JoinGrant,
+    target: NodeId,
+    deviceName: string,
+    transportFingerprint: string
+  ): Promise<void> {
+    const client = this.join(),
+      box = generateKeyPairSync('x25519').privateKey,
+      request = await client.requestToJoin(grant, {
+        target,
+        deviceName,
+        boxPublicKey: rawPublicKey(box),
+        transportFingerprint
+      })
+    let sealed: string | undefined
+    while (!(sealed = await client.readRequest(grant, request.id))) {
+      if (this.host.clock.now() + JOIN_POLL_MS >= Math.min(request.expiresAt, grant.expiresAt))
+        throw new NetError('authority_offline')
+      await abortableDelay(JOIN_POLL_MS, this.host.signal)
+    }
+    const invite = openRequestSeal(
+      sealed,
+      box.export({ type: 'pkcs8', format: 'der' }).subarray(-32),
+      request.id
+    )
+    await this.host.joinWithInvite(invite, deviceName)
   }
 
   async request(method: NetLocalMethod, params: Record<string, unknown>): Promise<unknown> {
