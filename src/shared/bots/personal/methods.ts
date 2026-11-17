@@ -5,6 +5,7 @@ import type { BotLook } from './look'
 import type { BotPickReason } from './modelSlots'
 import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from './memory'
 import type { LlmProviderOption } from '../../settings'
+import type { NewBotAccess } from './deviceAccess'
 
 /** A computer on a bot's About and create row: this one (`this_computer`), or another of the person's computers by node. */
 export interface BotComputerChoice {
@@ -67,6 +68,11 @@ export interface BotRunsOnChoices {
   imageProviders?: LlmProviderOption[]
   /** What the owner can add for the Images row to offer a model, while it offers none (its tooltip). */
   imagesMissing?: string
+  /**
+   * New bot's Devices row: the service takes `access` on `bots.create`, saved before the bot is listed anywhere. Absent
+   * from an older service, which refuses the key, so the app shows no such row there.
+   */
+  reachOnCreate?: true
 }
 
 /** The pictures a bot made today against its caps (#1088), for the Images row's tooltip. */
@@ -176,9 +182,11 @@ export interface BotsPersonalV2Api {
    * from before rows): one model by name on every row; neither, by usage (an app from before picks). Older services
    * refuse these keys, so the app sends `model` only to a service that has `bots.model.choices`, and `slots` only to one
    * whose choices carry `providers`. `image`: the Images row (#1088), one of `imageProviders`' models; sent only to a
-   * service whose choices carry `imageProviders`.
+   * service whose choices carry `imageProviders`. `access`: which devices reach the new bot (New bot's Devices row),
+   * saved before the bot is listed anywhere; sent only to a service whose choices carry `reachOnCreate`. Absent, every
+   * device, as before.
    */
-  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }; result: { bot: BotSummary } }
+  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
   /**
    * Renames the bot, changes its look, or (`description`) edits its prompt in About: the description it works under from

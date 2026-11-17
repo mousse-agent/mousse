@@ -11,6 +11,8 @@ import { WizardSteps } from '../ui/WizardSteps'
 import { BotDialogFrame } from './BotDialogs'
 import { BotComputerSelect, BotModelRows, BotModelSelect, offeredListing } from './BotRunsOn'
 import { BotLookPicker } from './face/BotLookPicker'
+import { Select, type SelectOption } from '../ui/Select'
+import { BOT_DEVICES_TIP, type NewBotAccess } from '../../../shared/bots/personal/deviceAccess'
 import '../../styles/chats.css'
 import '../../styles/bots.css'
 
@@ -101,7 +103,9 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
     const model = choices && !choices.providers ? state.newBotDraft.model : null
     // The Images row (#1088) only to a service that offers it.
     const image = choices?.imageProviders && slots ? state.newBotDraft.image : null
-    const bot = await state.create({ look: state.newBotDraft.look ?? look, description, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}) })
+    // The Devices row only to a service that takes it: an older one refuses the key, and its bots reach every device.
+    const access = choices?.reachOnCreate ? { mode: state.newBotDraft.access } : null
+    const bot = await state.create({ look: state.newBotDraft.look ?? look, description, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}) })
     if (bot && onCreated) onCreated(bot)
     else if (bot) await useChatsStore.getState().openBot(bot.id)
     // Refused because a pick is gone: Runs on (where the store returned) offers what is there now, and that row is empty.
@@ -124,6 +128,7 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
         </>}
         {step === 'runsOn' && <div className="bot-new-runs-on-step">
           {choices ? <NewBotRunsOn choices={choices} model={draft.model} onModel={(model) => setNewBotDraft({ model })} rows={draft.slots}
+            access={draft.access} onAccess={(access) => setNewBotDraft({ access })}
             image={draft.image} onImage={(image) => setNewBotDraft({ image })}
             onPick={(keys, pick) => setNewBotDraft({ slots: { ...(draft.slots ?? EMPTY_ROWS), ...Object.fromEntries(keys.map((key) => [key, pick])) } })}
             onOneWork={() => { const rows = draft.slots ?? EMPTY_ROWS; setNewBotDraft({ slots: { ...rows, light: rows.medium, hard: rows.medium } }) }} /> : null}
@@ -142,16 +147,25 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
 
 const EMPTY_ROWS: BotShownRows = { talk: null, light: null, medium: null, hard: null }
 
+/** New bot's Devices row: every device, as a bot always started, or this computer alone. */
+const NEW_BOT_ACCESS_OPTIONS: SelectOption<NewBotAccess['mode']>[] = [
+  { value: 'all', label: 'Everywhere', description: 'Your connected devices and phones' },
+  { value: 'this_computer', label: 'This computer only' }
+]
+
 /**
  * Where the new bot will run (#673), as About → Runs on says it: this computer (a picker once there are two or more, the
  * others greyed), then the model rows, Talk and Work (and each kind of work under Advanced), in the app's model picker.
- * An older service without rows has its single Model picker, by usage unless a model is picked.
+ * An older service without rows has its single Model picker, by usage unless a model is picked. Devices: every device
+ * (the default) or this computer alone, which About changes later; a service that can't take it shows no such row.
  */
-function NewBotRunsOn({ choices, model, onModel, rows, image, onImage, onPick, onOneWork }: {
+function NewBotRunsOn({ choices, model, onModel, rows, access, onAccess, image, onImage, onPick, onOneWork }: {
   choices: BotRunsOnChoices
   model: string | null
   onModel: (model: string | null) => void
   rows: BotShownRows | null
+  access: NewBotAccess['mode']
+  onAccess: (access: NewBotAccess['mode']) => void
   image: BotModelPick | null
   onImage: (image: BotModelPick | null) => void
   onPick: (keys: readonly BotModelSlotKey[], pick: BotModelPick) => void
@@ -173,6 +187,12 @@ function NewBotRunsOn({ choices, model, onModel, rows, image, onImage, onPick, o
         <span>Model</span>
         <BotModelSelect ariaLabel="New bot's model" models={choices.models} value={model} onChange={onModel} />
       </div>}
+    {/* After the models, so the step still opens on the pick Create bot waits for. */}
+    {choices.reachOnCreate && <div className="bot-new-row">
+      <span title={BOT_DEVICES_TIP}>Devices</span>
+      <Select ariaLabel="Devices that reach the new bot" size="small" value={access} options={NEW_BOT_ACCESS_OPTIONS}
+        title="Change it later in About" onChange={onAccess} />
+    </div>}
   </div>
 }
 

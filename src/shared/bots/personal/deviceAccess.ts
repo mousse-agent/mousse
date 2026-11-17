@@ -2,8 +2,9 @@ import { isId } from '../../net/ids'
 
 /**
  * Which of the owner's devices can reach a personal bot (`docs/bots.md`, Which devices reach a bot). It is kept with the
- * bot on its home computer and set only there: in the bot's About, from this computer's own window. A device that is left
- * out finds no such bot: it is in none of its lists, and every call about it answers as for a bot that is not there.
+ * bot on its home computer and set there: on New bot or in the bot's About, from this computer's own window. A device
+ * that makes a bot may ask for it to reach that device alone (`RemoteBotReach`). A device that is left out finds no such
+ * bot: it is in none of its lists, and every call about it answers as for a bot that is not there.
  */
 
 /** Every one of the owner's devices (the default), this computer alone, or the devices picked by their Net node id. */
@@ -18,6 +19,23 @@ export type BotDeviceAccessMode = BotDeviceAccess['mode']
 export const DEFAULT_BOT_DEVICE_ACCESS: BotDeviceAccess = Object.freeze({ mode: 'all' }) as BotDeviceAccess
 /** What a choice that can't be read means: this computer alone, so no device reaches the bot by mistake. */
 export const UNREADABLE_BOT_DEVICE_ACCESS: BotDeviceAccess = Object.freeze({ mode: 'this_computer' }) as BotDeviceAccess
+
+/** What New bot offers (`bots.create`'s `access`): every device (the default), or this computer alone. */
+export type NewBotAccess = { mode: 'all' } | { mode: 'this_computer' }
+
+/** Whether `value` is a choice New bot may send. */
+export function isNewBotAccess(value: unknown): value is NewBotAccess {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 &&
+    ((value as { mode?: unknown }).mode === 'all' || (value as { mode?: unknown }).mode === 'this_computer')
+}
+
+/**
+ * What a device that makes a bot on another computer may ask for (`bots.create`'s `reach` there): every device, or the
+ * bot's home computer and the device that made it (`chosen`, with that device alone). Changing it later stays on the
+ * home computer.
+ */
+export const REMOTE_BOT_REACH = ['all', 'home_and_maker'] as const
+export type RemoteBotReach = (typeof REMOTE_BOT_REACH)[number]
 
 /** Most devices one bot's list holds. */
 export const MAX_BOT_DEVICES = 64

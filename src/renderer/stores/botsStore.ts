@@ -4,6 +4,7 @@ import type { BotChatMessage, BotChatQuote, BotChip, BotDetail, BotSummary } fro
 import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryEntry } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots } from '../../shared/bots/personal/definition'
+import type { NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
 import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotShownRows, type BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
@@ -69,6 +70,8 @@ export interface NewBotDraft {
   slots: BotShownRows | null
   /** The Images row (#1088): a model to make pictures with, or null (none, the default). */
   image: BotModelPick | null
+  /** The Devices row: every device (the default) or this computer alone; sent only to a service that takes it. */
+  access: NewBotAccess['mode']
   /** The step New bot shows, so closing and reopening returns to it. */
   step: NewBotStep
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
@@ -76,7 +79,7 @@ export interface NewBotDraft {
 }
 /** New bot's steps: the look, what it does (name and sentence), and where it runs. */
 export type NewBotStep = 'look' | 'about' | 'runsOn'
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, step: 'look', touched: false }
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, access: 'all', step: 'look', touched: false }
 
 /**
  * The step that can fix a refused create: a model no longer offered is Runs on's, a name or sentence the service
@@ -181,7 +184,7 @@ interface BotsState {
   /** Moves New bot to a step; moving alone is not putting anything in. */
   setNewBotStep(step: NewBotStep): void
   /** One create at a time: a second call while one is on its way gets the same answer. */
-  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<BotSummary | null>
+  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
   /**
    * The owner edits the bot's prompt in About (its description; null: back to the default). Its next turn works under
@@ -190,6 +193,8 @@ interface BotsState {
   setPrompt(botId: string, description: string | null): Promise<string | null>
   pause(botId: string): Promise<void>
   resume(botId: string): Promise<void>
+  /** Make private: only this computer reaches the bot from now on (About's Devices, in one click). */
+  makePrivate(botId: string): Promise<void>
   remove(botId: string): Promise<boolean>
   loadDetail(botId: string): Promise<void>
   setPermission(botId: string, permissionId: string, enabled: boolean): Promise<void>
@@ -811,6 +816,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
     async resume(botId) {
       const owner = epoch
       try { const bot = await bots().resume(botId); if (owner === epoch) putBot(bot) } catch (cause) { fail(owner, cause, botId) }
+    },
+
+    async makePrivate(botId) {
+      const owner = epoch
+      try {
+        await bots().setDevices(botId, { mode: 'this_computer' })
+        if (owner !== epoch) return
+        // The list's lock shows at once; the service's `bots.changed` reads it again too.
+        set((state) => ({ bots: state.bots.map((bot) => (bot.id === botId ? { ...bot, reach: 'this_computer' } : bot)) }))
+      } catch (cause) { fail(owner, cause, botId) }
     },
 
     async remove(botId) {

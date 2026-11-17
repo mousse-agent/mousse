@@ -234,7 +234,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
     </p>)(usageLine(detail.usage))}
     <h3>RUNS ON</h3>
     <RunsOn botId={bot.id} name={bot.name} refresh={`${bot.last?.at ?? ''}|${bot.error?.text ?? ''}`} />
-    <BotDevicesRow botId={bot.id} name={bot.name} />
+    <BotDevicesRow botId={bot.id} name={bot.name} reach={bot.reach} />
     <div className="bot-about-foot">
       <button type="button" className="bot-ghost-button" onClick={() => void (paused ? store().resume(bot.id) : store().pause(bot.id))}>{paused ? 'Resume' : 'Pause'}</button>
       <button type="button" className="bot-ghost-button is-danger" onClick={() => useBotsStore.setState({ dialog: { kind: 'delete', botId: bot.id }, error: null })}>Delete</button>

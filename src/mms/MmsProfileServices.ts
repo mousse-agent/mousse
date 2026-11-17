@@ -866,6 +866,8 @@ export class MmsProfileServices {
       // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
       computerName: () => computerNameIfKnown() || hostname(),
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
+      // Which devices reach each bot: a new bot's choice is saved before the bot is published.
+      deviceAccess: this.botDeviceAccess,
       // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers,
@@ -936,6 +938,15 @@ export class MmsProfileServices {
       return { journal, context, progress: memory, memory: admin, supervision: botProcesses }
     })
     this.botStore = opened?.store ?? null
+    // A new bot's choice of devices is saved before the bot: one left by a crash between the two names a bot that was
+    // never made, and goes now, before any call can make a bot.
+    if (opened) {
+      try {
+        this.botDeviceAccess.dropBots((botId) => opened.store.registry(botId) !== undefined)
+      } catch (error) {
+        console.warn('bot device choices could not be tidied', error instanceof Error ? error.message : String(error))
+      }
+    }
     // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
     if (opened) {
       try {
