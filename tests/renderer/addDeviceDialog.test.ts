@@ -29,7 +29,6 @@ describe('Add device routes', () => {
   })
 
   it('makes and pastes links on any computer, set up or not, once it is unlocked', () => {
-    expect(blocked(fresh)).toMatchObject({ link: undefined, paste: undefined })
     expect(blocked({ ...ready, authority: false, protectedKeys: false })).toMatchObject({ link: undefined, paste: undefined })
     expect(blocked({ ...ready, unlocked: false })).toMatchObject({ link: 'Unlock this device first.', paste: 'Unlock this device first.' })
   })

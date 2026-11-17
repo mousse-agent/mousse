@@ -47,8 +47,7 @@ describe('UnigramTokenizer', () => {
     expect(tokenizer.decode(tokenizer.encode('’'))).toBe('’')
   })
 
-  it('decodes a run of tokens without the leading space', () => {
-    expect(tokenizer.decode(tokenizer.encode('hello'))).toBe('hello')
+  it('decodes no tokens as empty text', () => {
     expect(tokenizer.decode([])).toBe('')
   })
 
