@@ -6,9 +6,10 @@ import { botCoreTool } from '../../../../shared/bots/personal/catalogue'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import { startedByPerson } from '../../approvalRights'
 import type { ModeCeiling } from '../../types'
+import { familyMessageScope } from './family'
 import { refused } from './refusal'
 import { callerThreadOnly } from './thread'
-import { McpToolError, type AppToolTurn, type McpCaller, type MousseTool, type ThreadRelation, type ToolAccess, type ToolListing, type ToolOutcome, type ToolScope } from './types'
+import { McpToolError, type AppToolTurn, type FamilyRelation, type McpCaller, type MousseTool, type ThreadRelation, type ToolAccess, type ToolListing, type ToolOutcome, type ToolScope } from './types'
 
 /**
  * The authority compiler (docs/plans/tool-api.md §1.3, PR 2a): the one place that decides what a thread lists and what
@@ -68,6 +69,8 @@ export interface ToolNeeds {
   starts: boolean
   /** The capability a read-only child lacks for it, when it may not call it. */
   readOnlyLacks?: string
+  /** It sends messages (`messageIntent`): a read-only child holds it for a note to its family, whatever `readOnlyLacks` says. */
+  messages: boolean
   /** The owner's own preference it changes: it never passes down to a subagent (§1.3 "Subagents"). */
   owner?: 'themes' | 'quick_actions'
   /** A plan ceiling refuses it, and why. */
@@ -114,6 +117,7 @@ export function toolNeeds(tool: MousseTool): ToolNeeds {
     callable: tool.callable !== 'in_process',
     starts,
     ...(readOnlyChild ? {} : { readOnlyLacks: starts ? 'threads.start' : WRITE_CAPABILITY[tool.access] }),
+    messages: tool.messageIntent !== undefined,
     ...(owner ? { owner } : {}),
     ...(starts ? { planRefuses: 'starts threads' as const } : tool.access === 'changesSettings' ? { planRefuses: 'changes settings' as const } : {}),
     ...(tool.asksUser ? { waitsFor: tool.asksUser } : {}),
@@ -130,6 +134,8 @@ export function toolNeeds(tool: MousseTool): ToolNeeds {
 export interface ToolAccessPolicy {
   /** How `threadId` is related to the caller, or null. */
   relation(caller: McpCaller, threadId: string): ThreadRelation | null
+  /** How `threadId` sits in the caller's family (`familyRelation`), or null; absent: no thread is family. */
+  family?(caller: McpCaller, threadId: string): FamilyRelation | null
   threadExists(threadId: string): boolean
   /** The thread is private (`Thread.localOnly`); absent: no thread is. */
   localOnly?(threadId: string): boolean
@@ -157,7 +163,7 @@ export function unattendedRefusal(needs: Pick<ToolNeeds, 'waitsFor' | 'botAnswer
  */
 export function listsTool(tool: MousseTool, listing: ToolListing): boolean {
   const needs = toolNeeds(tool)
-  if (listing.readOnly && !needs.readOnlyChild) return false
+  if (listing.readOnly && !needs.readOnlyChild && !needs.messages) return false
   if (listing.modeCeiling === 'plan' && needs.planRefuses) return false
   // A subagent's thread never holds the owner's own preferences, so it never lists them.
   if (listing.subagent && needs.owner) return false
@@ -276,6 +282,11 @@ function turnLacks(tool: MousseTool, needs: ToolNeeds, turn: AppToolTurn): ToolO
 
 /** Read-only children, the caller's own thread, the plan ceiling, then how the caller reaches another thread. */
 function centralScope(tool: MousseTool, needs: ToolNeeds, args: Record<string, unknown>, caller: McpCaller, inputs: AuthorityInputs, targets: ToolAccessPolicy | undefined): ToolScope | undefined {
+  // A message to the caller's family follows the family rules (a note from anyone in it, work from the direct parent);
+  // one outside the family is checked as before.
+  const intent = tool.messageIntent?.(args)
+  const family = intent ? familyMessageScope(tool, intent, args, caller, targets?.family ? (actor, threadId) => targets.family!(actor, threadId) : undefined) : undefined
+  if (family) return family
   if (needs.readOnlyLacks && inputs.readOnly)
     throw new McpToolError('mousse_read_only', `${tool.name} can change threads or the workspace; a read-only subagent cannot call it.`, { lacks: needs.readOnlyLacks, fix: READ_ONLY_FIX })
   // Scope before any approval: a call refused for naming another thread must not prompt the user first.
@@ -365,7 +376,7 @@ function botThreadScope(tool: MousseTool, needs: ToolNeeds, args: Record<string,
  */
 export function heldBeforeArguments(tool: MousseTool, turn: AppToolTurn, inputs: { readOnly: boolean; ceiling: ModeCeiling }): boolean {
   const needs = toolNeeds(tool)
-  if (needs.readOnlyLacks && inputs.readOnly) return false
+  if (needs.readOnlyLacks && inputs.readOnly && !needs.messages) return false
   if (needs.planRefuses && inputs.ceiling === 'plan') return false
   if (turnLacks(tool, needs, turn)) return false
   return botTurnOffers(turn.bot, tool.name)

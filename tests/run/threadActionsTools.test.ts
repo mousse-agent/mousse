@@ -516,6 +516,22 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(fx.engine.inbox.listPending('caller')).toEqual([])
     })
 
+    it('a call a native helper made reads the result but never acknowledges it: the thread\'s own turn still gets the notice (§2.7)', async () => {
+      const { registry, request, result, fx, callerRun, runs, threads, delegation } = await world()
+      const child = await fx.delegate(callerRun.runId, 'call-helper')
+      threads.set(child.childThreadId, { id: child.childThreadId, name: 'Child', createdAt: '', updatedAt: '' } as never)
+      fx.finish(child.childRunId, 'the child answer')
+      const byHelper = (): McpCallRequest => ({ ...request({ threadId: 'caller', runId: runs.caller }), helper: { kind: 'unattributed' } })
+      expect(await result(registry.call('thread_wait', { threadId: child.childThreadId, runId: child.childRunId }, byHelper()))).toMatchObject({ status: 'finished', resultText: 'the child answer' })
+      expect(fx.engine.delegations.get(child.delegationId)!.status).toBe('result_available')
+      expect(fx.engine.inbox.listPending('caller')).toHaveLength(1)
+      // task_status from a helper asks the thread owner not to acknowledge; the thread's own call still does.
+      await registry.call('task_status', { subagent: child.childThreadId }, byHelper())
+      expect(delegation.taskStatus).toHaveBeenLastCalledWith({ subagent: child.childThreadId }, { acknowledge: false })
+      await registry.call('task_status', { subagent: child.childThreadId }, request({ threadId: 'caller', runId: runs.caller }))
+      expect(delegation.taskStatus).toHaveBeenLastCalledWith({ subagent: child.childThreadId })
+    })
+
     it('a question answered before the wait could report it does not end the wait: it goes on to the run\'s result, never a false timeout', async () => {
       let open = false
       const listeners = new Set<(threadId: string) => void>()

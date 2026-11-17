@@ -7,6 +7,7 @@ import { botCatalogueTools } from './botCatalogue'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
 import { delegationTools } from './delegation'
+import { familyRelation, threadFamily } from './family'
 import { goalTools } from './goal'
 import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
@@ -65,6 +66,7 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
       const lineage = lineageRelation(engine, caller.threadId, threadId)
       return lineage === 'descendant' ? 'descendant' : lineage ? 'ancestor_or_sibling' : null
     },
+    family: (caller, threadId) => familyRelation(threadFamily(host, engine), caller.threadId, threadId),
     // A personal bot: its own rule for threads; it reaches every project.
     botReach: (caller, target, options) => {
       if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId, options)

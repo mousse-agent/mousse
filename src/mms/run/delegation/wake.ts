@@ -10,6 +10,7 @@ import { writeTerminalRun } from '../terminal'
 import {
   TERMINAL_RUN_STATUSES,
   stoppedByPerson,
+  isQuietNoteRow,
   isRetiredInboxRow,
   isWakeTurnPayload,
   type ChildResultPayload,
@@ -208,7 +209,8 @@ function deliveryFailure(store: RunStore, effect: EffectRecord, row: InboxRecord
  * to pending (`restoreUndeliveredRows`). Then, for every thread with `pending` inbox rows:
  * - no active run and no wake run already queued (its `turn.start` pending, deferred while the
  *   thread is busy, or claimed) → one `wake` run with a `turn.start` effect for all of the
- *   thread's pending rows, which become `delivered` by that effect;
+ *   thread's pending rows, which become `delivered` by that effect; never for notes sent with
+ *   `attention: none` alone (`isQuietNoteRow`), which wait for a turn something else starts;
  * - an active run, for a person's answers to the thread's open questions → one `turn.steer` with them, on a provider
  *   that steers natively or by restarting its reply (`steeredRows`);
  * - an active run that takes native steer, while every row wants `wake: 'always'` → one
@@ -243,6 +245,9 @@ export function wakeThreads(
         const active = store.getActiveRun(threadId)
         if (!active) {
           if (hasQueuedWake(store, threadId)) return
+          // A note sent with `attention: none` waits for the thread's next turn: it never starts one, and it rides with
+          // a wake that something else starts.
+          if (rows.every(isQuietNoteRow)) return
           // The wake carries on the work that delegated: a chain of agent messages is not reset by it (SPEC §15.1).
           const carriedHops = inheritedAgentHops(store, threadId, 'wake')
           const run = store.createRun({
