@@ -252,6 +252,14 @@ describe('what a computer refused, in words', () => {
     expect(blocked.message).toMatch(/refused this device\.$/)
     await t.owner.net.request('bridge.policy', { node: t.callerNode, blocked: false })
     await expect(t.dispatch('threads.get', { threadId: id })).resolves.toBeDefined()
+
+    // Disconnected on the owner, the caller keeps its session with it (the keeper) and its calls are refused.
+    await t.owner.net.request('bridge.disconnect', { node: t.callerNode })
+    const disconnected = await t.refused(t.dispatch('threads.get', { threadId: id }))
+    expect(disconnected).toMatchObject({ code: 'computer_forbidden', details: { reason: 'not_connected' } })
+    expect(disconnected.message).toMatch(/hasn't connected this computer\.$/)
+    await t.owner.net.request('bridge.connect', { node: t.callerNode })
+    await expect(t.dispatch('threads.get', { threadId: id })).resolves.toBeDefined()
   }, 60_000)
 
   it('says to update only for the action an older computer lacks', async () => {

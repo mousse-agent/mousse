@@ -155,8 +155,16 @@ export function isNetErrorCode(value: unknown): value is NetErrorCode {
  * Why a routed call to another computer was refused (`forbidden`). It lets the caller say "turn on
  * Works on threads", "this computer blocked this device" or "turned the setting off" instead of a
  * bare "not permitted". Fixed words only: it is the one detail of an error that crosses the wire.
+ * `not_connected`: the other computer has not connected this device (a connection it refuses for that reason is
+ * tried again slowly, never given up).
  */
-export const FORBIDDEN_REASONS = ['capability', 'blocked', 'setting_off', 'terminal_off'] as const
+export const FORBIDDEN_REASONS = [
+  'capability',
+  'blocked',
+  'setting_off',
+  'terminal_off',
+  'not_connected'
+] as const
 export type ForbiddenReason = (typeof FORBIDDEN_REASONS)[number]
 export const isForbiddenReason = (value: unknown): value is ForbiddenReason =>
   (FORBIDDEN_REASONS as readonly unknown[]).includes(value)

@@ -101,6 +101,22 @@ describe('network CLI validation', () => {
       params: { node: nodeId, name: 'Desk' }
     })
   })
+  it('maps connect and disconnect to the daemon methods and refuses a missing or bad node', () => {
+    expect(prepareNetCommand(args('bridge', 'connect', [nodeId]))).toEqual({
+      method: 'bridge.connect',
+      params: { node: nodeId }
+    })
+    expect(prepareNetCommand(args('bridge', 'disconnect', [nodeId]))).toEqual({
+      method: 'bridge.disconnect',
+      params: { node: nodeId }
+    })
+    for (const bad of [
+      args('bridge', 'connect', []),
+      args('bridge', 'disconnect', ['not-a-node']),
+      args('bridge', 'connect', [nodeId], [['terminal', 'on']])
+    ])
+      expect(() => prepareNetCommand(bad)).toThrow()
+  })
   it('maps block, unblock, limits, caps and kind to the daemon methods and refuses bad input', () => {
     expect(prepareNetCommand(args('bridge', 'block', [nodeId]))).toEqual({
       method: 'bridge.policy',

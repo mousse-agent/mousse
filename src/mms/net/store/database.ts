@@ -99,8 +99,17 @@ export class NetDatabase {
       if (version > 1) fail('downgrade_unsupported', 'Net database has a newer schema.')
       this.database.exec('BEGIN IMMEDIATE')
       try {
+        // A store this transaction creates is born with every one-time step already done.
+        const created = !this.database
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='net_schema_migrations'")
+          .get()
         this.database.exec(SCHEMA)
         this.addMissingColumns()
+        if (created)
+          for (const marker of BORN_MARKERS)
+            this.database
+              .prepare('INSERT OR IGNORE INTO net_local_markers VALUES(?,?)')
+              .run(marker, integer(this.clock.now()))
         this.database
           .prepare('INSERT OR IGNORE INTO net_schema_migrations VALUES(1,?)')
           .run(integer(this.clock.now()))
@@ -324,6 +333,13 @@ export class NetDatabase {
   }
 }
 
+/**
+ * One-time steps a store records as done in `net_local_markers`, kept out of `user_version` so an older build still
+ * opens the store. A new store is born with all of them.
+ */
+export const CONNECTIONS_MARKER = 'connections.v1'
+const BORN_MARKERS = [CONNECTIONS_MARKER]
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS net_schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS net_streams(id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, space_id TEXT, kind TEXT NOT NULL, epoch INTEGER NOT NULL, head INTEGER NOT NULL, cursor INTEGER NOT NULL, retained INTEGER NOT NULL, active_generation TEXT NOT NULL) STRICT;
@@ -356,5 +372,7 @@ CREATE INDEX IF NOT EXISTS bridge_audit_node ON bridge_audit(node,kind,id);
 CREATE TABLE IF NOT EXISTS bridge_audit_reads(node TEXT NOT NULL, hour INTEGER NOT NULL, calls INTEGER NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(node,hour)) STRICT;
 CREATE TABLE IF NOT EXISTS remote_thread_order(node TEXT NOT NULL, thread TEXT NOT NULL, position REAL NOT NULL, PRIMARY KEY(node,thread)) STRICT;
 CREATE TABLE IF NOT EXISTS remote_thread_opened(node TEXT NOT NULL, thread TEXT NOT NULL, opened_at INTEGER NOT NULL, PRIMARY KEY(node,thread)) STRICT;
+CREATE TABLE IF NOT EXISTS net_local_markers(name TEXT PRIMARY KEY, at INTEGER NOT NULL) STRICT;
+CREATE TABLE IF NOT EXISTS net_connections(node TEXT PRIMARY KEY, state TEXT NOT NULL, source TEXT NOT NULL, at INTEGER NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS remote_lists_cache(node TEXT PRIMARY KEY, saved_at INTEGER NOT NULL, snapshot TEXT NOT NULL) STRICT;
 `

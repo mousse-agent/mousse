@@ -116,11 +116,16 @@ export class BridgeProfileService {
       access: (botId) => access.get(botId).access,
       choices: () => access.choices(),
       deviceOn: (node) => rt.policy.get(node as NodeId).bots,
-      // A blocked device reads nothing here, so it does not hold a bot back from the streams every device may read.
-      devices: () => accountDevices(rt.identity)?.filter((node) => !rt.policy.isBlocked(node)),
+      // A blocked device, or one not connected here, reads nothing here, so it does not hold a bot back from the
+      // streams every device may read.
+      devices: () =>
+        accountDevices(rt.identity)?.filter(
+          (node) => !rt.policy.isBlocked(node) && rt.connections.connected(node)
+        ),
       changes: [
         (listener) => access.onChange(listener),
         (listener) => rt.policy.onChange(() => listener()),
+        (listener) => rt.connections.onChange(() => listener()),
         (listener) => rt.identity.onRosterChanged(() => listener())
       ]
     })
@@ -128,10 +133,19 @@ export class BridgeProfileService {
       ...reach,
       devices: async () => {
         const view = (await net.request('bridge.nodes', {})) as {
-          nodes: Array<{ node: NodeId; name?: string; kind?: string; self?: boolean; revoked?: boolean; policy?: { bots?: boolean } }>
+          nodes: Array<{
+            node: NodeId
+            name?: string
+            kind?: string
+            self?: boolean
+            revoked?: boolean
+            connection?: string
+            policy?: { bots?: boolean }
+          }>
         }
+        // Only the devices connected here are offered.
         return view.nodes
-          .filter((entry) => !entry.self && !entry.revoked)
+          .filter((entry) => !entry.self && !entry.revoked && entry.connection === 'connected')
           .map((entry): BotDeviceChoice => ({
             node: entry.node,
             name: cleanDeviceName(entry.name || 'Unnamed device'),
@@ -567,11 +581,14 @@ export class BridgeProfileService {
     // This computer's own threads go to the front of a group in front of the other computers' rows too.
     const floor = (projectId: string | undefined): number | undefined => this.lists.frontFloor(projectId)
     services.threads.remoteFloor = floor
-    // A device this computer blocks (or unblocks) is dropped from (or read into) the lists at once.
+    // A device this computer blocks (or unblocks), connects or disconnects, is dropped from (or read into) the lists at
+    // once, cached rows and all.
     const offPolicy = rt.policy.onChange(() => void this.lists.reconcile())
+    const offConnections = rt.connections.onChange(() => void this.lists.reconcile())
     this.lists.start()
     this.disposers.add(() => {
       offPolicy()
+      offConnections()
       if (services.threads.remoteFloor === floor) services.threads.remoteFloor = undefined
       if (services.remoteLists === this.lists) services.remoteLists = undefined
       this.lists.close()

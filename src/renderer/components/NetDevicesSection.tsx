@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
-import { AlertTriangle, Bot, CircleCheck, Download, Gauge, Laptop, Monitor, MonitorSmartphone, MoreHorizontal, Pencil, Plus, RefreshCw, ShieldCheck, ShieldOff, Smartphone, Trash2, Undo2, type LucideIcon } from '../lib/icons'
+import { AlertTriangle, Bot, CircleCheck, Download, Gauge, Laptop, Link2, Monitor, MonitorSmartphone, MoreHorizontal, Pencil, Plus, RefreshCw, ShieldCheck, ShieldOff, Smartphone, Trash2, Undo2, Unlink, type LucideIcon } from '../lib/icons'
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
 import { AddDeviceChooser, InviteComputerDialog, RouteBack, addDeviceRoutes, type AddDeviceRouteId, type Invitation } from './devices/AddDeviceDialog'
@@ -17,7 +17,7 @@ import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { DeviceAccessRows } from './devices/DeviceAccessRows'
 import { DeviceBotsRow } from './devices/DeviceBotsRow'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
-import { joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { connectedHere, connectStep, joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetStartOverCheck, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
@@ -327,6 +327,8 @@ export function NetDevicesSection() {
     const open = (kind: 'undo' | 'rename' | 'update') => () => { if (record) setRecordDialog({ kind, record, name: device.name }) }
     const blocked = !!device.policy?.blocked
     return [
+      // Connected here or not is this computer's own choice, like a block.
+      ...(device.connection === 'connected' ? [{ label: 'Disconnect', icon: Unlink, onSelect: () => void action('bridge.disconnect', { node: device.node }) }] : []),
       // Limits live on this computer, so they need no authority. A daemon from before them sends no policy.
       ...(device.policy ? [
         blocked
@@ -467,6 +469,7 @@ export function NetDevicesSection() {
       >
         {others.map((device) => {
           const items = deviceMenu(device), offer = device.sshOffer, record = sshRecordFor(device, sshRecords)
+          const connected = connectedHere(device), step = connectStep(device)
           return [
             <SettingsRow
               key={device.node}
@@ -478,8 +481,13 @@ export function NetDevicesSection() {
                 : authority && device.kind === 'unknown'
                   ? <span className="devices-kind" title="This device never told this computer what it is. Choose This is a computer or This is a phone in its menu.">Unknown device</span>
                   : undefined}
-              description={<span title={routeDetails(device) || undefined}>{deviceLine(device, Date.now())}{offer ? ' · offers an SSH route' : ''}</span>}
+              description={connected
+                ? <span title={routeDetails(device) || undefined}>{deviceLine(device, Date.now())}{offer ? ' · offers an SSH route' : ''}</span>
+                : 'Not connected here'}
               control={<>
+                {step && ('connect' in step
+                  ? <button type="button" className="settings-btn" disabled={busy} onClick={() => void action('bridge.connect', { node: device.node })}><Link2 size={14} />Connect</button>
+                  : <span className="settings-muted">{step.hint}</span>)}
                 {offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}
                 {items.length > 0 && <DeviceMenu name={device.name} disabled={busy} items={items} />}
               </>}
@@ -499,7 +507,7 @@ export function NetDevicesSection() {
               />
             ),
             // Terminals and editor connections from it, side by side, with a waiting ask answered here too.
-            device.policy && isComputer(device) && worksOnThreads(device) && !device.policy.blocked && (
+            connected && device.policy && isComputer(device) && worksOnThreads(device) && !device.policy.blocked && (
               <DeviceAccessRows
                 key={`${device.node}-access`}
                 device={device}
@@ -508,7 +516,7 @@ export function NetDevicesSection() {
               />
             ),
             // Whether it reaches this computer's bots at all, for phones and computers alike.
-            device.policy && !device.policy.blocked && <DeviceBotsRow key={`${device.node}-bots`} device={device} onChanged={reloadQuietly} />,
+            connected && device.policy && !device.policy.blocked && <DeviceBotsRow key={`${device.node}-bots`} device={device} onChanged={reloadQuietly} />,
             // What it did here, with its Block and limits beside it. A phone has none of this: it keeps the phone API.
             device.policy && isComputer(device) && (
               <DeviceActivityRows
