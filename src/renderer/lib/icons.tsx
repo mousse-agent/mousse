@@ -104,6 +104,7 @@ import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
 import LaptopIcon from '@hugeicons/core-free-icons/LaptopIcon'
 import Layers01Icon from '@hugeicons/core-free-icons/Layers01Icon'
 import Link01Icon from '@hugeicons/core-free-icons/Link01Icon'
+import Unlink01Icon from '@hugeicons/core-free-icons/Unlink01Icon'
 import LinkSquare02Icon from '@hugeicons/core-free-icons/LinkSquare02Icon'
 import Loading03Icon from '@hugeicons/core-free-icons/Loading03Icon'
 import Logout01Icon from '@hugeicons/core-free-icons/Logout01Icon'
@@ -276,6 +277,7 @@ export const Laptop = /* @__PURE__ */ createIcon('Laptop', LaptopIcon)
 export const Layers = /* @__PURE__ */ createIcon('Layers', Layers01Icon)
 export const LayoutGrid = /* @__PURE__ */ createIcon('LayoutGrid', GridViewIcon)
 export const Link2 = /* @__PURE__ */ createIcon('Link2', Link01Icon)
+export const Unlink = /* @__PURE__ */ createIcon('Unlink', Unlink01Icon)
 export const ListTree = /* @__PURE__ */ createIcon('ListTree', Structure01Icon)
 export const Loader2 = /* @__PURE__ */ createIcon('Loader2', Loading03Icon)
 export const Lock = /* @__PURE__ */ createIcon('Lock', SquareLock01Icon)

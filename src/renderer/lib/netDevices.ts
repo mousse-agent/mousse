@@ -1,5 +1,5 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { BridgeNodePolicy, NetAddonRecords, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
@@ -47,6 +47,23 @@ export interface Device {
   sshOffer?: { endpoint: string }
   /** What this computer lets the device do here. Absent from a daemon that predates it. */
   policy?: BridgeNodePolicy
+  /** Whether the device is connected here. Absent from a daemon that predates it, where every device is. */
+  connection?: BridgeNodeConnection
+  /** This computer holds the device's routes, so Connect can reach it. */
+  routeHeld?: boolean
+}
+
+/** The device is connected here (a daemon from before the record connects every device). */
+export function connectedHere(device: Pick<Device, 'connection'>): boolean {
+  return device.connection === undefined || device.connection === 'connected'
+}
+/**
+ * How a device that is not connected here gets connected from its row: Connect when this computer holds its routes,
+ * otherwise a link from it. Undefined for a connected device.
+ */
+export function connectStep(device: Pick<Device, 'connection' | 'routeHeld' | 'name'>): { connect: true } | { hint: string } | undefined {
+  if (connectedHere(device)) return undefined
+  return device.routeHeld ? { connect: true } : { hint: `Paste a link from ${device.name}` }
 }
 
 /** The capability that lets a computer work on this one's threads is stored as `settings`. */
