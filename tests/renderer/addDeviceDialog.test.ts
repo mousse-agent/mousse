@@ -1,8 +1,10 @@
-import { createElement } from 'react'
+// @vitest-environment jsdom
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { RowMenu } from '../../src/renderer/components/integrations/RowMenu'
 import {
-  AddDeviceChooser,
   InviteComputerDialog,
   addDeviceRoutes,
   type AddDeviceState
@@ -13,15 +15,27 @@ import { PAIRING_DISCLOSURE } from '../../src/renderer/lib/netDevices'
 
 const ready: AddDeviceState = { hasIdentity: true, unlocked: true, authority: true, protectedKeys: true }
 const fresh: AddDeviceState = { hasIdentity: false, unlocked: false, authority: false, protectedKeys: false }
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 const blocked = (state: AddDeviceState) => Object.fromEntries(addDeviceRoutes(state).map((route) => [route.id, route.blocked]))
 
 describe('Add device routes', () => {
-  it('offers the three routes in order', () => {
-    expect(addDeviceRoutes(ready).map((route) => route.title)).toEqual(['Invite a computer', 'Join with invitation', 'Remote machine over SSH'])
+  it('offers the routes in order, with a phone only in a build with Mousse ID', () => {
+    expect(addDeviceRoutes(ready).map((route) => route.title)).toEqual(['Invite a computer', 'Remote machine over SSH', 'Join with invitation'])
+    expect(addDeviceRoutes({ ...ready, phone: {} }).map((route) => route.id)).toEqual(['invite', 'phone', 'ssh', 'join'])
   })
 
   it('lets the computer that manages the devices invite and set up over SSH, and never join again', () => {
     expect(blocked(ready)).toEqual({ invite: undefined, join: 'Only on a device that is not set up yet.', ssh: undefined })
+  })
+
+  it('says what adding a phone needs, and holds everything but joining while this computer reconnects', () => {
+    expect(blocked({ ...ready, phone: { blocked: 'Sign in to add phones.' } }).phone).toBe('Sign in to add phones.')
+    expect(blocked({ ...ready, phone: {}, lapsed: true })).toEqual({
+      invite: 'Wait for this computer to reconnect first.',
+      phone: 'Wait for this computer to reconnect first.',
+      ssh: 'Wait for this computer to reconnect first.',
+      join: 'Only on a device that is not set up yet.'
+    })
   })
 
   it('lets a device that is not set up only join, and says what inviting needs', () => {
@@ -37,41 +51,47 @@ describe('Add device routes', () => {
   })
 })
 
-describe('Add device chooser', () => {
-  const html = renderToStaticMarkup(createElement(AddDeviceChooser, { routes: addDeviceRoutes(fresh), onChoose: () => undefined, onClose: () => undefined }))
-  const buttons = [...html.matchAll(/<button[^>]*data-route="([a-z]+)"[^>]*>(.*?)<\/button>/g)].map((match) => ({
-    route: match[1],
-    tag: match[0],
-    disabled: /aria-disabled="true"/.test(match[0]),
-    text: match[2]
-  }))
-
-  it('names the dialog for assistive tech without a visible title', () => {
-    expect(html).toContain('aria-label="Add device"')
-    expect(html).not.toContain('<h3')
-  })
-
-  it('keeps unavailable routes focusable and says why beside each', () => {
-    expect(buttons.map((button) => [button.route, button.disabled])).toEqual([['invite', true], ['join', false], ['ssh', true]])
-    // aria-disabled, not disabled, so the keyboard still reaches the route and reads its need.
-    for (const button of buttons) expect(button.tag).not.toMatch(/ disabled=""/)
-    expect(buttons[0].text).toContain('Turn on networking first.')
-    expect(buttons[1].text).toContain('Paste an invitation from one of your devices.')
-    const described = /aria-describedby="([^"]+)"/.exec(buttons[0].tag)?.[1]
-    expect(html).toContain(`id="${described}">Turn on networking first.`)
+describe('Add device menu', () => {
+  it('lists every route with its detail, and keeps an unavailable one focusable with its need', async () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    const chosen = vi.fn()
+    const routes = addDeviceRoutes({ ...fresh, phone: { blocked: 'Sign in to add phones.' } })
+    await act(async () => root.render(createElement(RowMenu, {
+      label: 'Add device',
+      buttonClassName: 'settings-btn',
+      trigger: 'Add device',
+      items: routes.map((route) => ({ label: route.title, detail: route.blocked ?? route.detail, disabled: !!route.blocked, action: `add-${route.id}`, onSelect: () => chosen(route.id) }))
+    })))
+    const trigger = host.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!
+    expect(trigger.textContent).toBe('Add device')
+    await act(async () => trigger.click())
+    const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    expect(items.map((item) => [item.dataset.action, item.getAttribute('aria-disabled') === 'true', item.disabled])).toEqual([
+      ['add-invite', true, false], ['add-phone', true, false], ['add-ssh', true, false], ['add-join', false, false]
+    ])
+    expect(items[1].textContent).toBe('Add a phoneSign in to add phones.')
+    await act(async () => items[0].click())
+    expect(chosen).not.toHaveBeenCalled()
+    await act(async () => items[3].click())
+    expect(chosen).toHaveBeenCalledWith('join')
+    act(() => root.unmount())
+    host.remove()
   })
 })
 
 describe('Invite a computer', () => {
   const render = (patch: Partial<Parameters<typeof InviteComputerDialog>[0]> = {}) => renderToStaticMarkup(createElement(InviteComputerDialog, {
-    ready: true, busy: false, now: 1_000_000, onCreate: () => undefined, onBack: () => undefined, onClose: () => undefined, ...patch
+    ready: true, busy: false, now: 1_000_000, onCreate: () => undefined, onClose: () => undefined, ...patch
   }))
 
   it('says what pairing allows before an invitation exists', () => {
     const html = render()
     expect(html).toContain(PAIRING_DISCLOSURE.replace(/'/g, '&#x27;'))
     expect(html).toContain('>Create invitation</button>')
-    expect(html).toContain('aria-label="Back"')
+    // Opened straight from the Add device menu, so there is no route to go back to.
+    expect(html).not.toContain('aria-label="Back"')
   })
 
   it('cannot create an invitation until this device is ready', () => {

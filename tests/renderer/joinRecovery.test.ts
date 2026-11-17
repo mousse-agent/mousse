@@ -72,6 +72,14 @@ describe('a join whose answer never arrived', () => {
     expect(alert()).toBe('Couldn’t reach Studio Mac. Check that it’s on and that both computers are on the same network or tailnet, then try again.')
   })
 
+  it('says why a retry failed for a lapsed pass too, where no Reconnecting note shows', async () => {
+    daemon.answers['net.join.retry'] = () => { throw joinError('bad_delegation') }
+    await mount()
+    await click(button('Retry'))
+    expect(alert()).toBeTruthy()
+    expect(alert()).not.toContain('bad_delegation')
+  })
+
   it('asks for the passphrase before a retry when the keys are locked', async () => {
     daemon.status = { ...daemon.status, keystore: 'locked' }
     await mount()

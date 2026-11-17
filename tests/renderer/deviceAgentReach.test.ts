@@ -85,9 +85,11 @@ afterEach(() => {
   host.remove()
 })
 
+/** Mounts the page and opens Mac's detail, where its Limits and activity are. */
 const showDevices = async () => {
   await act(async () => root.render(createElement(NetDevicesSection)))
   await flush()
+  await click(document.querySelector('[aria-label="Show details for Mac"]'))
 }
 const policyCalls = () => request.mock.calls.filter(([method]) => method === 'bridge.policy')
 

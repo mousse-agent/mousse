@@ -1,11 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import { ChevronLeft, Laptop, Link2, Server, type LucideIcon } from '../../lib/icons'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Laptop, Link2, Server, Smartphone, type LucideIcon } from '../../lib/icons'
 import { formatCountdown, secondsLeft } from '../../lib/plusSignIn'
 import { PAIRING_DISCLOSURE } from '../../lib/netDevices'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
 
-export type AddDeviceRouteId = 'invite' | 'join' | 'ssh'
+export type AddDeviceRouteId = 'invite' | 'phone' | 'ssh' | 'join'
 
 export interface AddDeviceRoute {
   id: AddDeviceRouteId
@@ -25,10 +25,18 @@ export interface AddDeviceState {
   authority: boolean
   /** Network keys are protected, which an invitation needs. */
   protectedKeys: boolean
+  /**
+   * Adding a phone through Mousse ID: absent in a build without Mousse ID, else what it needs first
+   * (`blocked`), or nothing when a phone can be added now.
+   */
+  phone?: { blocked?: string }
+  /** This computer's device pass lapsed: nothing can be added until it is renewed. */
+  lapsed?: boolean
 }
 
 /** Why this device cannot invite another one yet, or nothing when it can. */
 function inviteBlocked(state: AddDeviceState): string | undefined {
+  if (state.lapsed) return 'Wait for this computer to reconnect first.'
   if (!state.hasIdentity) return 'Turn on networking first.'
   if (!state.unlocked) return 'Unlock this device first.'
   if (!state.authority) return 'Add it from the computer that manages your devices.'
@@ -37,57 +45,18 @@ function inviteBlocked(state: AddDeviceState): string | undefined {
 }
 
 /**
- * The three ways to add a device, each with what it needs first when it is not possible yet.
- * Inviting a computer and setting one up over SSH both need this device to sign the invitation;
- * joining is only for a device that has no network identity yet.
+ * The ways to add a device, in the Add device menu, each with what it needs first when it is not possible yet.
+ * Inviting a computer and setting one up over SSH both need this device to sign the invitation; a phone comes
+ * through Mousse ID; joining is only for a device that has no network identity yet.
  */
 export function addDeviceRoutes(state: AddDeviceState): AddDeviceRoute[] {
   const invite = inviteBlocked(state)
   return [
     { id: 'invite', icon: Laptop, title: 'Invite a computer', detail: 'Paste an invitation on a computer with Mousse.', blocked: invite },
-    { id: 'join', icon: Link2, title: 'Join with invitation', detail: 'Paste an invitation from one of your devices.', blocked: state.hasIdentity ? 'Only on a device that is not set up yet.' : undefined },
-    { id: 'ssh', icon: Server, title: 'Remote machine over SSH', detail: 'Set up Mousse on a machine you reach with ssh.', blocked: invite }
+    ...(state.phone ? [{ id: 'phone' as const, icon: Smartphone, title: 'Add a phone', detail: 'Scan a code with the Mousse app.', blocked: state.lapsed ? invite : state.phone.blocked }] : []),
+    { id: 'ssh', icon: Server, title: 'Remote machine over SSH', detail: 'Set up Mousse on a machine you reach with ssh.', blocked: invite },
+    { id: 'join', icon: Link2, title: 'Join with invitation', detail: 'Paste an invitation from one of your devices.', blocked: state.hasIdentity ? 'Only on a device that is not set up yet.' : undefined }
   ]
-}
-
-/** The first view of Add device: one row per route. An unavailable route stays focusable and says why. */
-export function AddDeviceChooser({ routes, onChoose, onClose }: {
-  routes: AddDeviceRoute[]
-  onChoose: (route: AddDeviceRouteId) => void
-  onClose: () => void
-}) {
-  const id = useId()
-  // The routes name the task, so the title is for assistive tech only.
-  return (
-    <Modal open title="Add device" hideTitle onClose={onClose}>
-      <div className="devices-routes" role="group" aria-label="Add device">
-        {routes.map((route) => (
-          <button
-            key={route.id}
-            type="button"
-            className="devices-choice"
-            data-route={route.id}
-            aria-disabled={route.blocked ? true : undefined}
-            aria-describedby={`${id}-${route.id}`}
-            onClick={() => { if (!route.blocked) onChoose(route.id) }}
-          >
-            <route.icon size={14} aria-hidden="true" />
-            <strong>{route.title}</strong>
-            <span id={`${id}-${route.id}`}>{route.blocked ?? route.detail}</span>
-          </button>
-        ))}
-      </div>
-    </Modal>
-  )
-}
-
-/** A Back button for a route's own view, returning to the choice of routes. */
-export function RouteBack({ onBack }: { onBack: () => void }) {
-  return (
-    <button type="button" className="settings-icon-btn devices-back" title="Back" aria-label="Back" onClick={onBack}>
-      <ChevronLeft size={16} />
-    </button>
-  )
 }
 
 function useNow(active: boolean) {
@@ -107,7 +76,7 @@ export interface Invitation {
 }
 
 /** Invite a computer: create an invitation, then copy it. An expired one can be made again. */
-export function InviteComputerDialog({ invitation, ready, busy, error, now: fixedNow, onCreate, onBack, onClose }: {
+export function InviteComputerDialog({ invitation, ready, busy, error, now: fixedNow, onCreate, onClose }: {
   invitation?: Invitation
   /** This device can sign an invitation now. */
   ready: boolean
@@ -116,7 +85,6 @@ export function InviteComputerDialog({ invitation, ready, busy, error, now: fixe
   /** For tests: the time to show the countdown at. */
   now?: number
   onCreate: () => void
-  onBack: () => void
   onClose: () => void
 }) {
   const ticking = useNow(!!invitation?.expiresAt && fixedNow === undefined)
@@ -148,7 +116,6 @@ export function InviteComputerDialog({ invitation, ready, busy, error, now: fixe
       open
       title="Invite a computer"
       onClose={onClose}
-      headerStart={<RouteBack onBack={onBack} />}
       footer={!invitation ? create('Create invitation') : expired ? create('Create new invitation') : undefined}
     >
       <div className="devices-dialog">
