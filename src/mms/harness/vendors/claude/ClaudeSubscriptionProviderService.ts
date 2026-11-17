@@ -616,6 +616,7 @@ export async function claudeModelExtras(query: Query, models: ModelInfo[], signa
     if (model.value === 'default') continue
     try {
       await query.setModel(model.value)
+      if (signal.aborted) break
       const applied = (await settingsOf())?.applied
       extras[model.value] = {
         ...(typeof applied?.effort === 'string' ? { defaultEffort: applied.effort } : {}),
@@ -1985,7 +1986,13 @@ export class ClaudeSubscriptionProviderService {
     this.controllers.add(controller)
     const cancel = () => controller.abort()
     signal?.addEventListener('abort', cancel, { once: true })
-    const timer = setTimeout(cancel, 15_000)
+    const timeout = new Error('Claude Code model discovery timed out')
+    const timer = setTimeout(() => controller.abort(timeout), 15_000)
+    const aborted = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true })
+    })
+    // Cancellation can occur before there is an SDK request to race.
+    void aborted.catch(() => {})
     let query: Query | undefined
     // Once the live list is saved, the older-model check may take the idle query over.
     let handedOver = false
@@ -1998,26 +2005,38 @@ export class ClaudeSubscriptionProviderService {
           controller.signal.addEventListener('abort', () => resolveIdle(), { once: true })
         )
       }
-      query = await this.createQuery(idle(), {
+      const pending = this.createQuery(idle(), {
         ...this.housekeepingOptions(cwd, controller),
         tools: [],
         canUseTool: async () => ({ behavior: 'deny', message: 'Model discovery cannot run tools' })
+      }).then((created) => {
+        if (controller.signal.aborted) created.close()
+        return created
       })
-      const listed = await query.supportedModels()
+      query = await Promise.race([pending, aborted])
+      controller.signal.throwIfAborted()
+      const listed = await Promise.race([query.supportedModels(), aborted])
       controller.signal.throwIfAborted()
       // A model whose catalog route needs a newer Mousse is not offered, even when Claude Code lists it.
       const { read, gated } = this.catalogs()
       const models = claudeLiveModelsForThisMousse(listed, read, gated)
       // A listing whose every model is gated still replaces the saved one: it is empty, not unknown.
       if (listed.length) {
-        const extras = models.length ? await claudeModelExtras(query, models, controller.signal) : {}
-        controller.signal.throwIfAborted()
+        const extras = models.length
+          ? await Promise.race([claudeModelExtras(query, models, controller.signal), aborted]).catch((error) => {
+              // Discovering optional reasoning settings can time out after the live list arrived.
+              if (error !== timeout) throw error
+              return {}
+            })
+          : {}
+        signal?.throwIfAborted()
+        if (controller.signal.reason !== timeout) controller.signal.throwIfAborted()
         this.settings.models = claudeModelOptions(models, extras)
         this.settings.modelRoutes = Object.fromEntries(models.flatMap((model) => (model.resolvedModel ? [[model.value, bareModelId(model.resolvedModel)]] : [])))
         this.settings.modelsRefreshedAt = new Date().toISOString()
         this.save()
         try {
-          handedOver = this.startOlderCheck(query, controller, listed)
+          if (!controller.signal.aborted) handedOver = this.startOlderCheck(query, controller, listed)
         } catch {
           // The live list is saved; the older models wait for the next refresh.
         }
