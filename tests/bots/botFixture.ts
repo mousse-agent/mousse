@@ -214,7 +214,7 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
   scheduler.on('jobRemoved', (_id: string, job: ScheduledJob) => {
     if (job.bot) fixture.bots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job), canWakeMe: job.bot.canWakeMe })
   })
-  scheduler.setBotRunner({ findOccurrence: (input) => fixture.bots.findScheduledOccurrence(input), runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
+  scheduler.setBotRunner({ editSchedule: (botId, save) => fixture.bots.editSchedule(botId, save), findOccurrence: (input) => fixture.bots.findScheduledOccurrence(input), runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
   scheduler.setTickHook((now) => fixture.bots.maintain(now))
   fixture.tickSchedules = async (now) => {
     if (now) clock.now = now.getTime()

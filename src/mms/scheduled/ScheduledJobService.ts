@@ -42,6 +42,8 @@ export interface ScheduledJobRunner {
  * ready yet (the occurrence stays due).
  */
 export interface ScheduledBotRunner {
+  /** Save a schedule edit and retire stale approval rows before edit observers run. */
+  editSchedule?(botId: string, save: () => ScheduledJob | null): ScheduledJob | null
   /** The run already inserted for this claim, before a crash interrupted the hand-over. */
   findOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { messageId: string; occurrenceAt: string } | { kind: 'skipped'; reason: string } | undefined
   runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; say?: string; ownerAsked?: boolean; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
@@ -485,11 +487,16 @@ export class ScheduledJobService extends EventEmitter {
     return job
   }
 
+  private editBotSchedule(id: string, save: () => ScheduledJob | null): ScheduledJob | null {
+    const job = this.store.getJob(id)
+    return job?.bot && this.botRunner?.editSchedule ? this.botRunner.editSchedule(job.bot.botId, save) : save()
+  }
+
   updateJob(id: string, patch: Partial<ScheduledJob>, options?: Parameters<ScheduledJobStore['updateJob']>[2]): ScheduledJob | null {
     this.lifecycle.assertAccepting()
     // The live status is derived when listed; a patch that carries it back never stores it.
     const { liveStatus: _status, liveThreadId: _thread, ...stored } = patch
-    const job = this.store.updateJob(id, stored, options)
+    const job = this.editBotSchedule(id, () => this.store.updateJob(id, stored, options))
     if (job) this.emitUpdated()
     return job
   }
@@ -503,14 +510,14 @@ export class ScheduledJobService extends EventEmitter {
 
   pauseJob(id: string, reason?: string, resumeAt?: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
-    const job = this.store.pauseJob(id, reason, resumeAt)
+    const job = this.editBotSchedule(id, () => this.store.pauseJob(id, reason, resumeAt))
     if (job) this.emitUpdated()
     return job
   }
 
   resumeJob(id: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
-    const job = this.store.resumeJob(id)
+    const job = this.editBotSchedule(id, () => this.store.resumeJob(id))
     if (job) this.emitUpdated()
     return job
   }

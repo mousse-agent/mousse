@@ -9341,6 +9341,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** One of a bot's schedules changed in the shared store (an edit on the Automations page): its chat and About read it again. */
+  editSchedule<T>(botId: string, save: () => T): T {
+    return this.store.db.transaction(() => {
+      const result = save()
+      this.actions.withdrawChanged(botId)
+      return result
+    })
+  }
+
   schedulesEdited(botId: string): void {
     this.dropRemovedScheduleRuns(botId)
     this.changed({ botId })
