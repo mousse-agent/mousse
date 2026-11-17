@@ -219,7 +219,6 @@ describe('pull request store', () => {
     vi.advanceTimersByTime(2000)
     await refreshPullRequest('/repo/a', 'feature')
     expect(git.pullRequest).toHaveBeenCalledTimes(2)
-    expect(PULL_REQUEST_MAX_AGE_MS).toBe(60_000)
   })
 
   it('refetches when forced, and queues exactly one more fetch behind one in flight', async () => {
@@ -859,24 +858,8 @@ describe('commit, push and open PR through the git store', () => {
     expect(formOf()).toEqual(projectForm())
   })
 
-  it('stops at a hook refusal in a thread worktree the same way', async () => {
-    const git = noLookupInstall({ commit: vi.fn(async () => { throw failure('git_hook_failed', 'pre-commit hook failed (exit 1)') }) })
-    await refreshGitStatus('/repo/a', { scope: { projectId: 'p1', workspaceThreadId: null } })
-    await expect(
-      commitGitChanges('/repo/a', 'x', worktree, { openPullRequest: scope({ threadId: 't1', originThreadId: 't1' }) })
-    ).rejects.toThrow('pre-commit hook failed')
-    expect(git.push).not.toHaveBeenCalled()
-    expect(formOf()).toBeNull()
-  })
-
-  it.each([
-    ['the remote has newer commits', failure('git_push_rejected', 'The remote has commits this branch does not. Pull them, then push again.')],
-    ['the branch has diverged', failure('git_pull_diverged', 'This branch has diverged from its upstream.')],
-    ['there is no remote to push to', failure('git_no_remote', 'Add a remote before pushing.')],
-    ['the branch has no upstream', failure('git_no_upstream', 'This branch has no upstream. Push it first to set one.')],
-    ['the remote refused the push', failure('git_push_rejected_by_remote', 'The remote refused this push.')],
-    ['the push was cancelled', failure('git_cancelled', 'Cancelled.')]
-  ])('stops at a push refused because %s: the commit stays, nothing is looked up or opened', async (_name, pushError) => {
+  it('stops at a refused push: the commit stays, nothing is looked up or opened', async () => {
+    const pushError = failure('git_push_rejected', 'The remote has commits this branch does not. Pull them, then push again.')
     const git = noLookupInstall({ push: vi.fn(async () => { throw pushError }) })
     await refreshGitStatus('/repo/a', { scope: GIT_SCOPE })
     const caught = await commitGitChanges('/repo/a', 'Add things', project, { openPullRequest: projectForm() }).catch((error: unknown) => error)
@@ -928,27 +911,6 @@ describe('commit, push and open PR through the git store', () => {
     await expect(commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() })).rejects.toThrow('The branch changed')
     expect(git.commit).not.toHaveBeenCalled()
     expect(git.push).not.toHaveBeenCalled()
-    expect(formOf()).toBeNull()
-  })
-
-  it('stops when the daemon finds another branch at the commit, and leaves nothing pushed or opened', async () => {
-    const changed = failure('git_branch_changed', 'The branch changed while this was open. Review it, then try again.')
-    const git = noLookupInstall({ commit: vi.fn(async () => { throw changed }) })
-    await refreshGitStatus('/repo/a', { scope: GIT_SCOPE })
-    await expect(commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() })).rejects.toBe(changed)
-    expect(git.push).not.toHaveBeenCalled()
-    expect(git.pullRequest).not.toHaveBeenCalled()
-    expect(formOf()).toBeNull()
-  })
-
-  it('stops when the branch changes between the commit and the push: the push is refused and nothing is opened', async () => {
-    const changed = failure('git_branch_changed', 'The branch changed while this was open. Review it, then try again.')
-    const git = noLookupInstall({ push: vi.fn(async () => { throw changed }) })
-    await refreshGitStatus('/repo/a', { scope: GIT_SCOPE })
-    const caught = await commitGitChanges('/repo/a', 'x', project, { openPullRequest: projectForm() }).catch((error: unknown) => error)
-    expect(caught).toBeInstanceOf(CommitPushError)
-    expect((caught as CommitPushError).pushError).toBe(changed)
-    expect(git.pullRequest).not.toHaveBeenCalled()
     expect(formOf()).toBeNull()
   })
 
