@@ -1,7 +1,8 @@
 // Shared helpers for the work-skill scripts (related-work, work-claim, verify,
 // task-notes, close-completed-issues). Node ESM, no dependencies; uses git and gh.
 import { execFile, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // ---------- processes ----------
@@ -89,33 +90,40 @@ export function parseArgv(argv, { bool = [], value = [], multi = [] } = {}) {
 
 // ---------- paths ----------
 
-/** Normalises a planned path: forward slashes, no leading ./, and `dir/**` or `dir/*` become `dir/`. */
+/**
+ * Normalises a planned path: forward slashes, no leading ./, and `dir/**` or `dir/*` become `dir/`.
+ * The repository root ("", ".", "./", "/", "*", "**") normalises to the empty string and means every file.
+ */
 export function normalizePath(path) {
-  let value = String(path ?? '').trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/');
+  let value = String(path ?? '').trim().replace(/\\/g, '/').replace(/^(\.\/)+/, '').replace(/\/{2,}/g, '/');
+  if (/^(\.|\/|\*{1,2})?$/.test(value)) return '';
   value = value.replace(/\/\*\*$/, '/').replace(/\/\*$/, '/');
-  return value === '.' || value === '' ? '' : value;
+  return value;
 }
 
-/** True when `a` names `b` or a directory containing it. Both are normalised. */
+/** True when `a` names `b` or a directory containing it. Both are normalised; the root covers everything. */
 function covers(a, b) {
-  if (a === b) return true;
+  if (a === '' || a === b) return true;
   if (a.endsWith('/')) return b.startsWith(a) || `${b}/` === a;
   return b.startsWith(`${a}/`);
 }
 
-/** Changed files that fall under any planned path (a planned entry is a file or a directory). */
+/** Changed files that fall under any planned path (a planned entry is a file or a directory, or the root). */
 export function pathsOverlap(planned, changed) {
-  const plans = planned.map(normalizePath).filter(Boolean);
+  const plans = planned.map(normalizePath);
   if (!plans.length) return [];
   return changed.map(normalizePath).filter((file) => file && plans.some((plan) => covers(plan, file)));
 }
 
-/** Paths shared by two planned sets: for each overlapping pair, the more specific path. */
+/** True when a planned path is the repository root, which overlaps every open change. */
+export const coversWholeRepo = (planned) => planned.some((path) => normalizePath(path) === '');
+
+/** Paths shared by two planned sets: for each overlapping pair, the more specific path (the root shows as "."). */
 export function pathSetsOverlap(left, right) {
   const shared = new Set();
-  for (const a of left.map(normalizePath).filter(Boolean)) {
-    for (const b of right.map(normalizePath).filter(Boolean)) {
-      if (covers(a, b)) shared.add(b);
+  for (const a of left.map(normalizePath)) {
+    for (const b of right.map(normalizePath)) {
+      if (covers(a, b)) shared.add(b === '' ? '.' : b);
       else if (covers(b, a)) shared.add(a);
     }
   }
@@ -286,3 +294,29 @@ export function ensureDir(path) {
   return path;
 }
 
+
+// ---------- working-tree fingerprint ----------
+
+/**
+ * Identity of the exact contents of the working tree: the git tree object of every tracked file and every
+ * untracked, non-ignored file as they are on disk now. It is built in a throwaway copy of the index, so the
+ * real index is untouched. Committing the same contents gives the same value, so a check run before a commit
+ * still matches after it, while any later edit, new file or deletion changes it.
+ */
+export function workingTreeFingerprint(cwd = process.cwd()) {
+  const head = git(['rev-parse', 'HEAD'], { cwd });
+  const headTree = git(['rev-parse', 'HEAD^{tree}'], { cwd });
+  const scratch = mkdtempSync(join(tmpdir(), 'tree-fingerprint-'));
+  try {
+    const temp = join(scratch, 'index');
+    const realIndex = git(['rev-parse', '--path-format=absolute', '--git-path', 'index'], { cwd });
+    if (existsSync(realIndex)) copyFileSync(realIndex, temp);
+    else git(['read-tree', 'HEAD'], { cwd, env: { ...process.env, GIT_INDEX_FILE: temp } });
+    const env = { ...process.env, GIT_INDEX_FILE: temp };
+    run('git', ['add', '-A', '--', '.'], { cwd, env, timeout: 300_000 });
+    const tree = git(['write-tree'], { cwd, env });
+    return { head, tree, dirty: tree !== headTree };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}

@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Runs the named test files (vitest, quiet) and optional typechecks, prints only a pass/fail
 // summary with the first failures trimmed, and records HEAD, commands and results in
-// .task-notes.json so later steps reuse them instead of rerunning.
+// .task-notes.json so later steps reuse them instead of rerunning. A record is reusable only while the
+// working-tree fingerprint (the exact file contents) is the same; any edit makes it not verified.
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { git, parseArgv, readNotes, recordNotes, repoRoot, stripAnsi, trimText } from './work-lib.mjs';
+import { parseArgv, readNotes, recordNotes, repoRoot, stripAnsi, trimText, workingTreeFingerprint } from './work-lib.mjs';
 
 const HELP = `Usage: node scripts/verify.mjs [test files...] [--typecheck web|node|all] [options]
 
@@ -19,8 +20,8 @@ Options:
   --help             this text
 
 Exit codes: 0 everything passed, 1 something failed or could not run, 2 usage error.
-The record (HEAD sha, dirty flag, commands, results) lives in .task-notes.json under "tested".
-Rerunning on the same HEAD replaces the entry for the same command; a new HEAD starts a new record.`;
+The record (HEAD sha, working-tree fingerprint, commands, results) lives in .task-notes.json under "tested".
+Rerunning with the same fingerprint replaces the entry for the same command; any change to the files starts a new record.`;
 
 const TYPECHECKS = { web: 'tsconfig.web.json', node: 'tsconfig.node.json' };
 
@@ -66,11 +67,11 @@ function shortName(name) {
 
 const indent = (text, prefix) => text.split('\n').map((line) => `${prefix}${line}`).join('\n');
 
-/** Merges a new result into the recorded run: same HEAD and dirty flag keeps older results. */
-export function mergeTested(previous, { sha, dirty, at }, result) {
-  const sameRun = previous && previous.sha === sha && previous.dirty === dirty;
+/** Merges a new result into the recorded run: only the same working-tree fingerprint keeps older results. */
+export function mergeTested(previous, { sha, tree, dirty, at }, result) {
+  const sameRun = Boolean(previous && tree && previous.tree === tree);
   const results = (sameRun ? previous.results : []).filter((entry) => entry.command !== result.command);
-  return { sha, dirty, at, results: [...results, result] };
+  return { sha, tree, dirty, at, results: [...results, result] };
 }
 
 // ---------- running ----------
@@ -135,11 +136,11 @@ export function main(argv, { cwd = process.cwd() } = {}) {
 
   let root;
   let sha;
+  let tree;
   let dirty;
   try {
     root = repoRoot(cwd);
-    sha = git(['rev-parse', 'HEAD'], { cwd: root });
-    dirty = git(['status', '--porcelain', '--untracked-files=no'], { cwd: root }) !== '';
+    ({ head: sha, tree, dirty } = workingTreeFingerprint(root));
   } catch (error) {
     console.log(`NOT VERIFIED: ${error.message}`);
     return 1;
@@ -154,17 +155,18 @@ export function main(argv, { cwd = process.cwd() } = {}) {
   const lines = [];
   for (const result of results) {
     lines.push(`${result.ok ? 'PASS' : 'FAIL'} ${result.name}: ${result.summary} (${seconds(result.ms)})`);
+    lines.push(`  $ ${result.command}`);
     if (!result.ok) lines.push(...result.failures);
   }
   const ok = results.every((result) => result.ok);
-  lines.push(`verify: ${ok ? 'PASS' : 'FAIL'} @ ${sha.slice(0, 7)}${dirty ? ' (uncommitted changes included)' : ''}`);
+  lines.push(`verify: ${ok ? 'PASS' : 'FAIL'} @ ${sha.slice(0, 7)}${dirty ? ' + uncommitted changes' : ''} (tree ${tree.slice(0, 7)})`);
   console.log(lines.join('\n'));
 
   if (!args.bool['no-notes']) {
     const at = new Date().toISOString();
     let tested = readNotes(root).tested;
     for (const result of results) {
-      tested = mergeTested(tested, { sha, dirty, at }, {
+      tested = mergeTested(tested, { sha, tree, dirty, at }, {
         name: result.name, command: result.command, ok: result.ok, summary: result.summary, seconds: Number((result.ms / 1000).toFixed(1)),
       });
     }

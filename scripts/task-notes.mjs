@@ -3,7 +3,7 @@
 // related-work verdict, claim, tested commit and results, and PR number. Read it after a
 // context reset instead of rerunning checks.
 import { pathToFileURL } from 'node:url';
-import { getPath, git, mergeNotes, parseArgv, readNotes, repoRoot, setPath, timeAgo, writeNotes } from './work-lib.mjs';
+import { getPath, mergeNotes, parseArgv, readNotes, repoRoot, setPath, timeAgo, workingTreeFingerprint, writeNotes } from './work-lib.mjs';
 
 const HELP = `Usage: node scripts/task-notes.mjs <command> [args]
 
@@ -18,8 +18,11 @@ Commands:
 Keys used by the scripts: tier, related, claim, tested, pr. The file is untracked (.gitignore).
 Exit codes: 0 ok, 1 key missing or file unwritable, 2 usage error.`;
 
-/** One-screen summary of the notes, flagging a tested record that no longer matches HEAD. */
-export function formatNotes(notes, { head = null, now = Date.now() } = {}) {
+/**
+ * One-screen summary of the notes. A tested record is called current only when its working-tree fingerprint
+ * (`tree`) equals the one passed in; anything else, including an old record without one, is not verified.
+ */
+export function formatNotes(notes, { tree = null, now = Date.now() } = {}) {
   if (!Object.keys(notes).length) return 'no task notes yet';
   const lines = [];
   if (notes.tier !== undefined) lines.push(`tier: ${notes.tier}`);
@@ -32,9 +35,11 @@ export function formatNotes(notes, { head = null, now = Date.now() } = {}) {
   if (notes.claim) lines.push(`claim: ${notes.claim.task} session ${notes.claim.session} until ${notes.claim.expiresAt}`);
   if (notes.tested) {
     const t = notes.tested;
-    const state = head && head !== t.sha ? `STALE (HEAD is ${head.slice(0, 7)})` : (head ? 'current' : 'unchecked');
-    lines.push(`tested: @ ${t.sha.slice(0, 7)}${t.dirty ? ' (uncommitted)' : ''} ${state}`);
-    for (const r of t.results ?? []) lines.push(`  ${r.ok ? 'PASS' : 'FAIL'} ${r.name}: ${r.summary}`);
+    const state = !tree ? 'unchecked (could not fingerprint the working tree)'
+      : t.tree && t.tree === tree ? 'current'
+        : 'NOT VERIFIED for the files as they are now (edited since the run); rerun verify';
+    lines.push(`tested: @ ${t.sha.slice(0, 7)}${t.dirty ? ' + uncommitted' : ''} ${state}`);
+    for (const r of t.results ?? []) lines.push(`  ${r.ok ? 'PASS' : 'FAIL'} ${r.name}: ${r.summary}${r.command ? `\n    $ ${r.command}` : ''}`);
   }
   if (notes.pr !== undefined) lines.push(`pr: #${notes.pr}`);
   return lines.join('\n');
@@ -56,9 +61,9 @@ export function main(argv, { cwd = process.cwd() } = {}) {
   switch (command) {
     case 'show': {
       if (args.bool.json) { console.log(JSON.stringify(notes, null, 2)); return 0; }
-      let head = null;
-      try { head = git(['rev-parse', 'HEAD'], { cwd: root }); } catch { /* unchecked */ }
-      console.log(formatNotes(notes, { head }));
+      let tree = null;
+      try { tree = workingTreeFingerprint(root).tree; } catch { /* unchecked */ }
+      console.log(formatNotes(notes, { tree }));
       return 0;
     }
     case 'get': {

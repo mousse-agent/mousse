@@ -1,22 +1,23 @@
 #!/usr/bin/env node
-// Compact related-work check: searches issues and PRs by terms, intersects the planned paths
-// with the changed files of open PRs, and prints only hits. Read-only; writes nothing to GitHub.
+// Compact related-work check: searches issues and PRs (open and closed) by terms, intersects the planned
+// paths with the changed files of open PRs and of recent remote branches that have no PR, and prints only
+// hits. Read-only; writes nothing to GitHub. Anything incomplete is said so and never reported as CLEAR.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  gh, git, gitCommonDir, parseArgv, pathsOverlap, pool, recordNotes, repoRoot, runAsync, timeAgo,
+  coversWholeRepo, gh, git, gitCommonDir, parseArgv, pathsOverlap, pool, recordNotes, repoRoot, runAsync, timeAgo,
 } from './work-lib.mjs';
 
 const HELP = `Usage: node scripts/related-work.mjs [terms and planned paths] [options]
 
-Finds open and recently merged work that overlaps a task. Prints only hits.
+Finds open and closed work that overlaps a task, plus recent remote branches without a PR. Prints only hits.
 
-Arguments (a bare argument with a "/" or a file extension is a planned path, the rest are terms):
+Arguments (a bare argument with a "/" or a file extension, or "." for the whole repository, is a planned path):
   --term <text>    search term (repeatable; quote phrases)
-  --path <path>    planned file or directory (repeatable)
+  --path <path>    planned file or directory (repeatable); "." means everything and matches every open change
 Options:
-  --days <n>       how far back "recently merged" reaches (default 14)
+  --days <n>       how recent a remote branch must be to be examined (default 14)
   --self <branch>  head branch to ignore (default: the current branch)
   --repo <o/r>     repository (default: the current checkout's)
   --no-fetch       skip "git fetch origin"
@@ -24,18 +25,36 @@ Options:
   --json           print the result as JSON
   --help           this text
 
-Exit codes: 0 checked (hits or clear), 1 NOT CHECKED (any gh/git failure), 2 usage error.
-CLEAR is printed only when every check completed and found nothing.`;
+Exit codes: 0 checked (hits, incomplete notes, or clear), 1 NOT CHECKED (any gh/git failure, or a list that
+hit its limit), 2 usage error. CLEAR is printed only when every check completed and found nothing.`;
 
+const ROOT_LIKE = /^(\.|\.\/|\/|\*{1,2})$/;
 const PATH_LIKE = /[\\/]|\.[A-Za-z0-9]{1,8}$/;
-const MAX_TERM_LINES = 10;
+export const OPEN_PR_LIMIT = 1000;
+export const SEARCH_LIMIT = 15;
+export const MAX_BRANCHES = 400;
+const MAX_TERM_LINES = 12;
 const MAX_FILES_SHOWN = 5;
+const MAX_BRANCH_LINES = 10;
 
 export function classifyArgs(positional) {
   const terms = [];
   const paths = [];
-  for (const arg of positional) (PATH_LIKE.test(arg) && !/\s/.test(arg) ? paths : terms).push(arg);
+  for (const arg of positional) (ROOT_LIKE.test(arg) || (PATH_LIKE.test(arg) && !/\s/.test(arg)) ? paths : terms).push(arg);
   return { terms, paths };
+}
+
+/** A list that came back at its limit may have more rows: the check is incomplete, so it must not pass. */
+export function assertComplete(count, limit, what) {
+  if (count >= limit) throw new Error(`incomplete: ${what} reached its limit of ${limit}; there may be more`);
+}
+
+/** The PR is the current task's own: same branch name in this repository, not a fork's branch of that name. */
+export function isOwnPr(pr, branch, repoOwner) {
+  if (!branch || pr.headRefName !== branch) return false;
+  if (pr.isCrossRepository) return false;
+  const headOwner = pr.headRepositoryOwner?.login;
+  return !headOwner || !repoOwner || headOwner.toLowerCase() === repoOwner.toLowerCase();
 }
 
 /** Open PRs whose changed files intersect the plan. `filesByPr` maps PR number to its file list. */
@@ -50,10 +69,42 @@ export function findOverlaps(prs, filesByPr, planned) {
   return hits;
 }
 
-const limited = (items, max) => (items.length > max ? [...items.slice(0, max), `+${items.length - max}`] : items);
+/** Whether every term's words (3+ letters) appear in a branch name. */
+export function branchNameMatches(name, terms) {
+  const lower = name.toLowerCase();
+  return terms.some((term) => {
+    const words = term.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length >= 3);
+    return words.length > 0 && words.every((word) => lower.includes(word));
+  });
+}
 
-export function formatReport({ repo, baseSha, openCount, terms, planned, overlaps, termHits, now = Date.now() }) {
+/**
+ * Recent remote branches (already without an open PR) that match a term by name or change a planned path.
+ * `aheadOf(name)` is the number of commits not on the default branch; `filesOf(name)` the files it changes
+ * against the default branch. A branch whose diff cannot be read counts in `failed`, never as clear.
+ */
+export function findBranchHits(branches, { terms, planned, aheadOf, filesOf }) {
+  const hits = [];
+  let failed = 0;
+  for (const branch of branches) {
+    try {
+      if (aheadOf(branch.name) === 0) continue;
+      const byName = branchNameMatches(branch.name, terms);
+      const files = planned.length ? pathsOverlap(planned, filesOf(branch.name)) : [];
+      if (byName || files.length) hits.push({ ...branch, byName, files });
+    } catch {
+      failed += 1;
+    }
+  }
+  return { hits, failed };
+}
+
+const limited = (items, max) => (items.length > max ? [...items.slice(0, max), `+${items.length - max}`] : items);
+const stateLabel = (hit, now) => (hit.state === 'open' ? 'open' : `${hit.state} ${timeAgo(hit.updatedAt, now).replace(' ago', '')}`);
+
+export function formatReport({ repo, baseSha, openCount, terms, planned, overlaps, termHits, branchHits = [], incomplete = [], now = Date.now() }) {
   const lines = [`related-work ${repo} @ ${baseSha.slice(0, 7)}: ${openCount} open PRs, ${terms.length} term(s), ${planned.length} path(s)`];
+  if (planned.some((path) => coversWholeRepo([path]))) lines.push('Planned path is the whole repository: every open change counts as overlapping.');
   if (overlaps.length) {
     lines.push('OPEN PRs touching planned paths:');
     for (const { pr, overlap, truncated } of overlaps) {
@@ -63,17 +114,26 @@ export function formatReport({ repo, baseSha, openCount, terms, planned, overlap
       lines.push(`    files: ${limited(overlap, MAX_FILES_SHOWN).join(', ')}${truncated ? ' (file list truncated by GitHub)' : ''}`);
     }
   }
+  if (branchHits.length) {
+    lines.push('Remote branches without a PR (recent):');
+    for (const branch of limited(branchHits, MAX_BRANCH_LINES)) {
+      if (typeof branch === 'string') { lines.push(`  ${branch} more`); continue; }
+      lines.push(`  origin/${branch.name}  ${timeAgo(branch.date, now)}${branch.byName ? '  name matches a term' : ''}${branch.files.length ? `  files: ${limited(branch.files, MAX_FILES_SHOWN).join(', ')}` : ''}`);
+    }
+  }
   const shownNumbers = new Set(overlaps.map(({ pr }) => pr.number));
   const rest = termHits.filter((hit) => !(hit.kind === 'PR' && hit.state === 'open' && shownNumbers.has(hit.number)));
   if (rest.length) {
-    lines.push('Matches by term (number and title; read only if the plan overlaps):');
+    lines.push('Matches by term, open and closed (number and title; read only if the plan overlaps):');
     for (const hit of limited(rest, MAX_TERM_LINES)) {
-      lines.push(typeof hit === 'string' ? `  ${hit} more` : `  ${hit.kind} #${hit.number} ${hit.state}: ${hit.title}`);
+      lines.push(typeof hit === 'string' ? `  ${hit} more` : `  ${hit.kind} #${hit.number} ${stateLabel(hit, now)}: ${hit.title}`);
     }
   }
-  if (!planned.length) lines.push('Files: NOT CHECKED (no planned paths given), so overlap with open PRs is unknown.');
-  if (!overlaps.length && !rest.length) {
-    lines.push(planned.length ? 'CLEAR: no open PR touches the planned paths and no term matched.' : 'No term matched. Not clear: planned paths were not checked.');
+  if (!planned.length) lines.push('Files: NOT CHECKED (no planned paths given), so overlap with open PRs and branches is unknown.');
+  for (const note of incomplete) lines.push(`INCOMPLETE: ${note}`);
+  const anyHit = overlaps.length || branchHits.length || rest.length;
+  if (!anyHit && !incomplete.length) {
+    lines.push(planned.length ? 'CLEAR: no open PR or recent branch touches the planned paths and no open or closed item matched a term.' : 'No term matched. Not clear: planned paths were not checked.');
   }
   return lines.join('\n');
 }
@@ -96,41 +156,61 @@ async function fetchPrFiles(repo, number) {
   return out.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
+/** A cached file list is valid for one head commit against one base commit (the diff moves with either). */
+export const cacheStamp = (pr) => `${pr.headRefOid}|${pr.baseRefName}|${pr.baseRefOid}`;
+
+function recentBranches(cwd, days, defaultBranch) {
+  const out = git(['for-each-ref', '--sort=-committerdate', '--format=%(refname)%09%(committerdate:iso-strict)', 'refs/remotes/origin'], { cwd });
+  const cutoff = Date.now() - days * 86_400_000;
+  const prefix = 'refs/remotes/origin/';
+  return out.split('\n').filter(Boolean).map((line) => {
+    const [ref, date] = line.split('\t');
+    return { name: ref.slice(prefix.length), date };
+  }).filter(({ name, date }) => name && name !== 'HEAD' && name !== defaultBranch && name !== 'agent-claims' && Date.parse(date) >= cutoff);
+}
+
 export async function check({ terms, paths, days, self, repo: repoArg, fetch = true, cwd = process.cwd() }) {
   const info = JSON.parse(gh(['repo', 'view', ...(repoArg ? [repoArg] : []), '--json', 'nameWithOwner,defaultBranchRef'], { cwd }));
   const repo = info.nameWithOwner;
+  const repoOwner = repo.split('/')[0];
   const defaultBranch = info.defaultBranchRef.name;
   if (fetch) git(['fetch', '--no-prune', '--no-tags', 'origin'], { cwd, timeout: 120_000 });
   const baseSha = git(['rev-parse', '--verify', `refs/remotes/origin/${defaultBranch}`], { cwd });
 
-  const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-  const fields = 'number,title';
+  const sort = ' sort:updated-desc';
   const searches = terms.flatMap((term) => [
-    { kind: 'issue', state: 'open', args: ['issue', 'list', '-R', repo, '--state', 'open', '--search', term, '--limit', '15', '--json', fields] },
-    { kind: 'PR', state: 'open', args: ['pr', 'list', '-R', repo, '--state', 'open', '--search', term, '--limit', '15', '--json', fields] },
-    { kind: 'PR', state: 'merged', args: ['pr', 'list', '-R', repo, '--state', 'merged', '--search', `${term} merged:>=${since}`, '--limit', '15', '--json', fields] },
+    { kind: 'issue', state: 'open', args: ['issue', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(SEARCH_LIMIT), '--json', 'number,title,updatedAt'] },
+    { kind: 'issue', state: 'closed', args: ['issue', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(SEARCH_LIMIT), '--json', 'number,title,updatedAt'] },
+    { kind: 'PR', state: 'open', args: ['pr', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(SEARCH_LIMIT), '--json', 'number,title,updatedAt'] },
+    { kind: 'PR', state: 'closed', args: ['pr', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(SEARCH_LIMIT), '--json', 'number,title,updatedAt,mergedAt'] },
   ]);
 
   const [openPrs, searchResults] = await Promise.all([
-    ghJson(['pr', 'list', '-R', repo, '--state', 'open', '--limit', '1000',
-      '--json', 'number,title,author,headRefName,headRefOid,updatedAt,isDraft,baseRefName,changedFiles']),
+    ghJson(['pr', 'list', '-R', repo, '--state', 'open', '--limit', String(OPEN_PR_LIMIT),
+      '--json', 'number,title,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,isDraft,changedFiles,isCrossRepository,headRepositoryOwner']),
     pool(searches.map((search) => async () => ({ search, rows: await ghJson(search.args) })), 6),
   ]);
+  assertComplete(openPrs.length, OPEN_PR_LIMIT, 'the open PR list');
 
+  const incomplete = [];
   const termHits = [];
   const seen = new Set();
   for (const { search, rows } of searchResults) {
+    if (rows.length >= SEARCH_LIMIT) incomplete.push(`a term search for ${search.state} ${search.kind}s returned ${SEARCH_LIMIT} rows; more may exist, narrow the term`);
     for (const row of rows) {
       const key = `${search.kind}#${row.number}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      termHits.push({ kind: search.kind, number: row.number, state: search.state, title: row.title });
+      const state = search.state === 'closed' && search.kind === 'PR' ? (row.mergedAt ? 'merged' : 'closed') : search.state;
+      termHits.push({ kind: search.kind, number: row.number, state, title: row.title, updatedAt: row.updatedAt });
     }
   }
+  // Open work first, then the most recently updated closed work.
+  termHits.sort((a, b) => (a.state === 'open' ? 0 : 1) - (b.state === 'open' ? 0 : 1) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 
   let branch = self;
   if (!branch) { try { branch = git(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd }); } catch { branch = null; } }
-  const others = openPrs.filter((pr) => pr.headRefName !== branch);
+  const others = openPrs.filter((pr) => !isOwnPr(pr, branch, repoOwner));
   const filesByPr = new Map();
   if (paths.length) {
     const cachePath = join(gitCommonDir(cwd), 'work-cache', 'pr-files.json');
@@ -139,18 +219,34 @@ export async function check({ terms, paths, days, self, repo: repoArg, fetch = t
     const missing = [];
     for (const pr of others) {
       const key = `${repo}#${pr.number}`;
-      if (cache[key]?.sha === pr.headRefOid) { next[key] = cache[key]; filesByPr.set(pr.number, cache[key].files); } else missing.push(pr);
+      if (cache[key]?.stamp === cacheStamp(pr)) { next[key] = cache[key]; filesByPr.set(pr.number, cache[key].files); } else missing.push(pr);
     }
     const fetched = await pool(missing.map((pr) => async () => ({ pr, files: await fetchPrFiles(repo, pr.number) })), 6);
     for (const { pr, files } of fetched) {
-      next[`${repo}#${pr.number}`] = { sha: pr.headRefOid, files };
+      next[`${repo}#${pr.number}`] = { stamp: cacheStamp(pr), files };
       filesByPr.set(pr.number, files);
     }
     try { saveCache(cachePath, next); } catch { /* the cache is an optimisation only */ }
   }
+  const overlaps = paths.length ? findOverlaps(others, filesByPr, paths) : [];
 
-  const overlaps = findOverlaps(others, filesByPr, paths);
-  return { repo, baseSha, openCount: others.length, terms, planned: paths, overlaps, termHits };
+  // Recent remote branches that have no open PR: matched by name, or by files changed against the default branch.
+  const withPr = new Set(openPrs.filter((pr) => !pr.isCrossRepository).map((pr) => pr.headRefName));
+  const candidates = recentBranches(cwd, days, defaultBranch).filter(({ name }) => !withPr.has(name) && name !== branch);
+  if (candidates.length > MAX_BRANCHES) incomplete.push(`${candidates.length} recent remote branches have no PR; only the newest ${MAX_BRANCHES} were examined`);
+  const base = `refs/remotes/origin/${defaultBranch}`;
+  const { hits: branchHits, failed } = findBranchHits(candidates.slice(0, MAX_BRANCHES), {
+    terms, planned: paths,
+    aheadOf: (name) => {
+      // A branch with no common history (such as an assets branch) is not work on this code.
+      try { git(['merge-base', base, `refs/remotes/origin/${name}`], { cwd }); } catch (error) { if (error.status === 1) return 0; throw error; }
+      return Number(git(['rev-list', '--count', `${base}..refs/remotes/origin/${name}`], { cwd }));
+    },
+    filesOf: (name) => git(['diff', '--name-only', `${base}...refs/remotes/origin/${name}`], { cwd }).split('\n').filter(Boolean),
+  });
+  if (failed) incomplete.push(`${failed} remote branch(es) could not be compared`);
+
+  return { repo, baseSha, openCount: others.length, terms, planned: paths, overlaps, termHits, branchHits, incomplete };
 }
 
 async function main(argv) {
@@ -176,15 +272,17 @@ async function main(argv) {
     return 1;
   }
 
-  const hasHits = result.overlaps.length > 0 || result.termHits.length > 0;
-  const verdict = hasHits ? 'hits' : (paths.length ? 'clear' : 'terms-only');
+  const hasHits = result.overlaps.length > 0 || result.termHits.length > 0 || result.branchHits.length > 0;
+  const verdict = hasHits ? 'hits' : result.incomplete.length ? 'incomplete' : (paths.length ? 'clear' : 'terms-only');
   if (!args.bool['no-notes']) {
     try {
       recordNotes(repoRoot(), {
         related: {
           verdict, baseSha: result.baseSha, checkedAt: new Date().toISOString(), terms, paths,
           openPrs: result.overlaps.map(({ pr }) => pr.number),
+          branches: result.branchHits.map((hit) => hit.name),
           termHits: result.termHits.slice(0, 20).map((hit) => `${hit.kind}#${hit.number}`),
+          incomplete: result.incomplete,
         },
       });
     } catch { /* not in a checkout: nothing to record */ }

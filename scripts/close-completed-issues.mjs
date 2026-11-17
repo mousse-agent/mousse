@@ -19,13 +19,25 @@ Options:
 Exit codes: 0 ok, 1 a GitHub call failed (nothing is assumed closed), 2 usage error.
 An issue is skipped when it was opened after the merge, reopened after the merge, or is a pull request.`;
 
-/** Issue numbers a merged PR completes: body keywords plus GitHub's closing references, same repo only. */
+/**
+ * The "owner/name" of the repository a gh closingIssuesReferences entry points at. gh returns
+ * `repository: { name, owner: { login } }`, and the issue `url` as a second source; nothing else is trusted.
+ */
+export function referenceRepo(ref) {
+  const owner = ref.repository?.owner?.login;
+  const name = ref.repository?.name;
+  if (owner && name) return `${owner}/${name}`;
+  const fromUrl = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/\d+/.exec(ref.url ?? '');
+  return fromUrl ? fromUrl[1] : null;
+}
+
+/** Issue numbers a merged PR completes: body keywords plus GitHub's closing references, this repository only. */
 export function closingIssues(pr, repo) {
   const fromBody = parseClosingRefs(pr.body, { repo });
   const fromGitHub = (pr.closingIssuesReferences ?? [])
-    .filter((ref) => !ref.repository?.nameWithOwner || ref.repository.nameWithOwner.toLowerCase() === repo.toLowerCase())
+    .filter((ref) => referenceRepo(ref)?.toLowerCase() === repo.toLowerCase())
     .map((ref) => ref.number);
-  return [...new Set([...fromBody, ...fromGitHub])].filter((n) => n !== pr.number).sort((a, b) => a - b);
+  return [...new Set([...fromBody, ...fromGitHub])].filter((n) => n !== pr.number).sort((x, y) => x - y);
 }
 
 /** Whether to close `issue` for `pr`. `reopenedAt` is the latest reopen time, if any. */
