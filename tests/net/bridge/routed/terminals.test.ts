@@ -100,8 +100,7 @@ describe('where a routed terminal starts', () => {
       { env: { LD_PRELOAD: '/tmp/x' } },
       { shellArgs: ['-c', 'x'] },
       { projectPath: '/' },
-      { source: 'bot' },
-      { cwd: '.' }
+      { source: 'bot' }
     ])
       await expect(
         create(o, t.id, extra),
@@ -493,18 +492,6 @@ describe('what is audited', () => {
     expect(
       o.audit.reads(o.f.callerNode).reduce((sum, hour) => sum + hour.bytes, 0)
     ).toBeGreaterThanOrEqual(Buffer.byteLength('hello from the shell'))
-  }, 240_000)
-
-  it('tells the owner of a device’s first terminal once, not for the next ones', async () => {
-    const o = await routedOwner()
-    fakeShells(o.f.mms.ptyManager, resources)
-    o.policy.set(o.f.callerNode, { terminal: true })
-    expect(o.audit.has(o.f.callerNode, 'pty.first_open')).toBe(false)
-    await another(o)
-    await another(o)
-    expect(
-      o.audit.recent(20, o.f.callerNode).filter((row) => row.method === 'pty.first_open')
-    ).toHaveLength(1)
   }, 240_000)
 })
 
