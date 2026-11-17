@@ -41,6 +41,13 @@ export interface EnrollmentServiceOptions {
   clock: Clock
   routes(): Signed
   fault?(point: 'enroll.beforeCommit' | 'join.beforeCommit'): void
+  /**
+   * In the transaction that enrolls a device with an invitation made here: the device is connected here (an
+   * invitation connects whoever redeems it).
+   */
+  onRedeemed?(node: NodeId): void
+  /** In the transaction that completes this computer's join: the computer it joined through is connected here. */
+  onJoined?(inviter: NodeId): void
 }
 export interface NodeInviteInput {
   ttlMs?: number
@@ -931,6 +938,7 @@ export class EnrollmentService {
       db.database
         .prepare('UPDATE net_enrollment_kinds SET node=? WHERE invite=?')
         .run(request.node, request.invite)
+      this.options.onRedeemed?.(request.node)
       this.options.fault?.('enroll.beforeCommit')
     })
     return result
@@ -985,6 +993,7 @@ export class EnrollmentService {
       )
       latest.claims.state = 'enrolled'
       this.saveJoin(latest)
+      this.options.onJoined?.(claims.authority)
       this.options.fault?.('join.beforeCommit')
     })
     return this.preparedNodeJoin()!

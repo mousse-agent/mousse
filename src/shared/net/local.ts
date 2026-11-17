@@ -67,6 +67,8 @@ export const NET_LOCAL_METHODS = [
   'bridge.setCaps',
   'bridge.setKind',
   'bridge.policy',
+  'bridge.connect',
+  'bridge.disconnect',
   'bridge.workOnThreads',
   'bridge.shareBots',
   'bridge.editorServer',
@@ -114,6 +116,13 @@ export interface BridgeInviteInput {
   name?: string
   caps?: NodeCapability[]
 }
+/**
+ * Whether another device of this user's list is connected here (`connection` on each `bridge.nodes` row, set with
+ * `bridge.connect` and `bridge.disconnect`). `none`: never connected here; `disconnected`: someone disconnected it.
+ * Either way this computer serves it nothing but the keeper's control traffic, and two members not connected on
+ * both ends open no session.
+ */
+export type BridgeNodeConnection = 'connected' | 'disconnected' | 'none'
 /**
  * What this computer lets another device do here (`bridge.policy`, and `policy` on each
  * `bridge.nodes` row). It is kept on this computer only, so every computer sets its own.

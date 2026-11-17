@@ -33,6 +33,7 @@ import {
   DIAL_TLS_DEADLINE_MS,
   COMPUTER_NODE_CAPABILITIES,
   NODE_CAPABILITIES,
+  forbiddenReason,
   newId,
   isId
 } from '../../shared/net'
@@ -40,6 +41,7 @@ import type {
   NetAddonActionResult,
   NetAddonRecords,
   NetDoctor,
+  BridgeNodeConnection,
   BridgeNodePolicy,
   EditorProbeResult,
   NetInitInput,
@@ -71,6 +73,11 @@ import { SqliteBudgetLedger } from './store/budgets'
 import { SqliteOutbox } from './store/outbox'
 import { SqliteQuotaRateLedger } from './store/limits'
 import { SqliteNodePolicy } from './store/nodePolicy'
+import {
+  SqliteConnections,
+  type ConnectionEvent,
+  type ConnectionState
+} from './store/connections'
 import { SqliteBridgeAudit } from './store/audit'
 import { SqliteRemoteLists } from './store/remoteLists'
 import { FileBlobStore } from './store/blobs'
@@ -199,6 +206,48 @@ const fromPeer = (error: NetError) => (error.details as { from?: unknown } | und
 const JOIN_FIRST_SESSION_WAIT_MS = 20_000
 /** Clocks further apart than this are named as the reason a join failed. */
 const JOIN_CLOCK_LIMIT_MS = 30_000
+/**
+ * The calls a device of this user's list makes on a session that is open but not connected here: the keeper and its
+ * members keep moving the role (list sync, renewals and routes travel as session messages, not calls).
+ */
+const CONTROL_METHOD = /^authority\.transfer\./
+/** The refusal of a device of this user's list that is not connected here. */
+const notConnected = () =>
+  new NetError('forbidden', undefined, { details: { reason: 'not_connected' } })
+/**
+ * The other devices of this computer's list now (not this one, none revoked), read with the pinned root key so a
+ * locked key store reads it too. Undefined when the list cannot be read; empty when this computer has none.
+ */
+function listedOwnNodes(identity: NetIdentityService): NodeId[] | undefined {
+  try {
+    const self = identity.self()
+    if (!self) return []
+    const signed = identity.roster(self.user),
+      root = identity.pinnedRootKey(self.user)
+    if (!signed || !root) return []
+    const roster = identity.verifySigned<Roster>(signed, root),
+      latest = new Map<NodeId, NodeDelegation>()
+    for (const row of roster.nodes) {
+      const delegation = identity.verifySigned<NodeDelegation>(row, root)
+      const held = latest.get(delegation.subject)
+      if (!held || delegation.keyEpoch > held.keyEpoch) latest.set(delegation.subject, delegation)
+    }
+    return [...latest.values()]
+      .filter(
+        (row) =>
+          row.subject !== self.node &&
+          !roster.revoked.some(
+            (value) => value.subject === row.subject && value.throughKeyEpoch >= row.keyEpoch
+          )
+      )
+      .map((row) => row.subject)
+  } catch {
+    return undefined
+  }
+}
+/** A stored state this build does not know shows as disconnected: not connected, and someone's choice. */
+const connectionView = (state: ConnectionState): BridgeNodeConnection =>
+  state === 'connected' || state === 'none' ? state : 'disconnected'
 /** A join that succeeded; `wait`: whether to wait for the first session with `authority`. */
 interface JoinOutcome {
   user: UserId
@@ -238,6 +287,8 @@ export interface NetRuntime {
   blobs: FileBlobStore
   /** What this computer lets each other device do here (`net_node_policy`). */
   policy: SqliteNodePolicy
+  /** Which devices of this user's own list are connected here (`net_connections`). */
+  connections: SqliteConnections
   /** What other computers did on this one, and how much they read (`bridge_audit`). */
   audit: SqliteBridgeAudit
   /** What this computer remembers of its other computers' threads: row positions, openings, last lists. */
@@ -332,6 +383,11 @@ export class NetService {
   private renewal?: { cancel(): void }
   private rosterListener?: () => void
   private policyListener?: () => void
+  private connectionsListener?: () => void
+  /** This computer's user, once it has one: read on every record pushed, so not parsed from the identity each time. */
+  private ownUserCache?: UserId
+  /** The list Mousse ID's devices were last connected from, while signed in. */
+  private accountSyncedFor?: string
   private domain?: NetDomainComposition
   private presenceStore?: PeerPresence
   private presenceTimer?: { cancel(): void }
@@ -506,14 +562,24 @@ export class NetService {
       const streams = new SqliteStreamStore(db),
         executions = new SqliteExecutionLedger(db),
         blobs = new FileBlobStore(db)
+      const connections = new SqliteConnections(db, this.clock)
       const enrollment = new EnrollmentService({
         db,
         identity,
         keys,
         clock: this.clock,
-        routes: () => this.signedRoutes()
+        routes: () => this.signedRoutes(),
+        onRedeemed: (node) => connections.set(node, 'connected', 'invite'),
+        onJoined: (inviter) => connections.set(inviter, 'connected', 'join')
       })
       const policy = new SqliteNodePolicy(db, this.clock)
+      // A store from before this record: every device listed now counts as connected, once, and before any session
+      // work, so nothing that worked stops. A list that cannot be read now is left for the next start; until then
+      // only the keeper's control traffic passes.
+      if (!connections.migrated()) {
+        const listed = listedOwnNodes(identity)
+        if (listed) connections.migrate(listed)
+      }
       const rpc = new DurableRpcDispatcher({
           db,
           identity,
@@ -524,6 +590,10 @@ export class NetService {
             if (method.family === 'bridge' || method.family === 'routed')
               this.assertFeature('netBridge')
             else if (method.family === 'spaces') this.assertFeature('netSpaces')
+            // A device of this user's list that is not connected here gets the keeper's control calls only, every
+            // family and the calls with none alike; read on every call and on every lookup of a saved result.
+            if (!CONTROL_METHOD.test(method.method) && !this.connectedHere(peer))
+              throw new NetError('forbidden', undefined, { details: { reason: 'not_connected' } })
             // Read on every call, so a block takes effect on the device's next request, and
             // on the lookup of a result it asked for earlier.
             if (
@@ -659,6 +729,7 @@ export class NetService {
         outbox: new SqliteOutbox(db),
         limits: new SqliteQuotaRateLedger(db),
         policy,
+        connections,
         audit: new SqliteBridgeAudit(db, this.clock),
         remoteLists: new SqliteRemoteLists(db, this.clock),
         rpc
@@ -740,8 +811,11 @@ export class NetService {
             this.domain?.privateStreams?.close({ reader: event.node, kind: 'terminal' }) ?? []
           )
       })
+      // Connecting or disconnecting takes effect on the open sessions, with no redial.
+      this.connectionsListener = connections.onChange((events) => this.connectionsChanged(events))
       this.domain = this.options.composeRuntime?.(this.state) ?? undefined
       this.rosterListener = identity.onRosterChanged((user) => {
+        this.ownUserCache = undefined
         // A computer that lost "Works on threads" (or was revoked) keeps no editor tunnel either.
         this.tunnels?.reconcile()
         // A computer that lost "Works on threads" (or was revoked) keeps nothing open for it, as a block does.
@@ -754,6 +828,12 @@ export class NetService {
             }
           }) ?? []
         )
+        if (user === identity.self()?.user) {
+          // Signed in to Mousse ID, a device that joins the list is connected when it appears.
+          this.connectAccountDevices()
+          // The keeper's exception follows the role: a pair that lost it keeps nothing it has no right to.
+          this.enforceConnections()
+        }
         this.emit()
         if (this.routes) this.refreshPeers()
         this.closeRevokedWebRtc()
@@ -1086,6 +1166,25 @@ export class NetService {
           this.emit()
           return { policy: policyView(policy) }
         }
+        case 'bridge.connect':
+        case 'bridge.disconnect': {
+          const rt = this.requireEnrolled(),
+            node = params.node as NodeId
+          if (node === rt.identity.self()!.node) throw new NetError('bad_request')
+          // Only a device of this computer's list.
+          try {
+            this.currentNode(node)
+          } catch {
+            throw new NetError('bad_request', 'Unknown device.')
+          }
+          rt.connections.set(
+            node,
+            method === 'bridge.connect' ? 'connected' : 'disconnected',
+            'person'
+          )
+          this.emit()
+          return { connection: rt.connections.state(node) }
+        }
         case 'bridge.workOnThreads': {
           // "Let my other computers work on this computer's threads". Any computer sets it for itself; it
           // takes effect on the next routed call, so turning it off is also the kill switch.
@@ -1272,7 +1371,11 @@ export class NetService {
       hostedSpacePeerAuthorized: (user, node) =>
         this.domain?.hostedSpacePeerAuthorized?.(user, node) === true,
       serial: (work) => this.serial(work),
-      emit: () => this.emit(),
+      emit: () => {
+        // Signing in connects every device of the list that has no record yet.
+        this.connectAccountDevices()
+        this.emit()
+      },
       fail: (error) => {
         this.lastError = error instanceof NetError ? error.code : 'internal'
       },
@@ -1424,6 +1527,10 @@ export class NetService {
     this.rosterListener = undefined
     this.policyListener?.()
     this.policyListener = undefined
+    this.connectionsListener?.()
+    this.connectionsListener = undefined
+    this.ownUserCache = undefined
+    this.accountSyncedFor = undefined
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
     for (const session of this.sessions) session.close()
@@ -1696,6 +1803,7 @@ export class NetService {
     this.signedRoutes()
     this.syncPhoneWebRtc()
     this.lastError = undefined
+    this.connectAccountDevices()
     this.refreshPeers()
     this.scheduleRenewal(5_000)
     this.emit()
@@ -1978,9 +2086,12 @@ export class NetService {
     const check = (stream: StreamId): void => {
       if (!allowed(stream)) throw new NetError('disabled')
     }
-    // A device this computer blocked reads, fetches and writes none of its Bridge streams.
-    const blockedFor = (stream: StreamId, peer: { node: NodeId }): boolean =>
-      !store.getStream(stream)?.kind.startsWith('space.') && rt.policy.isBlocked(peer.node)
+    // A device this computer blocked reads, fetches and writes none of its Bridge streams. A device of this user's
+    // list that is not connected here has none of its streams, its Spaces' included (another user's device is
+    // governed by its Space membership alone).
+    const blockedFor = (stream: StreamId, peer: { node: NodeId; user: UserId }): boolean =>
+      !this.connectedHere(peer) ||
+      (!store.getStream(stream)?.kind.startsWith('space.') && rt.policy.isBlocked(peer.node))
     // A private stream is read by its computer only, while the owner's switch for other computers is on
     // (read on every record, so turning it off is also a kill switch) and, for a terminal, the device's
     // terminal switch is on. The authority checks the reader and "Works on threads".
@@ -2053,6 +2164,11 @@ export class NetService {
       localRoutes: () => this.signedRoutes(),
       onPeerRoutes: (routes, peer) =>
         this.adoptRoutes(routes, peer.node, peer.user, peer.delegation),
+      // Two members of this user's list open a session only once each has connected the other; the keeper and a
+      // member always do, and carry only control traffic until connected. The routes above are kept either way.
+      admitPeer: (peer) => {
+        if (!this.admitted(peer)) throw notConnected()
+      },
       ...(inbound?.carrier ? { carrier: inbound.carrier } : {}),
       onAuthenticated: () => {
         if (inbound?.sameUserOnly && session.peer.user !== rt.identity.self()?.user)
@@ -2155,6 +2271,8 @@ export class NetService {
   async connectChannel(peer: PeerRef, signal: AbortSignal): Promise<SecureChannel> {
     this.assertEnabled()
     this.requireEnrolled()
+    // A device of this user's list is dialled only when a session with it would be admitted.
+    if (!this.admitted(peer)) throw notConnected()
     if (!this.routes) await this.activate()
     return this.track(
       this.routes!.connect(peer, signal).then((result) => {
@@ -2259,6 +2377,8 @@ export class NetService {
     for (const row of rt.db.database.prepare('SELECT node,signed FROM net_peer_routes').all()) {
       const node = String(row.node) as NodeId
       if (node === self.node || this.supervisors.has(node)) continue
+      // Its signed routes are kept, and never dialled until a session with it would be admitted.
+      if (!this.admitted({ node, user: self.user })) continue
       const current = roster.nodes
         .map((value) => rt.identity.verifySigned<NodeDelegation>(value, root))
         .filter((value) => value.subject === node)
@@ -2283,6 +2403,7 @@ export class NetService {
         clock: this.clock,
         connect: async (signal) => {
           this.assertEnabled()
+          if (!this.admitted({ node, user: self.user })) throw notConnected()
           const latest = this.currentNode(node),
             manager = this.routes!
           const held = rt.db.database
@@ -2356,6 +2477,116 @@ export class NetService {
     // Its private streams are closed as well, not only unserved: nothing is kept open for a device that is blocked.
     this.domain?.privateStreams?.close({ reader: node })
   }
+  /**
+   * Whether this computer serves `peer` application traffic: a device of this user's list only while connected here.
+   * Another user's device answers yes; its Space membership decides, as before.
+   */
+  private connectedHere(peer: { node: NodeId; user: UserId }): boolean {
+    const rt = this.state
+    if (!rt) return false
+    if (rt.connections.connected(peer.node)) return true
+    const own = this.ownUser()
+    return own !== undefined && peer.user !== own
+  }
+  /** Whether a session with `peer` is opened at all: connected here, or the keeper and one of its members. */
+  private admitted(peer: { node: NodeId; user: UserId }): boolean {
+    return this.connectedHere(peer) || this.keeperPair(peer.node)
+  }
+  /** This computer or `node` keeps the list (from the list itself, so the rule follows the role when it moves). */
+  private keeperPair(node: NodeId): boolean {
+    const rt = this.state,
+      self = rt?.identity.self()
+    if (!rt || !self) return false
+    try {
+      const signed = rt.identity.roster(self.user),
+        root = rt.identity.pinnedRootKey(self.user)
+      if (!signed || !root) return false
+      const keeper = rt.identity.verifySigned<Roster>(signed, root).authorityNode
+      return keeper === self.node || keeper === node
+    } catch {
+      return false
+    }
+  }
+  private ownUser(): UserId | undefined {
+    return (this.ownUserCache ??= this.state?.identity.self()?.user)
+  }
+  /** Signed in to Mousse ID (or getting back to it). */
+  private signedInToMousseId(): boolean {
+    const plus = this.hosted?.status()
+    return !!(plus?.connected || plus?.reconnecting)
+  }
+  /**
+   * Signed in to Mousse ID, every device of the list is connected here when it appears or at sign-in, except one
+   * that was disconnected. The records stay after signing out.
+   */
+  private connectAccountDevices(): void {
+    const rt = this.state
+    if (!rt || !this.signedInToMousseId()) {
+      this.accountSyncedFor = undefined
+      return
+    }
+    try {
+      // Mousse ID tells this computer of every change; the list is read again only when it changed.
+      const signed = rt.identity.roster()
+      if (!signed || signed.sig === this.accountSyncedFor) return
+      const listed = listedOwnNodes(rt.identity)
+      if (!listed) return
+      if (listed.length) rt.connections.connectUnrecorded(listed, 'account')
+      this.accountSyncedFor = signed.sig
+    } catch {
+      // A record that cannot be written now is written at the next change.
+    }
+  }
+  /** A connection record changed: it takes effect on the open sessions, with no redial. */
+  private connectionsChanged(events: readonly ConnectionEvent[]): void {
+    // An editor tunnel is shell access: one for a device that is no longer connected ends first, and cannot throw.
+    this.tunnels?.reconcile()
+    for (const event of events)
+      if (event.before === 'connected' && event.after !== 'connected')
+        this.endUnconnected(event.node)
+    this.enforceConnections()
+    if (this.routes) this.refreshPeers()
+    for (const event of events)
+      if (event.after === 'connected') this.supervisors.get(event.node)?.retryAfterStateChange()
+    this.emit()
+  }
+  /**
+   * A device stopped being connected here: what it reads here ends now (streams, private streams), and what it
+   * already started runs on; its next call is refused by the check itself.
+   */
+  private endUnconnected(node: NodeId): void {
+    for (const session of this.sessions) {
+      try {
+        if (session.state() === 'open' && session.peer.node === node)
+          void session.endServing('forbidden').catch(() => {})
+      } catch {
+        // Not authenticated yet: its hello is checked against the record.
+      }
+    }
+    this.domain?.privateStreams?.close({ reader: node })
+  }
+  /**
+   * Sessions of this user's list that would not be admitted now end, telling the peer why, and their dialling stops
+   * (their routes are kept). Run when a record changes and when the role moves.
+   */
+  private enforceConnections(): void {
+    const own = this.ownUser()
+    if (!own) return
+    for (const [node, supervisor] of this.supervisors)
+      if (!this.admitted({ node, user: own })) {
+        this.supervisors.delete(node)
+        supervisor.close('forbidden')
+      }
+    for (const session of this.sessions) {
+      let peer: SyncSession['peer']
+      try {
+        peer = session.peer
+      } catch {
+        continue
+      }
+      if (peer.user === own && !this.admitted(peer)) void session.goAway(notConnected())
+    }
+  }
   /** Tells every session that serves one of these private streams that it is over. */
   private endPrivateServing(streams: readonly StreamId[]): void {
     if (!streams.length) return
@@ -2424,7 +2655,9 @@ export class NetService {
   private deviceRefusal(node: NodeId): TunnelReason | undefined {
     const rt = this.state
     if (!rt || !this.featureEnabled('netBridge')) return 'net_off'
-    if (rt.policy.isBlocked(node)) return 'blocked'
+    // A device that is not connected here is refused as a blocked one is (the reason crosses the wire, and older
+    // computers know only these words).
+    if (rt.policy.isBlocked(node) || !rt.connections.connected(node)) return 'blocked'
     let caps: readonly NodeCapability[]
     try {
       // From the roster, not from what the session last saw: a grant taken away counts at once.
@@ -3611,6 +3844,16 @@ export class NetService {
         // What this computer lets the device do here; the device's own limits are on that device.
         policy: policyView(rt.policy.get(node.subject)),
         self: node.subject === rt.identity.self()!.node,
+        // Whether the device is connected here, and whether this computer holds its routes (so Connect can reach it).
+        connection:
+          node.subject === rt.identity.self()!.node
+            ? 'connected'
+            : connectionView(rt.connections.state(node.subject)),
+        routeHeld:
+          node.subject !== rt.identity.self()!.node &&
+          !!rt.db.database
+            .prepare('SELECT 1 FROM net_peer_routes WHERE node=?')
+            .get(node.subject),
         revoked: roster.revoked.some(
           (row) => row.subject === node.subject && row.throughKeyEpoch >= node.keyEpoch
         ),
@@ -3758,7 +4001,13 @@ export class NetService {
       // Unknown method: an older daemon. Any other failure (a closed session, a timeout) leaves
       // what was known before. A phone reached over the relay answers the same way, but it
       // never publishes routes, so only a device that does can be an older daemon.
-      if (error instanceof NetError && error.code === 'forbidden' && this.publishesRoutes(node)) {
+      // A refusal that names its reason (the device has not connected this one) comes from a current daemon.
+      if (
+        error instanceof NetError &&
+        error.code === 'forbidden' &&
+        forbiddenReason(error.details) === undefined &&
+        this.publishesRoutes(node)
+      ) {
         try {
           this.presences().legacy(node)
         } catch {
@@ -3877,6 +4126,7 @@ export class NetService {
     this.presenceTimer?.cancel()
     this.rosterListener?.()
     this.policyListener?.()
+    this.connectionsListener?.()
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
     for (const session of this.sessions) session.close()
