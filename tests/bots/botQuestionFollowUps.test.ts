@@ -200,7 +200,7 @@ describe('a default', () => {
     expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'No answer, so I went with Flat A and booked Saturday.' })
   })
 
-  it('queues a chat turn of its own for a chat question, not the owner’s: their threads stay read-only and it has none of their words', async () => {
+  it('queues a chat turn of its own for a chat question, not the owner’s: it may act on their threads (#1359) but has none of their words', async () => {
     const { bubble, questionId } = await chatAsks(DEFAULT_A)
     await reach(Date.parse(bubble.at) + 30 * MIN)
     expect(f.store.question(questionId)?.status).toBe('defaulted')
@@ -208,7 +208,8 @@ describe('a default', () => {
     expect(turn).toMatchObject({ lane: 'chat', trigger: { kind: 'manual', input: defaultChatInput(FLATS.question, 'Flat A', 30 * MIN) } })
     expect(turn.trigger).not.toHaveProperty('owner')
     const running = await start(f, turn.id)
-    expect(running.prepared.authority.threadsReadOnly).toBe('not_owner')
+    // It carries on the owner's work, so it may act on their threads like a wake or a thread's notice.
+    expect(running.prepared.authority).not.toHaveProperty('threadsReadOnly')
     expect(f.bots.ownerWords(botId, turn.id)).toBe('')
     await finish(f, running.payload, 'completed', { text: 'No answer, so I went with Flat A.' })
     expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', text: 'No answer, so I went with Flat A.' })
