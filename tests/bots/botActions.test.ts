@@ -1780,6 +1780,7 @@ it('forget history removes settled text and preserves the call key that prevents
   expect(saved).toMatchObject({ call_key: a.call_key, status: 'declined', args_json: '"[forgotten]"', result_json: '{"text":"[forgotten]"}' })
   const result = f.bots.actions.hold(f.store.activation(t.workId)!, JSON.parse(a.call_key)[1], { server: 'mail', tool: 'send' } as never, t.args, 'runtime-call-1')
   expect(result).not.toMatchObject({ isError: true })
+  expect(result.text).toContain('forgotten call')
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
   expect(t.calls).toEqual([])
 })
@@ -2939,8 +2940,8 @@ it('review10 reads shared action nudge history once per bot per read or upkeep p
   expect(expensive()).toHaveLength(1)
   reads.mockClear()
   await f.bots.deliverDueReminders()
-  // One pass snapshot plus one fresh timer read after the pass; never one scan per open card.
-  expect(expensive().length).toBeLessThanOrEqual(2)
+  // The final timer read reuses the updated pass snapshot too.
+  expect(expensive()).toHaveLength(1)
 })
 
 it('review12 pending unattended cap does not claim its open cards were declined or already sent', async () => {
@@ -2991,5 +2992,22 @@ it.each([true, false])('review12 settled repeat warns while a second open duplic
   const duplicate = await later('while-repeat-open')
   expect(duplicate.result).toMatchObject({ isError: true, text: expect.stringContaining('already waiting') })
   expect(f.bots.actions.forWork(duplicate.workId)).toBeUndefined()
+  expect(t.calls).toEqual([t.args])
+})
+
+it('review12 a later scheduled occurrence warns about the earlier sent call', async () => {
+  const t = await scheduledCall()
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' }); await flush()
+  const resumed = await start(f, t.id, 2); await finish(f, resumed.payload)
+  f.clock.now += 5 * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const id = due.inserted[0]!
+  const turn = await start(f, id)
+  const outcome = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-schedule-send', signal: new AbortController().signal })
+  expect(outcome.isError).not.toBe(true)
+  const b = f.bots.actions.forWork(id)!
+  expect(f.bots.service.actionMessage(t.botId, b.id).action?.previous).toMatchObject({ status: 'done' })
   expect(t.calls).toEqual([t.args])
 })
