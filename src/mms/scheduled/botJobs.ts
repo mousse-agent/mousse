@@ -187,7 +187,7 @@ export class BotScheduleBook {
     if (!job.bot || !when) return undefined
     return {
       jobId: job.id,
-      revision: shortHash(canonicalJson({ prompt: job.prompt, schedule: job.schedule, expiresAt: job.expiresAt, bot: job.bot, enabled: job.enabled, name: job.name, tellMe: tellMeOf(job) }), 64),
+      revision: shortHash(canonicalJson({ prompt: job.prompt, schedule: job.schedule, expiresAt: job.expiresAt, model: job.bot.model, pick: job.bot.pick, say: job.bot.say, enabled: job.enabled, paused: job.state === 'paused' }), 64),
       botId: job.bot.botId,
       scheduleId: job.bot.scheduleId,
       when,

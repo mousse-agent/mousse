@@ -671,7 +671,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const source = row.trigger.kind === 'work' ? this.store.activation(row.trigger.from) : row
       const limit = source?.trigger.kind === 'manual' ? source.trigger.owner?.limit ?? null : null
       const schedule = row.trigger.kind === 'schedule' ? this.host.schedules?.get(row.botId, row.trigger.scheduleId) : undefined
-      if (row.trigger.kind === 'schedule' && !schedule) return undefined
+      if (row.trigger.kind === 'schedule' && (!schedule || schedule.paused)) return undefined
       return { ...server, pairLevel: pair.level ?? 'allowed', deviceLimit: limit, ...(schedule ? { scheduleRevision: schedule.revision } : {}) }
     },
     obsolete: action => {
