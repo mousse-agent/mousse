@@ -9,6 +9,8 @@ import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { forgetThreadOpenMemory, hasThreadOpenMemory } from '../../src/renderer/chat/components/agent-elements/thread-open-memory'
+import { markRecoveredFailures, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
+import type { ChatMessage } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -178,24 +180,64 @@ describe('the count of replies a finished turn folds', () => {
 })
 
 describe('a turn that waited on a secret', () => {
-  it('does not count the wait once the request is answered and the turn finishes', () => {
+  // The transcript as the service saves it, shown the way the app shows it (`mousseToUIMessages`).
+  const prompt: ChatMessage = { id: 'u1', role: 'user', content: 'Deploy it', timestamp: at(0), turnId: 't-u1' } as ChatMessage
+  const thinking = { id: 't1', role: 'system', kind: 'thinking', content: '', timestamp: at(2), thinking: { content: 'Need the deploy token', status: 'complete' } } as ChatMessage
+  /** The `secret_request` call, from `start`; `end` is when its result arrived (the person answered). */
+  const secretCall = (start: number, end?: number) =>
+    ({
+      id: 's1', role: 'system', kind: 'mcp_tool_call', content: '', timestamp: at(start),
+      toolCall: {
+        title: 'Called mousse.secret_request', summary: end == null ? 'secret_request' : 'Saved', details: ['Server: mousse', 'Tool: secret_request'],
+        status: end == null ? 'processing' : 'complete', toolName: 'secret_request', ...(end == null ? {} : { response: 'saved' })
+      },
+      activity: { id: 's1', callId: 's1', toolName: 'secret_request', kind: 'generic', server: 'mousse', status: end == null ? 'running' : 'done', startedAt: at(start), ...(end == null ? {} : { endedAt: at(end) }) }
+    }) as unknown as ChatMessage
+  const bash = (id: string, seconds: number) =>
+    ({
+      id, role: 'system', kind: 'tool_call', content: '', timestamp: at(seconds),
+      toolCall: { title: 'Bash', summary: 'Ran npm run deploy', details: ['Tool: Bash'], status: 'complete', toolName: 'Bash', input: { command: 'npm run deploy' }, response: 'ok' }
+    }) as unknown as ChatMessage
+  const reply = (seconds: number) => ({ id: 'a1', role: 'assistant', content: 'Deployed.', timestamp: at(seconds), completedAt: at(seconds) }) as ChatMessage
+  /** The open request, as the app adds it below the turn until it is answered. */
+  const openRequest = (seconds: number) =>
+    ({ id: 'secret:1', role: 'assistant', createdAt: at(seconds), parts: [{ type: 'data-secret-request', data: { requestId: '1', label: 'Deploy token', createdAt: T0 + seconds * 1000 } }] }) as unknown as UIMessage
+  const label = () => host.querySelector('.turn-work-label')!.textContent
+
+  it('leaves out the whole wait when another call ran in the same step, after the answer and after a reload', () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
-      const question = ask('u1', 'Deploy it', 0)
-      const before = [question, thought('t1', 'Need the deploy token', 2)]
-      const secretCall = (state: string) => call('s1', 'tool-mcp__mousse__secret_request', { label: 'Deploy token' }, 10, state)
-      // Open: the call waits, and the open request shows below it.
+      // Open, with a call the agent started in the same step done long before the answer.
       vi.setSystemTime(T0 + 60_000)
-      const open = { id: 'secret:1', role: 'assistant', createdAt: at(11), parts: [{ type: 'data-secret-request', data: { requestId: '1', label: 'Deploy token', createdAt: T0 + 11_000 } }] } as unknown as UIMessage
-      render([...before, secretCall('input-available'), open], 'streaming')
-      // Answered five minutes later: the open request is gone, the call has its output, and the work goes on.
+      render([...mousseToUIMessages([prompt, thinking, secretCall(10), bash('d0', 11)]), openRequest(12)], 'streaming')
+      // Answered five minutes later: the open request is gone, and the work goes on.
       vi.setSystemTime(T0 + 315_000)
-      const after = [secretCall('output-available'), call('d1', 'tool-Bash', { command: 'npm run deploy' }, 310)]
-      render([...before, ...after], 'streaming')
+      const answered = [prompt, thinking, secretCall(10, 310), bash('d0', 11), bash('d1', 311)]
+      render(mousseToUIMessages(answered), 'streaming')
       // Finished: ten seconds of work before the wait and ten after.
       vi.setSystemTime(T0 + 320_000)
-      render([...before, ...after, said('a1', 'Deployed.', 320)], 'ready')
-      expect(host.querySelector('.turn-work-label')!.textContent).toBe('Worked for 20s')
+      render(mousseToUIMessages([...answered, reply(320)]), 'ready')
+      expect(label()).toBe('Worked for 20s')
+      // Reloaded: the saved transcript alone says the same.
+      act(() => root.render(createElement(MessageList, { key: 'reloaded', messages: mousseToUIMessages([...answered, reply(320)]), status: 'ready' })))
+      expect(label()).toBe('Worked for 20s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves out the wait when the answered call is the last thing the turn did', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(T0 + 60_000)
+      render([...mousseToUIMessages([prompt, thinking, secretCall(10)]), openRequest(11)], 'streaming')
+      // Answered at 5:10; the open request is gone and nothing came after the call yet.
+      vi.setSystemTime(T0 + 311_000)
+      render(mousseToUIMessages([prompt, thinking, secretCall(10, 310)]), 'streaming')
+      // The turn ends there, two seconds after the answer.
+      vi.setSystemTime(T0 + 312_000)
+      render(mousseToUIMessages([prompt, thinking, secretCall(10, 310)]), 'ready')
+      expect(label()).toBe('Worked for 12s')
     } finally {
       vi.useRealTimers()
     }
@@ -319,13 +361,24 @@ describe('a message that holds text beside its calls', () => {
     expect(visible(0)).not.toContain('package.json')
   })
 
-  it('keeps a failed call in view with the text beside it, and the answer after it', () => {
-    render([ask('u1', 'Fix it', 0), call('r1', 'tool-Read', { file_path: 'package.json' }, 2), mixed('m1', 'Trying the build.', bash('b1', 'npm run build', 'output-error'), 3), said('a1', 'The build still fails on the missing key.', 9)])
+  // Whether a failure was got past is the transcript's rule (`markRecoveredFailures`), run here as the app runs it.
+  const failedRun = { id: 'e1', role: 'assistant', createdAt: at(5), parts: [{ type: 'error', title: 'Run failed', message: 'The agent stopped with an error.' }] } as unknown as UIMessage
+
+  it('keeps a failed call the turn ended on in view, with the text beside it', () => {
+    render(markRecoveredFailures([ask('u1', 'Fix it', 0), call('r1', 'tool-Read', { file_path: 'package.json' }, 2), mixed('m1', 'Trying the build.', bash('b1', 'npm run build', 'output-error'), 3), failedRun]))
     const text = visible(0)
     expect(text).toContain('Trying the build.')
     expect(text).toContain('npm run build')
-    expect(text).toContain('The build still fails on the missing key.')
     expect(text).not.toContain('package.json')
+  })
+
+  it('folds a failed call with its text when a later reply got past it', () => {
+    render(markRecoveredFailures([ask('u1', 'Fix it', 0), call('r1', 'tool-Read', { file_path: 'package.json' }, 2), mixed('m1', 'Trying the build.', bash('b1', 'npm run build', 'output-error'), 3), said('a1', 'The build passes with the key set.', 9)]))
+    const text = visible(0)
+    expect(text).not.toContain('Trying the build.')
+    expect(text).not.toContain('npm run build')
+    expect(text).toContain('The build passes with the key set.')
+    expect(nameOf(toggles()[0]!)).toContain('1 reply inside')
   })
 })
 
