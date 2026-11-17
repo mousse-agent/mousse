@@ -2879,3 +2879,14 @@ it('C4 authority compiler fences every registered Mousse tool for held work and 
   expect(t.calls).toEqual([])
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
 })
+
+it.each(['args', 'tool'] as const)('review8 rejects a reused nested id for different %s without a second hold', async change => {
+  const t = await setup(true, false, true)
+  const call = catalogueTurn(t)
+  await call('use_tool', { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'same-id' } }, 'first-runtime-id')
+  const result = await call('use_tool', { tool: change === 'tool' ? 'mail_other' : 'mail_send', arguments: { ...t.args, ...(change === 'args' ? { body: 'different call' } : {}), clientRequestId: 'same-id' } }, 'retry-runtime-id')
+  expect(result).toMatchObject({ isError: true, text: expect.stringContaining('already used for a different call') })
+  expect(result.text).not.toContain('This call is held')
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(t.calls).toEqual([])
+})
