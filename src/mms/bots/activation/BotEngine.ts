@@ -666,7 +666,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (action && action.args_digest !== '[forgotten]' && ['done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn'].includes(String(action.status))) this.store.db.transaction(() => this.host.journal?.appendInTx(this.store.db, {
         botId: String(action.bot_id), activationId: String(action.activation_id), lane: 'run', kind: 'notice', who: 'mousse', external: true,
         sourceKey: `bm:${id}:status:${action.status}`,
-        text: `Held action: ${action.status === 'done' ? 'Sent' : action.status === 'uncertain' ? "Couldn't tell if it went through" : action.status === 'running' ? 'Sending' : action.status === 'approved' ? 'Waiting for the service' : action.status === 'expired' ? 'Expired · not sent' : action.status === 'failed' ? 'Failed; check the card for its outcome' : 'Not sent'}`
+        text: `Held action: ${this.store.message(id)?.text ?? 'Not sent'}`
       }))
       this.chat.republish(id)
       for (const suffix of ['_n1', '_n2']) if (this.store.message(`${id}${suffix}`)) this.chat.republish(`${id}${suffix}`)

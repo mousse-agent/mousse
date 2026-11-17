@@ -185,13 +185,14 @@ export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_js
   }
   const result = action.result_json ? JSON.parse(action.result_json) as BotMcpCallOutcome : undefined
   if (JSON.parse(action.card_json ?? '{}').ownerRemoved) return 'Your owner removed this request. Do not ask for it again unless they write.'
+  if (action.status === 'expired' && result?.text !== '[forgotten]') return result?.text ?? 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.'
   const forgotten = result?.text === '[forgotten]'
   if (action.status === 'withdrawn') return forgotten ? `${botActionRefusalText(withdrawalCode({ card_json: action.card_json ?? null, result_json: action.result_json }))} The saved details of this outcome were removed.` : result?.text ?? 'Nothing was sent. Carry on without it.'
   const card = JSON.parse(action.card_json ?? '{}')
   if (result?.notSentInTime) return `${result.text} Nothing left Mousse. Decide whether a new request is needed.`
   const line = action.status === 'done' ? forgotten ? 'Your owner sent it.' : 'Your owner sent it. The tool answered:'
     : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
-      : action.status === 'expired' ? 'This call expired. Nothing was sent; do not try the same call again without a new reason.'
+      : action.status === 'expired' ? 'This expired, so nothing was sent.'
       : action.status === 'uncertain' ? 'It could not be confirmed whether this went through: check before trying again.'
         : result?.toolReportedError || card.toolReportedError ? 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'
           : 'Nothing was sent. The call failed:'
@@ -297,14 +298,14 @@ export class BotActions {
   }
   expireDue(): void {
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'open' AND expires_at <= ?", this.host.store.now())) {
-      if (this.transition(String(a.id), String(a.status), 'expired', { text: 'This call expired. Carry on without it; do not try the same call again without a new reason.' })) this.finish(a as unknown as ActionRow)
+      if (this.transition(String(a.id), String(a.status), 'expired', { text: 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' })) this.finish(a as unknown as ActionRow)
     }
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'approved'") as unknown as ActionRow[])
       if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) this.sendTimeout(action)
   }
   withdrawChanged(botId?: string): void {
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)) {
-      if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: this.host.store.activation(String(a.activation_id))?.trigger.kind === 'schedule' ? 'This schedule or its tool changed since you saw it. Nothing was sent; carry on without it.' : 'This tool or its permission changed, so nothing was sent. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
+      if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: this.host.store.activation(String(a.activation_id))?.trigger.kind === 'schedule' ? 'This schedule or its tool changed since you saw it. Nothing was sent. Carry on without it.' : 'This tool or its permission changed, so nothing was sent. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
     }
   }
   get(id: string): ActionRow | undefined { return this.host.store.get('SELECT * FROM bot_actions WHERE id = ?', id) as unknown as ActionRow | undefined }
@@ -455,7 +456,7 @@ export class BotActions {
     const row = this.host.store.activation(action.activation_id)
     if (row?.trigger.kind === 'schedule' && this.host.obsolete(action)) {
       if (settle) this.host.store.db.transaction(() => {
-        if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent; carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(action))
+        if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(action))
       })
       throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
     }
@@ -497,7 +498,7 @@ export class BotActions {
       let intact = false
       try { intact = Boolean(action.exec_args && action.exec_args.length <= ACTION_MAX_ARGUMENT_CHARS && !containsCredential(JSON.parse(action.exec_args)) && actionDigest(JSON.parse(action.exec_args)) === action.args_digest) } catch { /* Corrupt arguments are never recoverable. */ }
       if (intact && current && !this.host.binding(current, JSON.parse(action.target_json)) && !this.host.obsolete(action)) return
-      this.transition(id, 'approved', 'withdrawn', { text: 'This changed since you saw it. Nothing was sent; carry on without it.' })
+      this.transition(id, 'approved', 'withdrawn', { text: 'This changed since you saw it. Nothing was sent. Carry on without it.' })
       this.finish(action)
       return
     }

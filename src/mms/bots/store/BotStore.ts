@@ -2344,9 +2344,10 @@ export class BotStore {
       ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
   }
 
-  /** Settling is not telling: only model output or completion of a carrying dispatch consumes it. */
+  /** Model output or completion consumes an outcome. Ended work consumes all remaining outcomes: nobody can be told. */
   unreadWorkActions(workId: string): ActionRow[] {
     return this.all(`SELECT a.* FROM bot_actions a WHERE a.activation_id = ? AND a.status NOT IN ('open', 'approved', 'running')
+      AND EXISTS (SELECT 1 FROM bot_activations w WHERE w.id = a.activation_id AND w.status NOT IN ('done', 'failed', 'cancelled'))
       AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workActionIds') told
         WHERE d.activation_id = a.activation_id AND ${WORK_TOLD} AND told.value = a.id)
       ORDER BY COALESCE(a.ran_at, a.answered_at, a.created_at), a.rowid`, workId) as unknown as ActionRow[]
