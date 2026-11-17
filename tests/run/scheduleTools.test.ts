@@ -864,9 +864,8 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const w = await world()
       const child = await w.fx.delegate(w.callerRun.runId, 'call-a')
       w.threads.set(child.childThreadId, thread(child.childThreadId))
-      const asChild = await liveCaller(w, child.childThreadId, child.childRunId)
-      const made = JSON.parse((await asChild('schedule_create', CREATE)).text).job as { id: string }
-      expect(w.stored(made.id).createdBy?.threadId).toBe(child.childThreadId)
+      // Made through the tools by the subagent, after the person allowed it.
+      const made = w.jobs.createJob({ ...CREATE, schedule: { kind: 'manual' }, createdBy: { threadId: child.childThreadId, runId: child.childRunId } })
       const listed = (await w.result(w.call('schedule_list'))).jobs
       expect(listed).toEqual([expect.objectContaining({ id: made.id, createdByYou: false, createdBySubagent: child.childThreadId })])
       // Listed for removal, not handed over: the parent still cannot change it.
@@ -880,23 +879,37 @@ describe('the schedule tools (SPEC §15.1)', () => {
       ])
     })
 
-    it('a subagent cannot remove any job, not even the one it made, whoever started its turn', async () => {
+    it('every job a subagent asks for is asked of the person, even where its thread and its parent were allowed', async () => {
       const w = await world()
       const child = await w.fx.delegate(w.callerRun.runId, 'call-a')
       w.threads.set(child.childThreadId, thread(child.childThreadId))
       const asChild = await liveCaller(w, child.childThreadId, child.childRunId)
-      const own = JSON.parse((await asChild('schedule_create', CREATE)).text).job as { id: string }
+      expect(w.state.allowed).toBe(true)
+      for (const key of ['first', 'second']) {
+        const answer = JSON.parse((await asChild('schedule_create', { ...CREATE, clientRequestId: key })).text)
+        expect(answer, key).toMatchObject({ waiting: true })
+      }
+      expect(w.schedules.askFirst).toHaveBeenCalledTimes(2)
+      expect(w.schedules.askFirst).toHaveBeenCalledWith(expect.objectContaining({ threadId: child.childThreadId }))
+      expect(w.schedules.create).not.toHaveBeenCalled()
+      // Its parent, allowed, still adds one at once.
+      expect((await w.create()).id).toEqual(expect.any(String))
+    })
+
+    it('a subagent removes the job it made, as its parent would, and never its parent\'s', async () => {
+      const w = await world()
+      const child = await w.fx.delegate(w.callerRun.runId, 'call-a')
+      w.threads.set(child.childThreadId, thread(child.childThreadId))
+      const asChild = await liveCaller(w, child.childThreadId, child.childRunId)
+      const own = w.jobs.createJob({ ...CREATE, schedule: { kind: 'manual' }, createdBy: { threadId: child.childThreadId, runId: child.childRunId } })
       const parents = await w.create({ name: 'The parent\'s' })
-      w.recordAgentAction.mockClear()
-      for (const id of [own.id, parents.id, 'missing']) {
+      for (const id of [parents.id, 'missing']) {
         const error = await w.denied(asChild('schedule_delete', { jobId: id }))
         expect(error, id).toBeInstanceOf(McpToolError)
         expect(error!.code).toBe('mousse_scope_denied')
-        expect(error!.message).toMatch(/A subagent cannot remove scheduled jobs/)
       }
-      expect(w.jobs.listJobs().map((job) => job.id).sort()).toEqual([own.id, parents.id].sort())
-      expect(w.schedules.remove).not.toHaveBeenCalled()
-      expect(w.recordAgentAction).not.toHaveBeenCalled()
+      expect(JSON.parse((await asChild('schedule_delete', { jobId: own.id })).text).removed).toBe(true)
+      expect(w.jobs.listJobs().map((job) => job.id)).toEqual([parents.id])
     })
 
     // Who made the job, as seen from the caller: only its own thread and subagents below it are the caller's.

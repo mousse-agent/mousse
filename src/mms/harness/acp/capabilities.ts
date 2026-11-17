@@ -5,8 +5,8 @@ import type { AcpRpc } from './connection'
 
 /**
  * What every ACP agent offers the run engine. `childPolicy: 'isolated_only'`: Mousse cannot hold
- * an agent's own tools to read-only, so a `shared` (read-only) child is refused. An `isolated`
- * child runs; any native subagent it starts is only observed, not controlled.
+ * an agent's own tools to read-only, so a read-only child is refused. Any other child runs; any
+ * native subagent it starts is only observed, not controlled.
  */
 export const ACP_BASE_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',

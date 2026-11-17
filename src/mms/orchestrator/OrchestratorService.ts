@@ -23,7 +23,7 @@ import { join, resolve } from 'node:path'
 import { projectKeptFilesOwner, registerProjectKeptFilesFolder } from '../actions/keptCopies'
 import { getMousseHomeDir } from '../data/paths'
 import { tmpdir } from 'node:os'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import {
   normalizeAgentAccessSettings,
   normalizeContextSettings,
@@ -299,7 +299,7 @@ import { ThreadActionService } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
-import { coverageNotice, SnapshotRefusedError, snapshotOriginAsync } from '../actions/snapshots'
+import { coverageNotice, SnapshotRefusedError, snapshotOriginAsync, takeSnapshotAsync } from '../actions/snapshots'
 import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync, tryGitAsync as actionTryGitAsync } from '../actions/git'
 import {
   claimNextNormal,
@@ -368,7 +368,7 @@ import {
   repairQueueJournal,
   runDurableQueueCommand
 } from '../queue/durableQueue'
-import { ThreadSession, steerImages, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
+import { ThreadSession, isReadOnlyShared, steerImages, type ActiveTurnControl, type SharedWorkspace, type SteerEntry } from './ThreadSession'
 import { SteerHold, type PendingSteerFacts } from './steerHold'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
@@ -405,6 +405,21 @@ interface SnapshotFolder {
   workTree: string
   /** The project, when the folder is a project's; the project's threads share one store. */
   projectId?: string
+}
+
+/**
+ * Where a subagent that may edit its parent's folder keeps that folder's snapshots, by run: taken as each of its turns
+ * starts and ends, so its task's result says what changed there while it worked (`delegationResultReport`).
+ */
+const SHARED_FOLDER_SNAPSHOTS_FILE = 'shared-folder-snapshots.json'
+
+function readSharedFolderSnapshots(file: string): Record<string, { start?: string; end?: string }> {
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, { start?: string; end?: string }> : {}
+  } catch {
+    return {}
+  }
 }
 
 interface NormalizedOrchestratorSendRequest {
@@ -1100,10 +1115,10 @@ type LeaseWait = {
 /** None of the messages a lease wait woke for is still waiting by the time the queue lock is held. */
 class LeaseWaitGone extends Error {}
 
-/** Tool access of a delegated child in its parent's workspace: read-only roles only. */
+/** Tool access of a read-only delegated child (`delegate_task` `readOnly`) in its parent's workspace. */
 const SHARED_READER_POLICY: AgentWorkspacePolicy = { version: 1, workspace: 'shared', access: 'read-only' }
-/** Roles allowed `workspace: 'shared'` (SPEC §14.2: read-only roles). */
-const SHARED_WORKSPACE_ROLES: ReadonlySet<string> = new Set(['research', 'review'])
+/** What a read-only subagent's own subagents must be, since authority only narrows down the tree. */
+const READ_ONLY_CALLER_MESSAGE = 'You are a read-only subagent, so your own subagents must be read-only too: start them with readOnly true.'
 /** Most named assignments one `create_subagents` call may start. */
 const NAMED_BATCH_LIMIT = 8
 /** How long a remote subagent may run when `delegate_task` gives no `maxMinutes`: as long as a local turn may. */
@@ -4078,8 +4093,11 @@ export class OrchestratorService extends EventEmitter {
     try {
       if (this.botThreads?.roleOf(caller.threadId)) return false
       const engine = this.runEngine
-      const run = engine?.getRun(caller.runId)
-      const binding = engine?.bindingForRun(caller.runId)
+      // A subagent has what its parent has: a subagent of a person's turn (or of one of its subagents) counts as that turn.
+      const root = this.delegationRootOf(caller.runId)
+      const run = root ? engine?.getRun(root) : undefined
+      if (run && run.threadId !== caller.threadId && this.botThreads?.roleOf(run.threadId)) return false
+      const binding = root ? engine?.bindingForRun(root) : undefined
       return Boolean(run && binding) && startedByPerson({ origin: policyOrigin(binding!.policy), source: run!.source })
     } catch {
       return false
@@ -4132,7 +4150,7 @@ export class OrchestratorService extends EventEmitter {
       actor: defaultIntegrationActor(false),
       enabledSkills: [],
       loadedSkills: [],
-      ...(session.sharedWorkspace ? { toolAccess: createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path) } : {}),
+      ...(session.sharedWorkspace && isReadOnlyShared(session.sharedWorkspace) ? { toolAccess: createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path) } : {}),
       // A bot turn: every app-tool call is held to the bot's grant (the registry checks it).
       ...(bot ? { bot: bot.authority } : {}),
       // A bot's browser tools run on its own browser, never the profile's tabs.
@@ -7012,13 +7030,16 @@ export class OrchestratorService extends EventEmitter {
     // global default (or the parent's session) at every later turn.
     const effective = override ?? this.defaultAgentModel()
     const model = effective.model?.trim() && (effective.instanceId?.trim() || effective.llmProvider?.trim()) ? structuredClone(effective) : undefined
-    const shared = request.workspace === 'shared' ? this.sharedWorkspaceOf(request.parentThreadId) : null
+    const parentFolder = request.workspace === 'shared' ? this.sharedWorkspaceOf(request.parentThreadId) : null
+    // A `shared` child works in the parent's folder with every tool the parent has, unless it was asked read-only.
+    const shared: SharedWorkspace | null = parentFolder ? { ...parentFolder, access: request.readOnly ? 'read-only' : 'write' } : null
     // With "Give each subagent its own worktree" on, the child's worktree starts at the parent's HEAD as it is now.
     const startSha = request.workspace === 'isolated' && this.subagentWorktreesOn() ? this.parentHeadNow(request.parentThreadId) : undefined
     const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
       lineage: lineageForChild(parentThread),
       ownerThreadId: parentThread.id,
-      workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated', ...(shared ? { sharedPath: shared.path } : {}), ...(startSha ? { startSha } : {}) },
+      // `access` is kept whether or not the parent has a folder: a read-only child stays read-only without one.
+      workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated', ...(shared ? { sharedPath: shared.path } : {}), ...(request.workspace === 'shared' ? { access: request.readOnly ? 'read-only' as const : 'write' as const } : {}), ...(startSha ? { startSha } : {}) },
       // A child starts at the narrowest of its lineage's ceiling, the parent's saved mode and the mode
       // the delegating run actually enforces (its binding: a provider may have lowered the saved
       // mode, and a per-turn option may have tightened it). It never starts wider than the run that
@@ -7045,10 +7066,11 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Issue #142: the policy every turn of a delegated child carries (first or resumed); undefined
-   * for a thread that is not a subagent. A `shared` child is read-only.
+   * for a thread that is not a subagent. Only a child asked read-only is held read-only; a `shared` one that was not
+   * keeps every tool its parent has.
    */
   private childTurnPolicy(session: ThreadSession): ChildTurnPolicy | undefined {
-    if (session.sharedWorkspace) return { readOnly: true }
+    if (isReadOnlyShared(session.sharedWorkspace) || this.readOnlyBinding(session.threadId)) return { readOnly: true }
     try {
       return this.runEngine?.delegations.getLineage(session.threadId)?.relationship === 'subagent' ? { readOnly: false } : undefined
     } catch {
@@ -7056,9 +7078,41 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** Whether `threadId` is a read-only (`shared`) delegated child; its Mousse tools may not write threads. */
+  /** Whether `threadId` is a read-only delegated child (`delegate_task` `readOnly`); its Mousse tools may not write threads. */
   private isReadOnlyChild(threadId: string): boolean {
-    return Boolean(this.getOrCreateSession(threadId).sharedWorkspace)
+    return isReadOnlyShared(this.getOrCreateSession(threadId).sharedWorkspace) || this.readOnlyBinding(threadId)
+  }
+
+  /** Whether the thread's saved binding says read-only, folder or not: a read-only child never runs unheld for lack of one. */
+  private readOnlyBinding(threadId: string): boolean {
+    try {
+      const binding = this.threadStore?.getThread(threadId)?.workspaceBinding
+      return binding?.policy === 'shared' && binding.access === 'read-only'
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The run at the top of a delegated run's chain: the turn a person, a job, a wake or another agent's message started,
+   * whose subagent (or subagent of a subagent) `runId` is. `runId` itself when it was not delegated; undefined when the
+   * chain can't be read or is deeper than 64.
+   */
+  private delegationRootOf(runId: string): string | undefined {
+    const engine = this.runEngine
+    if (!engine) return undefined
+    let run = runId
+    for (let depth = 0; depth < 64; depth += 1) {
+      try {
+        if (engine.getRun(run)?.source !== 'delegation') return engine.getRun(run) ? run : undefined
+        const parentRunId = engine.delegations.getByChildRun(run)?.parentRunId
+        if (!parentRunId) return undefined
+        run = parentRunId
+      } catch {
+        return undefined
+      }
+    }
+    return undefined
   }
 
   /**
@@ -7066,7 +7120,7 @@ export class OrchestratorService extends EventEmitter {
    * child to its policy gets a structured refusal instead of a child it could not keep read-only.
    * `instanceId` is the requested instance; without one the child runs on the parent's selection.
    */
-  private async delegationRefusal(parentThreadId: string, instanceId: string | undefined, workspace: 'shared' | 'isolated') {
+  private async delegationRefusal(parentThreadId: string, instanceId: string | undefined, readOnly: boolean) {
     let target: ResolvedTurnSelection
     try {
       target = instanceId
@@ -7076,20 +7130,20 @@ export class OrchestratorService extends EventEmitter {
       // An unresolvable target fails loudly when the child is created, as before.
       return null
     }
-    const refusal = await this.targetRefusal(target, workspace, this.sharedWorkspaceOf(parentThreadId)?.path ?? null)
+    const refusal = await this.targetRefusal(target, readOnly, this.sharedWorkspaceOf(parentThreadId)?.path ?? null)
     return refusal ? { started: false as const, ...refusal } : null
   }
 
   /** The static check of the instance's capabilities, then the instance's look at the user's setup. */
-  private async targetRefusal(target: ResolvedTurnSelection, workspace: 'shared' | 'isolated', cwd: string | null): Promise<SubagentRefusal | null> {
-    return subagentTargetRefusal(target.caps, target.driver, workspace)
-      ?? await this.harness.childPreflight(target.instanceId, { workspace, cwd })
+  private async targetRefusal(target: ResolvedTurnSelection, readOnly: boolean, cwd: string | null): Promise<SubagentRefusal | null> {
+    return subagentTargetRefusal(target.caps, target.driver, readOnly)
+      ?? await this.harness.childPreflight(target.instanceId, { readOnly, cwd })
   }
 
   /**
    * SPEC §14.2: a delegated child keeps the workspace policy its delegation recorded. A session
-   * built from storage (after a restart, or once evicted) reads it back, so a `shared` read-only
-   * child still observes its parent's workspace under `SHARED_READER_POLICY`.
+   * built from storage (after a restart, or once evicted) reads it back, so a `shared` child still
+   * works in its parent's folder, and a read-only one there under `SHARED_READER_POLICY`.
    */
   private restoreDelegatedWorkspace(session: ThreadSession): void {
     const engine = this.runEngine
@@ -7101,11 +7155,14 @@ export class OrchestratorService extends EventEmitter {
       // delegation row and the parent's current workspace.
       const binding = this.threadStore?.getThread(session.threadId)?.workspaceBinding
       if (binding) {
-        if (binding.policy === 'shared' && binding.sharedPath) session.sharedWorkspace = { path: binding.sharedPath, parentThreadId: lineage.parentThreadId }
+        // A binding saved before `access` existed is a read-only child's: every `shared` child was one then.
+        if (binding.policy === 'shared' && binding.sharedPath)
+          session.sharedWorkspace = { path: binding.sharedPath, parentThreadId: lineage.parentThreadId, access: binding.access === 'write' ? 'write' : 'read-only' }
         return
       }
       const policy = engine.delegations.listForChildThread(session.threadId).filter((delegation) => delegation.workspace).at(-1)
-      if (policy?.workspace === 'shared') session.sharedWorkspace = this.sharedWorkspaceOf(lineage.parentThreadId)
+      const folder = policy?.workspace === 'shared' ? this.sharedWorkspaceOf(lineage.parentThreadId) : null
+      if (folder) session.sharedWorkspace = { ...folder, access: 'read-only' }
     } catch (error) {
       console.warn('delegated workspace policy could not be restored', {
         threadId: session.threadId,
@@ -7558,11 +7615,15 @@ export class OrchestratorService extends EventEmitter {
     const listDelegations = () => this.listDelegations(parentThreadId)
     const named = (request: NamedAgentToolRequest): DelegateTaskInput => {
       const write = request.access === 'write'
+      const workspace = write ? 'isolated' : request.workspace ?? 'shared'
       return {
         prompt: request.task,
         title: request.name,
-        workspace: write ? 'isolated' : request.workspace ?? 'shared',
+        workspace,
         role: write ? 'implement' : 'research',
+        // The older named tools default to a read-only reader in the caller's folder, as they always did; one asked
+        // for a worktree of its own keeps every tool, as it always did.
+        ...(workspace === 'shared' ? { readOnly: true } : {}),
         wake: 'always'
       }
     }
@@ -7607,14 +7668,13 @@ export class OrchestratorService extends EventEmitter {
     const modeCeiling = narrowCeiling(callerCeiling, input.modeCeiling)
     // Every agent may read and manage every thread (SPEC §15.1).
     const accessLevel: AgentAccessLevel = 'manage'
-    const role = input.role?.trim() || undefined
-    // Experimental: every subagent gets a worktree of its own, whatever the main agent asked for. A read-only subagent's
-    // own subagents stay read-only, since authority only narrows down the tree.
+    // A read-only subagent (the narrow kind the caller asked for) reads the caller's own folder: it needs no worktree.
+    if (input.readOnly && input.workspace !== 'shared') input = { ...input, workspace: 'shared' }
+    // Experimental: every other subagent gets a worktree of its own, whatever the main agent asked for.
     const askedShared = input.workspace === 'shared'
-    if (askedShared && this.subagentWorktreesOn() && !this.isReadOnlyChild(parentThreadId)) input = { ...input, workspace: 'isolated' }
+    if (askedShared && !input.readOnly && this.subagentWorktreesOn() && !this.isReadOnlyChild(parentThreadId)) input = { ...input, workspace: 'isolated' }
     const ownWorktree = askedShared && input.workspace === 'isolated'
-    if (input.workspace === 'shared' && !(role && SHARED_WORKSPACE_ROLES.has(role)))
-      throw new Error('workspace "shared" is allowed only for read-only roles (role "research" or "review"); use workspace "isolated" for work that edits, builds or tests.')
+    const role = input.role?.trim() || undefined
     if (input.computer !== undefined) return this.delegateRemoteTask(parentThreadId, parentRunId, input, call, { modeCeiling, accessLevel, role })
     // SPEC §13.8: the child names an instance; an older `provider` name is mapped to one. An unknown
     // or disabled instance fails the tool call here, before any thread is created.
@@ -7627,8 +7687,8 @@ export class OrchestratorService extends EventEmitter {
       : undefined
     const instanceId = resolved?.instanceId
     // A read-only subagent may start subagents, but only read-only ones: authority only narrows down the tree.
-    if (input.workspace !== 'shared' && this.isReadOnlyChild(parentThreadId))
-      return { started: false as const, code: 'read_only_caller_requires_shared' as const, message: 'You are a read-only subagent, so your own subagents must be read-only too: start them with workspace "shared" and role "research" or "review".' }
+    if (!input.readOnly && this.isReadOnlyChild(parentThreadId))
+      return { started: false as const, code: 'read_only_caller_requires_shared' as const, message: READ_ONLY_CALLER_MESSAGE }
     // A model the agent named is one the picker offers, on an entry that can run now; else nothing starts.
     const model = input.model?.trim() || undefined
     if (requested || model) {
@@ -7641,7 +7701,10 @@ export class OrchestratorService extends EventEmitter {
       const choice = target ? await this.localModelRefusal(this.threadScope(parentThreadId), { instanceId: target, ...(model ? { model: resolved?.model || model } : {}), ...(input.effort ? { effort: input.effort } : {}) }) : undefined
       if (choice) return { started: false as const, ...choice }
     }
-    const refusal = await this.delegationRefusal(parentThreadId, instanceId, input.workspace)
+    // A read-only subagent is held to the read-only tools in its parent's folder: with no folder, nothing could hold it.
+    if (input.readOnly && !this.sharedWorkspaceOf(parentThreadId))
+      return { started: false as const, code: 'read_only_needs_folder' as const, message: 'This thread has no folder, so a read-only subagent could not be held read-only here. Leave readOnly out, or start it from a thread in a project.' }
+    const refusal = await this.delegationRefusal(parentThreadId, instanceId, input.readOnly === true)
     if (refusal) return refusal
     const title = input.title?.trim() || undefined
     let accepted: Awaited<ReturnType<RunEngine['requestDelegation']>>
@@ -7656,6 +7719,7 @@ export class OrchestratorService extends EventEmitter {
         model: model ? agentModelId(model, input.effort) : undefined,
         role,
         workspace: input.workspace,
+        ...(input.readOnly ? { readOnly: true } : {}),
         wake: input.wake ?? 'always',
         title,
         ...(modeCeiling ? { modeCeiling } : {}),
@@ -7675,6 +7739,8 @@ export class OrchestratorService extends EventEmitter {
       title: this.titleOf(accepted.childThreadId) ?? title ?? null,
       ...(accepted.replayed ? { replayed: true } : {}),
       ...(ownWorktree ? { workspace: 'isolated' as const } : {}),
+      // What it holds, so the caller never has to guess: everything it has, or the read-only tools only.
+      access: input.readOnly ? 'read-only' as const : 'full' as const,
       note: ownWorktree
         ? 'Started in a worktree of its own, not your folder: this computer gives every subagent one. Mousse sends you the result when it finishes; end your turn.'
         : 'Started. Mousse sends you the result when it finishes; end your turn.'
@@ -7704,8 +7770,8 @@ export class OrchestratorService extends EventEmitter {
     const prior = engine.store.getReceipt(requestKey)
     const remote = this.remoteSubagents
     if (!prior) {
-      if (input.workspace !== 'shared' && this.isReadOnlyChild(parentThreadId))
-        return refuse('read_only_caller_requires_shared', 'You are a read-only subagent, so your own subagents must be read-only too: start them with workspace "shared" and role "research" or "review".')
+      if (!input.readOnly && this.isReadOnlyChild(parentThreadId))
+        return refuse('read_only_caller_requires_shared', READ_ONLY_CALLER_MESSAGE)
       // A chain stays one computer deep: work another device started here never reaches a third computer.
       const parent = this.threadStore?.getThread(parentThreadId)
       const root = parent?.lineage ? this.threadStore?.getThread(parent.lineage.rootThreadId) : parent
@@ -7767,6 +7833,7 @@ export class OrchestratorService extends EventEmitter {
         model: remoteModel,
         role: policy.role,
         workspace: input.workspace,
+        ...(input.readOnly ? { readOnly: true } : {}),
         wake: input.wake ?? 'always',
         title,
         ...(policy.modeCeiling ? { modeCeiling: policy.modeCeiling } : {}),
@@ -7776,8 +7843,10 @@ export class OrchestratorService extends EventEmitter {
           prompt: `${remoteSubagentPreamble(this.titleOf(parentThreadId))}\n\n${input.prompt}`,
           permissionMode,
           // A read-only task, or one under a plan ceiling, plans and reads there: it never edits.
-          chatMode: input.workspace === 'shared' || policy.modeCeiling === 'plan' ? 'plan' : 'agent',
-          worktree: input.workspace === 'isolated',
+          chatMode: input.readOnly || policy.modeCeiling === 'plan' ? 'plan' : 'agent',
+          // Only a read-only task reads that computer's project folder itself: one that may edit gets a worktree there,
+          // never that folder, which is nobody's own folder here.
+          worktree: input.workspace === 'isolated' || !input.readOnly,
           projectId: farProjectId,
           instanceId: input.instanceId?.trim() || input.provider?.trim() || null,
           model: remoteModel ?? null,
@@ -7808,6 +7877,7 @@ export class OrchestratorService extends EventEmitter {
     }
     return {
       ...value,
+      access: input.readOnly ? 'read-only' as const : 'full' as const,
       note: launched.ok === true
         ? `Started on ${computer.name}. Mousse sends you the result when it finishes; end your turn.`
         : `Sent to ${computer.name}, which has not confirmed it yet (${launched.message}). Mousse keeps trying and sends you the result; end your turn.`
@@ -8366,8 +8436,23 @@ export class OrchestratorService extends EventEmitter {
       role: row.role,
       provider: row.provider,
       model: row.model,
-      ...(row.computer ? { computer: row.computer.name, computerOnline: row.computer.online } : {})
+      ...(row.computer ? { computer: row.computer.name, computerOnline: row.computer.online } : { access: this.childAccess(row.childThreadId) })
     }))
+  }
+
+  /**
+   * What a child on this computer holds, read from its saved binding as `restoreDelegatedWorkspace` reads it: the
+   * read-only tools only, or everything its parent has.
+   */
+  private childAccess(threadId: string): 'read-only' | 'full' {
+    try {
+      const binding = this.threadStore?.getThread(threadId)?.workspaceBinding
+      if (binding?.policy !== 'shared') return 'full'
+      // A binding saved before `access` existed, with a folder, is a read-only child's.
+      return binding.access === 'read-only' || (binding.access === undefined && binding.sharedPath) ? 'read-only' : 'full'
+    } catch {
+      return 'full'
+    }
   }
 
   /**
@@ -8417,8 +8502,19 @@ export class OrchestratorService extends EventEmitter {
       const pins = { base: `${prefix}/base`, result: `${prefix}/result` }
       const project = this.projectManager && this.threadStore ? resolveThreadProjectPath(this.projectManager, this.threadStore, delegation.parentThreadId) : undefined
       let built: { report: SubagentResultReport; repositoryId: string } | undefined
-      if (delegation.workspace === 'shared') {
-        // The subagent read and wrote the parent's own folder: what changed there during the task is in the parent's turn records.
+      const writer = delegation.workspace === 'shared' ? this.threadStore?.getThread(delegation.childThreadId)?.workspaceBinding : undefined
+      if (writer?.access === 'write' && writer.sharedPath) {
+        // A subagent that may edit its parent's folder: what it changed is between the folder as its task's run started
+        // and as its last run ended, recorded by its own turns. Without both, no file report: never a made-up "no change".
+        const rows = readSharedFolderSnapshots(join(childDirectory, SHARED_FOLDER_SNAPSHOTS_FILE))
+        const base = rows[delegation.childRunId]?.start
+        const resultSha = rows[delegation.result?.runId ?? delegation.childRunId]?.end
+        if (!base || !resultSha || !existsSync(writer.sharedPath)) return undefined
+        const parentDirectory = this.resolveThreadDir(delegation.parentThreadId)
+        const repositoryId = (parentDirectory ? new ThreadWorkspaceManager(parentDirectory).load()?.repositoryId : undefined) ?? writer.sharedPath
+        built = { repositoryId, report: buildSubagentResultReport({ cwd: writer.sharedPath, workedIn: writer.sharedPath, shared: true, baseSha: base, resultSha, pins }) }
+      } else if (delegation.workspace === 'shared') {
+        // A read-only subagent read the parent's own folder: what changed there during the task is in the parent's turn records.
         const parentDirectory = this.resolveThreadDir(delegation.parentThreadId)
         const parent = parentDirectory ? new ThreadWorkspaceManager(parentDirectory).load() : undefined
         if (!parent || !parentDirectory) return undefined
@@ -12713,10 +12809,51 @@ export class OrchestratorService extends EventEmitter {
   /** One turn; whatever way it ends, nothing of its app-tool context stays registered. */
   private async executeTurn(...args: Parameters<OrchestratorService['executeTurnBody']>): Promise<OrchestratorResponse> {
     const runId = args[3]?.runId
+    // A subagent that may edit its parent's folder records that folder as its turn starts and ends: its result is
+    // measured from those, never from the parent's own turn records, which say nothing once the parent's turn has ended.
+    const writer = runId ? this.sharedWriterOf(runId) : undefined
+    if (writer && runId) await this.recordSharedFolder(writer, runId, 'start')
     try {
       return await this.executeTurnBody(...args)
     } finally {
       if (runId) this.appToolTurns.dropRun(runId)
+      // A turn that completed recorded its end before its run did (`executeTurnBody`); one that failed or was stopped
+      // records it here, so a later look at its result still has it.
+      if (writer && runId && !this.sharedFolderEnded.delete(runId)) await this.recordSharedFolder(writer, runId, 'end')
+    }
+  }
+
+  /** Runs whose turn already recorded the shared folder's end (`recordSharedFolder`), until their `executeTurn` returns. */
+  private readonly sharedFolderEnded = new Set<string>()
+
+  /** The folder and thread of a run of a subagent that works in its parent's folder and may edit it; else undefined. */
+  private sharedWriterOf(runId: string): { threadId: string; path: string } | undefined {
+    try {
+      const threadId = this.runEngine?.getRun(runId)?.threadId
+      const binding = threadId ? this.threadStore?.getThread(threadId)?.workspaceBinding : undefined
+      return threadId && binding?.policy === 'shared' && binding.access === 'write' && binding.sharedPath ? { threadId, path: binding.sharedPath } : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Records the shared folder as a snapshot for a run's start or end (`SHARED_FOLDER_SNAPSHOTS_FILE` in the subagent's
+   * thread folder). Never fails the turn: a folder Mousse can't snapshot leaves the task's result without a file report.
+   */
+  private async recordSharedFolder(writer: { threadId: string; path: string }, runId: string, at: 'start' | 'end'): Promise<void> {
+    const directory = this.resolveThreadDir(writer.threadId)
+    if (!directory) return
+    try {
+      const { sha } = await takeSnapshotAsync(writer.path, { reason: `subagent task ${at}`, threadId: writer.threadId, operationId: runId })
+      const file = join(directory, SHARED_FOLDER_SNAPSHOTS_FILE)
+      const rows = readSharedFolderSnapshots(file)
+      // The first start and the last end of a run: a run started again after a restart keeps where it began.
+      rows[runId] = at === 'start' ? { start: rows[runId]?.start ?? sha, ...(rows[runId]?.end ? { end: rows[runId]!.end } : {}) } : { ...rows[runId], end: sha }
+      writeFileSync(file, JSON.stringify(rows))
+    } catch (error) {
+      // A folder that is not a Git repository has none to record, every turn: not worth a warning.
+      logDebug('OrchestratorService', 'a shared folder could not be recorded for a subagent', error, { threadId: writer.threadId, runId, at })
     }
   }
 
@@ -12889,7 +13026,7 @@ export class OrchestratorService extends EventEmitter {
     // Resolve the task binding before dispatch. Provisioning failures must not
     // turn an isolated code request into a write to the registered checkout.
     if (session.sharedWorkspace) {
-      // A read-only delegated child observes its parent's workspace (SPEC §14.2 `shared`).
+      // A `shared` delegated child works in its parent's folder (SPEC §14.2), read-only when it was asked so.
       session.workspace = null
       session.projectCwd = session.sharedWorkspace.path
     } else if (session.primaryCheckout) {
@@ -13354,10 +13491,13 @@ export class OrchestratorService extends EventEmitter {
       promptCacheInstanceId = instance.instanceId
       // Issue #142: a read-only child is checked on every turn, not only when it was created. Its
       // provider may have been switched, or the user's setup changed, since then.
-      if (session.sharedWorkspace) {
-        const refusal = await this.targetRefusal(instance, 'shared', session.sharedWorkspace.path)
+      if (session.sharedWorkspace && isReadOnlyShared(session.sharedWorkspace)) {
+        const refusal = await this.targetRefusal(instance, true, session.sharedWorkspace.path)
         // A known error keeps its message; an unknown one would reach the thread as a generic failure.
         if (refusal) throw new AppError({ code: refusal.code, message: refusal.message, errorInfo: { category: 'unavailable', retryable: false } })
+      } else if (this.readOnlyBinding(session.threadId)) {
+        // Read-only with no folder to hold it in: refuse rather than run with every tool.
+        throw new AppError({ code: 'read_only_needs_folder', message: 'This read-only subagent has no folder to be held read-only in, so it cannot run.', errorInfo: { category: 'unavailable', retryable: false } })
       }
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
       const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => opts?.origin ?? this.turnOrigin(session.threadId, request.workflowInvocationId), {
@@ -13817,7 +13957,7 @@ export class OrchestratorService extends EventEmitter {
           onPublishApplet,
           browser: browserExecution,
           delegation: engineRunId && this.effectsEnabled() ? this.turnDelegationTools(session, engineRunId, mode) : undefined,
-          toolAccess: session.sharedWorkspace
+          toolAccess: session.sharedWorkspace && isReadOnlyShared(session.sharedWorkspace)
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
           toolLedger: this.toolLedgerFor(engineRunId),
@@ -14231,6 +14371,13 @@ export class OrchestratorService extends EventEmitter {
       // turn waits for it (its end snapshot is this turn's alone), and a parent's delegation publishes only with it.
       this.setTurnPhase(session.threadId, 'completed')
       this.markRun(engineRunId, (engine, id) => engine.markFinalizing(id))
+    }
+    // A subagent that edits its parent's folder: the folder as its turn ended, recorded while the run is still
+    // finalizing, so its parent's result never comes without it.
+    const sharedWriter = engineRunId ? this.sharedWriterOf(engineRunId) : undefined
+    if (sharedWriter && engineRunId) {
+      await this.recordSharedFolder(sharedWriter, engineRunId, 'end')
+      this.sharedFolderEnded.add(engineRunId)
     }
     try {
       await checkpointTurn(executionFailed ? 'failed' : 'completed')

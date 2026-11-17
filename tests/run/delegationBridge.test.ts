@@ -173,23 +173,4 @@ describe('delegation bridge (SPEC §14)', () => {
     expect(second.engine.inbox.listForThread(parent.id).map((row) => row.status)).toEqual(['acknowledged'])
   }, 30_000)
 
-  it('rejects a shared workspace for a role that writes', async () => {
-    const dir = setupHome()
-    let rejection = ''
-    let parentId = ''
-    const d = daemon(dir, async (input, delegation) => {
-      if (input.threadId !== parentId) return 'child'
-      try {
-        await delegation!.delegateTask({ prompt: 'Edit files', workspace: 'shared', role: 'implement' }, { toolCallId: 'c' })
-      } catch (error) {
-        rejection = (error as Error).message
-      }
-      return 'done'
-    }, 1)
-    stops.push(d.stop)
-    parentId = d.store.createThread('Parent').id
-    await d.orch.send('go', false, { threadId: parentId })
-    expect(rejection).toMatch(/read-only roles/)
-    expect(d.engine.delegations.listForParentThread(parentId)).toEqual([])
-  }, 30_000)
 })

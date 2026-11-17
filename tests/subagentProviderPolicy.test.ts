@@ -469,37 +469,37 @@ describe('Codex children', () => {
   })
 
   describe('preflight of the user setup (CodexAdapter.childPreflight)', () => {
-    const preflight = (s: ReturnType<typeof server>, workspace: 'shared' | 'isolated') =>
-      new CodexAdapter(() => create(s)).childPreflight({ workspace, cwd: home })
+    const preflight = (s: ReturnType<typeof server>, kind: 'read-only' | 'general-purpose') =>
+      new CodexAdapter(() => create(s)).childPreflight({ readOnly: kind === 'read-only', cwd: home })
     const SHARED_REFUSED = 'shared_unsupported_for_provider'
 
     it.each([
-      ['no MCP servers', {}, 'shared', null],
-      ['no MCP servers', {}, 'isolated', null],
-      ['a disabled server only', { mcpServers: { old: { enabled: false } } }, 'shared', null],
-      ['a user MCP server', { mcpServers: { ext: { enabled: true } } }, 'shared', SHARED_REFUSED],
-      ['a user MCP server whose enabled flag is unset', { mcpServers: { ext: {} } }, 'shared', SHARED_REFUSED],
-      ['a Mousse-managed server named mousse counts as external', { mcpServers: { mousse: { enabled: true } } }, 'shared', SHARED_REFUSED],
-      ['a user MCP server, isolated child', { mcpServers: { ext: { enabled: true } } }, 'isolated', null],
-      ['a server only in an applied config layer (project)', { layers: [{ disabledReason: null, config: { mcp_servers: { projsrv: {} } } }] }, 'shared', SHARED_REFUSED],
-      ['a server in a layer Codex switched off (untrusted project)', { layers: [{ disabledReason: 'trust this project', config: { mcp_servers: { projsrv: {} } } }] }, 'shared', null],
-      ['an unreadable config, shared child', { configFails: true }, 'shared', SHARED_REFUSED],
-      ['an unreadable config, isolated child', { configFails: true }, 'isolated', null]
-    ] as const)('%s (%s workspace)', async (_name, setup, workspace, code) => {
+      ['no MCP servers', {}, 'read-only', null],
+      ['no MCP servers', {}, 'general-purpose', null],
+      ['a disabled server only', { mcpServers: { old: { enabled: false } } }, 'read-only', null],
+      ['a user MCP server', { mcpServers: { ext: { enabled: true } } }, 'read-only', SHARED_REFUSED],
+      ['a user MCP server whose enabled flag is unset', { mcpServers: { ext: {} } }, 'read-only', SHARED_REFUSED],
+      ['a Mousse-managed server named mousse counts as external', { mcpServers: { mousse: { enabled: true } } }, 'read-only', SHARED_REFUSED],
+      ['a user MCP server, general-purpose child', { mcpServers: { ext: { enabled: true } } }, 'general-purpose', null],
+      ['a server only in an applied config layer (project)', { layers: [{ disabledReason: null, config: { mcp_servers: { projsrv: {} } } }] }, 'read-only', SHARED_REFUSED],
+      ['a server in a layer Codex switched off (untrusted project)', { layers: [{ disabledReason: 'trust this project', config: { mcp_servers: { projsrv: {} } } }] }, 'read-only', null],
+      ['an unreadable config, read-only child', { configFails: true }, 'read-only', SHARED_REFUSED],
+      ['an unreadable config, general-purpose child', { configFails: true }, 'general-purpose', null]
+    ] as const)('%s (%s child)', async (_name, setup, kind, code) => {
       const s = server(setup)
-      expect((await preflight(s, workspace))?.code ?? null).toBe(code)
+      expect((await preflight(s, kind))?.code ?? null).toBe(code)
       // It only reads the user's setup, and it never looks at Codex's own subagent flags.
       expect(s.messages.map((message) => message.method).filter((method) => /write|set|batch|experimentalFeature/i.test(method ?? ''))).toEqual([])
     })
 
     it("leaves Codex's native subagents alone: no refusal whatever the config", async () => {
-      for (const workspace of ['shared', 'isolated'] as const) expect((await preflight(server(), workspace))?.code ?? null).toBeNull()
+      for (const kind of ['read-only', 'general-purpose'] as const) expect((await preflight(server(), kind))?.code ?? null).toBeNull()
     })
 
-    it('names the servers and points to isolated', async () => {
-      const refusal = await preflight(server({ mcpServers: { ext: {}, other: {} } }), 'shared')
+    it('names the servers and says to leave readOnly out', async () => {
+      const refusal = await preflight(server({ mcpServers: { ext: {}, other: {} } }), 'read-only')
       expect(refusal?.message).toContain('ext, other')
-      expect(refusal?.message).toContain('"isolated"')
+      expect(refusal?.message).toContain('Leave readOnly out')
     })
   })
 

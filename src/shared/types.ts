@@ -1453,8 +1453,13 @@ export interface ThreadLineage {
 export interface SubagentWorkspaceBinding {
   /** `primary`: a scheduled run on the project's own checkout, never a provisioned worktree. */
   policy: 'shared' | 'isolated' | 'primary'
-  /** The parent's workspace path a `shared` child observes read-only. */
+  /** The parent's workspace path a `shared` child works in. */
   sharedPath?: string
+  /**
+   * What a `shared` child may do there: `write`, every tool its parent has; `read-only` (and absent, on a child saved
+   * before this existed), the read-only tools only (`delegate_task` `readOnly`).
+   */
+  access?: 'read-only' | 'write'
   /**
    * An `isolated` child started with "Give each subagent its own worktree" on: the parent's HEAD when it was started. Its
    * worktree is made from this commit before its first turn, whatever that turn's mode.
