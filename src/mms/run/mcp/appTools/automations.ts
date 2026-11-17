@@ -2,7 +2,7 @@ import { AutomationDraftError, type AutomationDrafts, type AutomationEditor, typ
 import { RunReportError } from '../../../automations/AutomationRuns'
 import type { InboxRun } from '../../../../shared/automationInbox'
 import type { AppToolHost } from './host'
-import { json, McpToolError, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
+import { checkedInHandler, json, McpToolError, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /** What the automation tools reach: the drafts service, and who the caller is. Read at every call. */
 export interface AutomationToolHost {
@@ -111,7 +111,7 @@ export function automationTools(host: AppToolHost): MousseTool[] {
   const common = {
     access: 'actsAsCaller' as const,
     // The only thread a draft names is a thread event's pull request thread: the service reads it and binds nothing else.
-    threadArgChecked: 'trigger.threadId of a thread event: AutomationDrafts checks the thread exists and has a pull request',
+    authorize: checkedInHandler('trigger.threadId of a thread event: AutomationDrafts checks the thread exists and has a pull request'),
     available: (turn: { threadId: string }) => (reach(turn.threadId) ? true as const : 'Only the Automation manager or a bot can use this.'),
     // Listed only to the manager's thread and to bots; every other agent never sees them.
     listed: (listing: { threadId?: string }) => Boolean(listing.threadId && reach(listing.threadId))

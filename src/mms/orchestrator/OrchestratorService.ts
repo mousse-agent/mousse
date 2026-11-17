@@ -89,7 +89,7 @@ import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
-import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation } from '../run/mcp/appTools/thread'
 import { botMessage } from '../run/mcp/appTools/agentMessage'
@@ -127,7 +127,6 @@ import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnP
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
-import { botTurnOffers } from '../../shared/bots/personal/walls'
 import { BOT_COMPACTION_HOLD_MS, isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type HarnessDriverKind, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider, McpToolBoundary } from '../run/mcp/MousseMcpServer'
@@ -4123,7 +4122,8 @@ export class OrchestratorService extends EventEmitter {
       const run = root ? engine?.getRun(root) : undefined
       if (run && run.threadId !== caller.threadId && this.botThreads?.roleOf(run.threadId)) return false
       const binding = root ? engine?.bindingForRun(root) : undefined
-      return Boolean(run && binding) && startedByPerson({ origin: policyOrigin(binding!.policy), source: run!.source })
+      // Provenance the run cannot show (no run or no binding) holds no person authority.
+      return holdsPerson(run && binding ? { origin: policyOrigin(binding.policy), source: run.source } : undefined)
     } catch {
       return false
     }
@@ -4281,18 +4281,7 @@ export class OrchestratorService extends EventEmitter {
 
   /** The Mousse tools a thread's credential lists that the turn may use now. */
   private usableAppTools(turn: AppToolTurn): string[] {
-    return this.mcpToolRegistry()
-      .listForThread(turn.threadId, 'default', turn.runId)
-      // A Plan turn cannot start threads; everything else listed is usable when available now.
-      .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
-      .filter((tool) => (tool.available?.(turn) ?? true) === true)
-      // A bot turn may use only its granted app tools; every other one is refused if called.
-      .filter((tool) => botTurnOffers(turn.bot, tool.name))
-      // A run nobody answers does not offer the tools that wait for the user (they are refused if called).
-      .filter((tool) => !unattendedRefusal(tool, turn))
-      // A screenshot is refused when it cannot reach the model; the preamble does not offer it.
-      .filter((tool) => !(tool.name === 'browser_screenshot' && turn.browser && !turn.browser.vision))
-      .map((tool) => tool.name)
+    return this.mcpToolRegistry().usableNow(turn)
   }
 
   /**
