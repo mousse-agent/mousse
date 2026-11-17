@@ -426,6 +426,44 @@ describe('what you opened in a thread', () => {
     expect(groupLine().getAttribute('aria-expanded')).toBe('true')
   })
 
+  it('keeps what was opened on a turn sent from the composer, whose prompt shows first under a temporary id', () => {
+    const live = (messages: UIMessage[], status: 'ready' | 'streaming' | 'submitted') =>
+      act(() => root.render(createElement(MessageList, { key: 'thread-e', threadId: 'thread-e', messages, status })))
+    const steer = (id: string, text: string, seconds: number): UIMessage =>
+      ({ id, role: 'user', parts: [{ type: 'text', text }], createdAt: at(seconds), metadata: { steered: true } }) as unknown as UIMessage
+    const lineOf = (text: string) =>
+      [...answerOf(0).querySelectorAll<HTMLElement>('[aria-expanded]:not(.turn-work-toggle)')].find((line) => line.textContent!.includes(text))
+    // The composer paints the prompt under a temporary id; the saved prompt takes its place a moment later, as
+    // `landMessage` does in the store.
+    live([ask('optimistic:7', 'Fix the cache 7', 0)], 'submitted')
+    const prompt = ask('u7', 'Fix the cache 7', 0)
+    live([prompt], 'streaming')
+    const work = [thought('t7', 'Reading the cache code', 2), call('r7', 'tool-Read', { file_path: 'src/cache.ts' }, 3)]
+    live([prompt, ...work, call('b7', 'tool-Bash', { command: 'node test.js' }, 4, 'input-available')], 'streaming')
+    act(() => host.querySelector<HTMLButtonElement>('[data-turn-live] button.turn-live-toggle')!.click())
+    const ended = [
+      prompt, ...work, call('b7', 'tool-Bash', { command: 'node test.js' }, 4),
+      said('n7', 'Reading done, running the tests next.', 6),
+      steer('s7', 'use pnpm', 8),
+      call('p7', 'tool-Bash', { command: 'pnpm test' }, 9),
+      call('q7', 'tool-Bash', { command: 'pnpm lint' }, 10),
+      said('a7', 'Tests pass with pnpm.', 12)
+    ]
+    live(ended, 'ready')
+    act(() => toggles()[0]!.click())
+    act(() => toggles()[1]!.click())
+    act(() => lineOf('2 commands')!.click())
+    const opened = () => [
+      ...toggles().map((line) => line.getAttribute('aria-expanded')),
+      lineOf('2 actions')?.getAttribute('aria-expanded') ?? 'hidden',
+      lineOf('2 commands')?.getAttribute('aria-expanded') ?? 'hidden'
+    ]
+    expect(opened()).toEqual(['true', 'true', 'true', 'true'])
+    show('thread-b', turn(2, 0))
+    live(ended, 'ready')
+    expect(opened()).toEqual(['true', 'true', 'true', 'true'])
+  })
+
   it('gives the focus on a live run to "Worked for" when the run joins the thought before it as the turn ends', () => {
     const live = (messages: UIMessage[], status: 'ready' | 'streaming') =>
       act(() => root.render(createElement(MessageList, { key: 'thread-d', threadId: 'thread-d', messages, status })))

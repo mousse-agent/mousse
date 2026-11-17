@@ -1390,8 +1390,10 @@ export const MessageList = memo(function MessageList({
   } | null>(null);
   const [settledWork, setSettledWork] = useState<Record<string, number>>({});
   // The optimistic send id is replaced by the saved id a moment later. Keep
-  // one React key so the bubble does not unmount and land again.
-  const turnKeyAliasRef = useRef<Map<string, string>>(new Map());
+  // one React key so the bubble does not unmount and land again. The aliases
+  // are the thread's (`openMemory`): the turn keeps that key after the list
+  // remounts, and so do the folds opened under it.
+  const turnKeyAliasRef = useRef<Map<string, string>>(openMemory.turnKeys);
   const replyHoldRef = useRef<{ sawStreaming: boolean } | null>(null);
   const liveOptimisticKeyRef = useRef<string | null>(null);
 
