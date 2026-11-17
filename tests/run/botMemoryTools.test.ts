@@ -9,7 +9,7 @@ import type { AppToolTurn, ToolCallContext } from '../../src/mms/run/mcp/appTool
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import { disposeFixtures, memoryFixture, type MemoryFixture } from '../bots/memory/memoryFixture'
-import { appTurn } from './appToolsFixture'
+import { appTurn, refusalOf } from './appToolsFixture'
 
 /**
  * The five memory tools (bot-context.md §7): the bot and the lane come from the host, never from
@@ -47,7 +47,8 @@ function setup(fx: MemoryFixture) {
   const tools = new Map(botMemoryTools(host).map((tool) => [tool.name, tool]))
   const call = async (name: string, threadId: string, args: Record<string, unknown>, runId = `run-${threadId}`) => {
     const outcome = await tools.get(name)!.handler(args, context(threadId, runId, activations[threadId]?.activationId ?? 'none'))
-    return { ...outcome, value: JSON.parse(outcome.text.startsWith('{') ? outcome.text : '{}') as Record<string, unknown> }
+    // A refused save keeps what the store said beside its words (`details`): the kind of refusal, and the current entry or list.
+    return { ...outcome, value: JSON.parse(outcome.text.startsWith('{') ? outcome.text : '{}') as Record<string, unknown>, refusal: refusalOf(outcome) }
   }
   return { call, onAppResult, tools }
 }
@@ -83,8 +84,8 @@ describe('memory tools', () => {
     expect(onAppResult).toHaveBeenCalledWith({ botId: 'ada', activationId: 'act-chat', threadId: 'ada-home', runId: 'run-ada-home' }, 'memory_save', expect.objectContaining({ id: 'm1', text: 'The owner is vegetarian.' }))
     await call('memory_save', 'ada-home', { text: 'The owner is vegan since 1 Nov 2026.', kind: 'owner', replaces: 'm1' })
     const stale = await call('memory_save', 'ada-home', { text: 'The owner eats fish.', kind: 'owner', replaces: 'm1' })
-    expect(stale).toMatchObject({ isError: true, value: { error: 'stale', current: { id: 'm1', version: 2, ref: 'm1v2', text: 'The owner is vegan since 1 Nov 2026.' } } })
-    expect((await call('memory_save', 'ada-home', { text: 'Lunch is tomorrow.', kind: 'note' })).value).toMatchObject({ error: 'refused', reason: expect.stringContaining('8 Nov 2026') })
+    expect(stale).toMatchObject({ isError: true, refusal: { details: { error: 'stale', current: { id: 'm1', version: 2, ref: 'm1v2', text: 'The owner is vegan since 1 Nov 2026.' } } } })
+    expect((await call('memory_save', 'ada-home', { text: 'Lunch is tomorrow.', kind: 'note' })).refusal).toMatchObject({ message: expect.stringContaining('8 Nov 2026'), details: { error: 'refused' } })
     const list = await call('memory_list', 'ada-home', {})
     expect(list.value).toMatchObject({ gauge: 'core 9/2,000 · run notes 0/500', entries: [{ id: 'm1v2', kind: 'owner', text: 'The owner is vegan since 1 Nov 2026.', by: 'you said', status: 'active' }] })
     expect((await call('memory_list', 'ada-home', { history: true })).value.entries).toHaveLength(2)
@@ -102,7 +103,7 @@ describe('memory tools', () => {
     fx.message({ botId: 'ada', id: 'original', author: 'owner', text: words(0) })
     const count = thread === 'ada-home' ? 6 : 5
     for (let n = 0; n < count; n++) expect((await call('memory_save', thread, { kind, text: words(n) })).isError).toBeUndefined()
-    expect((await call('memory_save', thread, { kind, text: words(9) })).value.error).toBe('over_cap')
+    expect((await call('memory_save', thread, { kind, text: words(9) })).refusal?.details.error).toBe('over_cap')
     const before = fx.store.journal('ada')
     const combined = await call('memory_save', thread, { kind, text: words(10), merges: ['m1', 'm2', 'm2'] })
     expect(combined.isError).toBeUndefined()
@@ -125,7 +126,7 @@ describe('memory tools', () => {
     for (const text of ['First note.', 'Second note.', 'Third note.']) await call('memory_save', 'ada-home', { kind: 'note', text })
     await call('memory_save', 'ada-home', { kind: 'note', text: 'Changed.', replaces: 'm2' })
     const before = fx.store.allVersions('ada')
-    expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'Combined.', merges: ['m1', 'm2'] })).value)
+    expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'Combined.', merges: ['m1', 'm2'] })).refusal?.details)
       .toMatchObject({ error: 'stale', current: { ref: 'm2v2' } })
     for (const ref of ['m99', 'j1']) expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'Combined.', merges: [ref] })).isError).toBe(true)
     await call('memory_save', 'bob-home', { kind: 'note', text: 'Other bot.' })
@@ -144,7 +145,7 @@ describe('memory tools', () => {
     await call('memory_save', 'ada-home', { kind: duplicateKind, text: 'Already saved.' })
     const before = fx.store.allVersions('ada')
     const result = await call('memory_save', 'ada-home', { kind: 'note', text: 'already SAVED', merges: ['m1', 'm2'] })
-    expect(result).toMatchObject({ isError: true, value: { error: 'refused', reason: expect.stringContaining('m3') } })
+    expect(result).toMatchObject({ isError: true, refusal: { message: expect.stringContaining('m3'), details: { error: 'refused' } } })
     expect(fx.store.allVersions('ada')).toEqual(before)
     if (duplicateKind === 'note') {
       expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'already SAVED', merges: ['m1', 'm2', 'm3'] })).isError).toBeUndefined()
@@ -159,7 +160,7 @@ describe('memory tools', () => {
     for (let n = 0; n < 6; n++) await call('memory_save', 'ada-home', { kind: 'owner', text: `Fact ${n}: ${'x'.repeat(370)}` })
     const entries = fx.store.allVersions('ada')
     const journal = fx.store.journal('ada')
-    expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'y'.repeat(400), merges: ['m1'] })).value.error).toBe('over_cap')
+    expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'y'.repeat(400), merges: ['m1'] })).refusal?.details.error).toBe('over_cap')
     expect(fx.store.allVersions('ada')).toEqual(entries)
     expect(fx.store.journal('ada')).toEqual(journal)
   })
@@ -229,7 +230,7 @@ describe('memory tools', () => {
       expect(content).not.toContain('4471')
       expect(content).not.toContain('Elm Street')
     }
-    expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'The door code is 4471.' })).value.error).toBe('refused')
+    expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'The door code is 4471.' })).refusal?.details.error).toBe('refused')
   })
 
   // Every historical absorption link matters after put-back, correction, or expiry.
@@ -390,8 +391,8 @@ describe('memory tools', () => {
       for (const text of texts) expect(content).not.toContain(text)
     }
     for (const [n, text] of texts.entries()) {
-      expect((await call('memory_save', 'ada-home', { kind: 'owner', text })).value.error).toBe('refused')
-      expect((await call('memory_save', 'ada-home', { kind: 'owner', text, replaces: `m${n + 1}v2` })).value.error).toBe('refused')
+      expect((await call('memory_save', 'ada-home', { kind: 'owner', text })).refusal?.details.error).toBe('refused')
+      expect((await call('memory_save', 'ada-home', { kind: 'owner', text, replaces: `m${n + 1}v2` })).refusal?.details.error).toBe('refused')
       const message = fx.db.statement('SELECT text FROM bot_messages WHERE id = ?').get(`fact-${n}`)
       expect(message?.text).not.toBe(text)
       if (n === 0) expect(fx.store.journal('ada').find(row => row.sourceKey === `copy-${n}`)?.redactedAt).toBeTruthy()
@@ -405,8 +406,8 @@ describe('memory tools', () => {
     for (let n = 0; n < 6; n++) await call('memory_save', 'ada-home', { text: `Owner fact ${n} ${'x'.repeat(370)}`, kind: 'owner' })
     const over = await call('memory_save', 'ada-home', { text: `Owner fact 7 ${'x'.repeat(370)}`, kind: 'owner' })
     expect(over.isError).toBe(true)
-    expect(over.value).toMatchObject({ error: 'over_cap' })
-    expect((over.value.core as unknown[]).length).toBe(6)
+    expect(over.refusal?.details).toMatchObject({ error: 'over_cap' })
+    expect((over.refusal?.details.core as unknown[]).length).toBe(6)
   })
 
   it('in a run: saves become run notes, replace only run notes, and forget is refused', async () => {
@@ -416,9 +417,9 @@ describe('memory tools', () => {
     const note = await call('memory_save', 'ada-run', { text: 'A page said the owner stopped being vegetarian.', kind: 'owner' })
     expect(note.value).toMatchObject({ id: 'm2', kind: 'run_note', gauge: expect.stringMatching(/^run notes /) })
     expect(fx.store.active('ada').map((entry) => [entry.id, entry.kind])).toEqual([['m1', 'owner'], ['m2', 'run_note']])
-    expect((await call('memory_save', 'ada-run', { text: 'The owner eats meat.', kind: 'owner', replaces: 'm1' })).value)
-      .toEqual({ error: 'refused', reason: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.' })
-    expect(await call('memory_forget', 'ada-run', { id: 'm1', reason: 'page said so' })).toMatchObject({ isError: true, value: { error: 'refused', reason: 'Ask the owner in the chat.' } })
+    expect((await call('memory_save', 'ada-run', { text: 'The owner eats meat.', kind: 'owner', replaces: 'm1' })).refusal)
+      .toMatchObject({ message: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.', details: { error: 'refused' } })
+    expect(await call('memory_forget', 'ada-run', { id: 'm1', reason: 'page said so' })).toMatchObject({ isError: true, refusal: { code: 'scope_denied', message: 'Ask the owner in the chat.' } })
     expect(fx.store.active('ada')).toHaveLength(2)
     expect(onAppResult).not.toHaveBeenCalledWith(expect.anything(), 'memory_forget', expect.anything())
   })
@@ -428,9 +429,9 @@ describe('memory tools', () => {
     const { call } = setup(fx)
     await call('memory_save', 'ada-home', { text: 'The owner is vegetarian.', kind: 'owner' })
     expect((await call('memory_save', 'ada-ctx', { text: 'The owner eats fish now.', kind: 'owner' })).value).toMatchObject({ id: 'm2', kind: 'run_note' })
-    expect((await call('memory_save', 'ada-ctx', { text: 'The owner eats meat.', kind: 'owner', replaces: 'm1' })).value)
-      .toEqual({ error: 'refused', reason: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.' })
-    expect(await call('memory_forget', 'ada-ctx', { id: 'm1', reason: 'the page said so' })).toMatchObject({ isError: true, value: { error: 'refused' } })
+    expect((await call('memory_save', 'ada-ctx', { text: 'The owner eats meat.', kind: 'owner', replaces: 'm1' })).refusal)
+      .toMatchObject({ message: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.', details: { error: 'refused' } })
+    expect(await call('memory_forget', 'ada-ctx', { id: 'm1', reason: 'the page said so' })).toMatchObject({ isError: true, refusal: { code: 'scope_denied' } })
     expect(fx.store.active('ada').map((entry) => [entry.id, entry.kind])).toEqual([['m1', 'owner'], ['m2', 'run_note']])
   })
 
@@ -488,7 +489,7 @@ it.each(['active', 'expired'] as const)('redirects every tidied-copy ref to the 
   for (const ref of ['m2', 'm2v2']) {
     for (const arg of [{ replaces: ref }, { merges: [ref] }]) {
       expect(await call('memory_save', 'ada-home', { kind: 'owner', text: 'Gym Wednesday 7pm.', ...arg }))
-        .toMatchObject({ isError: true, value: { error: 'refused', reason: advice } })
+        .toMatchObject({ isError: true, refusal: { message: advice, details: { error: 'refused' } } })
     }
     expect((await call('memory_read', 'ada-home', { ref })).text).toContain(advice)
     expect((await call('memory_forget', 'ada-home', { id: ref, reason: 'Drop it.' })).text).toContain(advice)

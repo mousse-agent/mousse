@@ -12,6 +12,7 @@ import type { BotMemoryStore } from '../../../bots/memory/BotMemoryStore'
 import { BotJournalError } from '../../../bots/memory/BotMemoryStore'
 import type { BotToolHost } from '../../../bots/seams'
 import { json, plainSchema, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
+import { refused } from './refusal'
 
 /**
  * The bot's memory tools (docs/plans/bot-context.md §7): always on, never grantable. The bot and
@@ -219,12 +220,18 @@ export function botMemoryTools(source: BotMemoryToolHost | (() => BotMemoryToolH
         ...(str(args.validFrom) ? { validFrom: str(args.validFrom)! } : {}),
         ...(str(args.expiresAt) ? { expiresAt: str(args.expiresAt)! } : {})
       })
-      if ('error' in result) return { text: JSON.stringify(result), isError: true }
+      if ('error' in result) {
+        // The store's fields (`current` of a stale entry, `core` over the cap) stay beside the refusal.
+        const { reason, ...rest } = result as { error: string; reason?: string }
+        if (rest.error === 'stale') return refused('conflict', 'That entry changed since you read it: current has it as it is now.', { data: rest })
+        if (rest.error === 'over_cap') return refused('conflict', reason ?? 'That part of memory is full: gauge says how full, core lists what is in it. Absorb or replace entries to make room.', { data: rest })
+        return refused('invalid_arguments', reason ?? rest.error, { data: rest })
+      }
       report(ctx, activation, 'memory_save', { ...result, text })
       return json(activation.lane === 'run' ? { ...result, kind: 'run_note', note: 'In a run or a turn you started yourself, saves are run notes.' } : result)
     }),
     tool('memory_forget', () => 'Forget', (args, ctx, activation, store) => {
-      if (activation.lane === 'run') return { text: JSON.stringify({ error: 'refused', reason: 'Ask the owner in the chat.' }), isError: true }
+      if (activation.lane === 'run') return refused('scope_denied', 'Ask the owner in the chat.')
       if (!str(args.reason)) return error('memory_forget needs a reason.')
       const refs = Array.isArray(args.refs) ? args.refs.filter((ref): ref is string => typeof ref === 'string').slice(0, 100) : []
       if (!str(args.id) && !refs.length) return error('Say which entry (id) or rows (refs) to forget.')

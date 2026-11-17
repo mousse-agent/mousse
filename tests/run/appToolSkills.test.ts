@@ -20,7 +20,7 @@ import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
 import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
 import type { SkillDescriptor } from '../../src/shared/integrations'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { callTool, VendorAdapter, vendorDaemon, type ToolCallResult, type VendorDaemon } from './appToolVendorFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -90,9 +90,9 @@ describe('list_skills and load_skill over MCP', () => {
 
     const refused = await callTool(mcp, 'load_skill', { skill: 'deploy' })
     expect(refused.error).toBeUndefined()
-    expect(refused).toMatchObject({ isError: true, text: 'Skill deploy can only be loaded by explicit user invocation.' })
+    expect(refusalOf(refused)).toMatchObject({ message: 'Skill deploy can only be loaded by explicit user invocation.' })
     const unknown = await callTool(mcp, 'load_skill', { skill: 'nope' })
-    expect(unknown).toMatchObject({ isError: true, text: 'Skill not found: nope' })
+    expect(refusalOf(unknown)).toMatchObject({ message: 'Skill not found: nope' })
     expect(skills.reads).toEqual(['inst-review'])
   })
 

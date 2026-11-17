@@ -4,6 +4,7 @@ import { TERMINAL_READ_DEFAULT_LINES, TERMINAL_READ_MAX_CHARS, TERMINAL_READ_MAX
 import type { AppToolHost, TerminalReadHost } from './host'
 import { isBotThread } from './thread'
 import { McpToolError, type MousseTool, type ToolOutcome } from './types'
+import { refusalText } from './refusal'
 
 export const TERMINAL_READ_TOOL = 'terminal_read'
 
@@ -70,7 +71,7 @@ export function readTerminals(terminals: TerminalReadHost, threadId: string, arg
     ? listed.find((terminal) => terminal.ptyId === args.terminalId)
     : [...listed].sort((a, b) => newest(b) - newest(a))[0]
   if (!chosen) {
-    return { text: mask(JSON.stringify({ threadId, terminals: listed.map(terminalView), error: `This thread has no terminal ${String(args.terminalId)} now: pick one from terminals.` })), isError: true }
+    return { text: mask(refusalText('invalid_arguments', `This thread has no terminal ${String(args.terminalId)} now: pick one from terminals.`, { data: { threadId, terminals: listed.map(terminalView) } })), isError: true }
   }
   const kept = terminals.output(chosen.ptyId)
   const page = terminalPage(kept?.scrollback ?? '', { ...(lines ? { lines } : {}), ...(before ? { before } : {}), droppedLines: kept?.droppedLines ?? 0, ...(kept?.columns ? { columns: kept.columns } : {}), mask })

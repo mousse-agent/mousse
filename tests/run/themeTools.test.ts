@@ -18,7 +18,7 @@ import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import type { AppearanceToolHost } from '../../src/mms/run/mcp/appTools'
 import type { MousseSettingsUpdate } from '../../src/shared/settings'
 import { canAnswerApproval } from '../../src/mms/run/approvalRights'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, denied, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 describe('theme_read and theme_set', () => {
@@ -168,7 +168,7 @@ describe('theme_read and theme_set', () => {
 
   it('a read-only child and a Plan ceiling are refused before anything runs, and are not offered the tool', async () => {
     const child = await setup({ readOnlyChild: true })
-    await expect(child.call('theme_set', { theme: 'light' })).rejects.toMatchObject({ code: 'mousse_read_only' })
+    expect(await denied(child.call('theme_set', { theme: 'light' }))).toMatchObject({ code: 'mousse_read_only' })
     expect(child.registry.listForThread('parent').map((tool) => tool.name)).toContain('theme_read')
     expect(child.registry.listForThread('parent').map((tool) => tool.name)).not.toContain('theme_set')
     expect(child.saves).toEqual([])
@@ -176,7 +176,7 @@ describe('theme_read and theme_set', () => {
     fx = undefined
 
     const plan = await setup({ ceiling: 'plan' })
-    await expect(plan.call('theme_set', { theme: 'light' })).rejects.toMatchObject({ code: 'mousse_ceiling_exceeded' })
+    expect(await denied(plan.call('theme_set', { theme: 'light' }))).toMatchObject({ code: 'mousse_ceiling_exceeded' })
     expect(plan.registry.listFor({ readOnly: false, modeCeiling: 'plan' }).map((tool) => tool.name)).not.toContain('theme_set')
     expect(plan.saves).toEqual([])
   })
@@ -332,7 +332,7 @@ describe('theme_read and theme_set', () => {
   ])('refuses %s with one sentence that does not say which, and saves nothing', async (_name, path) => {
     const { call, saves, home } = await setup({ mode: 'full' })
     const outcome = await call('theme_set', { userTheme: { name: 'Bad', base: 'dark', wallpaper: { path: path(home) } } })
-    expect(outcome).toMatchObject({ isError: true, text: WALLPAPER_REFUSED })
+    expect(refusalOf(outcome)).toMatchObject({ message: WALLPAPER_REFUSED })
     expect(saves).toEqual([])
   })
 

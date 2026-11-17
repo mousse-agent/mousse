@@ -6,7 +6,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { mousseVersion } from '../../appVersion'
-import { McpToolError, type McpCredentialAuthority, type McpToolErrorCode, type MousseTool, type ToolOutcome, type ToolRegistry } from './appTools'
+import { McpToolError, refusalOutcome, type McpCredentialAuthority, type MousseTool, type ToolOutcome, type ToolRegistry } from './appTools'
 import { mousseOrchestrationInstructions } from './instructions'
 import type { BearerTurn, CredentialRecord, McpCredentials, TurnSettlement } from './McpCredentials'
 import { RELAY_BOT_INSTRUCTIONS, RELAY_INSTRUCTIONS, type RelayHandler } from './relay/handler'
@@ -69,14 +69,13 @@ export interface McpToolBoundary {
 /** The line that opens the notices a tool result carries, so they are never read as the tool's own output. */
 export const BOUNDARY_NOTICE_HEADER = 'Mousse notices that arrived while you were working (not part of the tool result above):'
 
-/** JSON-RPC error codes the server uses (implementation-defined range). */
-export const MCP_ERROR_CODES: Record<McpToolErrorCode | 'mousse_unauthorized', number> = {
+/**
+ * JSON-RPC error codes the server uses (implementation-defined range), for protocol and credential faults only: a
+ * tool's refusal is an error result in the refusal shape (`appTools/refusal.ts`).
+ */
+export const MCP_ERROR_CODES: Record<'mousse_unauthorized' | 'mousse_caller_not_live' | 'mousse_unknown_tool', number> = {
   mousse_unauthorized: -32001,
   mousse_caller_not_live: -32002,
-  mousse_scope_denied: -32003,
-  mousse_ceiling_exceeded: -32004,
-  mousse_read_only: -32005,
-  mousse_conflict: -32006,
   mousse_unknown_tool: -32601
 }
 
@@ -325,7 +324,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
   /**
    * Runs one tool call under the credential as it stands for it (the run it is bound to now, its
    * ceiling and relay grant), counted as received and running for the drained-turn check; a
-   * refusal becomes a JSON-RPC error.
+   * refusal becomes an error result in the refusal shape, and a fault a JSON-RPC error.
    */
   private async tracked(resolved: CredentialRecord, run: (authority: McpCredentialAuthority) => Promise<McpOutcome>) {
     const { credentials } = this.options
@@ -345,8 +344,12 @@ export class MousseMcpServer implements McpAttachmentProvider {
     try {
       return toolContent(await run(authority))
     } catch (error) {
+      // A refusal is an error result in the refusal shape; only a fault (the credential's turn is over, no such tool)
+      // is a JSON-RPC error.
+      const refused = refusalOutcome(error)
+      if (refused) return toolContent(refused)
       if (error instanceof McpToolError)
-        throw Object.assign(new Error(error.message), { code: MCP_ERROR_CODES[error.code], data: { ...error.details, reason: error.code } })
+        throw Object.assign(new Error(error.message), { code: MCP_ERROR_CODES[error.code as keyof typeof MCP_ERROR_CODES], data: { ...error.details, reason: error.code } })
       throw error
     } finally {
       credentials.callRunning(record.tokenHash, record.runId, -1)

@@ -6,7 +6,7 @@ import type { Socket } from 'node:net'
 import { BOUNDARY_NOTICE_HEADER, MCP_ERROR_CODES, MousseMcpServer, type McpToolBoundary } from '../../src/mms/run/mcp/MousseMcpServer'
 import { runStdioBridge } from '../../src/mms/run/mcp/stdioBridge'
 import { PassThrough } from 'node:stream'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOfResponse } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 async function rpc(url: string, token: string | null, body: unknown) {
@@ -86,8 +86,9 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(payload.events.map((event: { seq: number }) => event.seq)).toEqual(fx.engine.listEvents('thread-a').map((event) => event.seq))
 
     const scope = await rpc(server.url, attachment.token, call(5, 'queue_enqueue', { content: 'x', threadId: 'thread-b', expectedRevision: 'rev-0' }))
-    expect(scope.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied, data: { reason: 'mousse_scope_denied' } })
-    expect(scope.body.error.message).toMatch(/^mousse_scope_denied/)
+    expect(scope.body.error).toBeUndefined()
+    expect(refusalOfResponse(scope.body)).toMatchObject({ code: 'mousse_scope_denied', refused: { code: 'scope_denied', retry: 'never' } })
+    expect(refusalOfResponse(scope.body)!.message).not.toMatch(/^mousse_/)
 
     const get = await fetch(server.url, { headers: { Authorization: `Bearer ${attachment.token}`, Accept: 'text/event-stream' } })
     expect(get.status).toBe(405)
@@ -227,7 +228,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(JSON.parse(read.body.result.content[0].text)).toMatchObject({ threadId: 'thread-b', scope: 'manage' })
   })
 
-  it('reports a conflict as -32006 with its details in the error data', async () => {
+  it('reports a conflict as a refusal result with its details beside it', async () => {
     fx = delegationFixture()
     const run = await fx.runningRun('thread-a')
     const turns = new AppToolTurns()
@@ -241,12 +242,11 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     await server.start()
     const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
     const result = await rpc(server.url, token, call(1, 'stale'))
-    expect(MCP_ERROR_CODES.mousse_conflict).toBe(-32006)
-    expect(result.body.error).toMatchObject({
-      code: -32006,
+    expect(result.body.error).toBeUndefined()
+    expect(JSON.parse(result.body.result.content[0].text)).toEqual({
+      refused: { code: 'conflict', message: 'run 1 is no longer the active run', retry: 'after_change' },
       data: { reason: 'mousse_conflict', expectedRunId: 'run-1', activeRunId: 'run-2' }
     })
-    expect(result.body.error.message).toMatch(/^mousse_conflict/)
   })
 
   it('relays stdio JSON-RPC lines through the stdio bridge', async () => {
@@ -278,7 +278,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(bearer()).toBeNull()
   })
 
-  it('maps transport failures to HTTP statuses and a refused tool to its JSON-RPC code', async () => {
+  it('maps transport failures to HTTP statuses, an unknown tool to its JSON-RPC code, and a refused tool to a refusal result', async () => {
     const { server, attachment, bearer } = await setup()
     const post = (body: string, path = '/mcp') => fetch(`${server.url.replace(/\/mcp$/, '')}${path}`, {
       method: 'POST', body,
@@ -305,7 +305,8 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     server.revokeThread('thread-a')
     const plan = bearer({ instanceId: 'p', modeCeiling: 'plan' })
     const ceiling = await rpc(server.url, plan.token, call(5, 'thread_fork'))
-    expect(ceiling.body.error).toMatchObject({ code: -32004, data: { reason: 'mousse_ceiling_exceeded' } })
+    expect(ceiling.body.error).toBeUndefined()
+    expect(refusalOfResponse(ceiling.body)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'ceiling_exceeded', retry: 'never' } })
   })
 
   describe('in-flight tool calls', () => {

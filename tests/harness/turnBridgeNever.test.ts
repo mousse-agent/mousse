@@ -27,7 +27,7 @@ import { AcpSessions, type SavedAcpSession } from '../../src/mms/harness/acp/ses
 import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { QuickActionTools } from '../../src/mms/orchestrator/QuickActionTools'
-import { createAppToolRegistry, type AppToolTurn } from '../../src/mms/run/mcp/appTools'
+import { createAppToolRegistry, refused, type AppToolTurn } from '../../src/mms/run/mcp/appTools'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture, type DelegationFixture } from '../run/delegationFixture'
 import type { RunPolicy } from '../../src/shared/harness/types'
@@ -312,8 +312,8 @@ describe('Mousse tools that wait for the user', () => {
 
   it('are refused before they ask under `never`', async () => {
     const r = await registry()
-    expect(await r.call('ask_user', question, 'never')).toEqual({ text: QUESTIONS_REFUSED_MESSAGE, isError: true })
-    expect(await r.call('create_quick_action', action, 'never')).toEqual({ text: APPROVALS_REFUSED_MESSAGE, isError: true })
+    expect(await r.call('ask_user', question, 'never')).toEqual(refused('needs_person', QUESTIONS_REFUSED_MESSAGE))
+    expect(await r.call('create_quick_action', action, 'never')).toEqual(refused('needs_person', APPROVALS_REFUSED_MESSAGE))
     expect(r.askUser).not.toHaveBeenCalled()
     expect(r.approve).not.toHaveBeenCalled()
     // A tool that does not wait for the user still runs.

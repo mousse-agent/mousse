@@ -18,7 +18,7 @@ import { BOT_THEMES_PERMISSION, BOT_THEME_TOOLS, botStarterManifest } from '../.
 import type { MousseSettingsUpdate } from '../../src/shared/settings'
 import { WALLPAPER_REFUSED } from '../../src/shared/themes/wallpaperImage'
 import { pngHeader } from '../fixtures/wallpaperBytes'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const themeNames = (names: readonly string[]) => names.filter((name) => name.startsWith('theme_')).sort()
@@ -86,7 +86,8 @@ describe('a bot\'s theme tools ("change how Mousse looks")', () => {
     turns.register(appTurn({ threadId: 'home', runId: homeRun.runId, bot: authority, approvals: 'never', ...(role === 'subagent' ? { subagent: true } : {}) }))
     const call = async (name: string, args: Record<string, unknown> = {}) => {
       const outcome = await registry.call(name, args, request({ threadId: 'home', runId: homeRun.runId }))
-      return { error: outcome.isError === true, text: outcome.text }
+      // A refusal reads as its words; its shape is checked in toolRefusalShape.test.ts.
+      return { error: outcome.isError === true, text: refusalOf(outcome)?.message ?? outcome.text }
     }
     const listed = () => themeNames(registry.listForThread('home', 'default', homeRun.runId).map((tool) => tool.name))
     /** A PNG at `folder` (the bot's files folder by default). */

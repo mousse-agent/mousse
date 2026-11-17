@@ -5,12 +5,12 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../../src/shared/types'
-import { McpToolError, type AgentRunCommandResult, type AgentSendResult, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
+import type { AgentRunCommandResult, AgentSendResult, McpCallRequest } from '../../src/mms/run/mcp/appTools'
 import { AGENT_MESSAGE_END, agentMessage, agentMessageText } from '../../src/mms/run/mcp/appTools/agentMessage'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, THREAD_RESULT_MAX_CHARS, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import type { RunPause } from '../../src/mms/run/types'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-10-12T00:00:00.000Z'
@@ -77,7 +77,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       request({ threadId: 'caller', runId: runs.caller, ...extra })
     const call = (name: string, args: Record<string, unknown> = {}, extra: Partial<Parameters<typeof request>[0]> = {}) =>
       registry.call(name, args, as(extra))
-    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    const denied = refusalIn
     const result = async (promise: Promise<{ text: string }>) => JSON.parse((await promise).text)
     return { fx, registry, turns, request, threads, sent, answers, runs, call, denied, result, callerRun, targetRun, ...fake }
   }

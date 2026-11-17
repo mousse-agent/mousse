@@ -13,6 +13,7 @@ import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
 import type { DelegationToolHost } from './delegation'
+import { legacyRefusal, REFUSAL_FAULT_CODES } from './refusal'
 
 /**
  * What a tool may touch (docs/run-engine/SPEC.md §15.1):
@@ -309,8 +310,14 @@ export type McpToolErrorCode =
   | 'mousse_conflict'
   | 'mousse_unknown_tool'
 
-/** A refusal the server reports as a JSON-RPC error, not as a tool result; `details` go into its `data`. */
+/**
+ * A refusal a tool throws. The registry and the MCP server turn it into an error result in the refusal shape
+ * (`legacyRefusal`), with `details` under its `data`; only the faults in `REFUSAL_FAULT_CODES` (the credential's turn
+ * is over, no such tool) stay JSON-RPC errors.
+ */
 export class McpToolError extends Error {
+  /** The message without the code in front. */
+  readonly reason: string
   constructor(
     readonly code: McpToolErrorCode,
     message: string,
@@ -318,7 +325,14 @@ export class McpToolError extends Error {
   ) {
     super(`${code}: ${message}`)
     this.name = 'McpToolError'
+    this.reason = message
   }
+}
+
+/** A thrown refusal as an error result, or undefined for a fault that stays a JSON-RPC error (and anything else). */
+export function refusalOutcome(error: unknown): ToolOutcome | undefined {
+  if (!(error instanceof McpToolError) || REFUSAL_FAULT_CODES.has(error.code)) return undefined
+  return legacyRefusal(error.code, error.reason, error.details)
 }
 
 export type ToolLedger = {

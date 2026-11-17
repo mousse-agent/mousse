@@ -17,7 +17,7 @@ import { BOT_THREADS_NOT_OWNER_TEXT } from '../../src/shared/bots/personal/walls
 import { botCatalogueGroup, botCoreTool } from '../../src/shared/bots/personal/catalogue'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { ChatMessage, Thread } from '../../src/shared/types'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-11-13T10:00:00.000Z'
@@ -125,7 +125,8 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const text = async (name: string, args: Record<string, unknown>) => {
       try {
         const outcome = await call(name, args)
-        return { error: outcome.isError === true, text: outcome.text }
+        // A refusal reads as its words; its shape is checked in toolRefusalShape.test.ts.
+        return { error: outcome.isError === true, text: refusalOf(outcome)?.message ?? outcome.text }
       } catch (error) {
         return { error: true, text: error instanceof Error ? error.message : String(error) }
       }
@@ -163,9 +164,9 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     // With no turn of its own running, none; and never what no bot can hold.
     expect(thread(registry.listForThread('home', 'default').map((tool) => tool.name))).toEqual([])
     expect(registry.listForThread('home', 'default', runId).map((tool) => tool.name).filter((name) => name === 'delegate_task' || name === 'continue_subagent')).toEqual([])
-    // An ordinary thread lists it as the agent's own (its own thread only, no thread to name).
+    // An ordinary thread lists it as the agent's own (its own thread only, no thread to name): only the retry key.
     const own = registry.listForThread('mine', 'default').find((tool) => tool.name === 'thread_archive')
-    expect(own?.inputSchema).toEqual({ type: 'object', properties: {} })
+    expect(own?.inputSchema).toEqual({ type: 'object', properties: { clientRequestId: expect.objectContaining({ type: 'string' }) } })
   })
 
   // Who the bot may reach, by each tool that names a thread: whether read, send, wait, stop and archive go ahead. Every thread the
