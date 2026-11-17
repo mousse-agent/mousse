@@ -62,7 +62,7 @@ const bash = (id: string, n: number, command: string, status: 'running' | 'ok' |
 } as ChatMessage)
 
 /** The chat view's path from the store to the list. */
-function Transcript({ progress }: { progress: TurnProgressState }) {
+function Transcript({ progress, status = 'streaming' }: { progress: TurnProgressState | null; status?: 'streaming' | 'ready' }) {
   const messages = useAppStore((s) => s.messages)
   const shown = useRef<UIMessage[]>([])
   const ui = useMemo(() => {
@@ -70,11 +70,11 @@ function Transcript({ progress }: { progress: TurnProgressState }) {
     shown.current = next
     return next
   }, [messages])
-  return createElement(TurnProgressContext.Provider, { value: progress }, createElement(MessageList, { messages: ui, status: 'streaming' }))
+  return createElement(TurnProgressContext.Provider, { value: progress }, createElement(MessageList, { messages: ui, status }))
 }
 
-function render(progress: TurnProgressState) {
-  act(() => root.render(createElement(Transcript, { progress })))
+function render(progress: TurnProgressState | null, status: 'streaming' | 'ready' = 'streaming') {
+  act(() => root.render(createElement(Transcript, { progress, status })))
 }
 
 /** One frame of streamed updates, as App's batcher applies them. */
@@ -201,5 +201,91 @@ describe('a running turn, streamed step by step', () => {
     stream({ id: 'reply', role: 'assistant', content: 'Two files.', timestamp: at(2), streaming: true })
     expect(groupLines()).toHaveLength(1)
     expect(groupLines()[0]!.textContent).toContain('Ran ls')
+  })
+
+  it("keyboard focus on the live row's chevron moves to the run's group line when the reply starts", () => {
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'running')], activeThreadId: 'thread-1' })
+    render(TOOL)
+    act(() => toggle()!.focus())
+    expect(document.activeElement).toBe(toggle())
+    stream(bash('c2', 2, 'npm test', 'ok'))
+    expect(document.activeElement).toBe(toggle())
+    render(STREAMING)
+    stream({ id: 'reply', role: 'assistant', content: 'Two files.', timestamp: at(3), streaming: true })
+    expect(toggle()).toBeNull()
+    expect(groupLines()).toHaveLength(1)
+    expect(document.activeElement).toBe(groupLines()[0])
+  })
+
+  it('keyboard focus on the live chevron moves to "Worked for" when the turn ends with the run folded, and stays there', () => {
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'running')], activeThreadId: 'thread-1' })
+    render(TOOL)
+    act(() => toggle()!.focus())
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'ok')] })
+    render(null, 'ready')
+    expect(host.querySelector('button.turn-live-toggle')).toBeNull()
+    const worked = host.querySelector<HTMLButtonElement>('button.turn-work-toggle')!
+    expect(worked.getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(worked)
+    // Opening the fold shows the run's group line; focus stays on the line that opened it.
+    act(() => worked.click())
+    expect(groupLines().length).toBeGreaterThan(0)
+    expect(document.activeElement).toBe(worked)
+    // The hand-off is spent: with focus gone, closing and opening again does not move it either.
+    act(() => worked.blur())
+    act(() => worked.click())
+    act(() => worked.click())
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('focus the group line took from the live chevron moves to "Worked for" when the turn ends a moment later and folds it', () => {
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'running')], activeThreadId: 'thread-1' })
+    render(TOOL)
+    act(() => toggle()!.focus())
+    stream(bash('c2', 2, 'npm test', 'ok'))
+    // A short reply closes the run (its group line takes focus), then the turn ends and folds the run away.
+    render(STREAMING)
+    stream({ id: 'reply', role: 'assistant', content: 'Done.', timestamp: at(3), streaming: true })
+    expect(document.activeElement).toBe(groupLines()[0])
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'ok'), { id: 'reply', role: 'assistant', content: 'Done.', timestamp: at(3) }] })
+    render(null, 'ready')
+    const worked = host.querySelector<HTMLButtonElement>('button.turn-work-toggle')!
+    expect(worked.getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(worked)
+  })
+
+  it('focus the person moved elsewhere before the turn ended stays there', () => {
+    const composer = document.createElement('textarea')
+    document.body.append(composer)
+    try {
+      useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'running')], activeThreadId: 'thread-1' })
+      render(TOOL)
+      act(() => toggle()!.focus())
+      act(() => composer.focus())
+      useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'ok')] })
+      render(null, 'ready')
+      expect(host.querySelector('button.turn-work-toggle')).not.toBeNull()
+      expect(document.activeElement).toBe(composer)
+      // Nor does it move later, when the fold opens.
+      act(() => composer.blur())
+      act(() => host.querySelector<HTMLButtonElement>('button.turn-work-toggle')!.click())
+      expect(document.activeElement).toBe(document.body)
+    } finally {
+      composer.remove()
+    }
+  })
+
+  it('a focused live chevron that goes with nothing to take its focus leaves none to take later', () => {
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'running')], activeThreadId: 'thread-1' })
+    render(TOOL)
+    act(() => toggle()!.focus())
+    // The list goes (another thread opens) and comes back after the turn ended: nothing takes focus.
+    act(() => root.render(null))
+    useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'ok')] })
+    render(null, 'ready')
+    expect(document.activeElement).toBe(document.body)
+    act(() => host.querySelector<HTMLButtonElement>('button.turn-work-toggle')!.click())
+    expect(groupLines().length).toBeGreaterThan(0)
+    expect(document.activeElement).toBe(document.body)
   })
 })

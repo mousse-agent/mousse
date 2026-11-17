@@ -11,6 +11,7 @@ import {
 import { commandLabel, knownToolName, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
 import { splitExitCode } from '../components/agent-elements/utils/bash-output'
+import { getToolStatus } from '../components/agent-elements/utils/format-tool'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
 
@@ -728,8 +729,11 @@ export function markRecoveredFailures(messages: UIMessage[]): UIMessage[] {
         continue
       }
       if (isToolPartShape(part)) {
-        if (part.state === 'output-error') pending.push(part)
-        else if (part.state === 'output-available' && part.type !== 'tool-Thinking') settle(false)
+        if (part.type === 'tool-Thinking') continue
+        // The row's own rule: a call that ended with `success: false` in its output failed too.
+        const status = getToolStatus(part)
+        if (status.isError) pending.push(part)
+        else if (status.isSuccess) settle(false)
         continue
       }
       if (type === 'text' && typeof (part as { text?: unknown }).text === 'string' && (part as { text: string }).text.trim()) settle(false)

@@ -9,7 +9,7 @@ import { codexToolEvent } from '../src/mms/harness/vendors/codex/codexActivity'
 import { claudeActivityComplete, claudeActivityStart, claudeCallContext } from '../src/mms/harness/vendors/claude/claudeActivity'
 import { cursorToolActivity, cursorToolName, cursorToolTitle } from '../src/mms/harness/cursor/session'
 import { formatSearchRowLabels, getToolStatus, searchResultCount } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
-import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
+import { markRecoveredFailures, mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
 import { toolRegistry } from '../src/renderer/chat/components/agent-elements/tools/tool-registry'
 
 const base = (overrides: Partial<ChatMessage>): ChatMessage => ({
@@ -1038,6 +1038,19 @@ describe('failures the agent got past', () => {
     expect(failedParts(ended)[0]!.failureRecovered).toBeUndefined()
     const stopped = base({ id: 's', role: 'system', content: 'Stopped', turnEnd: { cause: 'user' } as ChatMessage['turnEnd'] })
     expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), stopped]))[0]!.failureRecovered).toBeUndefined()
+  })
+
+  it('does not count a call that ended with `success: false` as getting past a failure: it failed too', () => {
+    const call = (id: string, state: string, output?: unknown) =>
+      ({ id, role: 'assistant', parts: [{ type: 'tool-Bash', toolCallId: id, state, input: { command: 'npm test' }, ...(output ? { output } : {}) }] }) as unknown as UIMessage
+    const messages = [
+      { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Go' }] } as unknown as UIMessage,
+      call('a', 'output-error'),
+      call('b', 'output-available', { success: false }),
+      { id: 'e', role: 'assistant', parts: [{ type: 'error', errorText: 'failed' }] } as unknown as UIMessage,
+    ]
+    const parts = markRecoveredFailures(messages).flatMap((message) => message.parts as unknown as Array<Record<string, any>>)
+    expect(parts.filter((part) => part.type === 'tool-Bash').map((part) => part.failureRecovered)).toEqual([undefined, undefined])
   })
 
   it('does not count a thought after the failure as getting past it', () => {

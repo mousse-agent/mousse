@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { TextShimmer } from "../text-shimmer";
 import { IconChevronRight } from "../../../../lib/icons";
@@ -49,6 +49,8 @@ export type ToolRowBaseProps = {
   onOpen?: () => void;
   /** Rows in the panel when it is a list; a long one opens without the per-row stagger. */
   itemCount?: number;
+  /** The line's toggle button, for a caller that moves focus to it. */
+  toggleRef?: Ref<HTMLButtonElement>;
   children?: ReactNode;
 };
 
@@ -71,6 +73,7 @@ export function ToolRowBase({
   onToggleExpand,
   onOpen,
   itemCount,
+  toggleRef,
   children,
 }: ToolRowBaseProps) {
   const isComplete = !isAnimating;
@@ -164,6 +167,7 @@ export function ToolRowBase({
   return (
     <div className="an-tool-chrome flex flex-col w-full">
       <button
+        ref={toggleRef}
         type="button"
         className="group flex"
         aria-expanded={isExpanded}

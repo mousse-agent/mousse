@@ -1,4 +1,4 @@
-import { thoughtHeadline } from "./format-tool";
+import { getToolStatus, thoughtHeadline } from "./format-tool";
 import { normalizeAssistantToolParts } from "./tool-part-normalizer";
 import type { LiveThoughtSource } from "../../../../stores/liveTextStore";
 
@@ -336,8 +336,12 @@ export function pendingFailures(messages: readonly { parts?: unknown[] }[]): Rea
         continue;
       }
       if (!isV5ToolPart(part) || part.type === "tool-Thinking") continue;
-      if (part.state === "output-error" && part.toolCallId) pending.push(part.toolCallId);
-      else if (part.state === "output-available") pending = [];
+      // The row's own rule: a call that ended with `success: false` in its output failed too. Only a call that
+      // succeeded gets past the failures before it.
+      const status = getToolStatus(part);
+      if (status.isError) {
+        if (part.toolCallId) pending.push(part.toolCallId);
+      } else if (status.isSuccess) pending = [];
     }
   }
   return new Set(pending);
