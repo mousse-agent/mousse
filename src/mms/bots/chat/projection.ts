@@ -622,7 +622,7 @@ export class BotChatProjection {
         ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
         : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
-        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : approval ? `Wants to send: ${oneLine(approvalLabel, 80)}` : `Asked: ${oneLine((waitingOn[0] ?? chatQuestions[0])?.spec.question ?? 'Your answer is needed', 80)}`)
+        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : approval ? `${this.options.asksFirst?.() === true ? 'Waiting for you' : 'Wants to send'}: ${oneLine(approvalLabel, 80)}` : `Asked: ${oneLine((waitingOn[0] ?? chatQuestions[0])?.spec.question ?? 'Your answer is needed', 80)}`)
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn ? 'Working…' : work.length ? workingOn(work) : managing.length ? managingLine(managing) : 'Working…')
             : last ? oneLine(last.text || last.error?.text || plainCards(last.cards)) : ''
     return {

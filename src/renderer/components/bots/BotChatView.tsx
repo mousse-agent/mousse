@@ -388,9 +388,9 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
         {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} />}
         {stepsOpen && <BotSteps chips={steps} />}
-        {(steps.length > 0 || time) && <div className="bot-bubble-foot">
+        {(steps.length > 0 || time && !message.action) && <div className="bot-bubble-foot">
           {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
-          {time && <BubbleTime message={message} />}
+          {time && !message.action && <BubbleTime message={message} />}
         </div>}
         {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
       </div>

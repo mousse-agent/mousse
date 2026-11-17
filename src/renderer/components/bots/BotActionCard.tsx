@@ -82,7 +82,7 @@ function outcome(card: BotActionCardData): string {
     case 'approved': return `Waiting for ${actionText(card.serverName)}…`
     case 'running': return 'Sending…'
     case 'done': return 'Sent'
-    case 'failed': return card.result?.notSentInTime ? actionText(card.result.text) : card.result?.toolReportedError ? 'The tool reported an error' : 'Not sent'
+    case 'failed': return card.result?.notSentInTime ? actionText(card.result.text ?? '') : card.result?.toolReportedError ? 'The tool reported an error' : 'Not sent'
     case 'uncertain': return "Couldn't tell if it went through"
     case 'expired': return 'Expired · not sent'
     default: return 'Not sent'
@@ -103,7 +103,7 @@ function reviewLabel(card: BotActionCardData): string {
 }
 
 export function actionStatus(card: BotActionCardData): string {
-  const status = outcome(card)
+  const status = outcome(card).replace(card.result?.notSentInTime && card.at ? /\.\s*$/ : /$^/, '')
   return status && card.at ? `${status} · ${botGroupTime(card.at)}` : status
 }
 
@@ -132,10 +132,10 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   </>
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
     <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span>{!card.forgotten && <> · <span className="bot-action-server">{actionText(card.serverName)}</span></>}</p>
-    {actionStatus(card) && <p role="status" className="bot-action-outcome" data-find-text data-message-id={messageId} data-part-index="1">{actionStatus(card)}</p>}
-    {!card.forgotten && card.result && !card.result.notSentInTime && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
+    {actionStatus(card) && <p role="status" className="bot-action-outcome" data-find-text data-message-id={messageId} data-part-index="1">{card.at ? <>{actionStatus(card).slice(0, -(botGroupTime(card.at).length + 3))} · <time dateTime={card.at}>{botGroupTime(card.at)}</time></> : actionStatus(card)}</p>}
+    {!card.forgotten && card.result && !card.result.notSentInTime && card.result.text && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text ?? '')}</blockquote>}
     {card.forgotten ? <p role="note">Forgotten</p> : card.tooLarge ? null : card.status === 'open' ? argumentsView : <details aria-label={reviewLabel(card)}><summary>{reviewLabel(card)}</summary>{argumentsView}</details>}
-    {refusal && <p role="status" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(refusal.text).replace(/\s+/g, ' ')}</p>}
+    {refusal && !(refusal.reason === 'bot_action_expired' && card.status === 'expired') && <p role="status" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(refusal.text).replace(/\s+/g, ' ')}</p>}
     {!card.forgotten && card.tooLarge && <p role="note" className="bot-action-notice"><CircleAlert size={14} aria-hidden />This action is too large to review on this device. Use the computer to review and send it.</p>}
     {card.status === 'open' && !card.forgotten && <>
       {previous && <p role="note" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {repeatedAt}</p>}
