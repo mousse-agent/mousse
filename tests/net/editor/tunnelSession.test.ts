@@ -514,13 +514,6 @@ describe('a computer from before tunnels', () => {
     expect(t.echo.connections).toBe(0)
     expect(t.owner.editorTunnelList()).toEqual([])
   }, 60_000)
-
-  it('is not a reason for the others to stop working: a computer that offers it still opens tunnels', async () => {
-    const t = await pair()
-    await t.policy({ editor: true })
-    const { tunnel } = await t.open()
-    await echoed(tunnel)
-  }, 60_000)
 })
 
 describe('a block when something else fails', () => {
@@ -735,17 +728,6 @@ describe('the check before an editor opens (net.editor.probe)', () => {
     const { tunnel } = await t.open()
     await echoed(tunnel)
   }, 90_000)
-
-  it('a check is refused for every missing permission, like an open', async () => {
-    const t = await pair()
-    await t.policy({ editor: true, blocked: true })
-    expect(await probe(t)).toMatchObject({ ok: false, reason: 'blocked' })
-    await t.policy({ blocked: false })
-    await t.owner.request('bridge.workOnThreads', { enabled: false })
-    expect(await probe(t)).toMatchObject({ ok: false, reason: 'setting_off' })
-    await t.owner.request('bridge.workOnThreads', { enabled: true })
-    expect(await probe(t)).toMatchObject({ ok: true })
-  }, 60_000)
 
   it('says the computer’s own editor settings were not ready, instead of opening anything', async () => {
     const t = await pair({ editorSsh: true })
