@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, hkdfSync, randomBytes } from 'node:crypto'
 import type { RelayRendezvous } from './relay/protocol'
 import { HOSTED_RELAY_TRANSPORT } from './relay/hostedAudience'
 import {
@@ -1761,6 +1761,35 @@ export class NetService {
           : undefined,
       identity: () => this.relayIdentity(),
       addonRecords: this.addonRecords(),
+      lanPeers: () => {
+        const self = rt.identity.self()!
+        const root = rt.identity.pinnedRootKey(self.user)!
+        const evidence = rt.identity.roster()
+        if (!evidence) return []
+        const roster = rt.identity.verifySigned<Roster>(evidence, root)
+        const nodes = new Set(
+          roster.nodes.map((row) => rt.identity.verifySigned<NodeDelegation>(row, root).subject)
+        )
+        return [...nodes]
+          .filter((node) => node !== self.node)
+          .flatMap((node) => {
+            try {
+              const peer = this.currentNode(node)
+              const secret = rt.keys.agree(decodeBase64(peer.keys.agree, 32))
+              const key = (sender: NodeId) =>
+                Buffer.from(
+                  hkdfSync('sha256', secret, Buffer.alloc(0), `mousse-lan-v1:${sender}`, 32)
+                )
+              return [{ node, sendKey: key(self.node), receiveKey: key(node) }]
+            } catch {
+              return []
+            }
+          })
+      },
+      onLanChanged: () => {
+        this.refreshPeers()
+        for (const supervisor of this.supervisors.values()) supervisor.retryAfterStateChange()
+      },
       onChanged: () => {
         if (this.stopped || this.disabled || !this.config.enabled || !this.routes) return
         try {
@@ -2425,7 +2454,7 @@ export class NetService {
       } catch {
         continue
       }
-      if (!routes.routes.length) continue
+      if (!routes.routes.length && !this.transport?.lanRoutes(node).length) continue
       const supervisor = new SyncSupervisor({
         identity: rt.identity,
         clock: this.clock,
@@ -2443,7 +2472,12 @@ export class NetService {
             latest.keys.sign
           )
           const result = await manager.connect(
-            { node, user: self.user, transportKey: latest.keys.transport, routes: fresh.routes },
+            {
+              node,
+              user: self.user,
+              transportKey: latest.keys.transport,
+              routes: [...(this.transport?.lanRoutes(node) ?? []), ...fresh.routes].slice(0, 32)
+            },
             signal
           )
           const session = this.makeSession(result.channel)

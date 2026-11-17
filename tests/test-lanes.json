@@ -113,7 +113,8 @@
     "tests/net/chats/framed.test.ts",
     "tests/net/chats/joined.test.ts",
     "tests/net/chats/publication.test.ts",
-    "tests/net/chats/tasks.test.ts"
+    "tests/net/chats/tasks.test.ts",
+    "tests/net/transports/lan-offline.test.ts"
   ],
   "daemon": [
     "tests/net/bots/daemon/reader.test.ts",
