@@ -302,7 +302,7 @@ export class BotActions {
     const digest = actionDigest(args)
     const target = JSON.stringify({ server: tool.server, tool: tool.tool })
     const duplicate = this.host.store.get("SELECT * FROM bot_actions WHERE bot_id = ? AND target_json = ? AND args_digest = ? AND status = 'open' LIMIT 1", row.botId, target, digest) as unknown as ActionRow | undefined
-    if (duplicate) return this.refuse(row, duplicate, 'This exact call is already waiting for your owner on an open card. Carry on without asking again; nothing new was held or sent.')
+    if (duplicate) return this.refuse(row, duplicate, 'An identical call is already waiting for your owner on an earlier card. If your owner sends that card, the call goes out once. Say that in your report; do not say it was not sent. Do not ask again.')
     // Unattended work and schedules share history. Owner messages and taps retain per-work history.
     const scope = origin === 'unattended'
       ? this.host.store.all('SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id WHERE a.bot_id = ? AND a.target_json = ? ORDER BY a.rowid DESC', row.botId, target)
