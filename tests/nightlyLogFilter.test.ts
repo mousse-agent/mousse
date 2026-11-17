@@ -25,8 +25,27 @@ describe('nightly failed-log filter', () => {
     ])
     const text = formatFiltered(result, { logPath: '/tmp/nightly-1.log' })
     expect(text).toContain('full log: /tmp/nightly-1.log')
-    expect(text).toContain('Unhandled Errors (full section)')
+    expect(text).toContain('Unhandled Errors (full section 1 of 1)')
     expect(text).toContain('more matching line(s) omitted')
+  })
+
+  it('prints every Unhandled Errors section in full, however long, and stops a section at the next job', () => {
+    const body = Array.from({ length: 500 }, (_, i) => stamp(`  at frame ${i}`))
+    const text = [
+      stamp('⎯⎯ Unhandled Errors ⎯⎯'), ...body, stamp(' Test Files  1 failed (1)'),
+      'Other job\tOther step\t2026-11-17T10:01:00.0000000Z ⎯⎯ Unhandled Errors ⎯⎯',
+      'Other job\tOther step\t2026-11-17T10:01:00.0000000Z TypeError: second',
+      'Third job\tStep\t2026-11-17T10:02:00.0000000Z unrelated line'
+    ].join('\n')
+    const result = filterLog(text)
+    expect(result.unhandledSections).toHaveLength(2)
+    expect(result.unhandledSections[0]).toHaveLength(501)
+    expect(result.unhandledSections[1]).toHaveLength(2)
+    expect(result.unhandledSections[1].join('\n')).not.toContain('unrelated line')
+    const printed = formatFiltered(result)
+    expect(printed).toContain('full section 1 of 2')
+    expect(printed).toContain('at frame 499')
+    expect(printed).not.toContain('section continues')
   })
 
   it('reports nothing found rather than an empty answer', () => {

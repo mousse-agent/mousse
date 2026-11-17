@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  OPEN_PR_LIMIT, assertComplete, branchNameMatches, cacheStamp, classifyArgs, findBranchHits, findOverlaps, formatReport, isOwnPr
+  OPEN_PR_LIMIT, TERM_CEILING, assertComplete, branchNameMatches, cacheStamp, ceilingNotes, classifyArgs, exitCodeFor, findBranchHits,
+  findOverlaps, formatReport, isOwnPr, rankTermHits, verdictOf
 } from '../scripts/related-work.mjs'
 import { closeComment, closingIssues, decideClose, referenceRepo } from '../scripts/close-completed-issues.mjs'
 import { formatNotes } from '../scripts/task-notes.mjs'
@@ -71,6 +72,38 @@ describe('path overlap', () => {
     expect(isOwnPr({ ...own, headRepositoryOwner: { login: 'someone' } }, 'task', 'mousse-agent')).toBe(false)
     expect(isOwnPr(own, 'other', 'mousse-agent')).toBe(false)
     expect(isOwnPr(own, null, 'mousse-agent')).toBe(false)
+  })
+
+  it('ranks term matches for display and flags only a search that hit the ceiling, naming its term', () => {
+    const hit = (number: number, state: string, title: string, updatedAt: string) => ({ kind: 'PR', number, state, title, updatedAt })
+    const ranked = rankTermHits([
+      hit(1, 'merged', 'tool catalogue for bots', '2026-11-16T00:00:00Z'),
+      hit(2, 'open', 'unrelated chat fix', '2026-11-10T00:00:00Z'),
+      hit(3, 'merged', 'bot tool catalogue lands', '2026-11-01T00:00:00Z'),
+      hit(4, 'open', 'tool catalogue for bots', '2026-11-12T00:00:00Z')
+    ], ['tool catalogue'])
+    expect(ranked.map((row: { number: number }) => row.number)).toEqual([4, 2, 1, 3])
+    const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ number: i }))
+    const results = [
+      { search: { term: 'bots', kind: 'PR', state: 'closed' }, rows: rows(TERM_CEILING) },
+      { search: { term: 'bots', kind: 'issue', state: 'open' }, rows: rows(TERM_CEILING - 1) },
+      { search: { term: 'tools', kind: 'issue', state: 'closed' }, rows: rows(20) }
+    ]
+    const notes = ceilingNotes(results)
+    expect(notes).toHaveLength(1)
+    expect(notes[0]).toContain('"bots"')
+    expect(notes[0]).toContain(String(TERM_CEILING))
+    expect(ceilingNotes(results.slice(1))).toEqual([])
+  })
+
+  it('lets incomplete coverage outrank hits in the verdict and the exit status', () => {
+    expect(verdictOf({ hasHits: true, incomplete: ['x'], hasPaths: true })).toBe('incomplete')
+    expect(verdictOf({ hasHits: true, incomplete: [], hasPaths: true })).toBe('hits')
+    expect(verdictOf({ hasHits: false, incomplete: [], hasPaths: true })).toBe('clear')
+    expect(verdictOf({ hasHits: false, incomplete: [], hasPaths: false })).toBe('terms-only')
+    expect(exitCodeFor('incomplete')).toBe(3)
+    expect(exitCodeFor('hits')).toBe(0)
+    expect(exitCodeFor('clear')).toBe(0)
   })
 
   it('finds recent branches without a PR by name or by changed paths, and counts ones it could not compare', () => {
@@ -269,6 +302,11 @@ describe('task notes and arguments', () => {
     const old = formatNotes({ tested: { sha: 'abcdef1234', dirty: false, results: [] } }, { tree: 'tree1' })
     expect(old).toContain('NOT VERIFIED')
     expect(formatNotes(notes)).toContain('unchecked')
+    const related = formatNotes({ related: { verdict: 'incomplete', baseSha: 'abcdef1234', openPrs: [12], branches: ['topic'], incomplete: ['term "bots": more than 300 PRs matched', '2 branches could not be compared'] } })
+    expect(related).toContain('related-work: incomplete')
+    expect(related).toContain('INCOMPLETE: term "bots": more than 300 PRs matched')
+    expect(related).toContain('INCOMPLETE: 2 branches could not be compared')
+    expect(related).toContain('origin/topic')
     expect(formatNotes({})).toBe('no task notes yet')
   })
 

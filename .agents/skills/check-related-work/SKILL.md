@@ -15,13 +15,13 @@ The check only reads. It does not create, comment on, close or assign anything. 
 
 It fetches and then covers four things:
 
-- issues and PRs matching the terms, open and closed (merged or not, any age, newest first), as number and title;
+- issues and PRs matching the terms, open and closed (merged or not, any age): each term search pages through the results up to a ceiling of 300 per search, then the report shows only a short ranked list (open first, best title match, newest) as number and title, with a count of the rest;
 - every open PR's changed files against the planned paths (cached by PR head and base commit), as number, title, author, branch, overlapping files and last update;
 - recent remote branches (last 14 days, `--days`) that have no open PR, matched by branch name against the terms or by files changed against the default branch, bounded to the newest 400;
 - the current task's own PR is ignored, but a fork's branch of the same name is not.
 
 - `NOT CHECKED: <reason>` (exit 1): the check did not happen, including when a list reached its limit and may be cut short. Retry or report that it was not done; never say there is no related work.
-- `INCOMPLETE: <what>`: it ran but part was cut short (a term search at its row limit, more branches than the bound, a branch that could not be compared). Treat the plan as not cleared; narrow the terms and rerun, or say what was not covered.
+- `INCOMPLETE: <what>` (exit 3): it ran but part was cut short: a term search hit the 300-row ceiling (the line names the term), there were more branches than the bound, or a branch could not be compared. Candidates are still printed, but incomplete outranks hits in the verdict and exit status, so the plan is not cleared. Narrow the named term and rerun, or say what was not covered. A long list of matches alone is not incomplete; the short list is a display limit, not a retrieval limit.
 - `CLEAR`: it completed everything and found nothing. State the base commit it printed as the commit the plan was checked against, and stop.
 - Terms alone cannot clear a plan: without `--path` the output says the files were not checked. `--path .` means the whole repository and matches every open change, so it never clears.
 - Branches older than the window, or on other remotes, are not covered; say so when the plan is large and old work might matter.

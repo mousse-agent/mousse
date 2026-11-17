@@ -3,8 +3,8 @@
 //   node .agents/skills/nightly-build-release/filter-log.mjs --run <run id> [--context 4] [--max 150]
 //   node .agents/skills/nightly-build-release/filter-log.mjs <log file> [--context 4] [--max 150]
 // With --run it saves the full failed log to the system temp folder and prints where. Output has three parts:
-// the test summary lines, the whole "Unhandled Errors" section (never cut by the line limit), and the other
-// matching lines with surrounding context, limited to --max lines.
+// the test summary lines, every "Unhandled Errors" section in full (no line cap), and the other matching
+// lines with surrounding context, limited to --max lines.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,27 +12,32 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const HELP = `Usage: node filter-log.mjs --run <run id> | <log file> [--context <n>] [--max <n>]
-Prints test summaries, the full "Unhandled Errors" section, then matching lines with context (at most --max, default 150).
+Prints test summaries, every "Unhandled Errors" section in full, then matching lines with context (at most --max, default 150).
 Exit codes: 0 printed, 1 could not read the log, 2 usage error.`;
 
 const STAMP = /^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
 const content = (line) => line.replace(STAMP, '');
 const SUMMARY = /^\s*(Test Files|Tests|Errors)\s+\d/;
 const MATCH = /\bFAIL\b|✗|×|Error:|AssertionError|error TS\d+|ELIFECYCLE|exit code [1-9]|Unhandled/;
-const MAX_UNHANDLED = 200;
+// Log lines read "job<TAB>step<TAB>timestamp text"; a section stays inside the job and step it started in.
+const origin = (line) => (STAMP.test(line) ? line.match(STAMP)[0].replace(/\d{4}-\d\d-\d\dT[\d:.]+Z ?$/, '') : '');
+const SECTION_END = /^\s*(Test Files|Tests)\s+\d|^\s*Duration\s/;
 
 export function filterLog(text, { context = 4, maxLines = 150 } = {}) {
   const lines = text.split(/\r?\n/);
   const summary = lines.filter((line) => SUMMARY.test(content(line)));
 
-  const unhandled = [];
+  // Every Unhandled Errors section, whole: from its header to the test summary that follows it, or until the
+  // log moves to another job or step. There is no length cap.
+  const unhandledSections = [];
   const inUnhandled = new Set();
-  const start = lines.findIndex((line) => content(line).includes('Unhandled Errors'));
-  if (start !== -1) {
+  for (let start = 0; start < lines.length; start++) {
+    if (inUnhandled.has(start) || !content(lines[start]).includes('Unhandled Errors')) continue;
+    const where = origin(lines[start]);
     let end = start + 1;
-    while (end < lines.length && end - start < MAX_UNHANDLED && !/^\s*(Test Files|Tests)\s+\d|^\s*Duration\s/.test(content(lines[end]))) end += 1;
-    for (let i = start; i < end; i++) { unhandled.push(lines[i]); inUnhandled.add(i); }
-    if (end - start >= MAX_UNHANDLED) unhandled.push(`… section continues; see the full log (${lines.length - end} more lines follow)`);
+    while (end < lines.length && !SECTION_END.test(content(lines[end])) && origin(lines[end]) === where) end += 1;
+    unhandledSections.push(lines.slice(start, end));
+    for (let i = start; i < end; i++) inUnhandled.add(i);
   }
 
   const wanted = new Set();
@@ -42,14 +47,16 @@ export function filterLog(text, { context = 4, maxLines = 150 } = {}) {
   });
   const ordered = [...wanted].sort((a, b) => a - b);
   const matches = ordered.slice(0, maxLines).map((i) => lines[i]);
-  return { summary, unhandled, matches, omitted: Math.max(0, ordered.length - maxLines) };
+  return { summary, unhandledSections, unhandled: unhandledSections.flat(), matches, omitted: Math.max(0, ordered.length - maxLines) };
 }
 
 export function formatFiltered(result, { logPath = null } = {}) {
   const out = [];
   if (logPath) out.push(`full log: ${logPath}`);
   out.push('== test summary ==', ...(result.summary.length ? result.summary : ['(none found)']));
-  if (result.unhandled.length) out.push('== Unhandled Errors (full section) ==', ...result.unhandled);
+  result.unhandledSections.forEach((section, i) => {
+    out.push(`== Unhandled Errors (full section ${i + 1} of ${result.unhandledSections.length}) ==`, ...section);
+  });
   out.push('== matching lines ==', ...(result.matches.length ? result.matches : ['(none found)']));
   if (result.omitted) out.push(`… ${result.omitted} more matching line(s) omitted; see the full log${logPath ? ` at ${logPath}` : ''}`);
   return out.join('\n');

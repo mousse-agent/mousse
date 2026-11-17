@@ -30,6 +30,8 @@ export function formatNotes(notes, { tree = null, now = Date.now() } = {}) {
     const r = notes.related;
     const hits = [...(r.openPrs ?? []).map((n) => `#${n}`), ...(r.termHits ?? [])];
     lines.push(`related-work: ${r.verdict} @ ${String(r.baseSha ?? '').slice(0, 7)} ${r.checkedAt ? timeAgo(r.checkedAt, now) : ''}${hits.length ? ` hits: ${hits.slice(0, 8).join(' ')}` : ''}`.trimEnd());
+    for (const name of r.branches ?? []) lines.push(`  branch: origin/${name}`);
+    for (const warning of r.incomplete ?? []) lines.push(`  INCOMPLETE: ${warning}`);
     if (r.review) lines.push(`related-work review: ${r.review}`);
   }
   if (notes.claim) lines.push(`claim: ${notes.claim.task} session ${notes.claim.session} until ${notes.claim.expiresAt}`);

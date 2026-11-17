@@ -25,15 +25,43 @@ Options:
   --json           print the result as JSON
   --help           this text
 
-Exit codes: 0 checked (hits, incomplete notes, or clear), 1 NOT CHECKED (any gh/git failure, or a list that
-hit its limit), 2 usage error. CLEAR is printed only when every check completed and found nothing.`;
+Exit codes: 0 checked completely (hits or clear), 1 NOT CHECKED (any gh/git failure, or the open PR list hit its
+limit), 2 usage error, 3 INCOMPLETE (ran, but coverage was cut short; candidates are still printed and this takes
+precedence over hits). CLEAR is printed only when every check completed and found nothing.
+Each term search pages through results up to 300 per search; only a search that hits that ceiling is
+incomplete. The report shows a short ranked list (12 lines), not everything retrieved.`;
 
 const ROOT_LIKE = /^(\.|\.\/|\/|\*{1,2})$/;
 const PATH_LIKE = /[\\/]|\.[A-Za-z0-9]{1,8}$/;
 export const OPEN_PR_LIMIT = 1000;
-export const SEARCH_LIMIT = 15;
+export const TERM_CEILING = 300;
 export const MAX_BRANCHES = 400;
 const MAX_TERM_LINES = 12;
+const TERM_WORDS = (term) => term.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length >= 3);
+
+/**
+ * Orders term matches for display: open work first, then the share of each term's words found in the title,
+ * then the most recently updated. Retrieval is separate: every row up to the ceiling is fetched and ranked.
+ */
+export function rankTermHits(hits, terms) {
+  const score = (hit) => {
+    const title = hit.title.toLowerCase();
+    return Math.max(0, ...terms.map((term) => {
+      const words = TERM_WORDS(term);
+      return words.length ? words.filter((word) => title.includes(word)).length / words.length : 0;
+    }));
+  };
+  return hits
+    .map((hit) => ({ hit, score: score(hit) }))
+    .sort((a, b) => (a.hit.state === 'open' ? 0 : 1) - (b.hit.state === 'open' ? 0 : 1) || b.score - a.score || Date.parse(b.hit.updatedAt) - Date.parse(a.hit.updatedAt))
+    .map(({ hit }) => hit);
+}
+
+/** One note per search that reached the ceiling, naming its term; none when every search was exhausted. */
+export function ceilingNotes(results, ceiling = TERM_CEILING) {
+  return results.filter(({ rows }) => rows.length >= ceiling)
+    .map(({ search }) => `term "${search.term}": more than ${ceiling} ${search.state} ${search.kind === 'PR' ? 'PRs' : 'issues'} matched; only the newest ${ceiling} were ranked`);
+}
 const MAX_FILES_SHOWN = 5;
 const MAX_BRANCH_LINES = 10;
 
@@ -179,10 +207,10 @@ export async function check({ terms, paths, days, self, repo: repoArg, fetch = t
 
   const sort = ' sort:updated-desc';
   const searches = terms.flatMap((term) => [
-    { kind: 'issue', state: 'open', args: ['issue', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(SEARCH_LIMIT), '--json', 'number,title,updatedAt'] },
-    { kind: 'issue', state: 'closed', args: ['issue', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(SEARCH_LIMIT), '--json', 'number,title,updatedAt'] },
-    { kind: 'PR', state: 'open', args: ['pr', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(SEARCH_LIMIT), '--json', 'number,title,updatedAt'] },
-    { kind: 'PR', state: 'closed', args: ['pr', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(SEARCH_LIMIT), '--json', 'number,title,updatedAt,mergedAt'] },
+    { term, kind: 'issue', state: 'open', args: ['issue', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(TERM_CEILING), '--json', 'number,title,updatedAt'] },
+    { term, kind: 'issue', state: 'closed', args: ['issue', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(TERM_CEILING), '--json', 'number,title,updatedAt'] },
+    { term, kind: 'PR', state: 'open', args: ['pr', 'list', '-R', repo, '--state', 'open', '--search', term + sort, '--limit', String(TERM_CEILING), '--json', 'number,title,updatedAt'] },
+    { term, kind: 'PR', state: 'closed', args: ['pr', 'list', '-R', repo, '--state', 'closed', '--search', term + sort, '--limit', String(TERM_CEILING), '--json', 'number,title,updatedAt,mergedAt'] },
   ]);
 
   const [openPrs, searchResults] = await Promise.all([
@@ -196,7 +224,6 @@ export async function check({ terms, paths, days, self, repo: repoArg, fetch = t
   const termHits = [];
   const seen = new Set();
   for (const { search, rows } of searchResults) {
-    if (rows.length >= SEARCH_LIMIT) incomplete.push(`a term search for ${search.state} ${search.kind}s returned ${SEARCH_LIMIT} rows; more may exist, narrow the term`);
     for (const row of rows) {
       const key = `${search.kind}#${row.number}`;
       if (seen.has(key)) continue;
@@ -205,8 +232,8 @@ export async function check({ terms, paths, days, self, repo: repoArg, fetch = t
       termHits.push({ kind: search.kind, number: row.number, state, title: row.title, updatedAt: row.updatedAt });
     }
   }
-  // Open work first, then the most recently updated closed work.
-  termHits.sort((a, b) => (a.state === 'open' ? 0 : 1) - (b.state === 'open' ? 0 : 1) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  incomplete.push(...ceilingNotes(searchResults));
+  termHits.splice(0, termHits.length, ...rankTermHits(termHits, terms));
 
   let branch = self;
   if (!branch) { try { branch = git(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd }); } catch { branch = null; } }
@@ -249,6 +276,15 @@ export async function check({ terms, paths, days, self, repo: repoArg, fetch = t
   return { repo, baseSha, openCount: others.length, terms, planned: paths, overlaps, termHits, branchHits, incomplete };
 }
 
+/** Incomplete coverage outranks hits: candidates are still reported, but the verdict is never a complete one. */
+export function verdictOf({ hasHits, incomplete, hasPaths }) {
+  if (incomplete.length) return 'incomplete';
+  if (hasHits) return 'hits';
+  return hasPaths ? 'clear' : 'terms-only';
+}
+
+export const exitCodeFor = (verdict) => (verdict === 'incomplete' ? 3 : 0);
+
 async function main(argv) {
   const args = parseArgv(argv, {
     bool: ['help', 'no-fetch', 'no-notes', 'json'], value: ['days', 'self', 'repo'], multi: ['term', 'path'],
@@ -273,7 +309,7 @@ async function main(argv) {
   }
 
   const hasHits = result.overlaps.length > 0 || result.termHits.length > 0 || result.branchHits.length > 0;
-  const verdict = hasHits ? 'hits' : result.incomplete.length ? 'incomplete' : (paths.length ? 'clear' : 'terms-only');
+  const verdict = verdictOf({ hasHits, incomplete: result.incomplete, hasPaths: paths.length > 0 });
   if (!args.bool['no-notes']) {
     try {
       recordNotes(repoRoot(), {
@@ -289,7 +325,7 @@ async function main(argv) {
   }
   if (args.bool.json) console.log(JSON.stringify({ verdict, ...result, overlaps: result.overlaps.map(({ pr, overlap, truncated }) => ({ number: pr.number, title: pr.title, author: pr.author?.login, branch: pr.headRefName, updatedAt: pr.updatedAt, files: overlap, truncated })) }));
   else console.log(formatReport(result));
-  return 0;
+  return exitCodeFor(verdict);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
