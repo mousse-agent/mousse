@@ -3224,3 +3224,41 @@ it.each([
   expect(botActionRefusalText(code as BotActionRefusalCode)).toBe(ownerText)
   expect(t.calls).toEqual([])
 })
+
+it('C9 expiry reaches work once with the owner-writing rule', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.clock.now = Date.parse(a.expires_at)
+  await f.bots.deliverDueReminders(); await flush()
+  const prompt = f.store.lastMainDispatch(t.workId)!.prompt.text
+  expect(prompt.split('This expired, so nothing was sent.')).toHaveLength(2)
+  expect(prompt).not.toContain('without a new reason')
+  expect(prompt).toContain('unless your owner writes')
+  const next = await start(f, t.workId, 2)
+  await finish(f, next.payload, 'completed', { text: 'Skipped it.' })
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+})
+it('C9 failed action journal fact uses the card sentence', async () => {
+  const t = await setup(true, false, false, false, false, true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  f.clock.now += 11 * 60_000
+  await f.bots.deliverDueReminders()
+  const fact = f.store.get('SELECT text FROM bot_journal WHERE source_key = ?', `bm:${a.message_id}:status:failed`)
+  expect(fact?.text).toContain(f.store.message(a.message_id)!.text)
+  expect(fact?.text).not.toContain('check the card')
+})
+it.each(['stop', 'done', 'failed'] as const)('C9 work ending %s consumes unread action outcomes', async end => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  if (end === 'stop') await f.bots.stopWork(t.botId, t.workId)
+  else {
+    f.bots.actions.transition(a.id, 'open', 'declined', { text: 'Not sent' })
+    f.store.moveActivation(t.workId, ['blocked'], end === 'done' ? 'done' : 'failed')
+  }
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+})
