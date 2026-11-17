@@ -21,6 +21,7 @@ export type MousseNoticeKind =
   | 'job_update'
   | 'bot_message'
   | 'bot_subagent'
+  | 'bot_action'
   | 'question_answered'
   | 'question_dismissed'
 
