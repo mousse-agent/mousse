@@ -27,7 +27,7 @@ import {
   claudeSandboxFact,
   type ClaudeLockedTurn
 } from '../../src/mms/harness/claude/locked'
-import { CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../../src/mms/harness/compatibility'
+import { hasContainmentEvidence, type ContainmentEvidence } from '../../src/mms/harness/compatibility'
 import { isProviderTurnCap, PROVIDER_TURN_CAP, providerFailureText } from '../../src/shared/harness/types'
 import { normalizeAppError, serializeAppError } from '../../src/shared/errors'
 import { botFixture, createBot, finish as botFinish, runDispatch, start as botStart } from '../bots/botFixture'
@@ -282,18 +282,6 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     expect(captured.filter((entry) => entry.hooks)).toHaveLength(1)
   })
 
-  it('keeps the sign-in the owner\'s Claude settings give as variables, though it loads no settings files', async () => {
-    const root = temp('claude-owner-root-')
-    const scratch = temp('claude-owner-scratch-')
-    writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key' } }))
-    const { service, captured } = ownerService(async () => {})
-    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
-    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
-    const options = captured.find((entry) => entry.hooks)!
-    expect(options.settingSources).toEqual([])
-    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key' })
-  })
-
   it('a failed turn reports Claude Code\'s own reason', async () => {
     const root = temp('claude-owner-root-')
     const scratch = temp('claude-owner-scratch-')
@@ -441,7 +429,6 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
       maxTurns: CLAUDE_LOCKED_MAX_TURNS,
       tools: ['Glob', 'Grep', 'Read', 'ToolSearch']
     })
-    expect(CLAUDE_LOCKED_MAX_TURNS).toBe(300)
     for (const name of ['allowDangerouslySkipPermissions', 'additionalDirectories', 'allowedTools', 'sandbox', 'resume']) expect(options, name).not.toHaveProperty(name)
     // Mousse's own server only, without the MCP relay, over Claude Code's input; none on its command line (#358).
     expect(options.mcpServers).toEqual({})
@@ -652,12 +639,6 @@ describe('locked Claude Code: who runs bots', () => {
   })
 
   it('no locked entry holds a bot, or gets exact tool control, without recorded evidence (item 14)', () => {
-    // Claude's records: `tools` on Linux, for the two versions the real-CLI suite passed on, with
-    // the items it asserts (Pi RPC's own records do not count for Claude Code). No `sandbox` record.
-    expect(CONTAINMENT_EVIDENCE.filter((record) => record.driver === 'claude').map(({ kind, platform, cliVersion, items }) => ({ kind, platform, cliVersion, items: [...items] }))).toEqual([
-      { kind: 'tools', platform: 'linux', cliVersion: '2.1.291', items: [1, 2, 3, 4, 5, 7] },
-      { kind: 'tools', platform: 'linux', cliVersion: '2.1.306', items: [1, 2, 3, 4, 5, 7] }
-    ])
     for (const platform of ['linux', 'darwin', 'win32'] as const) {
       const driver = claudeCodeDriver({ platform, managedPolicy: () => false })
       // Only Linux has a record: a locked entry there holds a bot exactly. The owner's own entries

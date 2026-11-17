@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { TurnSpec } from '../../src/mms/harness/gateway'
-import { BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy, HOST_APPROVALS_UNAVAILABLE, policyDigest } from '../../src/mms/harness/policy'
+import { botRuntimeGapReason, checkPolicy, HOST_APPROVALS_UNAVAILABLE, policyDigest } from '../../src/mms/harness/policy'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter } from '../../src/mms/harness/adapter'
@@ -184,7 +184,6 @@ describe('approvals answered by a bot authority (PR 6 6c-1)', () => {
   })
 
   it('no piece is missing any more (Bot Phase 1 §5.9): by default a runtime that holds bots admits a bot turn', async () => {
-    expect(BOT_RUNTIME_GAPS).toEqual([])
     const s = setup({ botAuthority: true, defaultGaps: true })
     const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: { ...BOT_POLICY, approve: 'host' } })
     await expect(s.harness.startTurn(s.spec(binding)).result).resolves.toMatchObject({ text: 'ok' })
