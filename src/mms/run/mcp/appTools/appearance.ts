@@ -20,6 +20,7 @@ import {
   type UserTheme
 } from '../../../../shared/themes/userThemes'
 import { WALLPAPER_REFUSED, type WallpaperImageInfo } from '../../../../shared/themes/wallpaperImage'
+import { sameChoice, type ThemeChoice, type ThemeRestorePoint } from '../../../appearance/ThemeRestoreStore'
 import type { AppToolHost } from './host'
 import { disabledInSettings, json, type Availability, type AppToolTurn, type MousseTool, type ToolOutcome } from './types'
 
@@ -33,6 +34,11 @@ export interface AppearanceToolHost {
    * returns its id. Rejects for any file it cannot use.
    */
   importWallpaper?(path: string): Promise<WallpaperImageInfo & { id: string }>
+  /** Where the theme from before agents changed it is kept, so `theme_set { restore: true }` can put it back. */
+  restorePoint?: {
+    get(): ThemeRestorePoint | undefined
+    set(point: ThemeRestorePoint | undefined): void
+  }
 }
 
 export const THEME_READ_TOOL = 'theme_read'
@@ -57,6 +63,79 @@ function summary(theme: UserTheme, withCss: boolean): Record<string, unknown> {
     ...(withCss ? { css: theme.css } : { cssLength: theme.css.length }),
     ...(theme.wallpaper ? { wallpaper: theme.wallpaper } : {})
   }
+}
+
+function choiceOf(appearance: AppearanceSettings): ThemeChoice {
+  return { theme: appearance.theme, userTheme: appearance.userTheme }
+}
+
+/** The restore point that still applies: the theme in use is the one agents left. */
+function currentPoint(store: AppearanceToolHost['restorePoint'], appearance: AppearanceSettings): ThemeRestorePoint | undefined {
+  const point = store?.get()
+  return point && sameChoice(point.after, appearance) ? point : undefined
+}
+
+/**
+ * The colors a theme update leaves: the theme's colors with the given ones changed, and those given as null or ""
+ * removed. A new theme gets the given ones.
+ */
+function nextColors(existing: Record<string, string> | undefined, input: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(existing ?? {}) }
+  for (const [name, value] of Object.entries(input)) {
+    if (value === null || value === '') delete out[name]
+    else out[name] = value
+  }
+  return out
+}
+
+/**
+ * Saves `patch` and keeps the restore point: the one already taken while the theme in use is the one agents left, else
+ * a new one from `before`. `touched` is a user theme this change edits or makes, kept as it was the first time.
+ */
+function saveRemembering(
+  tools: AppearanceToolHost,
+  before: AppearanceSettings,
+  patch: Partial<AppearanceSettings>,
+  touched?: { id: string; original: UserTheme | null }
+): AppearanceSettings {
+  const point: ThemeRestorePoint = currentPoint(tools.restorePoint, before) ?? {
+    savedAt: new Date().toISOString(),
+    before: choiceOf(before),
+    themes: {},
+    after: choiceOf(before)
+  }
+  const themes = touched && !(touched.id in point.themes) ? { ...point.themes, [touched.id]: touched.original } : point.themes
+  const saved = tools.set(patch)
+  tools.restorePoint?.set({ ...point, themes, after: choiceOf(saved) })
+  return saved
+}
+
+/** Puts the restore point back: the theme in use and the user themes agents edited; removes the ones they made. */
+function restore(tools: AppearanceToolHost): ToolOutcome {
+  if (!tools.restorePoint) return { text: 'Restoring is not available in this profile.', isError: true }
+  const appearance = tools.get()
+  const stored = tools.restorePoint.get()
+  if (!stored) return { text: 'Nothing to restore: no agent has changed the theme since it was last restored.', isError: true }
+  if (!sameChoice(stored.after, appearance)) {
+    tools.restorePoint.set(undefined)
+    return { text: 'Nothing to restore: the theme was changed in Settings after the agents\' last change, and that choice stays.', isError: true }
+  }
+  let userThemes = appearance.userThemes
+  const removed: string[] = []
+  for (const [id, original] of Object.entries(stored.themes)) {
+    const present = userThemes.some((theme) => theme.id === id)
+    if (original === null) {
+      if (present) removed.push(id)
+      userThemes = userThemes.filter((theme) => theme.id !== id)
+    } else {
+      userThemes = present ? userThemes.map((theme) => (theme.id === id ? original : theme)) : [...userThemes, original]
+    }
+  }
+  const { userTheme: was } = stored.before
+  const userTheme = was && userThemes.some((theme) => theme.id === was) ? was : ''
+  const saved = tools.set({ userThemes, theme: stored.before.theme, userTheme })
+  tools.restorePoint.set(undefined)
+  return json({ ...state(saved), restored: true, ...(removed.length ? { removed } : {}) })
 }
 
 function state(appearance: AppearanceSettings): Record<string, unknown> {
@@ -147,7 +226,7 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
     {
       name: THEME_READ_TOOL,
       description:
-        'Read Mousse\'s themes: the one in use, the built-in themes, the user themes and a short styling guide (color tokens and stable selectors for CSS). Pass id to get one user theme\'s full CSS. Read this before theme_set.',
+        'Read Mousse\'s themes: the one in use, the built-in themes, the user themes, a short styling guide (color tokens and stable selectors for CSS), and restorePoint: the theme from before agents changed it, which theme_set { restore: true } puts back. Pass id to get one user theme\'s full CSS. Read this before theme_set.',
       inputSchema: {
         type: 'object',
         properties: { id: { type: 'string', description: 'A user theme id, to include its CSS.' } }
@@ -162,8 +241,12 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
         const appearance = reach().get()
         const wanted = typeof args.id === 'string' ? args.id : undefined
         if (wanted && !appearance.userThemes.some((theme) => theme.id === wanted)) return { text: `No user theme ${wanted}.`, isError: true }
+        const point = currentPoint(reach().restorePoint, appearance)
         return json({
           ...state(appearance),
+          restorePoint: point
+            ? { savedAt: point.savedAt, theme: point.before.theme, userTheme: point.before.userTheme || null, changedThemes: Object.keys(point.themes) }
+            : null,
           builtIn: THEME_OPTIONS.map((option) => ({ id: option.id, label: option.label, scheme: option.scheme })),
           userThemes: appearance.userThemes.map((theme) => summary(theme, theme.id === wanted || (!wanted && theme.id === appearance.userTheme))),
           guide: themeStylingGuide()
@@ -173,13 +256,14 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
     {
       name: THEME_SET_TOOL,
       description:
-        `Change how Mousse looks. Either theme: switch to a built-in theme (${builtIns}; "system" follows the computer's light or dark mode) or an existing user theme id. Or userTheme: create a user theme (no id) or update one (its id; fields left out keep their values) and switch to it. Theme CSS asks the person unless the run is in Full access. Read theme_read first for the tokens and selectors. CSS that could load anything from outside Mousse is dropped.`,
+        `Change how Mousse looks. Either theme: switch to a built-in theme (${builtIns}; "system" follows the computer's light or dark mode) or an existing user theme id. Or userTheme: create a user theme (no id) or update one (its id; fields left out keep their values) and switch to it. Or restore: true: put back the theme from before agents changed it, user themes they edited included, and remove the ones they made. Theme CSS asks the person unless the run is in Full access. Read theme_read first for the tokens and selectors. CSS that could load anything from outside Mousse is dropped.`,
       botDescription:
-        `Change how Mousse looks for your owner. Either theme: switch to a built-in theme (${builtIns}; "system" follows the computer's light or dark mode) or an existing user theme id. Or userTheme: create a user theme (no id) or update one (its id; fields left out keep their values) and switch to it. Your owner allowed this, so nothing asks first. Read theme_read first for the tokens and selectors. CSS that could load anything from outside Mousse is dropped.`,
+        `Change how Mousse looks for your owner. Either theme: switch to a built-in theme (${builtIns}; "system" follows the computer's light or dark mode) or an existing user theme id. Or userTheme: create a user theme (no id) or update one (its id; fields left out keep their values) and switch to it. Or restore: true: put back the theme from before agents changed it, user themes they edited included, and remove the ones they made. Your owner allowed this, so nothing asks first. Read theme_read first for the tokens and selectors. CSS that could load anything from outside Mousse is dropped.`,
       inputSchema: {
         type: 'object',
         properties: {
           theme: { type: 'string', description: 'A built-in theme id, or a user theme id.' },
+          restore: { type: 'boolean', description: 'true: put back the theme from before agents changed it (theme_read shows it as restorePoint). Pass it alone.' },
           userTheme: {
             type: 'object',
             description: 'A user theme to save and switch to.',
@@ -188,7 +272,7 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
               name: { type: 'string', description: `A short name (at most ${USER_THEME_LIMITS.name} characters). Needed for a new theme.` },
               base: { type: 'string', enum: [...USER_THEME_BASES], description: 'The built-in theme it starts from: dark or light, usually. Needed for a new theme.' },
               accent: { type: 'string', description: 'Accent color as #rrggbb; leave out to keep the person\'s accent.' },
-              colors: { type: 'object', additionalProperties: { type: 'string' }, description: 'Color tokens by name (--surface-base: "#101418"). Plain colors only.' },
+              colors: { type: 'object', additionalProperties: { type: ['string', 'null'] }, description: 'Color tokens by name (--surface-base: "#101418"). Plain colors only. An update changes only the ones given; null removes one.' },
               css: { type: 'string', description: `Extra CSS, using the stable selectors from theme_read; at most ${USER_THEME_LIMITS.css} characters. The only url() allowed is a quoted data: address.` },
               wallpaper: {
                 type: ['object', 'null'],
@@ -208,6 +292,7 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
       permissionKey: PERMISSION_KEYS.mousseAppearance,
       class: 'mutation',
       approvalPrompt: (args) => {
+        if (args.restore === true) return 'Allow this agent to put back the theme you had before agents changed it?'
         const path = wallpaperPath(args)
         return path ? `Allow this agent to use ${shownPath(path)} as the wallpaper and change how Mousse looks?` : 'Allow this agent to change how Mousse looks?'
       },
@@ -215,6 +300,8 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
       // Mousse read a file the agent named: both ask unless the run is in Full access. Switching themes, colors and how a
       // wallpaper shows ask like any edit.
       runsWithoutAsking: (args) => {
+        // Restoring only puts back what the profile had before, so it asks like a switch.
+        if (args.restore === true) return 'edit'
         const css = args.userTheme && typeof args.userTheme === 'object' ? (args.userTheme as Record<string, unknown>).css : undefined
         return (typeof css === 'string' && css.trim()) || wallpaperPath(args) ? 'full' : 'edit'
       },
@@ -224,9 +311,13 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
       botGrantAnswers: true,
       listed: () => Boolean(host.appearance?.()),
       available: mayChangeSettings,
-      describe: (args) => (args.userTheme ? 'Save and use a theme' : 'Switch theme'),
+      describe: (args) => (args.restore === true ? 'Restore theme' : args.userTheme ? 'Save and use a theme' : 'Switch theme'),
       handler: async (args): Promise<ToolOutcome> => {
         const tools = reach()
+        if (args.restore === true) {
+          if (args.theme !== undefined || args.userTheme !== undefined) return { text: 'Pass restore alone, without theme or userTheme.', isError: true }
+          return restore(tools)
+        }
         // A new wallpaper image is stored first and the themes are read after it, so a change made meanwhile (another
         // window, another agent) is not overwritten: nothing below waits.
         const given = args.userTheme && typeof args.userTheme === 'object' ? wallpaperInput(args.userTheme as Record<string, unknown>) : undefined
@@ -247,20 +338,20 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
         const appearance = tools.get()
         const hasTheme = typeof args.theme === 'string' && args.theme.trim() !== ''
         const hasUser = args.userTheme !== undefined
-        if (hasTheme === hasUser) return { text: 'Pass either theme or userTheme.', isError: true }
+        if (hasTheme === hasUser) return { text: 'Pass either theme or userTheme, or restore.', isError: true }
         if (hasTheme) {
           const id = (args.theme as string).trim()
-          if (BUILT_IN_IDS.has(id)) return json({ ...state(tools.set({ theme: id as ThemeId, userTheme: '' })) })
+          if (BUILT_IN_IDS.has(id)) return json({ ...state(saveRemembering(tools, appearance, { theme: id as ThemeId, userTheme: '' })), before: choiceOf(appearance) })
           if (!appearance.userThemes.some((theme) => theme.id === id))
             return { text: `No theme ${id}. Built-in: ${[...BUILT_IN_IDS].join(', ')}; user themes: ${appearance.userThemes.map((theme) => theme.id).join(', ') || 'none'}.`, isError: true }
-          return json({ ...state(tools.set({ userTheme: id })) })
+          return json({ ...state(saveRemembering(tools, appearance, { userTheme: id })), before: choiceOf(appearance) })
         }
         const input = args.userTheme && typeof args.userTheme === 'object' ? args.userTheme as Record<string, unknown> : {}
         const existing = typeof input.id === 'string' ? appearance.userThemes.find((theme) => theme.id === input.id) : undefined
         if (typeof input.id === 'string' && !existing) return { text: `No user theme ${input.id}; leave id out to create one.`, isError: true }
         if ((input.base !== undefined || !existing) && !isUserThemeBase(input.base)) return { text: `base must be one of ${USER_THEME_BASES.join(', ')}.`, isError: true }
         const colors = input.colors && typeof input.colors === 'object' ? input.colors as Record<string, unknown> : {}
-        const badColor = Object.entries(colors).find(([name, value]) => !isThemeTokenName(name) || !isThemeColorValue(value))
+        const badColor = Object.entries(colors).find(([name, value]) => !isThemeTokenName(name) || (value !== null && value !== '' && !isThemeColorValue(value)))
         if (badColor) return { text: `colors["${badColor[0]}"] is not a plain color token (a lower-case --name and a hex, rgb(), hsl() or named color).`, isError: true }
         if (input.accent !== undefined && input.accent !== '' && !(typeof input.accent === 'string' && /^#[0-9a-f]{6}$/i.test(input.accent)))
           return { text: 'accent must be #rrggbb.', isError: true }
@@ -270,16 +361,24 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
         const id = existing?.id ?? userThemeIdFor(typeof input.name === 'string' ? input.name : '', appearance.userThemes.map((theme) => theme.id))
         const wallpaper = nextWallpaper(existing?.wallpaper, wallpaperInput(input), image)
         if (wallpaper === 'missing') return { text: 'This theme has no wallpaper yet: give wallpaper.path to choose an image.', isError: true }
-        // An update keeps what it leaves out (its CSS, colors, accent, wallpaper), so a change of name or base loses nothing.
-        const theme = normalizeUserTheme({ ...(existing ?? {}), ...input, wallpaper, id })
+        // An update keeps what it leaves out (its CSS, colors, accent, wallpaper), so a change of name or base loses nothing;
+        // colors given change only those colors.
+        const theme = normalizeUserTheme({
+          ...(existing ?? {}),
+          ...input,
+          ...(input.colors !== undefined ? { colors: nextColors(existing?.colors, colors) } : {}),
+          wallpaper,
+          id
+        })
         if (!theme) return { text: 'The theme needs a name.', isError: true }
         const userThemes = existing
           ? appearance.userThemes.map((entry) => (entry.id === theme.id ? theme : entry))
           : [...appearance.userThemes, theme]
-        const saved = tools.set({ userThemes, userTheme: theme.id })
+        const saved = saveRemembering(tools, appearance, { userThemes, userTheme: theme.id }, { id: theme.id, original: existing ?? null })
         const dropped = rulesThatWillBeDropped(theme.css)
         return json({
           ...state(saved),
+          before: choiceOf(appearance),
           saved: theme.id,
           ...(dropped.length ? { dropped, note: 'These rules will not be applied: a theme cannot load anything from outside Mousse.' } : {})
         })
