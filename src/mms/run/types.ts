@@ -82,6 +82,12 @@ export interface RunOutcome {
    */
   sentByAgent?: true
   agentHops?: number
+  /**
+   * The causal chain this run belongs to (`AgentChains`): the chain of the agent message that started it, or of the run
+   * it carries on (a wake, a provider's continuation, the resume after a pause, a subagent's task). Absent on a run a
+   * person, a schedule or an event started: its messages start a chain of their own (`chainIdOf`).
+   */
+  agentChain?: string
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */
@@ -412,6 +418,8 @@ export interface AgentActor {
   toolCallId: string
   /** How many agent messages in a row led to this one (the sender's own count plus one); set by the thread owner. */
   hops?: number
+  /** The causal chain the message belongs to (`AgentChains`); set by the thread owner for a sender on this computer. */
+  chain?: string
   /**
    * Set when the agent is on another of the user's computers (a routed call marked as an agent's): `threadId` and `runId`
    * are then its ids on that computer, and nothing about the sender is looked up here. `node` is the calling computer
@@ -515,9 +523,29 @@ export function isAgentNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): bool
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'agent_note'
 }
 
-/** A note sent with `attention: none`: it never starts a turn of its own. */
+/**
+ * Payload of a `reconcile_notice` row that tells a sender what became of its message held at its chain's budget (issue
+ * #1443): the person stopped it, or Continue could not send it. It never starts a turn: the sender reads it with its next.
+ */
+export interface ChainHoldSettledPayload {
+  kind: 'chain_hold_settled'
+  holdId: string
+  outcome: 'stopped' | 'failed'
+  targetThreadId: string
+  targetTitle: string | null
+  /** The start of the held message, so the sender knows which it was. */
+  excerpt: string
+  /** Why Continue could not send it (`failed`). */
+  reason?: string
+}
+
+export function isChainHoldSettledRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'chain_hold_settled'
+}
+
+/** A note sent with `attention: none`, or word of a held message: it never starts a turn of its own. */
 export function isQuietNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
-  return isAgentNoteRow(row) && (row.payload as AgentNotePayload).attention === 'none'
+  return (isAgentNoteRow(row) && (row.payload as AgentNotePayload).attention === 'none') || isChainHoldSettledRow(row)
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */

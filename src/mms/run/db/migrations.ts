@@ -759,5 +759,48 @@ CREATE TABLE run_time_limits(
   updated_at TEXT NOT NULL
 ) STRICT;
 `
+  },
+  {
+    version: 25,
+    sql: `
+-- The causal chain of agent messages (issue #1442): what a person (or a schedule or an event) started, followed through
+-- every agent message, wake and delegation it led to. A run names its chain in outcome.agentChain; a run that names
+-- none starts its own (chain id 'chain:<runId>'). used counts the messages since the chain's budget began (a person's
+-- message, or Continue, begins a new one); total counts them all.
+CREATE TABLE agent_chains(
+  chain_id          TEXT PRIMARY KEY,
+  root_thread_id    TEXT NOT NULL,
+  root_run_id       TEXT NOT NULL,
+  used              INTEGER NOT NULL DEFAULT 0 CHECK(used >= 0),
+  total             INTEGER NOT NULL DEFAULT 0 CHECK(total >= 0),
+  budget_started_at TEXT NOT NULL,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+) STRICT;
+CREATE INDEX agent_chains_root ON agent_chains(root_thread_id);
+
+-- A message held at the chain's budget for the person's Continue or Stop (issue #1443). Nothing is dropped:
+--   held:      waiting for the person;
+--   continued: sent after Continue (result: what the send returned);
+--   stopped:   withdrawn by Stop; its sender was told;
+--   failed:    Continue could not send it (result: the error); its sender was told.
+-- request_key is the sender's request, so a retry finds its hold instead of making another.
+CREATE TABLE agent_chain_holds(
+  hold_id          TEXT PRIMARY KEY,
+  chain_id         TEXT NOT NULL,
+  request_key      TEXT NOT NULL UNIQUE,
+  kind             TEXT NOT NULL CHECK(kind IN ('work','note')),
+  sender_thread_id TEXT NOT NULL,
+  sender_run_id    TEXT,
+  target_thread_id TEXT NOT NULL,
+  payload          TEXT NOT NULL,
+  status           TEXT NOT NULL CHECK(status IN ('held','continued','stopped','failed')),
+  result           TEXT,
+  created_at       TEXT NOT NULL,
+  settled_at       TEXT
+) STRICT;
+CREATE INDEX agent_chain_holds_chain ON agent_chain_holds(chain_id, status);
+CREATE INDEX agent_chain_holds_status ON agent_chain_holds(status);
+`
   }
 ]

@@ -60,6 +60,17 @@ describe('run protocol validation', () => {
     await expect(client.request('runs.cancelPause', { runId: 'run:missing' })).rejects.toMatchObject({ code: 'conflict' })
   }, 30_000)
 
+  it('threads.chainHold takes Continue or Stop for a chain that started in the thread; anything else is refused', async () => {
+    const thread = mms.threads.createThread('Held chain')
+    const invalid = { code: 'invalid_params' }
+    await expect(client.request('threads.chainHold', { threadId: thread.id, chainId: 'chain:x', answer: 'continue', bogus: 1 })).rejects.toMatchObject(invalid)
+    await expect(client.request('threads.chainHold', { threadId: thread.id, chainId: 'chain:x', answer: 'maybe' })).rejects.toMatchObject(invalid)
+    await expect(client.request('threads.chainHold', { threadId: thread.id, answer: 'stop' })).rejects.toMatchObject(invalid)
+    await expect(client.request('threads.chainHold', { threadId: 'missing', chainId: 'chain:x', answer: 'stop' })).rejects.toMatchObject({ code: 'thread_not_found' })
+    // A card that has not caught up with an answer from another window gets feedback, not silence.
+    await expect(client.request('threads.chainHold', { threadId: thread.id, chainId: 'chain:x', answer: 'stop' })).rejects.toMatchObject({ code: 'conflict' })
+  }, 30_000)
+
   it('surfaces engine refusals with their reason as the error code', async () => {
     const thread = mms.threads.createThread('Refusals')
     await expect(client.request('thread.mergeBack', { forkThreadId: thread.id })).rejects.toMatchObject({ code: 'not_a_fork' })

@@ -9,7 +9,8 @@ import { hostingTurn } from '../../nativeHelpers'
 import type { RunEngine } from '../../RunEngine'
 import { TERMINAL_RUN_STATUSES, type AgentActor, type AgentNotePayload, type DelegationRecord, type RunRecord, type ThreadEvent } from '../../types'
 import { familyRelation, threadFamily } from './family'
-import { noteDelivery, noteFrom, postNote, runtimeOwnedResult, type SendDelivery } from './threadNotes'
+import { heldResult, noteDelivery, noteFrom, noteInboxId, postNote, runtimeOwnedResult, type SendDelivery } from './threadNotes'
+import { isAgentMessageHeld } from '../../AgentChains'
 import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunCommandResult, AgentThreadRequest, AppToolHost, ApprovalRequestInfo } from './host'
 import type { BotAppToolDeps } from './bots'
 import { threadLink } from '../../../../shared/threadLink'
@@ -51,10 +52,11 @@ export const AGENT_QUEUE_MAX_PER_SENDER = 3
 /** Messages from all agents together a thread may have waiting in its queue; the next is refused. */
 export const AGENT_QUEUE_MAX_PER_THREAD = 10
 /**
- * The same text from the same sending thread to the same thread within this window is refused as a repeat
- * (`duplicate_message`). Two minutes is longer than an MCP client waits on a call (about a minute) plus the retry an agent
- * makes when a send seemed to fail, which is the repeat this catches; it is short enough that sending the same words again
- * after the other thread has answered ("continue") still goes through.
+ * The same text from the same sending thread to the same thread within this window coalesces into the first message: the
+ * call returns that message's result (`coalesced`) and nothing is sent again. Two minutes is longer than an MCP client
+ * waits on a call (about a minute) plus the retry an agent makes when a send seemed to fail, which is the repeat this
+ * catches; it is short enough that sending the same words again after the other thread has answered ("continue") still
+ * goes through.
  */
 export const AGENT_REPEAT_WINDOW_MS = 120_000
 /** A removed message's text is cut to this many characters in the transcript row (the event keeps more). */
@@ -556,11 +558,12 @@ const SEND_CONFLICTS: Readonly<Record<string, string>> = {
   questions_pending:
     'The thread is waiting for the user to answer a question or an approval; a message from an agent never answers or skips it. Try again after the user has answered.',
   agent_hops_exceeded:
-    'Too many agent messages in a row without a person in between: this message would be past the limit. Stop here and let a person reply before agents go on.',
+    'This chain of agent messages reached its limit without a person in between, so this message cannot go now. A thread_send to a thread on this computer is kept for the person to Continue or Stop; otherwise end your turn and let a person reply.',
   agent_queue_full_per_sender:
     `The thread already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread waiting in its queue, the most one thread may have there; nothing was queued. Wait for them to run (thread_wait), or change one of them (queue_list, queue_edit) instead of adding another.`,
   agent_queue_full:
     `The thread already has ${AGENT_QUEUE_MAX_PER_THREAD} messages from agents waiting in its queue, the most it holds from all agents together; nothing was queued. Wait for them to run (thread_wait), or try again later.`,
+  // Refused by a computer that has no chain coalescing yet.
   duplicate_message:
     `You sent the same text to this thread less than ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes ago, so it was not sent again. If your earlier call failed or timed out, call again with the same clientRequestId to get its result. To send it again on purpose, wait until retryAfterMs has passed, or write a new message.`,
   device_limit:
@@ -1297,6 +1300,15 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       text: content,
       attention
     }
+    // A note that starts a turn is one step of the caller's chain: past its budget it waits for the person (#1443).
+    if (attention === 'needed' && !engine.inbox.get(noteInboxId(requestKey))) {
+      try {
+        host.admitAgentNote?.(threadId, requestKey, payload, actorOf(ctx))
+      } catch (error) {
+        if (isAgentMessageHeld(error)) return json(heldResult(threadId, 'note', error.held))
+        throw error
+      }
+    }
     const { row, replayed } = postNote(engine, requestKey, payload, threadId)
     if (!replayed) showAction(host, threadId, actorOf(ctx), 'sent a note')
     // A message never answers, dismisses or replaces a request: the note waits until the person answers.
@@ -1713,8 +1725,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread, as work (the default) or as a note. A note (intent "note") is information that grants nothing: you may send one to any thread of your family (your parent, siblings, your subagents and those below them), from a read-only subagent too. It arrives labelled with your thread and what you may do, never as the user's words, and returns delivery: presented (it reached the running turn), waiting_on_command (the runtime injects it when the running command ends), waiting_for_boundary (it arrives with that turn's next Mousse tool call, otherwise at its next turn), started (an idle thread got a turn for it), queued (attention "none": it waits for the thread's next turn) or after_answer (the thread waits on a question or approval; a note never answers one). interrupt: true restarts your own subagent's running reply with the note on a runtime that cannot inject it; it is refused (waiting_on_request) while that thread waits on a person. A note to a thread outside your family joins the running turn you name with runId, as thread_steer does. Work is a new assignment: within your family only a thread's direct parent sends it; send a note to anyone else there. To a thread that mirrors a helper its runtime started, nothing is sent: delivery runtime_owned names the agent id and the runtime's own message tool. Work runs as follows. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Sent to your own subagent, it is a follow-up task as continue_subagent starts (the same clientRequestId never starts it twice under either name, and Mousse sends you the result without notify); another thread's subagent is reached only through its parent. ${REMOTE_REACH} A message there is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; status uncertain means that computer did not confirm it (call again with the same clientRequestId: it is never sent twice); notify works there too: Mousse follows that computer's run and tells you when it settles.`,
-      botDescription: `Send a message to one of your owner's threads. Its model receives it labelled as a message from you, not from your owner, and runs it in that thread's own mode; its approvals and questions wait for your owner. It starts a turn when the thread is idle and queues behind the running turn otherwise. Refused while the thread waits for your owner to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from you or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, and when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes; each refusal says why (data.conflict). Send as many messages as the work needs: there is no count per turn, per run or per day, and no limit on messages in a row. Each message you send is a job in your ledger (or joins the job the thread still works on): you are told here in your chat when the thread finishes or waits for a person, with its report and link, so end your turn instead of waiting; use thread_wait only when this turn can't go on without the answer. Returns the run it created and delivery: started or queued.`,
+      description: `Send a message to another thread, as work (the default) or as a note. A note (intent "note") is information that grants nothing: you may send one to any thread of your family (your parent, siblings, your subagents and those below them), from a read-only subagent too. It arrives labelled with your thread and what you may do, never as the user's words, and returns delivery: presented (it reached the running turn), waiting_on_command (the runtime injects it when the running command ends), waiting_for_boundary (it arrives with that turn's next Mousse tool call, otherwise at its next turn), started (an idle thread got a turn for it), queued (attention "none": it waits for the thread's next turn) or after_answer (the thread waits on a question or approval; a note never answers one). interrupt: true restarts your own subagent's running reply with the note on a runtime that cannot inject it; it is refused (waiting_on_request) while that thread waits on a person. A note to a thread outside your family joins the running turn you name with runId, as thread_steer does. Work is a new assignment: within your family only a thread's direct parent sends it; send a note to anyone else there. To a thread that mirrors a helper its runtime started, nothing is sent: delivery runtime_owned names the agent id and the runtime's own message tool. Work runs as follows. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting; each refusal names its limit (data.conflict). The same text you sent it in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes is not sent again: you get the first message's result (coalesced). When the agent messages that followed one person's message reach their limit, the next is kept for the person to Continue or Stop and returns status held: end your turn and do not send it again. Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Sent to your own subagent, it is a follow-up task as continue_subagent starts (the same clientRequestId never starts it twice under either name, and Mousse sends you the result without notify); another thread's subagent is reached only through its parent. ${REMOTE_REACH} A message there is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; status uncertain means that computer did not confirm it (call again with the same clientRequestId: it is never sent twice); notify works there too: Mousse follows that computer's run and tells you when it settles.`,
+      botDescription: `Send a message to one of your owner's threads. Its model receives it labelled as a message from you, not from your owner, and runs it in that thread's own mode; its approvals and questions wait for your owner. It starts a turn when the thread is idle and queues behind the running turn otherwise. Refused while the thread waits for your owner to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from you or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting; each refusal says why (data.conflict). The same text you sent it in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes is not sent again: you get the first message's result (coalesced). Send as many messages as the work needs: there is no count per turn, per run or per day, and no limit on messages in a row. Each message you send is a job in your ledger (or joins the job the thread still works on): you are told here in your chat when the thread finishes or waits for a person, with its report and link, so end your turn instead of waiting; use thread_wait only when this turn can't go on without the answer. Returns the run it created and delivery: started or queued.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1776,6 +1788,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         try {
           sent = await host.sendToThread(threadId, { content: args.content, mode }, { clientRequestId: requestKey, actor })
         } catch (error) {
+          // Past its chain's budget the message waits for the person's Continue or Stop: nothing was dropped (#1443).
+          if (isAgentMessageHeld(error)) return json(heldResult(threadId, 'work', error.held))
           throw sendConflict(error) ?? error
         }
         if (!sent.replayed) showAction(host, threadId, actor, `sent a message (run ${sent.runId})`)

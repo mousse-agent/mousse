@@ -14,6 +14,7 @@ import type { ThreadSearchOptions } from '../../../data/ThreadDataStore'
 import type { QuickActionTools } from '../../../orchestrator/QuickActionTools'
 import type { WebTools } from '../../../orchestrator/WebTools'
 import type { TaskQueue } from '../../../tasks/TaskQueue'
+import type { HeldMessage } from '../../AgentChains'
 import type { ApprovalRefusal } from '../../approvalRights'
 import type { SteerStrategy } from '../../CommandPolicy'
 import type { RunEngine } from '../../RunEngine'
@@ -49,6 +50,10 @@ export interface AgentSendResult {
   replayed: boolean
   /** The mode the message was sent in: Plan when the thread is kept in Plan, whatever the sender asked for. */
   mode?: 'agent' | 'plan'
+  /** The same text went from the same sender to the same thread moments ago: this is that message's result. */
+  coalesced?: true
+  /** Where the message stands in its causal chain: message `seq` of the `budget` before a person decides. */
+  chain?: { id: string; seq: number; budget: number }
 }
 
 /** What `thread_create` asks for, checked for shape by the tool. */
@@ -160,7 +165,7 @@ export interface AgentCreatedThread {
   /** The mode the thread's turns run in: no wider than the creator's. */
   permissionMode: PermissionMode
   /** The first message: what became of it. Absent when none was asked for. */
-  firstMessage?: ({ sent: true } & AgentSendResult) | { sent: false; reason: string }
+  firstMessage?: ({ sent: true } & AgentSendResult) | { sent: false; reason: string; held?: HeldMessage }
   /** The same `clientRequestId` created this thread before; nothing new was made. */
   replayed: boolean
 }
@@ -441,6 +446,11 @@ export interface AppToolHost extends DelegationToolsHost {
    * `clientRequestId` returns the first result.
    */
   sendToThread?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentSendResult>
+  /**
+   * Counts a note that asks for attention as one step of `actor`'s chain (issue #1442). Past the chain's budget the note
+   * is kept for the person's Continue or Stop and `AgentMessageHeld` is thrown; Continue posts it then.
+   */
+  admitAgentNote?(threadId: string, requestKey: string, payload: unknown, actor: AgentActor): void
   /**
    * Watches the message `messageKey` sent to `targetThreadId` (`notify` on `thread_send` and `thread_create`): Mousse
    * tells the sending thread when the work it started waits on a person (once) and when it ends (SPEC §15.1). Once per

@@ -1283,6 +1283,8 @@ export interface AgentOrigin {
    * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
    */
   hops?: number
+  /** The causal chain of agent messages it belongs to, so a queued message keeps it until it runs. */
+  chain?: string
   /**
    * Where the sending agent's own words sit in the stored text: after the header Mousse wrote and before its closing
    * line (`agentMessageWords`). Lengths, not positions: text another computer reads is re-encoded inside the words,
@@ -1775,6 +1777,23 @@ export interface TurnState {
    * In memory, like `step`; set only while the turn is active.
    */
   heldSteer?: HeldSteer
+  /**
+   * A chain of agent messages that started in this thread reached its budget, and its next messages wait for the person's
+   * Continue or Stop (issue #1443). Kept through every phase, and after a restart, until it is decided.
+   */
+  chainHold?: ChainHoldView
+}
+
+/** What the card of a held chain of agent messages shows (`TurnState.chainHold`). */
+export interface ChainHoldView {
+  chainId: string
+  /** Messages the agents exchanged since the chain's budget began. */
+  used: number
+  budget: number
+  /** Messages waiting for the decision. */
+  held: number
+  /** The threads of the held messages, senders and receivers, with their titles. */
+  between: Array<{ threadId: string; title: string | null }>
 }
 
 /** What a held steer waits for (`TurnState.heldSteer`). */

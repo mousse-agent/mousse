@@ -322,7 +322,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
     // Each limit the owner enforces has its own code and says which limit it is and what to do (one "limit reached" sends
     // agents looking for the wrong cause).
     it.each([
-      ['agent_hops_exceeded', /agent messages in a row/],
+      ['agent_hops_exceeded', /reached its limit without a person in between/],
       ['agent_queue_full_per_sender', new RegExp(`${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread .*the most one thread may have`)],
       ['agent_queue_full', new RegExp(`${AGENT_QUEUE_MAX_PER_THREAD} messages from agents .*from all agents together`)],
       ['duplicate_message', /same text .*same clientRequestId/]
@@ -337,7 +337,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
     it('a steer past the hop limit, or into a run that has not started its turn, is a conflict that says so', async () => {
       const { call, denied, answers, targetRun } = await world()
-      for (const [reason, message] of [['agent_hops_exceeded', /agent messages in a row/], ['steer_target_not_ready', /not started its turn yet/]] as const) {
+      for (const [reason, message] of [['agent_hops_exceeded', /reached its limit without a person in between/], ['steer_target_not_ready', /not started its turn yet/]] as const) {
         answers.steer = async () => ({ status: 'rejected', reason })
         const error = await denied(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'x' }))
         expect(error, reason).toMatchObject({ code: 'mousse_conflict', details: { conflict: reason } })

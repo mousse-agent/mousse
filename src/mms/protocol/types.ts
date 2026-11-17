@@ -305,6 +305,7 @@ export const PROTOCOL_METHODS = [
   'runs.resumeNow',
   'runs.cancelPause',
   'threads.goal',
+  'threads.chainHold',
   'thread.fork',
   'thread.mergeBack',
   'orchestrator.answerQuestions',
