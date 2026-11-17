@@ -317,6 +317,29 @@ async function scheduledCall(on = true, minutes = 5, untilMinutes?: number) {
   const call = (args = t.args) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
   return { ...t, schedule, id, run, call }
 }
+it.each([true, false])('a scheduled use_tool call holds the real arguments once with asks first %s', async on => {
+  const t = await scheduledCall(on)
+  const call = catalogueTurn({ ...t, work: t.run, workId: t.id })
+  const args = { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'scheduled-once' } }
+  const result = await call('use_tool', args, 'outer-one')
+  if (!on) {
+    expect(result.text).toContain('delivered')
+    expect(t.calls).toEqual([t.args])
+    expect(f.bots.actions.forWork(t.id)).toBeUndefined()
+    return
+  }
+  expect(result.text).toContain('held')
+  await call('use_tool', args, 'outer-retry')
+  const a = f.bots.actions.forWork(t.id)!
+  expect(a.exec_args).toBe(JSON.stringify(t.args))
+  expect(JSON.parse(a.call_key)).toEqual([t.id, f.store.dispatches(t.id)[0]!.clientRequestId, 'mcp:scheduled-once'])
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect((await t.call()).isError).toBe(true)
+  expect(botAppToolRefusal(t.run.prepared.authority, 'thread_create')).toBeTruthy()
+  await finish(f, t.run.payload)
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
