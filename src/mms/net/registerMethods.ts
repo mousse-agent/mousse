@@ -81,7 +81,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.rename': ['node', 'name'],
   'bridge.setCaps': ['node', 'caps'],
   'bridge.setKind': ['node', 'kind'],
-  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots', 'agentReach'],
+  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots', 'agentReach', 'work'],
   'bridge.connect': ['node'],
   'bridge.disconnect': ['node'],
   'bridge.workOnThreads': ['enabled'],
@@ -285,9 +285,12 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       params.terminal === undefined &&
       params.editor === undefined &&
       params.bots === undefined &&
-      params.agentReach === undefined
+      params.agentReach === undefined &&
+      params.work === undefined
     )
       throw new DomainRpcError('invalid_params', 'Choose a limit to change')
+    if (params.work !== undefined && typeof params.work !== 'boolean')
+      throw new DomainRpcError('invalid_params', 'work must be boolean')
     if (params.blocked !== undefined && typeof params.blocked !== 'boolean')
       throw new DomainRpcError('invalid_params', 'blocked must be boolean')
     if (params.terminal !== undefined && typeof params.terminal !== 'boolean')

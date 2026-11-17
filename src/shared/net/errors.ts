@@ -157,13 +157,16 @@ export function isNetErrorCode(value: unknown): value is NetErrorCode {
  * bare "not permitted". Fixed words only: it is the one detail of an error that crosses the wire.
  * `not_connected`: the other computer has not connected this device (a connection it refuses for that reason is
  * tried again slowly, never given up).
+ * `work_off`: the other computer lets this device view threads and chat with bots only ("Work on threads from this
+ * device" is off there), so it refuses every call that would start, change or stop work.
  */
 export const FORBIDDEN_REASONS = [
   'capability',
   'blocked',
   'setting_off',
   'terminal_off',
-  'not_connected'
+  'not_connected',
+  'work_off'
 ] as const
 export type ForbiddenReason = (typeof FORBIDDEN_REASONS)[number]
 export const isForbiddenReason = (value: unknown): value is ForbiddenReason =>

@@ -37,6 +37,12 @@ import {
   newId,
   isId
 } from '../../shared/net'
+import {
+  methodAccess,
+  needsWork,
+  ROUTED_STREAM_ACCESS,
+  STREAM_ACCESS
+} from '../../shared/net/accessClasses'
 import type {
   NetAddonActionResult,
   NetAddonRecords,
@@ -160,7 +166,8 @@ const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
   terminal: policy.terminal,
   editor: policy.editor,
   bots: policy.bots,
-  agentReach: policy.agentReach
+  agentReach: policy.agentReach,
+  work: policy.work
 })
 
 interface NetConfiguration {
@@ -215,6 +222,8 @@ const CONTROL_METHOD = /^authority\.transfer\./
 /** The refusal of a device of this user's list that is not connected here. */
 const notConnected = () =>
   new NetError('forbidden', undefined, { details: { reason: 'not_connected' } })
+/** The refusal of a device this computer lets view threads and chat with bots only. */
+const workOff = () => new NetError('forbidden', undefined, { details: { reason: 'work_off' } })
 /**
  * The other devices of this computer's list now (not this one, none revoked), read with the pinned root key so a
  * locked key store reads it too. Undefined when the list cannot be read; empty when this computer has none.
@@ -613,6 +622,10 @@ export class NetService {
               if (method.needsTerminal && !policy.get(peer.node).terminal)
                 throw new NetError('forbidden', undefined, { details: { reason: 'terminal_off' } })
             }
+            // "Work on threads from this device" off: the device views threads and chats with bots, and every call
+            // that would start, change or stop work is refused, in every family, a saved result's lookup included.
+            if (needsWork(methodAccess(method.method)) && !policy.get(peer.node).work)
+              throw workOff()
           }
         }),
         transfer = new AuthorityTransferDelivery({ db, identity, keys })
@@ -1163,6 +1176,7 @@ export class NetService {
             ...(params.terminal === undefined ? {} : { terminal: params.terminal as boolean }),
             ...(params.editor === undefined ? {} : { editor: params.editor as boolean }),
             ...(params.bots === undefined ? {} : { bots: params.bots as boolean }),
+            ...(params.work === undefined ? {} : { work: params.work as boolean }),
             ...(params.agentReach === undefined
               ? {}
               : { agentReach: params.agentReach as AgentReach })
@@ -2093,9 +2107,19 @@ export class NetService {
     // A device this computer blocked reads, fetches and writes none of its Bridge streams. A device of this user's
     // list that is not connected here has none of its streams, its Spaces' included (another user's device is
     // governed by its Space membership alone).
+    // A stream whose kind is work (none is today) is not for a device that may only view and chat with bots; the
+    // class is read first, so the record-by-record check costs no query for the kinds every device reads.
+    const streamWorkOff = (stream: StreamId, peer: { node: NodeId }): boolean => {
+      const kind = store.getStream(stream)?.kind
+      if (!kind) return false
+      const own = this.domain?.privateStreams?.access(stream)
+      const access = own ? ROUTED_STREAM_ACCESS[own.kind] : STREAM_ACCESS[kind]
+      return needsWork(access) && !rt.policy.get(peer.node).work
+    }
     const blockedFor = (stream: StreamId, peer: { node: NodeId; user: UserId }): boolean =>
       !this.connectedHere(peer) ||
-      (!store.getStream(stream)?.kind.startsWith('space.') && rt.policy.isBlocked(peer.node))
+      (!store.getStream(stream)?.kind.startsWith('space.') &&
+        (rt.policy.isBlocked(peer.node) || streamWorkOff(stream, peer)))
     // A private stream is read by its computer only, while the owner's switch for other computers is on
     // (read on every record, so turning it off is also a kill switch) and, for a terminal, the device's
     // terminal switch is on. The authority checks the reader and "Works on threads".

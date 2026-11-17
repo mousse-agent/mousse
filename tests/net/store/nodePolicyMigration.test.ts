@@ -272,3 +272,33 @@ describe('agent reach in net_node_policy (issue #1160)', () => {
     expect(policy.get(node).agentReach).toBe('none')
   })
 })
+
+describe('"Work on threads from this device" in net_node_policy', () => {
+  it('adds the column with every device on, an earlier build\'s write leaves it, and only a stored 1 is on', () => {
+    const dir = profile()
+    const node = newId('node')
+    writeOldDatabase(dir, [[node, 0, 'full', 1]])
+    let db = new NetDatabase({ profileDir: dir })
+    expect(columns(db).find((column) => column.name === 'work')).toMatchObject({ notnull: 1, dflt_value: '1' })
+    expect(userVersion(db)).toBe(1)
+    const first = new SqliteNodePolicy(db, systemClock)
+    expect(first.get(node)).toMatchObject({ work: true, maxPermissionMode: 'full', terminal: true })
+    expect(first.get(newId('node')).work).toBe(true)
+    expect(first.set(node, { work: false })).toMatchObject({ work: false, terminal: true, maxPermissionMode: 'full' })
+    db.close()
+    db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(policy.get(node).work).toBe(false)
+    // An earlier build's write names only its own columns: the switch stays off.
+    db.database
+      .prepare(
+        'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,created_at) VALUES(?,?,?,?,?,?,?,?) ' +
+          'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal'
+      )
+      .run(node, 0, 'ask', 0, 0, 1, 'launched', 5)
+    expect(policy.get(node)).toMatchObject({ work: false, maxPermissionMode: 'ask' })
+    expect(() => db.database.prepare('UPDATE net_node_policy SET work=2 WHERE node=?').run(node)).toThrow()
+    expect(() => policy.set(node, { work: 'no' as never })).toThrow()
+  })
+})
