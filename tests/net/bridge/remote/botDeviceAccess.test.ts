@@ -552,12 +552,14 @@ it.each(['send', 'not_now'] as const)('held-action %s rechecks real bot Reach an
   } }
   // The backend is scripted: this case proves the bridge's authorization boundary, not execution of an email.
   vi.spyOn(f.bots.service, 'actionMessage').mockReturnValue(card)
+  const admission = vi.spyOn(f.bots.service, 'actionCheck').mockImplementation(() => {})
   const backend = vi.spyOn(f.bots.service, 'answerAction').mockResolvedValue({ status: answer === 'send' ? 'done' : 'declined' })
   const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'accept_edits' })
   const params = { botId, actionId: 'action-one', digest: 'shown', answer }
   const context = { ...as(PHONE), execution: 'execution-action-one' } as RpcContext
   expect(await outcome(methods, 'bots.actions.answer', params, context)).toEqual({ ok: true })
   expect(backend).toHaveBeenCalledExactlyOnceWith(params)
+  expect(admission).toHaveBeenCalledExactlyOnceWith(params)
   const method = methods.find(method => method.method === 'bots.actions.answer')!
   store.set(botId, { mode: 'chosen', nodes: [LAPTOP] })
   expect(await outcome(methods, 'bots.actions.answer', params, context)).toMatchObject({ code: 'stream_unknown' })
