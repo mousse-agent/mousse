@@ -10,6 +10,7 @@ import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { markRecoveredFailures } from '../../src/renderer/chat/adapters/mousseToUI'
+import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
 import {
   TurnProgressContext,
   describeTurnProgress,
@@ -35,6 +36,8 @@ beforeEach(() => {
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
+  // Words show as they come; the test of a paced reply turns pacing on itself.
+  setReplyPacing(false)
 })
 
 afterEach(() => {
@@ -43,6 +46,7 @@ afterEach(() => {
   window.matchMedia = realMatchMedia
   globalThis.ResizeObserver = realResizeObserver
   vi.useRealTimers()
+  setReplyPacing(true)
 })
 
 type Status = 'ready' | 'submitted' | 'streaming'
@@ -68,6 +72,14 @@ const liveRow = () => host.querySelector<HTMLElement>('[data-turn-live]')
 /** The live row's first line: the headline of the current run's thought. */
 const headline = () => liveRow()?.querySelector('.turn-live-headline')?.textContent ?? null
 const line = () => host.querySelector<HTMLElement>('[data-turn-progress]')
+/**
+ * The live row shows nothing: hidden, or, with reply pacing, saying "Writing…" right under reply text that is on
+ * screen, which turn-progress.css hides (\`data-until-text\`).
+ */
+const rowQuiet = () => {
+  const row = liveRow()!
+  return row.hidden || (row.dataset.untilText !== undefined && Boolean(row.previousElementSibling?.querySelector('.an-markdown')))
+}
 /** The line's label; what a running call works on follows it, dim (`.turn-progress-detail`). */
 const lineText = () => line()?.querySelector('.turn-progress-label')?.textContent ?? ''
 const lineDetail = () => line()?.querySelector('.turn-progress-detail')?.textContent ?? null
@@ -173,7 +185,7 @@ describe('the line under Working', () => {
     const live = reply('t1', thought('input-available', '**Reading the test**\n\nIt starts both.'))
     render([ask(), live, reply('a1', text('The test is'))], 'streaming', { phase: 'streaming' })
     expect(reasoningRow('Reading the test').querySelector('svg.thinking-icon.is-thinking')).toBeNull()
-    expect(liveRow()!.hidden).toBe(true)
+    expect(rowQuiet()).toBe(true)
   })
 
   it('3. a long thought moves on paragraph by paragraph, one still line each, and a finished one shows its newest', () => {
@@ -249,7 +261,7 @@ describe('the line under Working', () => {
     expect(reasoningRows()).toHaveLength(0)
     expect(groupHeader('Reading the test')!.getAttribute('aria-expanded')).toBe('false')
     // The text being written says the rest: the live row has nothing to add.
-    expect(liveRow()!.hidden).toBe(true)
+    expect(rowQuiet()).toBe(true)
     act(() => { groupHeader('Reading the test')!.click() })
     const opened = groupHeader('Reading the test')!.parentElement!.textContent!
     for (const piece of ['Reading the test', 'ls', 'Planning the fix']) expect(opened).toContain(piece)
@@ -264,11 +276,27 @@ describe('the line under Working', () => {
     render([ask(), reply('a1', text(''))], 'streaming', { phase: 'streaming' })
     expectLive('Writing…')
     const row = liveRow()
+    setReplyPacing(true)
+    // Paced, the first words wait for their block to finish: nothing of the reply shows yet, so the row still says it.
     render([ask(), reply('a1', text('The test fails because'))], 'streaming', { phase: 'streaming' })
-    expect(line()).toBeNull()
-    // Hidden, not removed: the same row comes back when the turn moves on.
-    expect(liveRow()).toBe(row)
-    expect(row!.hidden).toBe(true)
+    expect(host.querySelector('.turn-answer .an-markdown')).toBeNull()
+    expectLive('Writing…')
+    expect(rowQuiet()).toBe(false)
+    // A finished paragraph shows: the reply says it, and the row is hidden by the style rule that reads its mark.
+    render([ask(), reply('a1', text('The test fails because the clock drifts.\n\nThe fix'))], 'streaming', { phase: 'streaming' })
+    expect(host.querySelector('.turn-answer .an-markdown')).not.toBeNull()
+    expect(rowQuiet()).toBe(true)
+    expect(readFileSync('src/renderer/chat/components/agent-elements/turn-progress.css', 'utf8')).toMatch(/\.turn-answer > :has\(\.an-markdown\) \+ \.turn-live\[data-until-text\] \{\s*display: none;/)
+    // Not paced, the words show as they come: the row is hidden at once. Hidden, not removed: it is the same row.
+    setReplyPacing(false)
+    try {
+      render([ask(), reply('a1', text('The test fails because'))], 'streaming', { phase: 'streaming' })
+      expect(line()).toBeNull()
+      expect(liveRow()).toBe(row)
+      expect(row!.hidden).toBe(true)
+    } finally {
+      setReplyPacing(true)
+    }
   })
 
   it('5. a tool call being prepared: Preparing <tool>…', () => {
@@ -539,7 +567,7 @@ describe('the line under Working', () => {
     const steered = ask('u2', 'Also check the lint', { steered: true })
     const messages = [ask('u1'), reply('a1', text('Looking at the')), steered]
     render(messages, 'streaming', { phase: 'streaming' })
-    expect(line()).toBeNull()
+    expect(rowQuiet() || lineText() === 'Writing…').toBe(true)
     render(messages, 'streaming', { phase: 'streaming', step: { kind: 'waiting' } })
     expectLive('Thinking…')
   })
@@ -577,7 +605,7 @@ describe('the line under Working', () => {
         expect(header()).toMatch(/^Working/)
         const last = messages.at(-1)!
         const textShown = state.phase === 'streaming' && !state.step && last.role === 'assistant' && last.parts.some((part) => part.type === 'text')
-        if (textShown) expect(liveRow()!.hidden).toBe(true)
+        if (textShown) expect(rowQuiet()).toBe(true)
         else expect(lineText(), JSON.stringify({ state, parts: messages.at(-1)!.parts })).not.toBe('')
       }
     }

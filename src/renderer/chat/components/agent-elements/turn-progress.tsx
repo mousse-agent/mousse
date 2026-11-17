@@ -3,6 +3,7 @@ import type { UIMessage } from "ai";
 import { Collapse } from "../../../components/ui/Collapse";
 import { LiveRunBodyContext, useToolOpen } from "./tools/tool-open-state";
 import { IconChevronRight } from "../../../lib/icons";
+import { useReplyPacing } from "../../../lib/replyPacingSetting";
 import type { TurnPhase, TurnStep } from "../../../../shared/types";
 import { isWaitingPermissionRequest } from "./tools/permission-request";
 import { useSubagentCards } from "./tools/subagent-cards-context";
@@ -237,6 +238,7 @@ const THINKING_KINDS: ReadonlySet<TurnProgressKind> = new Set(["thinking", "star
 /** The turn's start and the wait for the model's first output say nothing more than that it thinks: the tooltip says which. */
 const STARTING: TurnProgress = { kind: "starting", label: "Thinking…", title: "Starting the agent and its tools" };
 const WAITING: TurnProgress = { kind: "waiting", label: "Thinking…", title: "Waiting for the model's first output" };
+const WRITING: TurnProgress = { kind: "writing", label: "Writing…" };
 
 function hasContent(messages: readonly UIMessage[]): boolean {
   return messages.some((message) =>
@@ -447,7 +449,12 @@ export function TurnProgressRow({
   // only renders the line again each second while one runs.
   const [, setTick] = useState(0);
   const now = Date.now();
-  const progress = describeTurnProgress({ state, messages, stepSince: stepSeenAt(state, now), awaitingSubagents, spawningSubagents, standalone, now });
+  const described = describeTurnProgress({ state, messages, stepSince: stepSeenAt(state, now), awaitingSubagents, spawningSubagents, standalone, now });
+  // Paced, reply text reaches the screen a finished block at a time, so text in the reply may not show yet: the row
+  // still says "Writing…", and turn-progress.css hides it once the reply above it shows text.
+  const paced = useReplyPacing();
+  const untilText = !described && paced && state?.phase === "streaming" && textOnScreen(messages);
+  const progress = untilText ? WRITING : described;
   const until = progress?.until;
   useEffect(() => {
     if (until == null) return;
@@ -472,7 +479,7 @@ export function TurnProgressRow({
   ) : null;
   return (
     <div className="turn-live flex flex-col min-w-0 max-w-full" data-find-ignore data-turn-live
-      hidden={!headline && !progress && !open}>
+      data-until-text={untilText || undefined} hidden={!headline && !progress && !open}>
       <div className="turn-live-lines flex items-start gap-1 min-w-0 max-w-full select-none" role="status"
         data-toggles={chevron ? "" : undefined} onClick={chevron ? toggle : undefined}>
       <div className="turn-live-text flex flex-col min-w-0 max-w-full">

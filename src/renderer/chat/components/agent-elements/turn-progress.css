@@ -18,6 +18,11 @@
   display: none;
 }
 
+/* A paced reply has text the row cannot see on screen yet: "Writing…" stays until the reply right above it shows some. */
+.turn-answer > :has(.an-markdown) + .turn-live[data-until-text] {
+  display: none;
+}
+
 .turn-live-thought,
 .turn-progress {
   height: 22px;

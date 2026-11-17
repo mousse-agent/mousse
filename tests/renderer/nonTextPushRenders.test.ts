@@ -198,9 +198,10 @@ describe('pushes other than text while a reply streams', () => {
   })
 
   it('a turn-state push renders the line under Working only', async () => {
+    // Words show as they come (not paced): the reply being written is on screen, and the live row has nothing to add.
+    setReplyPacing(false)
     await mount()
     const useAppStore = await store()
-    // The reply being written is on screen: the live row has nothing to add.
     expect(progressLine()).toBeNull()
     expect(host.querySelector<HTMLElement>('[data-turn-live]')!.hidden).toBe(true)
     // The service sends every thread's turn and then the one that changed, both new objects.
