@@ -1901,14 +1901,14 @@ export const MessageList = memo(function MessageList({
     typeof window !== "undefined" && turns.length > RENDER_ALL_THRESHOLD;
   windowedRef.current = windowed;
   // The reply just ended and its work is about to fold: a reader up in the thread keeps their place
-  // (virtual/fold-hold.ts). Measured now, while the rows on screen are still the running turn's. A windowed thread
-  // holds its reading line itself, and one that follows the end has the follower.
+  // (virtual/fold-hold.ts). Measured now, while the rows on screen are still the running turn's. A windowed thread's
+  // own holder stands down while the hold runs; a thread that follows the end has the follower.
   const replyActiveSeenRef = useRef(replyActive);
   const foldHoldRef = useRef<FoldHold | null>(null);
   if (replyActiveSeenRef.current !== replyActive) {
     replyActiveSeenRef.current = replyActive;
     foldHoldRef.current =
-      !replyActive && !windowed && followModeRef.current !== "following-end"
+      !replyActive && followModeRef.current !== "following-end"
         ? captureFoldHold(chatContainerRef.current, rowsRef.current)
         : null;
   }

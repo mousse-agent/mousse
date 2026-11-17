@@ -6,6 +6,8 @@ import { COLLAPSE_CLOSE_MS } from "../../../../components/ui/Collapse";
  * work above or around it closes, that row stays where it was on screen. If the row they read is itself work that
  * folds, the nearest row below it that stays visible (the answer, the next prompt) holds instead. The browser's own
  * scroll anchoring cannot do this: it anchors on the row under the reading line, and that row may be the one folding.
+ * Neither can the windowed list's holder (use-turn-window.ts): the row it holds is remounted inside the fold, so it
+ * falls back to the turn's top, which does not move. It stands down while a hold runs (`foldHoldActive`).
  *
  * `captureFoldHold` runs while the old rows are still on screen (during the render that ends the turn); `runFoldHold`
  * runs once they are replaced, and keeps the row in place until the fold has closed or the reader scrolls.
@@ -21,6 +23,14 @@ export type FoldHold = {
 const FOLDING = ".turn-answer > .ui-collapse";
 /** On the scroller while a hold runs: native scroll anchoring is off (global.css). */
 const HOLD_ATTR = "data-fold-hold";
+
+/**
+ * Whether a fold hold owns the scroll position now. The windowed list's own reading-line holder (use-turn-window.ts)
+ * stands down while it does, so one writer corrects the view at a time.
+ */
+export function foldHoldActive(container: HTMLElement): boolean {
+  return container.hasAttribute(HOLD_ATTR);
+}
 
 function contentTop(container: HTMLElement): number {
   return container.getBoundingClientRect().top + container.clientTop;
