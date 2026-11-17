@@ -1,10 +1,11 @@
 import { publishMarkdownPreviews } from '../readAloud/markdownFileSpeech'
 import { registerFileTabCloser, setFileTabDirtyPaths } from '../services/fileTabs'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
-import { AlertTriangle, Eye, Pencil, Search, X } from '../lib/icons'
+import { AlertTriangle, ArrowShrink, ChevronRight, Code2, Eye, FolderTree, Maximize, Search, WrapText, X } from '../lib/icons'
+import { profilePreferenceKey } from '../lib/profilePreferences'
 import { useCommand } from '../commands/commandRegistry'
 import { useActiveProjectLocation, useFilesRoot } from '../hooks/useActiveProjectPath'
 import type { FileGrepMatch } from '../../shared/types'
@@ -101,6 +102,38 @@ function assetSignature(data: ArrayLike<number>, mimeType: string): string {
   return `${mimeType}:${data.length}:${hash}`
 }
 
+/** An on/off choice kept in this computer's storage under `key`; a new key reads its own stored value. */
+function useStoredFlag(key: string, fallback: boolean): [boolean, (value: boolean) => void] {
+  const [chosen, setChosen] = useState<Record<string, boolean>>({})
+  const stored = window.localStorage.getItem(key)
+  const value = chosen[key] ?? (stored === null ? fallback : stored === '1')
+  const set = useCallback((next: boolean) => {
+    window.localStorage.setItem(key, next ? '1' : '0')
+    setChosen((current) => ({ ...current, [key]: next }))
+  }, [key])
+  return [value, set]
+}
+
+/** The folders and name of an open file, from the thread's folder name down; an absolute path is named in full. */
+export function fileCrumbs(path: string, filesRoot: string): string[] {
+  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean)
+  if (isAbsolutePath(path)) return parts
+  const rootName = filesRoot ? basename(filesRoot.replace(/[\\/]+$/, '')) : ''
+  return rootName ? [rootName, ...parts] : parts
+}
+
+/** A small icon button of the file bar; `pressed` makes it an on/off toggle. */
+function BarButton({ label, shortcut, pressed, onClick, children }: {
+  label: string
+  shortcut?: string
+  pressed?: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return <button type="button" className="files-icon-btn" aria-label={label} title={shortcut ? `${label} (${shortcut})` : label}
+    aria-pressed={pressed} onClick={onClick}>{children}</button>
+}
+
 interface FilesPanelProps {
   /**
    * Whether the panel is on screen. While it is not, the tree and the editor unmount and the panel keeps only what
@@ -150,6 +183,12 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const [positions, setPositions] = useState<Record<string, { line: number; column: number }>>({})
   /** Source or preview, per Markdown file; it outlives the editor, which unmounts while the panel is hidden. */
   const [markdownViews, setMarkdownViews] = useState<Record<string, MarkdownEditorViewMode>>({})
+  /** The file tree beside an open file. Off by default: the file gets the panel's whole width. */
+  const [explorerOpen, setExplorerOpen] = useStoredFlag(profilePreferenceKey(profileId, 'mousse:files-explorer-open'), false)
+  const [wordWrap, setWordWrap] = useStoredFlag(profilePreferenceKey(profileId, 'mousse:files-word-wrap'), true)
+  /** Images show at their own size instead of fitted to the panel. */
+  const [imageActualSize, setImageActualSize] = useState(false)
+  const [imageSizes, setImageSizes] = useState<Record<string, { width: number; height: number }>>({})
   useEffect(() => {
     const previews: Record<string, string> = {}
     for (const path of openPaths) {
@@ -647,6 +686,12 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     monacoRef.current = monaco
     setAvailableLanguageIds(new Set(monaco.languages.getLanguages().map((language) => language.id)))
     applyEditorTheme(monaco)
+    // The editor sees one file, not its project: every import and outside name would be marked as an error.
+    // Syntax errors still show.
+    const typescript = monaco.languages.typescript
+    for (const defaults of [typescript?.typescriptDefaults, typescript?.javascriptDefaults]) {
+      defaults?.setDiagnosticsOptions({ ...defaults.getDiagnosticsOptions(), noSemanticValidation: true })
+    }
   }
   const onMount: OnMount = (instance, monaco) => {
     editorRef.current = instance
@@ -683,9 +728,51 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     return ''
   }, [selected])
 
-  const supportsPreview = selected?.kind === 'html'
+  const ready = Boolean(selected && selectedKey && !selected.loading && !selected.initialLoadFailed && !selected.binary)
+  // Markdown and HTML show rendered or as source; one button switches. A Markdown file opened at a line shows source only.
+  const markdownRendered = selected?.kind === 'markdown' && selectedKey && !positions[selectedKey]
+    ? (markdownViews[selectedKey] ?? 'preview') === 'preview' : null
+  const rendered = !ready ? null : markdownRendered ?? (selected?.kind === 'html' ? selectedPreview : null)
+  const setRendered = (next: boolean) => {
+    if (!selectedKey) return
+    if (selected?.kind === 'markdown') setMarkdownViews((views) => ({ ...views, [selectedKey]: next ? 'preview' : 'source' }))
+    else setPreview((state) => ({ ...state, [selectedKey]: next }))
+  }
+  const showsSource = ready && rendered !== true && !isAssetView(selected!.kind)
+  const imageSize = selected?.kind === 'image' && selectedKey ? imageSizes[selectedKey] : undefined
+  const crumbs = selectedPath ? fileCrumbs(selectedPath, filesRoot) : []
 
   if (!showing) return null
+
+  // The folder the tree shows, its search and its tree: the whole panel with no file open, a column beside one.
+  const browser = <div className="files-sidebar-body">
+    {/* The path and the search field share the row: one fades and slides out as the other comes in. */}
+    <div className={`panel-toolbar files-header${searchOpen ? ' searching' : ''}`}>
+      <div className="files-header-layer files-header-title" inert={searchOpen}>
+        {browseRoot ? <FilesPathBar path={browseRoot} canBrowse={!remote} quickPlaces={quickPlaces} loadDrives={loadDrives}
+          onNavigate={navigate} onNavigateTyped={navigateTyped} editRequest={pathEditRequest} />
+          : <span className="panel-toolbar-label">Files</span>}
+        <div className="files-toolbar-actions">
+          <button type="button" className="files-icon-btn" aria-label="Search files" title="Search files (Ctrl+F)"
+            onClick={() => openSearch('files')}><Search size={14} strokeWidth={2} /></button>
+          <FileTreeToolbar onRefresh={() => setRefreshKey((key) => key + 1)} />
+        </div>
+      </div>
+      <div className="files-header-layer files-header-search" inert={!searchOpen}>
+        <FilesSearchField state={search.state} inputRef={search.inputRef} {...searchHandlers} />
+        <button type="button" className="files-icon-btn" aria-label="Close search" title="Close search (Esc)"
+          onClick={closeSearch}><X size={14} strokeWidth={2} /></button>
+      </div>
+    </div>
+    {searchShowsResults && <FilesSearchResults state={search.state} onAction={searchHandlers.onAction}
+      onOpenFile={searchHandlers.onOpenFile} onOpenLine={searchHandlers.onOpenLine} />}
+    {/* Hidden, not unmounted, while results show: the tree keeps its open folders. */}
+    <div className="files-browse" hidden={searchShowsResults}>
+      <FileTree key={`${navKey}|${browseRoot}`} memory={treeMemories.current.get(`${navKey}|${browseRoot}`)} filesRoot={browseRoot} listRoot={listRoot} threadId={activeThreadId}
+        selectedPath={treePathOf(selectedPath)} refreshKey={refreshKey}
+        onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(joinFolder(browseRoot, path), filesRoot))} />
+    </div>
+  </div>
 
   return (
     <div className="files-panel" ref={panelRef} onKeyDown={(event) => {
@@ -704,35 +791,9 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       setPathEditRequest((request) => request + 1)
     }}>
       {/* Files is the browser tab; each picked file has its own sibling tab. */}
-      {!selectedPath && <ResizablePanelSidebar className="files-sidebar" defaultWidth={260} fill>
-        <div className="files-sidebar-body">
-        {/* The title and the search field share the row: one fades and slides out as the other comes in. */}
-        <div className={`panel-toolbar files-header${searchOpen ? ' searching' : ''}`}>
-          <div className="files-header-layer files-header-title" inert={searchOpen}>
-            <span className="panel-toolbar-label">Explorer</span>
-            <div className="files-toolbar-actions">
-              <button type="button" className="files-icon-btn" aria-label="Search files" title="Search files (Ctrl+F)"
-                onClick={() => openSearch('files')}><Search size={14} strokeWidth={2} /></button>
-              <FileTreeToolbar onRefresh={() => setRefreshKey((key) => key + 1)} />
-            </div>
-          </div>
-          <div className="files-header-layer files-header-search" inert={!searchOpen}>
-            <FilesSearchField state={search.state} inputRef={search.inputRef} {...searchHandlers} />
-            <button type="button" className="files-icon-btn" aria-label="Close search" title="Close search (Esc)"
-              onClick={closeSearch}><X size={14} strokeWidth={2} /></button>
-          </div>
-        </div>
-        {searchShowsResults && <FilesSearchResults state={search.state} onAction={searchHandlers.onAction}
-          onOpenFile={searchHandlers.onOpenFile} onOpenLine={searchHandlers.onOpenLine} />}
-        {/* Hidden, not unmounted, while results show: the tree keeps its open folders. */}
-        <div className="files-browse" hidden={searchShowsResults}>
-          {browseRoot && <FilesPathBar path={browseRoot} canBrowse={!remote} quickPlaces={quickPlaces} loadDrives={loadDrives}
-            onNavigate={navigate} onNavigateTyped={navigateTyped} editRequest={pathEditRequest} />}
-          <FileTree key={`${navKey}|${browseRoot}`} memory={treeMemories.current.get(`${navKey}|${browseRoot}`)} filesRoot={browseRoot} listRoot={listRoot} threadId={activeThreadId}
-            selectedPath={treePathOf(selectedPath)} refreshKey={refreshKey}
-            onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(joinFolder(browseRoot, path), filesRoot))} />
-        </div>
-        </div>
+      {/* Files is the browser tab; each picked file has its own sibling tab, with the tree beside it when asked for. */}
+      {(!selectedPath || explorerOpen) && <ResizablePanelSidebar className="files-sidebar" defaultWidth={240} fill={!selectedPath}>
+        {browser}
       </ResizablePanelSidebar>}
       {selectedPath && <div className="files-editor" role="region" aria-label={selectedPath} onKeyDown={(event) => {
         // Escape closes the preview, except where a text field or the code editor uses it.
@@ -740,16 +801,30 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         event.preventDefault()
         closePreview()
       }}>
-        {/* The main tab row names the file; this row holds its editing controls. */}
-        <div className="files-editor-toolbar">
+        {/* One row: where the file is, then its controls as small icon buttons. */}
+        <div className="panel-toolbar files-editor-toolbar">
+          <div className="files-crumbs" title={isAbsolutePath(selectedPath) || !filesRoot ? selectedPath : absoluteFilesPath(selectedPath, filesRoot)}>
+            {crumbs.map((crumb, index) => <Fragment key={index}>
+              {index > 0 && <ChevronRight size={12} className="files-crumb-sep" aria-hidden="true" />}
+              <span className={`files-crumb${index === crumbs.length - 1 ? ' current' : ''}`}>{crumb}</span>
+            </Fragment>)}
+          </div>
           <div className="files-toolbar-actions">
-            {supportsPreview && <div className="files-view-toggle" role="group" aria-label="File view">
-              <button type="button" className={`btn btn-sm ${!selectedPreview ? 'active' : ''}`} onClick={() => selectedKey && setPreview((state) => ({ ...state, [selectedKey]: false }))}><Pencil size={13} /> Edit</button>
-              <button type="button" className={`btn btn-sm ${selectedPreview ? 'active' : ''}`} onClick={() => selectedKey && setPreview((state) => ({ ...state, [selectedKey]: true }))}><Eye size={13} /> Preview</button>
-            </div>}
             {saveLabel && selected && <span className={`files-save-status ${selected.saveState}`}>{saveLabel}</span>}
-            <button type="button" className="files-icon-btn" aria-label="Close preview" title="Close preview (Esc)"
-              onClick={closePreview}><X size={14} strokeWidth={2} /></button>
+            {imageSize && <span className="files-bar-note">{imageSize.width} × {imageSize.height}</span>}
+            {imageSize && <BarButton label={imageActualSize ? 'Fit to panel' : 'Actual size'} onClick={() => setImageActualSize(!imageActualSize)}>
+              {imageActualSize ? <ArrowShrink size={14} strokeWidth={2} /> : <Maximize size={14} strokeWidth={2} />}
+            </BarButton>}
+            {rendered !== null && <BarButton label={rendered ? 'Show source' : 'Show preview'} onClick={() => setRendered(!rendered)}>
+              {rendered ? <Code2 size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
+            </BarButton>}
+            {showsSource && <BarButton label="Wrap lines" pressed={wordWrap} onClick={() => setWordWrap(!wordWrap)}>
+              <WrapText size={14} strokeWidth={2} />
+            </BarButton>}
+            <BarButton label={explorerOpen ? 'Hide file tree' : 'Show file tree'} pressed={explorerOpen} onClick={() => setExplorerOpen(!explorerOpen)}>
+              <FolderTree size={14} strokeWidth={2} />
+            </BarButton>
+            <BarButton label="Close preview" shortcut="Esc" onClick={closePreview}><X size={14} strokeWidth={2} /></BarButton>
           </div>
         </div>
         {selected?.error && <div className={`panel-error ${selected.saveState === 'conflict' ? 'files-conflict' : ''}`}>
@@ -779,12 +854,18 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         {selected?.loading ? <DelayedLoader label={`Opening ${basename(selected.path)}`} className="files-editor-loader" />
           : selected?.initialLoadFailed ? <div className="files-editor-empty">Unable to read this file. Use Retry open above.</div>
           : selected && selected.kind === 'pdf' && selected.assetUrl ? <iframe className="files-asset-preview files-pdf-preview" src={selected.assetUrl} title={`PDF preview: ${selected.path}`} />
-          : selected && selected.kind === 'image' && selected.assetUrl ? <div className="files-asset-preview"><img src={selected.assetUrl} alt={selected.path} /></div>
+          : selected && selected.kind === 'image' && selected.assetUrl ? <div className={`files-asset-preview files-image-preview${imageActualSize ? ' actual-size' : ''}`}>
+            <img src={selected.assetUrl} alt={selected.path} onLoad={(event) => {
+              const { naturalWidth: width, naturalHeight: height } = event.currentTarget
+              const key = selectedKey
+              if (key && width && height) setImageSizes((sizes) => sizes[key]?.width === width && sizes[key]?.height === height ? sizes : { ...sizes, [key]: { width, height } })
+            }} />
+          </div>
           : selected && selected.kind === 'video' && selected.assetUrl ? <div className="files-asset-preview"><video src={selected.assetUrl} controls /></div>
           : selected?.binary ? <div className="files-editor-empty">Binary files cannot be edited.</div>
-          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
+          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} showViewTabs={false} wordWrap={wordWrap} minimap={false} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
-          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
+          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: false }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: wordWrap ? 'on' : 'off' }} /></div>
           : <DelayedLoader label={`Opening ${basename(selectedPath)}`} className="files-editor-loader" />}
       </div>}
     </div>

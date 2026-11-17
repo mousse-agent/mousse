@@ -619,12 +619,12 @@ html.platform-darwin .titlebar-left {
 }
 
 .main-view-tab:hover {
-  background: rgba(var(--accent-rgb), 0.1);
+  background: var(--ui-hover, rgba(127, 127, 127, 0.1));
   color: var(--text-primary);
 }
 
 .main-view-tab.active {
-  background: rgba(var(--accent-rgb), 0.18);
+  background: var(--main-tab-selected, rgba(127, 127, 127, 0.16));
   color: var(--text-primary);
 }
 
@@ -635,7 +635,6 @@ html.platform-darwin .titlebar-left {
 
 .main-view-tab.active .main-view-tab-icon {
   opacity: 1;
-  color: var(--accent);
 }
 
 /* The empty app panel: one muted line and the list, in a compact column centred in the pane, a little
