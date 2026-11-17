@@ -10,6 +10,18 @@ import { MAX_INBOX_REDELIVERIES, recoverWakesOnBoot, restoreUndeliveredRows } fr
 import { waitFor } from './phase6Fixture'
 import { useSubagentWorld } from './subagentWorld'
 
+/** How a subagent result reaches the parent's model. */
+const RESULT_NOTICE = '<mousse_notice kind="subagent_result"'
+
+/** The result notice for task `delegationId`: one block, with the subagent's result quoted and its workspace said. */
+function expectResultNotice(text: string, delegationId: string): void {
+  expect(text.startsWith(`${RESULT_NOTICE} ref="${delegationId}">\n`)).toBe(true)
+  expect(text.endsWith('\n</mousse_notice>')).toBe(true)
+  expect(text).toContain('Subagent "API reviewer" (thread ')
+  expect(text).toContain('<quoted from="subagent result">\nAll modules look fine.\n</quoted>')
+  expect(text).toContain('It worked in your own folder, shared with you; Mousse merged nothing.')
+}
+
 describe('delivering a subagent result to its parent (issue #142)', () => {
   const world = useSubagentWorld()
 
@@ -27,12 +39,12 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
     const { d, parent, out, reconciler, adapter, row } = await finished()
     const wakeRunId = reconciler.runOnce().wakes.wakes[0]
     await waitFor(() => d.engine.getRun(wakeRunId)?.status === 'completed', 'the wake run')
-    const wake = adapter.turns.find((turn) => turn.threadId === parent.id && turn.prompt.startsWith('Subagent'))!
-    expect(wake.prompt).toBe(`Subagent "API reviewer" (thread ${out.first.childThreadId}) finished task ${out.first.delegationId}.\nAll modules look fine.\nFull result above.\nIt worked in your own folder, shared with you; Mousse merged nothing.`)
+    const wake = adapter.turns.find((turn) => turn.threadId === parent.id && turn.prompt.startsWith(RESULT_NOTICE))!
+    expectResultNotice(wake.prompt, out.first.delegationId)
     expect(d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
     expect(d.engine.delegations.get(out.first.delegationId)!.status).toBe('acknowledged')
     // The wake message tells the app what it reports, so the app never parses the text.
-    const message = d.orch.getMessages(parent.id).find((entry) => entry.role === 'user' && entry.content.startsWith('Subagent'))!
+    const message = d.orch.getMessages(parent.id).find((entry) => entry.role === 'user' && entry.content.startsWith(RESULT_NOTICE))!
     expect(message.subagentNotice).toEqual([{ delegationId: out.first.delegationId, childThreadId: out.first.childThreadId, title: 'API reviewer', runStatus: 'completed', fullyShown: true }])
   })
 
@@ -77,7 +89,8 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       // The run is terminal in this fixture, so make the engine report it live for this call.
       vi.spyOn(w.d.engine, 'getRun').mockReturnValue({ ...run, status: 'running' })
       ;(w.d.orch as any).executeTurnSteerEffect(effect)
-      expect(steered).toHaveBeenCalledWith(w.parent.id, `Subagent "API reviewer" (thread ${w.out.first.childThreadId}) finished task ${w.out.first.delegationId}.\nAll modules look fine.\nFull result above.\nIt worked in your own folder, shared with you; Mousse merged nothing.`, [expect.objectContaining({ title: 'API reviewer', fullyShown: true })], { inboxIds: [w.row.inboxId], effectId: effect.effectId }, undefined, undefined, undefined, undefined, { durable: true })
+      expectResultNotice(steered.mock.calls[0]![1] as string, w.out.first.delegationId)
+      expect(steered).toHaveBeenCalledWith(w.parent.id, expect.stringContaining(RESULT_NOTICE), [expect.objectContaining({ title: 'API reviewer', fullyShown: true })], { inboxIds: [w.row.inboxId], effectId: effect.effectId }, undefined, undefined, undefined, undefined, { durable: true })
       // What the notice showed is recorded when it is built.
       expect(w.d.engine.inbox.get(w.row.inboxId)!.payload).toMatchObject({ noticeShown: true })
     })
@@ -101,12 +114,12 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       // The steered run is over, so the steer cannot be taken by a live turn.
       expect(w.d.engine.getRun(run.runId)!.status).toBe('completed')
       ;(w.d.orch as any).executeTurnSteerEffect(effect)
-      await waitFor(() => w.adapter.turns.some((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith('Subagent')), 'the queued steer to run')
+      await waitFor(() => w.adapter.turns.some((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith(RESULT_NOTICE)), 'the queued steer to run')
       const lateRun = w.d.engine.listRuns(w.parent.id).find((entry) => entry.source === 'steer-late')!
       await w.settled(lateRun.runId)
       await waitFor(() => w.d.engine.inbox.get(w.row.inboxId)!.status === 'acknowledged', 'the row to be read')
       expect(w.d.engine.delegations.get(w.out.first.delegationId)!.status).toBe('acknowledged')
-      const message = w.d.orch.getMessages(w.parent.id).find((entry) => entry.role === 'user' && entry.content.startsWith('Subagent'))!
+      const message = w.d.orch.getMessages(w.parent.id).find((entry) => entry.role === 'user' && entry.content.startsWith(RESULT_NOTICE))!
       expect(message.subagentNotice?.[0]).toMatchObject({ delegationId: w.out.first.delegationId, fullyShown: true })
     })
 
@@ -132,7 +145,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       w.d.engine.inbox.markDelivered([w.row.inboxId], wake.effectId)
       ;(w.d.orch as any).scheduleQueueDrain(w.d.orch.getOrCreateSession(w.parent.id))
       await waitFor(() => w.d.orch.listQueue(w.parent.id).length === 0, 'the queue to be drained')
-      expect(w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith('Subagent'))).toEqual([])
+      expect(w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith(RESULT_NOTICE))).toEqual([])
       expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: wake.effectId })
       expect(item.id).toBeTruthy()
     })
@@ -228,7 +241,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       return { ...w, run, steer, release: async () => { release(); await turn.catch(() => undefined) } }
     }
     const noticeTurns = (w: { adapter: { turns: Array<{ threadId: string; prompt: string }> }; parent: { id: string } }) =>
-      w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith('Subagent'))
+      w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith(RESULT_NOTICE))
 
     it('the run ends first: the result is not lost, and is delivered once when the steer runs', async () => {
       const w = await heldTurn('completed')
@@ -301,7 +314,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       return { ...w, run, steer, finish: async () => { release(); await turn.catch(() => undefined); await w.settled(run.runId) } }
     }
     const noticeTurns = (w: { adapter: { turns: Array<{ threadId: string; prompt: string }> }; parent: { id: string } }) =>
-      w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith('Subagent'))
+      w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith(RESULT_NOTICE))
 
     it('a crash after the run ended but before its follow-up was queued: the rows are delivered again after restart, once', async () => {
       const w = await held()
@@ -332,7 +345,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       expect(w.d.orch.steerThread(w.parent.id, 'last plain')).toBe(true)
       await w.finish()
       await waitFor(() => w.adapter.turns.filter((turn) => turn.threadId === w.parent.id).length >= 5, 'the three follow-ups')
-      expect(w.adapter.turns.filter((turn) => turn.threadId === w.parent.id).slice(2).map((turn) => (turn.prompt.startsWith('Subagent') ? 'result' : turn.prompt))).toEqual(['first plain', 'result', 'last plain'])
+      expect(w.adapter.turns.filter((turn) => turn.threadId === w.parent.id).slice(2).map((turn) => (turn.prompt.startsWith(RESULT_NOTICE) ? 'result' : turn.prompt))).toEqual(['first plain', 'result', 'last plain'])
     })
 
     it('the follow-up turn cannot be queued: the rows go back to pending and rule 4 delivers them once', async () => {
@@ -387,7 +400,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       vi.spyOn(w.d.orch as any, 'enqueueTurnStart').mockImplementation(() => { throw new Error('outbox unavailable') })
       session.turnAdmitted = false
       ;(w.d.orch as any).scheduleQueueDrain(session)
-      await waitFor(() => w.d.orch.listQueue(w.parent.id).length === 0 && w.adapter.turns.some((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith('Subagent')), 'the direct turn')
+      await waitFor(() => w.d.orch.listQueue(w.parent.id).length === 0 && w.adapter.turns.some((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith(RESULT_NOTICE)), 'the direct turn')
       return w
     }
 

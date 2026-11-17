@@ -4,6 +4,7 @@ import { BOT_CHAT_DIGEST, BOT_CHAT_PACK_BUDGET, estimateTokens } from '../../../
 import type { BotJournalRow } from './BotMemoryStore'
 import { guardPackText, MEMORY_SECRET_MARKER } from './guard'
 import { cut, dayLabel } from './render'
+import { isMousseContext } from '../../../shared/mousseContext'
 
 /**
  * The chat summary (docs/plans/bot-context.md §5.1, §14): what the chat said before the verbatim window. Up to three
@@ -101,7 +102,7 @@ export function withinBudget(lines: readonly string[], budget: number): string[]
 function summaryLine(row: BotJournalRow, zone: string | undefined): string | undefined {
   if (row.redactedAt) return undefined
   const text = packText(row)
-  if (!text.trim() || (row.kind === 'owner_msg' && text.startsWith('[Mousse '))) return undefined
+  if (!text.trim() || (row.kind === 'owner_msg' && isMousseContext(text))) return undefined
   const body = row.kind === 'owner_msg' ? cut(text, 300) : row.kind === 'run_report' ? cut(firstLine(text), 300) : cut(firstSentence(text), 300)
   return `- ${dayLabel(row.at, zone)} · ${speaker(row)}: ${body}`
 }

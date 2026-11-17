@@ -379,6 +379,7 @@ describe('a note reaches running work while it works', () => {
     const steer = work.prepared.steer!
     expect(steer.peek()).toBe(noteSteerText(['Only ones under £200.']))
     const taken = steer.take()!
+    expect(taken.text.startsWith('<mousse_message from="owner" reply="required">\n- Only ones under £200.\n</mousse_message>\n\n')).toBe(true)
     expect(taken.text).toContain('The owner added this to your job')
     expect(taken.text).toContain('lead with what changed')
     // Taken is not read: nothing else offers it meanwhile.

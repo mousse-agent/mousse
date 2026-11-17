@@ -88,7 +88,10 @@ describe('the ledger in the bot engine', () => {
     expect(input).toContain('mousse://thread/t1')
     expect(input).toContain('Who asked: your owner.')
     expect(input).toContain('Fix the login page in project Web')
-    expect(input).toContain('Fixed the login redirect.')
+    // One Mousse block about this thread that may end with no reply; the thread's words are quoted inside it.
+    expect(input.startsWith('<mousse_notice kind="job_update" reply="if-needed" ref="t1">\n')).toBe(true)
+    expect(input.endsWith('\n</mousse_notice>')).toBe(true)
+    expect(input).toContain('<quoted from="its answer">\nFixed the login redirect.')
     // The answer is held to the report cap, with where to read the rest.
     expect(input).toMatch(new RegExp(`cut at ${BOT_REPORT_MAX_CHARS.toLocaleString('en-US')} characters: read the rest with thread_read`))
     expect(input.length).toBeLessThan(BOT_REPORT_MAX_CHARS + 1_500)

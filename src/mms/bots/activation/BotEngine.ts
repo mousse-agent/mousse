@@ -96,6 +96,7 @@ import { nudgeSlot } from './questionFollowUps'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
 import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
+import { message as mousseMessage, notice as mousseNotice } from '../../../shared/mousseContext'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, SILENT_REPLY, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { BOT_THREADS_READ_ONLY_TURN_NOTE, botAllowedOf, namedPowerOf, type BotAllowed, type BotNamedPower } from '../instructions'
@@ -6376,7 +6377,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (ended && !stopped && title && main?.n === dispatch.mainN && !main.controller.signal.aborted) {
       const state = this.subagentEnds.get(key)!.state
       const notices = this.subagentNotices.get(row.id) ?? new Map<string, string>()
-      notices.set(dispatch.threadId, `[Mousse] Your subagent "${title}" ${state === 'done' ? 'finished' : state === 'failed' ? 'ended without a result' : 'was stopped'}. Read what it returned with subagent_result.`)
+      notices.set(dispatch.threadId, mousseNotice({ kind: 'bot_subagent' }, [`Your subagent "${title}" ${state === 'done' ? 'finished' : state === 'failed' ? 'ended without a result' : 'was stopped'}. Read what it returned with subagent_result.`]))
       this.subagentNotices.set(row.id, notices)
     }
     this.wakeSubagentWaiters(row.id)
@@ -10225,7 +10226,7 @@ export function unattendedChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempot
  * conversation, answered in the one reply the turn is writing, never as a separate request.
  */
 export function chatSteerText(messages: readonly string[]): string {
-  return `[Mousse] The owner wrote again while you were answering:\n\n${messages.join('\n\n')}\n\nRead it together with their earlier message and answer both in the one reply you are writing.`
+  return `${mousseMessage({ from: 'owner', reply: 'required' }, messages.join('\n\n'))}\n\nThe owner wrote this while you were answering. Read it together with their earlier message and answer both in the one reply you are writing.`
 }
 
 /**
@@ -10233,7 +10234,7 @@ export function chatSteerText(messages: readonly string[]): string {
  * never as a new task, and with what its report must lead with.
  */
 export function noteSteerText(notes: readonly string[]): string {
-  return `[Mousse] The owner added this to your job while you work:\n${notes.map((note) => `- ${note}`).join('\n')}\n\nTake it into account from here on. If it changes what you found so far, update it. When you report, lead with what changed because of it, in plain words.`
+  return `${mousseMessage({ from: 'owner', reply: 'required' }, notes.map((note) => `- ${note}`).join('\n'))}\n\nThe owner added this to your job while you work. Take it into account from here on. If it changes what you found so far, update it. When you report, lead with what changed because of it, in plain words.`
 }
 
 /** The one line work that waited too long to go on ends with. */

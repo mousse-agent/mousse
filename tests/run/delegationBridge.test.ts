@@ -134,7 +134,7 @@ describe('delegation bridge (SPEC §14)', () => {
         state.delegationId = started.delegationId
         return 'Delegated the count.'
       }
-      if (input.prompt.startsWith('Subagent')) {
+      if (input.prompt.startsWith('<mousse_notice kind="subagent_result"')) {
         state.status = await delegation!.taskStatus({ delegationId: state.delegationId! })
         return 'The child found three modules.'
       }

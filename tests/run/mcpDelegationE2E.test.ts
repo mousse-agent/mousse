@@ -130,7 +130,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
         seen.unknown = (await raw.json() as { result?: { content: Array<{ text: string }>; isError?: boolean } }).result
         return 'Delegated the survey.'
       }
-      if (input.prompt.startsWith('Subagent')) {
+      if (input.prompt.startsWith('<mousse_notice kind="subagent_result"')) {
         seen.wakeStatus = (await callTool(mcp, 'task_status', { delegationId: seen.started.delegationId })).value
         return 'The survey is in.'
       }

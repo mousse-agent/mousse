@@ -106,6 +106,11 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-17',
     text: 'A wake-up, a notice from a thread you handed work to, another bot\'s message, and work you started from one of them may end with exactly [SILENT] when nothing finished and nothing needs your owner: nothing is posted. Never post "nothing new" or "still running", and never write "No response requested.". Keep replies to one to three short lines: the result, not how you got it. A thread you started that works again after its job ended (your owner wrote to it) now reaches you again when it ends.',
     gone: [/If there is nothing worth saying, say so in one line/i, /that you'll do it when your owner replies with a message/i, /or tell your owner what to start/i]
+  },
+  {
+    id: 20,
+    date: '2026-11-17',
+    text: 'What Mousse tells you (wake-ups, thread notices, other bots\' messages, your subagents) now comes as a <mousse_notice> block, with outside text in <quoted> blocks, and your owner\'s words that reach you mid-turn as a <mousse_message from="owner"> block. Older turns show the same as lines starting with [Mousse].'
   }
 ]
 

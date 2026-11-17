@@ -212,9 +212,9 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       const w = world(async (input, delegation: DelegationToolHost | undefined) => {
         if (input.prompt.includes('Review Coordinator')) { w.out.reader = await w.start(delegation!, 'Reader', {}, 'start:Reader'); return 'Coordinator started the Reader.' }
         if (input.prompt.includes('Review Reader')) return 'Reader result.'
-        if (input.prompt.startsWith('Subagent "Reader"')) {
+        if (input.prompt.startsWith('<mousse_notice kind="subagent_result"') && input.prompt.includes('Subagent "Reader"')) {
           // What `integrate_delegation` queued before Mousse stopped merging results.
-          const delegationId = /finished task (delegation:[0-9a-f-]+)/.exec(input.prompt)![1]
+          const delegationId = /kind="subagent_result" ref="(delegation:[0-9a-f-]+)"/.exec(input.prompt)![1]
           const queued = await w.d.engine.dispatch({ kind: 'send', threadId: input.threadId, clientRequestId: 'integration:legacy', source: 'integration' })
           if (queued.status !== 'accepted') throw new Error('not queued')
           integration = queued.runId
