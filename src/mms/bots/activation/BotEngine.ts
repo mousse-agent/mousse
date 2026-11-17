@@ -1518,12 +1518,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * Cancels the oldest waiting activations of a lane beyond the queue's size (inside a transaction); how many. In the run
-   * lane, the size counts work that waits to go on too, which is dropped the same way when it is the oldest. Running work
+   * lane, the size counts work that waits to go on too, except work waiting on a card. Running work
    * is never dropped, nor counted.
    */
   private dropOverQueue(botId: string, lane: BotLane = 'run'): number {
     const queued = this.store.laneActivations(botId, lane, ['queued'])
-    const waiting = lane === 'run' ? this.store.laneActivations(botId, 'run', ['blocked']).filter(workWaits) : []
+    const waiting = lane === 'run' ? this.store.laneActivations(botId, 'run', ['blocked']).filter(row => workWaits(row) && workWaitRule(row) !== WORK_WAIT_RULES.approval) : []
     const all = [...queued, ...waiting].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
     const over = all.slice(0, Math.max(0, all.length - MAX_QUEUED_ACTIVATIONS))
     for (const activation of over) {
