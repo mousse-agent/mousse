@@ -759,6 +759,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly reminderRetryAt = new Map<string, number>()
   /** The same for a question's follow-up (a nudge or a default) that failed. */
   private readonly questionRetryAt = new Map<string, number>()
+  private followUpNudgeBudget: { at: number; times: Map<string, number[]> } | undefined
   /** When each waiting wake on a pull request last read it (`PR_WAKE_READ_MS`). */
   private readonly wakeReadAt = new Map<string, number>()
   /** The bots' background commands (`watch_start`), each a wake on a `watcher` event; they end with this process. */
@@ -9089,6 +9090,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Never synchronous: the pass is held below before any of it runs, so its end always lets go of it.
       await Promise.resolve()
       try {
+        this.followUpNudgeBudget = { at: now.getTime(), times: new Map() }
         this.actions.expireDue()
         // Reminders cancelled, forgotten or purged since they failed are no longer tried.
         for (const id of this.reminderRetryAt.keys()) if (this.store.reminder(id)?.status !== 'waiting') this.reminderRetryAt.delete(id)
@@ -9123,6 +9125,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         this.tellings.release(now.getTime())
       } finally {
+        this.followUpNudgeBudget = undefined
         if (this.delivering === pass) this.delivering = undefined
         this.armDue()
       }
@@ -9233,11 +9236,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** Questions and held actions share the same bot-wide spacing and daily budget. */
   private nudgeTimes(botId: string, at: number): number[] {
-    const since = new Date(at - 24 * 60 * 60_000).toISOString()
+    const cached = this.followUpNudgeBudget?.times.get(botId)
+    if (cached) return cached
+    const since = new Date((this.followUpNudgeBudget?.at ?? at) - 24 * 60 * 60_000).toISOString()
     const actions = botAsksFirst(this.host.settings?.get()) ? this.store.all(`SELECT m.at FROM bot_messages m JOIN bot_actions a
       ON m.id = 'bm_' || a.id || '_n1' OR m.id = 'bm_' || a.id || '_n2'
       WHERE m.bot_id = ? AND m.at > ?`, botId, since) : []
-    return [...this.store.nudgeTimes(botId, since).map(time => Date.parse(time)), ...actions.map(row => Date.parse(String(row.at)))]
+    const times = [...this.store.nudgeTimes(botId, since).map(time => Date.parse(time)), ...actions.map(row => Date.parse(String(row.at)))]
+    this.followUpNudgeBudget?.times.set(botId, times)
+    return times
   }
 
   /** Durable nudge rows carry the count; telling receipts carry the clock, never executable arguments. */
@@ -9247,6 +9254,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       JOIN bot_registry b ON b.bot_id = a.bot_id JOIN bot_messages m ON m.id = a.message_id
       WHERE a.status = 'open' AND a.args_digest <> '[forgotten]' AND b.deleted_at IS NULL
       AND (? IS NULL OR a.bot_id = ?)`, botId ?? null, botId ?? null)
+    const budgets = this.followUpNudgeBudget?.times ?? new Map<string, number[]>()
     return rows.flatMap(row => {
       const id = String(row.id), bot = String(row.bot_id), messageId = String(row.message_id)
       if (this.store.messageForgotten(bot, messageId) || this.store.message(`bm_${id}_n2`)) return []
@@ -9257,7 +9265,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const toldAt = legacy?.value ?? source.toldAt
       if (typeof toldAt !== 'string') return []
       const due = Math.max(now, Date.parse(toldAt) + (first ? NUDGE_AGAIN_MS : DEFAULT_NUDGE_AFTER_MINUTES * 60_000))
-      const at = this.followUpTime(bot, nudgeSlot(due, this.nudgeTimes(bot, due)))
+      let history = budgets.get(bot)
+      if (!history) { history = this.nudgeTimes(bot, now); budgets.set(bot, history) }
+      const at = this.followUpTime(bot, nudgeSlot(due, history))
       if (!Number.isFinite(at) || at >= Date.parse(String(row.expires_at))) return []
       return [{ id, actionId: id, botId: bot, activationId: String(row.activation_id), messageId, count: first ? 2 : 1, at }]
     })
@@ -9273,6 +9283,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.chat.post({ id: `bm_${live.actionId}_n${live.count}`, botId: live.botId, author: 'bot', kind: 'notice',
         text: `Wants to ${title[0]?.toLowerCase() ?? ''}${title.slice(1)}`, external: true, replyTo: live.messageId, activationId: live.activationId, lane: 'run' })
     })
+    this.followUpNudgeBudget?.times.get(live.botId)?.push(now.getTime())
     this.changed({ botId: live.botId })
   }
 
@@ -9335,6 +9346,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return true
     })
     if (!posted) return
+    this.followUpNudgeBudget?.times.get(question.botId)?.push(at)
     // The rows before it hand their answers to it: they show them again in every window, without the buttons.
     for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot' && row.id !== `bm_${question.id}_n${count}`) this.chat.republish(row.id)
     this.changed({ botId: question.botId })
