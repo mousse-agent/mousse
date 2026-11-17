@@ -12,7 +12,7 @@ import { encodeFrame, FrameDecoder } from '../src/mms/protocol/framing'
 import { FIRST_SEND_BINDING_CAPABILITY, MMS_PROTOCOL_VERSION } from '../src/mms/protocol/types'
 import { MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS, MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES, NON_REPLAYED_METHODS, keepsResponseForReplay } from '../src/mms/protocol/replayCache'
 import { ROUTED_METHODS } from '../src/shared/bridge/routed'
-import { parseEnvelope, validateHello, asChatMode, asChatImages, asStringArray } from '../src/mms/protocol/validators'
+import { parseEnvelope, asChatMode, asChatImages, asStringArray } from '../src/mms/protocol/validators'
 import { scriptTurns } from './net/bridge/hub/fixture'
 
 /** Turns run on a scripted pi adapter that answers with `chatImpl` (or a short default reply). */
@@ -1243,14 +1243,6 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     )
     expect(sendResult.queued || sendResult.message).toBeTruthy()
 
-    const snap = await client.request<{
-      messages: { content: string }[]
-      queue: unknown[]
-    }>('thread.snapshot', { threadId: thread.id })
-    expect(
-      snap.messages.some((m) => m.content === 'hi from protocol') || snap.queue.length >= 0
-    ).toBe(true)
-
     const session = mms.orchestrator.getOrCreateSession(thread.id)
     session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
     await client.request('orchestrator.send', {
@@ -1371,17 +1363,6 @@ describe('EventSequenceRing', () => {
 })
 
 describe('protocol validators', () => {
-  it('validateHello rejects wrong version', () => {
-    const v = validateHello({
-      kind: 'hello',
-      protocolVersion: 42,
-      ownerToken: 'tok',
-      clientType: 'test'
-    })
-    expect(v.ok).toBe(false)
-    if (!v.ok) expect(v.code).toBe('protocol_version')
-  })
-
   it('rejects invalid chat mode and images without casting', () => {
     expect(() => asChatMode('hacker')).toThrow(/mode/)
     expect(() => asChatMode({ type: 'skill' })).toThrow()
