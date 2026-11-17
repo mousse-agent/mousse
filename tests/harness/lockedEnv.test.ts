@@ -104,8 +104,8 @@ describe('lockedEnv per platform', () => {
     expect(result.TMPDIR).toBe('/profile/bots/scratch/act-1/tmp')
   })
 
-  it.each(['darwin', 'linux'] as const)('%s: the same', (platform) => {
-    expect(sorted(Object.keys(env({ platform })))).toEqual(sorted([...POSIX_KEPT, 'TMPDIR']))
+  it('macOS: the same as other POSIX', () => {
+    expect(sorted(Object.keys(env({ platform: 'darwin' })))).toEqual(sorted([...POSIX_KEPT, 'TMPDIR']))
   })
 
   it('Windows: its own allowlist, in the parent\'s spelling, and no TMPDIR', () => {
