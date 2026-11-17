@@ -452,14 +452,17 @@ export class ToolRegistry {
     const { credential } = request
     const site: CallSite = { threadId, active, turn, credential, boundToken, request }
     // A catalogue turn's call of a catalogued tool (docs/plans/bot-context.md §15): the tool it names runs exactly as if
-    // it were called directly, through every check below.
+    // it were called directly, through every check below. That is a Mousse tool, or one of the owner's MCP tools the
+    // turn was offered, which goes through the same dispatcher (grant, masking, asks first) as its direct call.
     if (name === BOT_USE_TOOL && turn.bot?.catalogue === 'use_tool') {
       const inner = useToolCall(args)
       if ('refused' in inner) return { text: inner.refused, isError: true }
+      const innerRequest = inner.clientRequestId ? { ...request, toolCallId: `mcp:${inner.clientRequestId}` } : request
       const named = this.tools.get(inner.name)
+      if (!named && this.options.userMcp && turn.bot.mcpTools?.some((offered) => offered.providerName === inner.name))
+        return this.callUserMcp(inner.name, inner.args, { ...site, request: innerRequest })
       if (!named || named.hidden || inner.name === BOT_USE_TOOL || !botMayBeOffered(inner.name))
         return { text: `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`, isError: true }
-      const innerRequest = inner.clientRequestId ? { ...request, toolCallId: `mcp:${inner.clientRequestId}` } : request
       return this.callAdmitted(inner.name, named, inner.args, caller, { ...site, request: innerRequest })
     }
     if (!tool) return this.callUserMcp(name, args, site)
