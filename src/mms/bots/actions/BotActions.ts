@@ -355,7 +355,7 @@ export class BotActions {
     if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
     if (unanswered.length >= MAX_SAME_WAKES)
-      return this.refuse(row, unanswered[0], 'Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
+      return this.refuse(row, unanswered[0], row.trigger.kind === 'schedule' ? 'Three requests for this tool are waiting or were not sent. Say what you need in your report.' : 'Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
     const refused = unanswered.find(action => action.args_digest === digest)
     if (refused)
       return this.refuse(row, refused, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')
