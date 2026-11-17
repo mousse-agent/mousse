@@ -743,7 +743,9 @@ export class NetService {
           remote: bridgeRemoteMethodNames(),
           // The version of each bot method a device may call here, so it sends only keys this computer knows (a choice
           // of reach for a bot it makes). Absent: an older computer.
-          bots: remoteBotVersions()
+          bots: remoteBotVersions(),
+          // `bridge.access.mine` is here, so a refusal of it is a refusal, not an older build.
+          access: 1
         })
       })
       // What this computer lets the caller do here, for the caller's Settings, Devices. No family, so a blocked caller
@@ -2848,10 +2850,21 @@ export class NetService {
       if (error instanceof NetError && error.code === 'forbidden') {
         const reason = forbiddenReason(error.details)
         if (reason === 'not_connected') return { state: 'not_connected' }
-        // A method it does not have is refused with no reason: a build from before the call.
-        if (reason === undefined) return { state: 'unknown', reason: 'older' }
+        // A method it does not have is refused with no reason, as is a call this computer's grant does not cover there:
+        // `net.info` tells the two apart. Any other refusal is one.
+        if (reason !== undefined || (await this.knowsAccessMine(session))) return { state: 'refused' }
+        return { state: 'unknown', reason: 'older' }
       }
       return { state: 'unknown', reason: 'offline' }
+    }
+  }
+  /** Whether the device on `session` has `bridge.access.mine` (its `net.info` says so); false when it can't be asked. */
+  private async knowsAccessMine(session: SyncSession): Promise<boolean> {
+    try {
+      const info = await session.rpc('net.info', {}, { id: newId('rpc'), deadlineMs: 10_000 })
+      return (info as { access?: unknown } | undefined)?.access === 1
+    } catch {
+      return false
     }
   }
   /** The first editor tunnel a device ever opens on this computer (a desktop notification for the owner). */

@@ -186,6 +186,8 @@ export interface BridgeAccessMine {
 export type BridgeAccessThere =
   | { state: 'known'; access: BridgeAccessMine }
   | { state: 'not_connected' }
+  /** It answered, and refused this computer the question: its grant there covers nothing. */
+  | { state: 'refused' }
   | { state: 'unknown'; reason: 'offline' | 'older' }
 
 /** What a device's agents may change on this computer (`net_node_policy.agent_reach`). */

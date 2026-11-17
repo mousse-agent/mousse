@@ -4,7 +4,7 @@
  * checked against what the member's real calls then get: the answer comes from the same checks.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { newId } from '../../../../src/shared/net'
+import { NetError, newId } from '../../../../src/shared/net'
 import { accessPreset } from '../../../../src/shared/net/accessPresets'
 import type { BridgeAccessThere } from '../../../../src/shared/net/local'
 import { cleanupAll, linked } from './routerFixture'
@@ -25,6 +25,9 @@ const access = async () => {
 /** A real call from the member to the keeper. */
 const call = (method: string, params: unknown) =>
   t.caller.net.session(t.node).rpc(method, params, { id: newId('rpc'), deadlineMs: 15_000, idem: newId('rpc') })
+/** The keeper's registered remote methods, to stand in for another build. */
+const registry = () =>
+  (t.owner.net.runtime().rpc as unknown as { registry: Map<string, { handle: (...args: unknown[]) => Promise<unknown> }> }).registry
 const refusedWith = (reason: string) => ({ code: 'forbidden', details: { reason } })
 
 describe('what this computer may do there', () => {
@@ -86,9 +89,24 @@ describe('what this computer may do there', () => {
     expect(await access()).toMatchObject({ work: true })
   }, 60_000)
 
+  it('a refusal with no reason from a computer that has the call is a refusal, not an older build', async () => {
+    // As a grant there that does not cover the call: refused with no reason, as the dispatcher refuses a missing capability.
+    const entry = registry().get('bridge.access.mine')!
+    const handle = entry.handle
+    entry.handle = async () => { throw new NetError('forbidden') }
+    try {
+      expect(await there()).toEqual({ state: 'refused' })
+    } finally {
+      entry.handle = handle
+    }
+  }, 60_000)
+
   it('a computer on a build from before the call is unknown', async () => {
-    // As a build from before the call: the keeper does not have it.
-    ;(t.owner.net.runtime().rpc as unknown as { registry: Map<string, unknown> }).registry.delete('bridge.access.mine')
+    // As a build from before the call: the keeper does not have it, and its net.info does not name it.
+    const info = registry().get('net.info')!
+    const handle = info.handle
+    info.handle = async (...args) => { const { access: _access, ...older } = (await handle(...args)) as Record<string, unknown>; return older }
+    registry().delete('bridge.access.mine')
     expect(await there()).toEqual({ state: 'unknown', reason: 'older' })
   }, 60_000)
 })

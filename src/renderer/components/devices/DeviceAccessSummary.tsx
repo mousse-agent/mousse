@@ -28,6 +28,7 @@ function thereLine(device: Device, answer: BridgeAccessThere | undefined, now: n
   if (!answer) return 'Checking…'
   if (answer.state === 'known') return knownLine(answer.access, device.name)
   if (answer.state === 'not_connected') return <span title={`${device.name} hasn't connected this computer.`}>Nothing · not connected there</span>
+  if (answer.state === 'refused') return <span title={`${device.name} refused this computer the question: its grant there covers nothing.`}>Nothing</span>
   const last = lastAnswers.get(device.node)
   const why = answer.reason === 'older' ? `${device.name} runs an older version that can't tell.` : `${device.name} can't be reached now.`
   const before = last ? `\nLast answer: ${accessWords(last.access).line}` : ''

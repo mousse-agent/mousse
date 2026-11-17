@@ -132,6 +132,18 @@ describe('a device’s detail', () => {
     expect(detail('This computer may do there')).toBe('Nothing · not connected there')
   })
 
+  it('a grant that lacks chat claims no work here, and agents that may change nothing are named', async () => {
+    nodes = nodes.map((node) => node.node === 'node_b' ? { ...node, caps: ['read', 'settings'] } : node)
+    nodes.push(row('node_r', 'Reader', { policy: { ...work, agentReach: 'none' } }))
+    answers.node_r = { state: 'refused' }
+    await mount()
+    await open('Mini')
+    expect(detail('May do here')).toBe('Reads threads · bots')
+    await open('Reader')
+    expect(detail('May do here')).toBe('Works on threads · bots · agents read only')
+    expect(detail('This computer may do there')).toBe('Nothing')
+  })
+
   it('a computer on an older build is unknown', async () => {
     await mount()
     await open('Old Mac')

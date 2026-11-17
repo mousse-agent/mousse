@@ -1,5 +1,5 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { BridgeAccessMine, BridgeAccessThere, BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { AgentReach, BridgeAccessMine, BridgeAccessThere, BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
@@ -306,7 +306,13 @@ export function keeperAway(keeper: Device, devices: Device[], now: number): stri
 export const passEndLabel = (at: number): string => new Date(at).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
 
 /** What one device may do on one computer, in either direction. */
-export type DeviceAccess = Pick<BridgeAccessMine, 'threads' | 'work' | 'terminal' | 'editor' | 'bots'> & { maxPermissionMode?: PermissionMode }
+export type DeviceAccess = Pick<BridgeAccessMine, 'threads' | 'work' | 'terminal' | 'editor' | 'bots'> & {
+  maxPermissionMode?: PermissionMode
+  /** Which threads its agents may change; a person's own calls are not limited by it. */
+  agentReach?: AgentReach
+}
+/** Which threads a device's agents may change, as Limits names it. */
+const AGENT_REACH_WORDS: Record<AgentReach, string> = { none: 'none', launched: 'only threads they started', all: 'all threads' }
 
 /**
  * What this computer lets `device` do here, from what it knows: connected here, the block, the grant, this computer's
@@ -318,19 +324,22 @@ export function accessHere(device: Device, switches: { workOnThreads: boolean; s
   if (!policy) return undefined
   if (!connectedHere(device)) return 'not_connected'
   if (policy.blocked) return 'blocked'
-  const bots = policy.bots !== false && switches.shareBots
+  // Each item also needs the signed grant its calls check: reads need read, sends chat, terminals write.
+  const has = (cap: NodeCapability) => device.caps.includes(cap)
+  const bots = has('read') && policy.bots !== false && switches.shareBots
   if (!isComputer(device)) {
     const threads = device.caps.includes('read')
     return { threads, work: threads && device.caps.includes('write') && policy.work !== false, terminal: false, editor: false, bots }
   }
-  const threads = worksOnThreads(device) && switches.workOnThreads
+  const threads = worksOnThreads(device) && has('read') && switches.workOnThreads
   return {
     threads,
-    work: threads && policy.work !== false,
-    terminal: threads && policy.terminal,
+    work: threads && has('chat') && policy.work !== false,
+    terminal: threads && has('write') && policy.terminal,
     editor: threads && policy.editor,
     bots,
-    maxPermissionMode: policy.maxPermissionMode
+    maxPermissionMode: policy.maxPermissionMode,
+    ...(policy.agentReach ? { agentReach: policy.agentReach } : {})
   }
 }
 
@@ -344,10 +353,13 @@ export function accessWords(access: DeviceAccess, { phone = false }: { phone?: b
   const mode = access.work && access.maxPermissionMode ? `, up to ${describePermissionMode(access.maxPermissionMode)}` : ''
   const detail = [
     `Threads: ${access.work ? `${phone ? 'starts and sends to them' : 'works on them'}${mode}` : access.threads ? 'reads them' : 'none'}`,
+    ...(access.work && access.agentReach ? [`Agents change: ${AGENT_REACH_WORDS[access.agentReach]}`] : []),
     `Terminals: ${access.terminal ? 'on' : 'off'}`,
     `Editor connections: ${access.editor ? 'on' : 'off'}`,
     `Bots: ${access.bots ? 'on' : 'off'}`
   ].join('\n')
+  // Agents that may change no thread is the one limit a person working there would not expect.
+  if (access.work && access.agentReach === 'none') parts.push('agents read only')
   return { line: parts.length ? parts.join(' · ') : 'Nothing', detail }
 }
 
@@ -355,7 +367,7 @@ export function accessWords(access: DeviceAccess, { phone = false }: { phone?: b
 export function readAccessThere(value: unknown): BridgeAccessThere | undefined {
   const answer = value as BridgeAccessThere | undefined
   if (answer?.state === 'known' && answer.access && typeof answer.access === 'object') return answer
-  if (answer?.state === 'not_connected') return answer
+  if (answer?.state === 'not_connected' || answer?.state === 'refused') return answer
   if (answer?.state === 'unknown' && (answer.reason === 'offline' || answer.reason === 'older')) return answer
   return undefined
 }
