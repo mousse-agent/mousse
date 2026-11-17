@@ -97,6 +97,11 @@ export class ThreadSession {
   /** The messages a person sent while the stopped turn still ended, in the order sent (`stopping`). */
   sentAfterStop: string[] = []
   /**
+   * Who stopped the thread's last turn: a person (their Stop, or the Stop of the thread that launched this one) or an
+   * agent. Kept while the thread shows stopped, so its end is not announced to the person who stopped it.
+   */
+  stoppedBy?: 'person' | 'agent'
+  /**
    * Queued messages sent now (Steer) while the turn was still being set up, in the order sent. They wait at the
    * front of the queue and join the turn as soon as it runs; a turn that ends before it runs leaves them to go
    * first. Cleared with the admission.
