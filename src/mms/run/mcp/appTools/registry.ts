@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { APPROVALS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
@@ -367,9 +368,9 @@ export class ToolRegistry {
   }
 
   /**
-   * `listFor` a thread: its read-only status and the ceiling its delegations gave it, never the
-   * current turn's mode (a Plan turn's narrower ceiling is enforced at call time). `fallback` is the
-   * ceiling when the owner does not say.
+   * `listFor` a thread: its read-only status and the ceiling its delegations gave it, narrowed by a thread above it now
+   * (§1.3 "Listing": the thread's stable ceiling), never the current turn's mode (a Plan turn's narrower ceiling is
+   * enforced at call time). `fallback` is the ceiling when the owner does not say.
    */
   listForThread(threadId: string, fallback: ModeCeiling = 'default', runId?: string): MousseTool[] {
     const bot = this.botListing(threadId)
@@ -378,13 +379,26 @@ export class ToolRegistry {
     const listed = this.listFor({
       threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
-      modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
+      modeCeiling: this.callCeiling(threadId, this.options.threadCeiling?.(threadId) ?? fallback),
       ...(this.options.subagentThread?.(threadId) === true ? { subagent: true } : {}),
       ...bot,
       ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools, ...(turn.bot.catalogue ? { botCatalogue: turn.bot.catalogue } : {}) } : {})
     })
     // A bot's thread reads each tool as a bot uses it.
     return bot.botRole ? listed.map(asBotTool) : listed
+  }
+
+  /**
+   * The thread's capability revision (§1.3 "Listing"): a digest of the tools its stable listing holds. It changes only
+   * when that list does: `thread_update access`, a grant or settings change, or narrowing from above. A runtime caches
+   * its list and the server cannot tell it the list changed, so a new revision starts a new credential epoch at the
+   * next turn (the gateway's `generation`), and the runtime lists again. Undefined for a bot's thread, whose list
+   * follows its turn's grant and rotates with its policy.
+   */
+  capabilityRevision(threadId: string): string | undefined {
+    if (this.isBotThread(threadId)) return undefined
+    const names = this.listForThread(threadId).map((tool) => tool.name).sort()
+    return createHash('sha256').update(names.join(',')).digest('hex').slice(0, 12)
   }
 
   /**

@@ -192,6 +192,16 @@ export type AgentArchiveOwnResult =
   | { status: 'accepted'; changed: false }
   | { status: 'rejected'; reason: 'subagent' | 'not_started_by_person' | 'not_running' }
 
+/**
+ * What `thread_update access` did (docs/plans/tool-api.md §2.4): the subagent's access now and its capability revision
+ * (`ToolRegistry.capabilityRevision`); `stoppedRunId` is the running turn `apply: now` stopped. Refused for a thread that
+ * is not the caller's own subagent, a revision the caller did not expect, and, for `apply: now`, a subagent that waits on
+ * a person or has subagents of its own working (a Stop would end them).
+ */
+export type AgentAccessResult =
+  | { status: 'accepted'; readOnly: boolean; changed: boolean; revision?: string; stoppedRunId?: string }
+  | { status: 'rejected'; reason: 'not_parent' | 'revision_changed' | 'waiting_on_request' | 'subagents_working'; revision?: string }
+
 /** A thread's queue as a reader sees it: what is waiting, what a turn has claimed, and the revision a change must name. */
 export interface QueueSnapshot {
   /** Pending and steering items, in order; internal items are left out. */
@@ -481,6 +491,12 @@ export interface AppToolHost extends DelegationToolsHost {
    * is false when it already was so.
    */
   setThreadHidden?(threadId: string, hidden: boolean, options: { actor: AgentActor }): { hidden: boolean; changed: boolean }
+  /**
+   * Lifts the read-only narrowing of the caller's own subagent (`thread_update access {readOnly: false}`). With `apply:
+   * now` its running turn is stopped once the change is made, and the result names that run; the caller then continues
+   * the subagent on the same thread.
+   */
+  updateSubagentAccess?(threadId: string, access: { readOnly: false }, options: { actor: AgentActor; apply: 'next_turn' | 'now'; expectedRevision?: string; clientRequestId: string }): Promise<AgentAccessResult>
   /**
    * How text reaches the thread's active run now (`steerStrategy`): `native` steer, `interrupt_restart` (a note waits
    * for the run's next Mousse tool call), or neither; null when the thread's runtime is not known.
