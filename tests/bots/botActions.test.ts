@@ -379,6 +379,30 @@ it.each(['repeat', 'three', 'forgotten'] as const)('recreating a schedule or sta
   expect((await attempt(other.prepared.authority, 'second-schedule')).isError).toBe(true)
   expect(t.calls).toEqual([])
 })
+it('an edited schedule withdraws its card before edit observers see it and tells its run', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  const seen: string[] = []
+  f.scheduler.on('updated', () => seen.push(f.bots.actions.forWork(t.id)!.status))
+  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { prompt: 'Changed instructions' })
+  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(seen).not.toContain('open')
+  await flush()
+  expect(f.store.lastMainDispatch(t.id)?.prompt.text).toContain('changed')
+})
+it('Send withdraws a stale schedule card even if the edit hook was missed', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  const current = f.host.schedules!.get.bind(f.host.schedules)
+  vi.spyOn(f.host.schedules!, 'get').mockImplementation((bot, id) => { const entry = current(bot, id); return entry ? { ...entry, revision: 'missed-edit' } : undefined })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow(/changed/)
+  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(t.calls).toEqual([])
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
