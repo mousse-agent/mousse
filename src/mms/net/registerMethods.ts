@@ -74,6 +74,8 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.join': ['invite', 'name', 'passphrase', 'via'],
   'net.join.retry': ['passphrase'],
   'net.join.abandon': [],
+  'net.startOver.check': [],
+  'net.startOver': [],
   'bridge.nodes': [],
   'bridge.revoke': ['node'],
   'bridge.rename': ['node', 'name'],
@@ -433,8 +435,8 @@ export function registerEditorTunnelMethods(
     })
 }
 
-/** Methods whose errors carry why a join failed and the other computer's name, for the screen to word. */
-const JOIN_METHODS: ReadonlySet<NetLocalMethod> = new Set(['bridge.join', 'net.join.retry'])
+/** Methods whose errors carry a reason (and for a join, the other computer's name) for the screen to word. */
+const DETAILED_METHODS: ReadonlySet<NetLocalMethod> = new Set(['bridge.join', 'net.join.retry', 'net.startOver'])
 function publicError(code: keyof typeof NET_ERRORS, cause?: unknown, details?: unknown): AppError {
   const entry = NET_ERRORS[code]
   return new AppError(
@@ -480,7 +482,7 @@ export function registerNetMethods(
           return await (await forProfile(binding!.profileId)).request(method, params)
         } catch (error) {
           if (error instanceof NetError)
-            throw publicError(error.code, error, JOIN_METHODS.has(method) ? error.details : undefined)
+            throw publicError(error.code, error, DETAILED_METHODS.has(method) ? error.details : undefined)
           throw error
         }
       }

@@ -59,6 +59,8 @@ export const NET_LOCAL_METHODS = [
   'bridge.join',
   'net.join.retry',
   'net.join.abandon',
+  'net.startOver.check',
+  'net.startOver',
   'bridge.nodes',
   'bridge.revoke',
   'bridge.rename',
@@ -202,6 +204,23 @@ export interface PlusConfiguration {
   gatewayId: string
 }
 /** `net.plus.status`. Not configured (and never connected) when the Mousse ID module is absent. */
+/**
+ * Whether this computer may start over with a new identity, as `net.startOver.check` answers.
+ */
+export interface NetStartOverCheck {
+  /** It was removed, no other device holds a pass in its list, or its own pass lapsed past renewal. */
+  allowed?: 'removed' | 'alone' | 'lapsed'
+  /** It hosts a Space, is signed in to Mousse ID, or other devices still hold a pass in its list. */
+  refused?: 'space_host' | 'mousse_id' | 'live_devices'
+  /** It keeps the list; its key stays in the set-aside folder. */
+  keeper: boolean
+  /** The Spaces it hosts, when that is why it is refused. */
+  hosted?: string[]
+  /** The other devices that still hold a pass in its list. */
+  live?: string[]
+  /** The Spaces it belongs to, to join again afterwards. */
+  spaces: string[]
+}
 export interface PlusStatus {
   configured: boolean
   connected: boolean
