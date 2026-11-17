@@ -3,8 +3,6 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { LINEAGE_CLOSED, LineageList, LineageSection, type LineageOpenParts } from '../src/renderer/components/sideCard/LineageSection'
 import {
-  LINEAGE_COLLAPSED_COUNT,
-  LINEAGE_RUNNING_COUNT,
   countRunningSubagents,
   finishedGroupLabel,
   formatAgo,
@@ -136,7 +134,6 @@ describe('sliceLineage', () => {
   const rows = Array.from({ length: 8 }, (_, index) => index)
 
   it('shows the first five and counts the rest', () => {
-    expect(LINEAGE_COLLAPSED_COUNT).toBe(5)
     const { visible, hiddenCount } = sliceLineage(rows, false)
     expect(visible).toEqual([0, 1, 2, 3, 4])
     expect(hiddenCount).toBe(3)
@@ -341,7 +338,6 @@ describe('LineageList rendering', () => {
   })
 
   it('shows three running subagents with a "Show N more" row, and all of them once expanded', () => {
-    expect(LINEAGE_RUNNING_COUNT).toBe(3)
     const many = Array.from({ length: 7 }, (_, index) => subagent(`a${index}`, { createdAt: minutesAgo(index + 1) }))
     const collapsed = render(many)
     expect(collapsed).toContain('Show 4 more')
