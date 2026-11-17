@@ -152,3 +152,23 @@ it('keeps an owner MCP review readable in its sidebar summary, card and notifica
     for (const internal of ['send_email', 'mail_send_email', 'Mail__', 'private@example.test', 'Private content']) expect(`${summary.stateText}\n${banner.body}`).not.toContain(internal)
   } finally { f.close() }
 })
+
+it('notifies an older bot own-tool permission in its plain card words, without the tool id or call details', async () => {
+  const { botFixture, createBot, start, finish } = await import('./bots/botFixture')
+  const f = botFixture()
+  try {
+    const { botId } = await createBot(f, { reply: 'Ready' })
+    f.bots.narrowGrant(botId, manifest => ({ ...manifest, appTools: manifest.appTools.filter(tool => tool !== 'telling_set') }))
+    await f.bots.service.chatSend({ botId, text: 'Notify me when all done.', clientRequestId: 'notify-preference' })
+    const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { prepared, payload } = await start(f, chat.id)
+    expect(prepared.authority.check({ kind: 'app', tool: 'telling_set', args: { tellMe: 'look', quietHours: { from: '22:00', to: '07:00' } } })).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
+    await finish(f, payload, 'interrupted', { text: 'I need your OK first.', outcome: { interruptedBy: 'bot_wall' } })
+    const message = f.bots.service.chatList(botId).messages.find(message => message.ask?.status === 'open')!
+    expect(message.ask?.title).toBe('change when it tells you')
+    const banner = botNotificationContent('Helper', message)
+    expect(botNotificationKind(message, f.clock.now)).toBe('question')
+    expect(banner).toEqual({ title: 'Helper', body: 'Wants to change when it tells you' })
+    for (const internal of ['telling_set', 'tellMe', 'quietHours', '22:00']) expect(banner.body).not.toContain(internal)
+  } finally { f.close() }
+})
