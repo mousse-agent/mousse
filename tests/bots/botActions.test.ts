@@ -3116,3 +3116,21 @@ it('C9 queue pressure never counts or evicts work waiting on a card', async () =
   expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(22)
   expect(t.calls).toEqual([])
 })
+
+// Switch found off at each entry point; open and accepted rows end, executing rows survive.
+it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraws unstarted calls at %s', async path => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  for (const status of ['approved', 'running']) f.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, status, bot_note, result_json, message_id, expires_at, created_at, answered_at, ran_at)
+    SELECT id || ?, call_key || ?, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, ?, bot_note, result_json, message_id, expires_at, created_at, answered_at, ran_at FROM bot_actions WHERE id = ?`, `_${status}`, `_${status}`, status, a.id)
+  f.host.settings!.get().experimental.botAsksFirst = false
+  if (path === 'startup') { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
+  if (path === 'settings') f.bots.quietHoursChanged()
+  if (path === 'upkeep') await f.bots.deliverDueReminders()
+  for (const id of [a.id, `${a.id}_approved`]) expect(f.bots.actions.get(id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(f.bots.actions.get(`${a.id}_running`)?.status).toBe(path === 'startup' ? 'uncertain' : 'running')
+  expect(f.store.message(a.message_id)?.text).not.toContain('Mail · send')
+  expect(t.calls).toEqual([])
+  expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('This could not wait for your owner after all, so nothing was sent. Say so in your report.')
+})
