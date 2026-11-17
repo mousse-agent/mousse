@@ -40,7 +40,7 @@ export interface ClaudeLockedProfile {
 export type ClaudeSubscriptionClient = Pick<
   ClaudeSubscriptionProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured'
-> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'commitFailed' | 'stopThread' | 'forkConversation' | 'hasLiveProcess'>>
+> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'commitFailed' | 'stopThread' | 'forkConversation' | 'hasLiveProcess' | 'releaseBotProcess'>>
 
 export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
@@ -369,6 +369,10 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
 
   hasLiveProcess(threadId: string): boolean {
     return this.service()?.hasLiveProcess?.(threadId) ?? false
+  }
+
+  releaseBotProcess(threadId: string): boolean {
+    return this.service()?.releaseBotProcess?.(threadId) ?? false
   }
 
   /**

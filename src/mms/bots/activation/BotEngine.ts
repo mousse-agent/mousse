@@ -217,6 +217,11 @@ export interface BotEngineHost {
      * on another entry compares. Absent or undefined: held as tightly as nothing.
      */
     botHold?(instanceId: string): BotRuntimeHold | undefined
+    /**
+     * Closes the process the runtime keeps warm for the chat on `threadId` (`HarnessGateway.releaseBotProcess`); one running
+     * a turn closes when that turn ends. Must not throw.
+     */
+    releaseBotProcess?(threadId: string): void
   }
   /** The platform the hold rule of subagents reads (default: this process's). */
   platform?: string
@@ -790,6 +795,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   constructor(private readonly host: BotEngineHost) {
     this.actions = this.createActions()
+    // A change to what a bot's turns start with (grant, revision, pause, deletion) closes the process its chat keeps warm.
+    host.store.launchChanged = (botId) => this.releaseChatProcess(botId)
     this.watchers = new BotWatchers({
       onEnd: (spec, end, tail) => this.watcherEnded(spec, end, tail),
       ...(host.spawnWatcher ? { spawn: host.spawnWatcher } : {}),
@@ -883,6 +890,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private putThread(input: { threadId: string; botId: string; role: 'home' | BotThreadRole; key: string; activationId?: string }): void {
     this.store.putThread(input)
     this.known.set(input.threadId, { botId: input.botId, role: input.role })
+  }
+
+  /** Closes the process the runtime keeps warm for the bot's chat, if any (`releaseBotProcess`). Never throws. */
+  private releaseChatProcess(botId: string): void {
+    const home = this.store.registry(botId)?.homeThreadId
+    if (!home) return
+    try {
+      this.host.harness.releaseBotProcess?.(home)
+    } catch (error) {
+      console.warn("a bot's warm chat process could not be closed", { botId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   private get store(): BotStore {
@@ -3510,6 +3528,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const readOnly = threadsReadOnlyOf(row)
     const authority: BotAuthority = {
       ...base,
+      // The chat's own turns may run on a process kept warm between them, only while lane, turn kind and grant stay these.
+      ...(row.lane === 'chat' && input.role === 'activation' ? { warm: `chat:${input.role}:${input.grantDigest}` } : {}),
       ...(botAsksFirst(this.host.settings?.get()) ? {
         maskMcpArguments: (args: Record<string, unknown>) => maskedActionData(args) as Record<string, unknown>,
         holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string) => {

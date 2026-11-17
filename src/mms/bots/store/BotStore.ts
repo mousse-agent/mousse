@@ -1158,6 +1158,11 @@ export type BotStoreTx = Pick<ProfileDatabase, 'statement' | 'inTransaction'>
 /** The profile's `bots.db`: typed reads and the writes the bot engine and its scopes make. */
 export class BotStore {
   readonly db: ProfileDatabase
+  /**
+   * Told when what a bot's turns start with changes: its grant (approved, revoked, moved), its published revision (model,
+   * instructions), a pause, or its deletion. The engine closes the process kept warm for the bot's chat then. Must not throw.
+   */
+  launchChanged?: (botId: string) => void
 
   constructor(options: { profileHome: string; clock?: () => number; fault?: ProfileDatabaseFault }) {
     this.db = new ProfileDatabase({ profileHome: options.profileHome, name: 'bots', ...(options.clock ? { clock: options.clock } : {}), ...(options.fault ? { fault: options.fault } : {}) })
@@ -1233,6 +1238,15 @@ export class BotStore {
     if (reason === null && options.keepStreak) this.run('UPDATE bot_registry SET paused_reason = NULL, paused_until = NULL WHERE bot_id = ?', botId)
     else if (reason === null) this.run('UPDATE bot_registry SET paused_reason = NULL, paused_until = NULL, failure_streak = 0 WHERE bot_id = ?', botId)
     else this.run('UPDATE bot_registry SET paused_reason = ?, paused_until = ? WHERE bot_id = ?', reason, until ?? null, botId)
+    if (reason !== null) this.changedLaunch(botId)
+  }
+
+  private changedLaunch(botId: string): void {
+    try {
+      this.launchChanged?.(botId)
+    } catch (error) {
+      console.warn("a bot's launch change could not be passed on", { botId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** Adds one failed run (or resets with 0); the streak after the change. */
@@ -1288,6 +1302,7 @@ export class BotStore {
 
   setPublished(botId: string, revision: string): void {
     this.run('UPDATE bot_registry SET revision = ? WHERE bot_id = ? AND deleted_at IS NULL', revision, botId)
+    this.changedLaunch(botId)
   }
 
   setHomeThread(botId: string, threadId: string): void {
@@ -1296,6 +1311,7 @@ export class BotStore {
 
   markDeleted(botId: string): void {
     this.run('UPDATE bot_registry SET deleted_at = ? WHERE bot_id = ? AND deleted_at IS NULL', this.now(), botId)
+    this.changedLaunch(botId)
   }
 
   // -- Grants ----------------------------------------------------------------------------------
@@ -1330,6 +1346,7 @@ export class BotStore {
       this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', at, botId)
       this.run('INSERT INTO bot_grants(bot_id, digest, manifest_json, approved_at) VALUES(?, ?, ?, ?)', botId, digest, JSON.stringify(manifest), at)
       heldCalls(this.db)?.grantChanged(botId)
+      this.changedLaunch(botId)
       return { botId, digest, manifest, approvedAt: at }
     })
   }
@@ -1338,6 +1355,7 @@ export class BotStore {
     return this.db.transaction(() => {
       const revoked = this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', this.now(), botId) > 0
       if (revoked) heldCalls(this.db)?.grantChanged(botId)
+      if (revoked) this.changedLaunch(botId)
       return revoked
     })
   }
@@ -1994,6 +2012,7 @@ export class BotStore {
     this.run(`UPDATE bot_dispatches SET policy_digest = ? WHERE policy_digest = ? AND started_at IS NULL AND activation_id IN
       (SELECT id FROM bot_activations WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled'))`, toDigest, fromDigest, botId, fromDigest)
     this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled')", toDigest, revision, botId, fromDigest)
+    this.changedLaunch(botId)
   }
 
   // -- Chat (bot_messages) ----------------------------------------------------------------------

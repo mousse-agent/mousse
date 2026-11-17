@@ -22,8 +22,9 @@ import { LINUX_RUN_KEPT_OPEN, LINUX_SYSTEM_FOLDERS } from '../linuxFolders'
 /**
  * How a bot's turn runs on Claude Code (PR 6 §3), on either kind of entry:
  * - the owner's own entry (the one their chats use, with their sign-in): the turn runs in that
- *   locked environment plus its sign-in, as one query that is never kept warm, and its process is the turn's own:
- *   the deadline ends it through the turn's signal, never the bot supervisor (`ownerEntry`);
+ *   locked environment plus its sign-in, and its process is the turn's own: the deadline ends it through the turn's
+ *   signal, never the bot supervisor (`ownerEntry`). A chat turn without Bash runs on the chat's warm process, kept
+ *   between turns while its launch stays the same; every other turn is one query;
  * - a `locked` entry (`config.profile: 'locked'`), which runs in a home of its own and only bot
  *   turns, in the locked environment, with its process group under the bot supervisor.
  * Every interactive turn keeps the user's own setup, untouched.
