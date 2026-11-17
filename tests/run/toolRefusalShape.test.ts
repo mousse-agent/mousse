@@ -142,7 +142,7 @@ describe('clientRequestId', () => {
     const fx = delegationFixture()
     try {
       const { registry } = appToolRegistry(fx.engine, fakeAppToolHost().host, { bots: () => undefined, botMemory: () => undefined })
-      const listed = registry.list().filter((tool) => !tool.hidden)
+      const listed = registry.list().filter((tool) => tool.callable !== 'in_process')
       const declares = (schema: unknown) => Boolean((schema as { properties?: Record<string, unknown> }).properties?.clientRequestId)
       expect(listed.filter((tool) => !READ_ONLY_TOOL_NAMES.has(tool.name) && (!declares(tool.inputSchema) || (tool.botInputSchema && !declares(tool.botInputSchema)))).map((tool) => tool.name)).toEqual([])
       expect(listed.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool.name) && declares(tool.inputSchema)).map((tool) => tool.name)).toEqual([])

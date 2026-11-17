@@ -177,7 +177,8 @@ function summarize(
             name: remote.computerName,
             online: remote.online,
             ...(remote.ref ? { ref: remote.ref } : {}),
-            ...(remote.lastError && activity !== 'idle' ? { lastError: remote.lastError } : {})
+            ...(remote.stopRequested ? { stopRequested: true as const } : {}),
+            ...(remote.lastError && (activity !== 'idle' || remote.stopRequested) ? { lastError: remote.lastError } : {})
           }
         }
       : {})

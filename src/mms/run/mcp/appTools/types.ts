@@ -1,7 +1,6 @@
 import type { Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { SkillDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
-import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { AgentAccessLevel } from '../../../../shared/settings'
 import type { ChatMode } from '../../../../shared/types'
@@ -13,6 +12,7 @@ import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
 import type { DelegationToolHost } from './delegation'
+import type { ToolAccessPolicy } from './authority'
 import { legacyRefusal, REFUSAL_FAULT_CODES } from './refusal'
 
 /**
@@ -187,14 +187,18 @@ export interface ToolOutcome {
 export type JsonSchema = Record<string, unknown>
 
 /**
- * Why a run that nobody answers (`approvals: 'never'`) refuses a tool that waits for the user; undefined when it may run.
- * A personal bot's turn (always `never`) may still call a tool its grant answers (`botGrantAnswers`), or one whose ask
- * reaches its owner in the bot's own chat (`botAsksOwner`).
+ * A tool's own check of arguments that name a thread, project, source or file beyond the central one
+ * (docs/plans/tool-api.md §1.2 `authorize`). Returns the scope the call reaches its target with, or undefined to keep
+ * the central check's. `where` says where the check is made when it is the handler's.
  */
-export function unattendedRefusal(tool: Pick<MousseTool, 'asksUser' | 'botGrantAnswers' | 'botAsksOwner'>, turn: Pick<AppToolTurn, 'approvals'> & { bot?: unknown }): string | undefined {
-  if (turn.approvals !== 'never' || !tool.asksUser) return undefined
-  if (turn.bot && (tool.botGrantAnswers || tool.botAsksOwner)) return undefined
-  return tool.asksUser === 'question' ? QUESTIONS_REFUSED_MESSAGE : APPROVALS_REFUSED_MESSAGE
+export interface ToolAuthorize {
+  (actor: McpCaller, args: Record<string, unknown>, targets: ToolAccessPolicy | undefined): ToolScope | undefined
+  where?: string
+}
+
+/** `authorize` for a tool whose handler checks the thread arguments the central check does not cover; says where. */
+export function checkedInHandler(where: string): ToolAuthorize {
+  return Object.assign((() => undefined) as ToolAuthorize, { where })
 }
 
 /** Per-turn availability: `true`, or why the tool cannot be used now. */
@@ -223,8 +227,12 @@ export interface ToolListing {
   botCatalogue?: 'search' | 'use_tool'
 }
 
-export interface MousseTool {
-  name: string
+/**
+ * A Mousse tool's declaration. Who may call it (`access`, `class`, `readOnlySafe`, `callable`, `listed`, `available`,
+ * `asksUser`, `launchedOk`, `botGrantAnswers`, `botAsksOwner`, `authorize`) is read only by the authority compiler
+ * (`authority.ts`), which the list, the turn preamble and dispatch all ask.
+ */
+export interface MousseTool {  name: string
   description: string
   /**
    * What a personal bot's thread lists instead of `description`: the same tool as a bot uses it, without what does not
@@ -267,8 +275,11 @@ export interface MousseTool {
    * changes nothing but the caller's own conversation.
    */
   readOnlySafe?: boolean
-  /** Callable in process only and never listed (older names kept for replayed transcripts). */
-  hidden?: boolean
+  /**
+   * `in_process`: never callable over MCP (an older name kept for replayed transcripts). Whether it is listed is
+   * `listed`'s to say.
+   */
+  callable?: 'in_process'
   /**
    * Listed fully loaded (`_meta['anthropic/alwaysLoad']`): Claude Code then sends its whole
    * definition on every turn instead of deferring it behind tool search. Only for a tool the model
@@ -299,11 +310,11 @@ export interface MousseTool {
   /** A `managesOthers` tool that keeps the `launched` scope for a thread the caller launched. */
   launchedOk?: true
   /**
-   * A tool that takes a thread id the central check does not cover (the check covers `threadId` of a
-   * `readsOthers`, `managesOthers` or `writesThreads` tool) says here, in a few words, where the handler
-   * checks it. Registration refuses such a tool without it.
+   * The tool's own check of arguments that name a thread, beyond the central one (which covers `threadId` of a
+   * `readsOthers`, `managesOthers`, `writesThreads` or `editsWorkspace` tool); `checkedInHandler` says where the
+   * handler checks it. Registration refuses a tool that takes such an argument without it.
    */
-  threadArgChecked?: string
+  authorize?: ToolAuthorize
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 

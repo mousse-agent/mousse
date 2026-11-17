@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { PermissionAction, PermissionMode } from '../../src/shared/permissionMode'
 import { canAnswerApproval, describeApprovalRefusal, startedByPerson, type AgentApprovalAccess, type Answerer, type LineageLookup } from '../../src/mms/run/approvalRights'
 import { UserQuestionService, type ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
+import { holdsPerson } from '../../src/mms/run/mcp/appTools/authority'
 
 const lineage: LineageLookup = (threadId) => {
   if (threadId === 'child') return { parentThreadId: 'parent', relationship: 'subagent' }
@@ -54,8 +55,14 @@ describe('canAnswerApproval', () => {
     // `resume_now` is a person's Resume now press; `resume` is the timer's continue turn, which nobody asked for.
     const sources = ['gui', 'cli', 'resume_now', 'resume', 'schedule', 'webhook', 'remote', 'wake', 'delegation', 'internal', 'agent', 'mcp', 'protocol', 'bridge', 'steer-followup', '', undefined, null]
     for (const origin of origins)
-      for (const source of sources)
-        expect(startedByPerson({ origin, source }), `${origin} / ${source}`).toBe(origin === 'interactive' && (source === 'gui' || source === 'cli' || source === 'resume_now'))
+      for (const source of sources) {
+        const person = origin === 'interactive' && (source === 'gui' || source === 'cli' || source === 'resume_now')
+        expect(startedByPerson({ origin, source }), `${origin} / ${source}`).toBe(person)
+        // The tool authority reads the same rule.
+        expect(holdsPerson({ origin, source }), `${origin} / ${source}`).toBe(person)
+      }
+    // A run whose provenance cannot be read (no run, no binding) holds no person authority.
+    expect(holdsPerson(undefined)).toBe(false)
   })
 
   it.each([
