@@ -137,8 +137,9 @@ const botMarkdownComponents: Partial<Components> = {
 
 /** A bot message's text, drawn as a thread's reply is (headings, lists, tables, code), with its paths as chips. */
 // Memoized: a bubble that renders again for its corner alone (its time moving to a later message) leaves its words alone.
-export const BotMarkdown = memo(function BotMarkdown({ text, className }: { text: string; className?: string }) {
-  return <Markdown content={joinCodeToPunctuation(linkBotPaths(text))} className={className} images={BOT_IMAGES} components={botMarkdownComponents} />
+export const BotMarkdown = memo(function BotMarkdown({ text, className, streaming }: { text: string; className?: string; streaming?: boolean }) {
+  // `streaming`: a reply being written, whose new blocks fade in as a thread's do.
+  return <Markdown content={joinCodeToPunctuation(linkBotPaths(text))} className={className} images={BOT_IMAGES} components={botMarkdownComponents} {...(streaming ? { streaming: true } : {})} />
 })
 
 /** The language a file's code block is highlighted as, from its name. */

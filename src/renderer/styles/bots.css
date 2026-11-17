@@ -120,6 +120,9 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-markdown .an-md-code.is-whole { white-space: nowrap; }
 .bot-bubble-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 2px; }
 .bot-bubble-time { margin-left: auto; font-size: 11px; line-height: 16px; color: var(--text-secondary); opacity: .8; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* A reply its turn stopped before finishing: muted, with "Stopped" where a time would be (this window only). */
+.bot-cut-reply .bot-bubble > .bot-markdown { opacity: .7; }
+.bot-cut-mark { margin-left: auto; font-size: 11px; line-height: 16px; color: var(--text-secondary); }
 .bot-bubble > .bot-reply-quote { margin: 0 0 6px; max-width: 100%; }
 .bot-bubble-ask { display: flex; align-items: center; gap: 7px; margin: 6px 0 0; font-size: var(--bot-text); line-height: 1.5; }
 .bot-bubble-ask > svg { flex: none; color: var(--accent); }

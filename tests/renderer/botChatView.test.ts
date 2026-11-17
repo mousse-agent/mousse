@@ -51,6 +51,7 @@ const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { SelectionReplyButton } = await import('../../src/renderer/components/SelectionReplyButton')
 const { botMessageScroller } = await import('../../src/renderer/components/bots/BotChatView')
+const { SETTLE_MS, clearBotLiveReplies } = await import('../../src/renderer/stores/botLiveReplies')
 
 let root: Root
 let host: HTMLElement
@@ -116,6 +117,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   setBotsClient(null)
+  clearBotLiveReplies()
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
   useAppStore.setState({ settingsOpen: appInitial.settingsOpen })
@@ -979,6 +981,96 @@ describe('while it works', () => {
     await open({ ...inbox, state: 'paused', stateText: 'Paused until 14:00' })
     expect(presence()?.textContent).toBe('paused')
     expect(sticker()?.getAttribute('data-kind')).toBe('paused')
+  })
+})
+
+describe('a reply as it is written', () => {
+  // The bot's chat turns run in its home thread, whose messages reach the window as a thread's do.
+  const thread = { added: [] as Array<(event: { threadId: string; message: unknown }) => void>, updated: [] as Array<(event: { threadId: string; message: unknown }) => void> }
+  const writer = summary('inbox', { name: 'Inbox helper', state: 'working', stateText: 'Working…', homeThreadId: 'home1', chat: { activationId: 'act_c1' } })
+  const frame = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)) })
+  const add = async (message: object, threadId = 'home1') => { await act(async () => { for (const cb of thread.added) cb({ threadId, message }) }); await frame() }
+  const write = async (content: string, over: object = {}) => {
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content, timestamp: AT, streaming: true, ...over } }) })
+    await frame()
+  }
+  const live = () => transcript().querySelector('.bot-live-reply')
+  const stopped = () => transcript().querySelector('.bot-cut-reply')
+  async function openWriting(bot = writer) {
+    thread.added.length = 0
+    thread.updated.length = 0
+    installPreload(fake, { app: { setViewedBot }, orchestrator: { onThreadMessage: (cb: never) => { thread.added.push(cb); return () => {} }, onThreadMessageUpdated: (cb: never) => { thread.updated.push(cb); return () => {} } } })
+    fake.chats.inbox = [message(1, { id: 'o1', author: 'owner', text: 'Compare the two drives.' })]
+    await open(bot)
+    await add({ id: 'u1', role: 'user', content: 'Compare the two drives.', timestamp: AT })
+  }
+
+  it('shows the turn a finished block at a time before it ends, then only its posted message', async () => {
+    await openWriting()
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+    // A sentence still being written is not shown: the dots stay.
+    await write('The first drive')
+    expect(live()).toBeNull()
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+    await write('The first drive is faster.\n\nThe second one is')
+    expect(live()?.textContent).toBe('The first drive is faster.')
+    expect(transcript().querySelector('.bot-typing')).toBeNull()
+    // Another chat's thread is not this bot's.
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'other', message: { id: 'x', role: 'assistant', content: 'Not mine.\n\n', timestamp: AT, streaming: true } }) })
+    await frame()
+    expect(transcript().textContent).not.toContain('Not mine.')
+    // Its message posted: the live bubble goes, and the words show once, as the message.
+    await act(async () => fake.emit.message('inbox', message(2, { text: 'The first drive is faster.\n\nThe second one is cheaper.', activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    expect(transcript().querySelectorAll('.bot-message:not(.bot-typing)')).toHaveLength(1)
+    expect(stopped()).toBeNull()
+  })
+
+  it('a step after its words makes them the status beside the dots: the bubble goes until the reply after it', async () => {
+    await openWriting()
+    await write('Let me check the prices.\n\n')
+    expect(live()?.textContent).toBe('Let me check the prices.')
+    await add({ id: 't1', role: 'assistant', kind: 'tool_call', content: '', timestamp: AT })
+    expect(live()).toBeNull()
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+  })
+
+  it('never shows an applet’s source or the runtime’s placeholder, and draws nothing for words that finish no block', async () => {
+    await openWriting()
+    await write('Here it is.\n\n```mousse-applet\n{"schemaVersion":1,\n')
+    expect(live()?.textContent).toBe('Here it is.')
+    markdown.renders = 0
+    await write('Here it is.\n\n```mousse-applet\n{"schemaVersion":1,"title":"Budget",\n')
+    expect(markdown.renders).toBe(0)
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r2', role: 'assistant', content: 'No response requested.\n\n', timestamp: AT, streaming: true } }) })
+    await frame()
+    expect(transcript().textContent).not.toContain('No response requested')
+  })
+
+  it('a turn that ends without its message (a Stop) leaves its words muted and marked Stopped, never as a sent message', async () => {
+    await openWriting()
+    await write('The first drive is faster.\n\nThe second')
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fake.bots = [{ ...writer, state: 'idle', stateText: '', chat: undefined }]
+      await act(async () => { await useBotsStore.getState().refresh() })
+      // It waits a moment for its message first.
+      expect(live()).not.toBeNull()
+      expect(stopped()).toBeNull()
+      await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_MS + 50) })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(live()).toBeNull()
+    // All it had written, the sentence it was in the middle of too, as a thread keeps a stopped reply.
+    expect(stopped()?.querySelector('.bot-markdown')?.textContent).toBe('The first drive is faster.The second')
+    expect(stopped()?.querySelector('.bot-cut-mark')?.textContent).toBe('Stopped')
+    // Not a message: nothing to reply to, react to or quote.
+    expect(stopped()?.querySelector('button')).toBeNull()
+    expect(stopped()?.hasAttribute('data-message-id')).toBe(false)
+    // A message of that turn that still comes takes its place.
+    await act(async () => fake.emit.message('inbox', message(2, { at: new Date(Date.now() + 1000).toISOString(), text: 'Late reply.', activationId: 'act_c1' })))
+    expect(stopped()).toBeNull()
   })
 })
 

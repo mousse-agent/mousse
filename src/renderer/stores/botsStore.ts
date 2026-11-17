@@ -11,6 +11,7 @@ import type { AttachedFile } from '../components/ChatComposer'
 import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
 import { keepEqualById } from '../lib/keepEqual'
 import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
+import { clearBotLiveReplies, noteBots, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
@@ -324,7 +325,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
   const subscribe = () => {
     for (const stop of unsubscribe) stop()
     const events = personalBotsEvents()
+    // The bot's home thread streams its chat turn's reply: shown as it is written (botLiveReplies.ts).
+    const orchestrator = (window.mousse as Partial<typeof window.mousse> | undefined)?.orchestrator
     unsubscribe = [
+      orchestrator?.onThreadMessage?.(({ threadId, message }) => noteThreadMessage(threadId, message, true)),
+      orchestrator?.onThreadMessageUpdated?.(({ threadId, message }) => noteThreadMessage(threadId, message, false)),
       events.onChanged?.((event) => {
         void get().refresh()
         // About, and a chat card that shows one of the bot's automations (`watchBotDetail`), read its runs again.
@@ -364,6 +369,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       readSeq.clear()
       removed.clear()
       reactions.clear()
+      clearBotLiveReplies()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
         reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {} })
@@ -865,6 +871,10 @@ export const useBotsStore = create<BotsState>((set, get) => {
     }
   }
 })
+
+// A live reply follows its bot's chat turn and its chat's messages: it goes once its message is posted.
+setBotLiveReplySources({ bots: () => useBotsStore.getState().bots, messages: (botId) => useBotsStore.getState().chats[botId]?.messages ?? [] })
+useBotsStore.subscribe((state, previous) => { if (state.bots !== previous.bots || state.chats !== previous.chats) noteBots() })
 
 /** Failures whose words come from the service and are meant for the owner as they are. */
 const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable', 'model_unavailable'])

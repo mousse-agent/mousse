@@ -47,13 +47,16 @@ export function workSignalsOf(message: BotChatMessage): { titles: string[]; queu
  */
 export type BotChatRow =
   | { kind: 'message'; message: BotChatMessage }
-  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string; note?: 'info' | 'error' }
+  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string; note?: 'info' | 'error'; cut?: true }
+
+/** A row of this window only: a `/` command's line, or (`cut`) the words of a reply its turn stopped before finishing. */
+export interface BotWindowLine { id: string; at: string; text: string; error?: true; cut?: true }
 
 /**
- * `rows` with the owner's own lines from `/` commands (`notes`) among them by time: each before the first row that
- * came after it, the newest at the end.
+ * `rows` with this window's own lines (`notes`, oldest first: the owner's `/` commands, replies cut off) among them by
+ * time: each before the first row that came after it, the newest at the end.
  */
-export function withNotes(rows: readonly BotChatRow[], notes: ReadonlyArray<{ id: string; at: string; text: string; error?: true }>): BotChatRow[] {
+export function withNotes(rows: readonly BotChatRow[], notes: readonly BotWindowLine[]): BotChatRow[] {
   if (!notes.length) return rows as BotChatRow[]
   const merged: BotChatRow[] = []
   let next = 0
@@ -66,7 +69,9 @@ export function withNotes(rows: readonly BotChatRow[], notes: ReadonlyArray<{ id
   return merged
 }
 
-const noteRow = (note: { id: string; at: string; text: string; error?: true }): BotChatRow => ({ kind: 'system', id: note.id, at: note.at, text: note.text, note: note.error ? 'error' : 'info' })
+const noteRow = (note: BotWindowLine): BotChatRow => (note.cut
+  ? { kind: 'system', id: note.id, at: note.at, text: note.text, cut: true }
+  : { kind: 'system', id: note.id, at: note.at, text: note.text, note: note.error ? 'error' : 'info' })
 
 /** The quiet line an answer the owner tapped leaves in place of their bubble: "You answered “Flat B”". */
 export function tappedAnswerLine(label: string): string {
