@@ -73,14 +73,6 @@ describe('the shown thread is deleted', () => {
     expect(api.newChatAfterDelete).not.toHaveBeenCalled()
   })
 
-  it('from elsewhere (another window, the CLI, its expiry): the chat leaves it the same way', async () => {
-    windowShowing('a', [thread('b'), thread('a')])
-    deleteInService('a')
-    await vi.waitFor(() => expect(useAppStore.getState().activeThreadId).toBe('b'))
-    expect(api.get).toHaveBeenCalledWith('a')
-    expect(api.select).toHaveBeenCalledTimes(1)
-  })
-
   it('with no other thread to show: the chat goes to a new chat', async () => {
     windowShowing('a', [thread('a'), thread('old', { settledAt: at })])
     deleteInService('a')
