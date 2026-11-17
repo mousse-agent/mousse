@@ -100,7 +100,7 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
       if (input.prompt !== 'Survey it') return 'Noted.'
       const started = await callTool(mcp!, 'delegate_task', {
         prompt: 'Survey the run engine', title: 'Surveyor', provider: 'openai', model: 'gpt-replay',
-        workspace: 'shared', role: 'research', modeCeiling: 'plan', clientRequestId: 'survey-1'
+        workspace: 'shared', role: 'research', readOnly: true, modeCeiling: 'plan', clientRequestId: 'survey-1'
       })
       delegationId = JSON.parse(started.text!).delegationId
       return 'Delegated.'

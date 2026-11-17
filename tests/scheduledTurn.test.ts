@@ -1452,6 +1452,58 @@ describe('scheduled jobs run as turns', () => {
         }
       })
 
+      it("a subagent of a person's turn is that person's, down its chain; a subagent of any other run is not", async () => {
+        const w = boot([piAdapter(() => 'pi')])
+        const wired = wireJobs(w)
+        const project = projectOf(w)
+        const thread = w.store.createThread('Mine', project.id, project.path, ON_PRIMARY)
+        w.orch.setThreadPermissionMode(thread.id, 'full')
+        const delegate = (parentThreadId: string, parentRunId: string, key: string) =>
+          w.engine.requestDelegation({ parentThreadId, parentRunId, clientRequestId: `delegation:${parentRunId}:${key}`, prompt: 'look', workspace: 'shared', wake: 'always', title: key })
+        const person = await w.orch.send('start', false, { threadId: thread.id, source: 'gui', clientRequestId: 'person-1', awaitMode: 'turn' })
+        const child = await delegate(thread.id, person.runId!, 'child')
+        const grandchild = await delegate(child.childThreadId, child.childRunId, 'grandchild')
+        expect(wired.person(child.childThreadId, child.childRunId)).toBe(true)
+        expect(wired.person(grandchild.childThreadId, grandchild.childRunId)).toBe(true)
+        const woken = await w.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'unbound:wake', source: 'wake' })
+        if (woken.status !== 'accepted') throw new Error('send rejected')
+        const ofWake = await delegate(thread.id, woken.runId, 'of-wake')
+        expect(wired.person(ofWake.childThreadId, ofWake.childRunId)).toBe(false)
+        expect(wired.limits(ofWake.childThreadId, ofWake.childRunId)).toEqual(NARROWEST)
+
+        // Bound runs no person started: a job's, and another agent's message.
+        const jobThread = w.store.createThread('Job', project.id, project.path, ON_PRIMARY)
+        w.orch.setThreadPermissionMode(jobThread.id, 'full')
+        const job = addJob(w, { name: 'Job', prompt: 'scheduled run', threadId: jobThread.id, projectId: project.id })
+        await runNow(w, job)
+        const jobRun = (await finished(w, job.id)).runId!
+        const target = w.store.createThread('Target', project.id, project.path, ON_PRIMARY)
+        w.orch.setThreadPermissionMode(target.id, 'full')
+        await w.orch.mcpToolHost().sendToThread!(target.id, { content: 'please do it', mode: 'agent' }, {
+          clientRequestId: 'agent-send-1',
+          actor: { kind: 'agent', threadId: thread.id, runId: person.runId!, toolCallId: 'call-1' }
+        })
+        await waitFor(() => w.engine.listRuns(target.id).some((run) => run.status === 'completed'), 'the agent-sent turn')
+        const agentRun = w.engine.listRuns(target.id)[0]!.runId
+        for (const [name, threadId, runId] of [['job', jobThread.id, jobRun], ['agent message', target.id, agentRun]] as const) {
+          const ofIt = await delegate(threadId, runId, `of-${name}`)
+          const below = await delegate(ofIt.childThreadId, ofIt.childRunId, `below-${name}`)
+          expect(wired.person(ofIt.childThreadId, ofIt.childRunId), name).toBe(false)
+          expect(wired.person(below.childThreadId, below.childRunId), name).toBe(false)
+          expect(wired.limits(below.childThreadId, below.childRunId), name).toEqual(NARROWEST)
+        }
+
+        // A person's turn on a bot's thread: its subagents are not the person's either.
+        const botThread = w.store.createThread('Bot', project.id, project.path, ON_PRIMARY)
+        w.orch.setThreadPermissionMode(botThread.id, 'full')
+        const botRun = await w.orch.send('hello bot', false, { threadId: botThread.id, source: 'gui', clientRequestId: 'person-2', awaitMode: 'turn' })
+        const ofBot = await delegate(botThread.id, botRun.runId!, 'of-bot')
+        expect(wired.person(ofBot.childThreadId, ofBot.childRunId)).toBe(true)
+        w.orch.setBotThreads({ roleOf: (threadId: string) => (threadId === botThread.id ? 'activation' : undefined) } as never)
+        expect(wired.person(ofBot.childThreadId, ofBot.childRunId)).toBe(false)
+        w.orch.setBotThreads(null as never)
+      })
+
       it("a run that cannot be read is not a person's, and records the narrowest", async () => {
         const w = boot([piAdapter(() => 'pi')])
         const wired = wireJobs(w)

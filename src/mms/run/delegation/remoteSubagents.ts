@@ -25,7 +25,7 @@ export interface RemoteSubagentRecord {
    * to the limit it set for this one (`RemoteSubagents.advanceStart`), so Full access is used only when both allow it.
    */
   permissionMode: PermissionMode
-  /** `plan` for a read-only task (`workspace: 'shared'`, or a plan ceiling): it plans and reads, never edits. */
+  /** `plan` for a read-only task (`readOnly`, or a plan ceiling): it plans and reads, never edits. */
   chatMode: 'agent' | 'plan'
   /** The far thread works in a worktree of its own (`workspace: 'isolated'`). */
   worktree: boolean

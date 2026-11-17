@@ -273,6 +273,11 @@ export interface DelegationRequest {
   model?: string
   role?: string
   workspace: 'isolated' | 'shared'
+  /**
+   * A read-only child (`delegate_task` `readOnly`): it works in the parent's folder (`workspace: 'shared'`) with the
+   * read-only tools only. Absent: the child has every tool its parent has, in either workspace.
+   */
+  readOnly?: boolean
   wake: DelegationWake
   title?: string
   /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */

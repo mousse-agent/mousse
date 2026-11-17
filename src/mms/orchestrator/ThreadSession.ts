@@ -19,6 +19,22 @@ import type { MessageEstimate } from './contextEstimate'
 import { createNativeContext, isNativeContextBase, isNativeLastTurnUsage, isNativePromptCache, normalizeNativeContext } from './nativeContext'
 
 /**
+ * Where a delegated `shared` child works: its parent's folder. `access: 'write'` is a general-purpose child with every
+ * tool its parent has; absent or `'read-only'` is a read-only child (`delegate_task` `readOnly`, and every `shared`
+ * child started before the two were separate).
+ */
+export interface SharedWorkspace {
+  path: string
+  parentThreadId: string
+  access?: 'read-only' | 'write'
+}
+
+/** Whether a child working in `shared` is a read-only one. */
+export function isReadOnlyShared(shared: SharedWorkspace | null | undefined): boolean {
+  return Boolean(shared) && shared!.access !== 'write'
+}
+
+/**
  * One steer waiting for a live turn to read it. A person's typed steer has only its text. A promoted queue
  * item carries its id, and what the item carried when it was promoted (its mode ceiling, the agent it came
  * from), so the entry can stand in for the item if the item is gone: a steer the turn never reads becomes a
@@ -138,10 +154,11 @@ export class ThreadSession {
   /** The `workspace.workspaceNote` the agent was last told, so the next turns in the project folder do not repeat it. */
   workspaceNoteGiven: string | null = null
   /**
-   * A delegated child with `workspace: 'shared'` (read-only roles) runs in its parent's workspace
-   * path under read-only tool access instead of provisioning its own (SPEC §14.2).
+   * A delegated child with `workspace: 'shared'` runs in its parent's workspace path instead of provisioning its own
+   * (SPEC §14.2). `access: 'write'` has every tool its parent has; any other value (a child saved before `access`
+   * existed included) is a read-only child, held to read-only tool access.
    */
-  sharedWorkspace: { path: string; parentThreadId: string } | null = null
+  sharedWorkspace: SharedWorkspace | null = null
   /**
    * A scheduled run's thread works on the project's own checkout (`workspaceBinding.policy ===
    * 'primary'`): its turns never provision a worktree.
