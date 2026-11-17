@@ -89,7 +89,7 @@ import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, steerStrategy, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
-import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, type LacksReport, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation } from '../run/mcp/appTools/thread'
 import { botMessage } from '../run/mcp/appTools/agentMessage'
@@ -161,6 +161,7 @@ import {
   stoppedByPerson,
   type BotTurnPayload,
   type ChildQuestionPayload,
+  type ChildLacksPayload,
   type AgentActor,
   type DelegationRecord,
   type EffectKind,
@@ -1259,10 +1260,10 @@ export class OrchestratorService extends EventEmitter {
   /** What runs a job's saved agent (`ScheduledJob.agent`); the profile platform owns the agent definitions. */
   setScheduledAgentRunner(runner: ScheduledAgentRunner | undefined): void { this.scheduledAgentRunner = runner }
 
-  private scheduledJobs?: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'>
+  private scheduledJobs?: Omit<AgentScheduleHost, 'limits'>
 
   /** The profile's scheduled jobs, for the agents' `schedule_*` tools; without them the tools are not registered. */
-  setScheduledJobs(jobs: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'> | undefined): void { this.scheduledJobs = jobs }
+  setScheduledJobs(jobs: Omit<AgentScheduleHost, 'limits'> | undefined): void { this.scheduledJobs = jobs }
   /** The automation drafts the Automation manager and granted bots write (`automation_*`). */
   private automationTools?: AutomationToolHost
   setAutomationTools(tools: AutomationToolHost | undefined): void { this.automationTools = tools }
@@ -2200,6 +2201,8 @@ export class OrchestratorService extends EventEmitter {
   private botMcpImpl?: BotMcp
   /** The app-tool context of each running turn (PR 2 §2), for the Mousse MCP server's calls. */
   readonly appToolTurns = new AppToolTurns()
+  /** The capabilities a subagent's work was already reported lacking (`reportSubagentLacks`), by thread, work and capability. */
+  private readonly reportedLacks = new Set<string>()
   /** The threads' goals (`/goal`, issue #1207): set, continued, stopped, and decided after each turn. */
   readonly goals = new ThreadGoals({
     thread: (threadId) => this.threadStore?.getThread(threadId),
@@ -4253,6 +4256,23 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * Whether the run holds `person` (docs/plans/tool-api.md §1.3 "Provenance"): a person started this run itself, and its
+   * thread is neither a subagent (`person` never passes down) nor a bot's. Fails closed on anything that cannot be read.
+   */
+  private runHoldsPerson(caller: { threadId: string; runId: string }): boolean {
+    try {
+      const engine = this.runEngine
+      if (!engine || this.botThreads?.roleOf(caller.threadId)) return false
+      if (engine.delegations.getLineage(caller.threadId)?.relationship === 'subagent') return false
+      const run = engine.getRun(caller.runId)
+      const binding = engine.bindingForRun(caller.runId)
+      return run?.threadId === caller.threadId && holdsPerson(binding ? { origin: policyOrigin(binding.policy), source: run.source } : undefined)
+    } catch {
+      return false
+    }
+  }
+
   /** The delegation tools of an in-process turn, holding the grant its registered turn was given at its start. */
   private turnDelegationTools(session: ThreadSession, runId: string, mode: ChatMode): DelegationToolHost {
     const ceiling = this.modeCeilingFor(session.threadId, mode)
@@ -4507,7 +4527,7 @@ export class OrchestratorService extends EventEmitter {
   mcpToolHost(): AppToolHost {
     // Read at every use: the registry is built before the profile hands over its scheduled jobs.
     const scheduleHost = (): AgentScheduleHost | undefined =>
-      this.scheduledJobs ? { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller), startedByPerson: (caller) => this.runStartedByPerson(caller) } : undefined
+      this.scheduledJobs ? { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller) } : undefined
     return {
       get schedules() {
         return scheduleHost()
@@ -4555,6 +4575,10 @@ export class OrchestratorService extends EventEmitter {
       // Narrowing from above: an ancestor's running Plan turn narrows the subtree at its next call.
       liveCeiling: (threadId) => this.ancestorCeiling(threadId),
       subagentThread: (threadId) => this.isSubagentThread(threadId),
+      // `person` (§1.3): a person started the run, and it is not a subagent's (which has what its parent has, but never this).
+      personHeld: (caller) => this.runHoldsPerson(caller),
+      parentThread: (threadId) => this.subagentParentOf(threadId),
+      reportLacks: (report) => this.reportSubagentLacks(report),
       // Only a bot's threads list the bot tools (`escalate`; `consult` on its activation thread).
       botRole: (threadId) => this.botThreads?.roleOf(threadId),
       botHomeOf: (threadId) => this.botThreads?.homeOf?.(threadId),
@@ -5510,15 +5534,17 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `thread_archive`: the owner's bot archives or unarchives one of their threads through the app's own Archive
-   * (`settleThread`), only from its chat in a chat turn its owner's message started (`botSenderOf`). A bot's archive never
-   * ends work: a thread with a run working or paused, there or in a subagent below it, is refused, and the bot stops it
-   * first. Never a bot's thread. The change is recorded as an `agent.action` of the thread.
+   * `thread_archive` of another thread: an agent's turn the person started, or the owner's bot from its chat in a turn
+   * that may act on threads (`botSenderOf`), archives or unarchives it through the app's own Archive (`settleThread`). An
+   * agent's archive never ends work: a thread with a run working or paused, there or in a subagent below it, is refused,
+   * and the agent stops it first. Never the caller's own thread or a bot's. The change is recorded as an `agent.action`
+   * of the thread.
    */
   private async setThreadArchivedAsAgent(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult> {
     const engine = this.requireRunEngine()
-    const bot = this.botSenderOf(options.actor, 'thread_archive')
-    if (!bot) throw new McpToolError('mousse_scope_denied', 'Only a bot\'s chat archives threads this way.')
+    // The registry checked `person` (or the bot's grant) before the call; checked again here, where it acts.
+    if (!this.runHoldsPerson(options.actor) && !this.botSenderOf(options.actor, 'thread_archive'))
+      throw new McpToolError('mousse_scope_denied', 'Only a turn the user started, or a bot\'s with "use your threads", archives another thread.')
     const thread = this.threadStore?.getThread(threadId)
     let botThread = false
     try {
@@ -7252,6 +7278,52 @@ export class OrchestratorService extends EventEmitter {
     } catch {
       return false
     }
+  }
+
+  /** The parent a subagent's lineage names; undefined for a thread that is not a subagent. */
+  private subagentParentOf(threadId: string): string | undefined {
+    const lineage = this.runEngine?.delegations.getLineage(threadId)
+    return lineage?.relationship === 'subagent' ? lineage.parentThreadId : undefined
+  }
+
+  /** The thread at the root of `threadId`'s tree of subagents: the first thread above it that is not a subagent. */
+  private subagentRootOf(threadId: string): string | undefined {
+    let thread = threadId
+    for (let depth = 0; depth < 64; depth += 1) {
+      const parent = this.subagentParentOf(thread)
+      if (!parent) return thread === threadId ? undefined : thread
+      thread = parent
+    }
+    return undefined
+  }
+
+  /**
+   * A subagent was refused a capability it lacks (§2.4): its parent, which holds it, or the root of its tree, where no
+   * thread does, gets a `child_lacks` row (a `reconcile_notice`), and rule 4 wakes or steers it. Once per capability of
+   * the subagent's work (its running delegation, else its run).
+   */
+  private reportSubagentLacks(report: LacksReport): void {
+    const engine = this.runEngine
+    if (!engine) return
+    const task = engine.delegations.listForChildThread(report.threadId).filter((entry) => entry.parentThreadId === report.parentThreadId && entry.status === 'running').at(-1)
+    const key = `${report.threadId}\u0000${task?.delegationId ?? report.runId}\u0000${report.lacks}`
+    if (this.reportedLacks.has(key)) return
+    const target = report.to === 'parent' ? report.parentThreadId : this.subagentRootOf(report.threadId)
+    if (!target || this.titleOf(target) === undefined) return
+    if (this.reportedLacks.size >= 4096) this.reportedLacks.clear()
+    this.reportedLacks.add(key)
+    const payload: ChildLacksPayload = {
+      kind: 'child_lacks',
+      childThreadId: report.threadId,
+      childRunId: report.runId,
+      tool: report.tool,
+      lacks: report.lacks,
+      ...(report.fix ? { fix: report.fix } : {}),
+      to: report.to,
+      ...(task ? { delegationId: task.delegationId } : {})
+    }
+    const runId = report.to === 'parent' ? task?.parentRunId ?? null : null
+    engine.inbox.append({ threadId: target, runId, kind: 'reconcile_notice', payload })
   }
 
   /**

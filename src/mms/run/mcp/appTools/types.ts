@@ -304,6 +304,12 @@ export interface MousseTool {
    */
   capabilities?: readonly ToolCapability[]
   /**
+   * The call needs `person` (docs/plans/tool-api.md §1.3 "Provenance"): only a turn a person started holds it, and it
+   * never passes down to a subagent. `true` for every call, or the variants that need it, read from the arguments. A bot's
+   * turn is held to its grant instead.
+   */
+  needsPerson?: true | ((args: Record<string, unknown>) => boolean)
+  /**
    * `in_process`: never callable over MCP (an older name kept for replayed transcripts). Whether it is listed is
    * `listed`'s to say.
    */

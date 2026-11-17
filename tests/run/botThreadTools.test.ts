@@ -55,7 +55,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
    * owner started), `read` (another bot's message), or none (a consult). `disabled` is the
    * owner's switch as the engine reads it at each call (`BotEngine.permissionOff`).
    */
-  const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; catalogue?: 'search' | 'use_tool'; stillHolds?: () => string | undefined; wakes?: { add: (...args: unknown[]) => Promise<unknown> }; jobs?: { open: (...args: unknown[]) => { jobId: string } } } = {}) => {
+  const world = async (options: { person?: boolean; granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; catalogue?: 'search' | 'use_tool'; stillHolds?: () => string | undefined; wakes?: { add: (...args: unknown[]) => Promise<unknown> }; jobs?: { open: (...args: unknown[]) => { jobId: string } } } = {}) => {
     fx = delegationFixture()
     base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-threads-')))
     const profile = join(base, 'profile')
@@ -92,6 +92,8 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const onAppResult = vi.fn()
     const deps = { host: { activationOf: () => ({ botId: 'b1', activationId: 'act-1', lane: 'chat' }), ...(options.wakes ? { wakes: options.wakes } : {}), ...(options.jobs ? { jobs: options.jobs } : {}) }, activity: { onAppResult, onAllowed: vi.fn(), drain: () => [] } } as unknown as BotAppToolDeps
     const fake = fakeAppToolHost({
+      // An ordinary thread's run holds `person` when the test says a person started it.
+      personHeld: () => options.person === true,
       threadMeta: (id) => threads.get(id),
       listThreads: () => [...threads.values()],
       listProjects: () => [{ id: 'p1', name: 'Web app' }, { id: 'p2', name: 'Other' }],
@@ -163,9 +165,9 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     // With no turn of its own running, none; and never what no bot can hold.
     expect(thread(registry.listForThread('home', 'default').map((tool) => tool.name))).toEqual([])
     expect(registry.listForThread('home', 'default', runId).map((tool) => tool.name).filter((name) => name === 'delegate_task' || name === 'continue_subagent')).toEqual([])
-    // An ordinary thread lists it as the agent's own (its own thread only, no thread to name): only the retry key.
+    // An ordinary thread lists it as an agent's: its own thread when the turn ends, or another by id.
     const own = registry.listForThread('mine', 'default').find((tool) => tool.name === 'thread_archive')
-    expect(own?.inputSchema).toEqual({ type: 'object', properties: { clientRequestId: expect.objectContaining({ type: 'string' }) } })
+    expect(Object.keys((own?.inputSchema as { properties: object }).properties).sort()).toEqual(['archived', 'clientRequestId', 'threadId'])
   })
 
   // Who the bot may reach, by each tool that names a thread: whether read, send, wait, stop and archive go ahead. Every thread the
@@ -500,15 +502,28 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(await text('thread_archive', { threadId: 'mine' })).toEqual({ error: true, text: expect.stringContaining('is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_interrupt') })
     expect(host.showAgentAction).not.toHaveBeenCalled()
     expect(onAppResult).not.toHaveBeenCalled()
-    // An ordinary thread's agent archives only its own thread: another thread it names is refused.
+    // An ordinary thread's agent archives another thread only in a turn the person started: here none did.
     fx?.dispose()
     fx = undefined
     const fresh = await world({ threads: 'all' })
     const plain = await fx!.runningRun('mine')
     fresh.turns.register(appTurn({ threadId: 'mine', runId: plain.runId }))
-    const asAgent = await fresh.registry.call('thread_archive', { threadId: 'archived' }, fresh.request({ threadId: 'mine', runId: plain.runId })).catch((error: Error) => ({ isError: true, text: error.message }))
-    expect(asAgent).toMatchObject({ isError: true, text: expect.stringContaining('archives your own thread only') })
+    const asAgent = await fresh.registry.call('thread_archive', { threadId: 'archived' }, fresh.request({ threadId: 'mine', runId: plain.runId }))
+    expect(refusalOf(asAgent)?.refused).toMatchObject({ code: 'lacks_capability', lacks: 'person' })
     expect(fresh.host.setThreadArchived).not.toHaveBeenCalled()
+  })
+
+  it('thread_archive follows one rule: a turn the person started archives another thread now, and its line names the agent', async () => {
+    const fresh = await world({ threads: 'all', person: true })
+    const plain = await fx!.runningRun('mine')
+    fresh.turns.register(appTurn({ threadId: 'mine', runId: plain.runId }))
+    const asAgent = (args: Record<string, unknown>) => fresh.registry.call('thread_archive', args, fresh.request({ threadId: 'mine', runId: plain.runId }))
+    expect(JSON.parse((await asAgent({ threadId: 'archived', archived: false })).text)).toMatchObject({ threadId: 'archived', archived: false, changed: true })
+    expect(fresh.host.setThreadArchived).toHaveBeenLastCalledWith('archived', false, { actor: expect.objectContaining({ kind: 'agent', threadId: 'mine' }) })
+    expect(fresh.host.showAgentAction).toHaveBeenCalledWith({ threadId: 'archived' }, expect.objectContaining({ threadId: 'mine' }), 'unarchived this thread')
+    // Still working: refused, with what to do.
+    vi.mocked(fresh.host.setThreadArchived!).mockResolvedValueOnce({ status: 'rejected', reason: 'thread_running' })
+    expect(refusalOf(await asAgent({ threadId: 'archived' }))?.refused).toMatchObject({ code: 'conflict', message: expect.stringContaining('stop it first with thread_interrupt') })
   })
 
   it('what it reads is framed as data from the thread, short by default, and the transcript and run events with an agent\'s caps', async () => {

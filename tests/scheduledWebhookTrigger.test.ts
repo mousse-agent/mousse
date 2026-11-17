@@ -1205,8 +1205,8 @@ describe('scheduled job webhook trigger', () => {
       const schedules = mms.orchestrator.mcpToolHost().schedules!
       expect(schedules).toBeDefined()
       expect(schedules.threadAllowed('agent-thread')).toBe(false)
-      // The owner adds who started a run: a run that does not exist was not a person's.
-      expect(schedules.startedByPerson({ threadId: 'no-thread', runId: 'no-run' })).toBe(false)
+      // The owner says which run holds person: a run that does not exist does not.
+      expect(mms.orchestrator.mcpToolHost().personHeld!({ threadId: 'no-thread', runId: 'no-run' })).toBe(false)
       // The first ask is durable and listed; Allow lets the thread add more.
       const ask = schedules.askFirst({ threadId: 'agent-thread', requestKey: 'k1', job: { name: 'Asked', prompt: 'x', schedule: { kind: 'manual' }, createdBy: { threadId: 'agent-thread' } } })
       expect(mms.automationIndex().items.find((item) => item.kind === 'ask')).toMatchObject({ id: ask.id, attention: { kind: 'ask', answer: { kind: 'agent_ask', askId: ask.id } } })

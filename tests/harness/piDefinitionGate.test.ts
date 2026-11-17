@@ -144,7 +144,8 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     expect(starts).toHaveLength(1)
   }, 120_000)
 
-  it('an app tool the definition does not grant is not offered and costs no tool call, as an ungranted built-in', async () => {
+  // The registry leaves an ungranted app tool off the turn's list; a list that still carries one is refused at the call gate.
+  it('an app tool the definition does not grant is refused before it runs and costs no tool call, as an ungranted built-in', async () => {
     const { engine, recorder, project } = await setup(cleanups, {
       mousseTools: () => [{ name: 'create_task', description: 'Create a task', inputSchema: { type: 'object', properties: { description: { type: 'string' } } }, class: 'mutation' }]
     })
@@ -163,7 +164,7 @@ describe('a definition’s authority over Pi’s built-in tools (Pi RPC engine, 
     const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
     expect(result.text).toBe('done')
     const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
-    expect(String(results[0].response)).toBe('Tool create_task not found')
+    expect(JSON.parse(String(results[0].response))).toMatchObject({ refused: { code: 'not_granted', message: 'Tool "create_task" is not granted to this agent definition.' } })
     // The refused app tool cost nothing: the one allowed call was the granted write.
     expect(readFileSync(join(project, 'granted.txt'), 'utf8')).toBe('ok')
     expect(counters.toolCalls).toBe(1)

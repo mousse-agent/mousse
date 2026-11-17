@@ -20,6 +20,11 @@ export const REFUSAL_CODES = [
    * `fix` what would give it. The older code it was refused under stays in `data.reason`.
    */
   'lacks_capability',
+  /**
+   * The turn held the capability when it started and lost it during this work (§2.4): a thread above it switched to Plan.
+   * Never retried in this work, and nobody is told: whoever took it away knows.
+   */
+  'revoked',
   /** The target is not in a state to take the call now; `data.conflict` names which state. */
   'conflict',
   /** The tool cannot be used in this turn (no browser bound to it, a feature switched off, a missing argument the turn needs). */
@@ -69,6 +74,7 @@ const DEFAULT_RETRY: Readonly<Record<RefusalCode, RefusalRetry>> = {
   ceiling_exceeded: 'never',
   read_only: 'never',
   lacks_capability: 'after_change',
+  revoked: 'never',
   conflict: 'after_change',
   unavailable: 'after_change',
   not_granted: 'after_change',
