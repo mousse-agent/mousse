@@ -74,7 +74,7 @@ async function approveOnThread(
   if (sha256Hex(json) !== request.argumentDigest) return { status: 'denied' as const }
   try {
     const answers = await services.questions.requestAnswers([{ id: 'approval', prompt: `Allow ${request.canonicalToolName}?\nDigest: ${request.argumentDigest}\nArguments: ${json}`,
-      options: [{ id: 'approve', label: 'Allow this action' }, { id: 'reject', label: 'Reject' }] }], threadId)
+      options: [{ id: 'approve', label: 'Allow this action' }, { id: 'reject', label: 'Reject' }] }], threadId, { signal })
     const approved = !signal.aborted && answers.approval === 'approve'
     return { status: approved ? 'approved' as const : 'denied' as const, digest: request.argumentDigest }
   } catch {

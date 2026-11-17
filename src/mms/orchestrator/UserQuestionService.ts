@@ -3,11 +3,15 @@
  * Requests are keyed by requestId and scoped to threadId for snapshot/resubscribe.
  *
  * Two kinds live here, side by side. A plain question (`ask_user`, a plan question, a quick action)
- * is process memory only: it dies with the daemon and times out. A provider's, the Pi agent's or a
- * Mousse tool's approval request (an `ApprovalTag`) is saved in the Run Engine database once the
- * profile binds `ThreadApprovals`: it survives a reconnect and a daemon restart, any client can
- * answer it, and it has no timeout while a person is in the chat (SPEC §17). Without a store, an
- * approval behaves as a plain question.
+ * is process memory only: it dies with the daemon. A provider's, the Pi agent's or a Mousse tool's
+ * approval request (an `ApprovalTag`) is saved in the Run Engine database once the profile binds
+ * `ThreadApprovals`: it survives a reconnect and a daemon restart, and any client can answer it
+ * (SPEC §17). Without a store, an approval behaves as a plain question.
+ *
+ * Neither kind expires by default, whoever started the turn (docs/plans/tool-api.md §2.11, #1449): a
+ * request waits for the person until it is answered or dismissed, or its run ends (the caller's
+ * `signal`, or the runtime's own dismissal when it stops). Only a deadline the caller passes
+ * (`timeoutMs`) ends it unanswered.
  *
  * A third kind is a question an agent asked without waiting (`ask_user` with `wait: false`, `open`): saved in the Run
  * Engine database once the profile binds `OpenQuestions`. Nothing waits on it: its answer reaches the agent through the
@@ -40,8 +44,6 @@ import {
   type ContinuationDue,
   type ThreadApprovals
 } from '../run/ThreadApprovals'
-
-const QUESTION_TIMEOUT_MS = 10 * 60 * 1000
 
 /** The most characters of an approval prompt that are saved. */
 const SAVED_PROMPT_CHARS = 4500
@@ -299,10 +301,10 @@ export class UserQuestionService extends EventEmitter {
   }
 
   /**
-   * `options.timeoutMs` overrides the default: 10 minutes for a plain question (the Mousse MCP
-   * `ask_user` waits up to an hour), and for a saved approval none while a person runs the turn, 10
-   * minutes for an unattended origin (a workflow, a bot, a scheduled job, a definition run). An aborted
-   * `options.signal` dismisses the request (its caller's run ended).
+   * A request waits until it is answered or dismissed: there is no default deadline, for a person's turn or an
+   * unattended one (a workflow, a bot, a scheduled job, a definition run). `options.timeoutMs` is the caller's own
+   * deadline (the Mousse MCP `ask_user` waits up to an hour, since its client gives up). An aborted `options.signal`
+   * dismisses the request (its caller's run ended).
    * `options.approval` marks a provider's approval request (see `ApprovalTag`).
    * `options.onAttachments` is told the images a plain question's answer carries, by question id, before the answers
    * resolve: for a caller that can hand images to its agent (`ask_user`). Their paths are in the answers either way.
@@ -388,8 +390,8 @@ export class UserQuestionService extends EventEmitter {
     }
     const durable = record !== null
     if (options.approval?.helper) this.noteHelper(requestId, options.approval.helper)
-    // A person in the chat can take as long as they need; nobody watches an unattended run.
-    const timeoutMs = options.timeoutMs ?? (durable ? (context && context.origin !== 'interactive' ? QUESTION_TIMEOUT_MS : undefined) : QUESTION_TIMEOUT_MS)
+    // The person takes as long as they need, whoever started the turn: only the caller's own deadline ends it.
+    const timeoutMs = options.timeoutMs
 
     return new Promise<UserQuestionAnswers>((resolveAnswers, rejectAnswers) => {
       const signal = options.signal

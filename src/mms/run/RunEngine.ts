@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { onRetiredBareRoute, type ExecutionBinding } from '../../shared/harness/types'
+import { onRetiredBareRoute, type ExecutionBinding, type TurnOrigin } from '../../shared/harness/types'
 import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
@@ -444,6 +444,8 @@ export const RESTART_TRANSCRIPTS_THREAD_ID = '__restart_transcripts__'
 const RESTART_TRANSCRIPT_PENDING = 'restart.transcript_pending'
 /** The thread's transcript says the restart cut the run off. */
 const RESTART_TRANSCRIPT_WRITTEN = 'restart.transcript_written'
+/** Turn origins whose runs a thread turn does not continue after a restart: their own runner owns them. */
+const NOT_CONTINUABLE_ORIGINS: ReadonlySet<TurnOrigin> = new Set(['bot', 'workflow', 'definition'])
 
 /** The outcome of a run whose binding names the retired bare pi route (PR 4). */
 const RETIRED_ROUTE_OUTCOME = Object.freeze({
@@ -972,7 +974,9 @@ export class RunEngine extends EventEmitter {
         strandedQueued.push(run.runId)
       }
       // SPEC §17.6: what waited for a provider in the dead process can only continue the thread now.
-      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => (this.bindingForRun(runId)?.policy.origin ?? 'interactive') !== 'interactive')
+      // A bot's, a workflow's and an agent definition's runs belong to their own runner, which a thread turn does not
+      // continue; every other run's request parks for the person.
+      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => NOT_CONTINUABLE_ORIGINS.has(this.bindingForRun(runId)?.policy.origin ?? 'interactive'))
       for (const requestId of approvals.continued) {
         const record = this.approvals.get(requestId)
         if (!record) continue

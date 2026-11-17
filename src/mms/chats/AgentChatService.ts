@@ -505,7 +505,7 @@ export class AgentChatService {
     this.store.assertRoot(); atomicWriteJsonSync(path, audit)
     try {
       const answers = await this.options.services.questions.requestAnswers([{ id: 'approval', prompt: `Allow ${request.canonicalToolName}?\nDigest: ${request.argumentDigest}\nArguments: ${json}`,
-        options: [{ id: 'approve', label: 'Allow this action' }, { id: 'reject', label: 'Reject' }] }], record.conversation.threadId)
+        options: [{ id: 'approve', label: 'Allow this action' }, { id: 'reject', label: 'Reject' }] }], record.conversation.threadId, { signal })
       this.assertRun(this.store.read(chatId), owned)
       const approved = !signal.aborted && !this.lifecycle.stopping && answers.approval === 'approve'
       this.store.assertRoot(); atomicWriteJsonSync(path, { ...audit, state: approved ? 'approved' : 'denied', decidedAt: new Date().toISOString() })
