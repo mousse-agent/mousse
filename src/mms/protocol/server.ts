@@ -755,9 +755,12 @@ export class MmsProtocolServer {
       questions,
       'cleared',
       (payload: { requestId: string; threadId: string }) => {
-        services.threadRuntimes
-          .getOrHydrate(payload.threadId)
-          .pendingQuestionIds.delete(payload.requestId)
+        const runtime = services.threadRuntimes.getOrHydrate(payload.threadId)
+        runtime.pendingQuestionIds.delete(payload.requestId)
+        // The last open question answered: a turn that still runs reads as working again (and a steer steers).
+        if (!runtime.pendingQuestionIds.size && !questions.listPendingForThread(payload.threadId).length && !services.secretRequests?.waiting(payload.threadId)) {
+          services.orchestrator.inputAnswered(payload.threadId)
+        }
         emitToSubscribers(
           this.ring.push('questions.cleared', payload, payload.threadId)
         )

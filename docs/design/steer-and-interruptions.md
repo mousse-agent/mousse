@@ -2,6 +2,8 @@
 
 Status: design, revision 4 (final), after council rounds 1–3 (responses in §8, §9 and §10). PR 1 (acceptance per token) and PR C (the mark) are built; PR 2 (the hold on Claude Code, Send now) builds §2.2–§2.4 and §2.9–§2.11, with §2.4 updated to spike S1. PR 3 (Codex, ACP agents and Cursor) builds §2.5 and §2.7, with the per-provider windows and defaults in §6, item 4. Code references are checked against `master` at `6d846d9ec`. The orchestrator is `src/mms/orchestrator/OrchestratorService.ts`; "`OS.ts:N`" below means that file.
 
+> **Changed since revision 4: a person's steer no longer waits for a tool.** Holding a person's steer for a running command made Steer slow (it waited for the whole command), and a hold released as the turn ended came back to the queue as "Queued" with Send now, or ended the turn. A person's steer now goes in at once on every provider, as Send now did: the drain is forced, so the adapter stops the running tool (Claude Code: `stopTask` once the call has a task, else one interrupt; Codex `turn/interrupt`; Pi abort; ACP `session/cancel`; Cursor cancel) and the same turn goes on with the steer. It waits only for a compaction, where Send now is still offered. A call whose input still streams is not stopped on Claude Code: the push alone drops it (S1). An agent's steer and a subagent notice still wait for a running tool as described below, and are never shown as waiting. `steerDelivery` in `src/mms/run/CommandPolicy.ts` is the rule. Where the sections below say a person's steer is held for a tool or the release window, read "cut now".
+
 ## Summary
 
 Three related changes to how a running turn takes a person's message:

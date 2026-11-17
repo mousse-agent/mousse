@@ -1,11 +1,12 @@
 /**
- * The steer hold on Claude Code (docs/design/steer-and-interruptions.md §2.4): a real orchestrator, run engine, Claude
- * adapter and provider service against a fake Claude Code process. A person's steer is not pushed while a `tool_use`
- * of the turn is open, from its `content_block_start` to its `tool_result`; it is pushed right after. Only foreground
- * subagents that Claude Code runs as a task are moved to the background, each by its id, never with the call that has
- * no id (it also moves a running command, #874). Send now pushes the steer and then stops the command: by its task
- * once Claude Code named one, otherwise with an interrupt, because an immediate message waits for a running command
- * (spike S1). With no command left to stop, the push alone is the cut.
+ * A person's steer on Claude Code goes in now: a real orchestrator, run engine, Claude adapter and provider service
+ * against a fake Claude Code process (hand-authored frames; tests/live/claudeSteerCutsIn.test.ts runs the real Claude
+ * Code). The steer is pushed at once as an immediate message, whatever the turn does. An immediate message waits for a
+ * running command on Claude Code (spike S1), so the command is stopped too: by its task once Claude Code named one,
+ * otherwise with one interrupt. Foreground subagents Claude Code runs as a task are moved to the background first, each
+ * by its id, never with the call that has no id (it also moves a running command, #874); one that cannot be moved is
+ * stopped with the commands. With no command left to stop, the push alone is the cut. An agent's steer still waits for a
+ * running tool and is never shown as waiting.
  */
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -20,6 +21,9 @@ import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 vi.setConfig({ testTimeout: 60_000 })
 
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Another agent's thread, steering this one: its steer still waits for a running tool. */
+const AGENT = { kind: 'agent' as const, threadId: 'other-thread', runId: 'other-run' }
 
 /** What Claude Code sends when an interrupt ends a running command: the call's error result, then the aborted turn's result. */
 const interruptedCommand = (process: FakeClaudeProcess, callId: string, prompt: string): void => {
@@ -39,7 +43,7 @@ const answerSteer = (process: FakeClaudeProcess, id: string, text: string): void
   process.emit(lifecycle(id, 'started'), messageStart(id), textDelta(text, id), resultFrame({ uuids: [id], text }))
 }
 
-describe('a person\'s steer on Claude Code waits for a running tool', () => {
+describe('a person\'s steer on Claude Code goes in now', () => {
   let home: string | undefined
   let previousHome: string | undefined
   const stops: Array<() => Promise<void>> = []
@@ -106,22 +110,20 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     return { d, cli, claude, thread, prompt, runId, first, steer, held, pushed, outcomes, inContext, sendNow }
   }
 
-  it('no push while a tool_use is open, from its content_block_start to its tool_result; then one push, as an immediate message', async () => {
+  it('an agent\'s steer is not pushed while a tool_use is open, from its content_block_start to its tool_result; then one push, as an immediate message', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt))
     await later(30)
-    await w.steer('use pnpm')
-    await waitFor(() => w.held() !== undefined, 'held')
-    expect(w.held()).toMatchObject({ waitsFor: 'Bash', tools: 1, runId: w.runId })
+    expect(w.d.orch.steerThread(w.thread.id, 'from another agent', undefined, undefined, AGENT, 'ask')).toBe(true)
     await later(350)
     expect(w.claude.inputs).toHaveLength(1)
+    expect(w.held()).toBeUndefined()
     w.claude.emit(toolResult('bash-1'))
     await waitFor(() => w.claude.inputs.length === 2, 'the steer pushed after the result')
     expect(w.claude.inputs[1]).toMatchObject({ priority: 'now' })
-    expect(w.pushed()).toEqual([expect.stringContaining('use pnpm')])
+    expect(w.pushed()).toEqual([expect.stringContaining('from another agent')])
     expect(w.claude.backgroundCalls).toEqual([])
     expect(w.claude.interrupts).toBe(0)
-    expect(w.held()).toBeUndefined()
     await later(250)
     expect(w.claude.inputs).toHaveLength(2)
   })
@@ -135,7 +137,7 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(w.held()).toBeUndefined()
   })
 
-  it('moves only foreground subagents Claude Code runs as a task, each by its id, then checks again: a command that starts during the move keeps the steer waiting', async () => {
+  it('moves only foreground subagents Claude Code runs as a task, each by its id, then pushes: a command that starts during the move is stopped', async () => {
     const w = await running()
     w.claude.emit(toolStart('agent-1', 'Agent', w.prompt), taskStarted('agent-1', 'task-agent'))
     await later(30)
@@ -145,19 +147,16 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     await waitFor(() => w.claude.backgroundCalls.length === 1, 'the subagent moving')
     expect(w.claude.backgroundCalls).toEqual(['agent-1'])
     // A command starts while the move is awaited.
-    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt))
+    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
     await later(30)
     open()
-    await waitFor(() => w.held() !== undefined, 'held again for the command')
-    expect(w.held()?.waitsFor).toBe('Bash')
-    await later(300)
-    expect(w.claude.inputs).toHaveLength(1)
-    w.claude.backgroundGate = undefined
-    w.claude.emit(toolResult('bash-1'))
-    await waitFor(() => w.claude.inputs.length === 2, 'pushed after the command')
+    await waitFor(() => w.claude.inputs.length === 2, 'pushed after the move')
     expect(w.pushed()).toEqual([expect.stringContaining('after the move')])
-    // Never the call with no id, and the subagent moved once is not moved again.
+    // The command is stopped (no task named yet: one interrupt); the moved subagent goes on, and is never moved again.
+    await waitFor(() => w.claude.interrupts === 1, 'the command stopped')
+    expect(w.claude.stoppedTasks).toEqual([])
     expect(w.claude.backgroundCalls).toEqual(['agent-1'])
+    expect(w.held()).toBeUndefined()
   })
 
   it('a subagent moved once is not moved again for the next steer', async () => {
@@ -179,38 +178,37 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     await waitFor(() => w.claude.inputs.length === 2, 'pushed')
     expect(w.pushed()).toEqual([expect.stringContaining('before the subagent starts')])
     expect(w.claude.backgroundCalls).toEqual([])
+    // The push alone drops a call whose input still streams: nothing is interrupted.
+    await later(250)
+    expect(w.claude.interrupts).toBe(0)
     const row = w.d.orch.getOrCreateSession(w.thread.id).messages.find((message) => message.activity?.callId === 'agent-1')
     expect(row?.activity?.notMovable).toBeUndefined()
     expect(w.held()).toBeUndefined()
   })
 
   it.each([['answers false', false], ['throws (background tasks are off)', 'throw']] as const)(
-    'a subagent task that cannot be moved (the move %s) is reported and waited for, without moving again', async (_name, answer) => {
+    'a subagent task that cannot be moved (the move %s) is reported, the steer pushed, and the subagent stopped by its task', async (_name, answer) => {
       const w = await running()
       w.claude.backgroundAnswer = answer
-      w.claude.emit(toolStart('agent-1', 'Agent', w.prompt), taskStarted('agent-1', 'task-agent'))
+      w.claude.emit(toolStart('agent-1', 'Agent', w.prompt), toolUse('agent-1', 'Agent', { prompt: 'look around' }), taskStarted('agent-1', 'task-agent'))
       await later(30)
       await w.steer('after the subagent')
-      await waitFor(() => w.held() !== undefined, 'held for the subagent')
-      // The progress line's word for it ("Running subagent…").
-      expect(w.held()?.waitsFor).toBe('subagent')
+      await waitFor(() => w.claude.inputs.length === 2, 'pushed')
+      expect(w.pushed()).toEqual([expect.stringContaining('after the subagent')])
       const row = w.d.orch.getOrCreateSession(w.thread.id).messages.find((message) => message.activity?.callId === 'agent-1')
       expect(row?.activity?.notMovable).toBe(true)
-      await later(350)
+      await waitFor(() => w.claude.stoppedTasks.length === 1, 'the subagent stopped')
+      expect(w.claude.stoppedTasks).toEqual(['task-agent'])
       expect(w.claude.backgroundCalls).toEqual(['agent-1'])
-      expect(w.claude.inputs).toHaveLength(1)
-      w.claude.emit(toolResult('agent-1'))
-      await waitFor(() => w.claude.inputs.length === 2, 'pushed once the subagent ended')
-      expect(w.pushed()).toEqual([expect.stringContaining('after the subagent')])
+      expect(w.claude.interrupts).toBe(0)
+      expect(w.held()).toBeUndefined()
     })
 
-  it('Send now before Claude Code names the command\'s task: the steer is pushed, then the turn is interrupted', async () => {
+  it('a steer during a command Claude Code has not named a task for yet: the steer is pushed at once, then the turn is interrupted', async () => {
     const w = await running()
-    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt))
+    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
     await later(30)
     await w.steer('now please')
-    await waitFor(() => w.held() !== undefined, 'held')
-    expect(await w.sendNow('now-1')).toMatchObject({ status: 'accepted' })
     await waitFor(() => w.claude.interrupts === 1, 'interrupted')
     // Pushed first, so the interrupt leaves it queued and it runs once.
     expect(w.claude.inputs).toHaveLength(2)
@@ -218,59 +216,52 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(w.claude.interruptOptions).toEqual([undefined])
     expect(w.claude.stoppedTasks).toEqual([])
     expect(w.claude.backgroundCalls).toEqual([])
+    // Nothing waits, and windows are never offered Send now.
+    expect(w.held()).toBeUndefined()
   })
 
-  it('Send now once Claude Code named the command\'s task: the steer is pushed, then that task is stopped, with no interrupt', async () => {
+  it('a steer once Claude Code named the command\'s task: the steer is pushed, then that task is stopped, with no interrupt', async () => {
     const w = await running()
-    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), taskStarted('bash-1', 'task-9'))
+    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }), taskStarted('bash-1', 'task-9'))
     await later(30)
     await w.steer('stop it')
-    await waitFor(() => w.held() !== undefined, 'held')
-    await w.sendNow('now-1')
     await waitFor(() => w.claude.stoppedTasks.length === 1, 'task stopped')
     expect(w.claude.stoppedTasks).toEqual(['task-9'])
     expect(w.claude.inputs).toHaveLength(2)
     expect(w.claude.interrupts).toBe(0)
   })
 
-  it('Send now through to the end: the interrupt\'s aborted result does not end the run, the model answers the steer, and it is accepted once', async () => {
+  it('through to the end: the interrupt\'s aborted result does not end the run, the model answers the steer in the same run, and it is accepted once', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
     await later(30)
-    const itemId = await w.steer('use pnpm instead')
-    await waitFor(() => w.held() !== undefined, 'held')
     w.claude.onInterrupt = (process) => {
       setTimeout(() => {
         interruptedCommand(process, 'bash-1', w.prompt)
         answerSteer(process, process.uuid(1), 'switching to pnpm')
       }, 0)
     }
-    expect(await w.sendNow('now-1')).toMatchObject({ status: 'accepted' })
+    const itemId = await w.steer('use pnpm instead')
     await w.first
     expect(w.claude.interrupts).toBe(1)
     expect(w.inContext('use pnpm instead')).toBe(1)
+    // The same run went on to the steer's answer, and nothing else ran.
+    expect(w.d.engine.getRun(w.runId)?.status).toBe('completed')
+    expect(w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => message.role === 'assistant' && String(message.content).includes('switching to pnpm'))).toHaveLength(1)
     // Accepted: its row left the queue, and no follow-up turn carries it.
     expect(w.d.orch.listQueue(w.thread.id).map((item) => item.id)).not.toContain(itemId)
     expect(w.d.orch.listQueue(w.thread.id)).toEqual([])
-    expect(w.outcomes).toEqual([{ requestId: 'now-1', outcome: 'applied' }])
-    // The audit record of the person's Send now (§2.9).
-    expect(w.d.engine.listEvents(w.thread.id).filter((event) => event.type === 'person.action').map((event) => event.payload)).toEqual([
-      expect.objectContaining({ action: 'steered_run', now: true, requestId: 'now-1' })
-    ])
-    // Nothing runs it again.
     await later(300)
     expect(w.claude.inputs).toHaveLength(2)
     expect(w.d.engine.getActiveRun(w.thread.id)).toBeNull()
   })
 
-  it('Send now, then Stop before Claude Code reads the steer: the steer comes back once as a queued message and nothing runs it', async () => {
+  it('a steer, then Stop before Claude Code reads it: the steer comes back once as a queued message and nothing runs it', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
     await later(30)
     const itemId = await w.steer('then stop')
-    await waitFor(() => w.held() !== undefined, 'held')
-    await w.sendNow('now-1')
-    await waitFor(() => w.claude.interrupts === 1, 'Send now\'s interrupt')
+    await waitFor(() => w.claude.interrupts === 1, 'the steer\'s interrupt')
     expect(w.claude.inputs).toHaveLength(2)
     await w.d.orch.stopThread(w.thread.id, 'user')
     await w.first.catch(() => undefined)
@@ -282,41 +273,18 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(w.claude.inputs).toHaveLength(2)
   })
 
-  it('Send now as the command ends on its own: the push alone is the cut, with no interrupt (it would also stop background work)', async () => {
+  it('a steer as the command ends on its own: the push alone is the cut, with no interrupt (it would also stop background work)', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'npm test' }))
     await later(30)
+    // The command's result lands in the same moment as the steer, before the next poll.
     await w.steer('racing the end')
-    await waitFor(() => w.held() !== undefined, 'held')
-    const click = w.sendNow('now-1')
-    // The command's result lands in the same moment as the click, before the next poll.
     w.claude.emit(toolResult('bash-1'))
-    expect(await click).toMatchObject({ status: 'accepted' })
     await waitFor(() => w.claude.inputs.length === 2, 'pushed')
     await later(250)
     expect(w.pushed()).toEqual([expect.stringContaining('racing the end')])
     expect(w.claude.interrupts).toBe(0)
     expect(w.claude.stoppedTasks).toEqual([])
-  })
-
-  it('a click replayed with the same request id forces nothing more and is reported once', async () => {
-    const w = await running()
-    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
-    await later(30)
-    await w.steer('first')
-    await waitFor(() => w.held() !== undefined, 'held')
-    const shown = w.held()!
-    await w.sendNow('now-1', shown)
-    await waitFor(() => w.claude.interrupts === 1, 'Send now\'s interrupt')
-    expect(await w.sendNow('now-1', shown)).toMatchObject({ replayed: true })
-    // A new hold in the same turn: a second command, and a second steer held for it.
-    w.claude.emit(toolStart('bash-2', 'Bash', w.prompt), toolUse('bash-2', 'Bash', { command: 'sleep 30' }))
-    await later(30)
-    await w.steer('second')
-    await waitFor(() => w.held() !== undefined && w.held()!.holdGeneration !== shown.holdGeneration, 'held again')
-    await later(250)
-    expect(w.outcomes).toEqual([{ requestId: 'now-1', outcome: 'applied' }])
-    expect(w.claude.interrupts).toBe(1)
   })
 
   it.each([
@@ -336,15 +304,6 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(w.held()).toBeUndefined()
     // The steer answered the question as the person.
     await waitFor(() => w.d.questions.listPendingForThread(w.thread.id).length === 0, 'the question answered')
-  })
-
-  it('with no question pending, Mousse\'s ask_user call holds like any tool', async () => {
-    const w = await running()
-    w.claude.emit(toolStart('mcp-1', 'mcp__mousse__ask_user', w.prompt), toolUse('mcp-1', 'mcp__mousse__ask_user', {}))
-    await later(30)
-    await w.steer('waits')
-    await waitFor(() => w.held() !== undefined, 'held: no question is pending yet')
-    expect(w.held()?.waitsFor).toBe('Ask User')
   })
 
   it.each([
@@ -368,21 +327,22 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(w.held()).toBeUndefined()
   })
 
-  it('a call whose whole message arrived is not closed when the next message starts: it runs, and holds', async () => {
+  it('a call whose whole message arrived is not closed when the next message starts: it runs, and an agent\'s steer waits for it', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 5' }), messageStart(w.prompt))
     await later(30)
-    await w.steer('waits for it')
-    await waitFor(() => w.held() !== undefined, 'held')
-    expect(w.held()?.waitsFor).toBe('Bash')
+    expect(w.d.orch.steerThread(w.thread.id, 'waits for it', undefined, undefined, AGENT, 'ask')).toBe(true)
+    await later(350)
+    expect(w.claude.inputs).toHaveLength(1)
+    const row = w.d.orch.getOrCreateSession(w.thread.id).messages.find((message) => message.activity?.callId === 'bash-1')
+    expect(row?.activity?.status).not.toBe('interrupted')
   })
 
   it('an agent\'s steer held for a tool shows no wait line and no Send now, and a click on its hold is stale and stops nothing', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
     await later(30)
-    const origin = { kind: 'agent' as const, threadId: 'other-thread', runId: 'other-run' }
-    expect(w.d.orch.steerThread(w.thread.id, 'from another agent', undefined, undefined, origin, 'ask')).toBe(true)
+    expect(w.d.orch.steerThread(w.thread.id, 'from another agent', undefined, undefined, AGENT, 'ask')).toBe(true)
     await later(350)
     // Held (nothing pushed while the command runs), but not shown.
     expect(w.claude.inputs).toHaveLength(1)
@@ -395,47 +355,58 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(w.claude.inputs).toHaveLength(1)
   })
 
-  it('a person\'s steer with no queue item (a device with a permission limit) is saved as a queue row bound to the run while it is held, and Send now forces it', async () => {
+  it('once the person answers an approval for the running command, the turn reads as running it again, and a steer goes in at once', async () => {
+    const w = await running()
+    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
+    await waitFor(() => w.d.orch.getTurnState(w.thread.id).phase === 'tool_running', 'the command running')
+    // The daemon marks the turn as waiting while its approval is open (a question pending), and calls back once the
+    // thread's last question is answered. Claude Code then runs the command and sends nothing until its result.
+    w.d.orch.setAwaitingInput(w.thread.id)
+    expect(w.d.orch.getTurnState(w.thread.id).phase).toBe('awaiting_input')
+    w.d.orch.inputAnswered(w.thread.id)
+    expect(w.d.orch.getTurnState(w.thread.id)).toMatchObject({ phase: 'tool_running', turnId: w.runId })
+    await w.steer('after the approval')
+    await waitFor(() => w.claude.inputs.length === 2, 'the steer pushed')
+    await waitFor(() => w.claude.interrupts === 1, 'the command stopped')
+    expect(w.d.orch.listQueue(w.thread.id).filter((item) => item.state === 'pending')).toEqual([])
+  })
+
+  it('a person\'s steer with no queue item (a device with a permission limit) is saved as a queue row bound to the run, and goes in at once', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
     await later(30)
     // A device with a limit steers through the same entry a window does (`orchestrator.steer`).
     expect(w.d.orch.steerThreadOrEnqueueExternal(w.thread.id, 'limited device steer', { permissionMode: 'ask' })).toMatchObject({ steered: true })
-    await waitFor(() => w.held() !== undefined, 'held')
-    // It was saved as a queue row bound to the run, `steering` from the start, with the device's limit: a crash while
-    // it waits for the tool returns it once (`restartRecovery`, `steer-held-device`).
+    // It was saved as a queue row bound to the run, `steering` from the start, with the device's limit: a crash before
+    // it is read returns it once (`restartRecovery`, `steer-held-device`).
     const rows = readDurableQueue(w.d.store, w.thread.id)
     expect(rows).toEqual([expect.objectContaining({ content: 'limited device steer', state: 'steering', steerRunId: w.runId, permissionMode: 'ask' })])
-    expect(w.held()).toMatchObject({ itemIds: [rows[0]!.id], waitsFor: 'Bash' })
-    await w.sendNow('now-1')
     await waitFor(() => w.claude.interrupts === 1, 'interrupted')
     expect(w.pushed()).toEqual([expect.stringContaining('limited device steer')])
-    expect(w.outcomes).toEqual([{ requestId: 'now-1', outcome: 'applied' }])
+    expect(w.held()).toBeUndefined()
   })
 
-  it('a run-bound steer (`orchestrator.steer` with its run) is saved as a queue row bound to the run while it is held', async () => {
+  it('a run-bound steer (`orchestrator.steer` with its run) is saved as a queue row bound to the run, and goes in at once', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
     await later(30)
     expect(await w.d.orch.steerRun(w.runId, 'run-bound steer', 'steer-1', w.thread.id)).toMatchObject({ status: 'accepted' })
-    await waitFor(() => w.held() !== undefined, 'held')
+    // The engine takes it as a durable effect: the row appears once that effect runs.
+    await waitFor(() => readDurableQueue(w.d.store, w.thread.id).length === 1, 'the row saved')
     const rows = readDurableQueue(w.d.store, w.thread.id)
     expect(rows).toEqual([expect.objectContaining({ content: 'run-bound steer', state: 'steering', steerRunId: w.runId })])
-    expect(w.held()?.itemIds).toEqual([rows[0]!.id])
-    w.claude.emit(toolResult('bash-1'))
-    await waitFor(() => w.claude.inputs.length === 2, 'pushed after the command')
+    await waitFor(() => w.claude.inputs.length === 2, 'pushed while the command runs')
     expect(w.pushed()).toEqual([expect.stringContaining('run-bound steer')])
+    await waitFor(() => w.claude.interrupts === 1, 'the command stopped')
   })
 
   it.each([
     ['before the model wrote anything: the steer is handed back and runs once more', false, 2],
     ['after the model began its answer: the steer is read, once', true, 1]
-  ] as const)('Send now whose interrupt lands after Claude Code took the steer for its next request, aborted %s; the run ends at that aborted result, never stuck', async (_name, answered, sentTimes) => {
+  ] as const)('a steer whose interrupt lands after Claude Code took it for its next request, aborted %s; the run ends at that aborted result, never stuck', async (_name, answered, sentTimes) => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'npm test' }))
     await later(30)
-    await w.steer('use pnpm')
-    await waitFor(() => w.held() !== undefined, 'held')
     w.claude.onInterrupt = (process) => {
       // The command had just ended and Claude Code had taken the steer for its next request: the interrupt aborts that
       // request, so the model never answers the steer and no result of its own follows.
@@ -447,8 +418,8 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     w.claude.onInput = (message, process) => {
       if (message.priority !== 'now') process.answer(String(message.uuid), 'ok')
     }
-    await w.sendNow('now-1')
-    await waitFor(() => w.claude.interrupts === 1, 'Send now\'s interrupt')
+    await w.steer('use pnpm')
+    await waitFor(() => w.claude.interrupts === 1, 'the steer\'s interrupt')
     await waitFor(() => w.d.engine.getActiveRun(w.thread.id) === null && w.d.orch.listQueue(w.thread.id).length === 0 && !w.d.orch.isActiveTurnRunning(w.thread.id), 'the run ended and nothing waits').catch((error) => {
       throw new Error(`${(error as Error).message}: ${JSON.stringify({ active: w.d.engine.getActiveRun(w.thread.id)?.status, queue: w.d.orch.listQueue(w.thread.id).map((item) => [item.content, item.state]), running: w.d.orch.isActiveTurnRunning(w.thread.id), inputs: w.cli.processes.map((p) => p.inputs.map((_, i) => p.text(i).slice(0, 40))), phase: w.d.orch.getTurnState(w.thread.id).phase })}`)
     })
@@ -458,25 +429,21 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(cliInputsWith(w.cli, 'use pnpm')).toBe(sentTimes)
     expect(w.inContext('use pnpm')).toBe(1)
     expect(w.claude.interrupts).toBe(1)
-    // The person pressed Send now: the turn did not fail, and the thread shows no error.
+    // The person steered: the turn did not fail, and the thread shows no error.
     expect(w.d.engine.getRun(w.runId)?.status).toBe('completed')
     expect(w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => /orchestrator_turn_failed|Something went wrong/.test(String(message.content)))).toEqual([])
     // The cut turn wrote nothing: no "Done." placeholder stands where the steer's answer (or its second run) follows.
     expect(w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => message.role === 'assistant' && message.content === 'Done.')).toEqual([])
   })
 
-  it('two quick Send nows interrupt once: the second steer goes in with the first, and the run ends at their answer, never stuck', async () => {
+  it('two quick steers interrupt once: the second goes in with the first, and the run ends at their answer, never stuck', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
     await later(30)
     await w.steer('use pnpm')
-    await waitFor(() => w.held() !== undefined, 'the first steer held')
-    await w.sendNow('now-1')
     await waitFor(() => w.claude.interrupts === 1 && w.claude.inputs.length === 2, 'the first steer pushed and the interrupt sent')
-    // The command is still running (the interrupt has not landed): the second steer waits for it, and is sent now too.
-    const second = await w.steer('and run lint')
-    await waitFor(() => w.held()?.itemIds.includes(second) === true, 'the second steer held')
-    await w.sendNow('now-2')
+    // The command is still running (the interrupt has not landed): the second steer is pushed too, with no second interrupt.
+    await w.steer('and run lint')
     await waitFor(() => w.claude.inputs.length === 3, 'the second steer pushed')
     await later(100)
     const [a, b] = [w.claude.uuid(1), w.claude.uuid(2)]
@@ -498,12 +465,10 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(w.d.orch.listQueue(w.thread.id)).toEqual([])
   })
 
-  it('a later steer that cuts the same turn after a Send now is waited past: the run goes on to its answer, and it is sent once', async () => {
+  it('a later steer that cuts the same turn after one that stopped a command is waited past: the run goes on to its answer, and it is sent once', async () => {
     const w = await running()
     w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
     await later(30)
-    await w.steer('use pnpm instead')
-    await waitFor(() => w.held() !== undefined, 'held')
     // The interrupt ends the command, then Claude Code takes the steer and the model answers it; the turn goes on.
     w.claude.onInterrupt = (process) => {
       setTimeout(() => {
@@ -511,8 +476,8 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
         process.emit(lifecycle(process.uuid(1), 'started'), messageStart(process.uuid(1)), textDelta('switching to pnpm', process.uuid(1)))
       }, 0)
     }
-    await w.sendNow('now-1')
-    await waitFor(() => w.inContext('use pnpm instead') === 1 || w.outcomes.length > 0, 'the first steer answered')
+    await w.steer('use pnpm instead')
+    await waitFor(() => w.inContext('use pnpm instead') === 1, 'the first steer answered')
     await later(100)
     // A second steer cuts in while the model writes: Claude Code aborts the request, with no queued_turn_count.
     await w.steer('also run lint')
@@ -534,7 +499,7 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(w.claude.interrupts).toBe(1)
   })
 
-  it('Send now with two tasks whose stop fails interrupts the turn once', async () => {
+  it('a steer during two commands whose task stops fail interrupts the turn once', async () => {
     const w = await running()
     w.claude.stopTaskFails = true
     w.claude.emit(
@@ -543,20 +508,16 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     )
     await later(30)
     await w.steer('stop both')
-    await waitFor(() => w.held()?.tools === 2, 'held for both')
-    await w.sendNow('now-1')
     await waitFor(() => w.claude.stoppedTasks.length === 2, 'both stops tried')
     await later(250)
     expect(w.claude.interrupts).toBe(1)
   })
 
-  it.each(['WebFetch', 'WebSearch'])('Send now during %s pushes the steer with no interrupt: the push alone ends it (S1), and background work keeps running', async (tool) => {
+  it.each(['WebFetch', 'WebSearch'])('a steer during %s pushes the steer with no interrupt: the push alone ends it (S1), and background work keeps running', async (tool) => {
     const w = await running()
     w.claude.emit(toolStart('web-1', tool, w.prompt), toolUse('web-1', tool, tool === 'WebFetch' ? { url: 'https://example.com' } : { query: 'steer hold' }))
     await later(30)
     await w.steer('skip the page')
-    await waitFor(() => w.held() !== undefined, 'held')
-    await w.sendNow('now-1')
     await waitFor(() => w.claude.inputs.length === 2, 'pushed')
     await later(250)
     expect(w.pushed()).toEqual([expect.stringContaining('skip the page')])
