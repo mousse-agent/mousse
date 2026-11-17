@@ -581,3 +581,20 @@ function listsServices(bots: unknown, botsSharing?: unknown): ListsServices {
     ...(botsSharing ? { botsSharing } : {})
   } as unknown as ListsServices
 }
+
+describe('device presets and bot answers', () => {
+  it('holds both held-action choices to the same Work gate as ordinary permission answers', async () => {
+    const { ACCESS_PRESETS } = await import('../../../../src/shared/net/accessPresets')
+    const { methodAccess, needsWork } = await import('../../../../src/shared/net/accessClasses')
+    for (const preset of ACCESS_PRESETS) {
+      // NetService's authorizeMethod reads this same decision on calls AND saved-result lookups.
+      const mayAnswer = (method: string) => preset.fields.work || !needsWork(methodAccess(method))
+      expect(mayAnswer('bots.chat.list'), preset.label).toBe(true)
+      expect(mayAnswer('bots.chat.send'), preset.label).toBe(true)
+      for (const choice of ['send', 'not_now']) {
+        expect(mayAnswer('bots.actions.answer'), `${preset.label}: ${choice}`).toBe(mayAnswer('bots.asks.answer'))
+        expect(mayAnswer('bots.actions.answer'), `${preset.label}: ${choice}`).toBe(preset.fields.work)
+      }
+    }
+  })
+})
