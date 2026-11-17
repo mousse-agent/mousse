@@ -355,7 +355,7 @@ describe('the poll', () => {
 })
 
 it('keeps an open MCP review in needs-you words when its chat opens beside background work', async () => {
-  const stateText = 'Wants to send: Send email · Mail'
+  const stateText = 'Waiting for you: Send email · Mail'
   const bot = summary('mail-review', { name: 'Mail helper', state: 'needs_you', needsOwner: true, stateText,
     work: [{ id: 'other-work', title: 'Organising mail', status: 'running', startedAt: '2026-11-07T09:00:00.000Z' }] })
   fake.chats[bot.id] = [message(1, { id: 'bm_action_mail', text: 'Mail · send_email\nPrivate body', action: {

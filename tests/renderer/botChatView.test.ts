@@ -2752,3 +2752,21 @@ it('keeps empty and unusual field names injective and reserves the non-ASCII not
   expect(region.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')).toHaveLength(1)
   for (const text of ['＂false＂', '«false»', '„false„', '   ']) expect([...region.querySelectorAll('dd')].some(item => item.textContent === JSON.stringify(text))).toBe(true)
 })
+
+it('shows a settled card time once, trims timeout punctuation and avoids repeating an expired refusal', async () => {
+  const sentence = "Mail couldn't be reached, so nothing was sent."
+  fake.chats.inbox = [held({ status: 'failed', at: '2026-11-07T10:24:00.000Z', result: { text: sentence, notSentInTime: true } })]
+  await open()
+  const row = host.querySelector('[data-message-id="held-message"]')!
+  expect(row.querySelectorAll('time')).toHaveLength(1)
+  expect(row.querySelector('time')?.getAttribute('datetime')).toBe('2026-11-07T10:24:00.000Z')
+  expect(row.querySelector('[role="status"]')?.textContent).not.toContain('. ·')
+  // Redraw to an open row, then let the service expire it during Send.
+  await act(async () => fake.emit.message('inbox', held()))
+  Object.assign(fake.client, { answerAction: vi.fn(async () => { fake.chats.inbox = [held({ status: 'expired', at: AT })]; throw Object.assign(new Error('This expired, so nothing was sent.'), { code: 'bot_action_expired' }) }) })
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelectorAll('[role="status"]')).toHaveLength(1)
+  expect(card.textContent).toContain('Expired · not sent')
+  expect(card.textContent).not.toContain('This expired, so nothing was sent.')
+})

@@ -145,7 +145,7 @@ it('keeps an owner MCP review readable in its sidebar summary, card and notifica
     expect(message.action).toMatchObject({ title: 'Send email', serverName: 'Mail', status: 'open' })
     const summary = f.bots.service.list().bots.find(bot => bot.id === botId)!
     expect(summary).toMatchObject({ state: 'needs_you', needsOwner: true })
-    expect(summary.stateText).toBe('Wants to send: Send email · Mail')
+    expect(summary.stateText).toBe('Waiting for you: Send email · Mail')
     const banner = botNotificationContent(summary.name, message)
     expect(botNotificationKind(message, f.clock.now)).toBe('question')
     expect(banner).toEqual({ title: summary.name, body: 'Wants to send email' })
