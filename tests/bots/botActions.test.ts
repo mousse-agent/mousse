@@ -3315,3 +3315,15 @@ it('C9 switch rollback is atomic when a second row cannot be written', async () 
   expect(f.store.all("SELECT id FROM bot_actions WHERE status IN ('open', 'approved')")).toEqual([])
   expect(t.calls).toEqual([])
 })
+
+it('C9 an unread expiry from the earlier build uses the owner-writing rule too', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.bots.actions.transition(a.id, 'open', 'expired', { text: 'This call expired. Carry on without it; do not try the same call again without a new reason.' })
+  await f.bots.maintain(); await flush()
+  const text = f.store.lastMainDispatch(t.workId)!.prompt.text
+  expect(text).not.toContain('without a new reason')
+  expect(text.split('This expired, so nothing was sent.')).toHaveLength(2)
+  expect(text).toContain('unless your owner writes')
+})
