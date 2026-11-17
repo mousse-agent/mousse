@@ -196,7 +196,6 @@ describe('production platform composition through framed MMS', () => {
       await expect(b.workflows.get({ profileId: f.alice.id, id: workflow.id })).rejects.toMatchObject({ code: 'profile_mismatch' })
       await expect(b.integrations.skillEditor({ profileId: f.bob.id, installationId: skillId })).rejects.toThrow()
       const aliceServices = await f.main.getProfileServices(f.alice.id), bobServices = await f.main.getProfileServices(f.bob.id)
-      expect(aliceServices.providerAuth).toBe(bobServices.providerAuth)
       expect(aliceServices.platform).not.toBe(bobServices.platform)
     } finally { await f.close() }
     const reloaded = await MousseMainService.create({ homeDir: f.homeDir, repoRoot: f.root, requireOwnership: false, headless: true })

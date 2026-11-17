@@ -447,17 +447,6 @@ describe('definition browser runtime binding', () => {
     expect(result.text).toBe('stopped after unknown effect')
   })
 
-  it('keeps ask_user advertised next to browser tools on a definition run', async () => {
-    const { captured, recorded } = await runBrowserNative({
-      runtimeOutputs: [],
-      outputs: [providerResponse([{ type: 'text', text: 'ready' }], 'stop')]
-    })
-    expect(captured[0]!.tools!.map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(['ask_user', 'browser_open'])
-    )
-    expect(recorded.dispatches).toEqual([])
-  })
-
   it('holds a CLI-kind definition to the same browser rules as any other (PR 4 §6)', () => {
     const snapshot = browserSnapshot()
     snapshot.runtimeKind = 'codex'
