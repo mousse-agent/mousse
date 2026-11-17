@@ -9,7 +9,7 @@ import { asCreateScheduledJobInput, asScheduledJobPatch } from '../../../protoco
 import type { RunEngine } from '../../RunEngine'
 import type { AgentScheduleHost, AppToolHost } from './host'
 import { botThreadReach, lineageRelation } from './thread'
-import { CLIENT_REQUEST_ID_SCHEMA, json, McpToolError, type MousseTool, type ToolCallContext } from './types'
+import { checkedInHandler, CLIENT_REQUEST_ID_SCHEMA, json, McpToolError, type MousseTool, type ToolCallContext } from './types'
 
 /** The prompt `schedule_list` returns is cut to this many characters. */
 const PROMPT_LIST_CHARS = 2000
@@ -301,7 +301,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     // The central check reads this as a listing. Which jobs the caller may touch is the handler's decision (`visible`):
     // the ones its own thread made.
     target: () => ({}),
-    threadArgChecked: 'the handlers accept the caller\'s own thread or its lineage only (checkTarget)',
+    authorize: checkedInHandler('the handlers accept the caller\'s own thread or its lineage only (checkTarget)'),
     offered: () => false,
     listed: () => host.schedules !== undefined,
     available: () => (host.schedules ? true as const : 'Scheduled jobs are not available in this profile.')

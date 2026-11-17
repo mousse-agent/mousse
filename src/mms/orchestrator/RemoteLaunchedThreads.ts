@@ -27,7 +27,8 @@ import type { ThreadActivityState } from '../../shared/types'
  * - **Ids.** Results are named the way this computer names things before a tool sees them: that computer's threads
  *   qualified, this computer's own plain, and an agent sender (`origin.from`) named by its thread on its computer.
  * - **Stops.** A Stop that cannot be delivered is kept in its row (`remote_launches.stop_*`), survives a restart and is
- *   sent once that computer answers, until its deadline. The launcher's transcript says when it is still on its way.
+ *   sent once that computer answers, however long that takes; it is given up only when that computer is no longer one of
+ *   the user's computers. The launcher's transcript says when it is still on its way.
  */
 
 /** Codes of a call that did not reach the computer: tried once more before the computer is called offline. */
@@ -42,7 +43,10 @@ const PROBE_MS = 8_000
 export const SEARCH_MS = 10_000
 /** Without `runs.wait`, how often a wait asks the run's status. */
 export const REMOTE_WAIT_POLL_MS = 4_000
-/** A kept Stop is given up after this long. */
+/**
+ * The deadline a kept Stop records (`stop_deadline`), for an older version that reads it. This one keeps the Stop until it
+ * is delivered, or that computer is no longer one of the user's computers.
+ */
 export const REMOTE_STOP_DEADLINE_MS = 24 * 60 * 60_000
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -730,12 +734,16 @@ export class RemoteLaunchedThreads {
     for (const row of this.deps.records.listPendingStops()) {
       if (this.closed) return
       const stop = row.stop!
-      if (this.now() >= Date.parse(stop.deadline)) {
+      // A computer that left the user's device list can never take it; one listed as offline is tried once it answers.
+      const listed = this.deps.port()?.computers()
+      const computer = listed?.find((entry) => entry.node === row.node)
+      if (listed && !computer) {
         this.deps.records.settleStop(row.creationKey, stop.key, 'expired', stop.result)
         if (stop.reason === 'stopped')
-          this.safeNote(row.launcherThreadId, `The Stop did not reach «${row.title}» on ${row.computerName} within a day, so Mousse stopped trying. Its run there may still be going.`)
+          this.safeNote(row.launcherThreadId, `The Stop cannot reach «${row.title}»: ${row.computerName} is no longer one of your computers, so Mousse stopped trying. Its run there may still be going.`)
         continue
       }
+      if (computer && !computer.online && stop.result?.startsWith('undelivered')) continue
       try {
         const target: RemoteTarget = { ok: true, record: row, node: row.node, remoteThreadId: row.remoteThreadId!, computer: row.computerName, threadId: qualifyId(row.node, row.remoteThreadId!) }
         const done = await this.interrupt(target, undefined, { clientRequestId: stop.key, mark: { ...row.mark, hops: 1 } })
@@ -751,7 +759,7 @@ export class RemoteLaunchedThreads {
         const first = !current.result?.startsWith('undelivered')
         this.deps.records.updateStopResult(row.creationKey, stop.key, `undelivered: ${messageOf(error)}`)
         if (first && stop.reason === 'stopped')
-          this.safeNote(row.launcherThreadId, `The Stop has not reached «${row.title}» on ${row.computerName} yet (${messageOf(error)}), so its run there may still be going. Mousse sends it when ${row.computerName} answers, for up to a day.`)
+          this.safeNote(row.launcherThreadId, `The Stop has not reached «${row.title}» on ${row.computerName} yet (${messageOf(error)}), so its run there may still be going. Mousse sends it when ${row.computerName} answers.`)
       }
     }
   }

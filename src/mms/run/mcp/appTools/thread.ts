@@ -16,6 +16,7 @@ import { RemoteThreadRefusal, SEARCH_MS, type RemoteComputerReach, type RemoteTa
 import { cutEnd, messageRows, textOffsetProblem, type MessageRow } from './messageRows'
 import type { BotActivityContext, BotActivitySink } from '../../../bots/seams'
 import {
+  checkedInHandler,
   CLIENT_REQUEST_ID_SCHEMA,
   json,
   McpToolError,
@@ -2365,7 +2366,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         }
       },
       access: 'startsThreads',
-      threadArgChecked: 'the handler accepts the caller\'s own thread or its lineage as the source (a personal bot: a thread it may reach)',
+      authorize: checkedInHandler('the handler accepts the caller\'s own thread or its lineage as the source (a personal bot: a thread it may reach)'),
       class: 'mutation',
       offered: () => false,
       // A personal bot's source, held to what it may reach (`botThreadScope`); an agent's is checked in the handler.
@@ -2414,7 +2415,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       // into a parent it may reach; its owner allowing "use your threads" is its answer, so nothing asks.
       access: 'editsWorkspace',
       permissionKey: PERMISSION_KEYS.mousseMergeBack,
-      threadArgChecked: "the handler accepts the caller's own fork only (a personal bot: a fork it may reach)",
+      authorize: checkedInHandler("the handler accepts the caller's own fork only (a personal bot: a fork it may reach)"),
       class: 'mutation',
       offered: () => false,
       botGrantAnswers: true,

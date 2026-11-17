@@ -10,6 +10,8 @@ import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } f
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
+import { RemoteExpiryRecords } from './delegation/remoteExpiry'
+import { RunTimeLimitRecords } from './runTimeLimits'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
@@ -303,6 +305,8 @@ export interface RemoteDelegationTarget {
   instanceId: string | null
   model: string | null
   deadlineAt: string | null
+  /** The minutes of running time the task may use (`maxMinutes`); null for no limit. */
+  limitMinutes?: number | null
   /** The far thread, for a follow-up on a subagent that already has one. */
   remoteThreadId?: string | null
 }
@@ -477,6 +481,10 @@ export class RunEngine extends EventEmitter {
   readonly delegations: Delegations
   /** Remote subagents' tasks and the runs on other computers that do them (issue #469). */
   readonly remoteSubagents: RemoteSubagentRecords
+  /** The expiry each remote subagent's thread there must have (emote_expiry). */
+  readonly remoteExpiry: RemoteExpiryRecords
+  /** Running-time limits of runs on this computer (un_time_limits). */
+  readonly runTimeLimits: RunTimeLimitRecords
   /** Threads agents here launched on other computers (`thread_create` with `computer`, issue #1160). */
   readonly remoteLaunches: RemoteLaunchRecords
   /** Saved approval requests (SPEC §17). */
@@ -516,6 +524,8 @@ export class RunEngine extends EventEmitter {
     this.inbox = new Inbox(opts.store)
     this.delegations = new Delegations(opts.store, this.inbox)
     this.remoteSubagents = new RemoteSubagentRecords(opts.store)
+    this.remoteExpiry = new RemoteExpiryRecords(opts.store)
+    this.runTimeLimits = new RunTimeLimitRecords(opts.store)
     this.remoteLaunches = new RemoteLaunchRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
     this.openQuestions = new OpenQuestions(opts.store)

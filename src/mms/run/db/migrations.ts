@@ -719,5 +719,45 @@ CREATE TABLE open_questions(
 ) STRICT;
 CREATE INDEX open_questions_thread ON open_questions(thread_id, status);
 `
+  },
+  {
+    version: 24,
+    sql: `
+-- A remote subagent's limit (issue #685, maxMinutes): the minutes of running time its task may use. The computer that
+-- runs it counts them when it takes the limit; deadline_at stays the stop this computer makes for an older one.
+ALTER TABLE remote_subagents ADD COLUMN limit_minutes INTEGER CHECK(limit_minutes IS NULL OR limit_minutes >= 1);
+
+-- The expiry a remote subagent's thread there must have (issue #685): its root thread's here, kept until that
+-- computer took it, so a change made while it is offline reaches it when it answers. One row per subagent.
+--   pending: expires_at (null: no expiry) is not yet set there; generation rises with each change;
+--   sent:    that computer took it, or its thread there is gone.
+CREATE TABLE remote_expiry(
+  child_thread_id  TEXT PRIMARY KEY,
+  root_thread_id   TEXT NOT NULL,
+  node             TEXT NOT NULL,
+  remote_thread_id TEXT,
+  expires_at       TEXT,
+  stops_run        INTEGER NOT NULL DEFAULT 0 CHECK(stops_run IN (0,1)),
+  generation       INTEGER NOT NULL DEFAULT 1,
+  state            TEXT NOT NULL CHECK(state IN ('pending','sent')),
+  last_error       TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+) STRICT;
+CREATE INDEX remote_expiry_root ON remote_expiry(root_thread_id);
+CREATE INDEX remote_expiry_state ON remote_expiry(state);
+
+-- A run's running-time limit on the computer that runs it (an agent on another computer gave one, issue #685).
+-- used_ms counts the time the run was starting, running or finalizing and nothing in its thread waited on a person;
+-- the run is stopped once it reaches limit_ms. The row goes when the run ends.
+CREATE TABLE run_time_limits(
+  run_id     TEXT PRIMARY KEY,
+  thread_id  TEXT NOT NULL,
+  limit_ms   INTEGER NOT NULL CHECK(limit_ms > 0),
+  used_ms    INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+`
   }
 ]
