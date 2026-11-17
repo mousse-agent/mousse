@@ -6995,7 +6995,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('bot supervisor records could not be read', { error: error instanceof Error ? error.message : String(error) })
       }
       this.tryDropRemovedScheduleRuns()
-      await this.actions.reconcile()
+      try { await this.actions.reconcile() } catch (error) {
+        console.warn('bot actions could not be reconciled at startup', error)
+      }
       await this.reconcileAll()
       // The bot and request key committed together, but its first turn may still be missing.
       for (const created of this.store.unfinishedCreations()) {

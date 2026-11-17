@@ -513,7 +513,7 @@ export class BotActions {
     this.withdrawChanged()
     this.expireDue()
     const interrupted = this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")
-    await this.host.refresh()
+    if (interrupted.length) await this.host.refresh()
     this.withdrawChanged()
     if (this.host.store.get("SELECT 1 FROM bot_actions WHERE status IN ('open', 'approved') LIMIT 1")) this.host.held()
     for (const a of interrupted) {
