@@ -151,8 +151,8 @@ export function NetDevicesSection() {
       if (alive.current) {
         const joining = method === 'bridge.join' || method === 'net.join.retry'
         const message = joining ? joinErrorWords(cause as { code?: unknown; details?: unknown; message?: unknown }) : String((cause as Error)?.message ?? cause)
-        // A lapsed device pass is told by the Reconnecting note, in plain words.
-        setError((cause as { code?: unknown })?.code === 'bad_delegation' ? '' : message)
+        // A lapsed device pass is told by the Reconnecting note, in plain words; a join's failure is always told here.
+        setError(!joining && (cause as { code?: unknown })?.code === 'bad_delegation' ? '' : message)
         if (joining && (cause as { code?: unknown })?.code === 'keystore_locked') setJoinNeedsPassphrase(true)
         if (method === 'net.init' && (cause as { code?: unknown })?.code === 'keystore_locked') { setKeychainRefusal(message); await reload().catch(() => undefined) }
         if (method === 'net.disable') { setDevices([]); setManifests([]); await reload().catch(() => undefined) }
