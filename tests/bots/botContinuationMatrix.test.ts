@@ -1,7 +1,9 @@
+import { getDefaultSettings } from '../../src/shared/settings'
+import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import golden from './fixtures/continuationMaster.json'
-import { botFixture, type BotFixture } from './botFixture'
+import { botFixture, createBot, start, finish, flush, type BotFixture } from './botFixture'
 import { CELLS, REASONS, UPDATES, ROW, NOTE, ANSWER, REPLAY, matrixInput, eventsOf } from './fixtures/continuationMatrix'
 
 let f: BotFixture
@@ -112,13 +114,40 @@ it.each([false, true].flatMap(hasWaited => [
   expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(refusal))
 })
 
-// Schedule outcomes use the same ordered unread updates; captured work cells above stay untouched.
-it.each(actionLines)('schedule outcome %s shares the ordered continuation', (status, line) => {
-  const input = matrixInput('turn cap', 'note', false)
-  input.actionCaused = line
-  input.workEvents = [...eventsOf(input), { at: '2026-11-07T09:04:00Z', text: line, actionId: 'schedule-action' }]
-  const row = { ...ROW, trigger: { kind: 'schedule', scheduleId: 'mail', occurrenceAt: ROW.createdAt, input: 'Send' } }
-  const prompt: string = (f.bots as any).continuationPrompt(row, input)
-  expect(prompt.split(line)).toHaveLength(2)
-  expect(prompt).toContain(NOTE)
+// Real schedule activations and stored action outcomes drive the ordered continuation path.
+it.each(actionLines)('schedule stored outcome %s shares the ordered continuation', async (status, line) => {
+  const settings = getDefaultSettings(); settings.experimental.botAsksFirst = true
+  f.host.settings = { get: () => settings } as never
+  const mcp = new BotMcp({ enabled: () => true, catalog: {
+    ensure: async () => undefined,
+    listing: () => [{ installationId: 'mail', serverName: 'Mail', toolName: 'send', providerName: 'mail_send', configRevision: 'one', inputSchema: {}, name: 'Mail__send' }],
+    servers: () => [{ installationId: 'mail', serverName: 'Mail', configDigest: 'config', failing: false, tools: [{ toolName: 'send', providerName: 'mail_send', inputSchema: {} }] }]
+  }, manager: { callTool: async () => ({ content: [{ type: 'text', text: 'delivered' }] }) } as never })
+  f.host.mcp = mcp
+  await f.bots.reconcileOnStartup()
+  const { botId } = await createBot(f, { reply: 'Hello' })
+  const request = await f.bots.activate({ botId, input: 'Allow mail', clientRequestId: 'matrix-permission' })
+  const asking = await start(f, request.id)
+  asking.prepared.authority.escalate!({ permission: { mcp: { server: 'Mail' } } as never, reason: 'Send mail' })
+  await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+  await finish(f, asking.payload)
+  f.bots.setAsksFirstForDevelopment(botId, 'mail', 'send')
+  f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send mail' }, 'owner')
+  f.clock.now += 5 * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const id = due.inserted[0]!, turn = await start(f, id)
+  await callForBot({ bot: turn.prepared.authority, mcp, name: 'Mail__send', args: { body: 'message' }, toolCallId: 'matrix-call', signal: new AbortController().signal })
+  await finish(f, turn.payload)
+  const action = f.bots.actions.forWork(id)!
+  const settled = status === 'tool_error' || status === 'send_timeout' ? 'failed' : status === 'owner_removed' ? 'withdrawn' : status
+  if (status === 'owner_removed') f.store.run("UPDATE bot_actions SET card_json = json_set(card_json, '$.ownerRemoved', json('true')) WHERE id = ?", action.id)
+  f.bots.actions.transition(action.id, 'open', settled, { text: status === 'send_timeout' ? "Mail couldn't be reached, so nothing was sent." : 'delivery detail', ...(status === 'tool_error' ? { toolReportedError: true } : {}), ...(status === 'send_timeout' ? { notSentInTime: true } : {}) })
+  await f.bots.maintain(new Date(f.clock.now)); await flush()
+  const prompt = f.store.lastMainDispatch(id)!.prompt
+  expect(prompt.workActionIds).toEqual([action.id])
+  expect(prompt.text.split(line)).toHaveLength(2)
+  expect(prompt.text).toContain('<mousse_notice kind="bot_action"')
+  const resumed = await start(f, id, 2)
+  await finish(f, resumed.payload)
+  expect(f.store.unreadWorkActions(id)).toEqual([])
 })
