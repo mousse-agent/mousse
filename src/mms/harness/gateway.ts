@@ -150,6 +150,8 @@ export interface HarnessGateway {
    * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
    */
   oneShot(request: OneShotRequest): Promise<{ text: string }>
+  /** The driver's runtime masks secret values in its tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean
   /**
    * The models an entry can make pictures with in Mousse's own process (#1088, a bot's Images row); none for an entry
    * that is unknown, turned off, or whose runtime makes none.
@@ -273,6 +275,8 @@ export interface HarnessGateway {
   stopThread(threadId: string): Promise<'stopped' | 'not_active'>
   /** Whether any instance keeps a process for the thread between turns now (`ProviderAdapter.hasLiveProcess`). */
   hasLiveProcess?(threadId: string): boolean
+  /** Closes the process a bot's chat keeps warm on the thread, on whichever instance holds it (`ProviderAdapter.releaseBotProcess`). */
+  releaseBotProcess?(threadId: string): boolean
   /**
    * `/compact` on the instance a thread runs on: its own compaction of the thread's native session.
    * False when it has none or compacted nothing (`DriverRuntime.compactConversation`).
@@ -1582,6 +1586,11 @@ export class Harness implements HarnessGateway {
     }
   }
 
+  /** Whether a driver's runtime masks secrets in tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean {
+    return Boolean(driver && this.drivers.get(driver)?.masksToolResults)
+  }
+
   /** Whether the instance's driver runs one-shots (`HarnessDriver.oneShot`); read for picker listings. */
   private oneShotAvailable(instanceId: string): boolean {
     const entry = this.instanceMap.get(instanceId)
@@ -1960,6 +1969,18 @@ export class Harness implements HarnessGateway {
   hasLiveProcess(threadId: string): boolean {
     for (const record of this.records.values()) if (record.runtime.adapter.hasLiveProcess?.(threadId)) return true
     return false
+  }
+
+  releaseBotProcess(threadId: string): boolean {
+    let released = false
+    for (const record of this.records.values()) {
+      try {
+        if (record.runtime.adapter.releaseBotProcess?.(threadId)) released = true
+      } catch (error) {
+        console.warn("a bot's warm process could not be closed", { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return released
   }
 
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {

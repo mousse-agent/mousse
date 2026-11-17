@@ -125,6 +125,21 @@ describe('the Bots section', () => {
     expect(host.textContent).not.toContain('No bots yet')
   })
 
+  it('shows an idle bot\'s latest reply in place of Idle, a busy bot what it does, and Idle again with reply previews off', async () => {
+    const { setReplyPreviews } = await import('../../src/renderer/lib/replyPreviewSetting')
+    await show([
+      summary('a', { name: 'Inbox helper', lastReply: 'Sorted 12 emails into Later.' }),
+      summary('b', { name: 'Garden', state: 'working', stateText: 'Working…', lastReply: 'Watered the tomatoes.' })
+    ])
+    expect([stateLine('Inbox helper'), stateLine('Garden')].map((line) => line.textContent)).toEqual(['Sorted 12 emails into Later.', 'Working…'])
+    try {
+      act(() => setReplyPreviews(false))
+      expect(stateLine('Inbox helper').textContent).toBe('Idle')
+    } finally {
+      act(() => setReplyPreviews(true))
+    }
+  })
+
   it('lets an idle bot sleep, at full colour with its z, while a paused bot sleeps faded and a busy one stays awake', async () => {
     await show([summary('a', { name: 'Resting' }), summary('b', { name: 'Off', state: 'paused', stateText: 'Paused' }), summary('c', { name: 'Busy', state: 'working', stateText: 'Working…' })])
     const face = (name: string) => button(`Message ${name}`)!.querySelector<SVGElement>('.bot-face')!
@@ -149,6 +164,21 @@ describe('the Bots section', () => {
     expect(host.querySelectorAll('.bot-face')).toHaveLength(2)
     expect(button('Message Inbox helper')?.title).toBe('Inbox helper: Wants to use files on this computer')
     expect(button('Message Flight deals')?.title).toBe('Flight deals: Paused')
+  })
+
+  it('puts a lock before a bot that some of the owner\'s devices don\'t reach, and none before one every device does', async () => {
+    await show([
+      summary('a', { name: 'Diary', reach: 'this_computer' }),
+      summary('b', { name: 'Notes', reach: 'chosen' }),
+      summary('c', { name: 'Shopping', reach: 'all' }),
+      // A service that does not say: no lock, as before.
+      summary('d', { name: 'Flights' })
+    ])
+    const lock = (name: string) => button(`Message ${name}`)!.querySelector('.bot-row-head [aria-label="Private"]')
+    expect(lock('Diary')?.getAttribute('title')).toBe('Only this computer reaches this bot. Change it in About.')
+    expect(lock('Notes')?.getAttribute('title')).toBe('Only the devices picked in About reach this bot.')
+    expect(lock('Shopping')).toBeNull()
+    expect(lock('Flights')).toBeNull()
   })
 
   it('opens a bot’s chat from its face', async () => {

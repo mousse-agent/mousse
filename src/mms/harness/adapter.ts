@@ -60,17 +60,18 @@ export interface ProviderCapabilities {
   /** `featureGates.mcpAttachable` (Phase 5). */
   mcp: boolean
   /**
-   * `featureGates.subagentTargetRefusal`. `enforced`: the adapter holds a delegated child to its
-   * policy (read-only for a `shared` child, no provider-native subagents, no user MCP servers for a
-   * read-only child). `isolated_only`: it cannot hold a child to read-only, so it is refused as the target of a `shared` child and still runs `isolated` ones.
+   * `featureGates.subagentTargetRefusal`. `enforced`: the adapter holds a read-only child to its policy (the
+   * read-only tools only, no user MCP servers). `isolated_only`: it cannot hold a child to read-only, so it is refused
+   * as the target of a read-only child and still runs every other one.
    */
   childPolicy: 'enforced' | 'isolated_only'
 }
 
 /**
  * The policy of a delegated child's turn (issue #142), absent for a thread that is not a subagent.
- * Every turn of a child carries it, first or resumed. `readOnly` is a `shared` child, which
- * observes its parent's workspace and must not change it.
+ * Every turn of a child carries it, first or resumed. `readOnly` is a child asked read-only
+ * (`delegate_task` `readOnly`), which reads its parent's folder and must not change it; any other
+ * child has every tool its parent has.
  */
 export interface ChildTurnPolicy {
   readOnly: boolean
@@ -541,6 +542,11 @@ export interface ProviderAdapter {
   stopThread?(threadId: string): Promise<'stopped' | 'not_active'>
   /** Whether the adapter keeps a process for `threadId` between turns now (Claude's live query). */
   hasLiveProcess?(threadId: string): boolean
+  /**
+   * Closes the process a bot's chat keeps warm on `threadId` between its turns (its bot was paused or deleted, or its
+   * permissions or model changed); one running a turn closes when that turn ends. True when there was one.
+   */
+  releaseBotProcess?(threadId: string): boolean
   /**
    * SPEC §16.2 native fork: a new provider session branched from `ref` after `atTurnOrdinal`, or
    * null when the runtime cannot branch it (the fork then falls back to a portable handoff). Only

@@ -18,6 +18,7 @@ import { RelayHandler } from '../../src/mms/run/mcp/relay/handler'
 import { ToolRegistry, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools/registry'
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
 import { botCatalogueTools } from '../../src/mms/run/mcp/appTools/botCatalogue'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
 import { appTurn } from '../run/appToolsFixture'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
@@ -273,7 +274,7 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   expect(JSON.stringify([exported, captured, f.journal, f.bots.service.chatList(t.botId).messages, ledger.start.mock.calls])).not.toContain('private-call-secret')
   expect(t.calls).toEqual([])
 })
-// Owner MCP tools are separate offers. use_tool names only registered app tools.
+// Owner MCP tools are separately listed; catalogue runtimes may dispatch an offered one through use_tool.
 it.each([true, false].flatMap(on => ['pi', 'codex', 'claude'].map(runtime => ({ on, runtime }))))('owner MCP stays directly offered on $runtime, switch=$on', async ({ on, runtime }) => {
   const t = await setup(on, false, true, true)
   const bot = { ...t.work.prepared.authority, catalogue: runtime === 'claude' ? 'search' as const : 'use_tool' as const }
@@ -294,9 +295,9 @@ it.each([true, false].flatMap(on => ['pi', 'codex', 'claude'].map(runtime => ({ 
   expect(registry.listForThread('bot-thread', 'default', 'r1').some(tool => tool.name === 'git_status')).toBe(runtime === 'claude')
   const catalogue = await registry.call('tool_catalogue', { group: 'threads', [TURN_TOKEN_KEY]: 'tt' }, request)
   expect(catalogue.text).toContain(runtime === 'claude' ? 'ToolSearch' : 'use_tool')
-  const wronglyWrapped = await registry.call('use_tool', { tool: 'mail_send', arguments: t.args, [TURN_TOKEN_KEY]: 'tt' }, request)
+  const wronglyWrapped = await registry.call('use_tool', { tool: 'mail_not_offered', arguments: t.args, [TURN_TOKEN_KEY]: 'tt' }, request)
   expect(wronglyWrapped).toMatchObject({ isError: true })
-  expect(wronglyWrapped.text).toContain(runtime === 'claude' ? 'not used here' : 'no tool named mail_send')
+  expect(wronglyWrapped.text).toContain(runtime === 'claude' ? 'not used here' : 'no tool named mail_not_offered')
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(t.calls).toEqual([])
   expect(proxy).not.toHaveBeenCalled()
@@ -318,6 +319,44 @@ it.each([true, false].flatMap(on => ['pi', 'codex', 'claude'].map(runtime => ({ 
     expect(t.calls).toEqual([t.args])
     expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   }
+})
+/** A catalogue turn (`use_tool`) of the bot `setup` made, on a registry with the catalogue tools; `call` names its tool call id. */
+function catalogueTurn(t: Awaited<ReturnType<typeof setup>>) {
+  const bot = { ...t.work.prepared.authority, catalogue: 'use_tool' as const }
+  const turns = new AppToolTurns()
+  turns.register(appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot }))
+  const registry = new ToolRegistry({ activeRunId: () => 'r1', turns, botMcp: t.mcp, userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never })
+  for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
+  const credential = { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }
+  return (name: string, args: Record<string, unknown>, toolCallId: string) =>
+    registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, { credential, toolCallId, signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2])
+}
+// A catalogue turn's use_tool call of an offered owner MCP tool is the direct call: the same hold, call key and result.
+// The direct request carries the key the Mousse MCP server makes from a top-level clientRequestId; use_tool's carries it inside.
+it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route => ({ on, route }))))('a catalogue turn calls an offered MCP tool $route, asks first $on', async ({ on, route }) => {
+  const t = await setup(on)
+  const call = catalogueTurn(t)
+  const result = route === 'direct'
+    ? await call('mail_send', t.args, 'mcp:send-once')
+    : await call('use_tool', { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'send-once' } }, 'mcp:outer')
+  const actions = f.store.all('SELECT status, exec_args, call_key FROM bot_actions') as Array<{ status: string; exec_args: string; call_key: string }>
+  if (on) {
+    expect(result, result.text).toMatchObject({ text: expect.stringContaining('held') })
+    expect(actions).toHaveLength(1)
+    expect(actions[0]).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
+    expect(JSON.parse(actions[0]!.call_key)).toEqual([t.workId, f.store.dispatches(t.workId)[0]!.clientRequestId, 'mcp:send-once'])
+    expect(t.calls).toEqual([])
+  } else {
+    expect(result, result.text).toMatchObject({ text: expect.stringContaining('delivered') })
+    expect(t.calls).toEqual([t.args])
+    expect(actions).toEqual([])
+  }
+})
+it('a catalogue turn still refuses a tool it was not offered through use_tool', async () => {
+  const t = await setup(false)
+  const result = await catalogueTurn(t)('use_tool', { tool: 'mail_other', arguments: t.args }, 'mcp:outer')
+  expect(result).toEqual(refused('unknown_tool', 'You have no tool named mail_other. tool_catalogue lists each group\'s tools.'))
+  expect(t.calls).toEqual([])
 })
 it('a scheduled run is refused without parking or writing a card', async () => {
   const t = await setup(true)
@@ -479,16 +518,13 @@ it('R4 a question after a settled action ends as a question, not an approval', a
 })
 it('R5-slot keeps the slot until the held runtime finishes', async () => {
   const t = await setup(true)
-  const admission = f.bots as unknown as { holding(botId: string, lane: string): unknown[]; profileRunsHeld(): number }
+  const admission = f.bots as unknown as { holding(botId: string, lane: string): unknown[] }
   const before = admission.holding(t.botId, 'run').length
-  const profileBefore = admission.profileRunsHeld()
   expect(await t.call()).not.toMatchObject({ isError: true })
   expect(f.store.activation(t.workId)?.status).toBe('blocked')
   expect(admission.holding(t.botId, 'run')).toHaveLength(before)
-  expect(admission.profileRunsHeld()).toBe(profileBefore)
   await finish(f, t.work.payload)
   expect(admission.holding(t.botId, 'run')).toHaveLength(before - 1)
-  expect(admission.profileRunsHeld()).toBe(profileBefore - 1)
 })
 it.each(['access_token', 'client_secret', 'password', 'authorization', 'api_key', 'x-api-key', 'apiToken', 'AccessToken', 'clientSecret'] as const)('R5-mask masks %s by key', async key => {
   const { maskedActionData } = await import('../../src/mms/bots/actions/BotActions')

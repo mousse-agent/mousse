@@ -70,6 +70,10 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ threadProjectColors: value } as never).threadProjectColors).toBe(expected)
   })
 
+  it.each([[false, false], [true, true], [undefined, true], ['off', true]])('keeps reply previews %s as %s', (value, expected) => {
+    expect(normalizeAppearance({ replyPreviews: value } as never).replyPreviews).toBe(expected)
+  })
+
   it('migrates legacy acrylic theme ids', () => {
     expect(normalizeAppearance({ theme: 'system-acrylic' as never })).toEqual({
       theme: 'system',
@@ -81,6 +85,7 @@ describe('appearance settings', () => {
       interfaceFont: { source: 'default' },
       codeFont: { source: 'default' },
       threadProjectColors: 'fill',
+      replyPreviews: true,
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',

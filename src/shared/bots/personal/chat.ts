@@ -2,6 +2,7 @@ import type { AppletReference } from '../../applets'
 import type { BotLook } from './look'
 import type { BotChatQuestion } from './questions'
 import type { BotChatCard } from './cards'
+import type { BotDeviceAccessMode } from './deviceAccess'
 
 export type { BotChatQuestion } from './questions'
 export type { BotChatCard } from './cards'
@@ -193,6 +194,8 @@ export interface BotSummary {
   waiting?: 'internet'
   error?: BotError
   last?: { text: string; at: string; author: 'owner' | 'bot' }
+  /** The bot's latest reply with text, as one clipped line (`replyPreviewText`), for its row in the Bots list. */
+  lastReply?: string
   /** How the last activation ended. */
   lastOutcome?: 'ok' | 'failed' | 'stopped'
   unread: number
@@ -214,6 +217,11 @@ export interface BotSummary {
   threads?: BotLaunchedThread[]
   /** Background commands it runs now (`watch_start`), oldest first: the chat's Background work, each with Stop. Absent from older services and while none runs. */
   watchers?: BotWatcherItem[]
+  /**
+   * Which devices reach it (About's Devices), on its own computer's window only: anything but `all` shows a lock in the
+   * Bots list. Absent from older services and from what other devices get.
+   */
+  reach?: BotDeviceAccessMode
 }
 
 /** A background command a bot runs now: its title, the command, when it started and when its time limit ends. */

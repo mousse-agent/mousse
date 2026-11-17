@@ -15,6 +15,8 @@ const TURN_BINDINGS: Partial<Record<ProviderAdapter['driver'], McpTurnBinding>> 
 const RELAY_APPROVALS: Partial<Record<ProviderAdapter['driver'], 'runtime' | 'mousse'>> = { claude: 'runtime', codex: 'mousse', cursor: 'mousse', acp: 'runtime', antigravity: 'runtime', grok: 'runtime' }
 // As the real Claude Code and Codex drivers declare.
 const MCP_IMAGE_RESULTS: Partial<Record<ProviderAdapter['driver'], boolean>> = { claude: true, codex: true }
+// As the real Claude Code driver declares: Mousse masks secrets in its tool results before it keeps them.
+const MASKS_TOOL_RESULTS: Partial<Record<ProviderAdapter['driver'], boolean>> = { claude: true }
 
 /**
  * Test drivers over a plain `ProviderAdapter` (scripted, fake or replay adapters), so run-engine
@@ -34,6 +36,7 @@ export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCa
     customModels: true,
     mcpTurnBinding: mcpTurnBinding ?? TURN_BINDINGS[adapter.driver],
     mcpImageResults: MCP_IMAGE_RESULTS[adapter.driver] ?? false,
+    ...(MASKS_TOOL_RESULTS[adapter.driver] ? { masksToolResults: true } : {}),
     ...(RELAY_APPROVALS[adapter.driver] ? { relay: { approvals: RELAY_APPROVALS[adapter.driver]! } } : {}),
     // Only pi here: the test kit's vendor drivers stand for agents without one-shots.
     oneShot: adapter.driver === 'pi',

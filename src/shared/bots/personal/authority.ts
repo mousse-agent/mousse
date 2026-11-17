@@ -137,6 +137,12 @@ export interface BotFileReadResult {
 export interface BotAuthority {
   activationId: string
   role: BotThreadRole
+  /**
+   * Set on a chat turn of the bot's own (lane, turn kind and compiled grant digest, as one key): its runtime may run it on a
+   * process kept warm between the chat's turns, reused only while this key and every launch input stay the same. Every call
+   * is still checked against this turn's authority. Absent: the turn runs on a process of its own.
+   */
+  warm?: string
   /** Granted built-ins (neutral names). */
   tools: ReadonlySet<NeutralTool>
   /** Granted Mousse app tools, by their app-tool name. */

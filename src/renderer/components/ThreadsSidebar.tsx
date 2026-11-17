@@ -56,6 +56,9 @@ import { ProjectIcon } from './ProjectIcon'
 import { projectIconMenuActions } from '../lib/projectIconActions'
 import { projectTooltip, thisHomeFolder } from '../lib/projectTooltip'
 import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
+import { useReplyPreviews } from '../lib/replyPreviewSetting'
+import { threadPullRequestsOf, type ThreadPullRequestSummary } from '../../shared/pullRequests'
+import { ThreadPullRequestCount, ThreadReplyPreview } from './ThreadRowExtras'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import { ProjectRunsDot } from './automations/inbox/ProjectRunsDot'
@@ -268,7 +271,9 @@ function ThreadCardBody({
   fullTitle,
   onRename,
   onCancelRename,
-  onStartRename
+  onStartRename,
+  preview,
+  pullRequests
 }: {
   thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun'>
   projectName?: string
@@ -294,6 +299,9 @@ function ThreadCardBody({
   onCancelRename: () => void
   /** Double-click on the title starts a rename. */
   onStartRename?: (event: React.MouseEvent<HTMLElement>) => void
+  /** The latest reply, shown under the title; absent when it has none or previews are off. */
+  preview?: string
+  pullRequests: readonly ThreadPullRequestSummary[]
 }) {
   return (
     <>
@@ -308,6 +316,7 @@ function ThreadCardBody({
         <span className="threads-sidebar-card-meta">
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
+          <ThreadPullRequestCount pullRequests={pullRequests} />
           <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} />
         </span>
         {isRenaming ? (
@@ -321,6 +330,7 @@ function ThreadCardBody({
             {thread.name}
           </span>
         )}
+        {preview && !isRenaming && !isGeneratingTitle && <ThreadReplyPreview text={preview} className="threads-sidebar-card-preview" />}
         {(worktree || thread.node) && (
           <span className="threads-sidebar-card-sub">
             <ThreadComputerBadge thread={thread} withName className="threads-sidebar-card-device" />
@@ -558,6 +568,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
   const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
   const threadProjectColors = useThreadProjectColors()
+  const replyPreviews = useReplyPreviews()
   const hueByGroup = useMemo(
     () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
     [projectGroups]
@@ -1173,6 +1184,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // A row already named (a pending send's, from its prompt) shows its name, not a placeholder.
     const isGeneratingTitle = pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name)
     const statusNode = renderThreadStatus(thread.id)
+    const preview = replyPreviews ? thread.lastReply : undefined
+    const pullRequests = threadPullRequestsOf(thread)
+    // A row with a preview is two lines tall (`rowShowsPreview` sizes its group's list to match).
+    const rowPreview = layout === 'row' && preview && !isRenaming && !isGeneratingTitle ? preview : undefined
     const worktree = worktreeMark(thread, projects)
     const showTrailing = Boolean(statusNode || worktree || thread.node)
     const groupId = groupIdOf(thread.projectId)
@@ -1231,7 +1246,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           isActive ? ' active' : openSubagentParentId === thread.id ? ' has-open-subagent' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${thread.hidden ? ' hidden-thread' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${thread.hidden ? ' hidden-thread' : ''}${rowPreview ? ' has-preview' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
 
         style={hue ? ({ '--project-tint': projectHueColor(hue) } as CSSProperties) : undefined}
 
@@ -1320,6 +1335,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             onRename={(name) => void submitRename(name)}
             onCancelRename={endRename}
             onStartRename={renameFromTitle}
+            preview={preview}
+            pullRequests={pullRequests}
           />
         ) : (
           <>
@@ -1352,6 +1369,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         ) : isGeneratingTitle ? (
 
           <span className="threads-sidebar-skeleton" aria-label="Generating title" />
+
+        ) : rowPreview || pullRequests.length ? (
+
+          <span className="threads-sidebar-thread-text">
+            <span className="threads-sidebar-thread-line">
+              <ThreadTitle name={thread.name} fullTitle={fullTitle} provisional={thread.titleSource === 'provisional'} onDoubleClick={renameFromTitle} />
+              <ThreadPullRequestCount pullRequests={pullRequests} />
+            </span>
+            {rowPreview && <ThreadReplyPreview text={rowPreview} />}
+          </span>
 
         ) : (
 
@@ -1491,6 +1518,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     )
   }
 
+  /** Whether a tree row shows a reply preview (and is two lines tall), as `renderThreadRow` decides it. */
+  const rowShowsPreview = (thread: Thread) => replyPreviews && Boolean(thread.lastReply) &&
+    !(renaming?.type === 'thread' && renaming.id === thread.id && !renaming.inNeedsMe) &&
+    !(pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name))
+
   /** A group's thread rows: the first 5, and Show more for the rest. */
   const renderGroupThreads = (groupId: string, groupThreads: Thread[]) => {
     const showAll = expandedProjectThreadLists.has(groupId)
@@ -1498,7 +1530,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       <>
         <div
           className={`threads-sidebar-thread-list ui-collapse-items${showAll ? ' expanded' : ''}`}
-          style={{ '--project-thread-count': groupThreads.length } as CSSProperties}
+          style={{
+            '--project-thread-count': groupThreads.length,
+            // Rows with a reply preview are a line taller; the list's height counts them.
+            '--project-preview-count': groupThreads.filter(rowShowsPreview).length,
+            '--project-preview-shown': groupThreads.slice(0, PROJECT_THREAD_PREVIEW_LIMIT).filter(rowShowsPreview).length
+          } as CSSProperties}
           role="none"
         >
           {groupThreads.map((thread, index) => renderThreadRow(thread, {

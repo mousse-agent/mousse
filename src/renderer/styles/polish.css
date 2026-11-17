@@ -51,6 +51,8 @@
   --ui-menu-drop: 0 16px 44px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.2);
 
   --ui-hover: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  /* The selected main-area tab: a quiet neutral fill. */
+  --main-tab-selected: color-mix(in srgb, var(--text-primary) 9%, transparent);
   --ui-pressed: color-mix(in srgb, var(--text-primary) 10%, transparent);
   --ui-selected: rgba(var(--accent-rgb), 0.15);
   /* Opaque selection fill (selected settings page, selected theme): the
@@ -598,13 +600,14 @@ html .chat-avatar.group[class*='chat-color-'] {
   background: var(--ui-hover);
 }
 
+/* Main-area tabs are plain: the selected one gets a quiet neutral fill, with no tint, rim light or glint. */
 .app .main-view-tab.active {
-  background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
-  box-shadow: var(--ui-specular);
+  background: var(--main-tab-selected);
+  box-shadow: none;
 }
 
 .app .main-view-tab.active .main-view-tab-icon {
-  color: var(--accent);
+  color: inherit;
 }
 
 /* ---------- Home and composer ---------- */
@@ -964,7 +967,6 @@ html .composer-workspace-menu {
 .app .threads-sidebar-thread.active,
 .app .chat-list-row.active,
 .app .navigation-rail-button.active,
-.app .main-view-tab.active,
 .app .threads-sidebar-tab.active,
 .app .header-toggle-active,
 .app .header-actions .icon-btn-ghost.header-toggle-active,
@@ -976,7 +978,6 @@ html .composer-command-suggestion.selected {
 .app .threads-sidebar-thread.active::before,
 .app .chat-list-row.active::before,
 .app .navigation-rail-button.active::before,
-.app .main-view-tab.active::before,
 .app .threads-sidebar-tab.active::before,
 .app .header-toggle-active::before,
 .app .header-actions .icon-btn-ghost.header-toggle-active::before,

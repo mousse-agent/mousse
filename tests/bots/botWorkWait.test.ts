@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_JOURNAL_ERROR, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 import type { BotWakeEvent } from '../../src/shared/bots/personal/wakes'
 let f: BotFixture
@@ -491,23 +491,22 @@ it('keeps wait additions through a usage hold before the dispatch starts and a r
   expect(f.store.question(questionId)?.readAt).not.toBeNull()
 })
 
-it('keeps a delivered wait unread while the run queue has no free slot', async () => {
+it('keeps a delivered wait unread while the run queue is held, and carries it on once it goes again', async () => {
   const { workId, turn } = await work()
   await wait(workId)
   await finish(f, turn.payload, 'completed', { text: '' })
-  const blockers = []
-  for (let i = 0; i < 3; i++) blockers.push(await work(`full-queue-${i}`))
-  const queued = await f.bots.tools.work.start(botId, blockers[2]!.chat.id, { title: 'Later', brief: 'Later work', key: 'later-work' })
+  // Nothing starts while the bot's journal cannot be written.
+  f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
   f.clock.now += 60 * 60_000
   await f.bots.deliverDueReminders()
   await flush()
   expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'wait_ready' })
   expect(f.store.unreadWorkWaits(workId)).toHaveLength(1)
   expect(f.store.dispatches(workId)).toHaveLength(1)
-  await f.bots.service.workStop(botId, blockers[0]!.workId)
+  f.store.setError(botId, null)
+  await (f.bots as unknown as { pump(botId: string): Promise<void> }).pump(botId)
   await flush()
   expect(f.store.dispatch(workId, 2)?.prompt.text).toContain('Check again with the evidence already read.')
-  expect(f.store.activation(queued.workId)?.status).toBe('queued')
   const receiving = await start(f, workId, 2)
   ;(receiving.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkWaits(workId)).toEqual([])

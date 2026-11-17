@@ -18,8 +18,10 @@ import { disposeFixtures, memoryFixture } from './memory/memoryFixture'
 
 // Before the catalogue, a bot with the owner's usual permissions (commands, browser, threads, profiler) said hello in
 // about 87,300 characters on Codex and Pi (57 tools in full) and 27,900 on Claude Code; with it, about 50,700 and 21,300
-// (show_card is core: listed only in a group, Codex asked the owner instead of showing a card).
-const CEILING = { codexPi: 53_000, claude: 22_000 } as const
+// (show_card is core: listed only in a group, Codex asked the owner instead of showing a card). The retry key every tool
+// that changes something declares (clientRequestId) adds about 70 characters to each, about 170 to the tools Claude
+// Code always loads.
+const CEILING = { codexPi: 53_000, claude: 22_200 } as const
 
 let fx: DelegationFixture | undefined
 afterEach(() => {

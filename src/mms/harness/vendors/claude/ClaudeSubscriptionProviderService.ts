@@ -37,7 +37,7 @@ import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
 import { lockedEnv, withEnforced } from '../../env'
-import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, CLAUDE_PLAN_TOOLS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeLockedSettingsFile, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
+import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, CLAUDE_PLAN_TOOLS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeLockedSettingsFile, claudeLockedTools, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
   cliFingerprint,
@@ -106,8 +106,33 @@ export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
  * Mousse's server offers under it (the agent access level and the caller's policy, `McpAttachment.tools`) are: Claude
  * Code reconnects a server whose header changed and adds the tools it gains, but keeps offering the model the ones it
  * lost.
+ * A bot's chat turn adds what its process was started with (`claudeBotLaunchKey`): a change of any of it, the model
+ * and effort included, needs a new process.
  */
-const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse server or its tools', 'read-only policy']
+const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse server or its tools', 'read-only policy', 'bot launch']
+
+/** Removes the folder of a bot process's settings file (`claudeLockedSettingsFile`) once nothing reads it. Never throws. */
+function removeSettingsFolder(folder: string): void {
+  try {
+    rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  } catch (error) {
+    console.warn('[claude] the settings file of a bot turn could not be removed', error instanceof Error ? error.message : String(error))
+  }
+}
+
+/** How long a bot's warm chat process stays open with no turn before it is closed. */
+export const BOT_LIVE_IDLE_CLOSE_MS = 5 * 60_000
+
+/**
+ * What a bot's warm chat process is started with, as one digest (`HARD_PARTS`' `bot launch`): the bot's own key (lane,
+ * turn kind, compiled grant: `BotAuthority.warm`), the locked launch options (folder, environment, tools, the settings
+ * file's content, its system text) and the model and effort. A turn reuses the process only while all of it is equal.
+ * Functions (the grant gate, the spawn) are not part of it: they are read from the current turn on every call.
+ */
+export function claudeBotLaunchKey(warm: string, launch: Partial<Options>, flags: LiveFlags): string {
+  const plain = Object.fromEntries(Object.entries(launch).filter(([, value]) => typeof value !== 'function' && !(value instanceof AbortController)))
+  return createHash('sha256').update(JSON.stringify([warm, plain, flags])).digest('hex')
+}
 
 /** The MCP servers registered on a live process (`LiveSession.meta.mcp`), and the Mousse attachment among them. */
 interface RegisteredMcp {
@@ -262,9 +287,10 @@ export type ClaudeSubscriptionChatInput = {
   /**
    * A bot's turn (PR 6 §3): it runs under the locked profile's options (`claudeLockedOptions`:
    * Claude Code's asking mode, no settings files, plugins or user MCP servers) with Mousse's grant
-   * gate on every call, as one query that is never kept warm. On a locked instance it also runs in
-   * the locked environment; on the owner's own entry (`ownerEntry`) in that entry's environment,
-   * with their sign-in. Integrations, live processes and the thread's permission mode do not apply.
+   * gate on every call. On a locked instance it also runs in the locked environment, as one query; on the owner's own
+   * entry (`ownerEntry`) in that entry's environment, with their sign-in, where a chat turn without Bash runs on the
+   * chat's warm process (`botKeepsWarm`) and every other turn is one query. Integrations and the thread's permission
+   * mode do not apply.
    */
   locked?: ClaudeLockedTurn
   /**
@@ -2306,6 +2332,34 @@ export class ClaudeSubscriptionProviderService {
     return Boolean(live && !live.dead)
   }
 
+  /**
+   * Whether a bot's turn runs on a warm process kept between its turns (`acquireLive` with `bot`), as threads do: a chat
+   * turn (the engine marks it, `BotAuthority.warm`) on the owner's own entry, where the process is the SDK's and the turn's
+   * signal ends it, that is offered no commands, so nothing it starts can run on after its turn. A turn on a locked entry,
+   * whose processes the bot supervisor holds per dispatch, and every work or run turn stay one process per turn.
+   */
+  private botKeepsWarm(turn: ClaudeLockedTurn, mousseTools: boolean): boolean {
+    return Boolean(this.liveConfig && turn.ownerEntry && turn.authority.warm) && !claudeLockedTools(turn, mousseTools).tools.includes('Bash')
+  }
+  /** Closes a bot's warm process and ends everything it started (`reapClosed`). */
+  private closeBotLive(threadId: string, live: LiveSession<TurnContext>): void {
+    const target = live.process()
+    live.close('closed')
+    if (this.live.get(threadId) === live) this.live.delete(threadId)
+    if (!live.reaped) this.reapClosed(threadId, target)
+  }
+  /**
+   * A bot's warm chat process on `threadId` is closed: its bot was paused or deleted, or its permissions or model changed.
+   * One running a turn closes when that turn ends, which keeps the permissions it started with. True when there was one.
+   */
+  releaseBotProcess(threadId: string): boolean {
+    const live = this.live.get(threadId)
+    if (!live || live.dead || !live.meta.bot) return false
+    if (this.activeThreads.has(threadId) || live.busy) live.meta.closeAfterTurn = true
+    else this.closeBotLive(threadId, live)
+    return true
+  }
+
   stopThread(threadId: string): 'stopped' | 'not_active' {
     this.liveCommits.delete(threadId)
     const live = this.live.get(threadId)
@@ -2389,13 +2443,17 @@ export class ClaudeSubscriptionProviderService {
    * renewed for the same tools in place (#358); one that cannot is replaced. A new one has its MCP servers before it is
    * returned (`launch`). A query that has background work is never replaced silently: a change that needs a new
    * process is refused, naming the change, because it would end that work.
+   *
+   * `bot`: a bot's warm chat process (`botKeepsWarm`). It closes after `BOT_LIVE_IDLE_CLOSE_MS` with no turn, and what
+   * `create` leaves in `meta.cleanup` (its settings file) goes when it ends.
    */
   private async acquireLive(
     threadId: string,
     key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; flags: LiveFlags; historyNow: string; entrypoint?: string },
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options,
-    mcp: { servers: () => TurnMcp; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal; leftOut(names: string[]): void; policy(names: string[]): void }
+    mcp: { servers: () => TurnMcp; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal; leftOut(names: string[]): void; policy(names: string[]): void },
+    bot?: { idleCloseMs: number }
   ): Promise<LiveSession<TurnContext> | undefined> {
     const timings = this.liveConfig
     if (!timings) return undefined
@@ -2480,12 +2538,15 @@ export class ClaudeSubscriptionProviderService {
         taskEnded: (info) => this.notifyHost(() => this.liveHost?.taskEnded?.(threadId, info)),
         ended: () => {
           if (this.live.get(threadId) === created) this.live.delete(threadId)
+          const cleanup = created.meta.cleanup as (() => void) | undefined
+          created.meta.cleanup = undefined
+          cleanup?.()
         },
         reap: (target) => this.reapClosed(threadId, target)
       },
-      timings
+      bot ? { ...timings, idleCloseMs: bot.idleCloseMs } : timings
     )
-    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode, flags: key.flags, entrypoint: key.entrypoint }
+    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode, flags: key.flags, entrypoint: key.entrypoint, ...(bot ? { bot: true } : {}) }
     this.live.set(threadId, created)
     try {
       // Before its output is read or a prompt pushed (#358): the SDK takes Claude Code's answer by itself.
@@ -2562,6 +2623,12 @@ export class ClaudeSubscriptionProviderService {
    * process clears them (Claude has read them by then) or Stop or the cap ends the process.
    */
   private continuationStarted(live: LiveSession<TurnContext>, run: LiveRun, info: ContinuationInfo): void {
+    // A bot's warm process never runs a turn nobody gave it: it is stopped, and the process with it.
+    if (live.meta.bot) {
+      live.discardContinuation(run)
+      this.closeBotLive(live.threadId, live)
+      return
+    }
     const host = this.liveHost
     if (host?.continuationStarted) {
       try {
@@ -2611,6 +2678,8 @@ export class ClaudeSubscriptionProviderService {
                   const deny = (reason: string) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: reason } })
                   // Fails closed: Claude Code reads a hook that throws as no decision, and would go on.
                   try {
+                    // No turn runs (between a warm process's turns): nothing is decided, and nothing runs.
+                    if (turn.controller.signal.aborted) return deny('No turn of this bot is running, so this call does not run.')
                     const args = (event.tool_input ?? {}) as Record<string, unknown>
                     const decided = turn.locked.preToolUse(event.tool_name, args)
                     if (!decided.ok) return deny(decided.reason)
@@ -3039,7 +3108,7 @@ export class ClaudeSubscriptionProviderService {
     const withTurn = (sessionId: string): SessionTurn[] =>
       [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
     /**
-     * A one-shot query's steers (no live session: live queries turned off, or a bot's turn, which takes its
+     * A one-shot query's steers (no live session: live queries turned off, or a bot's one-query turn, which takes its
      * owner's notes and its pack after a compaction this way; nobody else steers a bot's thread), collected and waiting
      * to go in as the prompt of the query that restarts the turn. Taken, not accepted: Claude Code has not seen them.
      */
@@ -3226,8 +3295,8 @@ export class ClaudeSubscriptionProviderService {
     // The folder of the turn's settings file (`claudeLockedSettingsFile`), removed when it ends.
     let lockedSettingsFolder: string | undefined
     /**
-     * The sign-in check (`claude auth status`). A bot's turn (a one-shot query) starts Claude Code while it runs, and its
-     * prompt waits for it; any other turn waits for it here. A signed-out reading fails the turn with how to sign in.
+     * The sign-in check (`claude auth status`). A bot's turn starts Claude Code while it runs, and its prompt waits for it
+     * (on a warm process, only when the last reading is old); any other turn waits for it here. A signed-out reading fails the turn with how to sign in.
      */
     let signIn: Promise<void> | undefined
     try {
@@ -3261,6 +3330,8 @@ export class ClaudeSubscriptionProviderService {
       const permissionMode: PermissionMode = restricted ? 'default' : CLAUDE_PERMISSION_MODES[threadMode]
       const launchAppend = locked ? [] : claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
       const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
+      // A bot's chat turn on the owner's entry runs on a warm process (`botKeepsWarm`), started with exactly this launch.
+      const botWarm = lockedTurn && this.botKeepsWarm(lockedTurn, Boolean(input.mcp)) ? lockedTurn.authority.warm : undefined
       // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.
       const hard = [
         instanceId,
@@ -3268,7 +3339,8 @@ export class ClaudeSubscriptionProviderService {
         appendTexts.filter(Boolean).join('\n\n'),
         // Not the token: a new one for the same tools is given to the running process (`renewMousseServer`).
         input.mcp ? [input.mcp.url, input.mcp.tools ?? null] : null,
-        readOnlyChild
+        readOnlyChild,
+        botWarm ? claudeBotLaunchKey(botWarm, claudeLockedOptions(lockedTurn!, { env, mousseTools: Boolean(input.mcp) }), flags) : null
       ]
       const reusable = input.continuation ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
       /** The prompt, with the history in front when no session holds it: none resumed, cut or kept warm. */
@@ -3368,9 +3440,7 @@ export class ClaudeSubscriptionProviderService {
         }
       }
       // A locked turn: the locked profile over everything above, and nothing that would widen it.
-      const lockedOptions = (sdkController: AbortController, turnOf: () => TurnContext): Options => {
-        // Made before the options: a sandbox that closes Mousse's entries in the temporary folder closes this one too.
-        lockedSettingsFolder ??= mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))
+      const lockedOptions = (settingsFolder: string, sdkController: AbortController, turnOf: () => TurnContext): Options => {
         const base = buildOptions(sdkController, turnOf, false)
         const own = claudeLockedOptions(lockedTurn!, {
           env,
@@ -3379,7 +3449,7 @@ export class ClaudeSubscriptionProviderService {
           ...(locked!.ownerEntry ? {} : { spawn: claudeLockedSpawn(locked!.onProcess ? { onProcess: locked!.onProcess } : {}) })
         })
         const settings = { ...(typeof base.settings === 'object' ? base.settings : {}), ...(own.settings as SdkSettings) }
-        const options: Options = { ...base, ...own, settings: claudeLockedSettingsFile(settings, lockedSettingsFolder) }
+        const options: Options = { ...base, ...own, settings: claudeLockedSettingsFile(settings, settingsFolder) }
         for (const name of CLAUDE_LOCKED_REMOVED_OPTIONS) delete options[name]
         // The same thread's own session resumes; nothing else is carried over.
         if (resume) options.resume = resume
@@ -3430,11 +3500,15 @@ export class ClaudeSubscriptionProviderService {
       } else {
         const key = { hard, soft: this.launchKey(env, integrations, launchSettings, input.mcp?.relay ?? null), mode: permissionMode, flags, historyNow, entrypoint: env.CLAUDE_CODE_ENTRYPOINT }
         try {
-          // A bot's process is never kept warm: a locked turn is one query.
-          live = locked ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
+          // A bot's chat turn on the owner's entry runs on its warm process (`botWarm`); every other bot turn is one query.
+          // The warm process's settings file lives as long as it does, in a folder of its own.
+          live = locked && !botWarm ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
             created.current = turn
-            return buildOptions(created.lifetime, () => created.current ?? turn, true)
-          }, { servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal, leftOut, policy })
+            if (!botWarm) return buildOptions(created.lifetime, () => created.current ?? turn, true)
+            const folder = mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))
+            created.meta.cleanup = () => removeSettingsFolder(folder)
+            return lockedOptions(folder, created.lifetime, () => created.current ?? turn)
+          }, { servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal, leftOut, policy }, botWarm ? { idleCloseMs: BOT_LIVE_IDLE_CLOSE_MS } : undefined)
         } catch (error) {
           // A refused change started nothing: the conversation is as it was, so the next request can resume it.
           // Mousse keeps the refused message in the transcript, so the history the next request carries has
@@ -3465,6 +3539,15 @@ export class ClaudeSubscriptionProviderService {
         try {
           controller.signal.throwIfAborted()
           if (live) {
+            // A bot's new process gets its prompt only once the sign-in check said signed in, as a one-shot query does. One
+            // already running gets it at once while the last reading, under five minutes old, said signed in: this turn's
+            // reading still runs, and a signed-out one ends the turn and with it the process.
+            if (locked) {
+              const reading = this.cliProbe
+              const fresh = live.sessionId !== undefined && reading?.result.kind === 'signed_in' && Date.now() - reading.at < CLAUDE_AUTH_STATUS_TTL_MS && !this.signedOut()
+              if (!fresh) await signIn
+              controller.signal.throwIfAborted()
+            }
             live.current = turn
             // The permission mode follows the composer: a live query switches it for this turn.
             if (live.meta.permissionMode !== permissionMode) {
@@ -3566,7 +3649,8 @@ export class ClaudeSubscriptionProviderService {
         let resumedWithSteer = false
         /** The last query ran on a steer and ended with no words of the model's after it (`onSteerUnanswered`). */
         let steerUnanswered = false
-        const options = locked ? lockedOptions(controller, () => turn) : buildOptions(controller, () => turn, false)
+        // Made before the options: a sandbox that closes Mousse's entries in the temporary folder closes this one too.
+        const options = locked ? lockedOptions(lockedSettingsFolder ??= mkdtempSync(join(tmpdir(), 'mousse-claude-settings-')), controller, () => turn) : buildOptions(controller, () => turn, false)
         /**
          * Stop ended a query whose prompt carries steers it had not been seen reading, and sent its process SIGTERM
          * (`endOneShot`). What the process wrote before it died is still read, until its output ends or
@@ -3716,7 +3800,9 @@ export class ClaudeSubscriptionProviderService {
       controller.abort()
       // Background helpers keep calling tools after the turn ended, or was cancelled: they are checked by
       // this turn's policy under a controller of their own, until the next turn replaces it.
-      if (live && live.current === turn) live.current = { ...turn, controller: new AbortController() }
+      // A bot's warm process has none: between its turns it runs nothing, and any call it made would be denied (an ended
+      // turn's controller), since only the next turn's own grant gate may decide one.
+      if (live && live.current === turn) live.current = { ...turn, controller: live.meta.bot ? controller : new AbortController() }
       if (live && liveRun) {
         // A turn that ended without finishing still read what its result carried; a cancelled one did not.
         if (!liveRun.settled) live.abandon(liveRun)
@@ -3727,6 +3813,9 @@ export class ClaudeSubscriptionProviderService {
         if (!success && liveRun.ids.size > 0) live.meta.pushedFailed = true
         liveRun.onRead = undefined
       } else query?.close()
+      // A bot's warm process outlives only a turn that finished: one that failed, was stopped or reached its deadline ends
+      // with its process, and the next turn starts a fresh one. So does one asked to close meanwhile (`releaseBotProcess`).
+      if (live?.meta.bot && (!success || live.meta.closeAfterTurn)) this.closeBotLive(input.threadId, live)
       // No steer is collected after the abort above: a one-shot turn's steers Claude Code never read go back now.
       returnUnreadOneShotSteers()
       // After the cancel above has started: a steer Claude Code has not read is accepted or handed back before the turn
@@ -3743,13 +3832,7 @@ export class ClaudeSubscriptionProviderService {
       const release = (): void => {
         releaseBotTemp?.()
         // Claude Code read the settings when it started; nothing reads them once the turn ended.
-        if (settingsFolder) {
-          try {
-            rmSync(settingsFolder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-          } catch (error) {
-            console.warn('[claude] the settings file of a bot turn could not be removed', error instanceof Error ? error.message : String(error))
-          }
-        }
+        if (settingsFolder) removeSettingsFolder(settingsFolder)
       }
       if (exiting) void exiting.then(release)
       else release()

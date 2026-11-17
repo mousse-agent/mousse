@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { act, createElement, Fragment } from 'react'
+import { act, createElement, Fragment, StrictMode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAppStore } from '../../src/renderer/stores/appStore'
-import { useFileWorkspaceStore } from '../../src/renderer/stores/filesStore'
+import { fileWorkspaceScope, useFileWorkspaceStore } from '../../src/renderer/stores/filesStore'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -101,6 +101,38 @@ describe('closing the last open file', () => {
     expect(writeFile).toHaveBeenCalled()
     expect(tab()?.textContent).toBe('notes.txt •')
     expect(document.activeElement).toBe(tab())
+  })
+})
+
+describe('closing tabs', () => {
+  it('keeps the panel while another tab is open, and closes it with the last tab', async () => {
+    useAppStore.setState({ mainAreaOpen: true })
+    await openNotes()
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close notes.txt"]')!.click())
+    await flush()
+    expect(useAppStore.getState().mainAreaOpen).toBe(true)
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close Files"]')!.click())
+    await flush()
+    expect(useAppStore.getState().mainAreaOpen).toBe(false)
+  })
+})
+
+describe('an open file', () => {
+  it('fills the panel alone, without the tree', async () => {
+    await openNotes()
+    expect(host.querySelector('.files-editor')).not.toBeNull()
+    expect(host.querySelector('.tree-open')).toBeNull()
+  })
+
+  it('that was open before a restart loads, even through the development double mount', async () => {
+    let finishRead!: (text: string) => void
+    ;(window as unknown as { mousse: { fs: { readFile: () => Promise<string> } } }).mousse.fs.readFile = () => new Promise((resolve) => { finishRead = resolve })
+    useFileWorkspaceStore.getState().openFile(fileWorkspaceScope(useAppStore.getState().profileId, useAppStore.getState().activeThreadId, null), 'notes.txt')
+    await act(async () => root.render(createElement(StrictMode, null, createElement(FilesPanel))))
+    await act(async () => finishRead('restored text'))
+    await flush()
+    expect(host.querySelector('.panel-error')).toBeNull()
+    expect(host.querySelector<HTMLTextAreaElement>('.editor-stub')?.value).toBe('restored text')
   })
 })
 

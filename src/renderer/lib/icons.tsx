@@ -104,6 +104,7 @@ import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
 import LaptopIcon from '@hugeicons/core-free-icons/LaptopIcon'
 import Layers01Icon from '@hugeicons/core-free-icons/Layers01Icon'
 import Link01Icon from '@hugeicons/core-free-icons/Link01Icon'
+import Unlink01Icon from '@hugeicons/core-free-icons/Unlink01Icon'
 import LinkSquare02Icon from '@hugeicons/core-free-icons/LinkSquare02Icon'
 import Loading03Icon from '@hugeicons/core-free-icons/Loading03Icon'
 import Logout01Icon from '@hugeicons/core-free-icons/Logout01Icon'
@@ -116,6 +117,7 @@ import NetworkIcon from '@hugeicons/core-free-icons/NetworkIcon'
 import Notification02Icon from '@hugeicons/core-free-icons/Notification02Icon'
 import PaletteIcon from '@hugeicons/core-free-icons/PaletteIcon'
 import TextFontIcon from '@hugeicons/core-free-icons/TextFontIcon'
+import TextWrapIcon from '@hugeicons/core-free-icons/TextWrapIcon'
 import AppWindowIcon from '@hugeicons/core-free-icons/AppWindowIcon'
 import PanelLeftIcon from '@hugeicons/core-free-icons/PanelLeftIcon'
 import PanelRightCloseIcon from '@hugeicons/core-free-icons/PanelRightCloseIcon'
@@ -275,6 +277,7 @@ export const Laptop = /* @__PURE__ */ createIcon('Laptop', LaptopIcon)
 export const Layers = /* @__PURE__ */ createIcon('Layers', Layers01Icon)
 export const LayoutGrid = /* @__PURE__ */ createIcon('LayoutGrid', GridViewIcon)
 export const Link2 = /* @__PURE__ */ createIcon('Link2', Link01Icon)
+export const Unlink = /* @__PURE__ */ createIcon('Unlink', Unlink01Icon)
 export const ListTree = /* @__PURE__ */ createIcon('ListTree', Structure01Icon)
 export const Loader2 = /* @__PURE__ */ createIcon('Loader2', Loading03Icon)
 export const Lock = /* @__PURE__ */ createIcon('Lock', SquareLock01Icon)
@@ -292,6 +295,7 @@ export const MousePointer2 = /* @__PURE__ */ createIcon('MousePointer2', Cursor0
 export const Network = /* @__PURE__ */ createIcon('Network', NetworkIcon)
 export const Palette = /* @__PURE__ */ createIcon('Palette', PaletteIcon)
 export const TextFont = /* @__PURE__ */ createIcon('TextFont', TextFontIcon)
+export const WrapText = /* @__PURE__ */ createIcon('WrapText', TextWrapIcon)
 export const AppWindow = /* @__PURE__ */ createIcon('AppWindow', AppWindowIcon)
 export const PanelLeft = /* @__PURE__ */ createIcon('PanelLeft', PanelLeftIcon)
 export const PanelRightClose = /* @__PURE__ */ createIcon('PanelRightClose', PanelRightCloseIcon)

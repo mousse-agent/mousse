@@ -528,6 +528,12 @@ export interface HarnessDriver {
    */
   readonly compactsNearWindow?: boolean
   /**
+   * Mousse masks a secret's value in the runtime's tool results before the runtime keeps them (Claude Code's
+   * `PostToolUse` hook), so its turns may read the thread's secret copies while they run. Absent: the runtime keeps
+   * its tools' results as they are, and a turn on it holds the copies off until it settles.
+   */
+  readonly masksToolResults?: boolean
+  /**
    * What turns the agent's own telemetry off, as its vendor documents it: variables, and arguments
    * for the processes that take launch arguments. Set last, over the entry's own launch settings, on
    * every process Mousse starts for an entry whose telemetry is `off` (Settings → Providers). Absent:

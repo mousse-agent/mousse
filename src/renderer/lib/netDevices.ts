@@ -1,5 +1,5 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { BridgeNodePolicy, NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
@@ -47,6 +47,23 @@ export interface Device {
   sshOffer?: { endpoint: string }
   /** What this computer lets the device do here. Absent from a daemon that predates it. */
   policy?: BridgeNodePolicy
+  /** Whether the device is connected here. Absent from a daemon that predates it, where every device is. */
+  connection?: BridgeNodeConnection
+  /** This computer holds the device's routes, so Connect can reach it. */
+  routeHeld?: boolean
+}
+
+/** The device is connected here (a daemon from before the record connects every device). */
+export function connectedHere(device: Pick<Device, 'connection'>): boolean {
+  return device.connection === undefined || device.connection === 'connected'
+}
+/**
+ * How a device that is not connected here gets connected from its row: Connect when this computer holds its routes,
+ * otherwise a link from it. Undefined for a connected device.
+ */
+export function connectStep(device: Pick<Device, 'connection' | 'routeHeld' | 'name'>): { connect: true } | { hint: string } | undefined {
+  if (connectedHere(device)) return undefined
+  return device.routeHeld ? { connect: true } : { hint: `Paste a link from ${device.name}` }
 }
 
 /** The capability that lets a computer work on this one's threads is stored as `settings`. */
@@ -77,6 +94,50 @@ const NET_ERROR_WORDS: Record<string, string> = {
 /** A Net error code in words a person can read; a code this build does not know has its underscores taken out. */
 export function netErrorWords(code: string): string {
   return NET_ERROR_WORDS[code] ?? code.replaceAll('_', ' ')
+}
+
+/**
+ * Why a join failed, with the one thing to do next. The daemon names the reason and the other
+ * computer in the error's details; a daemon from before them sends only the code.
+ */
+export function joinErrorWords(error: { code?: unknown; details?: unknown; message?: unknown }): string {
+  const details = (error.details ?? {}) as { reason?: unknown; label?: unknown }
+  const other = typeof details.label === 'string' ? details.label : 'the other computer'
+  switch (details.reason) {
+    case 'unreachable':
+      return `Couldn’t reach ${other}. Check that it’s on and that both computers are on the same network or tailnet, then try again.`
+    case 'clock':
+      return `The clocks on this computer and ${other} are too far apart. Set both to the correct time, then try again.`
+    case 'cancelled':
+      return `This connection was cancelled on ${other}. Start again with a new link from ${other}.`
+    case 'join_unfinished':
+      return `Couldn’t finish connecting to ${other}. Retry, or give up and start again.`
+  }
+  switch (error.code) {
+    case 'invite_invalid':
+      return 'This link isn’t valid or has expired. Make a new one on the other computer.'
+    case 'keystore_locked':
+      return 'The system keychain refused to protect this computer’s keys. Set a passphrase to continue.'
+    case 'conflict':
+      return 'This computer is already set up with its own devices, so it can’t join another set.'
+  }
+  return String(error.message ?? error.code ?? 'The connection failed.')
+}
+
+/** Why this computer can't start over now, naming what stands in the way; undefined when it can. */
+export function startOverRefusal(check: NetStartOverCheck): string | undefined {
+  const names = (list?: string[]) => (list ?? []).join(', ')
+  switch (check.refused) {
+    case 'space_host':
+      return `This computer hosts ${names(check.hosted)}. Its members would lose it, so this computer can’t start over.`
+    case 'mousse_id':
+      return 'This computer is signed in to Mousse ID. Sign out first, then start over.'
+    case 'live_devices':
+      return check.keeper
+        ? `${names(check.live)} still rely on this computer. Remove them first, then start over.`
+        : `This computer still belongs with ${names(check.live)}. Remove it there first, then start over.`
+  }
+  return undefined
 }
 
 /** Words for a capability in the device line; `settings` is "work on threads". */

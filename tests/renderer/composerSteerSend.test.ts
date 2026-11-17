@@ -6,11 +6,17 @@ import { SERVICE_LOST_RECONNECT, SERVICE_LOST_TITLE } from '../../src/renderer/c
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-// The transcript is not part of this check: the shell shows the composer and its notices only.
+// The shell shows the composer and its notices; the transcript it is given is kept for the checks (`shown`).
+const transcript = vi.hoisted(() => ({ messages: [] as Array<{ id: string; role: string; parts?: Array<{ type: string; text?: string }>; metadata?: { steered?: boolean } }> }))
 vi.mock('../../src/renderer/chat/components/MousseAgentChatShell', async () => {
   const { createElement: create } = await import('react')
   const { ComposerNoticeProvider } = await import('../../src/renderer/components/ComposerNotice')
-  return { MousseAgentChatShell: ({ composer }: { composer: never }) => create(ComposerNoticeProvider, null, composer) }
+  return {
+    MousseAgentChatShell: ({ composer, messages }: { composer: never; messages: typeof transcript.messages }) => {
+      transcript.messages = messages
+      return create(ComposerNoticeProvider, null, composer)
+    }
+  }
 })
 vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 
@@ -168,5 +174,44 @@ describe('a steer with an image', () => {
     expect(request.images).toEqual([expect.objectContaining({ mimeType: 'image/png', data: 'iVBORw==' })])
     // Sent into the reply now, by the queued message's id.
     expect(promoteToSteer).toHaveBeenCalledWith('thread-a', 'q-shot')
+  })
+})
+
+/** The words of the steered messages the conversation shows. */
+const steeredShown = () =>
+  transcript.messages
+    .filter((message) => message.role === 'user' && message.metadata?.steered)
+    .map((message) => (message.parts ?? []).filter((part) => part.type === 'text').map((part) => part.text).join(''))
+
+describe('a steer on its way into the reply', () => {
+  it('shows in the reply from the click, before the service answers, and once when its copy arrives', async () => {
+    orchestrator.isTurnActive = vi.fn(async () => true)
+    let answer!: (value: boolean) => void
+    orchestrator.steer = vi.fn(() => new Promise<boolean>((resolve) => { answer = resolve }))
+    await mount()
+    await send('Use the id', { ctrlKey: true })
+    expect(host.querySelector<HTMLTextAreaElement>('.composer-input')!.value).toBe('')
+    // The service has not answered: the message is in the reply already, not gone.
+    expect(steeredShown()).toEqual(['Use the id'])
+
+    // The copy the service writes into the turn arrives, then the answer: still shown once.
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    await act(async () => {
+      useAppStore.getState().addMessage({ id: 'echo-1', role: 'user', content: 'Use the id', timestamp: new Date(Date.now() + 1000).toISOString(), steered: true } as never)
+    })
+    expect(steeredShown()).toEqual(['Use the id'])
+    await act(async () => { answer(true) })
+    await settle()
+    expect(steeredShown()).toEqual(['Use the id'])
+    expect(transcript.messages.some((message) => message.id === 'echo-1')).toBe(true)
+  })
+
+  it('leaves the reply when the turn could not take it: it is in the queue instead', async () => {
+    orchestrator.isTurnActive = vi.fn(async () => true)
+    orchestrator.steer = vi.fn(async () => 'queued')
+    await mount()
+    await send('Use the id', { ctrlKey: true })
+    await settle()
+    expect(steeredShown()).toEqual([])
   })
 })

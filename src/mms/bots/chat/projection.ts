@@ -1,6 +1,7 @@
 import { readableActionTitle, type ActionRow } from '../actions/BotActions'
 import type { BotActionCard } from '../../../shared/bots/personal/chat'
 import { workWaitLine, parkedNeedsOwner } from '../activation/workWaiting'
+import { replyPreviewText } from '../../../shared/threadPreview'
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
 import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
@@ -611,6 +612,8 @@ export class BotChatProjection {
     const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)
     const last = this.store.lastMessage(definition.id)
     const ended = this.store.lastEndedActivation(definition.id)
+    const replied = last?.author === 'bot' && last.text ? last : this.store.lastBotReply(definition.id)
+    const lastReply = replied?.text ? replyPreviewText(replied.text) : undefined
     const stateText = state === 'paused'
       ? pausedHere
         ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
@@ -632,6 +635,7 @@ export class BotChatProjection {
       ...(error ? { error } : {}),
       // A message of cards alone reads as its first card's plain text.
       ...(last ? { last: { text: oneLine(last.text || last.error?.text || plainCards(last.cards) || last.attachments?.map((file) => file.name).join(', ') || '', 200), at: last.at, author: last.author } } : {}),
+      ...(lastReply ? { lastReply } : {}),
       ...(ended ? { lastOutcome: ended.status === 'done' ? 'ok' as const : ended.status === 'failed' ? 'failed' as const : 'stopped' as const } : {}),
       unread: this.store.unread(definition.id, registry?.readSeq ?? 0),
       createdAt: registry?.createdAt ?? new Date(now).toISOString(),

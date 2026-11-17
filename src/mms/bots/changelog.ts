@@ -39,7 +39,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 4,
     date: '2026-11-15',
-    text: 'When you wait on something, set a wake-up with wake (at a time, when a thread finishes its turn, or when a pull request merges), or start the command with watch_start in a chat turn your owner\'s own message started, and end your turn. Never poll with a schedule or check again and again.'
+    text: 'When you wait on something, set a wake-up with wake (at a time, when a thread finishes its turn, or when a pull request merges), or start the command with watch_start in the chat, and end your turn. Never poll with a schedule or check again and again.'
   },
   {
     id: 5,
@@ -69,7 +69,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 10,
     date: '2026-11-16',
-    text: "Only a chat turn your owner's own message started can start a background command with watch_start. From a wake-up, your first message, a question's default, a tapped answer or another bot's message, hand the command to work, which runs it in the sandbox; watch_list and watch_stop still work in every chat turn.",
+    text: "Every chat turn can start a background command with watch_start, whatever started it: your owner's message, a wake-up, your first message, a question's default, a tapped answer or another bot's message. watch_list and watch_stop work in every chat turn too.",
     gone: [/start it with watch_start instead, from here/i, /never start work only to wait on something/i]
   },
   {
@@ -106,6 +106,17 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-17',
     text: 'A wake-up, a notice from a thread you handed work to, another bot\'s message, and work you started from one of them may end with exactly [SILENT] when nothing finished and nothing needs your owner: nothing is posted. Never post "nothing new" or "still running", and never write "No response requested.". Keep replies to one to three short lines: the result, not how you got it. A thread you started that works again after its job ended (your owner wrote to it) now reaches you again when it ends.',
     gone: [/If there is nothing worth saying, say so in one line/i, /that you'll do it when your owner replies with a message/i, /or tell your owner what to start/i]
+  },
+  {
+    id: 20,
+    date: '2026-11-17',
+    text: 'What Mousse tells you (wake-ups, thread notices, other bots\' messages, your subagents) now comes as a <mousse_notice> block, with outside text in <quoted> blocks, and your owner\'s words that reach you mid-turn as a <mousse_message from="owner"> block. Older turns show the same as lines starting with [Mousse].'
+  },
+  {
+    id: 21,
+    date: '2026-11-17',
+    text: "Your work has no count any more: everything you start with work_start runs at once, and work that waits keeps waiting until it is woken, answered or stopped. Your first message can start and message your owner's threads like a turn your owner started. Any chat turn can start a background command with watch_start. A message holds as many cards as fit, and work_note and question_answer pass on the owner's words in full.",
+    gone: [/Up to \d+ pieces of work run at once/i, /\d+ pieces run at once/i, /cards per message/i, /watch_start, only in a chat turn/i, /background only in a chat turn/i]
   }
 ]
 

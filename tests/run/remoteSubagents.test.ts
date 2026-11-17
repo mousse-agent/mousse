@@ -259,6 +259,25 @@ describe('remote subagents (issue #469)', () => {
     expect(d.engine.inbox.listPending(parent.id).length + d.engine.inbox.listByStatus(parent.id, 'delivered').length + d.engine.inbox.listByStatus(parent.id, 'acknowledged').length).toBeGreaterThan(0)
   })
 
+  it('has no default time limit and no longest one: without maxMinutes it runs on after days, and a limit past a day is kept as given', async () => {
+    const { d, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    steps['go'] = async (tools) => {
+      out.started = await startOnMac(tools, 'Mac tester')
+      out.long = await startOnMac(tools, 'Mac soak', { maxMinutes: 3000 })
+    }
+    await say('go')
+    const clock = (service as unknown as { deps: { now: () => number } }).deps
+    clock.now = () => Date.now() + 2 * 24 * 60 * 60_000
+    await service.pass()
+    expect(d.engine.delegations.get(out.started.delegationId)!.result).toBeFalsy()
+    expect(d.engine.delegations.get(out.long.delegationId)!.result).toBeFalsy()
+    expect(mac.methods()).not.toContain('orchestrator.abort')
+    clock.now = () => Date.now() + 3001 * 60_000
+    await service.pass()
+    expect(d.engine.delegations.get(out.long.delegationId)!.result!.error).toContain('3000-minute limit on Studio Mac')
+    expect(d.engine.delegations.get(out.started.delegationId)!.result).toBeFalsy()
+  })
+
   it('continues on the same thread there once the last task finished, and never merges here', async () => {
     const { d, steps, out, say, mac, service, startOnMac } = remoteWorld()
     steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
@@ -323,24 +342,27 @@ describe('remote subagents (issue #469)', () => {
 
   // Issue #1160: the mode there is the narrowest of the parent thread's mode, its run and the limit that computer set
   // for this one, with no fixed cap. A read-only task is still sent in Plan mode.
-  const MODE_ROWS: Array<{ name: string; parent: PermissionMode; limit: PermissionMode; workspace?: 'shared'; mode: PermissionMode; chatMode: 'agent' | 'plan' }> = [
+  const MODE_ROWS: Array<{ name: string; parent: PermissionMode; limit: PermissionMode; workspace?: 'shared'; readOnly?: boolean; mode: PermissionMode; chatMode: 'agent' | 'plan' }> = [
     { name: 'Full access when both sides allow it', parent: 'full', limit: 'full', mode: 'full', chatMode: 'agent' },
     { name: 'the default device limit narrows a Full access parent', parent: 'full', limit: 'accept_edits', mode: 'accept_edits', chatMode: 'agent' },
     { name: 'a lower device limit narrows it', parent: 'full', limit: 'ask', mode: 'ask', chatMode: 'agent' },
     { name: 'a stricter parent narrows a Full access limit', parent: 'accept_edits', limit: 'full', mode: 'accept_edits', chatMode: 'agent' },
-    { name: 'a read-only task is still Plan', parent: 'full', limit: 'full', workspace: 'shared', mode: 'full', chatMode: 'plan' }
+    { name: 'a read-only task is still Plan', parent: 'full', limit: 'full', workspace: 'shared', readOnly: true, mode: 'full', chatMode: 'plan' },
+    { name: 'a shared task not asked read-only is Agent', parent: 'full', limit: 'full', workspace: 'shared', mode: 'full', chatMode: 'agent' }
   ]
-  it.each(MODE_ROWS)('the mode there: $name', async ({ parent: parentMode, limit, workspace, mode, chatMode }) => {
+  it.each(MODE_ROWS)('the mode there: $name', async ({ parent: parentMode, limit, workspace, readOnly, mode, chatMode }) => {
     const { d, parent, steps, out, say, mac, startOnMac } = remoteWorld()
     d.orch.setThreadPermissionMode(parent.id, parentMode)
     mac.limit = limit
     steps['go'] = async (tools) => {
-      out.started = await startOnMac(tools, 'Mac tester', workspace ? { workspace, role: 'research' } : {})
+      out.started = await startOnMac(tools, 'Mac tester', workspace ? { workspace, role: 'research', ...(readOnly ? { readOnly } : {}) } : {})
     }
     await say('go')
     expect(out.started).toMatchObject({ title: 'Mac tester', computer: 'Studio Mac' })
     expect(mac.calls.find((call) => call.method === 'threads.setPermissionMode')!.params.mode).toBe(mode)
     expect(mac.calls.find((call) => call.method === 'orchestrator.send')!.params.mode).toBe(chatMode)
+    // Only a read-only task reads that computer's project folder itself; one that may edit gets a worktree there.
+    expect(mac.calls[0]!.params.worktreeEnabled).toBe(!readOnly)
   })
 
   it('a follow-up runs no looser than the run that sends it', async () => {

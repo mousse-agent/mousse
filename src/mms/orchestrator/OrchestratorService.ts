@@ -1,4 +1,7 @@
 import { profilerService } from '../diagnostics/profilerService'
+import { describeQuestionAnswers } from './questionAnswers'
+import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
+import { latestReplyPreview } from '../../shared/threadPreview'
 import type { SecretToolHost } from '../run/mcp/appTools/secrets'
 import { maskedCopy, maskInPlace, type SecretMasker } from '../secrets/secretMasking'
 import { admittedSelection, modelChangeNote, previousTurnModel, turnMarker, turnMarkerText } from './contextHandoff'
@@ -20,7 +23,7 @@ import { join, resolve } from 'node:path'
 import { projectKeptFilesOwner, registerProjectKeptFilesFolder } from '../actions/keptCopies'
 import { getMousseHomeDir } from '../data/paths'
 import { tmpdir } from 'node:os'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import {
   normalizeAgentAccessSettings,
   normalizeContextSettings,
@@ -88,7 +91,7 @@ import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/Com
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
 import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
-import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
+import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation } from '../run/mcp/appTools/thread'
 import { botMessage } from '../run/mcp/appTools/agentMessage'
 
 /**
@@ -126,11 +129,11 @@ import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { botTurnOffers } from '../../shared/bots/personal/walls'
 import { BOT_COMPACTION_HOLD_MS, isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
-import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
-import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
+import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type HarnessDriverKind, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
+import type { McpAttachmentProvider, McpToolBoundary } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
-import { cancelQueuedWakes } from '../run/delegation/wake'
+import { cancelQueuedWakes, deliverAtToolBoundary, releaseToolBoundary } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
 import { qualifyId } from '../../shared/threadRef'
@@ -141,7 +144,6 @@ import { REMOTE_THREAD_COMMAND, remoteThreadFingerprint, remoteThreadRefusal } f
 import type { RemoteLaunchRecord } from '../run/delegation/remoteLaunches'
 import { RemoteSubagents } from './RemoteSubagents'
 import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
-import { MAX_REMOTE_MINUTES } from '../run/mcp/appTools/delegation'
 import { isRunningSubagent, isWorkingSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
 import type { SettleNoticeItem } from '../../shared/settleNotice'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
@@ -296,7 +298,7 @@ import { ThreadActionService } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
-import { coverageNotice, SnapshotRefusedError, snapshotOriginAsync } from '../actions/snapshots'
+import { coverageNotice, SnapshotRefusedError, snapshotOriginAsync, takeSnapshotAsync } from '../actions/snapshots'
 import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync, tryGitAsync as actionTryGitAsync } from '../actions/git'
 import {
   claimNextNormal,
@@ -365,7 +367,7 @@ import {
   repairQueueJournal,
   runDurableQueueCommand
 } from '../queue/durableQueue'
-import { ThreadSession, steerImages, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
+import { ThreadSession, isReadOnlyShared, steerImages, type ActiveTurnControl, type SharedWorkspace, type SteerEntry } from './ThreadSession'
 import { SteerHold, type PendingSteerFacts } from './steerHold'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
@@ -402,6 +404,21 @@ interface SnapshotFolder {
   workTree: string
   /** The project, when the folder is a project's; the project's threads share one store. */
   projectId?: string
+}
+
+/**
+ * Where a subagent that may edit its parent's folder keeps that folder's snapshots, by run: taken as each of its turns
+ * starts and ends, so its task's result says what changed there while it worked (`delegationResultReport`).
+ */
+const SHARED_FOLDER_SNAPSHOTS_FILE = 'shared-folder-snapshots.json'
+
+function readSharedFolderSnapshots(file: string): Record<string, { start?: string; end?: string }> {
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, { start?: string; end?: string }> : {}
+  } catch {
+    return {}
+  }
 }
 
 interface NormalizedOrchestratorSendRequest {
@@ -469,39 +486,10 @@ export function formatQuestionAnswersMessage(
     .join('\n\n')
 }
 
-/**
- * The answers as the transcript keeps them (`ChatMessage.questionAnswers`): option ids resolve to
- * their labels; text that names no option is the reply typed instead.
- */
-export function describeQuestionAnswers(
-  questions: UserQuestion[],
-  answers: UserQuestionAnswers,
-  /** Which of the answer message's images each question got, by question id. */
-  imageIndexes?: Record<string, number[]>
-): AnsweredQuestion[] {
-  return questions.map((question) => {
-    const value = answers[question.id]
-    const values = (value === undefined ? [] : Array.isArray(value) ? value : [value])
-      .map((entry) => String(entry).trim())
-      .filter((entry) => entry.length > 0)
-    const chosen: string[] = []
-    const typed: string[] = []
-    for (const entry of values) {
-      const option = question.options.find((each) => each.id === entry)
-      if (option) chosen.push(option.label.trim() || entry)
-      else typed.push(entry)
-    }
-    const images = imageIndexes && Object.hasOwn(imageIndexes, question.id) ? imageIndexes[question.id] : undefined
-    return {
-      prompt: question.prompt,
-      chosen,
-      ...(typed.length ? { reply: typed.join('\n') } : {}),
-      ...(images?.length ? { images } : {})
-    }
-  })
-}
 
 /** Render an explicit dismissal as transcript text. */
+export { describeQuestionAnswers }
+
 export function formatQuestionDismissMessage(questions: UserQuestion[]): string {
   const first = questions[0]
   return first ? `Dismissed question: ${first.prompt}` : 'Dismissed the question.'
@@ -1126,14 +1114,20 @@ type LeaseWait = {
 /** None of the messages a lease wait woke for is still waiting by the time the queue lock is held. */
 class LeaseWaitGone extends Error {}
 
-/** Tool access of a delegated child in its parent's workspace: read-only roles only. */
+/** Tool access of a read-only delegated child (`delegate_task` `readOnly`) in its parent's workspace. */
 const SHARED_READER_POLICY: AgentWorkspacePolicy = { version: 1, workspace: 'shared', access: 'read-only' }
-/** Roles allowed `workspace: 'shared'` (SPEC §14.2: read-only roles). */
-const SHARED_WORKSPACE_ROLES: ReadonlySet<string> = new Set(['research', 'review'])
-/** Most named assignments one `create_subagents` call may start. */
-const NAMED_BATCH_LIMIT = 8
-/** How long a remote subagent may run when `delegate_task` gives no `maxMinutes`: as long as a local turn may. */
-const DEFAULT_REMOTE_MINUTES = 360
+/** What a read-only subagent's own subagents must be, since authority only narrows down the tree. */
+const READ_ONLY_CALLER_MESSAGE = 'You are a read-only subagent, so your own subagents must be read-only too: start them with readOnly true.'
+
+/** The latest time a JavaScript `Date` holds; a `maxMinutes` past it sets no deadline. */
+const MAX_DATE_MS = 8.64e15
+
+/** When a remote subagent given `maxMinutes` is stopped; null without one: it runs until it ends or is stopped. */
+function remoteDeadlineAt(maxMinutes: number | undefined, now = Date.now()): string | null {
+  if (maxMinutes === undefined) return null
+  const at = now + maxMinutes * 60_000
+  return Number.isFinite(at) && at <= MAX_DATE_MS ? new Date(at).toISOString() : null
+}
 
 /** In-process result of a `turn.start` effect, settled by its executor. */
 interface TurnResult {
@@ -1292,16 +1286,16 @@ export class OrchestratorService extends EventEmitter {
 
   private secretCopies?: SecretCopyControl
   /**
-   * As a turn starts: its thread's agents get readable copies of their secrets only on Claude Code, whose tool results
-   * Mousse masks before Claude Code keeps them (`PostToolUse`). Any other runtime keeps its own tools' results as they
-   * are, so its turn holds the copies of its thread, and of the threads above it (whose agents may have handed it a
+   * As a turn starts: its thread's agents get readable copies of their secrets only on a runtime whose tool results
+   * Mousse masks before the runtime keeps them (`HarnessDriver.masksToolResults`: Claude Code's `PostToolUse`). Any
+   * other runtime keeps its own tools' results as they are, so its turn holds the copies of its thread, and of the threads above it (whose agents may have handed it a
    * path), off until it settles: call the returned release then. Its agent uses secret_run. Throws when a copy cannot be
    * removed, and the turn must not start.
    */
-  private secretCopiesForTurn(threadId: string, driver: string | undefined): () => void {
+  private secretCopiesForTurn(threadId: string, driver: HarnessDriverKind | undefined): () => void {
     const copies = this.secretCopies
     if (!copies) return () => {}
-    if (driver === 'claude') {
+    if (this.harness?.masksToolResults?.(driver)) {
       try {
         copies.allow(threadId)
       } catch {
@@ -2189,7 +2183,11 @@ export class OrchestratorService extends EventEmitter {
   /** The clock saved queue holds are renewed and judged by (tests move it). */
   private queueHoldClock: () => number = () => Date.now()
 
+  /** The phase a running turn was in when it asked the person something (`setAwaitingInput`, `inputAnswered`). */
+  private readonly phaseBeforeInput = new Map<string, { phase: TurnPhase; turnId: string | null; activeMessageId?: string }>()
+
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
+
   private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause' | 'step' | 'uncertain'>> & { blockedOnWait?: boolean }): void {
     // A stopped turn that is still ending already shows stopped (`showStopped`): what its provider sent before it let go
     // (a last delta, a tool event, a question) does not make the thread look busy again.
@@ -2282,7 +2280,23 @@ export class OrchestratorService extends EventEmitter {
   }
 
   setAwaitingInput(threadId: string): void {
+    const existing = this.turnStates.get(threadId)
+    if (existing && isTurnActivePhase(existing.phase)) this.phaseBeforeInput.set(threadId, { phase: existing.phase, turnId: existing.turnId, ...(existing.activeMessageId ? { activeMessageId: existing.activeMessageId } : {}) })
     this.setTurnPhase(threadId, 'awaiting_input')
+  }
+
+  /**
+   * The thread's last question or approval was answered: a turn that still runs goes back to the phase it asked from.
+   * Without this it reads as waiting for an answer until the provider sends its next event (a whole command, after an
+   * approved Bash), and the composer queues what the person meant as a steer.
+   */
+  inputAnswered(threadId: string): void {
+    const before = this.phaseBeforeInput.get(threadId)
+    this.phaseBeforeInput.delete(threadId)
+    const existing = this.turnStates.get(threadId)
+    if (existing?.phase !== 'awaiting_input' || !existing.turnId || !this.sessions.get(threadId)?.activeTurn) return
+    const same = before && before.turnId === existing.turnId
+    this.setTurnPhase(threadId, same ? before.phase : 'thinking', same && before.activeMessageId ? { activeMessageId: before.activeMessageId } : undefined)
   }
 
   private get session(): ThreadSession {
@@ -2464,6 +2478,9 @@ export class OrchestratorService extends EventEmitter {
     this.on('turn-completed', (payload: { threadId?: string }) => { if (payload?.threadId) this.nameThreadAfterTurn(payload.threadId, true) })
     for (const event of ['turn-failed', 'turn-interrupted'] as const)
       this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.nameThreadAfterTurn(payload.threadId, false) })
+    // A thread's sidebar row shows its latest reply, kept in its metadata when each turn ends (`Thread.lastReply`).
+    for (const event of ['turn-completed', 'turn-failed', 'turn-interrupted', 'turn-paused'] as const)
+      this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.recordLastReply(payload.threadId) })
     // A thread's goal decides after each of its turns whether the next goal turn is queued.
     const outcomes = { 'turn-completed': 'completed', 'turn-failed': 'failed', 'turn-interrupted': 'interrupted', 'turn-paused': 'paused' } as const
     for (const [event, outcome] of Object.entries(outcomes) as Array<[keyof typeof outcomes, GoalTurnOutcome]>)
@@ -2721,12 +2738,31 @@ export class OrchestratorService extends EventEmitter {
       continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy),
       ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}).`)
     })
+    // Questions agents ask without waiting are kept there too; their answers go to the thread's inbox.
+    this.questions.setOpenQuestionStore(engine.openQuestions)
   }
 
   /** Only the binding this orchestrator made: a service shared with a newer orchestrator keeps theirs. */
   private unbindApprovals(): void {
     const store = this.runEngine?.approvals
     if (store && this.questions.approvalStore === store) this.questions.setApprovalStore(null)
+    const open = this.runEngine?.openQuestions
+    if (open && this.questions.openQuestionStore === open) this.questions.setOpenQuestionStore(null)
+  }
+
+  /**
+   * A Stop, an archive or a delete closes the questions the thread's agent asked without waiting: nothing would act on
+   * their answers. The thread says which were closed, so the card's going away is explained.
+   */
+  private closeOpenQuestions(threadId: string, reason: OpenQuestionCloseReason): void {
+    try {
+      const closed = this.questions.closeOpenForThread(threadId, reason)
+      if (closed.length === 0 || reason === 'thread_deleted') return
+      const what = closed.length === 1 ? `The open question "${closed[0]!.questions[0]?.prompt.replace(/\s+/g, ' ').slice(0, 120) ?? ''}" was` : `${closed.length} open questions were`
+      this.noteProviderNotice(threadId, `${what} closed because the thread was ${reason === 'archived' ? 'archived' : 'stopped'}.`)
+    } catch (error) {
+      console.warn('open questions could not be closed', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**
@@ -3657,10 +3693,12 @@ export class OrchestratorService extends EventEmitter {
    * turn's checkpoint and cleanup, which go on behind it. Until the turn has ended its late phases are not shown, and a
    * message sent meanwhile goes first and runs once it has ended (`ThreadSession.stopping`).
    */
-  private showStopped(threadId: string): void {
+  private showStopped(threadId: string, by: 'person' | 'agent'): void {
     const session = this.loadedSession(threadId)
     if (!session?.isTurnRunning()) return
     session.stopping = true
+    // Set before the phase: the activity the phase publishes reads it (`stoppedByPerson`).
+    session.stoppedBy = by
     if (isTurnStoppable(this.turnStates.get(threadId))) this.setTurnPhase(threadId, 'stopped')
   }
 
@@ -3699,13 +3737,15 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       console.warn('the goal of a stopped thread could not be stopped', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
+    // A person's Stop, or the cascade of one to the threads it launched; its end is not news to that person.
+    const stoppedBy = !opts.actor && !opts.byAgent && (reason === 'user' || reason === 'launcher_stopped') ? 'person' : 'agent'
     const engine = this.runEngine
     if (!engine) {
       // Without a run engine there is only the local turn and its queue.
       const ended = this.endFolderWaits([threadId])
       this.endTurnSetups([threadId])
       const aborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
-      if (aborted) this.showStopped(threadId)
+      if (aborted) this.showStopped(threadId, stoppedBy)
       return { ok: aborted || ended || compactionStopped, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
@@ -3734,6 +3774,7 @@ export class OrchestratorService extends EventEmitter {
           engine.approvals.cancelForThread(id, 'stopped')
           // And what was answered but not yet delivered, or granted but not yet used: nothing before a Stop may act after it.
           engine.approvals.retireDelivery(id)
+          this.closeOpenQuestions(id, reason === 'settled' ? 'archived' : 'stopped')
           // A scheduled prompt that waited behind those approvals may run now.
           const waiting = this.sessions.get(id)
           if (waiting) this.scheduleQueueDrain(waiting)
@@ -3749,7 +3790,7 @@ export class OrchestratorService extends EventEmitter {
       for (const run of result.activeRuns) {
         if (this.abortActiveTurn(run.threadId, { runId: run.runId })) {
           aborted = true
-          this.showStopped(run.threadId)
+          this.showStopped(run.threadId, stoppedBy)
         }
         // The worker runs the interrupt effect `stopSubtree` queued; without one, the interrupt runs now.
         if (!this.effectsEnabled()) void this.interruptRun(run.runId, run.threadId)
@@ -3758,7 +3799,7 @@ export class OrchestratorService extends EventEmitter {
       // for the thread the Stop was aimed at; nothing can have started since the transaction.
       if (!result.activeRuns.some((run) => run.threadId === threadId) && this.abortActiveTurn(threadId)) {
         aborted = true
-        this.showStopped(threadId)
+        this.showStopped(threadId, stoppedBy)
       }
       this.removeStoppedQueueEntries(result, opts.clearQueue === true, opts.actor !== undefined)
     }
@@ -4077,8 +4118,11 @@ export class OrchestratorService extends EventEmitter {
     try {
       if (this.botThreads?.roleOf(caller.threadId)) return false
       const engine = this.runEngine
-      const run = engine?.getRun(caller.runId)
-      const binding = engine?.bindingForRun(caller.runId)
+      // A subagent has what its parent has: a subagent of a person's turn (or of one of its subagents) counts as that turn.
+      const root = this.delegationRootOf(caller.runId)
+      const run = root ? engine?.getRun(root) : undefined
+      if (run && run.threadId !== caller.threadId && this.botThreads?.roleOf(run.threadId)) return false
+      const binding = root ? engine?.bindingForRun(root) : undefined
       return Boolean(run && binding) && startedByPerson({ origin: policyOrigin(binding!.policy), source: run!.source })
     } catch {
       return false
@@ -4131,7 +4175,7 @@ export class OrchestratorService extends EventEmitter {
       actor: defaultIntegrationActor(false),
       enabledSkills: [],
       loadedSkills: [],
-      ...(session.sharedWorkspace ? { toolAccess: createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path) } : {}),
+      ...(session.sharedWorkspace && isReadOnlyShared(session.sharedWorkspace) ? { toolAccess: createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path) } : {}),
       // A bot turn: every app-tool call is held to the bot's grant (the registry checks it).
       ...(bot ? { bot: bot.authority } : {}),
       // A bot's browser tools run on its own browser, never the profile's tabs.
@@ -4315,6 +4359,29 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * Notices handed to a running turn with its Mousse tool results (docs/plans/tool-api.md §2.2), on a runtime that
+   * steers by restarting its reply: the turn's pending subagent results and requests reach it at its next Mousse tool
+   * call instead of only when the turn ends (`deliverAtToolBoundary`). A native-steer runtime gets them from rule 4.
+   */
+  mcpToolBoundary(): McpToolBoundary {
+    return {
+      deliver: ({ threadId, runId }) => {
+        const engine = this.runEngine
+        if (!engine || !this.effectsEnabled()) return null
+        const delivery = deliverAtToolBoundary(engine.store, engine.outbox, {
+          threadId,
+          runId,
+          caps: this.capabilitiesForThread(threadId),
+          prepare: (rows) => this.dropStaleQuestionRows(rows),
+          plan: (rows) => planWakeNotice(rows, this.noticeContext())
+        })
+        if (!delivery) return null
+        return { text: delivery.text, release: () => engine.store.db.transaction(() => releaseToolBoundary(engine.store, delivery)) }
+      }
+    }
+  }
+
+  /**
    * What the Mousse MCP server's tools need from the thread owner (SPEC §15.1). Every call acts as
    * the credential's caller: its thread's session, run and mode ceiling.
    */
@@ -4329,6 +4396,8 @@ export class OrchestratorService extends EventEmitter {
       delegation: (caller: McpCaller) =>
         this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling),
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
+      askWithoutWaiting: (threadId, questions, runId) => this.questions.ask(questions, threadId, runId),
+      withdrawQuestion: (threadId, requestId) => this.questions.withdraw(requestId, threadId),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       secrets: () => this.secretTools,
       // The thread's terminals, read from memory: no lease, nothing written to them (`terminal_read`).
@@ -4386,16 +4455,20 @@ export class OrchestratorService extends EventEmitter {
       searchThreads: async (query, limit, options) => (await this.threadStore?.searchThreadsAsync(query, limit, { hideSubagents: true, ...options })) ?? [],
       threadMessages: (threadId) => this.visibleMessagesWithoutLoading(threadId),
       threadActivity: (threadId) => this.threadActivity(threadId),
+      pendingRequests: (threadId) => this.questions.listPendingForThread(threadId).map(withoutStandingRules),
+      onRequestPending: (listener) => {
+        const onPending = (event: { threadId: string }): void => listener(event.threadId)
+        this.questions.on('pending', onPending)
+        return () => this.questions.off('pending', onPending)
+      },
       recordAgentAction: (target, actor, action, details) => this.recordAgentAction(target, actor, action, details),
       showAgentAction: (target, actor, summary, options) => this.showAgentAction(target.threadId, actor, summary, options),
       sendToThread: (threadId, input, options) => this.sendToThreadAsAgent(threadId, input, options),
-      earlierSend: (threadId, clientRequestId) => this.earlierAgentSend(threadId, clientRequestId),
       watchSettle: (input) => {
         if (!this.settleNotices) throw new Error('Mousse cannot watch threads without the run engine.')
         return { watchId: this.settleNotices.watch(input).watchId }
       },
       createThread: (input, options) => this.createThreadAsAgent(input, options),
-      creationStarted: (clientRequestId) => this.agentCreationStarted(clientRequestId),
       createRemoteThread: (input, options) => this.createRemoteThreadAsAgent(input, options),
       ...(this.remoteThreads ? { remoteThreads: this.remoteThreadsHost(this.remoteThreads) } : {}),
       noteOnThread: (threadId, text, launched) => this.noteAgentLaunch(threadId, text, launched),
@@ -4797,12 +4870,6 @@ export class OrchestratorService extends EventEmitter {
     // A worktree needs Git: on any other project a "new worktree" thread would write in the project folder, beside others.
     if (input.workspace === 'new_worktree' && !gitBacked)
       throw new Error('workspace "new_worktree" needs a Git project: this project is not backed by a Git repository, so a thread there would work in the project folder. Use workspace "project". No thread was created.')
-    // However many runs this thread has made, only so many of its launched threads may be working at once. The owner's
-    // bot is not held to it: it starts as many as the owner's work needs.
-    const busy = options.bot ? undefined : new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
-    const working = busy ? this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && busy.has(thread.id)).length : 0
-    if (busy && working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
-      throw new McpToolError('mousse_conflict', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish (thread_wait) before launching more.`, { conflict: 'creation_limit', working })
     // A bot's thread never takes the bot's own model: the one it names, or the profile's default.
     const modelOverride = this.agentThreadModel(input, options.actor.threadId, project.id, options.bot !== undefined)
     // The thread runs no wider than its creator, and a looser default later cannot widen it: its mode is the stricter of
@@ -4964,17 +5031,11 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** The key has a stored creation: a retry finishes that one thread and needs no new place under the caller's cap. */
-  private agentCreationStarted(clientRequestId: string): boolean {
-    const engine = this.requireRunEngine()
-    return readAgentThreadReceipt(engine.store.getReceipt(clientRequestId)) !== undefined || engine.remoteLaunches.get(clientRequestId) !== null
-  }
-
   /**
    * `thread_create` with `computer` (issue #1160): a top-level thread on another of the user's computers, in its project
    * that is this thread's repository. Everything that can be checked here is checked before anything is recorded: the
    * caller may reach other computers (not private, not itself started from another device, the switch on and that
-   * computer ticked), the computer is online, knows the agent mark and has the repository, the caps and the hop count.
+   * computer ticked), the computer is online, knows the agent mark and has the repository, and the hop count.
    * Then the launch is recorded with its receipt, and `RemoteThreadLaunches` runs it: a retry with the same key continues
    * that one launch, and one a restart cut off is finished later. Refusals are returned with their code.
    */
@@ -5031,10 +5092,6 @@ export class OrchestratorService extends EventEmitter {
       const failed = remoteThreadRefusal(error, computer.name)
       return refuse(failed.code, failed.message, at)
     }
-    // However many runs this thread has made, only so many of the threads it launched may be working at once.
-    const working = await this.launchedThreadsWorking(callerThreadId)
-    if (working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
-      return refuse('creation_limit', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish before launching more.`, at)
     // The first message counts as the next agent message in a row: a launch cannot start a chain the limit would stop.
     let hops = (engine.getRun(options.actor.runId)?.outcome?.agentHops ?? 0) + 1
     if (input.firstMessage !== undefined) {
@@ -5107,18 +5164,6 @@ export class OrchestratorService extends EventEmitter {
     if (!access.computers.includes(node))
       return { code: 'computer_not_allowed', message: `The user has not turned on ${name} under "Let agents work on your other devices". They can turn it on in Settings → Agents → Agent access.` }
     return undefined
-  }
-
-  /**
-   * The threads `launcherThreadId` launched that are working: here, with a run going, and on other computers, as each
-   * computer says (a launch still open, or one that computer cannot be asked about, counts as working).
-   */
-  private async launchedThreadsWorking(launcherThreadId: string): Promise<number> {
-    const engine = this.requireRunEngine()
-    const busy = new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
-    const here = this.threadStore?.listAllThreads().filter((thread) => thread.createdByThreadId === launcherThreadId && busy.has(thread.id)).length ?? 0
-    const there = this.remoteThreads ? await this.remoteThreads.working(launcherThreadId) : 0
-    return here + there
   }
 
   /**
@@ -5245,8 +5290,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * The launcher's note of a thread it launched on another computer, once it exists there: drawn as a chip with the
-   * thread's live status, named by its qualified id. Written once, by the call or by the pass that finished the launch.
+   * The launcher's note of a thread it launched on another computer, once it exists there, named by its qualified id.
+   * Written once, by the call or by the pass that finished the launch.
    */
   private noteRemoteLaunch(record: RemoteLaunchRecord): void {
     if (!record.remoteThreadId) return
@@ -5262,8 +5307,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * A row on the creator's thread saying what it launched: where, on which model, in which mode (the person watching sees
-   * the agent's choice). `launched` names the new thread, which the transcript draws as a chip that opens it.
+   * A row in the creator's thread's record saying what it launched: where, on which model, in which mode. `launched`
+   * names the new thread. The chat does not show the row; the new thread shows its own model and mode.
    */
   private noteAgentLaunch(creatorThreadId: string, text: string, launched?: { threadId: string; summary?: string }): void {
     const session = this.getOrCreateSession(creatorThreadId)
@@ -5436,7 +5481,7 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
-  /** Whether any of these threads launched a thread on another computer that is still working there (`launchedThreadsWorking`). */
+  /** Whether any of these threads launched a thread on another computer that is still working there (a launch still open, or one that computer cannot be asked about, counts as working). */
   private async remoteLaunchesWorking(launcherThreadIds: readonly string[]): Promise<boolean> {
     const remote = this.remoteThreads
     if (!remote) return false
@@ -5721,7 +5766,7 @@ export class OrchestratorService extends EventEmitter {
       /* An unreadable queue file counts as empty here; the queue tools report it. */
     }
     // An agent never makes a standing rule, so the requests it reads do not offer "Always for this thread".
-    return { queuedCount, pendingQuestions: this.questions.listPendingForThread(threadId).map(withoutStandingRules) }
+    return { queuedCount, pendingQuestions: this.questions.listShownForThread(threadId).map(withoutStandingRules) }
   }
 
   /**
@@ -7009,13 +7054,16 @@ export class OrchestratorService extends EventEmitter {
     // global default (or the parent's session) at every later turn.
     const effective = override ?? this.defaultAgentModel()
     const model = effective.model?.trim() && (effective.instanceId?.trim() || effective.llmProvider?.trim()) ? structuredClone(effective) : undefined
-    const shared = request.workspace === 'shared' ? this.sharedWorkspaceOf(request.parentThreadId) : null
+    const parentFolder = request.workspace === 'shared' ? this.sharedWorkspaceOf(request.parentThreadId) : null
+    // A `shared` child works in the parent's folder with every tool the parent has, unless it was asked read-only.
+    const shared: SharedWorkspace | null = parentFolder ? { ...parentFolder, access: request.readOnly ? 'read-only' : 'write' } : null
     // With "Give each subagent its own worktree" on, the child's worktree starts at the parent's HEAD as it is now.
     const startSha = request.workspace === 'isolated' && this.subagentWorktreesOn() ? this.parentHeadNow(request.parentThreadId) : undefined
     const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
       lineage: lineageForChild(parentThread),
       ownerThreadId: parentThread.id,
-      workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated', ...(shared ? { sharedPath: shared.path } : {}), ...(startSha ? { startSha } : {}) },
+      // `access` is kept whether or not the parent has a folder: a read-only child stays read-only without one.
+      workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated', ...(shared ? { sharedPath: shared.path } : {}), ...(request.workspace === 'shared' ? { access: request.readOnly ? 'read-only' as const : 'write' as const } : {}), ...(startSha ? { startSha } : {}) },
       // A child starts at the narrowest of its lineage's ceiling, the parent's saved mode and the mode
       // the delegating run actually enforces (its binding: a provider may have lowered the saved
       // mode, and a per-turn option may have tightened it). It never starts wider than the run that
@@ -7042,10 +7090,11 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Issue #142: the policy every turn of a delegated child carries (first or resumed); undefined
-   * for a thread that is not a subagent. A `shared` child is read-only.
+   * for a thread that is not a subagent. Only a child asked read-only is held read-only; a `shared` one that was not
+   * keeps every tool its parent has.
    */
   private childTurnPolicy(session: ThreadSession): ChildTurnPolicy | undefined {
-    if (session.sharedWorkspace) return { readOnly: true }
+    if (isReadOnlyShared(session.sharedWorkspace) || this.readOnlyBinding(session.threadId)) return { readOnly: true }
     try {
       return this.runEngine?.delegations.getLineage(session.threadId)?.relationship === 'subagent' ? { readOnly: false } : undefined
     } catch {
@@ -7053,9 +7102,41 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** Whether `threadId` is a read-only (`shared`) delegated child; its Mousse tools may not write threads. */
+  /** Whether `threadId` is a read-only delegated child (`delegate_task` `readOnly`); its Mousse tools may not write threads. */
   private isReadOnlyChild(threadId: string): boolean {
-    return Boolean(this.getOrCreateSession(threadId).sharedWorkspace)
+    return isReadOnlyShared(this.getOrCreateSession(threadId).sharedWorkspace) || this.readOnlyBinding(threadId)
+  }
+
+  /** Whether the thread's saved binding says read-only, folder or not: a read-only child never runs unheld for lack of one. */
+  private readOnlyBinding(threadId: string): boolean {
+    try {
+      const binding = this.threadStore?.getThread(threadId)?.workspaceBinding
+      return binding?.policy === 'shared' && binding.access === 'read-only'
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The run at the top of a delegated run's chain: the turn a person, a job, a wake or another agent's message started,
+   * whose subagent (or subagent of a subagent) `runId` is. `runId` itself when it was not delegated; undefined when the
+   * chain can't be read or is deeper than 64.
+   */
+  private delegationRootOf(runId: string): string | undefined {
+    const engine = this.runEngine
+    if (!engine) return undefined
+    let run = runId
+    for (let depth = 0; depth < 64; depth += 1) {
+      try {
+        if (engine.getRun(run)?.source !== 'delegation') return engine.getRun(run) ? run : undefined
+        const parentRunId = engine.delegations.getByChildRun(run)?.parentRunId
+        if (!parentRunId) return undefined
+        run = parentRunId
+      } catch {
+        return undefined
+      }
+    }
+    return undefined
   }
 
   /**
@@ -7063,7 +7144,7 @@ export class OrchestratorService extends EventEmitter {
    * child to its policy gets a structured refusal instead of a child it could not keep read-only.
    * `instanceId` is the requested instance; without one the child runs on the parent's selection.
    */
-  private async delegationRefusal(parentThreadId: string, instanceId: string | undefined, workspace: 'shared' | 'isolated') {
+  private async delegationRefusal(parentThreadId: string, instanceId: string | undefined, readOnly: boolean) {
     let target: ResolvedTurnSelection
     try {
       target = instanceId
@@ -7073,20 +7154,20 @@ export class OrchestratorService extends EventEmitter {
       // An unresolvable target fails loudly when the child is created, as before.
       return null
     }
-    const refusal = await this.targetRefusal(target, workspace, this.sharedWorkspaceOf(parentThreadId)?.path ?? null)
+    const refusal = await this.targetRefusal(target, readOnly, this.sharedWorkspaceOf(parentThreadId)?.path ?? null)
     return refusal ? { started: false as const, ...refusal } : null
   }
 
   /** The static check of the instance's capabilities, then the instance's look at the user's setup. */
-  private async targetRefusal(target: ResolvedTurnSelection, workspace: 'shared' | 'isolated', cwd: string | null): Promise<SubagentRefusal | null> {
-    return subagentTargetRefusal(target.caps, target.driver, workspace)
-      ?? await this.harness.childPreflight(target.instanceId, { workspace, cwd })
+  private async targetRefusal(target: ResolvedTurnSelection, readOnly: boolean, cwd: string | null): Promise<SubagentRefusal | null> {
+    return subagentTargetRefusal(target.caps, target.driver, readOnly)
+      ?? await this.harness.childPreflight(target.instanceId, { readOnly, cwd })
   }
 
   /**
    * SPEC §14.2: a delegated child keeps the workspace policy its delegation recorded. A session
-   * built from storage (after a restart, or once evicted) reads it back, so a `shared` read-only
-   * child still observes its parent's workspace under `SHARED_READER_POLICY`.
+   * built from storage (after a restart, or once evicted) reads it back, so a `shared` child still
+   * works in its parent's folder, and a read-only one there under `SHARED_READER_POLICY`.
    */
   private restoreDelegatedWorkspace(session: ThreadSession): void {
     const engine = this.runEngine
@@ -7098,11 +7179,14 @@ export class OrchestratorService extends EventEmitter {
       // delegation row and the parent's current workspace.
       const binding = this.threadStore?.getThread(session.threadId)?.workspaceBinding
       if (binding) {
-        if (binding.policy === 'shared' && binding.sharedPath) session.sharedWorkspace = { path: binding.sharedPath, parentThreadId: lineage.parentThreadId }
+        // A binding saved before `access` existed is a read-only child's: every `shared` child was one then.
+        if (binding.policy === 'shared' && binding.sharedPath)
+          session.sharedWorkspace = { path: binding.sharedPath, parentThreadId: lineage.parentThreadId, access: binding.access === 'write' ? 'write' : 'read-only' }
         return
       }
       const policy = engine.delegations.listForChildThread(session.threadId).filter((delegation) => delegation.workspace).at(-1)
-      if (policy?.workspace === 'shared') session.sharedWorkspace = this.sharedWorkspaceOf(lineage.parentThreadId)
+      const folder = policy?.workspace === 'shared' ? this.sharedWorkspaceOf(lineage.parentThreadId) : null
+      if (folder) session.sharedWorkspace = { ...folder, access: 'read-only' }
     } catch (error) {
       console.warn('delegated workspace policy could not be restored', {
         threadId: session.threadId,
@@ -7531,7 +7615,7 @@ export class OrchestratorService extends EventEmitter {
     const parentThreadId = session.threadId
     const delegateTask = (input: DelegateTaskInput, call: DelegationToolCall) =>
       this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling)
-    const continueSubagent = (input: { subagent: string; prompt: string }, call: DelegationToolCall) =>
+    const continueSubagent = (input: { subagent: string; prompt: string; mode?: 'plan' }, call: DelegationToolCall) =>
       this.continueSubagent(parentThreadId, parentRunId, input, call, callerCeiling)
     // The retired merge tools (`integrate_delegation`, `integrate_subagent`) merge nothing: they return the task's
     // frozen result, which the caller brings in with Git.
@@ -7555,11 +7639,15 @@ export class OrchestratorService extends EventEmitter {
     const listDelegations = () => this.listDelegations(parentThreadId)
     const named = (request: NamedAgentToolRequest): DelegateTaskInput => {
       const write = request.access === 'write'
+      const workspace = write ? 'isolated' : request.workspace ?? 'shared'
       return {
         prompt: request.task,
         title: request.name,
-        workspace: write ? 'isolated' : request.workspace ?? 'shared',
+        workspace,
         role: write ? 'implement' : 'research',
+        // The older named tools default to a read-only reader in the caller's folder, as they always did; one asked
+        // for a worktree of its own keeps every tool, as it always did.
+        ...(workspace === 'shared' ? { readOnly: true } : {}),
         wake: 'always'
       }
     }
@@ -7577,8 +7665,8 @@ export class OrchestratorService extends EventEmitter {
       named: {
         create: async (request, call) => ({ name: request.name, ...(await delegateTask(named(request), call)) }),
         createBatch: async (requests, call) => {
-          if (requests.length === 0 || requests.length > NAMED_BATCH_LIMIT)
-            throw new Error(`Named batches start 1–${NAMED_BATCH_LIMIT} assignments`)
+          if (requests.length === 0)
+            throw new Error('A named batch starts at least one assignment')
           const results: unknown[] = []
           for (const [index, request] of requests.entries()) {
             try {
@@ -7604,14 +7692,13 @@ export class OrchestratorService extends EventEmitter {
     const modeCeiling = narrowCeiling(callerCeiling, input.modeCeiling)
     // Every agent may read and manage every thread (SPEC §15.1).
     const accessLevel: AgentAccessLevel = 'manage'
-    const role = input.role?.trim() || undefined
-    // Experimental: every subagent gets a worktree of its own, whatever the main agent asked for. A read-only subagent's
-    // own subagents stay read-only, since authority only narrows down the tree.
+    // A read-only subagent (the narrow kind the caller asked for) reads the caller's own folder: it needs no worktree.
+    if (input.readOnly && input.workspace !== 'shared') input = { ...input, workspace: 'shared' }
+    // Experimental: every other subagent gets a worktree of its own, whatever the main agent asked for.
     const askedShared = input.workspace === 'shared'
-    if (askedShared && this.subagentWorktreesOn() && !this.isReadOnlyChild(parentThreadId)) input = { ...input, workspace: 'isolated' }
+    if (askedShared && !input.readOnly && this.subagentWorktreesOn() && !this.isReadOnlyChild(parentThreadId)) input = { ...input, workspace: 'isolated' }
     const ownWorktree = askedShared && input.workspace === 'isolated'
-    if (input.workspace === 'shared' && !(role && SHARED_WORKSPACE_ROLES.has(role)))
-      throw new Error('workspace "shared" is allowed only for read-only roles (role "research" or "review"); use workspace "isolated" for work that edits, builds or tests.')
+    const role = input.role?.trim() || undefined
     if (input.computer !== undefined) return this.delegateRemoteTask(parentThreadId, parentRunId, input, call, { modeCeiling, accessLevel, role })
     // SPEC §13.8: the child names an instance; an older `provider` name is mapped to one. An unknown
     // or disabled instance fails the tool call here, before any thread is created.
@@ -7624,8 +7711,8 @@ export class OrchestratorService extends EventEmitter {
       : undefined
     const instanceId = resolved?.instanceId
     // A read-only subagent may start subagents, but only read-only ones: authority only narrows down the tree.
-    if (input.workspace !== 'shared' && this.isReadOnlyChild(parentThreadId))
-      return { started: false as const, code: 'read_only_caller_requires_shared' as const, message: 'You are a read-only subagent, so your own subagents must be read-only too: start them with workspace "shared" and role "research" or "review".' }
+    if (!input.readOnly && this.isReadOnlyChild(parentThreadId))
+      return { started: false as const, code: 'read_only_caller_requires_shared' as const, message: READ_ONLY_CALLER_MESSAGE }
     // A model the agent named is one the picker offers, on an entry that can run now; else nothing starts.
     const model = input.model?.trim() || undefined
     if (requested || model) {
@@ -7638,7 +7725,10 @@ export class OrchestratorService extends EventEmitter {
       const choice = target ? await this.localModelRefusal(this.threadScope(parentThreadId), { instanceId: target, ...(model ? { model: resolved?.model || model } : {}), ...(input.effort ? { effort: input.effort } : {}) }) : undefined
       if (choice) return { started: false as const, ...choice }
     }
-    const refusal = await this.delegationRefusal(parentThreadId, instanceId, input.workspace)
+    // A read-only subagent is held to the read-only tools in its parent's folder: with no folder, nothing could hold it.
+    if (input.readOnly && !this.sharedWorkspaceOf(parentThreadId))
+      return { started: false as const, code: 'read_only_needs_folder' as const, message: 'This thread has no folder, so a read-only subagent could not be held read-only here. Leave readOnly out, or start it from a thread in a project.' }
+    const refusal = await this.delegationRefusal(parentThreadId, instanceId, input.readOnly === true)
     if (refusal) return refusal
     const title = input.title?.trim() || undefined
     let accepted: Awaited<ReturnType<RunEngine['requestDelegation']>>
@@ -7653,6 +7743,7 @@ export class OrchestratorService extends EventEmitter {
         model: model ? agentModelId(model, input.effort) : undefined,
         role,
         workspace: input.workspace,
+        ...(input.readOnly ? { readOnly: true } : {}),
         wake: input.wake ?? 'always',
         title,
         ...(modeCeiling ? { modeCeiling } : {}),
@@ -7672,6 +7763,8 @@ export class OrchestratorService extends EventEmitter {
       title: this.titleOf(accepted.childThreadId) ?? title ?? null,
       ...(accepted.replayed ? { replayed: true } : {}),
       ...(ownWorktree ? { workspace: 'isolated' as const } : {}),
+      // What it holds, so the caller never has to guess: everything it has, or the read-only tools only.
+      access: input.readOnly ? 'read-only' as const : 'full' as const,
       note: ownWorktree
         ? 'Started in a worktree of its own, not your folder: this computer gives every subagent one. Mousse sends you the result when it finishes; end your turn.'
         : 'Started. Mousse sends you the result when it finishes; end your turn.'
@@ -7701,8 +7794,8 @@ export class OrchestratorService extends EventEmitter {
     const prior = engine.store.getReceipt(requestKey)
     const remote = this.remoteSubagents
     if (!prior) {
-      if (input.workspace !== 'shared' && this.isReadOnlyChild(parentThreadId))
-        return refuse('read_only_caller_requires_shared', 'You are a read-only subagent, so your own subagents must be read-only too: start them with workspace "shared" and role "research" or "review".')
+      if (!input.readOnly && this.isReadOnlyChild(parentThreadId))
+        return refuse('read_only_caller_requires_shared', READ_ONLY_CALLER_MESSAGE)
       // A chain stays one computer deep: work another device started here never reaches a third computer.
       const parent = this.threadStore?.getThread(parentThreadId)
       const root = parent?.lineage ? this.threadStore?.getThread(parent.lineage.rootThreadId) : parent
@@ -7751,7 +7844,6 @@ export class OrchestratorService extends EventEmitter {
     const permissionMode = narrowPermissionMode(this.requestedPermissionMode(parentThreadId), this.runPermissionMode(parentRunId))
     // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
     const remoteModel = input.model?.trim() ? agentModelId(input.model.trim(), input.effort) : undefined
-    const minutes = input.maxMinutes ?? DEFAULT_REMOTE_MINUTES
     const title = input.title?.trim() || undefined
     let accepted: Awaited<ReturnType<RunEngine['requestDelegation']>>
     try {
@@ -7764,6 +7856,7 @@ export class OrchestratorService extends EventEmitter {
         model: remoteModel,
         role: policy.role,
         workspace: input.workspace,
+        ...(input.readOnly ? { readOnly: true } : {}),
         wake: input.wake ?? 'always',
         title,
         ...(policy.modeCeiling ? { modeCeiling: policy.modeCeiling } : {}),
@@ -7773,12 +7866,14 @@ export class OrchestratorService extends EventEmitter {
           prompt: `${remoteSubagentPreamble(this.titleOf(parentThreadId))}\n\n${input.prompt}`,
           permissionMode,
           // A read-only task, or one under a plan ceiling, plans and reads there: it never edits.
-          chatMode: input.workspace === 'shared' || policy.modeCeiling === 'plan' ? 'plan' : 'agent',
-          worktree: input.workspace === 'isolated',
+          chatMode: input.readOnly || policy.modeCeiling === 'plan' ? 'plan' : 'agent',
+          // Only a read-only task reads that computer's project folder itself: one that may edit gets a worktree there,
+          // never that folder, which is nobody's own folder here.
+          worktree: input.workspace === 'isolated' || !input.readOnly,
           projectId: farProjectId,
           instanceId: input.instanceId?.trim() || input.provider?.trim() || null,
           model: remoteModel ?? null,
-          deadlineAt: new Date(Date.now() + Math.min(minutes, MAX_REMOTE_MINUTES) * 60_000).toISOString()
+          deadlineAt: remoteDeadlineAt(input.maxMinutes)
         }
       })
     } catch (error) {
@@ -7805,6 +7900,7 @@ export class OrchestratorService extends EventEmitter {
     }
     return {
       ...value,
+      access: input.readOnly ? 'read-only' as const : 'full' as const,
       note: launched.ok === true
         ? `Started on ${computer.name}. Mousse sends you the result when it finishes; end your turn.`
         : `Sent to ${computer.name}, which has not confirmed it yet (${launched.message}). Mousse keeps trying and sends you the result; end your turn.`
@@ -8003,7 +8099,7 @@ export class OrchestratorService extends EventEmitter {
   private async continueSubagent(
     parentThreadId: string,
     parentRunId: string,
-    input: { subagent: string; prompt: string },
+    input: { subagent: string; prompt: string; mode?: 'plan' },
     call: DelegationToolCall,
     callerCeiling?: ModeCeiling
   ) {
@@ -8021,7 +8117,7 @@ export class OrchestratorService extends EventEmitter {
       if (task) return this.followUpValue(task, target.title, { replayed: true })
     }
     if (this.threadStore?.getThread(childThreadId)?.runsOn)
-      return this.continueRemoteSubagent(parentThreadId, parentRunId, { childThreadId, title: target.title, requestId, prompt: input.prompt }, callerCeiling)
+      return this.continueRemoteSubagent(parentThreadId, parentRunId, { childThreadId, title: target.title, requestId, prompt: input.prompt, ...(input.mode ? { mode: input.mode } : {}) }, callerCeiling)
     const pending = this.questions.listPendingForThread(childThreadId)
     if (pending.length)
       return {
@@ -8043,7 +8139,7 @@ export class OrchestratorService extends EventEmitter {
     // Settle notices that waited for this follow-up reach the subagent with it.
     const notices = this.heldNoticesOf(childThreadId)
     try {
-      response = await this.send({ content: notices ? `${input.prompt}\n\n${notices.text}` : input.prompt, mode: modeCeiling === 'plan' ? 'plan' : 'agent' }, false, {
+      response = await this.send({ content: notices ? `${input.prompt}\n\n${notices.text}` : input.prompt, mode: modeCeiling === 'plan' || input.mode === 'plan' ? 'plan' : 'agent' }, false, {
         threadId: childThreadId,
         source: 'delegation',
         clientRequestId: requestId,
@@ -8083,7 +8179,7 @@ export class OrchestratorService extends EventEmitter {
   private async continueRemoteSubagent(
     parentThreadId: string,
     parentRunId: string,
-    target: { childThreadId: string; title: string; requestId: string; prompt: string },
+    target: { childThreadId: string; title: string; requestId: string; prompt: string; mode?: 'plan' },
     callerCeiling?: ModeCeiling
   ) {
     const engine = this.requireRunEngine()
@@ -8131,12 +8227,13 @@ export class OrchestratorService extends EventEmitter {
           prompt: target.prompt,
           // Never looser than the run that asks now, nor than the subagent started with.
           permissionMode: narrowPermissionMode(this.runPermissionMode(parentRunId), base?.permissionMode),
-          chatMode: base?.chatMode === 'plan' || modeCeiling === 'plan' ? 'plan' : 'agent',
+          chatMode: base?.chatMode === 'plan' || modeCeiling === 'plan' || target.mode === 'plan' ? 'plan' : 'agent',
           worktree: base?.worktree ?? false,
           projectId: base?.projectId ?? null,
           instanceId: null,
           model: null,
-          deadlineAt: new Date(Date.now() + DEFAULT_REMOTE_MINUTES * 60_000).toISOString(),
+          // A follow-up has no deadline of its own: it runs until it ends or is stopped.
+          deadlineAt: null,
           remoteThreadId: first?.remoteThreadId ?? null
         }
       })
@@ -8262,7 +8359,14 @@ export class OrchestratorService extends EventEmitter {
       ...(row?.tasks.find((entry) => entry.delegationId === delegationId)?.outcome === 'waiting_for_subagents'
         ? { workState: 'waiting_for_subagents' as const, waitingOn: row.waitingOn }
         : {}),
-      ...(pending.length ? { pendingQuestion: pending.map(({ requestId, questions }) => ({ requestId, questions })) } : {}),
+      // A subagent that waits on a question or an approval says so at once, and how it is answered (#657).
+      ...(pending.length
+        ? {
+            needsInput: true,
+            pendingQuestion: pending.map(({ requestId, questions }) => ({ requestId, questions })),
+            hint: `It waits for an answer. Answer it with answer_subagent (subagent "${this.titleOf(delegation.childThreadId) ?? delegation.childThreadId}", requestId ${pending[0].requestId}), or ask the user.`
+          }
+        : {}),
       ...(row?.computer ? { computer: this.remoteTaskStatus(delegationId, row.computer) } : {}),
       ...(delegation.result ? { result: delegation.result } : {}),
       ...(workspaceResult ? { workspaceResult, workspaceResultText: formatSubagentResultReport(workspaceResult) } : {})
@@ -8363,8 +8467,23 @@ export class OrchestratorService extends EventEmitter {
       role: row.role,
       provider: row.provider,
       model: row.model,
-      ...(row.computer ? { computer: row.computer.name, computerOnline: row.computer.online } : {})
+      ...(row.computer ? { computer: row.computer.name, computerOnline: row.computer.online } : { access: this.childAccess(row.childThreadId) })
     }))
+  }
+
+  /**
+   * What a child on this computer holds, read from its saved binding as `restoreDelegatedWorkspace` reads it: the
+   * read-only tools only, or everything its parent has.
+   */
+  private childAccess(threadId: string): 'read-only' | 'full' {
+    try {
+      const binding = this.threadStore?.getThread(threadId)?.workspaceBinding
+      if (binding?.policy !== 'shared') return 'full'
+      // A binding saved before `access` existed, with a folder, is a read-only child's.
+      return binding.access === 'read-only' || (binding.access === undefined && binding.sharedPath) ? 'read-only' : 'full'
+    } catch {
+      return 'full'
+    }
   }
 
   /**
@@ -8414,8 +8533,19 @@ export class OrchestratorService extends EventEmitter {
       const pins = { base: `${prefix}/base`, result: `${prefix}/result` }
       const project = this.projectManager && this.threadStore ? resolveThreadProjectPath(this.projectManager, this.threadStore, delegation.parentThreadId) : undefined
       let built: { report: SubagentResultReport; repositoryId: string } | undefined
-      if (delegation.workspace === 'shared') {
-        // The subagent read and wrote the parent's own folder: what changed there during the task is in the parent's turn records.
+      const writer = delegation.workspace === 'shared' ? this.threadStore?.getThread(delegation.childThreadId)?.workspaceBinding : undefined
+      if (writer?.access === 'write' && writer.sharedPath) {
+        // A subagent that may edit its parent's folder: what it changed is between the folder as its task's run started
+        // and as its last run ended, recorded by its own turns. Without both, no file report: never a made-up "no change".
+        const rows = readSharedFolderSnapshots(join(childDirectory, SHARED_FOLDER_SNAPSHOTS_FILE))
+        const base = rows[delegation.childRunId]?.start
+        const resultSha = rows[delegation.result?.runId ?? delegation.childRunId]?.end
+        if (!base || !resultSha || !existsSync(writer.sharedPath)) return undefined
+        const parentDirectory = this.resolveThreadDir(delegation.parentThreadId)
+        const repositoryId = (parentDirectory ? new ThreadWorkspaceManager(parentDirectory).load()?.repositoryId : undefined) ?? writer.sharedPath
+        built = { repositoryId, report: buildSubagentResultReport({ cwd: writer.sharedPath, workedIn: writer.sharedPath, shared: true, baseSha: base, resultSha, pins }) }
+      } else if (delegation.workspace === 'shared') {
+        // A read-only subagent read the parent's own folder: what changed there during the task is in the parent's turn records.
         const parentDirectory = this.resolveThreadDir(delegation.parentThreadId)
         const parent = parentDirectory ? new ThreadWorkspaceManager(parentDirectory).load() : undefined
         if (!parent || !parentDirectory) return undefined
@@ -9187,6 +9317,8 @@ export class OrchestratorService extends EventEmitter {
       this.runEngine?.approvals.cancelForThread(threadId, 'thread_deleted')
       // Prompts and answers never outlive the thread they belong to.
       this.runEngine?.approvals.deleteForThread(threadId)
+      this.closeOpenQuestions(threadId, 'thread_deleted')
+      this.runEngine?.openQuestions.deleteForThread(threadId)
     } catch (error) {
       console.warn('a deleted thread\'s approval requests could not be closed', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -10695,6 +10827,21 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * Keeps the preview of the thread's latest reply in its metadata, from the transcript the turn just wrote (in memory,
+   * secrets masked). A turn that left no reply keeps the one before. Never fails the turn.
+   */
+  private recordLastReply(threadId: string): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    if (threadId !== this.boundSession.threadId && !this.sessions.has(threadId)) return
+    try {
+      const preview = latestReplyPreview(this.getMessages(threadId))
+      if (preview !== undefined) this.threadStore.setThreadLastReply(threadId, preview)
+    } catch (error) {
+      console.warn('the reply preview could not be kept', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
    * After a turn of a thread Mousse named from its first message alone (`provisional` or `auto`). After the
    * first finished reply the thread is named once more from the request and the opening of that reply,
    * which says what "continue" or a pasted log was about, and the title is final; a model that fails or
@@ -10920,8 +11067,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `kind` `warning`: a line the thread shows, quiet, as Mousse's own (`ThreadNotice`); so is one with `launchedThread`
-   * (with the thread as a chip). Others are not shown.
+   * `kind` `warning`: a line the thread shows, quiet, as Mousse's own (`ThreadNotice`). Others are not shown, the note
+   * of a launched thread (`launchedThread`) among them.
    */
   private addSystemMessage(content: string, end?: { turnId?: string; turnEnd: TurnEnd }, kind?: 'warning', launchedThread?: ChatMessage['launchedThread']): void {
     const msg: ChatMessage = {
@@ -11397,6 +11544,8 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       console.warn('the queue a Stop held could not be saved as held', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
     }
+    // The window reads the hold to tell a send that starts a turn from one that waits behind the queue.
+    if (session.queue.some((item) => item.heldAfterStop)) this.emitQueueUpdated(session.threadId, session.queue)
   }
 
   /**
@@ -11410,6 +11559,7 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       console.warn('the hold a Stop saved on the queue could not be lifted', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
     }
+    this.emitQueueUpdated(session.threadId, session.queue)
   }
 
   /**
@@ -12466,6 +12616,7 @@ export class OrchestratorService extends EventEmitter {
     // A new turn is not the stopped one, unless a Stop already reached it while it was admitted.
     if (!session.abortRequested) {
       session.stopping = false
+      session.stoppedBy = undefined
       session.sentAfterStop = []
     }
     let turnResponse: OrchestratorResponse | undefined
@@ -12689,10 +12840,51 @@ export class OrchestratorService extends EventEmitter {
   /** One turn; whatever way it ends, nothing of its app-tool context stays registered. */
   private async executeTurn(...args: Parameters<OrchestratorService['executeTurnBody']>): Promise<OrchestratorResponse> {
     const runId = args[3]?.runId
+    // A subagent that may edit its parent's folder records that folder as its turn starts and ends: its result is
+    // measured from those, never from the parent's own turn records, which say nothing once the parent's turn has ended.
+    const writer = runId ? this.sharedWriterOf(runId) : undefined
+    if (writer && runId) await this.recordSharedFolder(writer, runId, 'start')
     try {
       return await this.executeTurnBody(...args)
     } finally {
       if (runId) this.appToolTurns.dropRun(runId)
+      // A turn that completed recorded its end before its run did (`executeTurnBody`); one that failed or was stopped
+      // records it here, so a later look at its result still has it.
+      if (writer && runId && !this.sharedFolderEnded.delete(runId)) await this.recordSharedFolder(writer, runId, 'end')
+    }
+  }
+
+  /** Runs whose turn already recorded the shared folder's end (`recordSharedFolder`), until their `executeTurn` returns. */
+  private readonly sharedFolderEnded = new Set<string>()
+
+  /** The folder and thread of a run of a subagent that works in its parent's folder and may edit it; else undefined. */
+  private sharedWriterOf(runId: string): { threadId: string; path: string } | undefined {
+    try {
+      const threadId = this.runEngine?.getRun(runId)?.threadId
+      const binding = threadId ? this.threadStore?.getThread(threadId)?.workspaceBinding : undefined
+      return threadId && binding?.policy === 'shared' && binding.access === 'write' && binding.sharedPath ? { threadId, path: binding.sharedPath } : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Records the shared folder as a snapshot for a run's start or end (`SHARED_FOLDER_SNAPSHOTS_FILE` in the subagent's
+   * thread folder). Never fails the turn: a folder Mousse can't snapshot leaves the task's result without a file report.
+   */
+  private async recordSharedFolder(writer: { threadId: string; path: string }, runId: string, at: 'start' | 'end'): Promise<void> {
+    const directory = this.resolveThreadDir(writer.threadId)
+    if (!directory) return
+    try {
+      const { sha } = await takeSnapshotAsync(writer.path, { reason: `subagent task ${at}`, threadId: writer.threadId, operationId: runId })
+      const file = join(directory, SHARED_FOLDER_SNAPSHOTS_FILE)
+      const rows = readSharedFolderSnapshots(file)
+      // The first start and the last end of a run: a run started again after a restart keeps where it began.
+      rows[runId] = at === 'start' ? { start: rows[runId]?.start ?? sha, ...(rows[runId]?.end ? { end: rows[runId]!.end } : {}) } : { ...rows[runId], end: sha }
+      writeFileSync(file, JSON.stringify(rows))
+    } catch (error) {
+      // A folder that is not a Git repository has none to record, every turn: not worth a warning.
+      logDebug('OrchestratorService', 'a shared folder could not be recorded for a subagent', error, { threadId: writer.threadId, runId, at })
     }
   }
 
@@ -12865,7 +13057,7 @@ export class OrchestratorService extends EventEmitter {
     // Resolve the task binding before dispatch. Provisioning failures must not
     // turn an isolated code request into a write to the registered checkout.
     if (session.sharedWorkspace) {
-      // A read-only delegated child observes its parent's workspace (SPEC §14.2 `shared`).
+      // A `shared` delegated child works in its parent's folder (SPEC §14.2), read-only when it was asked so.
       session.workspace = null
       session.projectCwd = session.sharedWorkspace.path
     } else if (session.primaryCheckout) {
@@ -13330,10 +13522,13 @@ export class OrchestratorService extends EventEmitter {
       promptCacheInstanceId = instance.instanceId
       // Issue #142: a read-only child is checked on every turn, not only when it was created. Its
       // provider may have been switched, or the user's setup changed, since then.
-      if (session.sharedWorkspace) {
-        const refusal = await this.targetRefusal(instance, 'shared', session.sharedWorkspace.path)
+      if (session.sharedWorkspace && isReadOnlyShared(session.sharedWorkspace)) {
+        const refusal = await this.targetRefusal(instance, true, session.sharedWorkspace.path)
         // A known error keeps its message; an unknown one would reach the thread as a generic failure.
         if (refusal) throw new AppError({ code: refusal.code, message: refusal.message, errorInfo: { category: 'unavailable', retryable: false } })
+      } else if (this.readOnlyBinding(session.threadId)) {
+        // Read-only with no folder to hold it in: refuse rather than run with every tool.
+        throw new AppError({ code: 'read_only_needs_folder', message: 'This read-only subagent has no folder to be held read-only in, so it cannot run.', errorInfo: { category: 'unavailable', retryable: false } })
       }
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
       const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => opts?.origin ?? this.turnOrigin(session.threadId, request.workflowInvocationId), {
@@ -13793,7 +13988,7 @@ export class OrchestratorService extends EventEmitter {
           onPublishApplet,
           browser: browserExecution,
           delegation: engineRunId && this.effectsEnabled() ? this.turnDelegationTools(session, engineRunId, mode) : undefined,
-          toolAccess: session.sharedWorkspace
+          toolAccess: session.sharedWorkspace && isReadOnlyShared(session.sharedWorkspace)
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
           toolLedger: this.toolLedgerFor(engineRunId),
@@ -14207,6 +14402,13 @@ export class OrchestratorService extends EventEmitter {
       // turn waits for it (its end snapshot is this turn's alone), and a parent's delegation publishes only with it.
       this.setTurnPhase(session.threadId, 'completed')
       this.markRun(engineRunId, (engine, id) => engine.markFinalizing(id))
+    }
+    // A subagent that edits its parent's folder: the folder as its turn ended, recorded while the run is still
+    // finalizing, so its parent's result never comes without it.
+    const sharedWriter = engineRunId ? this.sharedWriterOf(engineRunId) : undefined
+    if (sharedWriter && engineRunId) {
+      await this.recordSharedFolder(sharedWriter, engineRunId, 'end')
+      this.sharedFolderEnded.add(engineRunId)
     }
     try {
       await checkpointTurn(executionFailed ? 'failed' : 'completed')
@@ -16066,6 +16268,14 @@ export class OrchestratorService extends EventEmitter {
    */
   isScheduledTurn(threadId: string): boolean {
     return this.scheduledTurnThreads.has(threadId)
+  }
+
+  /**
+   * Whether the thread shows stopped because a person stopped it (their Stop, or the Stop of the thread that launched
+   * it). Its end is not announced: the person did it.
+   */
+  stoppedByPerson(threadId: string): boolean {
+    return this.turnStates.get(threadId)?.phase === 'stopped' && this.loadedSession(threadId)?.stoppedBy === 'person'
   }
 
   /** Whether a thread has a turn admitted or running here, or a live peer holds its execution lease. */

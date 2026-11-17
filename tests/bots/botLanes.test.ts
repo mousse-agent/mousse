@@ -67,8 +67,9 @@ describe('messages sent one after another', () => {
     expect(lane('chat', ['queued'])).toEqual([])
     expect(ownerRows().at(-1)).toMatchObject({ text: 'mousse', activationId: turn!.id })
     const taken = prepared.steer!.take()!
-    expect(taken.text).toContain('The owner wrote again while you were answering')
-    expect(taken.text).toContain('mousse')
+    // The owner's own words, in one block that asks for an answer, then what to do with them.
+    expect(taken.text.startsWith('<mousse_message from="owner" reply="required">\nmousse\n</mousse_message>\n\n')).toBe(true)
+    expect(taken.text).toContain('answer both in the one reply you are writing')
     prepared.steer!.accepted(taken.token)
     await finish(f, payload, 'completed', { text: 'You were right: I told the acrylic thread in mousse to retake the screenshots.' })
     expect(f.store.activation(turn!.id)).toMatchObject({ status: 'done' })

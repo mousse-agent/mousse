@@ -10,7 +10,8 @@ import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool, type BrowserToolContext, type BrowserToolOutput } from '../../src/shared/browser/automation'
 import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { callTool, listTools, VendorAdapter, vendorDaemon, type VendorDaemon } from './appToolVendorFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 import { waitFor } from './phase6Fixture'
@@ -120,8 +121,7 @@ describe('browser tools over MCP', () => {
   it('a turn with no binding is told the browser is not bound, and nothing is dispatched', async () => {
     const { registry, ctx, dispatched, port } = await setup({ bound: false })
     const outcome = await registry.call('browser_open', { url: 'http://127.0.0.1/' }, ctx())
-    expect(outcome.isError).toBe(true)
-    expect(outcome.text).toMatch(/^Browser tools are not bound for this turn/)
+    expect(refusalOf(outcome)?.message).toMatch(/^Browser tools are not bound for this turn/)
     expect(dispatched).toEqual([])
     expect(port.requestAccess).not.toHaveBeenCalled()
   })
@@ -129,7 +129,7 @@ describe('browser tools over MCP', () => {
   it('Settings turning browser_open off returns the disabled text; the other tools still run', async () => {
     const { registry, ctx, dispatched } = await setup({ settingsEnabled: (name) => name !== 'browser_open' })
     const off = await registry.call('browser_open', { url: 'http://127.0.0.1/' }, ctx())
-    expect(off).toEqual({ text: 'Tool "browser_open" is disabled in Settings → Skills & MCP.', isError: true })
+    expect(off).toEqual(refused('unavailable', 'Tool "browser_open" is disabled in Settings → Skills & MCP.'))
     expect(dispatched).toEqual([])
     expect((await registry.call('browser_tabs', { sessionId: 'session-1' }, ctx())).isError).toBeFalsy()
     expect(dispatched.map((call) => call.name)).toEqual(['browser_tabs'])
@@ -157,7 +157,7 @@ describe('browser tools over MCP', () => {
     const bare = await setup({ runtime: false })
     expect(bare.registry.listForThread('thread-a').some((tool) => tool.name.startsWith('browser_'))).toBe(false)
     const outcome = await bare.registry.call('browser_open', {}, bare.ctx())
-    expect(outcome).toMatchObject({ isError: true, text: expect.stringMatching(/^Browser runtime is not bound/) })
+    expect(refusalOf(outcome)?.message).toMatch(/^Browser runtime is not bound/)
   })
 })
 
@@ -243,7 +243,7 @@ describe('browser tools of a vendor turn', () => {
     d.orch.setBrowserRuntime(browser.port)
     await d.send('Open the browser')
     expect(result!.error).toBeUndefined()
-    expect(result).toMatchObject({ isError: true, text: expect.stringMatching(/^Browser tools are not bound for this turn/) })
+    expect(refusalOf(result)?.message).toMatch(/^Browser tools are not bound for this turn/)
     expect(browser.dispatched).toEqual([])
     expect(vendor.bridges[0].turnPreamble).not.toMatch(/browser_open/)
   }, 30_000)

@@ -83,9 +83,9 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     expect(report.steers).toHaveLength(1)
     const steer = f.outbox.get(report.steers[0])!
     expect(steer).toMatchObject({ kind: 'turn.steer', runId: parent.runId, status: 'pending' })
-    expect((steer.payload as { text: string; inboxIds: string[] }).text).toBe(
-      `Subagent thread ${accepted.childThreadId} finished task ${accepted.delegationId}.\nAll tests pass\nFull result above.`
-    )
+    const text = (steer.payload as { text: string; inboxIds: string[] }).text
+    expect(text.startsWith(`<mousse_notice kind="subagent_result" ref="${accepted.delegationId}">\nSubagent thread ${accepted.childThreadId} finished its task.`)).toBe(true)
+    expect(text).toContain('<quoted from="subagent result">\nAll tests pass\n</quoted>')
     // The steer carries the identity of the rows it delivers, so the executor can rebuild or skip it.
     expect((steer.payload as { inboxIds: string[] }).inboxIds).toHaveLength(1)
     expect(f.engine.inbox.listPending('parent')).toEqual([])

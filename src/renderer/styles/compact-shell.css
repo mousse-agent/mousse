@@ -110,7 +110,7 @@ html:not(.platform-darwin) .app {
 .app .main-view-tab { min-height: 28px; padding: 0; gap: 0; border-radius: 5px; font-size: 12px; }
 .app .main-view-tab-select { padding: 5px 7px 5px 9px; gap: 5px; }
 .app .main-view-tab:not(:has(.main-view-tab-close)) .main-view-tab-select { padding-right: 9px; }
-.app .main-view-tab.active { background: rgba(var(--accent-rgb), 0.07); }
+.app .main-view-tab.active { background: var(--main-tab-selected); }
 
 .app .panel-toolbar {
   min-height: 34px;

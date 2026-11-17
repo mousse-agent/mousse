@@ -160,7 +160,7 @@ export class ThreadRouter implements ThreadRouterPort {
 
   /**
    * The other computers of the user whose threads are listed: devices of the roster that are not this one, not
-   * revoked, not blocked here, and not phones. The kind the authority recorded wins; a device of unknown kind
+   * revoked, connected here, not blocked here, and not phones. The kind the authority recorded wins; a device of unknown kind
    * counts only if its signed delegation holds "Works on threads". `undefined` when the roster cannot be read.
    */
   pairedComputers(): ComputerRef[] | undefined {
@@ -184,6 +184,7 @@ export class ThreadRouter implements ThreadRouterPort {
           (found) =>
             found.subject !== self.node &&
             !roster.revoked.some((row) => row.subject === found.subject && row.throughKeyEpoch >= found.keyEpoch) &&
+            rt.connections.connected(found.subject as NodeId) &&
             !rt.policy.get(found.subject as NodeId).blocked &&
             isListedComputer(rt.enrollment.nodeKind(found.subject as NodeId), found.caps)
         )

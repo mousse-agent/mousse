@@ -259,7 +259,7 @@ describe('Cursor behind the gateway', () => {
   })
 })
 
-describe("the hold: a person's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
+describe("the hold: a person's steer cuts in at once; an agent's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
   const STEER = 'Use pnpm, not npm'
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
   function held(options: { cancel?: 'ends' | 'never' } = {}) {
@@ -299,13 +299,13 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     }
   }
 
-  it.each([['held for a command before', true], ['sent while it asks', false]] as const)('Mousse\'s ask_user over MCP does not hold a steer (%s): it cancels the run and answers the question', async (_name, heldBefore) => {
+  it.each([['an agent\'s, held for a command before', true], ['a person\'s, sent while it asks', false]] as const)('Mousse\'s ask_user over MCP does not hold a steer (%s): it cancels the run and answers the question', async (_name, heldBefore) => {
     const c = held()
     const handle = await c.turn()
     await c.running(1)
     if (heldBefore) {
       c.toolStart('run-1', 'call-1')
-      c.hold.steer(STEER)
+      c.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(c.hold.held()).toBe(true))
       c.toolDone('run-1', 'call-1')
     }
@@ -323,12 +323,12 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
   })
 
-  it('strict boundary drain: a steer held during a tool goes in as the next run when the run ends, and nothing is cancelled', async () => {
+  it('strict boundary drain: an agent\'s steer held during a tool goes in as the next run when the run ends, and nothing is cancelled', async () => {
     const c = held()
     const handle = await c.turn()
     await c.running(1)
     c.toolStart('run-1', 'call-1')
-    c.hold.steer(STEER)
+    c.hold.steer(STEER, { person: false })
     await vi.waitFor(() => expect(c.hold.held()).toBe(true))
     c.toolDone('run-1', 'call-1')
     c.writes('run-1', 'All 12 passed.')
@@ -379,13 +379,13 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     expect(sends[1]).toMatchObject({ text: STEER, images: [{ data: 'AAAA', mimeType: 'image/png' }] })
   })
 
-  it('a tool that starts between the drain and the cancel keeps the steer: handed back, held, and sent at the run\'s end', async () => {
+  it('a tool that starts between the drain and the cancel keeps an agent\'s steer: handed back, held, and sent at the run\'s end', async () => {
     const c = held()
     const handle = await c.turn()
     await c.running(1)
     c.writes('run-1', 'working')
     c.hold.beforeMayCut = () => c.toolStart('run-1', 'late')
-    c.hold.steer(STEER)
+    c.hold.steer(STEER, { person: false })
     await vi.waitFor(() => expect(c.events()).toContain(`returned:${STEER}`))
     await vi.waitFor(() => expect(c.hold.held()).toBe(true))
     c.toolDone('run-1', 'late')
@@ -398,19 +398,21 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-2`])
   })
 
-  it('Send now during a tool cancels the run at once, and the steer goes in once', async () => {
+  it('a person\'s steer during a tool cancels the run at once, holds nothing, and the turn goes on with it as the next run, once', async () => {
     const c = held()
     const handle = await c.turn()
     await c.running(1)
     c.toolStart('run-1', 'call-1')
     c.hold.steer(STEER)
-    await vi.waitFor(() => expect(c.hold.held()).toBe(true))
-    c.hold.sendNow()
+    // The tool never reports a result: the cancel comes during it.
     await vi.waitFor(() => expect(c.host.calls('cancel')).toEqual([{ runId: 'run-1' }]))
+    expect(c.hold.held()).toBe(false)
     await c.running(2)
+    c.writes('run-2', 'Switching to pnpm')
     c.end('run-2')
-    await handle.result
+    expect(await handle.result).toMatchObject({ aborted: false })
     expect(c.sent()).toEqual(['hi', STEER])
+    order(c.events(), 'tool:start:call-1', `drain:${STEER}`, 'mayCut:true', 'providerTurn:', 'taken:drain-1', `accepted:${STEER}@drain-1`)
     expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
   })
 

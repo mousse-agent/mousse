@@ -44,7 +44,7 @@ An agent's reply (a thread's or a bot's) draws every thread link as a chip: the 
 
 Only links become chips. A thread id written in prose, or a link inside inline code or a code block, stays text.
 
-When an agent starts a thread with `thread_create`, Mousse writes a note on the agent's thread with a `launchedThread` field (`ChatMessage.launchedThread`), drawn as "Started", the new thread's chip, and the model, mode and place it chose. The new thread shows "Started by an agent in «title»" at its top (`ThreadStartedByBar`), whose title opens the launching thread; a launcher that is no longer listed is named without a link.
+When an agent starts a thread with `thread_create`, Mousse writes a note in the agent's thread's record with a `launchedThread` field (`ChatMessage.launchedThread`): the new thread, and the model, mode and place it chose. The chat does not show the note, because the agent's reply names and links the new thread; agents that read the thread (`thread_read`) see it. The new thread shows "Started by an agent in «title»" at its top (`ThreadStartedByBar`), whose title opens the launching thread; a launcher that is no longer listed is named without a link.
 
 HTTP(S) links open in a new Mousse built-in browser tab. Unsafe and unsupported schemes (`javascript:`, `data:`, `vbscript:`, `file:`, `mailto:`, and `tel:`) are not navigated.
 

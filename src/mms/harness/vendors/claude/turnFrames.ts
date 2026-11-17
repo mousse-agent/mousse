@@ -171,12 +171,14 @@ export class TurnFrames {
   }
 
   /**
-   * The turn's own calls it waits for (Send now stops them): open root calls that are not subagents, or subagents that
-   * could not be moved, with the task each runs as when Claude Code named one.
+   * The turn's own calls a person's steer stops: open root calls that are not subagents, or subagents that could not be
+   * moved, with the task each runs as when Claude Code named one. A call whose input still streams is left out: the
+   * steer's push alone drops it before it runs (spike S1), and an interrupt would also stop background work.
    */
   foregroundCalls(): Array<{ callId: string; taskId?: string; toolName: string }> {
     return [...this.tools.keys()]
-      .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)))
+      .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)) &&
+        (this.inputComplete.has(callId) || this.taskIds.has(callId)))
       .map((callId) => {
         const taskId = this.taskIds.get(callId)
         const toolName = this.tools.get(callId)!

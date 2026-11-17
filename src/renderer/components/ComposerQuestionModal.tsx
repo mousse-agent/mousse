@@ -94,6 +94,12 @@ function typedFor(customs: Record<string, string>, questionId: string): string {
 /** The card's button that skips the questions and sends the composer's message as usual. */
 export const SKIP_QUESTIONS_AND_SEND_LABEL = 'Skip questions and send'
 
+/** The same button under a question asked without waiting: the message goes as usual, and the question stays open. */
+export const SEND_AS_MESSAGE_LABEL = 'Send as a message'
+
+/** Under a question the agent asked without waiting: answering is not urgent, and the agent is not stuck. */
+export const KEEPS_WORKING_NOTE = 'The agent keeps working while you decide.'
+
 /**
  * The card's state after a message from the composer answers the question at `step`, as if typed into its "Other…"
  * field. Images sent with it are that question's own and replace the ones an earlier message gave it.
@@ -513,6 +519,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onSkipAndS
           aria-label={total > 1 ? `Question ${clampedStep + 1} of ${total}` : undefined}
         >
           <p className={`composer-question-prompt${pending.approval ? ' composer-question-prompt--approval' : ''}`}>{active.prompt}</p>
+          {pending.wait === false && <p className="composer-question-reason">{KEEPS_WORKING_NOTE}</p>}
           {pending.approval && approvalNotes(pending.approval).map((note) => (
             <p key={note} className="composer-question-reason">{note}</p>
           ))}
@@ -560,7 +567,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onSkipAndS
           </button>
           {onSkipAndSend && (
             <button type="button" className="composer-question-btn is-quiet" onClick={() => { cancelAdvance(); onSkipAndSend() }}>
-              {SKIP_QUESTIONS_AND_SEND_LABEL}
+              {pending.wait === false ? SEND_AS_MESSAGE_LABEL : SKIP_QUESTIONS_AND_SEND_LABEL}
             </button>
           )}
         </span>

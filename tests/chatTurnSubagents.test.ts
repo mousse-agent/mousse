@@ -130,7 +130,7 @@ describe('a reply that launches subagents whose results arrive one by one', () =
     expect(view).toMatchObject({ turns: 1, indicators: ['Working · 20s'], notices: 0 })
 
     view = await show(21, all, 'completed', ['done', 'done', 'done'])
-    expect(view).toMatchObject({ turns: 1, indicators: ['Worked for 21s'], notices: 0 })
+    expect(view).toMatchObject({ turns: 1, indicators: ['Worked for 21s·2, 2 replies inside'], notices: 0 })
     // The finished turn folds its work behind its line, but the cards stay where the subagents were started.
     expect(view.text).not.toContain('One replied; two are still running.')
     expect(view.text).toContain('All three test subagents')
@@ -150,7 +150,7 @@ describe('a reply that launches subagents whose results arrive one by one', () =
     const all = [...launched, result(0, 8), result(1, 9), result(2, 10), reply('a2', 12, 'All done.'), user('u2', 30, 'Thanks, now summarize')]
     const view = await show(31, all, 'streaming', ['done', 'done', 'done'])
     expect(view.turns).toBe(2)
-    expect(view.indicators).toEqual(['Worked for 12s', 'Working · 1s'])
+    expect(view.indicators).toEqual(['Worked for 12s·1, 1 reply inside', 'Working · 1s'])
   })
 
   it('keeps a result line in the turn for a subagent with no card', async () => {
@@ -172,7 +172,7 @@ describe('a saved thread split by subagent results', () => {
       user('u2', 60, 'Next'), reply('a4', 62, 'Okay.')
     ]
     const view = await show(100, saved, 'completed', ['done', 'done', 'done'])
-    expect(view).toMatchObject({ turns: 2, indicators: ['Worked for 20s', 'Worked for 2s'], notices: 0 })
+    expect(view).toMatchObject({ turns: 2, indicators: ['Worked for 20s·2, 2 replies inside', 'Worked for 2s'], notices: 0 })
     expect(view.text).not.toMatch(/finished task|MODEL-ONLY RESULT/)
   })
 })

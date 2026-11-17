@@ -132,8 +132,11 @@ export function MainViewTabs() {
 
   const close = (item: SurfaceTabItem) => {
     const store = useAppStore.getState()
+    // Closing the last tab closes the panel with it.
+    const last = items.length === 1
+    const closePanelIfLast = () => { if (last) useAppStore.getState().setMainAreaOpen(false) }
     if (item.view === 'files' && item.resourceId) {
-      void closeFileTab(scope, item.resourceId)
+      void closeFileTab(scope, item.resourceId).then((closed) => { if (closed) closePanelIfLast() })
       return
     }
     if (item.view === 'terminal' && item.resourceId) {
@@ -144,6 +147,7 @@ export function MainViewTabs() {
         (tab) => tab.id !== item.resourceId && (tab.ownerThreadId === store.activeThreadId || tab.ownerThreadId === null)
       )
       if (remaining.length === 0) store.closeSurfaceKind('terminal')
+      closePanelIfLast()
       return
     }
     if (item.view === 'browser' && item.resourceId) {
@@ -152,13 +156,16 @@ export function MainViewTabs() {
         (tab) => tab.id !== item.resourceId && (tab.ownerThreadId === store.activeThreadId || tab.ownerThreadId === null)
       )
       if (remaining.length === 0) store.closeSurfaceKind('browser')
+      closePanelIfLast()
       return
     }
     if (item.view === 'documents' && item.resourceId) {
       store.closeDocumentTab(item.resourceId)
+      closePanelIfLast()
       return
     }
     store.closeSurfaceKind(item.view)
+    closePanelIfLast()
   }
 
   const active = (item: SurfaceTabItem) => {

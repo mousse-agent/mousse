@@ -97,7 +97,7 @@ describe('createSideCardPresence', () => {
   })
 
   it('keeps the exit wait and fade-in whatever the motion preference, which only changes the styling', () => {
-    // The controller has no motion input: reduced motion shares these timings and fades opacity only.
+    // The controller has no motion input: reduced motion makes the fades instant in CSS only.
     const { presence } = setup('shown')
     presence.setPresent(false)
     vi.advanceTimersByTime(SIDE_CARD_FADE_MS / 2)
@@ -160,30 +160,8 @@ describe('createSideCardPresence', () => {
   })
 })
 
-/** Specificity as the number of class, attribute and pseudo-class parts; :not() counts its argument. */
-function classWeight(selector: string): number {
-  const flat = selector.replace(/::[\w-]+/g, '').replace(/:not\(([^)]*)\)/g, ' $1 ')
-  return (flat.match(/\.[\w-]+|\[[^\]]*\]|:[\w-]+/g) ?? []).length
-}
-
 describe('side card stylesheet', () => {
   const css = read('../src/renderer/components/sideCard/sideCard.css')
-  const global = read('../src/renderer/styles/global.css')
-
-  it('keeps an opacity-only fade under reduced motion that beats the app-wide rule', () => {
-    const globalSelector = /@media \(prefers-reduced-motion: reduce\) \{\s*(\*:not[^,{]+)/.exec(global)?.[1]
-    expect(globalSelector).toBeTruthy()
-    expect(global).toMatch(/transition-duration: 0\.01ms !important/)
-
-    const block = /@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? ''
-    const rule = /([^{}]+)\{([^}]*transition-duration: 180ms !important[^}]*)\}/.exec(block)
-    expect(rule).toBeTruthy()
-    const [, selector, body] = rule!
-    expect(body).toContain('transition-property: opacity')
-    expect(body).toContain('transform: none')
-    expect(classWeight(selector)).toBeGreaterThan(classWeight(globalSelector!))
-    expect(selector).toContain('.thread-side-card')
-  })
 
   it('lifts the aside above the incoming app panel only while a card is mounted in a narrowed aside', () => {
     expect(css).toMatch(/\.sidebar:not\(\.sidebar-full\):has\(> \.thread-side-card-layer > \.thread-side-card\) \{\s*z-index: 1;/)

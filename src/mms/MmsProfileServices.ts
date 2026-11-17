@@ -165,6 +165,7 @@ import { buildAutomationIndex, mergeRemoteAutomations } from './automations/Auto
 import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAutomations'
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
 import { usedWallpapers, WallpaperStore } from './appearance/WallpaperStore'
+import { ThemeRestoreStore } from './appearance/ThemeRestoreStore'
 import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
 import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
 import type { AutomationIndex, ManagerTurn } from '../shared/automations'
@@ -597,7 +598,8 @@ export class MmsProfileServices {
     this.mcpServer = new MousseMcpServer({
       credentials: this.mcpCredentials,
       registry: this.orchestrator.mcpToolRegistry(),
-      relay: this.orchestrator.relayHandler()
+      relay: this.orchestrator.relayHandler(),
+      boundary: this.orchestrator.mcpToolBoundary()
     })
     this.orchestrator.setAppletStore(this.applets)
     // Registry agents install once per installation; each profile records which versions it uses.
@@ -864,6 +866,8 @@ export class MmsProfileServices {
       // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
       computerName: () => computerNameIfKnown() || hostname(),
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
+      // Which devices reach each bot: a new bot's choice is saved before the bot is published.
+      deviceAccess: this.botDeviceAccess,
       // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers,
@@ -934,6 +938,15 @@ export class MmsProfileServices {
       return { journal, context, progress: memory, memory: admin, supervision: botProcesses }
     })
     this.botStore = opened?.store ?? null
+    // A new bot's choice of devices is saved before the bot: one left by a crash between the two names a bot that was
+    // never made, and goes now, before any call can make a bot.
+    if (opened) {
+      try {
+        this.botDeviceAccess.dropBots((botId) => opened.store.registry(botId) !== undefined)
+      } catch (error) {
+        console.warn('bot device choices could not be tidied', error instanceof Error ? error.message : String(error))
+      }
+    }
     // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
     if (opened) {
       try {
@@ -1150,7 +1163,8 @@ export class MmsProfileServices {
       threads: this.threads
     })
     this.agentJobAsks = new AgentJobAskStore(homeDir)
-    this.wallpapers = new WallpaperStore(homeDir, { used: () => usedWallpapers(this.settings.get().appearance.userThemes) })
+    this.themeRestore = new ThemeRestoreStore(homeDir)
+    this.wallpapers = new WallpaperStore(homeDir, { used: () => this.usedWallpaperIds() })
     // The agents' theme tools: a change is saved like one made in Settings and reaches every window of the profile.
     this.orchestrator.setAppearanceTools({
       get: () => this.settings.get().appearance,
@@ -1160,7 +1174,8 @@ export class MmsProfileServices {
         return settings.appearance
       },
       // An agent's path: never a network share (signing in to a host the agent named would hand it the person's credentials).
-      importWallpaper: (path) => this.wallpapers.importFile(path, { network: false })
+      importWallpaper: (path) => this.wallpapers.importFile(path, { network: false }),
+      restorePoint: this.themeRestore
     })
     this.orchestrator.setScheduledJobs({
       // A thread whose first ask the person allowed; a profile that turned the old switch on lets every thread add them.
@@ -1496,6 +1511,7 @@ export class MmsProfileServices {
       },
       runStore: () => this.runEngine.store,
       notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
+      noteStates: (details) => { this.threads.notePullRequestStates(details) },
       onRunEnd: (listener) => {
         const handler = (event: ThreadEvent): void => {
           if (event.type !== 'run.status') return
@@ -1931,6 +1947,15 @@ export class MmsProfileServices {
 
   /** The profile's wallpaper images (`<profileHome>/wallpapers`); settings name them by id only. */
   wallpapers!: WallpaperStore
+
+  /** The theme from before agents changed it, which `theme_set { restore: true }` puts back. */
+  themeRestore!: ThemeRestoreStore
+
+  /** The wallpaper images to keep: the user themes', and those of the themes a restore would put back. */
+  private usedWallpaperIds(): Set<string> {
+    const kept = Object.values(this.themeRestore?.get()?.themes ?? {}).filter((theme) => theme !== null)
+    return usedWallpapers([...this.settings.get().appearance.userThemes, ...kept])
+  }
 
   /**
    * Answers an agent's first-creation ask. Allow makes the automation as the agent asked, ending after the lifetime
@@ -2573,7 +2598,7 @@ export class MmsProfileServices {
     // Threads still on JSON files move to thread.db in the background, one at a time.
     this.threads.startBackgroundImport()
     // Wallpaper images no theme has used for a week go, in the background.
-    void this.wallpapers.collect(usedWallpapers(this.settings.get().appearance.userThemes)).catch(() => 0)
+    void this.wallpapers.collect(this.usedWallpaperIds()).catch(() => 0)
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()

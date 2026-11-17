@@ -19,7 +19,7 @@ export type CodexTurnPolicy =
  * The sandbox and approval policy of one Codex turn, used for `thread/start` / `thread/resume` and
  * again for `turn/start`, so a resumed thread cannot keep an older policy.
  *
- * - A plan turn and a read-only (`shared`) child run in the read-only sandbox with the approval
+ * - A plan turn and a read-only child (`delegate_task` `readOnly`) run in the read-only sandbox with the approval
  *   policy `on-request`; Mousse answers each request that reaches it with a denial itself
  *   (`CodexProviderService.serve`), so a request never waits in a thread nobody watches.
  * - Ask before acting and Auto-accept edits run `untrusted` in the read-only sandbox (Codex's

@@ -60,6 +60,7 @@ import { attachDevGuiConsoleCapture, isDevGuiMainEnabled } from './devgui/devGui
 import { startDevGuiPoller } from './devgui/devGuiPoller'
 import { configureLinuxGraphics, configureLinuxVsync, configureLinuxWindowing, linuxTransparencyOptions } from './linuxRendering'
 import { addToSwitchList, KEEP_GPU_PROGRAMS_FEATURE } from '../shared/chromiumSwitches'
+import { watchKeepAwake } from './keepAwake'
 
 function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -349,6 +350,8 @@ function startGuiApp(): void {
           request: (sender, method, params) => controller.requestAttachedBrowser(sender, method, params)
         })
         controller.setAttachedBrowserHost(attachedBrowserHost)
+        // While the service reports working runs, the computer does not sleep (Settings → General → Threads).
+        watchKeepAwake(controller)
         guiMms = controller
       }
       const browserMms = guiMms

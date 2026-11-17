@@ -8,7 +8,7 @@ vi.mock('electron', () => ({
     constructor(public options: unknown) {}
     on() {} show() { h.shown.push(this) } close = vi.fn()
   },
-  powerMonitor: { getSystemIdleTime: () => h.idle }, app: { getPath: () => '', getVersion: () => 'test', on: (e: string, f: Function) => h.appEvents.set(e, f) }, shell: {}, dialog: {}, clipboard: {}, nativeTheme: { on() {} }, session: {}, webContents: {}
+  powerMonitor: { getSystemIdleTime: () => h.idle }, app: { getPath: () => '', getVersion: () => 'test', on: (e: string, f: Function) => h.appEvents.set(e, f) }, shell: {}, dialog: {}, clipboard: {}, nativeTheme: { on() {} }, screen: { on() {}, getAllDisplays: () => [] }, session: {}, webContents: {}
 }))
 vi.mock('../src/main/notifications/completionSound', () => ({ playThreadCompletionSound: h.played }))
 import { registerGuiIpc, type GuiIpcServices } from '../src/main/ipc/registerGuiIpc'

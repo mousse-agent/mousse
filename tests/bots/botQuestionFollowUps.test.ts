@@ -17,7 +17,7 @@
  * - Forget: the default's line goes from the work's prompt and from the chat turn it queued
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BotEngine, noteSteerText } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_JOURNAL_ERROR, BotEngine, noteSteerText } from '../../src/mms/bots/activation/BotEngine'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { capturedRows } from '../../src/mms/bots/memory/capture'
 import type { ChatMessage } from '../../src/shared/types'
@@ -200,7 +200,7 @@ describe('a default', () => {
     expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'No answer, so I went with Flat A and booked Saturday.' })
   })
 
-  it('queues a chat turn of its own for a chat question, not the owner’s: their threads stay read-only and it has none of their words', async () => {
+  it('queues a chat turn of its own for a chat question, not the owner’s: it may act on their threads (#1359) but has none of their words', async () => {
     const { bubble, questionId } = await chatAsks(DEFAULT_A)
     await reach(Date.parse(bubble.at) + 30 * MIN)
     expect(f.store.question(questionId)?.status).toBe('defaulted')
@@ -208,7 +208,8 @@ describe('a default', () => {
     expect(turn).toMatchObject({ lane: 'chat', trigger: { kind: 'manual', input: defaultChatInput(FLATS.question, 'Flat A', 30 * MIN) } })
     expect(turn.trigger).not.toHaveProperty('owner')
     const running = await start(f, turn.id)
-    expect(running.prepared.authority.threadsReadOnly).toBe('not_owner')
+    // It carries on the owner's work, so it may act on their threads like a wake or a thread's notice.
+    expect(running.prepared.authority).not.toHaveProperty('threadsReadOnly')
     expect(f.bots.ownerWords(botId, turn.id)).toBe('')
     await finish(f, running.payload, 'completed', { text: 'No answer, so I went with Flat A.' })
     expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', text: 'No answer, so I went with Flat A.' })
@@ -277,12 +278,8 @@ describe('a question that never follows up', () => {
       memory.forget(botId, { refs: [journaled(memory, q.bubble, 'notice')], by: 'owner_ui' })
     }],
     ['open again, with no follow-up, when its answer is forgotten before the work read it', 'open', async (q: Awaited<ReturnType<typeof workAsks>>) => {
-      // Every run slot busy: the answer waits, unread, for one.
-      for (const key of ['f1', 'f2', 'f3']) {
-        const turn = await chat(`Please do: ${key}`, `m-${key}`)
-        await f.bots.tools.work.start(botId, turn.activation.id, { title: key, brief: `${key}.`, key })
-        await finish(f, turn.payload, 'completed', { text: 'On it.' })
-      }
+      // Nothing starts while the bot's journal cannot be written: the answer waits, unread.
+      f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
       const { message } = await tap(q.questionId, 'Flat B')
       const memory = memoryStore()
       memory.forget(botId, { refs: [journaled(memory, message, 'owner_msg')], by: 'owner_ui' })
@@ -333,16 +330,13 @@ describe('a late answer, after the bot went with its default', () => {
 
   it('becomes the answer while the work has not gone on with its default yet', async () => {
     const { workId, bubble, questionId } = await workAsks(DEFAULT_A)
-    for (const key of ['f1', 'f2', 'f3']) {
-      const turn = await chat(`Please do: ${key}`, `m-${key}`)
-      await f.bots.tools.work.start(botId, turn.activation.id, { title: key, brief: `${key}.`, key })
-      await finish(f, turn.payload, 'completed', { text: 'On it.' })
-    }
+    // Nothing starts while the bot's journal cannot be written, so the work does not go on with its default yet.
+    f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     await reach(Date.parse(bubble.at) + 30 * MIN)
     expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'question_answered' })
     await tap(questionId, 'Flat B')
     expect(f.store.question(questionId)).toMatchObject({ status: 'answered', answer: { choice: 'Flat B', by: 'owner' } })
-    await finish(f, payloadOf(f, f.store.laneActivations(botId, 'run', ['running']).find((row) => row.id !== workId)!.id), 'completed', { text: 'Done.' })
+    f.store.setError(botId, null)
     await f.bots.maintain()
     expect(mainDispatches(workId).at(-1)!.prompt.text).toContain(`"${FLATS.question}": Flat B.`)
   })

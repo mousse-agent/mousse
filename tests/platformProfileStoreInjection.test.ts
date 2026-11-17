@@ -273,7 +273,9 @@ describe('profile start order (H4)', () => {
       lifecycle: { cleanup: { start: () => undefined } },
       events: { emit: () => undefined },
       projects: { listProjects: () => [] },
-      threads: { listAllThreads: () => [], startSearchIndexSweep: () => undefined, startBackgroundImport: () => undefined }
+      threads: { listAllThreads: () => [], startSearchIndexSweep: () => undefined, startBackgroundImport: () => undefined },
+      settings: { get: () => ({ appearance: { userThemes: [] } }) },
+      wallpapers: { collect: async () => 0 }
     })
     try {
       const startOwned = (MmsProfileServices.prototype as unknown as { startOwned: (this: typeof service) => Promise<void> }).startOwned

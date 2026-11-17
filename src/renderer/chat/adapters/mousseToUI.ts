@@ -461,17 +461,6 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       continue
     }
 
-    // The note Mousse writes when this thread's agent started another thread: a quiet line of its own with that thread as
-    // a chip. An older note (no `launchedThread`) is not shown, as Mousse's other plain lines are not.
-    if (msg.role === 'system' && msg.launchedThread) {
-      base.role = 'assistant'
-      base.metadata = { ...(base.metadata as object | undefined), notice: true, launchedThread: msg.launchedThread }
-      base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
-      out.push(base)
-      lastAssistantText = null
-      continue
-    }
-
     // Thinking -> tool-Thinking so ThinkingTool renders with shimmer
     if (msg.kind === 'thinking' && msg.thinking) {
       const state = msg.thinking.status === 'processing' ? 'input-available' : 'output-available'
@@ -560,6 +549,15 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       continue
     }
 
+    // The message that delivers answers to a question the agent asked without waiting (a steer, or a turn of its own)
+    // shows nothing for them: the answers row was recorded when they were given. What else it carries (a subagent's
+    // result delivered with them) shows as usual.
+    const otherNotice = msg.role === 'user' ? msg.subagentNotice?.filter((item) => item.event !== 'answer') : msg.subagentNotice
+    if (msg.role === 'user' && msg.subagentNotice?.length && !otherNotice?.length) {
+      lastAssistantText = null
+      continue
+    }
+
     if (msg.role === 'assistant' && msg.streaming) {
       const pending = streamingAppletPresentation(msg.content)
       if (pending.some(part => part.type === 'data-applet-pending')) {
@@ -611,7 +609,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     const sender = msg.role === 'user' && msg.turnId && !msg.steered ? senders?.[msg.turnId] : undefined
     if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }
     if (agentOrigin) base.metadata = { ...(base.metadata as object | undefined), origin: agentOrigin }
-    const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
+    const subagentNotice = msg.role === 'user' && otherNotice?.length ? otherNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
     // The same for the message a turn the provider started itself opens with: the background tasks it reports.
     const backgroundNotice = msg.role === 'user' && msg.backgroundNotice?.length ? msg.backgroundNotice : undefined

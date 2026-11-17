@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The two controls of which devices reach a bot, on the screens a person uses: About → Devices (each bot), and Bots on
- * this computer under each device in Settings → Devices. Each saves what was picked, and nothing else.
+ * The controls of which devices reach a bot, on the screens a person uses: About → Devices (each bot), Make private in
+ * the bot's menu, and Bots on this computer under each device in Settings → Devices. Each saves what was picked, and
+ * nothing else.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -11,6 +12,7 @@ import { fakeBots, installPreload, summary, type FakeBots } from './fakeBotsClie
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { BotAboutPanel } = await import('../../src/renderer/components/bots/BotAboutPanel')
+const { BotMenu } = await import('../../src/renderer/components/bots/BotMenu')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { NetDevicesSection } = await import('../../src/renderer/components/NetDevicesSection')
 
@@ -96,6 +98,63 @@ describe('About → Devices', () => {
     await show()
     expect(host.querySelector('[data-testid="bot-about-devices"]')).toBeNull()
     expect(host.querySelector('[role="alert"]')).toBeNull()
+  })
+})
+
+describe('Make private in the bot\'s menu', () => {
+  let fake: FakeBots
+  const botsInitial = useBotsStore.getInitialState()
+  afterEach(() => {
+    setBotsClient(null)
+    useBotsStore.setState(botsInitial)
+  })
+  /** The bot's menu and its About, both reading the bot from the list, as the chat header and About do. */
+  function Bot() {
+    const bot = useBotsStore((state) => state.bots.find((entry) => entry.id === 'b1'))
+    // The store is emptied after each test, before the root unmounts.
+    if (!bot) return null
+    return createElement('div', null, createElement(BotMenu, { bot }), createElement(BotAboutPanel, { bot }))
+  }
+  const show = async (reach?: 'all' | 'chosen' | 'this_computer') => {
+    const bot = summary('b1', { name: 'Server keeper', ...(reach ? { reach } : {}) })
+    fake = fakeBots({ bots: [bot] })
+    if (reach) fake.devices.b1 = { access: reach === 'chosen' ? { mode: 'chosen', nodes: ['nod_pocket'] } : { mode: reach }, devices: [{ node: 'nod_pocket', name: 'Pocket', kind: 'phone' }] }
+    installPreload(fake)
+    setBotsClient(fake.client)
+    useBotsStore.setState({ bots: [bot] })
+    await act(async () => root.render(createElement(Bot)))
+    await flush()
+  }
+  const items = async () => {
+    await click(host.querySelector('[aria-label="Bot menu"]'))
+    const names = [...host.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)
+    await act(async () => { host.querySelector('.bot-menu-root')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    return names
+  }
+  const devicesRow = () => host.querySelector('[data-testid="bot-about-devices"]')!.textContent
+
+  it('saves Only this computer in one click, and About and the menu follow', async () => {
+    await show('all')
+    expect(devicesRow()).toContain('All my devices')
+    await click(host.querySelector('[aria-label="Bot menu"]'))
+    await click([...host.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent === 'Make private'))
+    expect(fake.calls.filter(([name]) => name === 'setDevices')).toEqual([['setDevices', 'b1', { mode: 'this_computer' }]])
+    expect(useBotsStore.getState().bots[0]?.reach).toBe('this_computer')
+    expect(devicesRow()).toContain('Only this computer')
+    expect(await items()).not.toContain('Make private')
+  })
+
+  it('walls off a bot on chosen devices too; there is nothing to offer for one already private, or with a service that does not say', async () => {
+    await show('chosen')
+    expect(await items()).toContain('Make private')
+    act(() => root.unmount())
+    root = createRoot(host)
+    await show('this_computer')
+    expect(await items()).not.toContain('Make private')
+    act(() => root.unmount())
+    root = createRoot(host)
+    await show()
+    expect(await items()).not.toContain('Make private')
   })
 })
 

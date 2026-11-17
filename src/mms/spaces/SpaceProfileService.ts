@@ -532,6 +532,7 @@ export class SpaceProfileService {
         }
       },
       spaceJoin: this.host,
+      spaces: () => this.local.memberships(),
       authority: {
         canRead: (...args) => owner(args[0]).canRead(...args),
         append: (...args) => owner(args[0]).append(...args),

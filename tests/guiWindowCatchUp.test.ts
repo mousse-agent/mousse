@@ -25,6 +25,7 @@ vi.mock('electron', () => ({
   dialog: {},
   clipboard: {},
   nativeTheme: { on: () => undefined },
+  screen: { on: () => undefined, getAllDisplays: () => [] },
   session: {},
   webContents: {}
 }))

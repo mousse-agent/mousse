@@ -115,7 +115,7 @@ const parse = (response: Awaited<ReturnType<typeof rpc>>): Record<string, unknow
   return JSON.parse(response.result!.content![0].text)
 }
 
-const NOTICE = '[Mousse notice'
+const NOTICE = '<mousse_notice kind="thread_watch"'
 const GO = 'Go'
 const settle = () => new Promise((resolve) => setTimeout(resolve, 300))
 
@@ -205,9 +205,12 @@ describe('the settle notice: an agent that sends with notify is told when the wo
     // Told once: one turn, for one end.
     expect(w.noticeTurns(w.parent.id)).toHaveLength(1)
     const prompt = w.noticeTurns(w.parent.id)[0]!.prompt
+    // One Mousse block about the run, with the target's reply quoted inside it.
+    expect(prompt.startsWith(`<mousse_notice kind="thread_watch" ref="${sent.runId}">\n`)).toBe(true)
+    expect(prompt.endsWith('\n</mousse_notice>')).toBe(true)
     expect(prompt).toContain(`mousse://thread/${w.other.id}`)
     expect(prompt).toContain('finished')
-    expect(prompt).toContain('a'.repeat(SETTLE_NOTICE_RESULT_CHARS))
+    expect(prompt).toContain(`<quoted from="its reply">\n${'a'.repeat(SETTLE_NOTICE_RESULT_CHARS)}\n</quoted>`)
     expect(prompt).not.toContain('TAIL')
     expect(prompt).toContain('thread_read')
     // The transcript shows it as Mousse's notice, not as the person's message or an agent's.

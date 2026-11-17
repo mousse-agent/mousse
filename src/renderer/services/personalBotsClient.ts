@@ -4,7 +4,7 @@ import type { BotMemoryEntry, BotMemoryListing } from '../../shared/bots/persona
 import type { BotModelPick, BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
 import type { BotChatAttachment, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
-import type { BotDeviceAccess, BotDevicesView } from '../../shared/bots/personal/deviceAccess'
+import type { BotDeviceAccess, BotDevicesView, NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 
 /**
  * The Bot UI's methods (`bots.personal.v2`, Bot Phase 1 §5.11) over the host's profile-bound
@@ -15,9 +15,10 @@ export interface PersonalBotsClient {
   /**
    * `slots`: the rows picked on New bot (#673), all four, sent only to a service whose choices carry `providers`;
    * `model`: one model on every row (the single picker of an older service). An older service refuses the keys.
-   * `image`: the Images row (#1088), sent only to a service whose choices carry `imageProviders`.
+   * `image`: the Images row (#1088), sent only to a service whose choices carry `imageProviders`. `access`: the Devices
+   * row, sent only to a service whose choices carry `reachOnCreate`.
    */
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<BotSummary>
+  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<BotSummary>
   get(botId: string): Promise<BotDetail>
   /** `description`: the bot's prompt, as the owner edits it in About; null resets it. An older service refuses it. */
   update(botId: string, change: { name?: string; look?: BotLook; description?: string | null }): Promise<BotSummary>
@@ -86,8 +87,8 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     transport.request<BotsPersonalV2Result<M>>(method, params)
   return {
     list: async () => (await call('bots.personal.list', {})).bots,
-    create: async ({ look, name, description, clientRequestId, model, slots, image }) =>
-      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}) })).bot,
+    create: async ({ look, name, description, clientRequestId, model, slots, image, access }) =>
+      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
     update: async (botId, change) => (await call('bots.update', { botId, ...change })).bot,
     pause: async (botId) => (await call('bots.personal.pause', { botId })).bot,

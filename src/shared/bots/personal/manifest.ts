@@ -157,8 +157,8 @@ export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_
  * What changes threads: start one, message one, steer or stop one's turn, archive or unarchive one, hide one it started
  * from the owner's sidebar or show it again, fork one and hand a fork's work back, change what waits in a thread's queue,
  * and answer an approval in a thread (only while the owner lets agents answer approvals). A run (work, a reminder, a wake,
- * a schedule) and a chat turn the owner's message or tapped answer started get them; the bot's first message and a turn
- * another bot's message started do not.
+ * a schedule), a chat turn the owner's message or tapped answer started, and the bot's first message get them; a turn
+ * another bot's message started does not.
  */
 export const BOT_THREAD_ACT_TOOLS: readonly string[] = [
   'thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide', 'thread_steer', 'thread_fork', 'thread_merge_back',

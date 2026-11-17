@@ -1,5 +1,6 @@
 import { APP_PRESENCE_CAPABILITY } from '../../mms/notifications/OwnerQuietHours'
 import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
+import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
 import { ERROR_INFO_CAPABILITY } from '../../shared/errors'
 import { connectGuiClient } from './guiDaemonCompatibility'
 /**
@@ -201,7 +202,8 @@ const GUI_PLATFORM_CAPABILITIES = [
   BROWSER_SETUP_CAPABILITY,
   FIRST_SEND_BINDING_CAPABILITY,
   BOT_TELLING_CAPABILITY,
-  APP_PRESENCE_CAPABILITY
+  APP_PRESENCE_CAPABILITY,
+  KEEP_AWAKE_CAPABILITY
 ] as const
 
 export class GuiMmsController extends EventEmitter {

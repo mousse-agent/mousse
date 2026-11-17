@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type DragEvent, type KeyboardEvent, type RefObject } from 'react'
 import {
   ChevronDown,
   ChevronRight,
@@ -14,6 +14,7 @@ import { useAppStore } from '../stores/appStore'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useFixedRowWindow } from '../lib/virtualRows'
 import { addReferenceToChat, filesEntryReference } from '../utils/fileReference'
+import { startDragOut } from '../lib/fileDragOut'
 import { DelayedLoader } from './ui/DelayedLoader'
 import { FileTreeMemory, type FileTreeRow } from './fileTreeState'
 
@@ -41,7 +42,7 @@ interface EntryRowProps {
   onSelectFile: (path: string) => void
   onToggle: (path: string) => void
   onAction: (entry: FileEntry, action: EntryAction) => void
-  onDragEntry: (entry: FileEntry, dataTransfer: DataTransfer) => void
+  onDragEntry: (entry: FileEntry, event: DragEvent) => void
 }
 
 /** Shift+F10 and the context-menu key open a row's menu, as right-click does. */
@@ -139,7 +140,7 @@ function EntryRow({ row, selectedPath, onSelectFile, onToggle, onAction, onDragE
           setMenuOpen(true)
         }}
         draggable
-        onDragStart={(event) => onDragEntry(entry, event.dataTransfer)}
+        onDragStart={(event) => onDragEntry(entry, event)}
       >
         {isDir ? (
           expanded ? (
@@ -255,9 +256,14 @@ export function FileTree({
     path: entry.path, name: entry.name, kind: entry.kind === 'directory' ? 'folder' : 'file', filesRoot, threadId, projectId
   }), [filesRoot, projectId, threadId])
 
-  const onDragEntry = useCallback((entry: FileEntry, dataTransfer: DataTransfer) => {
-    setReferenceDragData(dataTransfer, referenceOf(entry))
-  }, [referenceOf])
+  // A row drags the real file or folder out to Finder or Explorer; dropped on the composer it still adds its reference.
+  // A folder browsed outside the thread keeps the window's own drag: the app drags only the thread's files.
+  const onDragEntry = useCallback((entry: FileEntry, event: DragEvent) => {
+    const reference = referenceOf(entry)
+    const item = { kind: 'workspace' as const, path: entry.path }
+    if (threadId && !listRoot && startDragOut(event, { name: entry.name, threadId, item, inApp: { kind: 'reference', reference } })) return
+    setReferenceDragData(event.dataTransfer, reference)
+  }, [listRoot, referenceOf, threadId])
 
   const onAction = useCallback((entry: FileEntry, action: EntryAction) => {
     const reference = referenceOf(entry)

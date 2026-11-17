@@ -143,6 +143,12 @@ export interface SyncSessionOptions {
   /** Bounded retained evidence for a prepared Space snapshot; never grants a pin. */
   retainRosterEvidence?: (roster: Signed, peer: SyncSession['peer']) => void
   onAuthenticated?: () => void
+  /**
+   * Whether this computer opens a session with the peer at all, asked once the peer is authenticated and its routes
+   * are kept, before this side acknowledges its hello. Throwing refuses it: the peer is sent a `goAway` carrying the
+   * error (and its refusal reason), and the session ends.
+   */
+  admitPeer?: (peer: SyncSession['peer']) => void
   /** The inbound carrier this session arrived on, passed to RPC handlers. */
   carrier?: string
   signal?: AbortSignal
@@ -791,6 +797,12 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   }
   close(code: NetErrorCode = 'cancelled'): void {
     this.fail(new NetError(code), true)
+  }
+  /** Ends the session and tells the peer why: a `goAway` carrying `error` (and its refusal reason), then the close. */
+  async goAway(error: NetError): Promise<void> {
+    if (this.currentState === 'closed' || this.currentState === 'closing') return
+    await this.send({ t: 'goAway', error: wireError(error) }).catch(() => {})
+    this.fail(error, true)
   }
 
   /** After a local authority transaction commits; all serving sessions recheck ACLs. */
@@ -1579,6 +1591,15 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       delegation: current.document
     }
     if (h.routes) this.options.onPeerRoutes?.(h.routes, this.authenticatedPeer)
+    if (this.options.admitPeer) {
+      try {
+        this.options.admitPeer(this.authenticatedPeer)
+      } catch (error) {
+        // The peer is told why, so it waits instead of giving up or dialling again at once.
+        await this.send({ t: 'goAway', error: wireError(error) }).catch(() => {})
+        throw error
+      }
+    }
     this.negotiatedCaps = this.localCaps.filter(
       (cap) => h.caps.includes(cap) && SESSION_CAPABILITIES.includes(cap)
     )

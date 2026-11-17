@@ -641,6 +641,11 @@ export interface PendingUserQuestions {
   threadId?: string
   /** Present on a provider's, the Pi agent's or a Mousse tool's saved approval request. */
   approval?: PendingApprovalInfo
+  /**
+   * `false`: the agent asked without waiting (`ask_user` with `wait: false`) and keeps working. The question stays
+   * open until it is answered, dismissed or withdrawn; a new message does not close it.
+   */
+  wait?: false
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
@@ -933,9 +938,9 @@ export interface ChatMessage {
    */
   scheduledRun?: { jobId: string; threadId: string; runId?: string }
   /**
-   * Set on the note Mousse writes on a thread whose agent started another thread (`thread_create`): that thread, which
-   * the transcript draws as a chip with its title and live status, and what was chosen for it (model, mode, where it
-   * runs). Notes written before this field stay plain text.
+   * Set on the note Mousse writes on a thread whose agent started another thread (`thread_create`): that thread, and
+   * what was chosen for it (model, mode, where it runs). The note is kept in the thread's record and read by agents
+   * (`thread_read`); the chat does not show it, as the agent's reply names the thread.
    */
   launchedThread?: { threadId: string; summary?: string }
   /**
@@ -1448,8 +1453,13 @@ export interface ThreadLineage {
 export interface SubagentWorkspaceBinding {
   /** `primary`: a scheduled run on the project's own checkout, never a provisioned worktree. */
   policy: 'shared' | 'isolated' | 'primary'
-  /** The parent's workspace path a `shared` child observes read-only. */
+  /** The parent's workspace path a `shared` child works in. */
   sharedPath?: string
+  /**
+   * What a `shared` child may do there: `write`, every tool its parent has; `read-only` (and absent, on a child saved
+   * before this existed), the read-only tools only (`delegate_task` `readOnly`).
+   */
+  access?: 'read-only' | 'write'
   /**
    * An `isolated` child started with "Give each subagent its own worktree" on: the parent's HEAD when it was started. Its
    * worktree is made from this commit before its first turn, whatever that turn's mode.
@@ -1634,6 +1644,17 @@ export interface Thread {
   worktreeBaseBranch?: string
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
   pullRequest?: ThreadPullRequestLink
+  /**
+   * Every pull request the thread has been linked to, oldest first, with its state as last read, for the sidebar's count.
+   * Written when a link is made and when the app reads, merges or closes one of them. Read through `threadPullRequestsOf`,
+   * which counts the `pullRequest` of a thread linked before this list was kept.
+   */
+  pullRequests?: import('./pullRequests').ThreadPullRequestSummary[]
+  /**
+   * The latest reply of the thread's agent as one clipped line of plain text (`replyPreviewText`), for its sidebar row.
+   * Written when a turn ends; absent until the first turn that ends with this field known.
+   */
+  lastReply?: string
   /** The thread's goal (`/goal`): Mousse keeps starting turns while it is working. Set by the daemon. */
   goal?: import('./threadGoal').ThreadGoal
   /** Explicit sidebar position within this thread's project (or standalone group). */
