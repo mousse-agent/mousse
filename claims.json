@@ -27,19 +27,6 @@
       ],
       "claimedAt": "2026-11-17T20:57:42.368Z",
       "expiresAt": "2026-11-17T22:57:42.368Z"
-    },
-    {
-      "task": "windows-codex-standalone",
-      "session": "agibook-ddaaf2",
-      "machine": "agibook",
-      "branch": "windows-codex-standalone",
-      "paths": [
-        "src/mms/harness/env.ts",
-        "src/mms/harness/vendors/codex/CodexProviderService.ts",
-        "tests/resolveWindowsShim.test.ts"
-      ],
-      "claimedAt": "2026-11-17T20:57:31.086Z",
-      "expiresAt": "2026-11-17T22:57:31.086Z"
     }
   ]
 }
