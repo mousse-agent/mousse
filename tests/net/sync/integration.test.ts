@@ -1639,16 +1639,7 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     await rejected
     expect(session.state()).toBe('closed')
   })
-  it('tears down an authenticated session when its verified roster revokes the peer', async () => {
-    const p = await profiles(),
-      connection = await sessions(p)
-    await Promise.all([connection.a.opened, connection.b.opened])
-    p.aIdentity.revoke(p.bIdentity.self()!.node)
-    await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
-    await vi.waitFor(() => expect(connection.b.state()).toBe('closed'))
-    expect(p.bIdentity.roster()).toEqual(p.aIdentity.roster())
-  })
-  it('closes a session with revoked once the live roster has dropped the peer', async () => {
+  it('tears down an authenticated session with revoked when its verified roster revokes the peer', async () => {
     const p = await profiles(),
       connection = await sessions(p),
       closed: Array<Error | undefined> = []
@@ -1656,7 +1647,9 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     connection.a.onClosed((error) => closed.push(error))
     p.aIdentity.revoke(p.bIdentity.self()!.node)
     await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
+    await vi.waitFor(() => expect(connection.b.state()).toBe('closed'))
     expect(closed).toEqual([expect.objectContaining({ code: 'revoked' })])
+    expect(p.bIdentity.roster()).toEqual(p.aIdentity.roster())
   })
   it('refuses a revoked peer with revoked, not bad_delegation, once its delegation is dropped', async () => {
     const p = await profiles(),
