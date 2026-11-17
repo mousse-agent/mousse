@@ -2731,7 +2731,9 @@ it('keeps only the newest review after two nudges, with earlier copies reduced t
   expect(latest.querySelector('[aria-label="Everything it will send"]')).toBeTruthy()
   expect(button('Send', latest)).toBeTruthy()
   const earlier = [...transcript().querySelectorAll('[role="note"]')].filter(item => item.textContent?.includes('Asked'))
-  expect(earlier).toHaveLength(2)
+  expect(earlier).toHaveLength(1)
+  expect(transcript().textContent).toContain('Reminded')
+  expect(latest.querySelector('time')?.getAttribute('datetime')).toBe(copies[0]!.at)
   for (const line of earlier) { expect(line.textContent).toContain('Send an email'); expect(line.querySelector('button, details, dl')).toBeNull() }
   await act(async () => fake.emit.message('inbox', { ...copies[2]!, action: { ...copies[2]!.action!, status: 'done', at: AT } }))
   expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
