@@ -829,7 +829,10 @@ export class MmsProtocolServer {
         // A scheduled occurrence's turn: its end is announced by `scheduled.runEnded` as the job's Tell me says, so
         // clients do not also announce the thread finishing.
         const scheduled = services.orchestrator.isScheduledTurn(payload.threadId)
-        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', scheduled ? { ...payload, scheduled: true } : payload, payload.threadId))
+        // A turn a person stopped: they did it, so clients do not announce it as stopped.
+        const stoppedByPerson = payload.state === 'idle' && services.orchestrator.stoppedByPerson(payload.threadId)
+        const marks = { ...(scheduled ? { scheduled: true } : {}), ...(stoppedByPerson ? { stoppedByPerson: true } : {}) }
+        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', scheduled || stoppedByPerson ? { ...payload, ...marks } : payload, payload.threadId))
         if (payload.activity) {
           const activity = bots.size ? Object.fromEntries(Object.entries(payload.activity).filter(([threadId]) => !bots.has(threadId))) : payload.activity
           emitToSubscribers(

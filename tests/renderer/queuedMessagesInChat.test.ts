@@ -150,6 +150,13 @@ describe('queued messages in the conversation', () => {
     expect(labels[0]!.getAttribute('title')).toBe('Sends when the current reply ends')
   })
 
+  it('says a Stop holds the queue, and what sends it, instead of "Queued"', async () => {
+    await show([queued('a', 'one', { heldAfterStop: true }), queued('b', 'two', { heldAfterStop: true })])
+    const labels = [...host.querySelectorAll('.queued-message-state')]
+    expect(labels.map((label) => label.textContent)).toEqual(['Held after Stop'])
+    expect(labels[0]!.getAttribute('title')).toBe('Sends after the reply to your next message, or send it now')
+  })
+
   it('edits in place: Enter saves the new text and the message keeps its place', async () => {
     await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
     await click(button('b', 'Edit'))

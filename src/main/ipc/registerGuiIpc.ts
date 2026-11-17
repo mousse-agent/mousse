@@ -339,6 +339,11 @@ function registerHandler(
  * `params` with the thread a call is about, when the window named one. The daemon routes a call
  * about a thread on another computer by it and ignores it for a thread of this one.
  */
+/** An activity event the service marked as a turn a person stopped (theirs, or the one that launched it). */
+function stoppedByPerson(data: unknown): boolean {
+  return (data as { stoppedByPerson?: unknown } | null)?.stoppedByPerson === true
+}
+
 function withThreadId<T extends object>(params: T, threadId: unknown): T & { threadId?: string } {
   return typeof threadId === 'string' && threadId.length > 0 ? { ...params, threadId } : params
 }
@@ -1003,8 +1008,8 @@ export function registerGuiIpc(
             notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
             notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
-          } else if (state === 'idle' || state === 'paused') {
-            // A run that hit a usage limit stopped and waits for the person (or the reset).
+          } else if ((state === 'idle' && !stoppedByPerson(event.data)) || state === 'paused') {
+            // A run that hit a usage limit stopped and waits for the person (or the reset). A turn a person stopped is not news.
             notifyThread(event.threadId, 'idle', currentPresentation().getActiveThreadId())
           }
         }
@@ -1203,7 +1208,8 @@ export function registerGuiIpc(
       // Working → Waiting is still the same work cycle; only its end notifies. A scheduled occurrence's end is the
       // automation's to announce (`scheduled.runEnded`, as its Tell me says), unless it stopped to ask.
       const scheduledTurn = (event.data as { scheduled?: unknown } | null)?.scheduled === true
-      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input')) {
+      // A turn a person stopped (theirs, or the thread that launched it) is not announced to them as stopped.
+      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input') && !(state === 'idle' && stoppedByPerson(event.data))) {
         const kind: ThreadNotificationKind = state === 'completed'
           ? 'completed'
           : state === 'awaiting_input'

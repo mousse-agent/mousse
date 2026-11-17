@@ -11,6 +11,7 @@ import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
 import { normalizeContextSettings, type ContextSettings, type LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
+  ChatMessage,
   ContextUsageSnapshot,
   QueuedMessage,
   SendExpectation,
@@ -187,6 +188,17 @@ function sameModel(
     has.llmProvider === wanted.llmProvider &&
     has.model === wanted.model &&
     (has.effort ?? '') === (wanted.effort ?? '')
+}
+
+/** The transcript shows a prompt with these words that was not there before the send (`seenBefore`): its turn started. */
+function startedAsPrompt(messages: readonly ChatMessage[], seenBefore: ReadonlySet<string>, content: string): boolean {
+  // New rows come last: read back to the first one that was already there.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!
+    if (seenBefore.has(message.id)) return false
+    if (message.role === 'user' && !message.id.startsWith('optimistic:') && message.content === content) return true
+  }
+  return false
 }
 
 export function OrchestratorChat() {
@@ -473,6 +485,9 @@ export function OrchestratorChat() {
     lastPromptQueueItemId: lastUserMessage?.queueItemId ?? null,
     hiddenRequestIds: steersOnTheWay
   })
+  // Read when a message is sent: whether something waits in the queue ahead of it.
+  const queueItemsRef = useRef(queue.items)
+  queueItemsRef.current = queue.items
   // The notice about the moved edit goes once the composer is empty again (sent or cleared).
   const { draftMoved: queueDraftMoved, dismissDraftMoved } = queue
   useEffect(() => { if (queueDraftMoved && !input.trim()) dismissDraftMoved() }, [queueDraftMoved, input, dismissDraftMoved])
@@ -980,9 +995,9 @@ export function OrchestratorChat() {
       const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
       // During a reply or a compaction the message goes to the queue, so it is painted there; so does one sent while
       // an earlier prompt is still on its way (its turn is not reported running yet), or while messages wait in the
-      // queue (between two queued turns).
+      // queue (between two queued turns). Messages a Stop held wait for the person: a send starts its turn at once.
       const onTheWay = targetThreadId ? promptsOnTheWay.current.get(targetThreadId) ?? 0 : 0
-      const queueWaiting = Boolean(targetThreadId) && targetThreadId === queue.threadId && queue.items.length > 0
+      const queueWaiting = Boolean(targetThreadId) && targetThreadId === queue.threadId && queueItemsRef.current.some((item) => !item.heldAfterStop)
       const queuesNow = loading || turnActive || compactionRunning || onTheWay > 0 || queueWaiting
       const optimisticMessageId = !queuesNow && targetThreadId
         ? `optimistic:${crypto.randomUUID()}`
@@ -1019,6 +1034,16 @@ export function OrchestratorChat() {
           clientRequestId: requestId
         }])
       }
+      // Painted in the queue, but the service started its turn at once: the copy leaves the queue as the transcript
+      // shows the message, not when the send answers (at the end of that turn).
+      const stopWatchingStart = optimisticQueueId && targetThreadId
+        ? useAppStore.subscribe((state, previous) => {
+          if (state.messages === previous.messages || state.activeThreadId !== targetThreadId) return
+          if (!startedAsPrompt(state.messages, seenBefore, request.content)) return
+          stopWatchingStart?.()
+          setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
+        })
+        : undefined
       // Optimistically mark the selected thread busy; queue accepts keep loading true.
       setLoading(true)
       // Promote drafts immediately and pin the thread to the top of its group
@@ -1156,6 +1181,7 @@ export function OrchestratorChat() {
           if (left > 0) promptsOnTheWay.current.set(promptThread, left)
           else promptsOnTheWay.current.delete(promptThread)
         }
+        stopWatchingStart?.()
       }
     },
     [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, setLoading, queue.threadId, queue.items.length, queue.steer, queue.beginComposerSteer, queue.endComposerSteer]
