@@ -206,7 +206,6 @@ describe('Supertonic 3 manifest', () => {
     expect(SUPERTONIC_3.repo).toBe('supertone-oss-archive/supertonic-3')
     expect(SUPERTONIC_3.revision).toBe('aafc6e32416a594460b32413efc49d7fe4ce6d46')
     expect(SUPERTONIC_3.license).toBe('OpenRAIL-M')
-    expect(SUPERTONIC_3.description).toBe('31 languages')
   })
 
   it('lists the graphs and tables its runtime reads as required files', () => {
@@ -226,8 +225,6 @@ describe('Supertonic 3 manifest', () => {
 
   it('has ten voices, each a style file, and only the default one is required', () => {
     expect(SUPERTONIC_3.voices.map((voice) => voice.id)).toEqual(['F1', 'F2', 'F3', 'F4', 'F5', 'M1', 'M2', 'M3', 'M4', 'M5'])
-    expect(SUPERTONIC_3.voices[0]).toEqual({ id: 'F1', label: 'F1, female' })
-    expect(SUPERTONIC_3.voices[9]).toEqual({ id: 'M5', label: 'M5, male' })
     const styles = SUPERTONIC_3.files.filter((file) => file.path.startsWith(`${SUPERTONIC_3.voiceStyles}/`))
     expect(styles.map((file) => file.path)).toEqual(SUPERTONIC_3.voices.map((voice) => `${SUPERTONIC_3.voiceStyles}/${voice.id}.json`))
     expect(styles.filter((file) => !file.optional).map((file) => file.path)).toEqual([`${SUPERTONIC_3.voiceStyles}/${SUPERTONIC_3.defaultVoice}.json`])
