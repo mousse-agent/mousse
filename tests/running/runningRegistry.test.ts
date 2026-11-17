@@ -153,7 +153,8 @@ describe.skipIf(!posix)('the running list on this computer', () => {
     // A command still in its call (a foreground command of a turn) is not a background one.
     registry.noteCommand({ threadId: 't-agent', callId: 'fg', command: 'node server.cjs', folder: project, ended: false })
     registry.noteCommand({ threadId: 't-agent', callId: 'bg', command: 'node server.cjs', folder: project, ended: false })
-    const server = background('node server.cjs')
+    // `exec`: the shell becomes the server, so the kill below ends it (a shell that keeps a child would leave it running).
+    const server = background('exec node server.cjs')
     registry.noteCommand({ threadId: 't-agent', callId: 'bg', command: 'node server.cjs', folder: project, ended: true })
     await until(async () => (await registry.list({ threadId: 't-agent', folders: [project], projectId: 'p1' }))[0]?.addresses.length === 1)
 

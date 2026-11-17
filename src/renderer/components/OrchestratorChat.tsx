@@ -1981,6 +1981,7 @@ export function OrchestratorChat() {
                 contextOpen,
                 onContextOpenChange: setContextOpen,
                 ...(!newChat && activeThreadId && !subagentsWorking ? { onCompactNow: handleCompactNow } : {}),
+                workInProgress: turnActive || loading || turnStoppable || subagentsWorking,
                 compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId),
                 ...(activeThread?.botOwned ? { contextHidden: true } : {})
               }}

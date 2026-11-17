@@ -75,6 +75,7 @@ import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
 import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
+import { nativeHelperRules } from '../run/adapters/nativeHelperRuntimes'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
 import { deleteRunResults, readRunResultText } from '../run/delegation/hold'
 import { SettleNotices, type PlannedSettleNotice } from './settleNotices'
@@ -11172,14 +11173,15 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Keeps the preview of the thread's latest reply in its metadata, from the transcript the turn just wrote (in memory,
-   * secrets masked). A turn that left no reply keeps the one before. Never fails the turn.
+   * secrets masked). A turn that left no reply keeps the one before; an Undo or Redo (`rewound`) shows what the
+   * transcript holds now, which may be no reply at all. Never fails the turn.
    */
-  private recordLastReply(threadId: string): void {
+  private recordLastReply(threadId: string, rewound = false): void {
     if (!this.threadStore || threadId === '__unbound__') return
     if (threadId !== this.boundSession.threadId && !this.sessions.has(threadId)) return
     try {
       const preview = latestReplyPreview(this.getMessages(threadId))
-      if (preview !== undefined) this.threadStore.setThreadLastReply(threadId, preview)
+      if (preview !== undefined || rewound) this.threadStore.setThreadLastReply(threadId, preview)
     } catch (error) {
       console.warn('the reply preview could not be kept', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -12514,9 +12516,7 @@ export class OrchestratorService extends EventEmitter {
     if (nativeHelper)
       throw new DomainRpcError(
         'runtime_owned',
-        nativeHelper.native.runtime === 'claude'
-          ? `Claude Code runs this helper inside its parent's run, and only that run can message it: ask the parent's agent to use SendMessage with agent ${nativeHelper.native.sendTo ?? nativeHelper.native.agentId}.`
-          : `Codex runs this helper inside its parent's run (agent ${nativeHelper.native.agentId}); write to the parent thread instead.`,
+        nativeHelperRules(nativeHelper.native.runtime).runtimeOwnedMessage(nativeHelper.native),
         { agentId: nativeHelper.native.agentId, hostThreadId: nativeHelper.hostThreadId }
       )
     const runsOn = this.threadStore?.getThread(threadId)?.runsOn
@@ -16275,6 +16275,7 @@ export class OrchestratorService extends EventEmitter {
       }
       this.persist(true)
       this.emitThreadMessages(threadId, session.messages, true)
+      this.recordLastReply(threadId, true)
     })
   }
 
@@ -16316,6 +16317,7 @@ export class OrchestratorService extends EventEmitter {
       }
       this.persist(true)
       this.emitThreadMessages(threadId, session.messages, true)
+      this.recordLastReply(threadId, true)
     })
   }
 
