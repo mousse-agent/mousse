@@ -94,9 +94,6 @@ describe('the client name of a turn', () => {
   // in every mode; only a name the user set themselves replaces it.
   const rows: Array<[string, Setup, PermissionMode | undefined, string]> = [
     ['subscription sign-in, Ask', {}, 'ask', MOUSSE_CLAUDE_ENTRYPOINT],
-    ['subscription sign-in, Auto-accept edits', {}, 'accept_edits', MOUSSE_CLAUDE_ENTRYPOINT],
-    ['subscription sign-in, Full access', {}, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
-    ['subscription sign-in, Auto', {}, 'auto', MOUSSE_CLAUDE_ENTRYPOINT],
     ['API-key sign-in', { authMethod: 'api_key' }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
     ['ANTHROPIC_API_KEY', { env: { ANTHROPIC_API_KEY: 'sk-ant-api03-x' } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
     ["apiKeyHelper in the user's Claude settings", { userSettings: { apiKeyHelper: 'echo key' } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],

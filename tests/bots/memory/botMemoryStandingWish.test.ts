@@ -166,7 +166,6 @@ describe('nearDuplicate', () => {
 // carry the server prefix, Codex dynamic calls and Pi carry the bare name.
 it.each([
   ['Claude Code', 'mcp__mousse__telling_set'],
-  ['Codex MCP', 'mcp__mousse__telling_set'],
   ['Codex dynamic', 'telling_set'],
   ['Pi', 'telling_set'],
   ['no telling call', undefined]

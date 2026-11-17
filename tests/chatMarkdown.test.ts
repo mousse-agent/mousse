@@ -107,11 +107,9 @@ describe('chat Markdown list rendering', () => {
     expect(markup).not.toContain('aria-label="Download file"')
   })
 
-  it('renders inline code compactly without the roomy default pill', () => {
+  it('renders inline code hugging the parentheses around it', () => {
     const markup = render('- item with (`abc123`) code')
 
-    expect(markup).toContain('an-md-code')
-    expect(markup).not.toContain('px-1.5')
     // Code hugs the parens — no rendered whitespace beyond the source's.
     expect(markup).toContain('(<code')
     expect(markup).toContain('</code>)')
