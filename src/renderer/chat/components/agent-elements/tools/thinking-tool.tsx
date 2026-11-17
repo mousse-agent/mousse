@@ -1,4 +1,5 @@
-import { memo } from "react";
+import { memo, useContext, useLayoutEffect, useRef } from "react";
+import { LiveRunBodyContext } from "./tool-open-state";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { ToolRowBase } from "./tool-row-base";
@@ -33,9 +34,19 @@ export function ThinkingCollapsed({
 }: ThinkingCollapsedProps) {
   useToolComplete(state === "animating", step.duration, onComplete);
 
-  // One still line: the headline of the thought's newest paragraph, the same line the live row and a group show.
+  // One still line: the thought's headline, the same line the live row and a group show.
   const heading = thoughtHeadline(step.thoughtContent);
   const isAnimating = state === "animating";
+  // In an opened live row the thought being written shows open, so it can be read in full as it grows.
+  const inLiveRun = useContext(LiveRunBodyContext);
+  const startsOpen = defaultOpen ?? (inLiveRun && isAnimating);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const atEndRef = useRef(true);
+  // While it is written, its box keeps its newest words in view, unless the person scrolled up in it.
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (box && isAnimating && atEndRef.current) box.scrollTop = box.scrollHeight;
+  }, [isAnimating, step.thoughtContent]);
 
   return (
     <ToolRowBase
@@ -46,11 +57,18 @@ export function ThinkingCollapsed({
       shimmer={false}
       isAnimating={isAnimating}
       expandable={!!step.thoughtContent}
-      defaultOpen={defaultOpen}
+      defaultOpen={startsOpen}
       expanded={expanded}
       onToggleExpand={onToggleExpand}
     >
-      <div className="max-h-[175px] overflow-y-auto">
+      <div
+        ref={boxRef}
+        className="max-h-[175px] overflow-y-auto"
+        onScroll={(event) => {
+          const box = event.currentTarget;
+          atEndRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
+        }}
+      >
         <Markdown
           content={step.thoughtContent ?? ""}
           // A thought still being written changes on every update: its splits are not kept.

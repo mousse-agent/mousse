@@ -35,6 +35,45 @@
   color: var(--danger);
 }
 
+/* "· 1 failed" after what the turn does now: never cut. */
+.turn-progress-badge {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* The two lines open the run's rows when clicked; the chevron is the keyboard's way in. */
+.turn-live-lines {
+  width: fit-content;
+}
+
+.turn-live-lines[data-toggles] {
+  cursor: pointer;
+}
+
+.turn-live-text {
+  gap: 2px;
+}
+
+.turn-live-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
+  cursor: pointer;
+}
+
+.turn-live-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* "+2 running": other calls beside the one named. Dim, never cut. */
 .turn-progress-more {
   flex-shrink: 0;

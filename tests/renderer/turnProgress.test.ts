@@ -163,8 +163,8 @@ describe('the line under Working', () => {
     expect(liveRow()!.querySelector<HTMLElement>('.turn-live-thought')!.title).toBe('The output says the')
     expect(liveRows()).toEqual([])
     expect(reasoningRows()).toHaveLength(0)
-    // The row is a status region: a screen reader hears the headline when it changes, not every word.
-    expect(liveRow()!.getAttribute('role')).toBe('status')
+    // Its two lines are a status region: a screen reader hears the headline when it changes, not every word.
+    expect(liveRow()!.querySelector('.turn-live-lines')!.getAttribute('role')).toBe('status')
     render([ask(), reply('t1', thought('input-available', '**Reading the test**\n\nThe output says the reminder starts twice.'))], 'streaming', { phase: 'thinking' })
     expect(headline()).toBe('Reading the test')
   })
@@ -193,11 +193,12 @@ describe('the line under Working', () => {
     render([ask(), reply('t1', thought('input-available', '**Reading**\n\nThe output says'))], 'streaming', { phase: 'thinking' })
     expect(host.querySelector('.turn-answer .an-text-shimmer--active')).toBeNull()
     expect(host.querySelector('.turn-answer svg.thinking-icon.is-thinking')).not.toBeNull()
-    // Nor a group's header while a call in it runs: the header is still, the live line under it names the call.
+    // Nor while a call runs: the live row keeps the headline still and names the call under it.
     const first = reply('t1', { ...thought('output-available', '**Reading the test**\n\nIt starts both.'), toolCallId: 'th1' })
     render([ask(), first, reply('c1', tool('Bash', 'input-available', { command: 'npm test' }))], 'streaming', { phase: 'tool_running' })
     expect(host.querySelector('.turn-answer .an-text-shimmer--active')).toBeNull()
-    expect(groupHeader('Reading the test')!.textContent).toContain('· Ran 1 command')
+    expect(headline()).toBe('Reading the test')
+    expectLive('Running Bash…')
   })
 
   it('3. a thought with no text yet shows only Thinking…', () => {
@@ -232,17 +233,15 @@ describe('the line under Working', () => {
     expect(opened.indexOf('Checking the order')).toBeLessThan(opened.lastIndexOf('Planning the fix'))
   })
 
-  it('3. a thought written after calls stays out of their group: the group is a still summary, the thought the live row\'s headline', () => {
+  it('3. a thought written after calls heads the live row, which is the run; the run takes a still group line when text starts', () => {
     const first = reply('t1', { ...thought('output-available', '**Reading the test**\n\nIt starts both.'), toolCallId: 'th1' })
     const call = reply('c1', tool('Bash', 'output-available', { command: 'ls' }))
     const live = reply('t2', { ...thought('input-available', '**Planning the fix**\n\nMake A due earlier'), toolCallId: 'th2' })
     render([ask(), first, call, live], 'streaming', { phase: 'thinking' })
     expectLive('Thinking…')
     expect(headline()).toBe('Planning the fix')
-    const group = groupHeader('Reading the test')!
-    expect(group.textContent).toContain('· Ran 1 command')
-    expect(group.getAttribute('aria-expanded')).toBe('false')
-    expect(group.textContent).not.toContain('Planning the fix')
+    // The run has no group line while it runs: the live row stands for it.
+    expect(groupHeader('Reading the test')).toBeNull()
     // The turn moves on to writing. The provider still marks the thought as streaming (it closes it at the turn's
     // end), but with text after it it is done: it joins the group, which keeps its title and stays one row.
     const still = reply('t2', { ...thought('input-available', '**Planning the fix**\n\nMake A due earlier.'), toolCallId: 'th2' })
@@ -286,10 +285,14 @@ describe('the line under Working', () => {
     render([ask(), reply('c1', tool('Bash', 'input-available', { command: 'npm test -- --run slow.test.ts' }))], 'streaming', { phase: 'tool_running' })
     expectLive('Running Bash…')
     expect(line()!.title).toBe('npm test -- --run slow.test.ts')
-    // The command follows the label, dim; the call itself is folded into a still line above the row, titled as its
-    // own row would be.
+    // The command follows the label, dim. The call has no row above: the live row is its run, and opens to show it.
     expect(lineDetail()).toBe('npm test -- --run slow.test.ts')
-    expect(groupHeader('Running npm test -- --run slow.test.ts')!.getAttribute('aria-expanded')).toBe('false')
+    expect(groupHeader('Running npm test')).toBeNull()
+    const toggle = liveRow()!.querySelector<HTMLButtonElement>('button.turn-live-toggle')!
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    act(() => { toggle.click() })
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(liveRow()!.querySelector('.an-tool-group-rows')!.textContent).toContain('npm test -- --run slow.test.ts')
   })
 
   it('5. while a steer waits for the command, the line still reads Running <tool>…, and its tooltip says when the steer goes in', () => {
@@ -351,13 +354,17 @@ describe('the line under Working', () => {
     expect(lineDetail()).toBe('pnpm vitest run tests/auth')
     expect(line()!.querySelector('.turn-progress-failed')).not.toBeNull()
     expect(headline()).toBe('Run the auth tests.')
-    // The group line names the failure while the turn runs, as it will if the turn ends there.
-    expect(groupHeader('Run the auth tests.')!.textContent).toContain('· 1 failed')
-    // A retry that works: the failure is got past and the group stops naming it.
+    expect(groupHeader('Run the auth tests.')).toBeNull()
+    // The agent thinks on: the line says so, and still names the failure nothing has got past.
+    const next = reply('t2', { ...thought('input-available', 'Try npx instead.'), toolCallId: 'th2' })
+    render(marked([ask(), lead, failed, next]), 'streaming', { phase: 'thinking' })
+    expectLive('Thinking…')
+    expect(line()!.querySelector('.turn-progress-badge')!.textContent).toBe('· 1 failed')
+    // A retry that works: the failure is got past and the line stops naming it.
     const retry = reply('c2', tool('Bash', 'output-available', { command: 'npx vitest run tests/auth' }, 'c2'))
-    render(marked([ask(), lead, failed, retry]), 'streaming', { phase: 'thinking' })
+    render(marked([ask(), lead, failed, { ...next, parts: [{ ...next.parts[0]!, state: 'output-available' }] } as UIMessage, retry]), 'streaming', { phase: 'thinking' })
     expectLive('Ran')
-    expect(groupHeader('Run the auth tests.')!.textContent).not.toContain('failed')
+    expect(line()!.querySelector('.turn-progress-badge')).toBeNull()
   })
 
   it('6. between tool calls: the last one, in the past tense, until something new starts', () => {

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
  * A running turn's live view holds still while it streams: one live row at its end, the same element from the first
- * thought to the last call; a run of calls keeps the container its first call made; a group's title is set by the
- * thought that led to its first call; and the live row's headline changes only when a new paragraph of thought starts.
+ * thought to the reply. The live row is the turn's current run: no group line repeats it while it runs; opened, it shows
+ * the run's rows, the thought being written in full; when text starts, the run takes one group line, titled with the
+ * headline the live row last showed for it, which never changes. The headline moves only at a new section or paragraph.
  * Driven through the store and the streamed-update channel, as the app feeds the list.
  */
 import { act, createElement, useMemo, useRef } from 'react'
@@ -88,12 +89,14 @@ const STREAMING: TurnProgressState = { phase: 'streaming' }
 const liveRow = () => host.querySelector<HTMLElement>('[data-turn-live]')
 const headline = () => host.querySelector('.turn-live-headline')?.textContent ?? ''
 const progress = () => host.querySelector<HTMLElement>('[data-turn-progress]')
-/** The run's container: its group line (the one toggle outside any group's rows). */
-const groupLine = () => [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')]
-  .find((button) => !button.closest('.an-tool-group-rows'))
+/** Group lines: toggles outside the live row and outside any group's rows. */
+const groupLines = () => [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')]
+  .filter((button) => !button.closest('.an-tool-group-rows') && !button.closest('[data-turn-live]'))
+const toggle = () => liveRow()!.querySelector<HTMLButtonElement>('button.turn-live-toggle')
+const openRows = () => liveRow()!.querySelector('.an-tool-group-rows')?.textContent ?? ''
 
 describe('a running turn, streamed step by step', () => {
-  it('keeps one live row, one run container and one group title, and moves the headline only on a new paragraph', () => {
+  it('is one live row while its run works, and the run takes one still group line when the reply starts', () => {
     useAppStore.setState({ messages: [prompt, thinking('th1', 1, 'Looking')], activeThreadId: 'thread-1' })
     render(THINKING)
     const row = liveRow()!
@@ -110,75 +113,93 @@ describe('a running turn, streamed step by step', () => {
       headlines.push(headline())
     }
     expect(headlines).toEqual(Array(5).fill('Looking at the slow test.'))
-    expect(new Set(headlines).size).toBe(1)
     expect(progress()!.textContent).toContain('Thinking…')
-    // A new paragraph: a new headline.
+    expect(groupLines()).toEqual([])
+    // A titled section: its title heads it, through every paragraph under it.
     text += '\n\n**Running it once**\n\nTo time it.'
+    stream(thinking('th1', 1, text))
+    expect(headline()).toBe('Running it once')
+    text += '\n\nThen I can compare it with a run of only the slow file.'
     stream(thinking('th1', 1, text))
     same()
     expect(headline()).toBe('Running it once')
 
-    // The thought ends and a call starts: the run gets its container, the live row says what runs.
+    // Opened, the live row shows the thought being written, open, as far as it has gone.
+    act(() => toggle()!.click())
+    expect(toggle()!.getAttribute('aria-expanded')).toBe('true')
+    expect(openRows()).toContain('Then I can compare it with a run of only the slow file.')
+    text += ' And the watcher.'
+    stream(thinking('th1', 1, text))
+    expect(openRows()).toContain('And the watcher.')
+
+    // The thought ends and a call starts: still no group line; the live row says what runs, and its rows grow.
     render(TOOL)
     stream(thinking('th1', 1, text, 'complete'), bash('c1', 2, 'npm test', 'running'))
     same()
-    const line = groupLine()!
-    expect(line.textContent).toContain('Running it once')
+    expect(groupLines()).toEqual([])
     expect(headline()).toBe('Running it once')
     expect(progress()!.textContent).toContain('npm test')
+    expect(openRows()).toContain('npm test')
+    // Nothing above the live row repeats the headline: the live row is the run.
+    expect([...host.querySelector('.turn-answer')!.children].filter((child) => child !== row && child.textContent!.includes('Running it once'))).toEqual([])
 
-    // The call finishes: the same container; the live row says what it did.
+    // The call finishes: the live row says what it did.
     stream(bash('c1', 2, 'npm test', 'ok'))
     same()
-    expect(groupLine()).toBe(line)
     expect(progress()!.dataset.turnProgress).toBe('ran-tool')
     expect(progress()!.textContent).toBe('Rannpm test')
-    expect(headline()).toBe('Running it once')
 
-    // A later thought streams: the group keeps the title its first call's thought gave it.
+    // A later thought streams: it heads the live row.
     render(THINKING)
     stream(thinking('th2', 3, 'The watcher restarts it.'))
     same()
-    expect(groupLine()).toBe(line)
-    expect(line.textContent).toContain('Running it once')
-    expect(line.textContent).not.toContain('The watcher')
     expect(headline()).toBe('The watcher restarts it.')
+    expect(groupLines()).toEqual([])
 
-    // The next call joins the run: the same container, the same title, now counting both.
+    // The next call fails: the live row says so under the same headline.
     render(TOOL)
     stream(thinking('th2', 3, 'The watcher restarts it.', 'complete'), bash('c2', 4, 'npm test -- --no-watch', 'running'))
-    same()
-    expect(groupLine()).toBe(line)
-    expect(line.textContent).toContain('Running it once')
-    expect(line.textContent).toContain('2 commands')
-
-    // It fails: the live row says so under the same headline, and the group line counts the failure.
     stream(bash('c2', 4, 'npm test -- --no-watch', 'failed'))
     same()
-    expect(groupLine()).toBe(line)
     expect(progress()!.dataset.turnProgress).toBe('failed-tool')
     expect(progress()!.querySelector('.turn-progress-failed')).not.toBeNull()
+    expect(progress()!.querySelector('.turn-progress-badge')).toBeNull()
     expect(headline()).toBe('The watcher restarts it.')
-    expect(line.textContent).toContain('· 1 failed')
+    // The agent thinks on: line 2 says so, and still names the failure.
+    render(THINKING)
+    stream(thinking('th3', 5, 'Try it without the flag.'))
+    expect(progress()!.textContent).toContain('Thinking…')
+    expect(progress()!.querySelector('.turn-progress-badge')!.textContent).toBe('· 1 failed')
 
-    // A reply starts: the live row hides (the text being written is on screen), still the same element.
+    // A reply starts: the live row hides, still the same element, and the run takes its group line, open as the person
+    // left it, titled with the headline the live row last showed for its calls.
     render(STREAMING)
-    stream({ id: 'reply', role: 'assistant', content: 'The watcher', timestamp: at(5), streaming: true })
+    stream(thinking('th3', 5, 'Try it without the flag.', 'complete'), { id: 'reply', role: 'assistant', content: 'The watcher', timestamp: at(6), streaming: true })
     same()
     expect(row.hidden).toBe(true)
+    const lines = groupLines()
+    expect(lines).toHaveLength(1)
+    const line = lines[0]!
+    expect(line.textContent).toContain('The watcher restarts it.')
+    expect(line.textContent).toContain('2 commands')
+    expect(line.getAttribute('aria-expanded')).toBe('true')
+    const title = line.textContent
+    // It never changes after that.
+    stream({ id: 'reply', role: 'assistant', content: 'The watcher restarts the suite.', timestamp: at(6), streaming: true })
+    expect(groupLines()[0]).toBe(line)
+    expect(line.textContent).toBe(title)
   })
 
-  it('a lone call keeps its container when it finishes and when the next call arrives', () => {
+  it('a lone call is the live row until the reply, then one group line titled like the call', () => {
     useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'running')], activeThreadId: 'thread-1' })
     render(TOOL)
-    const line = groupLine()!
-    // A run of one call is titled like the call.
-    expect(line.textContent).toContain('ls')
+    expect(groupLines()).toEqual([])
+    expect(progress()!.textContent).toContain('ls')
     stream(bash('c1', 1, 'ls', 'ok'))
-    expect(groupLine()).toBe(line)
-    expect(line.textContent).toContain('Ran ls')
-    stream(bash('c2', 2, 'pwd', 'running'))
-    expect(groupLine()).toBe(line)
-    expect(line.textContent).toContain('2 commands')
+    expect(groupLines()).toEqual([])
+    render(STREAMING)
+    stream({ id: 'reply', role: 'assistant', content: 'Two files.', timestamp: at(2), streaming: true })
+    expect(groupLines()).toHaveLength(1)
+    expect(groupLines()[0]!.textContent).toContain('Ran ls')
   })
 })

@@ -41,7 +41,7 @@ import {
 import { createToolOpenStore, ToolOpenContext } from "./tools/tool-open-state";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
-import { callTitle, TurnProgressRow, useTurnProgressState } from "./turn-progress";
+import { callTitle, TurnProgressRow, useTurnProgressState, type LiveRun } from "./turn-progress";
 import { ToolIcon } from "./tools/tool-icon";
 import {
   PermissionRequestRow,
@@ -78,6 +78,7 @@ import {
   isCompactionRow,
   settleFinishedTurn,
   turnAnswerText,
+  type AssistantToolItem,
   type ToolPartBase,
 } from "./utils/assistant-blocks";
 import { PromptEditButton, PromptUndoButton, PromptVersionSwitcher } from "../../../components/PromptUndoControls";
@@ -2506,9 +2507,9 @@ const TurnRow = memo(function TurnRow({
           const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
           const analyses = settled.order.map((index) => settled.analyses[index]!);
           // Consecutive calls and thoughts become one line that says what they did; narration between them
-          // splits them. While the turn runs, every run with a call is such a line from its first call to its last,
-          // even a run of one: a row never turns into a group (or back) as calls start and finish. (A thought at the
-          // very end is the live row's, below, so a run of thoughts alone is one that text closed: it cannot grow.)
+          // splits them. While the turn runs, every run with a call is such a line, even a run of one: a row never turns
+          // into a group (or back). The run at the very end is the live row's, below, until text closes it, so a group
+          // line is only drawn for a run that cannot grow, and keeps its title.
           const segments = partitionTurnSegments(
             analyses.map((a) => a.toolsOnly),
             analyses.map((a) => a.cardsOnly),
@@ -2540,18 +2541,35 @@ const TurnRow = memo(function TurnRow({
               toolRenderers={toolRenderers}
             />
           );
-          // The thought at the very end of a running turn, being written or just finished with nothing after it yet,
-          // is no row of its own: the live row shows its headline. Once something follows it, it takes its place in
-          // the list, as the thought that led to a group's first call or as a finished thought before the text.
+          // Only failures the agent did not get past are named on a group line; while the turn runs, a failure nothing
+          // has followed yet counts too, as it will if the turn ends there.
+          const failedNow = (item: AssistantToolItem) =>
+            isUnrecoveredFailure(item.part) || (isTurnStreaming && Boolean(item.part.toolCallId && turnFailures.has(item.part.toolCallId)));
+          // The turn's current run of work: its last segment while it streams, when that is calls and thoughts (a
+          // run of calls, or thoughts alone). The live row is that run: it has no group line while it runs, and takes
+          // one, titled once, when text starts or the turn ends.
           const liveTurn = isLastTurn && isStreaming;
           const lastSegment = segments[segments.length - 1];
-          const lastRunItems = !liveTurn || !lastSegment || lastSegment.kind === "cards"
+          const liveRunMsgs = !liveTurn || !lastSegment || lastSegment.kind === "cards"
             ? []
-            : (lastSegment.kind === "tools" ? lastSegment.msgIndices : [lastSegment.msgIndex]).flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
-          const endThought = lastRunItems.at(-1)?.part.type === "tool-Thinking" ? lastRunItems.at(-1) : undefined;
-          // The latest thought of the turn's current run of work, for the live row's first line.
-          const runThought = lastRunItems.filter((item) => item.part.type === "tool-Thinking").at(-1)?.part;
-          const rows = segments.map((segment): { node: React.ReactNode; fold: FoldRow } => {
+            : lastSegment.kind === "tools" ? lastSegment.msgIndices : [lastSegment.msgIndex];
+          const liveRunItems = liveRunMsgs.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+          const liveRunIndex = liveRunItems.length > 0 ? segments.length - 1 : -1;
+          // The latest thought of the current run, for the live row's first line.
+          const runThought = liveRunItems.filter((item) => item.part.type === "tool-Thinking").at(-1)?.part;
+          const runKeyOf = (firstId: string) => (item: AssistantToolItem, k: number) => item.part.toolCallId ?? `${firstId}-tool-${k}`;
+          const liveRun: LiveRun | undefined = (() => {
+            if (liveRunIndex < 0) return undefined;
+            const firstId = answerMsgs[liveRunMsgs[0]!]!.id;
+            const keyOf = runKeyOf(firstId);
+            return {
+              openKey: `${firstId}-toolcalls`,
+              count: liveRunItems.length,
+              failed: liveRunItems.filter(failedNow).length,
+              rows: liveRunItems.map((item, k) => renderTool(item.part, item.nestedTools, keyOf(item, k))),
+            };
+          })();
+          const rows = segments.map((segment, segmentIndex): { node: React.ReactNode; fold: FoldRow } => {
             if (segment.kind === "cards") {
               // A card still starting is not drawn: the progress line says "Starting subagent…".
               const cardParts = segment.msgIndices.flatMap(
@@ -2627,8 +2645,8 @@ const TurnRow = memo(function TurnRow({
                 };
               }
               const isLastMsg = isLastTurn && segment.msgIndex === answerMsgs.length - 1;
-              const ownItems = analyses[segment.msgIndex]!.toolItems;
-              if (endThought && ownItems.length === 1 && ownItems[0] === endThought) return { fold, node: null };
+              // Thoughts alone at the end of a running turn are its current run: the live row shows them.
+              if (segmentIndex === liveRunIndex) return { fold, node: null };
               return {
                 fold,
                 node: (
@@ -2645,19 +2663,16 @@ const TurnRow = memo(function TurnRow({
                 ),
               };
             }
-            const items = segment.msgIndices.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+            const grouped = segment.msgIndices.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+            const unrecovered = grouped.filter(failedNow).length;
+            // The current run is the live row, not a group line.
+            if (segmentIndex === liveRunIndex) return { fold: { kind: "tools", keep: unrecovered > 0 }, node: null };
             const firstId = answerMsgs[segment.msgIndices[0]!]!.id;
-            const itemKey = (item: (typeof items)[number], k: number) => item.part.toolCallId ?? `${firstId}-tool-${k}`;
-            const grouped = endThought && items[items.length - 1] === endThought ? items.slice(0, -1) : items;
+            const itemKey = runKeyOf(firstId);
             const iconType = workGroupIconType(grouped);
             // A group titled by a thought shows the thinking icon: the line is the agent's words, not a tool's.
             const heading = workGroupHeading(grouped);
             const calls = grouped.filter((item) => item.part.type !== "tool-Thinking");
-            // Only failures the agent did not get past are named on the group line; while the turn runs, a failure
-            // nothing has followed yet counts too, as it will if the turn ends there.
-            const failedNow = (item: (typeof items)[number]) =>
-              isUnrecoveredFailure(item.part) || (isTurnStreaming && Boolean(item.part.toolCallId && turnFailures.has(item.part.toolCallId)));
-            const unrecovered = grouped.filter(failedNow).length;
             // A run of one call says what that call does, as its own row would.
             const title = !heading.thought && calls.length === 1 && isV5ToolPart(calls[0]!.part)
               ? callTitle(calls[0]!.part)
@@ -2723,6 +2738,7 @@ const TurnRow = memo(function TurnRow({
                     awaitingSubagents={isTurnStreaming && !isStreaming}
                     standalone={!isTurnStreaming}
                     thought={runThought}
+                    run={liveRun}
                   />
                 )}
               </div>

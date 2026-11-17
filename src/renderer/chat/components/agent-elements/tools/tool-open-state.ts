@@ -63,3 +63,6 @@ export function useRowOpenState(initial: boolean): [boolean, (update: boolean | 
   if (kept) return [kept[0], (update) => kept[1](typeof update === "function" ? update(kept[0]) : update)];
   return [own, setOwn];
 }
+
+/** Set inside an opened live row (the turn's current run): the thought still being written there shows open. */
+export const LiveRunBodyContext = createContext(false);

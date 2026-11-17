@@ -173,10 +173,8 @@ describe('a streamed thought renders only the live row', () => {
     expect(tooltip()).toBe(text)
   })
 
-  it('after calls, renders only the live row, beside the calls\' group, and its headline follows the thought', () => {
-    const mounted = startRenderCounts()
+  it('after calls, renders only the live row (which is the run of calls and the thought), and its headline follows the thought', () => {
     mount(thread(5, 'Checking the build', [tool('tool-1', 12), tool('tool-0', 13)]))
-    expect(mounted.ToolCallsGroup).toBeGreaterThan(0)
     const row = liveRow()
     const counts = startRenderCounts()
     stream(thinking('th', 15, 'Checking the build output for the failing step. It exits 1.'))
@@ -189,6 +187,21 @@ describe('a streamed thought renders only the live row', () => {
     expect(counts.Transcript ?? 0).toBe(0)
     expect(liveRow()).toBe(row)
     expect(headline()).toBe('Checking the build output for the failing step.')
+  })
+
+  it('opened, renders the live row and the thought\'s own row per delta, and nothing else', () => {
+    mount(thread(5, 'Checking the build', [tool('tool-1', 12), tool('tool-0', 13)]))
+    act(() => liveRow()!.querySelector<HTMLButtonElement>('button.turn-live-toggle')!.click())
+    const counts = startRenderCounts()
+    stream(thinking('th', 15, 'Checking the build output for the failing step. It exits 1.'))
+    expect(counts.TurnProgressRow).toBe(1)
+    expect(counts.ThinkingTool).toBe(1)
+    expect(counts.ToolCallsGroup ?? 0).toBe(0)
+    expect(counts.MessageList ?? 0).toBe(0)
+    expect(counts.TurnRow ?? 0).toBe(0)
+    expect(counts.Transcript ?? 0).toBe(0)
+    // The thought being written is open in the run's rows: its words as they arrive.
+    expect(liveRow()!.querySelector('.an-tool-group-rows')!.textContent).toContain('It exits 1.')
   })
 
   it('a row that joins back-to-back thoughts heads the live row with the newest, and shows both once the turn ends', () => {

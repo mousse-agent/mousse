@@ -1,5 +1,8 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { UIMessage } from "ai";
+import { Collapse } from "../../../components/ui/Collapse";
+import { LiveRunBodyContext, useToolOpen } from "./tools/tool-open-state";
+import { IconChevronRight } from "../../../lib/icons";
 import type { TurnPhase, TurnStep } from "../../../../shared/types";
 import { isWaitingPermissionRequest } from "./tools/permission-request";
 import { useSubagentCards } from "./tools/subagent-cards-context";
@@ -357,32 +360,54 @@ function describeProgress({ state, messages, stepSince, awaitingSubagents, spawn
 }
 
 /**
+ * The turn's current run of work (its thoughts and calls since the last text), which the live row stands for while it
+ * runs: no group line is drawn for it until it ends.
+ */
+export type LiveRun = {
+  /** The open-state key of the group line the run becomes, so a run opened here is open there too. */
+  openKey: string;
+  /** How many rows it has. */
+  count: number;
+  /** Calls in it that failed and that nothing has got past yet. */
+  failed: number;
+  /** Its rows, as its group would show them. */
+  rows: ReactNode;
+};
+
+/**
  * The live row at the end of a running turn, under its Working: one element for the whole turn, which changes its
- * text and never its place.
+ * text and never its place. It is the turn's current run of work (`run`): that run has no group line of its own while
+ * it runs, and takes one (its only change of shape) when text starts or the turn ends.
  *
- * - Line 1, while the turn's current run of work has a thought (`thought`, its latest): the thinking icon and the
- *   thought's headline (`thoughtHeadline`), one line cut at its width. It changes only when the thought starts a new
- *   paragraph; the newest paragraph is its tooltip.
- * - Line 2: what the turn does now (`describeTurnProgress`), details in its tooltip. The thinking icon turns while the
- *   turn thinks; a running call's icon pulses; a call that just finished shows its icon still; anything else (a retry,
- *   a stop) shows three small dots. All move by transform or opacity only, so the row costs no layout or paint while
- *   it animates.
+ * - Line 1, while the current run has a thought (`thought`, its latest): the thinking icon and the thought's headline
+ *   (`thoughtHeadline`), one line cut at its width. It changes only when the thought starts a new section or
+ *   paragraph; the thought's latest paragraph is its tooltip.
+ * - Line 2: what the turn does now (`describeTurnProgress`), details in its tooltip, and "· 1 failed" while a call of
+ *   the run failed and nothing has got past it. The thinking icon turns while the turn thinks; a running call's icon
+ *   pulses; a call that just finished shows its icon still; anything else (a retry, a stop) shows three small dots.
+ *   All move by transform or opacity only, so the row costs no layout or paint while it animates.
+ * - A chevron opens the run's rows under it, in the box a group uses, under the group's open-state key. Open, the box
+ *   keeps its newest row in view as rows arrive and as the thought being written grows; that thought shows open.
  *
- * With neither line it is hidden, not removed, so it comes back as the same element. A streamed thought delta renders
- * this row alone (it reads the thought's live text, liveTextStore). It reads the thread's turn from context, so a
- * memoised turn row still follows it.
+ * With nothing to say and closed it is hidden, not removed, so it comes back as the same element. A streamed thought
+ * delta renders this row alone (it reads the thought's live text, liveTextStore), and the thought's own row too while
+ * the run is open. It reads the thread's turn from context, so a memoised turn row still follows it. The two lines are
+ * a `role="status"` region; the opened rows are not part of it.
  */
 export function TurnProgressRow({
   messages,
   awaitingSubagents,
   standalone,
   thought,
+  run,
 }: {
   messages: readonly UIMessage[];
   awaitingSubagents?: boolean;
   standalone?: boolean;
   /** The latest thought of the turn's current run of work, if it has one. */
   thought?: ToolPartBase;
+  /** The turn's current run of work, if one runs. */
+  run?: LiveRun;
 }) {
   countRender("TurnProgressRow");
   const state = useTurnProgressState();
@@ -391,6 +416,33 @@ export function TurnProgressRow({
   const liveThought = useLiveThought(thought ? thoughtSourceOf(thought) : undefined);
   const thoughtText = liveThought || (thought ? thoughtTextFromPart(thought) : "");
   const headline = thoughtHeadline(thoughtText);
+  const [ownOpen, setOwnOpen] = useState(false);
+  const kept = useToolOpen(run?.openKey, false);
+  const open = Boolean(run && run.count > 0) && (kept ? kept[0] : ownOpen);
+  const toggle = () => {
+    if (kept) kept[1](!kept[0]);
+    else setOwnOpen((value) => !value);
+  };
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
+  // Whether the open box shows its end: rows that arrive, and a thought that grows, then keep it in view.
+  const atEndRef = useRef(true);
+  const count = run?.count ?? 0;
+  useLayoutEffect(() => {
+    const box = scrollRef.current;
+    if (!box || !open || !atEndRef.current) return;
+    box.scrollTop = box.scrollHeight;
+  }, [count, open]);
+  useEffect(() => {
+    const box = scrollRef.current;
+    const rows = rowsRef.current;
+    if (!open || !box || !rows || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (atEndRef.current) box.scrollTop = box.scrollHeight;
+    });
+    observer.observe(rows);
+    return () => observer.disconnect();
+  }, [open]);
   // The clock is read as the line renders, so a countdown that starts shows its right second at once; the timer
   // only renders the line again each second while one runs.
   const [, setTick] = useState(0);
@@ -402,9 +454,28 @@ export function TurnProgressRow({
     const timer = window.setInterval(() => setTick((tick) => tick + 1), 1000);
     return () => window.clearInterval(timer);
   }, [until]);
+  const failed = run && progress?.kind !== "failed-tool" ? run.failed : 0;
+  // The chevron follows the two lines, level with the first: one element whichever lines show, so focus stays on it.
+  const chevron = run && run.count > 0 ? (
+    <button
+      type="button"
+      className="turn-live-toggle"
+      aria-expanded={open}
+      aria-label={open ? "Hide this run's steps" : "Show this run's steps"}
+      onClick={(event) => {
+        event.stopPropagation();
+        toggle();
+      }}
+    >
+      <IconChevronRight className="ui-collapse-chevron shrink-0 size-[18px]" data-open={open || undefined} aria-hidden="true" />
+    </button>
+  ) : null;
   return (
-    <div className="turn-live flex flex-col min-w-0 max-w-full select-none" role="status" data-find-ignore data-turn-live
-      hidden={!headline && !progress}>
+    <div className="turn-live flex flex-col min-w-0 max-w-full" data-find-ignore data-turn-live
+      hidden={!headline && !progress && !open}>
+      <div className="turn-live-lines flex items-start gap-1 min-w-0 max-w-full select-none" role="status"
+        data-toggles={chevron ? "" : undefined} onClick={chevron ? toggle : undefined}>
+      <div className="turn-live-text flex flex-col min-w-0 max-w-full">
       {headline && (
         <div className="turn-live-thought flex items-center gap-2 min-w-0" title={liveThoughtText(thoughtText) || headline}>
           <span className="turn-progress-icon" aria-hidden="true">
@@ -433,7 +504,28 @@ export function TurnProgressRow({
           <span className={progress.kind === "failed-tool" ? "turn-progress-label turn-progress-failed" : "turn-progress-label"}>{progress.label}</span>
           {progress.detail && <span className="turn-progress-detail">{progress.detail}</span>}
           {progress.more ? <span className="turn-progress-more">+{progress.more} running</span> : null}
+          {failed > 0 ? <span className="turn-progress-failed turn-progress-badge">· {failed} failed</span> : null}
         </div>
+      )}
+      </div>
+      {chevron}
+      </div>
+      {run && (
+        <Collapse open={open} className="overflow-hidden pt-2" itemCount={run.count}>
+          <div
+            ref={scrollRef}
+            className="an-tool-group-scroll"
+            data-tool-group-scroll
+            onScroll={(event) => {
+              const box = event.currentTarget;
+              atEndRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
+            }}
+          >
+            <div ref={rowsRef} className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
+              <LiveRunBodyContext.Provider value>{run.rows}</LiveRunBodyContext.Provider>
+            </div>
+          </div>
+        </Collapse>
       )}
     </div>
   );

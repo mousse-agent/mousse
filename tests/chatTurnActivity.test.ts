@@ -69,29 +69,36 @@ const edit = (id: string, path: string): UIMessage =>
 const reply = (id: string, said: string): UIMessage => ({ id, role: 'assistant', parts: [{ type: 'text', text: said }] })
 
 describe('a tool call group', () => {
-  it('is titled with the thought that led to its first call, then what its calls did', () => {
-    const html = render(
-      [
-        user,
-        thought('t1', 'Find the start script', 'output-available'),
-        read('r1', 'package.json'),
-        command('c1'),
-        read('r2', 'scripts/start.js'),
-        command('c2'),
-        thought('t2', 'The app is starting; watch the log', 'output-available'),
-        read('r3', 'logs/app.log'),
-        command('c3')
-      ],
-      'streaming'
-    )
-    // The thought that started the calls says why they ran; what they did follows it. A later thought leaves the title.
-    expect(text(html)).toContain('Find the start script · 6 actions')
-    expect(text(html)).not.toContain('The app is starting; watch the log ·')
+  const startRun = [
+    thought('t1', 'Find the start script', 'output-available'),
+    read('r1', 'package.json'),
+    command('c1'),
+    read('r2', 'scripts/start.js'),
+    command('c2'),
+    thought('t2', 'The app is starting; watch the log', 'output-available'),
+    read('r3', 'logs/app.log'),
+    command('c3')
+  ]
+
+  it('is drawn only once its run ends: until then the live row is the run', () => {
+    const html = render([user, ...startRun], 'streaming')
+    // The run is the live row: its latest thought heads it, and no group line repeats it.
+    expect(html).toMatch(/class="turn-live-headline">The app is starting; watch the log</)
+    expect(text(html).split('The app is starting; watch the log').length - 1).toBe(1)
+    expect(text(html)).not.toContain('6 actions')
+    expect(html).not.toContain('an-tool-chrome')
+  })
+
+  it('is titled with the headline its run last showed, then what its calls did', () => {
+    const html = render([user, ...startRun, reply('a1', 'It runs.')], 'streaming')
+    // The latest thought before the run's last call is what the live row last showed: it stays the title.
+    expect(text(html)).toContain('The app is starting; watch the log · 6 actions')
+    expect(text(html)).not.toContain('Find the start script ·')
   })
 
   it('splits at narration: the calls on each side are a group of their own, the narration prose between them', () => {
     const html = render(
-      [user, read('r1', 'a.ts'), read('r2', 'b.ts'), reply('n1', 'Now the fix.'), edit('e1', 'a.ts'), edit('e2', 'b.ts')],
+      [user, read('r1', 'a.ts'), read('r2', 'b.ts'), reply('n1', 'Now the fix.'), edit('e1', 'a.ts'), edit('e2', 'b.ts'), reply('a1', 'Fixed.')],
       'streaming'
     )
     const flat = text(html)
@@ -109,9 +116,9 @@ describe('a tool call group', () => {
       const chunk = html.split('an-tool-chrome').find((part) => part.includes(title)) ?? ''
       return chunk.slice(0, chunk.indexOf(title))
     }
-    const titled = render([user, thought('t1', 'Find the start script', 'output-available'), command('c1'), command('c2')], 'streaming')
+    const titled = render([user, thought('t1', 'Find the start script', 'output-available'), command('c1'), command('c2'), reply('a1', 'Up.')], 'streaming')
     expect(rowOf(titled, 'Find the start script')).toContain('thinking-icon')
-    const counted = render([user, command('c1'), command('c2')], 'streaming')
+    const counted = render([user, command('c1'), command('c2'), reply('a1', 'Up.')], 'streaming')
     expect(rowOf(counted, 'Ran 2 commands')).not.toBe('')
     expect(rowOf(counted, 'Ran 2 commands')).not.toContain('thinking-icon')
   })
