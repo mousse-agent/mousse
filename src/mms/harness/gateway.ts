@@ -273,6 +273,11 @@ export interface HarnessGateway {
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
    */
   stopThread(threadId: string): Promise<'stopped' | 'not_active'>
+  /**
+   * Stops one native helper of `hostThreadId`'s run on the instance that runs it (`ProviderAdapter.stopNativeHelper`).
+   * `unsupported`: that instance's runtime cannot stop a single helper.
+   */
+  stopNativeHelper?(instanceId: string, hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active' | 'unsupported'>
   /** Whether any instance keeps a process for the thread between turns now (`ProviderAdapter.hasLiveProcess`). */
   hasLiveProcess?(threadId: string): boolean
   /** Closes the process a bot's chat keeps warm on the thread, on whichever instance holds it (`ProviderAdapter.releaseBotProcess`). */
@@ -1989,6 +1994,12 @@ export class Harness implements HarnessGateway {
     if (results.some((result) => result.status === 'fulfilled' && result.value === 'stopped')) return 'stopped'
     if (failed) throw failed.reason
     return 'not_active'
+  }
+
+  async stopNativeHelper(instanceId: string, hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active' | 'unsupported'> {
+    const adapter = this.recordOrUndefined(instanceId)?.runtime.adapter
+    if (!adapter?.stopNativeHelper) return 'unsupported'
+    return adapter.stopNativeHelper(hostThreadId, agentId)
   }
 
   async compactConversation(request: NativeCompactRequest): Promise<boolean> {

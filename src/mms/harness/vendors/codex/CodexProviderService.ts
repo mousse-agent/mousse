@@ -2329,7 +2329,19 @@ export class CodexProviderService {
 
   private async serve(request: CodexServerRequest): Promise<unknown> {
     const params = (request.params ?? {}) as { threadId?: string; itemId?: string }
-    const run = params.threadId ? this.turns.get(params.threadId) : undefined
+    // A native helper's request is the run that started it's own (docs/plans/tool-api.md §2.7): it is asked in that run's
+    // thread, under that run's policy (bot, reader, Plan, approvals), and its item is read from the helper's own thread.
+    const own = params.threadId ? this.turns.get(params.threadId) : undefined
+    // Only the command and file-change approvals are a helper's that Mousse asks about; anything else a helper asks is
+    // refused as before.
+    const asksApproval = request.method === 'item/commandExecution/requestApproval' || request.method === 'item/fileChange/requestApproval'
+    const host = !own && asksApproval && params.threadId ? [...this.turns.values()].find((candidate) => candidate.helpers.has(params.threadId!)) : undefined
+    const run = own ?? host
+    const helper = host ? params.threadId : undefined
+    // Item ids are unique per thread only: a helper's item is never looked up among its parent's.
+    const itemOf = (itemId: string | undefined): unknown => (itemId === undefined ? undefined : helper ? run!.helpers.item(helper, itemId) : run!.item(itemId))
+    // The row a helper's call has in the run (`helperNotification`), so the steer hold sees it waiting on the person.
+    const callOf = (itemId: string | undefined): string | undefined => (itemId === undefined ? undefined : helper ? `${helper}:${itemId}` : itemId)
     type Result<M extends keyof CodexServerRequestMap> = CodexServerRequestMap[M]['result']
     switch (request.method) {
       case 'item/commandExecution/requestApproval': {
@@ -2337,14 +2349,14 @@ export class CodexProviderService {
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
         // A bot's turn: its authority answers, never a person.
         if (run.bot) {
-          const asked = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command
+          const asked = approval.command ?? (itemOf(approval.itemId) as { command?: string } | undefined)?.command
           const answer = codexBotCommand(run.bot, { command: typeof asked === 'string' ? asked : undefined, cwd: approval.cwd ? resolve(run.cwd, approval.cwd) : run.cwd, reason: approval.reason ?? null })
           return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/commandExecution/requestApproval'>
         }
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         // Full access never asks (Codex's own profile does not either; this is the backstop).
         if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
-        const known = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command
+        const known = approval.command ?? (itemOf(approval.itemId) as { command?: string } | undefined)?.command
         const command = typeof known === 'string' && known.trim() ? known : undefined
         // Where the command runs: the directory Codex names (a relative one is under the turn's), else the turn's own.
         // The accept carries only a decision, so Codex starts the command where it proposed: that exact path is hashed,
@@ -2363,7 +2375,8 @@ export class CodexProviderService {
             ...(where !== undefined ? { cwd: where } : {})
           },
           approval.reason,
-          approval.itemId
+          callOf(approval.itemId),
+          helper
         )
         return { decision } satisfies Result<'item/commandExecution/requestApproval'>
       }
@@ -2371,7 +2384,7 @@ export class CodexProviderService {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
         if (run.bot) {
-          const listed = (run.item(approval.itemId) as { changes?: Array<{ path: string; kind?: { type?: string; move_path?: string | null } }> } | undefined)?.changes ?? []
+          const listed = (itemOf(approval.itemId) as { changes?: Array<{ path: string; kind?: { type?: string; move_path?: string | null } }> } | undefined)?.changes ?? []
           const answer = codexBotFileChange(run.bot, {
             changes: listed.map((change) => ({ path: change.path, kind: change.kind?.type ?? 'update', ...(change.kind?.move_path ? { movePath: change.kind.move_path } : {}) })),
             cwd: run.cwd,
@@ -2382,7 +2395,7 @@ export class CodexProviderService {
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         // Edits go ahead under Auto-accept edits and Full access.
         if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
-        const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string; diff?: string; kind?: unknown }> } | undefined)?.changes ?? []
+        const changes = (itemOf(approval.itemId) as { changes?: Array<{ path: string; diff?: string; kind?: unknown }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
           `Allow Codex to edit ${changes.length ? changes.map((change) => change.path).join(', ') : 'files'}?${approval.reason ? `\n${approval.reason}` : ''}`,
@@ -2397,7 +2410,8 @@ export class CodexProviderService {
             cwd: run.cwd
           },
           approval.reason,
-          approval.itemId
+          callOf(approval.itemId),
+          helper
         )
         return { decision } satisfies Result<'item/fileChange/requestApproval'>
       }
@@ -2447,7 +2461,9 @@ export class CodexProviderService {
     kind: 'command' | 'edit',
     tool: { name: string; input: unknown; cwd?: string },
     reason?: string | null,
-    itemId?: string
+    itemId?: string,
+    /** The native helper's thread when the request is a helper's: shown on its mirror thread too, never answered by a rule. */
+    helper?: string
   ): Promise<'accept' | 'decline' | 'cancel'> {
     // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
     if (itemId) run.toolAwaiting(itemId, true)
@@ -2476,7 +2492,8 @@ export class CodexProviderService {
             tool,
             // A request that says why it asks (a retry outside the sandbox, a network or path escalation) is more
             // than the plain one: never "always", never answered by a rule.
-            ...(reason && reason.trim() ? { reason: reason.trim() } : {})
+            ...(reason && reason.trim() ? { reason: reason.trim() } : {}),
+            ...(helper ? { helper: { agentId: helper } } : {})
           }
         }
       )
@@ -2558,6 +2575,23 @@ export class CodexProviderService {
       throw new Error(`Codex's ${survivors.length === 1 ? 'command' : 'commands'} ${names} could not be stopped and may still be running.`)
     }
     return 'stopped'
+  }
+
+  /**
+   * Stop of a native helper's mirror thread (docs/plans/tool-api.md §2.7): interrupts that helper's own turn, and only
+   * it; the run that started it goes on. `hostThreadId` is the Mousse thread of that run: a helper of another thread's
+   * run is never stopped from here. `not_active` when the run no longer tracks the helper as running.
+   */
+  stopHelper(hostThreadId: string, helperThreadId: string): 'stopped' | 'not_active' {
+    const run = [...this.turns.values()].find((candidate) => candidate.mousseThreadId === hostThreadId && candidate.helpers.has(helperThreadId))
+    const conn = run?.conn
+    if (!run || !conn || conn.signal.aborted) return 'not_active'
+    const stopped = run.helpers.stopOne(helperThreadId, (threadId, turnId) => {
+      void conn.request('turn/interrupt', { threadId, turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
+        /* the helper ended meanwhile, or the process is gone */
+      })
+    })
+    return stopped ? 'stopped' : 'not_active'
   }
 
   /** Records a command Codex started for a thread Mousse runs, and forgets one that ended. */

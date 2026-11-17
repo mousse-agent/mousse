@@ -34,6 +34,7 @@ import {
   type ToolTimeline
 } from './types'
 import { asRefusal, refused } from './refusal'
+import { delegableTurn, hostingTurn, type CallAttribution } from '../../nativeHelpers'
 import {
   compileTool,
   heldBeforeArguments,
@@ -87,6 +88,11 @@ export interface McpCallRequest {
   toolCallId: string
   /** Aborted when the HTTP request closes or the caller's turn ends. */
   signal: AbortSignal
+  /**
+   * Set when the call is not the hosting run's own (docs/plans/tool-api.md §2.7): a native helper's, or one nothing ties
+   * to the run while a helper may be running. It holds the run's delegable authority only (`delegableTurn`).
+   */
+  helper?: Exclude<CallAttribution, { kind: 'host' }>
 }
 
 export interface ToolRegistryOptions {
@@ -432,7 +438,7 @@ export class ToolRegistry {
   /** The user MCP tool `name` as the run's current turn was offered it, without listing again. */
   private offeredTool(runId: string, turn: AppToolTurn, name: string): McpToolDescriptor | undefined {
     const entry = this.offeredUserMcp.get(runId)
-    if (entry?.turn === turn) return entry.tools.get(name)
+    if (entry?.turn === hostingTurn(turn)) return entry.tools.get(name)
     // A definition's tools are fixed for its run: what it was granted, never listed again.
     return turn.definition?.mcpTools?.find((tool) => tool.providerName === name && !this.tools.has(name))
   }
@@ -510,6 +516,10 @@ export class ToolRegistry {
    */
   private async callAdmitted(name: string, tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
     const { threadId, active, turn, request } = site
+    // A native helper's call holds none of what the run is offered only because it is not a subagent (asking the person,
+    // goals, tasks, secrets, quick actions): availability alone would let it call them.
+    if (request.helper && tool.offered && tool.offered(turn) !== true && tool.offered(hostingTurn(turn)) === true)
+      return refused('unavailable', `${name} belongs to the run that hosts this helper; a helper cannot use it.`)
     const compiled = compileTool(tool, {
       turn,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
@@ -543,7 +553,7 @@ export class ToolRegistry {
     // the call; a rejection ends the call before its handler runs and writes no ledger row.
     const ask = compiled.askFirst(args)
     if (ask) {
-      const refusal = await this.askFirst(tool, caller, request.signal, args, ask)
+      const refusal = await this.askFirst(tool, caller, request.signal, args, ask, request.helper)
       if (refusal) return refusal
     }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
@@ -586,8 +596,9 @@ export class ToolRegistry {
     // The credential acts for its own run only. A gate is the thread owner's word that the waiting
     // call belongs to the run that became active (a turn the runtime started itself).
     if (credential.runId !== active && !gate) throw notLive(`This credential belongs to an earlier turn of thread ${threadId}; its tools are closed.`)
-    const turn = this.options.turns?.get(active)
-    if (!turn) throw notLive(`The turn of thread ${threadId} is not running; its tools are closed.`)
+    const live = this.options.turns?.get(active)
+    if (!live) throw notLive(`The turn of thread ${threadId} is not running; its tools are closed.`)
+    const turn = request.helper ? delegableTurn(live) : live
     const args = { ...rawArgs }
     const turnToken = args[TURN_TOKEN_KEY]
     const attemptToken = args[ATTEMPT_TOKEN_KEY]
@@ -640,7 +651,7 @@ export class ToolRegistry {
       const decision = await authorizeDefinitionCall(definition, { toolName: name, args: checked, ...projectPath, signal: request.signal })
       if (!decision.allowed) return refused('not_granted', decision.message)
     }
-    if (this.options.activeRunId(threadId) !== active || this.options.turns?.get(active) !== turn || !credential.current())
+    if (this.options.activeRunId(threadId) !== active || this.options.turns?.get(active) !== hostingTurn(turn) || !credential.current())
       throw notLive(`Run ${active} is no longer the active run of thread ${threadId}; the tool was not run.`)
     return undefined
   }
@@ -702,7 +713,7 @@ export class ToolRegistry {
    * A call that asks first (`CompiledTool.askFirst`): the outcome it gets instead of running, or null when the person
    * allowed it once. An owner that cannot ask rejects, and so does a run nobody answers: nothing runs unapproved.
    */
-  private async askFirst(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, ask: AskFirst): Promise<ToolOutcome | null> {
+  private async askFirst(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, ask: AskFirst, helper?: McpCallRequest['helper']): Promise<ToolOutcome | null> {
     const { needs } = ask
     // A run nobody answers (`approvals: 'never'`) is refused at once rather than waiting for a person.
     if (ask.unattended) return refused('needs_person', APPROVALS_REFUSED_MESSAGE)
@@ -726,6 +737,8 @@ export class ToolRegistry {
             permissionKey: tool.permissionKey ?? PERMISSION_KEYS.mousseIntegrate,
             options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }],
             tool: { name: tool.name, input: args },
+            // A helper's ask is the hosting run's own request, shown on the helper's thread as well.
+            ...(helper?.kind === 'helper' ? { helper: { agentId: helper.agentId } } : {}),
             // A call that needs Full access to run unasked is the person's alone: no agent answers it for them.
             ...(needs === 'full' ? { reason: 'Only you can allow this: it needs Full access to run without asking.' } : {})
           }

@@ -209,11 +209,14 @@ import {
   type UserQuestionAnswers,
   type AnsweredQuestion,
   type ScheduledRunAgent,
+  type ThreadNativeHelper,
   DEFAULT_CHAT_MODE,
   TURN_STOPPED_TEXT,
   isTurnStoppable,
   isTurnActivePhase
 } from '../../shared/types'
+import { MirroredRun, NativeMirrorThreads } from './nativeMirrorThreads'
+import { nativeSessionEpoch, type CallAttribution } from '../run/nativeHelpers'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { agentMessageWords } from '../../shared/agentMessageWords'
 import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, TITLE_SYSTEM_PROMPT, titleContextOf, type TitleContext } from '../../shared/threadTitleText'
@@ -2068,6 +2071,105 @@ export class OrchestratorService extends EventEmitter {
   /** Threads running a scheduled occurrence's turn now (`isScheduledTurn`). */
   private readonly scheduledTurnThreads = new Set<string>()
   private readonly transcripts = new WeakMap<ThreadSession, TranscriptAssembler>()
+  /** The streaming assembler of each native helper's mirror session (`nativeMirrors`): no turn runs there. */
+  private readonly mirrorTranscripts = new WeakMap<ThreadSession, TranscriptAssembler>()
+  private nativeMirrorThreads: NativeMirrorThreads | undefined
+
+  /**
+   * The mirror threads of the runtimes' own helpers (docs/plans/tool-api.md §2.7). Each is made under its hosting thread
+   * as the run's events arrive, owned by it (trashed and purged with it), private when it is, and watch-only.
+   */
+  private get nativeMirrors(): NativeMirrorThreads {
+    this.nativeMirrorThreads ??= new NativeMirrorThreads({
+      thread: (threadId) => this.threadStore?.getThread(threadId) ?? undefined,
+      createMirror: ({ id, name, host, lineage, owner, native }) => {
+        if (!this.threadStore) throw new Error('Thread store is not ready.')
+        this.threadStore.createThread(name, host.projectId, undefined, {
+          id,
+          started: true,
+          lineage,
+          ownerThreadId: owner,
+          native,
+          ...(host.localOnly ? { localOnly: true } : {}),
+          ...(host.hidden ? { hidden: true } : {})
+        })
+      },
+      updateNative: (threadId, native) => { this.threadStore?.updateThreadMeta(threadId, { native }, { touch: false }) },
+      rename: (threadId, name) => { this.threadStore?.updateThreadMeta(threadId, { name }, { touch: false }) },
+      writeTool: (threadId, event) => this.inMirrorSession(threadId, (transcript) => transcript.tool(event)),
+      writeNote: (threadId, text) => this.inMirrorSession(threadId, () => this.addSystemMessage(text)),
+      closeOpenCalls: (threadId) => this.inMirrorSession(threadId, (transcript) => transcript.closeOpenTools('no_result'))
+    })
+    return this.nativeMirrorThreads
+  }
+
+  /** Runs `write` as the mirror thread's own: its messages, events and saves are that thread's, never the host's. */
+  private inMirrorSession(threadId: string, write: (transcript: TranscriptAssembler) => void): void {
+    const session = this.getOrCreateSession(threadId)
+    let transcript = this.mirrorTranscripts.get(session)
+    if (!transcript) {
+      transcript = new TranscriptAssembler(
+        {
+          getMessage: (id) => session.messages.find((message) => message.id === id),
+          addMessage: (message) => { session.messages.push(message) },
+          updateMessage: (message) => {
+            const index = session.messages.findIndex((entry) => entry.id === message.id)
+            if (index !== -1) session.messages[index] = message
+          },
+          removeMessage: (id) => this.removeMessage(id),
+          emitAdded: (message) => this.emitMessageAdded(message),
+          emitUpdated: (message) => this.emitMessageUpdated(message),
+          persist: (force) => this.persist(force),
+          currentRunId: () => undefined,
+          // The runtime owns the helper's turns: its thread shows no turn phase of its own.
+          setPhase: () => undefined
+        },
+        session
+      )
+      this.mirrorTranscripts.set(session, transcript)
+    }
+    const assembler = transcript
+    this.sessionAls.run(session, () => write(assembler))
+  }
+
+  /** The mirror record when `threadId` is a native helper's watch-only thread. */
+  private nativeHelperOf(threadId: string): { native: ThreadNativeHelper; hostThreadId: string } | undefined {
+    const thread = this.threadStore?.getThread(threadId)
+    if (!thread?.native || thread.lineage?.relationship !== 'native') return undefined
+    // The hosting thread is the top of the mirror chain (a helper's helper sits under the outer helper's mirror).
+    let host = thread
+    const seen = new Set<string>()
+    while (host.lineage?.relationship === 'native' && !seen.has(host.id)) {
+      seen.add(host.id)
+      const parent = this.threadStore?.getThread(host.lineage.parentThreadId)
+      if (!parent) break
+      host = parent
+    }
+    return { native: thread.native, hostThreadId: host.id }
+  }
+
+  /**
+   * Who made a Mousse tool call that arrived under `threadId`'s credential (§2.7 "Execution identity"), from the ids the
+   * runtime put in the request's `_meta`. The MCP server holds a call that is not the run's own to delegable authority.
+   */
+  attributeMcpCall(threadId: string, meta: unknown): Promise<CallAttribution> {
+    return this.nativeMirrors.attribute(threadId, meta)
+  }
+
+  /**
+   * A Stop of a native helper's mirror: the runtime stops that helper where it can (Codex); otherwise the Stop is refused
+   * `runtime_owned`, naming the run to stop instead. The hosting run is never stopped from here.
+   */
+  private async stopNativeHelper(threadId: string, mirror: { native: ThreadNativeHelper; hostThreadId: string }): Promise<{ stopped: boolean; message: string }> {
+    const { native, hostThreadId } = mirror
+    const host = this.threadStore?.getThread(hostThreadId)
+    const hosting = `the run of "${host?.name ?? hostThreadId}" (thread ${hostThreadId}, run ${native.hostRunId})`
+    if (native.state !== 'running') return { stopped: false, message: `This helper is not running (${native.state}).` }
+    const outcome = await this.harness?.stopNativeHelper?.(native.instanceId, hostThreadId, native.agentId).catch(() => 'not_active' as const) ?? 'unsupported'
+    if (outcome === 'stopped') return { stopped: true, message: 'The helper was asked to stop.' }
+    if (outcome === 'not_active') return { stopped: false, message: `The runtime no longer runs this helper. To stop everything it may still do, stop ${hosting}.` }
+    return { stopped: false, message: `runtime_owned: the runtime runs this helper and cannot stop it on its own (agent ${native.agentId}). Stop ${hosting} instead.` }
+  }
   private readonly sessionAls = new AsyncLocalStorage<ThreadSession>()
   private persistFn?: (threadId?: string | null) => void
   /** Per-thread delayed persist timers (concurrent turns must not suppress each other). */
@@ -3743,6 +3845,13 @@ export class OrchestratorService extends EventEmitter {
     reason: string,
     opts: { runId?: string; clientRequestId?: string; clearQueue?: boolean; requesterThreadId?: string; actor?: AgentActor; byAgent?: boolean } = {}
   ): Promise<StopThreadOutcome> {
+    // A native helper's mirror has no Mousse run: a person's or an agent's Stop goes to the runtime for that one helper.
+    // Any other Stop (delete, archive, expiry) leaves the helper to the run that hosts it.
+    const nativeHelper = reason === 'user' || reason === 'agent' || reason === 'remote' ? this.nativeHelperOf(threadId) : undefined
+    if (nativeHelper) {
+      const stopped = await this.stopNativeHelper(threadId, nativeHelper)
+      return { ok: stopped.stopped, status: stopped.stopped ? 'stopped' : 'rejected', reason: stopped.message, replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
+    }
     // A `/compact` the thread runs stops with it; the full history stays.
     const compactionStopped = this.stopCompaction(threadId)
     // A goal stops with its thread, and the goal turn waiting in the queue goes.
@@ -5349,6 +5458,12 @@ export class OrchestratorService extends EventEmitter {
   /** `thread_interrupt`: the one Stop (`stopThread`), asked for by an agent, aimed at one run. */
   private async stopRunAsAgent(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
+    // A native helper's mirror has no runs of its own: the Stop goes to its runtime, whatever run was named.
+    const nativeHelper = this.nativeHelperOf(threadId)
+    if (nativeHelper) {
+      const stopped = await this.stopNativeHelper(threadId, nativeHelper)
+      return stopped.stopped ? { status: 'accepted', runId, sequence: 0, replayed: false } : { status: 'rejected', reason: stopped.message }
+    }
     // A bot's thread stops another thread's turn only as the owner's bot, from a chat turn the owner's message started.
     const bot = this.botSenderOf(options.actor, 'thread_interrupt')
     // A Stop would close what waits on the owner there (an approval, a question): a bot leaves those to
@@ -9399,6 +9514,7 @@ export class OrchestratorService extends EventEmitter {
     if (opts?.purged) this.leaseWaitsOfDeleted.delete(threadId)
     this.revokeMcp(threadId)
     this.appToolTurns.forgetThread(threadId)
+    this.nativeMirrorThreads?.forget(threadId)
     this.dropContinuationsOf(threadId)
     try {
       this.runEngine?.approvals.cancelForThread(threadId, 'thread_deleted')
@@ -12252,6 +12368,16 @@ export class OrchestratorService extends EventEmitter {
     }
     // A remote subagent's thread here only stands in for the thread on its computer (issue #469): no turn
     // runs here. Its parent continues it with continue_subagent; a person writes to it on that computer.
+    // A native helper's mirror only shows what its runtime does (docs/plans/tool-api.md §2.7): nothing sent here reaches it.
+    const nativeHelper = this.nativeHelperOf(threadId)
+    if (nativeHelper)
+      throw new DomainRpcError(
+        'runtime_owned',
+        nativeHelper.native.runtime === 'claude'
+          ? `Claude Code runs this helper inside its parent's run, and only that run can message it: ask the parent's agent to use SendMessage with agent ${nativeHelper.native.sendTo ?? nativeHelper.native.agentId}.`
+          : `Codex runs this helper inside its parent's run (agent ${nativeHelper.native.agentId}); write to the parent thread instead.`,
+        { agentId: nativeHelper.native.agentId, hostThreadId: nativeHelper.hostThreadId }
+      )
     const runsOn = this.threadStore?.getThread(threadId)?.runsOn
     if (runsOn)
       throw new DomainRpcError('runs_on_other_computer', `This subagent runs on ${runsOn.computerName}. Open its thread there to write to it.`, { node: runsOn.node, ...(runsOn.ref ? { ref: runsOn.ref } : {}) })
@@ -13599,6 +13725,8 @@ export class OrchestratorService extends EventEmitter {
     }
     // The turn's steer hold, once its provider is known; the turn's end clears it.
     let turnHold: { hold: SteerHold; runId?: string } | undefined
+    // The hosting run as its native helpers' mirror threads follow it; absent on a runtime Mousse does not mirror.
+    let mirroredRun: MirroredRun | undefined
     try {
       // Instance id → driver → adapter; an unknown or disabled instance, or a blank explicit
       // override, fails the turn here.
@@ -13738,6 +13866,8 @@ export class OrchestratorService extends EventEmitter {
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)
       turnHold = { hold, runId: engineRunId }
+      // The runtime's own helpers are mirrored as watch-only threads as its events arrive (docs/plans/tool-api.md §2.7).
+      if (engineRunId) mirroredRun = this.nativeMirrors.beginRun({ hostThreadId: session.threadId, runId: engineRunId, driver: binding.driver, instanceId: binding.instanceId, sessionEpoch: nativeSessionEpoch(binding) })
       // A bot's notes reach its turn as it works on a runtime that takes steers; on one that does not, they wait for the
       // dispatch's end, as before.
       if (opts?.bot?.steer && opts.externalDrainSteer && instance.caps.steer !== 'queue_only') opts.bot.steer.attached()
@@ -13826,6 +13956,8 @@ export class OrchestratorService extends EventEmitter {
           if (event.phase === 'start' && (event.kind === 'mcp_tool_call' || event.kind === 'build_tool_call')) confirmBotOutput()
           if (event.kind !== 'skill_loaded') conversationToolsUsed = true
           this.handleStreamingToolEvent(event)
+          // A native helper's call is written to its mirror's log too; the hosting thread's log is unchanged.
+          mirroredRun?.tool(event)
           // After the assembler: the call's row is open (or closed) when the window restarts. Only the turn's own calls
           // restart it (§2.3): a subagent's or a background call's events say nothing about the turn's next tool.
           if (assembler.ownsForegroundCall(event.callId)) hold.toolEvent()
@@ -14195,6 +14327,8 @@ export class OrchestratorService extends EventEmitter {
         this.setHeldSteer(session.threadId, undefined)
       }
       appTurn?.drop()
+      // A helper whose end the runtime never reported reads unknown, never done.
+      mirroredRun?.end()
       if (compactionNote) onCompaction('unchanged')
       if (turn.abort.signal.aborted) aborted = true
       opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)

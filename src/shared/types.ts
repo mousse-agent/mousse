@@ -642,6 +642,11 @@ export interface PendingUserQuestions {
   /** Present on a provider's, the Pi agent's or a Mousse tool's saved approval request. */
   approval?: PendingApprovalInfo
   /**
+   * Set when the request is for a native helper's action (`Thread.native`): it is the hosting thread's own request and
+   * is shown on the mirror thread whose `native.agentId` this is, under that thread, as well.
+   */
+  helper?: { agentId: string }
+  /**
    * `false`: the agent asked without waiting (`ask_user` with `wait: false`) and keeps working. The question stays
    * open until it is answered, dismissed or withdrawn; a new message does not close it.
    */
@@ -1443,7 +1448,43 @@ export interface ThreadLineage {
   parentThreadId: string
   /** The thread at the top of the parent chain, the one a person started. */
   rootThreadId: string
-  relationship: 'subagent'
+  /**
+   * `subagent`: a Mousse subagent (`delegate_task`). `native`: a watch-only mirror of a helper the provider runtime
+   * started on its own (`Thread.native`); the parent is the thread whose run hosts it. Only the thread record says
+   * `native`: the run store's `thread_lineage` has no row for a mirror, so no delegation rule ever applies to one.
+   */
+  relationship: 'subagent' | 'native'
+}
+
+/** The runtimes whose own helpers Mousse mirrors as threads. */
+export type NativeHelperRuntime = 'codex' | 'claude'
+
+/**
+ * How a native helper's mirror stands. `running` until the runtime reports its end; `unknown` when its hosting run
+ * ended (or the process went away) without one: never shown as done or idle.
+ */
+export type NativeHelperState = 'running' | 'done' | 'failed' | 'stopped' | 'unknown'
+
+/**
+ * Set on a mirror thread (`ThreadLineage.relationship: 'native'`): a helper a provider runtime started inside a Mousse
+ * run (Codex's helper threads, Claude Code's Agent subagents). Mirroring creates no authority: the thread is
+ * watch-only, its runtime owns its turns, and nothing sent to it reaches the helper.
+ */
+export interface ThreadNativeHelper {
+  runtime: NativeHelperRuntime
+  /** The provider instance the hosting run ran on. */
+  instanceId: string
+  /** The runtime session the agent id belongs to (driver, home and account generation of the hosting run's binding). */
+  sessionEpoch: string
+  /** The runtime's own id of the helper: Codex's helper thread id, Claude Code's Agent call (`parent_tool_use_id`). */
+  agentId: string
+  /** The id Claude Code's SendMessage addresses the agent by, once the runtime has said it. */
+  sendTo?: string
+  /** The Mousse run that started the helper, then the latest that hosted it. */
+  hostRunId: string
+  state: NativeHelperState
+  /** Set when the log was rebuilt from what the runtime reported after the fact, not followed live from the start. */
+  partial?: true
 }
 
 /**
@@ -1540,8 +1581,10 @@ export interface Thread {
   projectId?: string
   createdAt: string
   updatedAt: string
-  /** Set on a subagent thread: the thread that started it. Absent on every other thread. */
+  /** Set on a subagent thread, and on a native helper's mirror: the thread that started it. Absent on every other thread. */
   lineage?: ThreadLineage
+  /** Set on a native helper's mirror thread (`ThreadLineage.relationship: 'native'`); watch-only. */
+  native?: ThreadNativeHelper
   /**
    * Set on a thread an agent launched with `thread_create`: the creating thread. Unlike `lineage` it
    * is not a subagent relation; it marks the thread as the creator's (the `launched` scope of the thread tools).

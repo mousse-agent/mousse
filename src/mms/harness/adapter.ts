@@ -540,6 +540,11 @@ export interface ProviderAdapter {
    * outlives a turn have it. Resolves `stopped` when there was a process to end.
    */
   stopThread?(threadId: string): Promise<'stopped' | 'not_active'>
+  /**
+   * Stops one helper the runtime started on its own inside a run of `hostThreadId` (its mirror thread's Stop), by the
+   * runtime's agent id, and nothing else. Only adapters whose runtime can stop a single helper have it (Codex).
+   */
+  stopNativeHelper?(hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active'>
   /** Whether the adapter keeps a process for `threadId` between turns now (Claude's live query). */
   hasLiveProcess?(threadId: string): boolean
   /**

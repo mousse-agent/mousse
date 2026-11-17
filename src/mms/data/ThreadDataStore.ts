@@ -33,6 +33,7 @@ import type {
   ThreadLineage,
   ThreadListVersion,
   ThreadRunsOn,
+  ThreadNativeHelper,
   ThreadSentFrom,
   ThreadStartedFrom
 } from '../../shared/types'
@@ -100,6 +101,8 @@ interface ThreadMeta {
   sentFrom?: ThreadSentFrom
   /** See `Thread.runsOn`. */
   runsOn?: ThreadRunsOn
+  /** See `Thread.native`: a native helper's mirror. */
+  native?: ThreadNativeHelper
   /** See `Thread.localOnly`. Written only with the first `meta.json`. */
   localOnly?: true
   /** See `Thread.botOwned`. */
@@ -1233,6 +1236,8 @@ export class ThreadDataStore extends EventEmitter {
       scheduledJobId?: string
       /** See `Thread.runsOn`: a remote subagent's stand-in. */
       runsOn?: ThreadRunsOn
+      /** See `Thread.native`: a native helper's watch-only mirror. */
+      native?: ThreadNativeHelper
       /** See `Thread.localOnly`. */
       localOnly?: boolean
       /** See `Thread.expiresAt`; checked by the caller. */
@@ -1268,6 +1273,7 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
     if (opts?.scheduledJobId) meta.scheduledJobId = opts.scheduledJobId
     if (opts?.runsOn) meta.runsOn = structuredClone(opts.runsOn)
+    if (opts?.native) meta.native = structuredClone(opts.native)
     if (opts?.localOnly === true) meta.localOnly = true
     if (opts?.expiresAt) meta.expiresAt = opts.expiresAt
     if (opts?.expiresAt && opts.expiryStopsRun === true) meta.expiryStopsRun = true
@@ -1638,7 +1644,7 @@ export class ThreadDataStore extends EventEmitter {
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'workspaceBinding' | 'pullRequest' | 'goal' | 'expiresAt' | 'expiryStopsRun'>>,
+    partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'native' | 'workspaceBinding' | 'pullRequest' | 'goal' | 'expiresAt' | 'expiryStopsRun'>>,
     opts: { touch?: boolean; ifRevision?: number; pullRequestInfo?: PullRequestInfo } = {}
   ): Thread {
     const thread = this.getThread(id)
