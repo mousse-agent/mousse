@@ -9,12 +9,29 @@ import {
   type HostedNetModule
 } from './hosted'
 import type { NodeInviteInput, PreparedNodeJoin } from './enrollment/service'
+import {
+  LINK_TTL_MS,
+  LinkOffers,
+  claimOffer,
+  formatLink,
+  lanLinkRoutes,
+  linkRoutes,
+  reachableFromOthers,
+  listId,
+  parseLink,
+  type ConnectLink,
+  type LinkAnswer
+} from './enrollment/link'
+import { hostname, networkInterfaces } from 'node:os'
+import { ACCESS_PRESETS } from '../../shared/net/accessPresets'
 import { DEFAULT_NET_FEATURE_FLAGS, type NetFeatureFlags } from '../../shared/featureFlags'
 import { existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import type {
   InviteId,
+  LinkClaimMessage,
+  LinkResultMessage,
   NodeCapability,
   NodeDelegation,
   NodeId,
@@ -54,6 +71,9 @@ import type {
   BridgeNodePolicy,
   EditorProbeResult,
   NetInitInput,
+  NetLinkCheck,
+  NetLinkMade,
+  NetLinkPasted,
   NetLocalMethod,
   NetStartOverCheck,
   NetStatus
@@ -267,7 +287,7 @@ function listedOwnNodes(identity: NetIdentityService): NodeId[] | undefined {
 }
 /** A stored state this build does not know shows as disconnected: not connected, and someone's choice. */
 const connectionView = (state: ConnectionState): BridgeNodeConnection =>
-  state === 'connected' || state === 'none' ? state : 'disconnected'
+  state === 'connected' || state === 'none' || state === 'held' ? state : 'disconnected'
 /** A join that succeeded; `wait`: whether to wait for the first session with `authority`. */
 interface JoinOutcome {
   user: UserId
@@ -315,6 +335,8 @@ export interface NetRuntime {
   remoteLists: SqliteRemoteLists
   rpc: DurableRpcDispatcher
   enrollment: EnrollmentService
+  /** The connect links made here (`net_link_offers`). */
+  links: LinkOffers
   transfer: AuthorityTransferDelivery
 }
 /**
@@ -411,6 +433,12 @@ export class NetService {
   private domain?: NetDomainComposition
   private presenceStore?: PeerPresence
   private lanMemoryStore?: SqliteLanMemory
+  /**
+   * Where a connect link's offer exchange just reached a device: a dial candidate for the first ordinary session
+   * with it, for links that add a computer and connect-only links alike. Once a session opens over a direct route,
+   * the address it opened on becomes the remembered last address and this entry goes.
+   */
+  private readonly linkCandidates = new Map<NodeId, string>()
   /** Sessions accepted on the automatic LAN listener, and the peer's address there. */
   private readonly lanInbound = new WeakMap<object, string>()
   private presenceTimer?: { cancel(): void }
@@ -586,15 +614,28 @@ export class NetService {
         executions = new SqliteExecutionLedger(db),
         blobs = new FileBlobStore(db)
       const connections = new SqliteConnections(db, this.clock)
+      const links = new LinkOffers(db, keys, this.clock)
       const enrollment = new EnrollmentService({
         db,
         identity,
         keys,
         clock: this.clock,
         routes: () => this.signedRoutes(),
-        onRedeemed: (node) => connections.set(node, 'connected', 'invite'),
-        onJoined: (inviter) => connections.set(inviter, 'connected', 'join')
+        // A device that came in by a link made here waits for Allow; a raw invitation connects it at once.
+        onRedeemed: (node, invite) =>
+          links.redeemed(invite, node)
+            ? connections.set(node, 'held', 'link')
+            : connections.set(node, 'connected', 'invite'),
+        onJoined: (inviter, link) =>
+          connections.set(inviter, link ? 'held' : 'connected', link ? 'link' : 'join')
       })
+      // A restart stops every link that can still take a new claim; a consumed one keeps answering.
+      for (const invite of links.cancelOpen())
+        try {
+          enrollment.revokeInvite(invite)
+        } catch {
+          // Not the keeper any more: the invitation lapses with its expiry.
+        }
       const policy = new SqliteNodePolicy(db, this.clock)
       // A store from before this record: every device listed now counts as connected, once, and before any session
       // work, so nothing that worked stops. A list that cannot be read now is left for the next start; until then
@@ -775,6 +816,7 @@ export class NetService {
         executions,
         blobs,
         enrollment,
+        links,
         transfer,
         budgets: new SqliteBudgetLedger(db),
         outbox: new SqliteOutbox(db),
@@ -982,6 +1024,18 @@ export class NetService {
             params.via as string | undefined
           )
         ).then((joined) => this.firstSession(joined))
+      )
+    // A connect link: making one on a computer with no identity creates it; pasting one picks its case offline, and a
+    // join waits for its first session outside the queue, as above.
+    if (method === 'net.link.check') return this.linkCheck(parseLink(params.link))
+    if (method === 'net.link.make') return this.serial(() => this.linkMake(params))
+    if (method === 'net.link.paste')
+      return this.track(
+        this.serial(() => this.linkPaste(params)).then(async (done) => {
+          if (!done.joined) return done.pasted
+          const first = (await this.firstSession(done.joined)) as { connected?: boolean }
+          return { ...done.pasted, ...(first.connected === undefined ? {} : { connected: first.connected }) }
+        })
       )
     // With no network folder there is no join to finish or give up and nothing to start over, and
     // none is made to find out.
@@ -1237,6 +1291,30 @@ export class NetService {
           )
           this.emit()
           return { connection: rt.connections.state(node) }
+        }
+        case 'bridge.allow': {
+          // A device held since a connect link: what it may do here (today's defaults) and the connection are
+          // written together, so it is never connected with no access chosen, nor the other way round.
+          const rt = this.requireEnrolled(),
+            node = params.node as NodeId
+          if (node === rt.identity.self()!.node) throw new NetError('bad_request')
+          try {
+            this.currentNode(node)
+          } catch {
+            throw new NetError('bad_request', 'Unknown device.')
+          }
+          if (rt.connections.state(node) !== 'held')
+            throw new NetError('conflict', 'This device isn’t waiting for Allow.')
+          const preset = ACCESS_PRESETS.find((row) => row.id === 'work')!
+          rt.db.transaction(() => {
+            rt.policy.set(node, { ...preset.fields })
+            rt.connections.set(node, 'connected', 'person')
+          })
+          this.emit()
+          return {
+            connection: connectionView(rt.connections.state(node)),
+            policy: policyView(rt.policy.get(node))
+          }
         }
         case 'bridge.workOnThreads': {
           // "Let my other computers work on this computer's threads". Any computer sets it for itself; it
@@ -2138,6 +2216,7 @@ export class NetService {
                 }
               }
             : undefined,
+          link: { claim: (request, secure) => this.answerLinkClaim(request, secure) },
           onEnrolled: () => this.markAuthenticated(raw),
           normalSession: (secure, mux, context) =>
             this.makeSession(secure, mux, context, raw, { carrier, lanRemote })
@@ -3230,14 +3309,18 @@ export class NetService {
    * computer already sent: the same claims and keys, with a fresh proof bound to the new channel.
    * A join that fails before its request leaves this computer is dropped at once; one that fails
    * after keeps everything for Retry or Give up, unless the other computer refused it outright.
-   * `mousseId`: the keys were made and announced by a Mousse ID join, so they are kept.
+   * `keepKeys`: the keys were made for this join and already shown to the other side (announced to Mousse ID, or
+   * pinned by a connect link's invitation), so they are kept. `link`: the invitation came from a connect link's offer
+   * path, answered on these addresses; they are dialled first, and the first one is where the first ordinary session
+   * is tried.
    */
   private async join(
     invite: string | undefined,
     name?: string,
     passphrase?: string,
     via?: string,
-    mousseId = false
+    keepKeys = false,
+    link?: { routes: Route[] }
   ): Promise<JoinOutcome> {
     if (via !== undefined && !isJoinVia(via)) throw new NetError('bad_request')
     if (
@@ -3246,7 +3329,7 @@ export class NetService {
     )
       throw new NetError('bad_request')
     // A text that is not an invitation fails here, before anything is dropped or made.
-    const needsProtection = invite !== undefined && inviteRequiresProtection(invite)
+    const needsProtection = invite !== undefined && inviteRequiresProtection(invite, !!link)
     let rt = this.runtime(),
       quarantine: EnrollmentQuarantine | undefined,
       label: string | undefined
@@ -3255,7 +3338,7 @@ export class NetService {
       if (leftovers !== 'sent') throw new NetError('not_enrolled')
       if (passphrase !== undefined && rt.keys.state() === 'locked') await rt.keys.unlock(passphrase)
       if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
-    } else if (leftovers === 'unsent' && !mousseId) {
+    } else if (leftovers === 'unsent' && !keepKeys) {
       // A new link replaces a join that never sent its request.
       await this.setAsideNetwork('unfinished-join')
       rt = this.runtime()
@@ -3278,7 +3361,7 @@ export class NetService {
           await rt.keys.initialize({ asAuthority: false })
         if (needsProtection && !rt.keys.protectedAtRest()) throw new NetError('keystore_locked')
         try {
-          prepared = await rt.enrollment.prepareNodeJoin(invite, name)
+          prepared = await rt.enrollment.prepareNodeJoin(invite, name, link)
         } catch (error) {
           if (leftovers === 'sent' && error instanceof NetError && error.code === 'conflict')
             throw this.unfinishedJoinError(rt)
@@ -3304,20 +3387,28 @@ export class NetService {
         const routes = parseProtocolJson(
           Buffer.from(prepared.routes.payload, 'base64url')
         ) as RoutesRecord
+        const local = prepared.link?.routes ?? []
         try {
           const result = await manager.connect(
             {
               node: prepared.authority,
               user: prepared.user,
               transportKey: prepared.authorityTransportKey,
-              // A remote machine set up over SSH reaches this computer through its own tunnel first.
+              // A remote machine set up over SSH reaches this computer through its own tunnel first; a link's
+              // addresses come next, and another computer answering on one fails that address alone.
               routes: [
                 ...(via ? [{ transport: 'direct', address: via, priority: 0 }] : []),
-                ...routes.routes
-              ]
+                ...local,
+                ...routes.routes.filter(
+                  (route) => !local.some((row) => row.address === route.address)
+                )
+              ].slice(0, 32),
+              remembered: local.map((route) => route.address)
             },
             this.shutdownSignal.signal
           )
+          if (result.route.transport === 'direct' && local.length)
+            this.linkCandidates.set(prepared.authority, result.route.address)
           quarantine = new EnrollmentQuarantine({
             channel: result.channel,
             service: rt.enrollment,
@@ -3343,6 +3434,9 @@ export class NetService {
         netBridgeThreads: this.config.features?.netBridgeThreads !== false
       }
       this.saveConfig()
+      // A link's first address stands in until the enrollment itself names one (or after a restart, a retry).
+      if (prepared.link?.routes.length && !this.linkCandidates.has(prepared.authority))
+        this.linkCandidates.set(prepared.authority, prepared.link.routes[0].address)
       await this.activate()
       this.adoptRoutes(prepared.routes, prepared.authority)
       this.refreshPeers()
@@ -3474,6 +3568,406 @@ export class NetService {
       })
     await this.setAsideNetwork('start-over')
     return this.status()
+  }
+  /** This computer's name for a new identity: its host name. */
+  private hostName(): string {
+    const name = hostname()
+      .replace(/\.local$/i, '')
+      .trim()
+    return name ? Array.from(name).slice(0, 64).join('') : 'My computer'
+  }
+  /** A refusal of the system keychain, worded so the screen asks for a passphrase once. */
+  private passphraseNeeded(error: unknown): unknown {
+    if (!(error instanceof NetError) || error.code !== 'keystore_locked') return error
+    return new NetError('keystore_locked', 'The system keychain refused. Choose a passphrase.', {
+      cause: error,
+      details: { reason: 'passphrase' }
+    })
+  }
+  /** The name of the computer that keeps the list, for "Add computers from <keeper>". */
+  private keeperName(): string | undefined {
+    try {
+      const rt = this.requireEnrolled(),
+        roster = rt.identity.verifySigned<Roster>(
+          rt.identity.roster()!,
+          rt.identity.pinnedRootKey(rt.identity.self()!.user)!
+        )
+      return this.currentNode(roster.authorityNode).name
+    } catch {
+      return undefined
+    }
+  }
+  /**
+   * The addresses a link made here offers: the automatic LAN listener on each IPv4 interface, then the direct and
+   * tunnel routes this computer publishes, then loopback (another copy on this computer). Relay routes are left out:
+   * a computer with no pass cannot use one without a ticket.
+   */
+  private linkRoutesHere(): Route[] {
+    const port = this.transport?.lanPort(),
+      lan = port
+        ? lanLinkRoutes(
+            port,
+            Object.values(networkInterfaces()).flatMap((rows) =>
+              (rows ?? [])
+                .filter((row) => row.family === 'IPv4' && !row.internal)
+                .map((row) => row.address)
+            )
+          )
+        : []
+    let published: Route[] = []
+    try {
+      published = (
+        parseProtocolJson(Buffer.from(this.signedRoutes().payload, 'base64url')) as RoutesRecord
+      ).routes
+    } catch {
+      published = []
+    }
+    return linkRoutes(lan, published)
+  }
+  /**
+   * Makes a connect link. On a computer with no identity this creates one, named after the host, which then keeps
+   * the others connected. On the keeper the link adds a computer; on any other device of the list it only connects
+   * devices already in it. A new link stops every earlier one here that was not used.
+   */
+  private async linkMake(params: Record<string, unknown>): Promise<NetLinkMade> {
+    const passphrase = params.passphrase as string | undefined
+    let rt = this.runtime()
+    const fresh = !rt.identity.self()
+    // A fresh computer whose keychain refused comes back with a passphrase: its identity was made by the first try,
+    // and this one finishes it, so it is still the call that set this computer up to keep the others connected.
+    let created = fresh
+    if (fresh || !this.config.enabled) {
+      try {
+        await this.init({
+          name: (params.name as string | undefined) ?? this.hostName(),
+          ...(passphrase === undefined ? {} : { passphrase })
+        })
+      } catch (error) {
+        throw this.passphraseNeeded(error)
+      }
+      rt = this.runtime()
+    }
+    const self = this.requireEnrolled().identity.self()!,
+      add = self.isAuthority
+    // An invitation is issued only from protected keys; the keychain does it, or a passphrase where it refuses.
+    if (add && !rt.keys.protectedAtRest()) {
+      try {
+        rt.keys.protect(passphrase)
+      } catch (error) {
+        throw this.passphraseNeeded(error)
+      }
+      created = true
+    }
+    if (!this.routes) await this.activate()
+    const routes = this.linkRoutesHere()
+    if (!routes.length)
+      throw new NetError('route_unreachable', 'This computer has no address another computer can reach.', {
+        details: { reason: 'no_listener' }
+      })
+    const made = rt.links.make(add ? 'add' : 'connect', LINK_TTL_MS)
+    for (const invite of made.revoke)
+      try {
+        rt.enrollment.revokeInvite(invite)
+      } catch {
+        // Not the keeper: nothing was issued from it.
+      }
+    try {
+      const link = formatLink({
+        add,
+        fingerprint: fingerprint(decodeBase64(rt.keys.nodeKeys().transport)),
+        key: made.key,
+        list: listId(rt.identity.pinnedRootKey(self.user)!),
+        offer: made.offer,
+        routes
+      })
+      this.emit()
+      const keeper = add ? undefined : this.keeperName()
+      return {
+        link,
+        add,
+        created,
+        expiresAt: made.expiresAt,
+        reachable: reachableFromOthers(routes),
+        ...(keeper === undefined ? {} : { keeper })
+      }
+    } finally {
+      made.key.fill(0)
+    }
+  }
+  /**
+   * What pasting `link` here would do, from the link and this computer's own state alone (topology table): no
+   * network call is made.
+   */
+  private linkCheck(link: ConnectLink): NetLinkCheck {
+    const refused = (reason: NonNullable<NetLinkCheck['reason']>, startOver?: NetStartOverCheck) => ({
+      row: 'refused' as const,
+      add: link.add,
+      reason,
+      ...(startOver ? { startOver } : {})
+    })
+    const rt = existsSync(join(this.options.profileDir, 'net', 'net.db')) ? this.runtime() : undefined,
+      self = rt?.identity.self()
+    if (!rt || !self) {
+      if (rt && this.joinLeftovers(rt) === 'sent') return refused('join_unfinished')
+      return link.add ? { row: 'join', add: true } : refused('connect_only')
+    }
+    const root = rt.identity.pinnedRootKey(self.user)
+    if (root && listId(root) === link.list) {
+      try {
+        if (fingerprint(decodeBase64(rt.keys.nodeKeys().transport)) === link.fingerprint)
+          return refused('own_link')
+      } catch {
+        // Locked keys: the paste itself asks for them.
+      }
+      return { row: 'connect', add: link.add }
+    }
+    if (!link.add) return refused('other_list')
+    let check: NetStartOverCheck
+    try {
+      check = this.startOverCheck()
+    } catch {
+      return refused('other_list')
+    }
+    if (check.refused) return refused(check.refused, check)
+    return { row: 'start_over', add: true, startOver: check }
+  }
+  /** Pastes a link: joins, connects, or (asked to) starts over and then joins. Runs in the serial queue. */
+  private async linkPaste(
+    params: Record<string, unknown>
+  ): Promise<{ pasted: NetLinkPasted; joined?: JoinOutcome }> {
+    const link = parseLink(params.link),
+      passphrase = params.passphrase as string | undefined
+    const check = this.linkCheck(link)
+    if (check.row === 'refused')
+      throw new NetError('conflict', 'This link can’t be used on this computer.', {
+        details: { reason: check.reason }
+      })
+    if (check.row === 'connect') return { pasted: await this.linkConnect(link) }
+    if (check.row === 'start_over') {
+      if (params.startOver !== true)
+        throw new NetError('conflict', 'This computer must start over first.', {
+          details: { reason: 'start_over' }
+        })
+      // Nothing is set aside until the other computer answers on the key the link pinned.
+      const opened = await this.dialLink(link, this.requireEnrolled().keys.tlsCredentials())
+      opened.channel.close()
+      await opened.transport.teardown()
+      await this.startOver()
+    }
+    const joined = await this.linkJoin(link, params.name as string | undefined, passphrase)
+    let name: string | undefined
+    try {
+      name = this.currentNode(joined.authority).name
+    } catch {
+      name = undefined
+    }
+    return {
+      joined,
+      pasted: {
+        row: 'join',
+        node: joined.authority,
+        ...(name === undefined ? {} : { name }),
+        connection: connectionView(this.runtime().connections.state(joined.authority))
+      }
+    }
+  }
+  /**
+   * Joins the list of the computer that made `link`: keys first (the claim binds the invitation to them), then the
+   * offer exchange, then the ordinary enrollment with the invitation it returned.
+   */
+  private async linkJoin(link: ConnectLink, name?: string, passphrase?: string): Promise<JoinOutcome> {
+    let rt = this.runtime()
+    const leftovers = this.joinLeftovers(rt)
+    if (leftovers === 'sent') throw this.unfinishedJoinError(rt)
+    if (leftovers === 'unsent') {
+      // Keys from an earlier paste are kept, so a link already claimed with them still answers this computer; a
+      // journal no request left is dropped. Keys that stay locked are set aside like any unsent join.
+      if (rt.keys.state() === 'locked' && passphrase !== undefined)
+        await rt.keys.unlock(passphrase).catch(() => {})
+      if (rt.keys.state() !== 'unlocked') {
+        await this.setAsideNetwork('unfinished-join')
+        rt = this.runtime()
+      } else if (rt.enrollment.joinAttempt()) rt.enrollment.abandonPreparedJoin()
+    }
+    if (rt.keys.state() === 'missing')
+      try {
+        await rt.keys.initialize({
+          asAuthority: false,
+          ...(passphrase === undefined ? {} : { passphrase })
+        })
+      } catch (error) {
+        throw this.passphraseNeeded(error)
+      }
+    if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+    const answer = await this.fetchFromLink(link, 'add', rt)
+    if (answer.kind !== 'invite') throw new NetError('bad_request')
+    // The address that answered goes first, for the enrollment and as the first ordinary session's candidate.
+    const routes = [
+      answer.route,
+      ...link.routes.filter((route) => route.address !== answer.route.address)
+    ]
+    return this.join(answer.invite, name ?? this.hostName(), undefined, undefined, true, { routes })
+  }
+  /**
+   * A link from a device of this computer's own list: the maker's signed routes come back on the offer path and
+   * each side connects the other unless it has a record already (a hold or a Disconnect stays). Nothing is enrolled.
+   */
+  private async linkConnect(link: ConnectLink): Promise<NetLinkPasted> {
+    const rt = this.requireEnrolled()
+    this.assertEnabled()
+    if (!this.routes) await this.activate()
+    const answer = await this.fetchFromLink(link, 'connect', rt)
+    if (answer.kind !== 'routes') throw new NetError('bad_request')
+    // The answer counts only from the device of this list whose key the link pinned.
+    const peer = this.currentNode(answer.node)
+    if (
+      answer.node === rt.identity.self()!.node ||
+      fingerprint(decodeBase64(peer.keys.transport)) !== link.fingerprint
+    )
+      throw new NetError('peer_key_mismatch')
+    this.adoptRoutes(answer.routes, answer.node)
+    if (answer.route.transport === 'direct')
+      this.linkCandidates.set(answer.node, answer.route.address)
+    rt.connections.connectUnrecorded([answer.node], 'link')
+    this.refreshPeers()
+    for (const supervisor of this.supervisors.values()) supervisor.retryAfterStateChange()
+    this.emit()
+    return {
+      row: 'connect',
+      node: answer.node,
+      name: peer.name,
+      connection: connectionView(rt.connections.state(answer.node))
+    }
+  }
+  /** One offer exchange: dial the link pinned to its fingerprint, claim, read the one answer. */
+  private async fetchFromLink(
+    link: ConnectLink,
+    want: 'add' | 'connect',
+    rt: NetRuntime
+  ): Promise<LinkAnswer & { route: Route }> {
+    const opened = await this.dialLink(link, rt.keys.tlsCredentials())
+    try {
+      return { ...(await claimOffer(opened.channel, link, want, this.clock)), route: opened.route }
+    } catch (error) {
+      if (error instanceof NetError && fromPeer(error) && error.code === 'invite_invalid')
+        throw new NetError('invite_invalid', 'This link was used or replaced. Make a new link.', {
+          cause: error,
+          details: { reason: 'stale' }
+        })
+      if (error instanceof NetError && fromPeer(error) && error.code === 'forbidden')
+        throw new NetError('forbidden', 'The other computer refused this link.', {
+          cause: error,
+          details: { reason: 'refused' }
+        })
+      throw error
+    } finally {
+      opened.channel.close()
+      await opened.transport.teardown()
+    }
+  }
+  /**
+   * Dials every address of `link` at once, with TLS pinned to its fingerprint and nothing else sent, and keeps the
+   * first that answers. Another computer on an address fails that address alone.
+   */
+  private async dialLink(
+    link: ConnectLink,
+    credentials: ReturnType<FileKeyStore['tlsCredentials']>
+  ): Promise<{ channel: SecureChannel; route: Route; transport: ProfileTransports }> {
+    const transport = new ProfileTransports({
+      clock: this.clock,
+      profileDir: this.options.profileDir,
+      identity: () => {
+        throw new NetError('not_enrolled')
+      }
+    })
+    await transport.start([], (raw) => raw.destroy())
+    const controllers = link.routes.map(() => new AbortController()),
+      abortAll = () => controllers.forEach((controller) => controller.abort())
+    const timer = this.clock.setTimeout(abortAll, DIAL_TLS_DEADLINE_MS * 2)
+    this.shutdownSignal.signal.addEventListener('abort', abortAll, { once: true })
+    let won: { channel: SecureChannel; route: Route } | undefined
+    const attempts = link.routes.map(async (route, index) => {
+      const signal = controllers[index].signal,
+        raw = await transport.dial(route, signal)
+      try {
+        const channel = await openSecureChannel(raw, {
+          role: 'client',
+          credentials,
+          expectedPeerFingerprint: link.fingerprint,
+          deadlineMs: DIAL_TLS_DEADLINE_MS,
+          signal
+        })
+        if (won) {
+          channel.close()
+          throw new NetError('cancelled')
+        }
+        won = { channel, route }
+        controllers.forEach((controller, other) => other !== index && controller.abort())
+        return won
+      } catch (error) {
+        raw.destroy()
+        throw error
+      }
+    })
+    try {
+      return { ...(await Promise.any(attempts)), transport }
+    } catch {
+      await transport.teardown()
+      throw new NetError('route_unreachable', 'The computer that made this link didn’t answer.', {
+        details: { reason: 'link_unreachable' }
+      })
+    } finally {
+      timer.cancel()
+      this.shutdownSignal.signal.removeEventListener('abort', abortAll)
+    }
+  }
+  /**
+   * The link's offer path on this computer: one claim on a fresh connection, answered from the offers made here.
+   * The gateway in front of it keeps the pre-auth byte and time limits.
+   */
+  private answerLinkClaim(request: LinkClaimMessage, channel: SecureChannel): LinkResultMessage {
+    const rt = this.requireEnrolled()
+    try {
+      return rt.links.claim(request, channel, {
+        self: () => {
+          const self = rt.identity.self()!
+          return { node: self.node, keeper: self.isAuthority }
+        },
+        issue: (claimer) => {
+          const issued = rt.enrollment.issueNodeInvite({
+            kind: 'computer',
+            caps: [...COMPUTER_NODE_CAPABILITIES],
+            joinerTransportFingerprint: claimer,
+            emptyRoutes: true
+          })
+          return { text: issued.text, invite: issued.invite }
+        },
+        revoke: (invite) => rt.enrollment.revokeInvite(invite),
+        listed: (transportKey) => this.listedByTransportKey(transportKey),
+        connect: (node) => rt.connections.connectUnrecorded([node], 'link'),
+        routes: () => this.signedRoutes()
+      })
+    } finally {
+      this.emit()
+    }
+  }
+  /** The current, unrevoked device of this list whose transport key is `transportKey`. */
+  private listedByTransportKey(transportKey: string): NodeId | undefined {
+    const rt = this.requireEnrolled(),
+      self = rt.identity.self()!,
+      root = rt.identity.pinnedRootKey(self.user)!,
+      roster = rt.identity.verifySigned<Roster>(rt.identity.roster()!, root)
+    for (const signed of roster.nodes) {
+      const delegation = rt.identity.verifySigned<NodeDelegation>(signed, root)
+      if (delegation.keys.transport !== transportKey) continue
+      try {
+        if (this.currentNode(delegation.subject).keys.transport === transportKey)
+          return delegation.subject
+      } catch {
+        // Revoked or replaced: not listed.
+      }
+    }
+    return undefined
   }
   private async transferAuthority(node: NodeId): Promise<unknown> {
     const rt = this.requireEnrolled()
@@ -4099,21 +4593,30 @@ export class NetService {
     if (this.lanMemoryStore?.db !== db) this.lanMemoryStore = new SqliteLanMemory(db, this.clock)
     return this.lanMemoryStore
   }
-  /** The last address a session with `node` opened over, as a dial candidate after the live LAN hints. */
+  /**
+   * Where a connect link just reached `node`, then the last address a session with it opened over: dial candidates
+   * after the live LAN hints.
+   */
   private lastAddressRoute(node: NodeId, others: readonly Route[]): Route[] {
+    let last: string | undefined
     try {
-      const address = this.lanMemory().lastAddress(node)
-      if (!address || others.some((route) => route.address === address)) return []
-      return [{ transport: 'direct', address, priority: LAST_ADDRESS_PRIORITY }]
+      last = this.lanMemory().lastAddress(node)
     } catch {
-      return []
+      last = undefined
     }
+    return [...new Set([this.linkCandidates.get(node), last])]
+      .filter(
+        (address): address is string =>
+          !!address && !others.some((route) => route.address === address)
+      )
+      .map((address) => ({ transport: 'direct', address, priority: LAST_ADDRESS_PRIORITY }))
   }
   /** Remembers where a session with one of this user's devices opened, unless it came through a relay. */
   private rememberAddress(node: NodeId, address: string | undefined): void {
     if (!address) return
     try {
       this.lanMemory().remember(node, address)
+      this.linkCandidates.delete(node)
     } catch {
       // A hint only: the next session writes it again.
     }

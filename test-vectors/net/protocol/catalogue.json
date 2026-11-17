@@ -346,6 +346,32 @@
       }
     },
     {
+      "t": "link.claim",
+      "offer": "ofr_00000000000000000000000000",
+      "want": "add",
+      "proof": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "t": "link.result",
+      "invite": "mj1_AAAA"
+    },
+    {
+      "t": "link.result",
+      "node": "nod_00000000000000000000000000",
+      "routes": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    {
+      "t": "link.result",
+      "error": {
+        "code": "invite_invalid",
+        "message": "stale",
+        "retryable": false
+      }
+    },
+    {
       "t": "space.join.request",
       "invite": "inv_00000000000000000000000000",
       "space": "spc_00000000000000000000000000",
