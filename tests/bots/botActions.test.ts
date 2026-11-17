@@ -284,7 +284,7 @@ it.each([true, false].flatMap(on => ['pi', 'codex', 'claude'].map(runtime => ({ 
     userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: proxy } as never })
   for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
   const app = vi.fn(async () => ({ text: 'registered read' }))
-  registry.register({ name: 'git_status', description: 'List threads', inputSchema: { type: 'object' }, access: 'reads', class: 'read', handler: app })
+  registry.register({ name: 'git_status', description: 'Read Git status', inputSchema: { type: 'object' }, access: 'reads', class: 'read', handler: app })
   const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: runtime, modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', relay: { approvals: 'runtime' }, current: () => true }, toolCallId: 'catalogue-call', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
   const callApp = () => registry.call(runtime === 'claude' ? 'git_status' : 'use_tool', { ...(runtime === 'claude' ? {} : { tool: 'git_status', arguments: {} }), [TURN_TOKEN_KEY]: 'tt' }, request)
   expect((await registry.userMcpForTurn('bot-thread', 'r1')).map(tool => tool.providerName)).toContain('mail_send')
@@ -294,12 +294,12 @@ it.each([true, false].flatMap(on => ['pi', 'codex', 'claude'].map(runtime => ({ 
   expect(registry.listForThread('bot-thread', 'default', 'r1').some(tool => tool.name === 'git_status')).toBe(runtime === 'claude')
   const catalogue = await registry.call('tool_catalogue', { group: 'threads', [TURN_TOKEN_KEY]: 'tt' }, request)
   expect(catalogue.text).toContain(runtime === 'claude' ? 'ToolSearch' : 'use_tool')
-  if (runtime !== 'claude') {
-    expect(await registry.call('use_tool', { tool: 'mail_send', arguments: t.args, [TURN_TOKEN_KEY]: 'tt' }, request)).toMatchObject({ isError: true, text: expect.stringContaining('no tool named mail_send') })
-    expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
-    expect(t.calls).toEqual([])
-    expect(proxy).not.toHaveBeenCalled()
-  }
+  const wronglyWrapped = await registry.call('use_tool', { tool: 'mail_send', arguments: t.args, [TURN_TOKEN_KEY]: 'tt' }, request)
+  expect(wronglyWrapped).toMatchObject({ isError: true })
+  expect(wronglyWrapped.text).toContain(runtime === 'claude' ? 'not used here' : 'no tool named mail_send')
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(t.calls).toEqual([])
+  expect(proxy).not.toHaveBeenCalled()
   expect(await callApp()).toMatchObject({ text: 'registered read' })
   expect(app).toHaveBeenCalledTimes(1)
   const result = await registry.call('mail_send', { ...t.args, [TURN_TOKEN_KEY]: 'tt' }, request)
