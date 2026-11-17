@@ -565,6 +565,23 @@ it('scheduled and unattended work share the same pending-card cap', async () => 
   expect(result).toMatchObject({ isError: true, text: expect.stringContaining('three cards') })
   expect(f.bots.actions.forWork(due.inserted[0]!)).toBeUndefined()
 })
+it('a duplicate refusal explains the earlier card without borrowing its outcome', async () => {
+  const t = await fanOut(true, false, 2, false)
+  const [first, duplicate] = t.works
+  const text = t.results[1]!.text
+  expect(text).toContain('earlier card')
+  expect(text).toContain('goes out once')
+  expect(text).toContain('Say that in your report')
+  expect(text).toContain('do not say it was not sent')
+  expect(f.store.unreadWorkRefusals(duplicate!.id).map(row => row.text)).toContain(text)
+  await finish(f, duplicate!.run.payload, 'completed', { text: 'An identical call is waiting on an earlier card.' })
+  await finish(f, first!.run.payload)
+  const a = f.bots.actions.forWork(first!.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+  expect(f.store.dispatches(duplicate!.id)).toHaveLength(1)
+  expect(f.store.unreadWorkActions(duplicate!.id)).toEqual([])
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
