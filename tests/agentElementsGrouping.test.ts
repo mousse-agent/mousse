@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatSearchRowLabels,
-  latestThoughtHeading,
   searchResultCount,
-  thoughtHeading,
+  thoughtHeadline,
 } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mapPartStateToInvocationState } from '../src/renderer/chat/components/agent-elements/utils/tool-adapters'
@@ -25,40 +24,63 @@ const tool = (type: string, toolCallId: string, extra: Record<string, unknown> =
   ...extra,
 })
 
-describe('latestThoughtHeading', () => {
-  it('takes the last titled summary, else the last paragraph', () => {
-    expect(latestThoughtHeading('**One**\n\nbody\n\n__Two__\n\nmore body')).toBe('Two')
-    expect(latestThoughtHeading('First idea.\n\n  \n\nSecond idea\nwith detail')).toBe('Second idea')
-    expect(latestThoughtHeading('   ')).toBe('')
-    expect(latestThoughtHeading(undefined)).toBe('')
+describe('thoughtHeadline', () => {
+  it.each([
+    // The newest paragraph's title line wins.
+    ['a bold title', '**Checking the auth flow**\n\nThe token is read twice.', 'Checking the auth flow'],
+    ['a title with a colon', '__Plan:__\nRead the file first.', 'Plan'],
+    ['a markdown heading', '## Plan of attack\nStart with the store.', 'Plan of attack'],
+    ['a title alone above the body', '**Two**\n\nmore body', 'Two'],
+    ['the newest paragraph, not the first', '**One**\n\nbody\n\n__Two__\n\nmore body', 'Two'],
+    ['else the first sentence of the newest paragraph', 'Old idea.\n\nFirst look at the store. Then the list.', 'First look at the store.'],
+    ['a sentence still being written is shown as far as it goes', 'Looking at the sto', 'Looking at the sto'],
+    ['a question ends a sentence', 'Why does it remount? The key changes.', 'Why does it remount?'],
+    ['a closing quote stays with its sentence', 'He said "stop." Then left.', 'He said "stop."'],
+    // Not a sentence end.
+    ['abbreviations', 'Check the caches, e.g. the disk one. Then stop.', 'Check the caches, e.g. the disk one.'],
+    ['etc. and vs.', 'Compare a vs. b etc. in the list. Next.', 'Compare a vs. b etc. in the list.'],
+    ['dotted names', 'Read package.json and src/main.ts first. Then build.', 'Read package.json and src/main.ts first.'],
+    ['a path ending in a dot word', 'Open ~/.mousse/config now. Then edit.', 'Open ~/.mousse/config now.'],
+    ['version numbers', 'Node 24.2.0 is fine. Next.', 'Node 24.2.0 is fine.'],
+    ['initials', 'Ask J. Smith first. Then go.', 'Ask J. Smith first.'],
+    ['inside inline code', 'Run `a. b` then go. Next.', 'Run a. b then go.'],
+    // Plain text out.
+    ['inline markdown is dropped', 'A **bold** move with `code`. More.', 'A bold move with code.'],
+    ['links keep their text', 'See [the docs](https://example.com) now. Then go.', 'See the docs now.'],
+    ['quote and list markers', '> quoted thought. More.', 'quoted thought.'],
+    ['lines of a paragraph join', 'Looking at the\nstore now. Then go.', 'Looking at the store now.'],
+    // Edges.
+    ['empty', '', ''],
+    ['whitespace', '   \n\n  ', ''],
+    ['missing', undefined, ''],
+  ] as const)('%s', (_name, content, expected) => {
+    expect(thoughtHeadline(content)).toBe(expected)
   })
-})
 
-describe('thoughtHeading', () => {
-  it('uses the first non-empty line as the heading', () => {
-    expect(thoughtHeading('  \nCheck the auth flow\nSecond line')).toBe('Check the auth flow')
+  it('cuts a long sentence at 200 code points, never inside an emoji', () => {
+    const long = '😀'.repeat(300)
+    const headline = thoughtHeadline(long)
+    expect(headline.endsWith('…')).toBe(true)
+    expect(Array.from(headline)).toHaveLength(200)
+    expect(Array.from(headline).slice(0, -1).every((ch) => ch === '😀')).toBe(true)
   })
 
-  it('strips markdown heading and quote markers', () => {
-    expect(thoughtHeading('## Plan of attack')).toBe('Plan of attack')
-    expect(thoughtHeading('> quoted thought')).toBe('quoted thought')
-  })
-
-  it('strips inline markdown formatting from the heading', () => {
-    expect(thoughtHeading('**Bold** move with `code`')).toBe('Bold move with code')
-    expect(thoughtHeading('See [the docs](https://example.com) now')).toBe('See the docs now')
-    expect(thoughtHeading('*italic* and ~~struck~~ text')).toBe('italic and struck text')
-  })
-
-  it('truncates long headings', () => {
-    const heading = thoughtHeading(`x${'y'.repeat(100)}`)
-    expect(heading.endsWith('...')).toBe(true)
-    expect(heading.length).toBeLessThanOrEqual(64)
-  })
-
-  it('returns empty for missing content', () => {
-    expect(thoughtHeading(undefined)).toBe('')
-    expect(thoughtHeading('   \n  ')).toBe('')
+  it('stays the same while its paragraph grows, and changes when a new one starts', () => {
+    const chunks = ['Looking at', ' the store. It holds', ' the text and', ' the parts.', '\n\nNow the list', '. It remounts.']
+    let text = ''
+    const seen: string[] = []
+    for (const chunk of chunks) {
+      text += chunk
+      seen.push(thoughtHeadline(text))
+    }
+    expect(seen).toEqual([
+      'Looking at',
+      'Looking at the store.',
+      'Looking at the store.',
+      'Looking at the store.',
+      'Now the list',
+      'Now the list.',
+    ])
   })
 })
 
@@ -413,7 +435,8 @@ describe('workGroupHeading', () => {
 
   it.each([
     ['a thought before the calls titles them, what they did follows', [thought('Find the config'), run()], { title: 'Find the config', summary: 'Ran 1 command', thought: true }],
-    ['the latest thought before a call wins', [thought('Look around'), read('a.ts'), thought('Run the tests'), run()], { title: 'Run the tests', summary: '2 actions', thought: true }],
+    ['the thought that led to the first call titles the group, and later thoughts leave it', [thought('Look around'), read('a.ts'), thought('Run the tests'), run()], { title: 'Look around', summary: '2 actions', thought: true }],
+    ['of the thoughts before the first call, the latest one', [thought('Look around'), thought('Read it'), read('a.ts')], { title: 'Read it', summary: 'Read 1 file', thought: true }],
     ['a thought after the last call is about what comes next: the count stays the title', [run(), thought('Now the fix')], { title: 'Ran 1 command' }],
     ['no thought: the count is the title', [run(), run()], { title: 'Ran 2 commands' }],
     ['thoughts alone: the latest one, no count', [thought('Look around'), thought('Check the order')], { title: 'Check the order' }],

@@ -1,4 +1,4 @@
-import { latestThoughtHeading } from "./format-tool";
+import { thoughtHeadline } from "./format-tool";
 import { normalizeAssistantToolParts } from "./tool-part-normalizer";
 import type { LiveThoughtSource } from "../../../../stores/liveTextStore";
 
@@ -259,7 +259,7 @@ function isSteerRow(message: SettleTurnMessage): boolean {
 }
 
 /** A thinking part's text (what streamed so far, or its final output). */
-function thoughtTextFromPart(part: ToolPartBase): string {
+export function thoughtTextFromPart(part: ToolPartBase): string {
   if (part.type !== "tool-Thinking") return "";
   const input = isRecord(part.input) ? part.input.thought : undefined;
   const output = part.output ?? part.result;
@@ -327,6 +327,27 @@ export function isLiveThoughtItem(item: AssistantToolItem | undefined): boolean 
   return item?.part.type === "tool-Thinking" && item.part.state === "input-available";
 }
 
+/**
+ * The calls of a running turn that failed with nothing after them yet: no later call succeeded and no reply followed.
+ * The transcript marks such a failure as got past while the turn runs (`markRecoveredFailures`), so its row stays
+ * quiet; a group line still counts it, as it will if the turn ends there.
+ */
+export function pendingFailures(messages: readonly { parts?: unknown[] }[]): ReadonlySet<string> {
+  let pending: string[] = [];
+  for (const message of messages) {
+    for (const part of (message.parts ?? []) as unknown[]) {
+      if (isTextPart(part)) {
+        if (part.text.trim()) pending = [];
+        continue;
+      }
+      if (!isV5ToolPart(part) || part.type === "tool-Thinking") continue;
+      if (part.state === "output-error" && part.toolCallId) pending.push(part.toolCallId);
+      else if (part.state === "output-available") pending = [];
+    }
+  }
+  return new Set(pending);
+}
+
 /** What a call in a work group did, for the group's title. */
 type WorkKind = "edit" | "command" | "read" | "search" | "web" | "fetch" | "agent" | "other" | "thought";
 
@@ -388,10 +409,10 @@ function tallyKinds(items: AssistantToolItem[]): KindTally[] {
   return [...tallies.values()];
 }
 
-/** One line from the latest thought in `items` that has text: a group of thoughts alone is titled with it. */
+/** The headline of the latest thought in `items` that has text: a group of thoughts alone is titled with it. */
 function latestThoughtTitle(items: AssistantToolItem[]): string {
   for (let index = items.length - 1; index >= 0; index -= 1) {
-    const heading = latestThoughtHeading(thoughtTextFromPart(items[index]!.part));
+    const heading = thoughtHeadline(thoughtTextFromPart(items[index]!.part));
     if (heading) return heading;
   }
   return "";
@@ -421,23 +442,21 @@ export function workGroupTitle(items: AssistantToolItem[]): string {
 }
 
 /**
- * A group's header: the latest thought written before one of its calls, with a short tag of what the calls did after
- * it (`summary`: "Ran 1 command", or "8 actions" for a mix); otherwise what the calls did (`workGroupTitle`) and no summary. That thought says why
- * the calls ran, which a count does not. A thought after the group's last call is about what comes next, so it does
- * not title the calls. `thought` is set when a thought is the title, so the row shows the thinking icon beside it.
+ * A group's header: the headline of the thought that led to its first call, with a short tag of what the calls did
+ * (`summary`: "Ran 1 command", or "8 actions" for a mix); otherwise what the calls did (`workGroupTitle`) and no
+ * summary. That thought says why the calls ran, which a count does not. The title is set once: thoughts written after
+ * the first call (taken into the group as the turn goes on) do not change it, so a running group never retitles.
+ * `thought` is set when a thought is the title, so the row shows the thinking icon beside it.
  */
 export function workGroupHeading(items: AssistantToolItem[]): { title: string; summary?: string; thought?: true } {
   const title = workGroupTitle(items);
-  let lastCall = -1;
-  items.forEach((item, index) => { if (workKindOf(item.part.type) !== "thought") lastCall = index; });
-  const thought = lastCall > 0 ? latestThoughtTitle(items.slice(0, lastCall)) : "";
+  const firstCall = items.findIndex((item) => workKindOf(item.part.type) !== "thought");
+  const thought = firstCall > 0 ? latestThoughtTitle(items.slice(0, firstCall)) : "";
   if (!thought) return { title };
   // Short beside a thought: one kind keeps its phrase ("Ran 3 commands"), a mix counts its calls ("8 actions").
   const kinds = tallyKinds(items).filter((tally) => tally.kind !== "thought").length;
   const calls = items.filter((item) => workKindOf(item.part.type) !== "thought").length;
-  // The row cuts the thought at its width; past a few lines' worth it is not read out either.
-  const heading = thought.length > 200 ? `${thought.slice(0, 199).trimEnd()}…` : thought;
-  return { title: heading, summary: kinds === 1 ? title : plural(calls, "action"), thought: true };
+  return { title: thought, summary: kinds === 1 ? title : plural(calls, "action"), thought: true };
 }
 
 /**

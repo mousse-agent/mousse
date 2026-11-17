@@ -86,57 +86,7 @@ export function getToolStatus(part: any, chatStatus?: string) {
   return { isPending, isError, isSuccess, isInterrupted };
 }
 
-/**
- * Heading for a thinking row: first non-empty line of the thought content, in plain text, cut at `limit` characters
- * (with no limit, the row cuts it at its own width).
- */
-export function thoughtHeading(content: string | undefined, limit = 64): string {
-  if (!content) return "";
-  const firstLine =
-    content
-      .split("\n")
-      .map((line) => line.trim())
-      .find((line) => line.length > 0) ?? "";
-  const plainText = stripInlineMarkdown(
-    firstLine.replace(/^#{1,6}\s+/, "").replace(/^>\s?/, ""),
-  ).trim();
-  if (plainText.length <= limit) return plainText;
-  return `${plainText.slice(0, limit - 3).trimEnd()}...`;
-}
-
-/**
- * A finished thought's row: its first paragraph in plain text, whole. The row cuts it at its own width, so a wide
- * chat shows more of it than a narrow one.
- */
-export function thoughtLine(content: string | undefined): string {
-  const first = content?.split(/\n\s*\n/).find((block) => block.trim());
-  return first ? liveThoughtText(first) : "";
-}
-
-/**
- * One line for the newest part of a thought, whole (a row cuts it at its width). A thought made of titled
- * summaries ("**Title**" lines, as Codex sends them) gives its last title;
- * any other gives the first line of its last paragraph.
- */
-export function latestThoughtHeading(content: string | undefined): string {
-  if (!content?.trim()) return "";
-  const lines = content.split("\n").map((line) => line.trim());
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (/^(\*\*|__)[^*_].*\1$/.test(lines[index]!)) {
-      return thoughtHeading(lines[index], Infinity);
-    }
-  }
-  const paragraphs = content.split(/\n\s*\n/).filter((block) => block.trim());
-  return thoughtHeading(paragraphs[paragraphs.length - 1], Infinity);
-}
-
-/**
- * Characters of a live thought kept for its lines: more than four lines of the widest row hold. The box shows its
- * last lines (`an-live-thought`), so the newest words are what shows at any width.
- */
-const LIVE_THOUGHT_CHARS = 640;
-
-/** The newest paragraph of a thought being written, whole, in plain text: the live line's tooltip and what is read out. */
+/** The newest paragraph of a thought, whole, in plain text: the tooltip of a line that shows its headline. */
 export function liveThoughtText(content: string | undefined): string {
   if (!content?.trim()) return "";
   const paragraphs = content.split(/\n\s*\n/).filter((block) => block.trim());
@@ -148,18 +98,90 @@ export function liveThoughtText(content: string | undefined): string {
   return stripInlineMarkdown(latest).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
 }
 
+/** Longest headline, in code points: a row cuts it at its width well before this. */
+const HEADLINE_MAX = 200;
+
+/** Words that end in a dot without ending a sentence, lower case and without their last dot. */
+const ABBREVIATIONS = new Set([
+  "e.g", "i.e", "eg", "ie", "etc", "vs", "cf", "approx", "incl", "esp", "resp", "viz", "al", "fig", "no", "nos",
+  "mr", "mrs", "ms", "dr", "st", "jr", "sr", "inc", "ltd", "co", "corp", "dept", "est", "min", "max", "ca",
+]);
+
+/** A paragraph's title line: `**Title**`, `__Title__` or a markdown heading. The title in plain text, or undefined. */
+function titleOf(line: string): string | undefined {
+  const trimmed = line.trim();
+  const bold = /^(\*\*|__)(?=\S)(.+?)\1[:.]?$/.exec(trimmed);
+  if (bold) return plainLine(bold[2]!).replace(/:$/, "");
+  const heading = /^#{1,6}\s+(.+)$/.exec(trimmed);
+  return heading ? plainLine(heading[1]!) : undefined;
+}
+
+function plainLine(text: string): string {
+  return stripInlineMarkdown(text).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
+}
+
+/** `text` cut to `max` code points (never inside a surrogate pair), with an ellipsis when cut. */
+function cutCodePoints(text: string, max: number): string {
+  const points = Array.from(text);
+  return points.length <= max ? text : `${points.slice(0, max - 1).join("").trimEnd()}…`;
+}
+
 /**
- * The thought as it is being written, for its one live line: the newest paragraph in plain text (a title's
- * markers dropped, even one still open), and of a long one its end, where the words arrive. Empty while the
- * thought has no text.
+ * Where the first sentence of `text` ends (the index after its closing mark), or -1 while it has not ended. A sentence
+ * ends at `.`, `?` or `!` (with any closing quotes, brackets or emphasis after it) followed by white space or the end.
+ * It does not end inside inline code, on an abbreviation ("e.g.", "etc.", "vs."), on a single initial, or on a dot
+ * inside a name or path ("config.ts", "v1.2"), which has no space after it.
  */
-export function liveThoughtLine(content: string | undefined): string {
-  const plain = liveThoughtText(content);
-  if (plain.length <= LIVE_THOUGHT_CHARS) return plain;
-  const tail = plain.slice(plain.length - LIVE_THOUGHT_CHARS);
-  // Start the tail at a word.
-  const space = tail.indexOf(" ");
-  return `…${space > 0 && space < 24 ? tail.slice(space + 1) : tail}`;
+function firstSentenceEnd(text: string): number {
+  let inCode = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (char === "`") {
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode || (char !== "." && char !== "?" && char !== "!")) continue;
+    let end = index + 1;
+    while (end < text.length && /["'”’)\]*_]/.test(text[end]!)) end += 1;
+    if (end < text.length && !/\s/.test(text[end]!)) continue;
+    if (char === ".") {
+      // The word the dot closes: an abbreviation or an initial does not end the sentence; nor does "..." mid-thought.
+      const word = /([\p{L}\p{N}.]*)$/u.exec(text.slice(0, index))?.[1] ?? "";
+      const bare = word.toLowerCase();
+      if (ABBREVIATIONS.has(bare) || /^\p{L}$/u.test(word)) continue;
+    }
+    return end;
+  }
+  return -1;
+}
+
+/**
+ * A thought's headline: one still line that stands for it, used wherever a thought is summarised (the live line, a
+ * finished thought's row, a group's heading). It is the headline of the thought's newest paragraph: the paragraph's
+ * title (a `**Title**` or `# Heading` line) when it has one, or the title just above it when that title stands alone
+ * as its own paragraph; otherwise its first sentence. Plain text, cut by code point.
+ *
+ * So the line changes only when a new paragraph starts (and while a paragraph's first words are still arriving): a
+ * long thought moves on paragraph by paragraph, and never reflows with every word.
+ */
+export function thoughtHeadline(content: string | undefined): string {
+  if (!content?.trim()) return "";
+  const paragraphs = content.split(/\n\s*\n/).filter((block) => block.trim());
+  const newest = paragraphs[paragraphs.length - 1]!;
+  const lines = newest.split("\n").map((line) => line.trim()).filter(Boolean);
+  const own = titleOf(lines[0]!);
+  if (own) return cutCodePoints(own, HEADLINE_MAX);
+  // A title written as its own paragraph heads the paragraph after it (summaries arrive as "**Title**\n\nbody").
+  const before = paragraphs.length > 1 ? paragraphs[paragraphs.length - 2]!.trim() : "";
+  const above = before && !before.includes("\n") ? titleOf(before) : undefined;
+  if (above) return cutCodePoints(above, HEADLINE_MAX);
+  // List markers and quote marks are not words of the sentence.
+  const body = lines
+    .map((line) => line.replace(/^>\s?/, "").replace(/^(?:[-*+]|\d+[.)])\s+/, ""))
+    .join(" ");
+  const end = firstSentenceEnd(body);
+  const sentence = plainLine(end === -1 ? body : body.slice(0, end));
+  return cutCodePoints(sentence, HEADLINE_MAX);
 }
 
 /** Remove inline markdown formatting, keeping the readable text. */

@@ -9,7 +9,7 @@ export type ToolCallsGroupProps = {
   count: number;
   /** The icon of the calls' kind, or a wrench for a mix. */
   icon?: ReactNode;
-  /** The latest thought in the group, or what the calls did ("Read 3 files and ran 2 commands"): `workGroupHeading`. */
+  /** The thought that led to the group's first call (set once), or what the calls did ("Read 3 files and ran 2 commands"): `workGroupHeading`. */
   title: string;
   /** What the calls did, after a thought title: a short dim tag that is never cut. */
   summary?: string;

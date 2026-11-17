@@ -7,7 +7,7 @@ import { ThinkingIcon } from "../../../../lib/icons";
 import { useLiveThought } from "../../../../stores/liveTextStore";
 import { thoughtSourceOf } from "../utils/assistant-blocks";
 import { countRender } from "../render-counts";
-import { liveThoughtLine, liveThoughtText, thoughtLine } from "../utils/format-tool";
+import { liveThoughtText, thoughtHeadline } from "../utils/format-tool";
 import {
   mapPartStateToInvocationState,
   mapToolInvocationToStep,
@@ -33,19 +33,15 @@ export function ThinkingCollapsed({
 }: ThinkingCollapsedProps) {
   useToolComplete(state === "animating", step.duration, onComplete);
 
-  const heading = thoughtLine(step.thoughtContent);
+  // One still line: the headline of the thought's newest paragraph, the same line the live row and a group show.
+  const heading = thoughtHeadline(step.thoughtContent);
   const isAnimating = state === "animating";
 
   return (
     <ToolRowBase
       icon={<ThinkingIcon size={18} active={isAnimating} />}
-      shimmerLabel="Thinking"
       completeLabel={heading || "Thinking"}
-      // While it streams, the thought as it is written is the row, up to four lines: its newest words ("Thinking"
-      // only until its first words). Once it ends (the next step starts), the row folds to one line of its opening.
-      detail={isAnimating ? liveThoughtLine(step.thoughtContent) || undefined : undefined}
-      liveDetail
-      detailTitle={isAnimating ? liveThoughtText(step.thoughtContent) || undefined : undefined}
+      labelTitle={liveThoughtText(step.thoughtContent) || undefined}
       // The icon turns; a shimmering label would paint every frame.
       shimmer={false}
       isAnimating={isAnimating}
