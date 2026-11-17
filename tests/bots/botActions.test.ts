@@ -2331,6 +2331,12 @@ it.each(['open', 'nudge', 'settled'] as const)('C4 merged epoch receives a maske
   const preamble = next.prepared.preamble ?? ''
   expect(preamble).toContain('New in the chat since your last turn')
   expect(preamble).not.toContain('private-action-password')
+  if (state === 'open') expect(preamble).not.toContain('<mousse_notice kind="bot_action"')
+  else {
+    expect(preamble).toContain('<mousse_notice kind="bot_action"')
+    expect(preamble).toContain(`ref="${state === 'nudge' ? `${a.message_id}_n1` : `${a.message_id}:status:done`}"`)
+    if (state === 'nudge') expect(preamble).toContain('<quoted from="held action">')
+  }
   const expected = state === 'open' ? 'one@example.test' : state === 'nudge' ? 'Wants to send' : 'Sent'
   const line = preamble.split('\n').find(line => line.includes(expected))
   expect(line, preamble).toBeDefined()
@@ -2383,4 +2389,43 @@ it.each([true, false])('C4 next wrapper preserves held review and retry identity
   }
   expect(app).not.toHaveBeenCalled(); expect(t.calls).toEqual([])
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+})
+
+
+it('C4 next wait-false question survives a held call and its answer reaches the continuation', async () => {
+  const t = await setup(true)
+  const asked = f.bots.askOwner(t.botId, t.workId, { question: 'Which inbox?', choices: [{ label: 'Personal' }, { label: 'Work' }], other: false, wait: false })
+  expect(asked.asked).toBe(true)
+  expect(f.store.activation(t.workId)!.status).toBe('running')
+  const q = f.store.workQuestion(t.workId)!
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(f.bots.service.actionMessage(t.botId, a.id).action?.status).toBe('open')
+  expect(f.bots.service.get(t.botId).summary).toMatchObject({ state: 'needs_you', needsOwner: true, stateText: expect.stringMatching(/^Wants to send:/) })
+  await f.bots.service.answerQuestion({ botId: t.botId, questionId: q.id, choice: 'Work', clientRequestId: 'answer-while-held' })
+  await finish(f, t.work.payload)
+  expect(f.bots.actions.get(a.id)!.status).toBe('open')
+  await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  const continuation = f.store.lastMainDispatch(t.workId)!
+  expect(JSON.stringify(continuation.prompt)).toContain('Work')
+  expect(JSON.stringify(continuation.prompt)).toContain('Which inbox?')
+  expect(f.store.question(q.id)!.status).toBe('answered')
+  expect(t.calls).toEqual([t.args])
+})
+
+it('C4 next removed week wait does not remove the card deadline or leave expired work parked', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(Date.parse(a.expires_at) - f.clock.now).toBe(48 * 60 * 60_000)
+  f.clock.now = Date.parse(a.expires_at)
+  await f.bots.deliverDueReminders(); await flush()
+  expect(f.bots.actions.get(a.id)!.status).toBe('expired')
+  expect(f.store.activation(t.workId)!.endReason).not.toBe('approval')
+  const runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+  await finish(f, runtime.payload, 'completed', { text: 'Skipped the expired call.' })
+  expect(f.store.activation(t.workId)!.status).toBe('done')
+  expect(f.bots.service.get(t.botId).summary.needsOwner).not.toBe(true)
+  expect(t.calls).toEqual([])
 })
