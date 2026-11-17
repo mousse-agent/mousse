@@ -1,42 +1,42 @@
 ---
 name: check-related-work
-description: Before presenting a final plan or starting a substantial implementation, check open and recently merged PRs, open issues and remote branches for work that already does part of it, conflicts with it, or will collide with it. Read-only; it writes nothing to GitHub.
+description: Before presenting a final plan or starting a substantial implementation, check open and recently merged PRs and open issues for work that already does part of it, conflicts with it, or will collide with it. Read-only; it writes nothing to GitHub.
 ---
 
 # Check related work
 
-A plan written against the default branch alone can miss work that is already in flight: a draft PR that does half of it, a stacked PR that changes the same design, or an issue that is already fixed. Run this check before presenting a plan as final, and before implementing anything that spans several modules. Read [the shared team policy](../../../docs/team-workflow.md); this check is part of its "search issues and PRs in all states" rule, done thoroughly.
+A plan written against the default branch alone can miss work in flight: a draft PR that does half of it, a PR that changes the same files, or an issue that is already fixed. Run this before presenting a plan as final and before implementing anything that spans several modules. It is part of the policy's "search issues and PRs in all states" rule ([team workflow](../../../docs/team-workflow.md); read that section only if the rule's wording is needed).
 
-The check only reads. It does not create, comment on, close or assign anything.
+The check only reads. It does not create, comment on, close or assign anything. It does not list everything open and does not read whole diffs.
 
-## 1. Collect the candidates
+## 1. Run the script
 
-1. `git fetch origin` and note the default branch's head. State it in the report as the commit the plan was checked against.
-2. List everything that could overlap, from every author, the user's own drafts included:
-   - open PRs: `gh pr list --state open --limit 200 --json number,title,author,headRefName,baseRefName,isDraft`;
-   - PRs merged since the plan's base commit, or in the last two weeks: `gh pr list --state merged --search "merged:>=<date>"`;
-   - open issues: `gh issue list --state open --limit 300`;
-   - remote branches with recent commits and no PR: `git for-each-ref --sort=-committerdate refs/remotes/origin --format='%(committerdate:short) %(refname:short)'`.
-   A truncated list is not evidence of no related work; raise the limit until the count is below it.
-3. Shortlist by two tests, not by title alone:
-   - **Terms:** the plan's subject, its main modules and the problems it fixes.
-   - **Files:** the files the plan changes, intersected with each open PR's files (`git diff --name-only origin/<default>...origin/<branch>`). Stacked PRs (a base other than the default branch) count with their whole stack.
+`node scripts/related-work.mjs --term "<subject>" --term "<main module or symptom>" --path <file or dir the plan changes>...`
 
-## 2. Read them
+It fetches, searches issues and PRs by the terms (open, plus merged in the last 14 days), compares the planned paths with the changed files of every open PR (cached by PR head commit), and prints only hits: PR number, title, author, branch, overlapping files, last update; term matches as number and title.
 
-- Read each shortlisted PR's body and diff, and each issue's body and discussion. Titles mislead: a PR named after one symptom can redesign the area the plan covers.
-- For each part of the plan, check the candidate branch's code, not its description. Example: a PR that says "Publish refuses a dirty folder" can still re-run Publish from automatic recovery.
-- For an open issue that looks already fixed, look for the merged PR that fixed it and check the code on the default branch.
+- `NOT CHECKED: <reason>` (exit 1): the check did not happen. Retry or report that it was not done; never say there is no related work.
+- `CLEAR`: it completed and found nothing. State the base commit it printed as the commit the plan was checked against, and stop.
+- Terms alone cannot clear a plan: without `--path` the output says the files were not checked.
+- Branches without a PR are not covered. Only when a hit points to one, look at it with `git ls-remote --heads origin "*<term>*"`.
+
+## 2. Read only what overlaps
+
+Start one background Sonnet subagent, or do this yourself when none is available. Brief:
+
+> Read-only check of overlap between a plan and open work in `<repo>`. Plan: `<two or three sentences and the planned paths>`. Candidates: `<PR numbers with their overlapping files; issue numbers with titles>`. For each PR, read only the hunks of the overlapping files (`gh api repos/<repo>/pulls/<n>/files --paginate`, use each file's `patch`), not the rest of the diff, and read its body or comments only when a hunk is unclear. For an issue, read the body only when its title looks like the same problem. Return, per candidate: number, overlapping files, one sentence on what it changes there, its owner (author or assignee), and one label: duplicate, conflicts, will collide, already done, or unrelated. No narration.
+
+A subagent that fails or times out means the overlap was not checked; say so. For an open issue that looks already fixed, find the merged PR and check the code on the default branch, not its description.
 
 ## 3. Report before the plan is final
 
-Report in plain words, with PR and issue numbers, under these headings, leaving out empty ones:
+Report in plain words with PR and issue numbers, under these headings, leaving out empty ones:
 
-- **Already done:** which parts of the plan an open or merged PR implements, and whether its design matches the plan's.
-- **Still needed:** what remains once those PRs land, checked in their code.
+- **Already done:** parts of the plan an open or merged PR implements, and whether its design matches.
+- **Still needed:** what remains once those land.
 - **Conflicts:** PRs or issues whose design or decisions contradict the plan.
-- **Will collide:** PRs that change the same files, with the files and what must move.
+- **Will collide:** PRs changing the same files, with the files and what must move.
 - **Stale issues:** open issues that look already fixed, and by what.
 - **Suggested order:** which PRs should land first, and how the plan changes on top of them.
 
-Then revise the plan against that order before calling it final. When the plan's parts are already done by someone else's active PR, reconcile ownership as the shared policy says before proposing to redo them.
+Revise the plan against that order before calling it final. When someone else's active PR already does part of it, reconcile ownership as the policy says before proposing to redo it. When used from the work skill, record the result with `node scripts/task-notes.mjs set related.review "<one line>"`.

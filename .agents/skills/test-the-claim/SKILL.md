@@ -62,6 +62,6 @@ Usual answers to the second, and the remedy:
 
 ## 8. Before the PR
 
-Run the named files for the changed code, as AGENTS.md says. Then find the tests that depend on what you changed without importing it: search `tests/` with `rg` for the copy, class, default or list entry you changed, and run those files too. About one PR in fifteen was a follow-up repairing tests that an earlier PR broke this way.
+Run the named files for the changed code, as "Verify" in the work skill says. Then find the tests that depend on what you changed without importing it: search `tests/` with `rg` for the copy, class, default or list entry you changed, and run those files too. About one PR in fifteen was a follow-up repairing tests that an earlier PR broke this way.
 
 In the PR's Verification, write for each part of the claim which test observes it, and which parts are checked by hand or not at all. "Not tested: the button's position" is an acceptable line; a CSS regex in its place is not.
