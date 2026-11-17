@@ -410,10 +410,10 @@ it('keeps the same class and due time with no quiet-hours wish even when active 
   expect(f.store.message(report.id)).toMatchObject({ tell: 'soon', tellAt: f.store.now() })
 })
 
-// Same reports by day, during quiet hours with owner activity, and from a can-wake bot.
-it.each(['day', 'active at night', 'can wake at night'] as const)('folds five soon reports into one banner and one sound: %s', async scenario => {
+// Same reports during quiet hours with owner activity, and from a can-wake bot (by day: the first test above).
+it.each(['active at night', 'can wake at night'] as const)('folds five soon reports into one banner and one sound: %s', async scenario => {
   Object.assign(f.host, {
-    quietHoursFor: () => scenario === 'day' ? undefined : { end: f.clock.now + 3600_000 },
+    quietHoursFor: () => ({ end: f.clock.now + 3600_000 }),
     ownerActive: () => scenario === 'active at night'
   })
   if (scenario === 'can wake at night') f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
