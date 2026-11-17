@@ -536,6 +536,46 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect((row.payload as { result: { text: string } }).result.text).toBe(long)
     })
 
+    it('the result of your own subagent read here is acknowledged, as task_status does, so its notice is not handed over again', async () => {
+      const { call, result, fx, callerRun, threads } = await world()
+      const child = await fx.delegate(callerRun.runId, 'call-ack')
+      threads.set(child.childThreadId, { id: child.childThreadId, name: 'Child', createdAt: '', updatedAt: '' } as never)
+      fx.finish(child.childRunId, 'the child answer')
+      expect(fx.engine.inbox.listPending('caller')).toHaveLength(1)
+      expect(await result(call('thread_wait', { threadId: child.childThreadId, runId: child.childRunId }))).toMatchObject({ status: 'finished', resultText: 'the child answer' })
+      expect(fx.engine.delegations.get(child.delegationId)!.status).toBe('acknowledged')
+      expect(fx.engine.inbox.listForDelegation(child.delegationId).map((row) => row.status)).toEqual(['acknowledged'])
+      expect(fx.engine.inbox.listPending('caller')).toEqual([])
+    })
+
+    it('a question answered before the wait could report it does not end the wait: it goes on to the run\'s result, never a false timeout', async () => {
+      let open = false
+      const listeners = new Set<(threadId: string) => void>()
+      const { call, result, fx, targetRun } = await world({
+        pendingRequests: (threadId) => (threadId === 'target' && open ? [{ requestId: 'q-1', questions: [] }] : []),
+        onRequestPending: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        }
+      })
+      const waiting = result(call('thread_wait', { threadId: 'target', runId: targetRun.runId, timeoutMs: 20_000 }))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      // The question opens and is answered before the waiter reads it.
+      open = true
+      for (const listener of listeners) listener('target')
+      open = false
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      fx.finish(targetRun.runId, 'answered and done')
+      expect(await waiting).toMatchObject({ status: 'finished', resultText: 'answered and done' })
+    })
+
+    it('a question still open when the wait reports it ends the wait with needs_input', async () => {
+      const { call, result, targetRun } = await world({
+        pendingRequests: (threadId) => (threadId === 'target' ? [{ requestId: 'q-1', questions: [] }] : [])
+      })
+      expect(await result(call('thread_wait', { threadId: 'target', runId: targetRun.runId, timeoutMs: 20_000 }))).toMatchObject({ status: 'needs_input', needsInput: true, requests: 1 })
+    })
+
     it('a run that left no text is finished without resultText', async () => {
       const { call, result, fx, targetRun } = await world()
       fx.engine.markTerminal(targetRun.runId, 'failed', { error: 'the model failed' })

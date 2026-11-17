@@ -1092,7 +1092,9 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
         seen.status = parse(await call(mcp!, 'task_status', { subagent: 'Asker' }))
         const requestId = (seen.asked as { pendingRequests: Array<{ requestId: string }> }).pendingRequests[0].requestId
         seen.answer = parse(await call(mcp!, 'answer_subagent', { subagent: 'Asker', requestId, answers: { which: 'b' }, clientRequestId: 'answer-1' }))
-        seen.done = parse(await call(mcp!, 'thread_wait', { threadId: child.childThreadId, runId: child.childRunId, timeoutMs: 60_000 }))
+        const done = await call(mcp!, 'thread_wait', { threadId: child.childThreadId, runId: child.childRunId, timeoutMs: 60_000 })
+        seen.done = parse(done)
+        seen.doneBlocks = done.result!.content!.length
         return 'answered'
       })
       await w.attach()
@@ -1106,6 +1108,12 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       })
       expect(seen.status).toMatchObject({ needsInput: true, pendingQuestion: expect.anything() })
       expect(seen.done).toMatchObject({ status: 'finished', resultText: 'picked b' })
+      // The result read by the wait is acknowledged: the same response carries no notice repeating it, and no wake turn follows.
+      expect(seen.doneBlocks).toBe(1)
+      const childResults = w.d.engine.inbox.listForThread(w.parent.id).filter((row) => row.kind === 'child_result')
+      expect(childResults.map((row) => row.status)).toEqual(['acknowledged'])
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(w.turnsOf(w.parent.id)).toHaveLength(1)
     })
 
     it('a busy parent on a runtime that steers by restarting gets its subagent\'s result with its next Mousse tool call, as a separate block, once', async () => {

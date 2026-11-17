@@ -1707,7 +1707,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const scope = ctx.scope ?? 'read'
         let target = args.runId as string | undefined
         let settle!: (end: WaitEnd) => void
-        const ended = new Promise<WaitEnd>((resolve) => { settle = resolve })
+        let ended = new Promise<WaitEnd>((resolve) => { settle = resolve })
+        const deadline = Date.now() + timeoutMs
         // Terminal runs seen before the run to wait for is known (no runId given).
         const seenTerminal = new Set<string>()
         // The run a usage-limit pause handed over to: its answer is the one the waiter wants, so the wait
@@ -1770,7 +1771,17 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           // follows it), or the wait times out and says when to ask again. It is never answered at once.
           if (answered(run) || (seenTerminal.has(run.runId) && answered(engine.getRun(run.runId) ?? run))) settle({ kind: 'finished' })
           else if (waiting()) settle({ kind: 'needs_input' })
-          const end = await ended
+          let end = await ended
+          // A request answered before its view was built: the wait goes on (never a timeout that did not happen),
+          // first checking what may have ended it meanwhile.
+          while (end.kind === 'needs_input' && !waiting()) {
+            ended = new Promise<WaitEnd>((resolve) => { settle = resolve })
+            const current = engine.getRun(target)
+            if (ctx.signal.aborted) settle({ kind: 'caller_ended' })
+            else if (current && answered(current)) settle({ kind: 'finished' })
+            else if (Date.now() >= deadline) settle({ kind: 'timeout' })
+            end = await ended
+          }
           if (end.kind === 'caller_ended') return json({ status: 'caller_ended', threadId })
           if (end.kind === 'refused') return { text: end.text, isError: true }
           // A bot's wait that ends after its owner removed "use your threads", or this computer switched it off, or the
@@ -1803,13 +1814,17 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
               hint: `A usage limit paused the run; it resumes by itself. Ask again after ${Math.ceil(retryAfterMs / 1000)} s (not sooner), or end it with thread_interrupt.`
             })
           }
-          if (end.kind === 'needs_input') {
-            const requests = pendingRequests?.(threadId) ?? []
-            if (requests.length) return json(needsInputView(threadId, reported, requests, scope === 'manage', ctx.caller.threadId))
-          }
-          if (end.kind === 'timeout' || end.kind === 'needs_input') return json({ status: 'timeout', threadId, run: reported, hint: 'The run is still going; call thread_wait again.' })
+          if (end.kind === 'needs_input') return json(needsInputView(threadId, reported, pendingRequests?.(threadId) ?? [], scope === 'manage', ctx.caller.threadId))
+          if (end.kind === 'timeout') return json({ status: 'timeout', threadId, run: reported, hint: 'The run is still going; call thread_wait again.' })
           // The text of this run only, never the latest message of the thread.
           const resultText = fullView ? readRunResultText(engine.store, threadId, now.runId) : undefined
+          // The caller's own subagent: the result read here is acknowledged as task_status does, so its notice is not
+          // handed over again.
+          if (resultText !== undefined && !bot) {
+            const task = engine.delegations.listForChildThread(threadId)
+              .find((entry) => entry.parentThreadId === ctx.caller.threadId && (entry.childRunId === now.runId || entry.childRunId === continuedFrom))
+            if (task) engine.acknowledgeDelegation(task.delegationId)
+          }
           // A personal bot: the run's final text, capped and framed as data from that thread.
           if (bot) {
             const title = oneLine(titleOf(threadId) ?? threadId)
