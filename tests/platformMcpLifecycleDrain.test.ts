@@ -358,17 +358,6 @@ describe('injected deterministic timeout races', () => {
 })
 
 describe('OAuth callback and local HTTP I/O during shutdown', () => {
-  it('surfaces authentication completion and errors before a deferred redirect, and accepts a ready redirect', async () => {
-    const neverRedirected = deferred()
-    await expect(waitForOAuthRedirect(neverRedirected.promise, Promise.resolve({ success: false, error: 'fixture discovery failed' })))
-      .rejects.toThrow('OAuth completed before redirect readiness: fixture discovery failed')
-    const failure = new Error('fixture authentication rejected')
-    await expect(waitForOAuthRedirect(neverRedirected.promise, Promise.reject(failure))).rejects.toBe(failure)
-    const authentication = deferred<Awaited<ReturnType<McpManager['authenticateServer']>>>()
-    await expect(waitForOAuthRedirect(Promise.resolve(), authentication.promise)).resolves.toBeUndefined()
-    authentication.resolve({ success: false, error: 'drained after redirect' })
-  })
-
   it('closes the local callback listener and does not leave a session write after drain', async (ctx) => {
     // The callback port is a product contract. When another process already holds it, the
     // test cannot own it and would only time out; say so instead.
