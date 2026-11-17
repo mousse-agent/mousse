@@ -607,6 +607,52 @@ describe('Codex children', () => {
       await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
     })
 
+    it("a helper's approval is asked in the hosting thread, about the helper's own item, and names the helper", async () => {
+      // The parent and the helper each have an item `patch-1`: item ids are unique per thread only.
+      const item = (threadId: string, path: string) => ({ method: 'item/started', params: { threadId, turnId: threadId === HELPER ? 'h-turn-1' : 'turn-1', item: { type: 'fileChange', id: 'patch-1', changes: [{ path, kind: { type: 'update' }, diff: '' }], status: 'inProgress' } } })
+      const s = server({
+        onTurnStart: (send) =>
+          setImmediate(() => {
+            send(item(PARENT, 'src/parent.ts'))
+            send(spawned('subAgentActivity'))
+            send(helperTurn)
+            send(item(HELPER, 'src/helper.ts'))
+            send({ id: 77, method: 'item/fileChange/requestApproval', params: { threadId: HELPER, turnId: 'h-turn-1', itemId: 'patch-1', reason: null } })
+            send(completed(PARENT, 'turn-1'))
+          })
+      })
+      const asked: Array<{ threadId: string; prompt: string; helper?: { agentId: string } }> = []
+      const onPending = (event: { requestId: string; threadId: string; questions: Array<{ prompt: string }>; helper?: { agentId: string } }): void => {
+        asked.push({ threadId: event.threadId, prompt: event.questions[0]!.prompt, ...(event.helper ? { helper: event.helper } : {}) })
+        questions.submitAnswers(event.requestId, { permission: 'allow' }, { kind: 'user' })
+      }
+      questions.on('pending', onPending)
+      try {
+        const running = chat(create(s), { child: ISOLATED, permissionMode: 'ask' })
+        await vi.waitFor(() => expect(s.messages.find((message) => message.id === 77)).toMatchObject({ result: { decision: 'accept' } }))
+        expect(asked).toEqual([{ threadId: 'child', prompt: expect.stringContaining('src/helper.ts'), helper: { agentId: HELPER } }])
+        expect(asked[0]!.prompt).not.toContain('src/parent.ts')
+        s.emit(completed(HELPER, 'h-turn-1'))
+        await expect(running).resolves.toMatchObject({ codexThreadId: PARENT })
+      } finally {
+        questions.off('pending', onPending)
+      }
+    })
+
+    it("Stop of one helper's mirror interrupts that helper alone, and the run goes on", async () => {
+      const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity'), onInterrupt: (send, params) => params.threadId === HELPER && interruptReply(send, params) })
+      const service = create(s)
+      const running = chat(service, { child: ISOLATED })
+      expect(await state(running)).toBe('pending')
+      expect(service.stopHelper('child', 'someone-else')).toBe('not_active')
+      expect(service.stopHelper('other-thread', HELPER)).toBe('not_active')
+      expect(service.stopHelper('child', HELPER)).toBe('stopped')
+      await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
+      // The helper's interrupted turn settles it, so the run completes as itself, not stopped.
+      await expect(running).resolves.toMatchObject({ codexThreadId: PARENT })
+      expect(service.stopHelper('child', HELPER)).toBe('not_active')
+    })
+
     it("Stop during the parent's turn interrupts the parent and its helper", async () => {
       const s = server({
         onTurnStart: (send) =>

@@ -7,6 +7,7 @@ import { botCatalogueTools } from './botCatalogue'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
 import { delegationTools } from './delegation'
+import { familyRelation, threadFamily } from './family'
 import { goalTools } from './goal'
 import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
@@ -27,7 +28,7 @@ import { webTools } from './web'
 export * from './types'
 export * from './refusal'
 export * from './registry'
-export { compileTool, heldBeforeArguments, holdsPerson, toolNeeds, unattendedRefusal, type CompiledTool, type RunProvenance, type ToolEffect, type ToolNeeds } from './authority'
+export { compileTool, heldBeforeArguments, holdsPerson, parentHolds, plannedFromAbove, toolNeeds, unattendedRefusal, type CompiledTool, type RunProvenance, type ToolEffect, type ToolNeeds } from './authority'
 export * from './turns'
 export type { AgentActionDetails, AgentApprovalResult, AgentArchiveResult, AgentArchiveOwnResult, AgentCreatedThread, AgentRemoteThreadRequest, AgentRemoteThreadResult, RemoteProjectCandidate, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, RemoteThreadsHost, ThreadSearchHit } from './host'
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, cleanRemoteSenderTitle, BOT_MESSAGE_END, BOT_MESSAGE_PREFIX, botMessage, botMessageText, isPersonMessage, personTurnRequest } from './agentMessage'
@@ -65,6 +66,7 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
       const lineage = lineageRelation(engine, caller.threadId, threadId)
       return lineage === 'descendant' ? 'descendant' : lineage ? 'ancestor_or_sibling' : null
     },
+    family: (caller, threadId) => familyRelation(threadFamily(host, engine), caller.threadId, threadId),
     // A personal bot: its own rule for threads; it reaches every project.
     botReach: (caller, target, options) => {
       if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId, options)
@@ -97,6 +99,9 @@ export function createAppToolRegistry(input: {
     threadCeiling: host.threadCeiling ? (threadId) => host.threadCeiling!(threadId) : undefined,
     liveCeiling: host.liveCeiling ? (threadId) => host.liveCeiling!(threadId) : undefined,
     subagentThread: host.subagentThread ? (threadId) => host.subagentThread!(threadId) : undefined,
+    personHeld: host.personHeld ? (caller) => host.personHeld!(caller) : undefined,
+    parentThread: host.parentThread ? (threadId) => host.parentThread!(threadId) : undefined,
+    reportLacks: host.reportLacks ? (report) => host.reportLacks!(report) : undefined,
     botRole: host.botRole ? (threadId) => host.botRole!(threadId) : undefined,
     permissionModeFor: host.permissionModeFor ? (runId) => host.permissionModeFor!(runId) : undefined,
     askApproval: host.askApproval ? (threadId, questions, options) => host.askApproval!(threadId, questions, options) : undefined,

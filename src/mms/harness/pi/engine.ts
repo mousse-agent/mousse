@@ -1591,17 +1591,12 @@ export class PiRpcEngine implements ProviderAdapter {
       const appTools = new Set(tools.map((tool) => tool.name))
       tools = [...tools, ...(await this.options.userMcpTools(input.threadId, input.runId)).filter((tool) => !appTools.has(tool.name))]
     }
-    // An agent definition's turn offers exactly its grants (the policy's allowlist, else its effective
-    // grants), and never a delegation tool: a definition delegates nothing, as on the legacy loop.
+    // An agent definition's turn offers exactly its granted built-ins (the policy's allowlist, else its effective
+    // grants). Its Mousse and MCP tools come already held to its grants (`ToolRegistry.listForTurn`).
     if (host.definition) {
-      const { grants, mcpTools } = host.definition
-      const allowed = new Set(host.bridge?.toolPolicy?.allow ?? [
-        ...grants.builtinTools.map((grant) => canonicalizeBuiltinToolName(grant.id)),
-        ...grants.mcpTools.map((grant) => grant.id),
-        ...(mcpTools ?? []).map((tool) => tool.providerName)
-      ])
+      const { grants } = host.definition
+      const allowed = new Set(host.bridge?.toolPolicy?.allow ?? grants.builtinTools.map((grant) => canonicalizeBuiltinToolName(grant.id)))
       builtins = builtins.filter((name) => allowed.has(name))
-      tools = tools.filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation')
     }
     // A bot's turn offers only its granted built-ins: an ungranted one does not exist for the model,
     // as on the locked Claude turn (`escalate` is how it asks). `bash` comes with "run commands",

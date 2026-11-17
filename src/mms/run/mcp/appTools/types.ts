@@ -47,6 +47,15 @@ export type ToolScope = 'own' | 'descendant' | 'ancestor_or_sibling' | 'launched
 export type ThreadRelation = 'descendant' | 'ancestor_or_sibling' | 'launched'
 
 /**
+ * How a thread sits in the caller's family (docs/plans/tool-api.md §1.2): its parent, a direct child, a sibling, a
+ * descendant further down, or a native helper's mirror thread hosted by any of these or by the caller.
+ */
+export type FamilyRelation = 'parent' | 'child' | 'sibling' | 'descendant' | 'native'
+
+/** What a message to another thread is (docs/plans/tool-api.md §2.2): a new assignment, or information. */
+export type MessageIntent = 'work' | 'note'
+
+/**
  * What a call does to the parent's work, read by the gate and the writer barrier of runtimes that
  * run tools concurrently (PR 2 §4): `read` changes nothing outside the caller's own conversation,
  * `mutation` changes state the turn's writer guards, `delegation` starts or steers a child.
@@ -284,11 +293,22 @@ export interface MousseTool {
    */
   readOnlySafe?: boolean
   /**
+   * The tool sends a message to the thread its `target` names, of this intent (docs/plans/tool-api.md §2.2): the
+   * family rules decide who may send it (`familyMessageScope`), before the central check of a target outside the family.
+   */
+  messageIntent?(args: Record<string, unknown>): MessageIntent | undefined
+  /**
    * Capabilities the tool needs beyond what its `access` says (docs/plans/tool-api.md §1.3): `threads.start` for a tool
    * that starts an independent thread (a Plan ceiling and a read-only child lack it), `themes` and `quick_actions` for
    * the owner's own preferences, which never pass down to a subagent.
    */
   capabilities?: readonly ToolCapability[]
+  /**
+   * The call needs `person` (docs/plans/tool-api.md §1.3 "Provenance"): only a turn a person started holds it, and it
+   * never passes down to a subagent. `true` for every call, or the variants that need it, read from the arguments. A bot's
+   * turn is held to its grant instead.
+   */
+  needsPerson?: true | ((args: Record<string, unknown>) => boolean)
   /**
    * `in_process`: never callable over MCP (an older name kept for replayed transcripts). Whether it is listed is
    * `listed`'s to say.

@@ -15,6 +15,7 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Subagent result:** what a subagent (or a workflow agent) left when it finished, reported to its parent: where it worked, the files it started from and finished with (kept as snapshots), and its branch and commits. Mousse never merges it; the parent agent brings the work in with Git.
 - **Run:** the saved record of a turn in the Run Engine, with its own ID. Stop, Steer, and Undo act on a run.
 - **Steer:** a message sent to a turn that is still running, to change its direction.
+- **Note:** a message one agent sends another thread with `thread_send` intent `note`: information that grants nothing. It arrives labelled with the sender, never as the user's words, and never answers a question or approval.
 - **Stop:** ends what a thread is doing and everything its subagents are doing, at every depth. The Stop button, the CLI, Nest's Stop and Stop all, `task_cancel`, deleting a thread and settling it are all the same Stop. A subagent's result that is already waiting to be read is kept.
 - **Provider:** the agent backend a thread uses, such as Claude or Codex. Each provider has an adapter that translates its protocol.
 - **Provider instance (instance):** one configured provider a profile can pick, with a stable id such as `claude`, `codex`, `pi:openai` or `claude:work`. Every caller chooses an agent by instance id and model. Settings → Providers shows each instance as an entry.

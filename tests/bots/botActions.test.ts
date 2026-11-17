@@ -475,7 +475,7 @@ it('Send withdraws a stale schedule card even if the edit hook was missed', asyn
   const a = f.bots.actions.forWork(t.id)!
   const current = f.host.schedules!.get.bind(f.host.schedules)
   vi.spyOn(f.host.schedules!, 'get').mockImplementation((bot, id) => { const entry = current(bot, id); return entry ? { ...entry, revision: 'missed-edit' } : undefined })
-  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow(/changed/)
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_withdrawn', message: 'This changed since you saw it. Nothing was sent.' })
   expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
 })
@@ -560,7 +560,7 @@ it.each([false, true])('one unattended chat starting twenty works has bounded op
   const actions = f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")
   expect(actions).toHaveLength(different ? 3 : 1)
   expect(t.results.filter(result => !result.isError)).toHaveLength(different ? 3 : 1)
-  expect(t.results.at(-1)?.text).toContain(different ? 'three cards' : 'already waiting')
+  expect(t.results.at(-1)?.text).toContain(different ? 'Three requests' : 'already waiting')
   expect(t.calls).toEqual([])
 })
 it('owner-started work retains five different open cards', async () => {
@@ -619,8 +619,63 @@ it('scheduled and unattended work share the same pending-card cap', async () => 
   const due = await f.tickSchedules(new Date(f.clock.now))
   const run = await start(f, due.inserted[0]!)
   const result = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'From the schedule' }, toolCallId: 'scheduled-cap', signal: new AbortController().signal })
-  expect(result).toMatchObject({ isError: true, text: expect.stringContaining('three cards') })
+  expect(result).toMatchObject({ isError: true, text: expect.stringContaining('Three requests') })
   expect(f.bots.actions.forWork(due.inserted[0]!)).toBeUndefined()
+})
+it('a duplicate refusal explains the earlier card without borrowing its outcome', async () => {
+  const t = await fanOut(true, false, 2, false)
+  const [first, duplicate] = t.works
+  const text = t.results[1]!.text
+  expect(text).toContain('earlier card')
+  expect(text).toContain('goes out once')
+  expect(text).toContain('Say that in your report')
+  expect(text).toContain('do not say it was not sent')
+  expect(f.store.unreadWorkRefusals(duplicate!.id).map(row => row.text)).toContain(text)
+  await finish(f, duplicate!.run.payload, 'completed', { text: 'An identical call is waiting on an earlier card.' })
+  await finish(f, first!.run.payload)
+  const a = f.bots.actions.forWork(first!.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+  expect(f.store.dispatches(duplicate!.id)).toHaveLength(1)
+  expect(f.store.unreadWorkActions(duplicate!.id)).toEqual([])
+})
+it.each(['send', 'not_now'] as const)('the open-card limit describes pending requests while %s still settles its card', async answer => {
+  const t = await fanOut(true, false, 4, true)
+  expect(t.results.at(-1)?.text).toBe('Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
+  const first = t.works[0]!
+  await finish(f, first.run.payload)
+  const a = f.bots.actions.forWork(first.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })
+  expect(f.bots.actions.forWork(first.id)?.status).toBe(answer === 'send' ? 'done' : 'declined')
+  expect(f.store.lastMainDispatch(first.id)?.prompt.text).toContain(answer === 'send' ? 'Your owner sent it' : 'chose not to send')
+})
+it('a saved schedule edit succeeds and refreshes observers if approval cleanup fails', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  const seen: string[] = []
+  const changed = vi.fn()
+  f.bots.events.on('changed', changed)
+  f.scheduler.on('updated', () => { seen.push(f.book.get(t.botId, t.schedule.scheduleId)!.prompt); f.bots.schedulesEdited(t.botId) })
+  vi.spyOn(f.bots.actions, 'withdrawChanged').mockImplementationOnce(() => { throw new Error('injected bot database write failure') })
+  const job = f.scheduler.updateJob(t.schedule.jobId, { prompt: 'Saved new instructions' })
+  expect(job?.prompt).toBe('Saved new instructions')
+  expect(seen).toContain('Saved new instructions')
+  expect(changed).toHaveBeenCalled()
+  expect(f.bots.schedulesOf(t.botId).find(row => row.scheduleId === t.schedule.scheduleId)?.prompt).toBe('Saved new instructions')
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_withdrawn', message: 'This changed since you saw it. Nothing was sent.' })
+  expect(t.calls).toEqual([])
+})
+it('an edit whose save itself fails still reports failure and keeps its card', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const store = (f.scheduler as any).store
+  vi.spyOn(store, 'updateJob').mockImplementationOnce(() => { throw new Error('injected save failure') })
+  expect(() => f.scheduler.updateJob(t.schedule.jobId, { prompt: 'Never saved' })).toThrow('injected save failure')
+  expect(f.book.get(t.botId, t.schedule.scheduleId)?.prompt).toBe('Send the email')
+  expect(f.bots.actions.forWork(t.id)?.status).toBe('open')
 })
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
@@ -763,7 +818,7 @@ it('three unsent calls stop the tool across occurrences, and owner words reset i
     turn = await start(f, id)
   }
   const call = () => callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'new version' }, toolCallId: 'fourth-call', signal: new AbortController().signal })
-  expect(await call()).toMatchObject({ isError: true, text: expect.stringContaining('three cards') })
+  expect(await call()).toMatchObject({ isError: true, text: expect.stringContaining('Three requests') })
   expect(f.bots.actions.forWork(id)).toBeUndefined()
   await f.bots.service.chatSend({ botId: t.botId, text: 'Please try again', clientRequestId: 'reset-schedule-refusal' })
   expect((await call()).isError).not.toBe(true)
@@ -2012,11 +2067,11 @@ it.each([true, false])('B3 three declined cards stop changed calls until owner i
       const a = f.bots.actions.forWork(t.workId)!
       await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
       await flush(); runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
-    } else expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('had three cards for this tool that were not sent') })
+    } else expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
   }
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(on ? 3 : 0)
   if (!on) { expect(t.calls).toHaveLength(20); return }
-  expect(f.store.unreadWorkRefusals(t.workId).map(n => n.text).join(' ')).toContain('had three cards for this tool that were not sent')
+  expect(f.store.unreadWorkRefusals(t.workId).map(n => n.text).join(' ')).toContain('Three requests for this tool are waiting or were not sent')
   expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__other', args: t.args, toolCallId: 'another-tool', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
   await finish(f, runtime.payload)
   const other = f.bots.actions.forWork(t.workId)!
@@ -2130,12 +2185,12 @@ it('R2-4 three expired cards refuse further calls without claiming the owner dec
     await f.bots.deliverDueReminders(); await flush()
     runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   }
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'before-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('had three cards for this tool that were not sent') })
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'before-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
   const a = f.bots.actions.forWork(t.workId)!
   const memory = new BotMemoryStore({ db: f.store.db })
   const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'declined call' })!
   memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('had three cards for this tool that were not sent') })
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(3)
 })
 
@@ -2958,7 +3013,7 @@ it('review12 pending unattended cap does not claim its open cards were declined 
   const result = t.results.at(-1)!
   expect(result.isError).toBe(true)
   expect(result.text).toContain('waiting')
-  expect(result.text).not.toContain('were not sent')
+  expect(result.text).toContain('waiting or were not sent')
   expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(3)
   expect(t.calls).toEqual([])
 })

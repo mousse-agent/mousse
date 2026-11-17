@@ -489,7 +489,17 @@ export class ScheduledJobService extends EventEmitter {
 
   private editBotSchedule(id: string, save: () => ScheduledJob | null): ScheduledJob | null {
     const job = this.store.getJob(id)
-    return job?.bot && this.botRunner?.editSchedule ? this.botRunner.editSchedule(job.bot.botId, save) : save()
+    if (!job?.bot || !this.botRunner?.editSchedule) return save()
+    let saved: ScheduledJob | null = null
+    try {
+      return this.botRunner.editSchedule(job.bot.botId, () => { saved = save(); return saved })
+    } catch (error) {
+      if (!saved) throw error
+      // The shared job file committed before the bot database step failed. Keep that successful edit
+      // and its normal updated event; revision checks still fence Send, and reconciliation retries cleanup.
+      console.warn('A schedule edit was saved but its approval cleanup failed', { jobId: id, error: error instanceof Error ? error.message : String(error) })
+      return saved
+    }
   }
 
   updateJob(id: string, patch: Partial<ScheduledJob>, options?: Parameters<ScheduledJobStore['updateJob']>[2]): ScheduledJob | null {

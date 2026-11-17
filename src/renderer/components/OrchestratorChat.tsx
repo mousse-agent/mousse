@@ -61,6 +61,7 @@ import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { useSubagents } from '../hooks/useSubagents'
 import { isWorkingSubagent } from '../../shared/subagents'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
+import { isWatchOnlyThread, NativeHelperNotice } from './NativeHelperNotice'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromTurn, reuseUIMessages } from '../chat/adapters/mousseToUI'
 import { useTurnSenders } from '../hooks/useTurnSenders'
@@ -1942,7 +1943,7 @@ export function OrchestratorChat() {
           />
         )}
             <ChatComposer
-              disabled={workspacePending || !workspaceReady}
+              disabled={workspacePending || !workspaceReady || isWatchOnlyThread(activeThread)}
               input={input}
               onInputChange={setInput}
               attachedFiles={attachedFiles}
@@ -1995,6 +1996,7 @@ export function OrchestratorChat() {
               lastPrompt={lastPrompt}
               banner={<>
                 <RemoteSubagentNotice runsOn={activeThread?.runsOn} />
+                <NativeHelperNotice thread={activeThread} />
                 <SubagentComposerBanner threadId={activeThreadId} />
               </>}
               searchMentions={searchMentions}

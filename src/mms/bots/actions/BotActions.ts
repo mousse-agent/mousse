@@ -317,7 +317,7 @@ export class BotActions {
     const digest = actionDigest(args)
     const target = JSON.stringify({ server: tool.server, tool: tool.tool })
     const duplicate = this.host.store.get("SELECT * FROM bot_actions WHERE bot_id = ? AND target_json = ? AND args_digest = ? AND status = 'open' LIMIT 1", row.botId, target, digest) as unknown as ActionRow | undefined
-    if (duplicate) return this.refuse(row, duplicate, 'This exact call is already waiting for your owner on an open card. Carry on without asking again; nothing new was held or sent.')
+    if (duplicate) return this.refuse(row, duplicate, 'An identical call is already waiting for your owner on an earlier card. If your owner sends that card, the call goes out once. Say that in your report; do not say it was not sent. Do not ask again.')
     // Unattended work and schedules share history. Owner messages and taps retain per-work history.
     const scope = origin === 'unattended'
       ? this.host.store.all('SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id WHERE a.bot_id = ? AND a.target_json = ? ORDER BY a.rowid DESC', row.botId, target)
@@ -328,9 +328,7 @@ export class BotActions {
     if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
     if (unanswered.length >= MAX_SAME_WAKES)
-      return this.refuse(row, unanswered[0], unanswered.some(action => action.status === 'open')
-        ? 'You have three cards for this tool that are waiting, declined or expired. Say what you need in your report and wait for your owner to write.'
-        : 'You had three cards for this tool that were not sent. Say what you need in your report and wait for your owner to write.')
+      return this.refuse(row, unanswered[0], 'Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
     const refused = unanswered.find(action => action.args_digest === digest)
     if (refused)
       return this.refuse(row, refused, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')

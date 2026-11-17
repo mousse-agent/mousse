@@ -28,7 +28,7 @@ import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOv
 export type CodexClient = Pick<
   CodexProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'userSetup'
-> & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'stopThread'>>
+> & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'stopThread' | 'stopHelper'>>
 
 /** How Codex 0.162.1 begins the message of a turn its `auth.command` failed (wire test). */
 const TOKEN_COMMAND_FAILED = 'provider auth command '
@@ -359,6 +359,11 @@ export class CodexAdapter implements ProviderAdapter {
    */
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
     return (await this.service()?.stopThread?.(threadId)) ?? 'not_active'
+  }
+
+  /** Stop of a native helper's mirror thread: Codex interrupts that helper's own turn (CodexProviderService.stopHelper). */
+  async stopNativeHelper(hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active'> {
+    return this.service()?.stopHelper?.(hostThreadId, agentId) ?? 'not_active'
   }
 
   /**

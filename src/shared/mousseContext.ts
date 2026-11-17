@@ -16,6 +16,7 @@ export type MousseNoticeKind =
   | 'subagent_result'
   | 'subagent_question'
   | 'subagent_stopped'
+  | 'subagent_lacks'
   | 'bot_wake'
   | 'bot_action'
   | 'work_wait'
@@ -25,6 +26,7 @@ export type MousseNoticeKind =
   | 'bot_action'
   | 'question_answered'
   | 'question_dismissed'
+  | 'agent_note'
 
 export type MousseReply = 'if-needed' | 'required'
 

@@ -9,6 +9,7 @@ import { mousseVersion } from '../../appVersion'
 import { McpToolError, refusalOutcome, type McpCredentialAuthority, type MousseTool, type ToolOutcome, type ToolRegistry } from './appTools'
 import { mousseOrchestrationInstructions } from './instructions'
 import type { BearerTurn, CredentialRecord, McpCredentials, TurnSettlement } from './McpCredentials'
+import type { CallAttribution } from '../nativeHelpers'
 import { RELAY_BOT_INSTRUCTIONS, RELAY_INSTRUCTIONS, type RelayHandler } from './relay/handler'
 
 /** The `tools/list` `_meta` key that keeps a tool out of Claude Code's tool search (`MousseTool.alwaysLoad`). */
@@ -106,6 +107,12 @@ export class MousseMcpServer implements McpAttachmentProvider {
       relay?: RelayHandler
       /** Notices handed over with `mousse` tool results; relayed tools carry none. Absent: none are. */
       boundary?: McpToolBoundary
+      /**
+       * Who made a call that arrived under a thread's credential, from the ids its runtime put in `_meta`: the run itself,
+       * one of its native helpers, or nobody it can tell while a helper may be running (docs/plans/tool-api.md §2.7). Absent:
+       * every call is the run's own.
+       */
+      attribute?: (threadId: string, meta: unknown) => Promise<CallAttribution>
       /** Defaults to `127.0.0.1`. */
       host?: string
       /** Defaults to 0 (a random free port). */
@@ -264,13 +271,28 @@ export class MousseMcpServer implements McpAttachmentProvider {
         : `mcp:${randomUUID()}`
       const signal = AbortSignal.any([requestSignal, extra.signal])
       return this.tracked(resolved, async (authority) => {
-        const outcome = await registry.call(request.params.name, args, { credential: authority, toolCallId, signal })
-        return this.withBoundaryNotices(outcome, authority, signal, handedOver)
+        // A call that is not the run's own (a native helper's, or one nothing ties to the run while a helper may be
+        // running) holds the run's delegable authority only, and never takes the run's notices with its result.
+        const helper = await this.attributed(authority.threadId, request.params._meta)
+        const outcome = await registry.call(request.params.name, args, { credential: authority, toolCallId, signal, ...(helper ? { helper } : {}) })
+        return helper ? outcome : this.withBoundaryNotices(outcome, authority, signal, handedOver)
       })
     })
     return server
   }
 
+  /** The call's attribution when it is not the run's own; undefined for the run's own call. A failed check fails closed. */
+  private async attributed(threadId: string, meta: unknown): Promise<Exclude<CallAttribution, { kind: 'host' }> | undefined> {
+    const attribute = this.options.attribute
+    if (!attribute) return undefined
+    try {
+      const attribution = await attribute(threadId, meta)
+      return attribution.kind === 'host' ? undefined : attribution
+    } catch (error) {
+      console.warn('a Mousse tool call could not be attributed; it holds delegable authority only', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return { kind: 'unattributed' }
+    }
+  }
   /**
    * A `mousse` tool's outcome, followed by the caller's pending notices as a separate text block when its runtime has
    * no native steer (`McpToolBoundary`). Never inside the tool's own text, and never for a call whose request is gone.

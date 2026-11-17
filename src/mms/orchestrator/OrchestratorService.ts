@@ -87,9 +87,9 @@ import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '.
 import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
-import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
+import { steerReleaseWindow, steerStrategy, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
-import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, type LacksReport, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation } from '../run/mcp/appTools/thread'
 import { botMessage } from '../run/mcp/appTools/agentMessage'
@@ -161,6 +161,7 @@ import {
   stoppedByPerson,
   type BotTurnPayload,
   type ChildQuestionPayload,
+  type ChildLacksPayload,
   type AgentActor,
   type DelegationRecord,
   type EffectKind,
@@ -209,11 +210,14 @@ import {
   type UserQuestionAnswers,
   type AnsweredQuestion,
   type ScheduledRunAgent,
+  type ThreadNativeHelper,
   DEFAULT_CHAT_MODE,
   TURN_STOPPED_TEXT,
   isTurnStoppable,
   isTurnActivePhase
 } from '../../shared/types'
+import { MirroredRun, NativeMirrorThreads } from './nativeMirrorThreads'
+import { nativeSessionEpoch, type CallAttribution } from '../run/nativeHelpers'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { agentMessageWords } from '../../shared/agentMessageWords'
 import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, TITLE_SYSTEM_PROMPT, titleContextOf, type TitleContext } from '../../shared/threadTitleText'
@@ -1256,10 +1260,10 @@ export class OrchestratorService extends EventEmitter {
   /** What runs a job's saved agent (`ScheduledJob.agent`); the profile platform owns the agent definitions. */
   setScheduledAgentRunner(runner: ScheduledAgentRunner | undefined): void { this.scheduledAgentRunner = runner }
 
-  private scheduledJobs?: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'>
+  private scheduledJobs?: Omit<AgentScheduleHost, 'limits'>
 
   /** The profile's scheduled jobs, for the agents' `schedule_*` tools; without them the tools are not registered. */
-  setScheduledJobs(jobs: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'> | undefined): void { this.scheduledJobs = jobs }
+  setScheduledJobs(jobs: Omit<AgentScheduleHost, 'limits'> | undefined): void { this.scheduledJobs = jobs }
   /** The automation drafts the Automation manager and granted bots write (`automation_*`). */
   private automationTools?: AutomationToolHost
   setAutomationTools(tools: AutomationToolHost | undefined): void { this.automationTools = tools }
@@ -2068,6 +2072,105 @@ export class OrchestratorService extends EventEmitter {
   /** Threads running a scheduled occurrence's turn now (`isScheduledTurn`). */
   private readonly scheduledTurnThreads = new Set<string>()
   private readonly transcripts = new WeakMap<ThreadSession, TranscriptAssembler>()
+  /** The streaming assembler of each native helper's mirror session (`nativeMirrors`): no turn runs there. */
+  private readonly mirrorTranscripts = new WeakMap<ThreadSession, TranscriptAssembler>()
+  private nativeMirrorThreads: NativeMirrorThreads | undefined
+
+  /**
+   * The mirror threads of the runtimes' own helpers (docs/plans/tool-api.md §2.7). Each is made under its hosting thread
+   * as the run's events arrive, owned by it (trashed and purged with it), private when it is, and watch-only.
+   */
+  private get nativeMirrors(): NativeMirrorThreads {
+    this.nativeMirrorThreads ??= new NativeMirrorThreads({
+      thread: (threadId) => this.threadStore?.getThread(threadId) ?? undefined,
+      createMirror: ({ id, name, host, lineage, owner, native }) => {
+        if (!this.threadStore) throw new Error('Thread store is not ready.')
+        this.threadStore.createThread(name, host.projectId, undefined, {
+          id,
+          started: true,
+          lineage,
+          ownerThreadId: owner,
+          native,
+          ...(host.localOnly ? { localOnly: true } : {}),
+          ...(host.hidden ? { hidden: true } : {})
+        })
+      },
+      updateNative: (threadId, native) => { this.threadStore?.updateThreadMeta(threadId, { native }, { touch: false }) },
+      rename: (threadId, name) => { this.threadStore?.updateThreadMeta(threadId, { name }, { touch: false }) },
+      writeTool: (threadId, event) => this.inMirrorSession(threadId, (transcript) => transcript.tool(event)),
+      writeNote: (threadId, text) => this.inMirrorSession(threadId, () => this.addSystemMessage(text)),
+      closeOpenCalls: (threadId) => this.inMirrorSession(threadId, (transcript) => transcript.closeOpenTools('no_result'))
+    })
+    return this.nativeMirrorThreads
+  }
+
+  /** Runs `write` as the mirror thread's own: its messages, events and saves are that thread's, never the host's. */
+  private inMirrorSession(threadId: string, write: (transcript: TranscriptAssembler) => void): void {
+    const session = this.getOrCreateSession(threadId)
+    let transcript = this.mirrorTranscripts.get(session)
+    if (!transcript) {
+      transcript = new TranscriptAssembler(
+        {
+          getMessage: (id) => session.messages.find((message) => message.id === id),
+          addMessage: (message) => { session.messages.push(message) },
+          updateMessage: (message) => {
+            const index = session.messages.findIndex((entry) => entry.id === message.id)
+            if (index !== -1) session.messages[index] = message
+          },
+          removeMessage: (id) => this.removeMessage(id),
+          emitAdded: (message) => this.emitMessageAdded(message),
+          emitUpdated: (message) => this.emitMessageUpdated(message),
+          persist: (force) => this.persist(force),
+          currentRunId: () => undefined,
+          // The runtime owns the helper's turns: its thread shows no turn phase of its own.
+          setPhase: () => undefined
+        },
+        session
+      )
+      this.mirrorTranscripts.set(session, transcript)
+    }
+    const assembler = transcript
+    this.sessionAls.run(session, () => write(assembler))
+  }
+
+  /** The mirror record when `threadId` is a native helper's watch-only thread. */
+  private nativeHelperOf(threadId: string): { native: ThreadNativeHelper; hostThreadId: string } | undefined {
+    const thread = this.threadStore?.getThread(threadId)
+    if (!thread?.native || thread.lineage?.relationship !== 'native') return undefined
+    // The hosting thread is the top of the mirror chain (a helper's helper sits under the outer helper's mirror).
+    let host = thread
+    const seen = new Set<string>()
+    while (host.lineage?.relationship === 'native' && !seen.has(host.id)) {
+      seen.add(host.id)
+      const parent = this.threadStore?.getThread(host.lineage.parentThreadId)
+      if (!parent) break
+      host = parent
+    }
+    return { native: thread.native, hostThreadId: host.id }
+  }
+
+  /**
+   * Who made a Mousse tool call that arrived under `threadId`'s credential (§2.7 "Execution identity"), from the ids the
+   * runtime put in the request's `_meta`. The MCP server holds a call that is not the run's own to delegable authority.
+   */
+  attributeMcpCall(threadId: string, meta: unknown): Promise<CallAttribution> {
+    return this.nativeMirrors.attribute(threadId, meta)
+  }
+
+  /**
+   * A Stop of a native helper's mirror: the runtime stops that helper where it can (Codex); otherwise the Stop is refused
+   * `runtime_owned`, naming the run to stop instead. The hosting run is never stopped from here.
+   */
+  private async stopNativeHelper(threadId: string, mirror: { native: ThreadNativeHelper; hostThreadId: string }): Promise<{ stopped: boolean; message: string }> {
+    const { native, hostThreadId } = mirror
+    const host = this.threadStore?.getThread(hostThreadId)
+    const hosting = `the run of "${host?.name ?? hostThreadId}" (thread ${hostThreadId}, run ${native.hostRunId})`
+    if (native.state !== 'running') return { stopped: false, message: `This helper is not running (${native.state}).` }
+    const outcome = await this.harness?.stopNativeHelper?.(native.instanceId, hostThreadId, native.agentId).catch(() => 'not_active' as const) ?? 'unsupported'
+    if (outcome === 'stopped') return { stopped: true, message: 'The helper was asked to stop.' }
+    if (outcome === 'not_active') return { stopped: false, message: `The runtime no longer runs this helper. To stop everything it may still do, stop ${hosting}.` }
+    return { stopped: false, message: `runtime_owned: the runtime runs this helper and cannot stop it on its own (agent ${native.agentId}). Stop ${hosting} instead.` }
+  }
   private readonly sessionAls = new AsyncLocalStorage<ThreadSession>()
   private persistFn?: (threadId?: string | null) => void
   /** Per-thread delayed persist timers (concurrent turns must not suppress each other). */
@@ -2098,6 +2201,8 @@ export class OrchestratorService extends EventEmitter {
   private botMcpImpl?: BotMcp
   /** The app-tool context of each running turn (PR 2 §2), for the Mousse MCP server's calls. */
   readonly appToolTurns = new AppToolTurns()
+  /** The capabilities a subagent's work was already reported lacking (`reportSubagentLacks`), by thread, work and capability. */
+  private readonly reportedLacks = new Set<string>()
   /** The threads' goals (`/goal`, issue #1207): set, continued, stopped, and decided after each turn. */
   readonly goals = new ThreadGoals({
     thread: (threadId) => this.threadStore?.getThread(threadId),
@@ -3743,6 +3848,13 @@ export class OrchestratorService extends EventEmitter {
     reason: string,
     opts: { runId?: string; clientRequestId?: string; clearQueue?: boolean; requesterThreadId?: string; actor?: AgentActor; byAgent?: boolean } = {}
   ): Promise<StopThreadOutcome> {
+    // A native helper's mirror has no Mousse run: a person's or an agent's Stop goes to the runtime for that one helper.
+    // Any other Stop (delete, archive, expiry) leaves the helper to the run that hosts it.
+    const nativeHelper = reason === 'user' || reason === 'agent' || reason === 'remote' ? this.nativeHelperOf(threadId) : undefined
+    if (nativeHelper) {
+      const stopped = await this.stopNativeHelper(threadId, nativeHelper)
+      return { ok: stopped.stopped, status: stopped.stopped ? 'stopped' : 'rejected', reason: stopped.message, replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
+    }
     // A `/compact` the thread runs stops with it; the full history stays.
     const compactionStopped = this.stopCompaction(threadId)
     // A goal stops with its thread, and the goal turn waiting in the queue goes.
@@ -4144,6 +4256,23 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * Whether the run holds `person` (docs/plans/tool-api.md §1.3 "Provenance"): a person started this run itself, and its
+   * thread is neither a subagent (`person` never passes down) nor a bot's. Fails closed on anything that cannot be read.
+   */
+  private runHoldsPerson(caller: { threadId: string; runId: string }): boolean {
+    try {
+      const engine = this.runEngine
+      if (!engine || this.botThreads?.roleOf(caller.threadId)) return false
+      if (engine.delegations.getLineage(caller.threadId)?.relationship === 'subagent') return false
+      const run = engine.getRun(caller.runId)
+      const binding = engine.bindingForRun(caller.runId)
+      return run?.threadId === caller.threadId && holdsPerson(binding ? { origin: policyOrigin(binding.policy), source: run.source } : undefined)
+    } catch {
+      return false
+    }
+  }
+
   /** The delegation tools of an in-process turn, holding the grant its registered turn was given at its start. */
   private turnDelegationTools(session: ThreadSession, runId: string, mode: ChatMode): DelegationToolHost {
     const ceiling = this.modeCeilingFor(session.threadId, mode)
@@ -4362,6 +4491,11 @@ export class OrchestratorService extends EventEmitter {
     return this.relayHandlerImpl
   }
 
+  /** The thread waits on a person's answer to a question or an approval (rule 4 holds agent notes until it comes). */
+  awaitsAnswer(threadId: string): boolean {
+    return this.questions.listPendingForThread(threadId).length > 0 || (this.runEngine?.approvals.listPending(threadId).length ?? 0) > 0
+  }
+
   /**
    * Notices handed to a running turn with its Mousse tool results (docs/plans/tool-api.md §2.2), on a runtime that
    * steers by restarting its reply: the turn's pending subagent results and requests reach it at its next Mousse tool
@@ -4376,6 +4510,7 @@ export class OrchestratorService extends EventEmitter {
           threadId,
           runId,
           caps: this.capabilitiesForThread(threadId),
+          awaitsAnswer: this.awaitsAnswer(threadId),
           prepare: (rows) => this.dropStaleQuestionRows(rows),
           plan: (rows) => planWakeNotice(rows, this.noticeContext())
         })
@@ -4392,7 +4527,7 @@ export class OrchestratorService extends EventEmitter {
   mcpToolHost(): AppToolHost {
     // Read at every use: the registry is built before the profile hands over its scheduled jobs.
     const scheduleHost = (): AgentScheduleHost | undefined =>
-      this.scheduledJobs ? { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller), startedByPerson: (caller) => this.runStartedByPerson(caller) } : undefined
+      this.scheduledJobs ? { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller) } : undefined
     return {
       get schedules() {
         return scheduleHost()
@@ -4440,6 +4575,10 @@ export class OrchestratorService extends EventEmitter {
       // Narrowing from above: an ancestor's running Plan turn narrows the subtree at its next call.
       liveCeiling: (threadId) => this.ancestorCeiling(threadId),
       subagentThread: (threadId) => this.isSubagentThread(threadId),
+      // `person` (§1.3): a person started the run, and it is not a subagent's (which has what its parent has, but never this).
+      personHeld: (caller) => this.runHoldsPerson(caller),
+      parentThread: (threadId) => this.subagentParentOf(threadId),
+      reportLacks: (report) => this.reportSubagentLacks(report),
       // Only a bot's threads list the bot tools (`escalate`; `consult` on its activation thread).
       botRole: (threadId) => this.botThreads?.roleOf(threadId),
       botHomeOf: (threadId) => this.botThreads?.homeOf?.(threadId),
@@ -4484,6 +4623,10 @@ export class OrchestratorService extends EventEmitter {
       archiveOwnThreadAfterTurn: (options) => this.archiveOwnThreadAfterTurn(options),
       setThreadHidden: (threadId, hidden, options) => this.setThreadHiddenAsAgent(threadId, hidden, options),
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
+      steerStrategyOf: (threadId) => {
+        const caps = this.capabilitiesForThread(threadId)
+        return caps ? steerStrategy(caps, this.runEngine?.getActiveRun(threadId) ?? null) : null
+      },
       approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
       answerApproval: (threadId, requestId, answers, options) => this.answerApprovalAsAgent(threadId, requestId, answers, options),
       automations: () => this.automationTools,
@@ -5349,6 +5492,12 @@ export class OrchestratorService extends EventEmitter {
   /** `thread_interrupt`: the one Stop (`stopThread`), asked for by an agent, aimed at one run. */
   private async stopRunAsAgent(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
+    // A native helper's mirror has no runs of its own: the Stop goes to its runtime, whatever run was named.
+    const nativeHelper = this.nativeHelperOf(threadId)
+    if (nativeHelper) {
+      const stopped = await this.stopNativeHelper(threadId, nativeHelper)
+      return stopped.stopped ? { status: 'accepted', runId, sequence: 0, replayed: false } : { status: 'rejected', reason: stopped.message }
+    }
     // A bot's thread stops another thread's turn only as the owner's bot, from a chat turn the owner's message started.
     const bot = this.botSenderOf(options.actor, 'thread_interrupt')
     // A Stop would close what waits on the owner there (an approval, a question): a bot leaves those to
@@ -5385,15 +5534,17 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `thread_archive`: the owner's bot archives or unarchives one of their threads through the app's own Archive
-   * (`settleThread`), only from its chat in a chat turn its owner's message started (`botSenderOf`). A bot's archive never
-   * ends work: a thread with a run working or paused, there or in a subagent below it, is refused, and the bot stops it
-   * first. Never a bot's thread. The change is recorded as an `agent.action` of the thread.
+   * `thread_archive` of another thread: an agent's turn the person started, or the owner's bot from its chat in a turn
+   * that may act on threads (`botSenderOf`), archives or unarchives it through the app's own Archive (`settleThread`). An
+   * agent's archive never ends work: a thread with a run working or paused, there or in a subagent below it, is refused,
+   * and the agent stops it first. Never the caller's own thread or a bot's. The change is recorded as an `agent.action`
+   * of the thread.
    */
   private async setThreadArchivedAsAgent(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult> {
     const engine = this.requireRunEngine()
-    const bot = this.botSenderOf(options.actor, 'thread_archive')
-    if (!bot) throw new McpToolError('mousse_scope_denied', 'Only a bot\'s chat archives threads this way.')
+    // The registry checked `person` (or the bot's grant) before the call; checked again here, where it acts.
+    if (!this.runHoldsPerson(options.actor) && !this.botSenderOf(options.actor, 'thread_archive'))
+      throw new McpToolError('mousse_scope_denied', 'Only a turn the user started, or a bot\'s with "use your threads", archives another thread.')
     const thread = this.threadStore?.getThread(threadId)
     let botThread = false
     try {
@@ -7129,6 +7280,52 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** The parent a subagent's lineage names; undefined for a thread that is not a subagent. */
+  private subagentParentOf(threadId: string): string | undefined {
+    const lineage = this.runEngine?.delegations.getLineage(threadId)
+    return lineage?.relationship === 'subagent' ? lineage.parentThreadId : undefined
+  }
+
+  /** The thread at the root of `threadId`'s tree of subagents: the first thread above it that is not a subagent. */
+  private subagentRootOf(threadId: string): string | undefined {
+    let thread = threadId
+    for (let depth = 0; depth < 64; depth += 1) {
+      const parent = this.subagentParentOf(thread)
+      if (!parent) return thread === threadId ? undefined : thread
+      thread = parent
+    }
+    return undefined
+  }
+
+  /**
+   * A subagent was refused a capability it lacks (§2.4): its parent, which holds it, or the root of its tree, where no
+   * thread does, gets a `child_lacks` row (a `reconcile_notice`), and rule 4 wakes or steers it. Once per capability of
+   * the subagent's work (its running delegation, else its run).
+   */
+  private reportSubagentLacks(report: LacksReport): void {
+    const engine = this.runEngine
+    if (!engine) return
+    const task = engine.delegations.listForChildThread(report.threadId).filter((entry) => entry.parentThreadId === report.parentThreadId && entry.status === 'running').at(-1)
+    const key = `${report.threadId}\u0000${task?.delegationId ?? report.runId}\u0000${report.lacks}`
+    if (this.reportedLacks.has(key)) return
+    const target = report.to === 'parent' ? report.parentThreadId : this.subagentRootOf(report.threadId)
+    if (!target || this.titleOf(target) === undefined) return
+    if (this.reportedLacks.size >= 4096) this.reportedLacks.clear()
+    this.reportedLacks.add(key)
+    const payload: ChildLacksPayload = {
+      kind: 'child_lacks',
+      childThreadId: report.threadId,
+      childRunId: report.runId,
+      tool: report.tool,
+      lacks: report.lacks,
+      ...(report.fix ? { fix: report.fix } : {}),
+      to: report.to,
+      ...(task ? { delegationId: task.delegationId } : {})
+    }
+    const runId = report.to === 'parent' ? task?.parentRunId ?? null : null
+    engine.inbox.append({ threadId: target, runId, kind: 'reconcile_notice', payload })
+  }
+
   /**
    * Narrowing from above (docs/plans/tool-api.md §1.3 "Subagents"): `plan` while any ancestor of a subagent runs a Plan
    * turn, so the person switching a parent to Plan narrows the whole subtree at its next call. Read at every call; a
@@ -7696,7 +7893,7 @@ export class OrchestratorService extends EventEmitter {
       delegateTask,
       continueSubagent,
       answerSubagent: (input) => this.answerSubagent(parentThreadId, parentRunId, input),
-      taskStatus: (ref) => this.taskStatus(parentThreadId, ref),
+      taskStatus: (ref, options) => this.taskStatus(parentThreadId, ref, options),
       taskCancel: (ref) => this.taskCancel(parentThreadId, ref),
       listDelegations,
       listSubagents: () => this.listSubagents(parentThreadId),
@@ -8425,13 +8622,13 @@ export class OrchestratorService extends EventEmitter {
     return { ok: true as const, delegation: pick }
   }
 
-  private taskStatus(parentThreadId: string, ref: SubagentRef) {
+  private taskStatus(parentThreadId: string, ref: SubagentRef, options?: { acknowledge?: false }) {
     const engine = this.requireRunEngine()
     const task = this.resolveTask(parentThreadId, ref)
     if (!task.ok) return task.refusal
     const delegationId = task.delegation.delegationId
     let delegation = task.delegation
-    if (delegation.status === 'result_available' || delegation.status === 'failed') delegation = engine.acknowledgeDelegation(delegationId)
+    if (options?.acknowledge !== false && (delegation.status === 'result_available' || delegation.status === 'failed')) delegation = engine.acknowledgeDelegation(delegationId)
     const row = this.subagentView(parentThreadId).find((subagent) => subagent.childThreadId === delegation.childThreadId)
     const pending = this.questions.listPendingForThread(delegation.childThreadId)
     const workspaceResult = delegation.result ? this.delegationResultReport(delegation) : undefined
@@ -9399,6 +9596,7 @@ export class OrchestratorService extends EventEmitter {
     if (opts?.purged) this.leaseWaitsOfDeleted.delete(threadId)
     this.revokeMcp(threadId)
     this.appToolTurns.forgetThread(threadId)
+    this.nativeMirrorThreads?.forget(threadId)
     this.dropContinuationsOf(threadId)
     try {
       this.runEngine?.approvals.cancelForThread(threadId, 'thread_deleted')
@@ -12252,6 +12450,16 @@ export class OrchestratorService extends EventEmitter {
     }
     // A remote subagent's thread here only stands in for the thread on its computer (issue #469): no turn
     // runs here. Its parent continues it with continue_subagent; a person writes to it on that computer.
+    // A native helper's mirror only shows what its runtime does (docs/plans/tool-api.md §2.7): nothing sent here reaches it.
+    const nativeHelper = this.nativeHelperOf(threadId)
+    if (nativeHelper)
+      throw new DomainRpcError(
+        'runtime_owned',
+        nativeHelper.native.runtime === 'claude'
+          ? `Claude Code runs this helper inside its parent's run, and only that run can message it: ask the parent's agent to use SendMessage with agent ${nativeHelper.native.sendTo ?? nativeHelper.native.agentId}.`
+          : `Codex runs this helper inside its parent's run (agent ${nativeHelper.native.agentId}); write to the parent thread instead.`,
+        { agentId: nativeHelper.native.agentId, hostThreadId: nativeHelper.hostThreadId }
+      )
     const runsOn = this.threadStore?.getThread(threadId)?.runsOn
     if (runsOn)
       throw new DomainRpcError('runs_on_other_computer', `This subagent runs on ${runsOn.computerName}. Open its thread there to write to it.`, { node: runsOn.node, ...(runsOn.ref ? { ref: runsOn.ref } : {}) })
@@ -13599,6 +13807,8 @@ export class OrchestratorService extends EventEmitter {
     }
     // The turn's steer hold, once its provider is known; the turn's end clears it.
     let turnHold: { hold: SteerHold; runId?: string } | undefined
+    // The hosting run as its native helpers' mirror threads follow it; absent on a runtime Mousse does not mirror.
+    let mirroredRun: MirroredRun | undefined
     try {
       // Instance id → driver → adapter; an unknown or disabled instance, or a blank explicit
       // override, fails the turn here.
@@ -13738,6 +13948,8 @@ export class OrchestratorService extends EventEmitter {
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)
       turnHold = { hold, runId: engineRunId }
+      // The runtime's own helpers are mirrored as watch-only threads as its events arrive (docs/plans/tool-api.md §2.7).
+      if (engineRunId) mirroredRun = this.nativeMirrors.beginRun({ hostThreadId: session.threadId, runId: engineRunId, driver: binding.driver, instanceId: binding.instanceId, sessionEpoch: nativeSessionEpoch(binding) })
       // A bot's notes reach its turn as it works on a runtime that takes steers; on one that does not, they wait for the
       // dispatch's end, as before.
       if (opts?.bot?.steer && opts.externalDrainSteer && instance.caps.steer !== 'queue_only') opts.bot.steer.attached()
@@ -13826,6 +14038,8 @@ export class OrchestratorService extends EventEmitter {
           if (event.phase === 'start' && (event.kind === 'mcp_tool_call' || event.kind === 'build_tool_call')) confirmBotOutput()
           if (event.kind !== 'skill_loaded') conversationToolsUsed = true
           this.handleStreamingToolEvent(event)
+          // A native helper's call is written to its mirror's log too; the hosting thread's log is unchanged.
+          mirroredRun?.tool(event)
           // After the assembler: the call's row is open (or closed) when the window restarts. Only the turn's own calls
           // restart it (§2.3): a subagent's or a background call's events say nothing about the turn's next tool.
           if (assembler.ownsForegroundCall(event.callId)) hold.toolEvent()
@@ -14195,6 +14409,8 @@ export class OrchestratorService extends EventEmitter {
         this.setHeldSteer(session.threadId, undefined)
       }
       appTurn?.drop()
+      // A helper whose end the runtime never reported reads unknown, never done.
+      mirroredRun?.end()
       if (compactionNote) onCompaction('unchanged')
       if (turn.abort.signal.aborted) aborted = true
       opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)

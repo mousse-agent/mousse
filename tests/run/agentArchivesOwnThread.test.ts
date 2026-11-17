@@ -3,7 +3,7 @@
  * `OrchestratorService`, Run Engine and effect worker, with a scripted provider whose turn calls `thread_archive`
  * through the Mousse MCP registry, as a provider does. The thread is archived only after the turn ends well, through the
  * app's own Archive; a turn that fails or is stopped, a message waiting in the queue, or a turn no person started leave it
- * open.
+ * open. Another thread it names is archived at once.
  */
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -246,11 +246,11 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     await w.send('settle yourself when done', 'internal')
     await w.idle()
     await afterTurnEnd()
-    expect(w.adapter.answers).toEqual([expect.objectContaining({ isError: true, text: expect.stringContaining('Only a turn the user started') })])
+    expect(w.adapter.answers).toEqual([expect.objectContaining({ isError: true, text: expect.stringContaining('"lacks":"person"') })])
     expect(w.archived()).toBe(false)
   })
 
-  it('names only its own thread: another thread is refused and stays open', async () => {
+  it('archives another thread it names at once, while its own turn goes on', async () => {
     const w = world()
     const other = w.d.store.createThread('Someone else\'s work', w.d.store.getThread(w.thread.id)!.projectId)
     w.adapter.onArchived = undefined
@@ -260,15 +260,18 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     const sent = w.send('settle yourself when done')
     await waitFor(() => w.adapter.answers.length === 1, 'turn running')
     const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
-    const refused = await orch.mcpToolRegistry().call('thread_archive', { threadId: other.id }, {
+    const archived = await orch.mcpToolRegistry().call('thread_archive', { threadId: other.id }, {
       credential: { threadId: w.thread.id, runId, provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage', binding: 'drained_turn', current: () => true },
       toolCallId: 'call-other',
       signal: new AbortController().signal
-    }).catch((error: Error) => ({ text: error.message, isError: true }))
-    expect(refused).toMatchObject({ isError: true, text: expect.stringContaining('your own thread only') })
+    })
+    expect(archived.isError).toBeFalsy()
+    expect(JSON.parse(archived.text)).toMatchObject({ threadId: other.id, archived: true, changed: true })
+    expect(w.d.store.getThread(other.id)?.settledAt).toBeDefined()
+    expect(w.d.engine.getActiveRun(w.thread.id)?.runId).toBe(runId)
     await orch.stopThread(w.thread.id)
     await sent.catch(() => undefined)
     await w.idle()
-    expect(w.d.store.getThread(other.id)?.settledAt).toBeUndefined()
+    expect(w.archived()).toBe(false)
   })
 })

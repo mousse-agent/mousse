@@ -1359,7 +1359,7 @@ describe('scheduled jobs run as turns', () => {
         const host = () => w.orch.mcpToolHost().schedules!
         return {
           limits: (threadId: string, runId: string) => host().limits({ threadId, runId }),
-          person: (threadId: string, runId: string) => host().startedByPerson({ threadId, runId })
+          person: (threadId: string, runId: string) => w.orch.mcpToolHost().personHeld!({ threadId, runId })
         }
       }
       const NARROWEST = { permissionCeiling: 'ask' }
@@ -1452,7 +1452,7 @@ describe('scheduled jobs run as turns', () => {
         }
       })
 
-      it("a subagent of a person's turn is that person's, down its chain; a subagent of any other run is not", async () => {
+      it("no subagent holds person, not even one of a person's turn, and a subagent of any other run records the narrowest", async () => {
         const w = boot([piAdapter(() => 'pi')])
         const wired = wireJobs(w)
         const project = projectOf(w)
@@ -1463,8 +1463,8 @@ describe('scheduled jobs run as turns', () => {
         const person = await w.orch.send('start', false, { threadId: thread.id, source: 'gui', clientRequestId: 'person-1', awaitMode: 'turn' })
         const child = await delegate(thread.id, person.runId!, 'child')
         const grandchild = await delegate(child.childThreadId, child.childRunId, 'grandchild')
-        expect(wired.person(child.childThreadId, child.childRunId)).toBe(true)
-        expect(wired.person(grandchild.childThreadId, grandchild.childRunId)).toBe(true)
+        expect(wired.person(child.childThreadId, child.childRunId)).toBe(false)
+        expect(wired.person(grandchild.childThreadId, grandchild.childRunId)).toBe(false)
         const woken = await w.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'unbound:wake', source: 'wake' })
         if (woken.status !== 'accepted') throw new Error('send rejected')
         const ofWake = await delegate(thread.id, woken.runId, 'of-wake')
@@ -1493,14 +1493,14 @@ describe('scheduled jobs run as turns', () => {
           expect(wired.limits(below.childThreadId, below.childRunId), name).toEqual(NARROWEST)
         }
 
-        // A person's turn on a bot's thread: its subagents are not the person's either.
+        // A person's turn on a bot's thread: its subagents record the narrowest too.
         const botThread = w.store.createThread('Bot', project.id, project.path, ON_PRIMARY)
         w.orch.setThreadPermissionMode(botThread.id, 'full')
         const botRun = await w.orch.send('hello bot', false, { threadId: botThread.id, source: 'gui', clientRequestId: 'person-2', awaitMode: 'turn' })
         const ofBot = await delegate(botThread.id, botRun.runId!, 'of-bot')
-        expect(wired.person(ofBot.childThreadId, ofBot.childRunId)).toBe(true)
-        w.orch.setBotThreads({ roleOf: (threadId: string) => (threadId === botThread.id ? 'activation' : undefined) } as never)
         expect(wired.person(ofBot.childThreadId, ofBot.childRunId)).toBe(false)
+        w.orch.setBotThreads({ roleOf: (threadId: string) => (threadId === botThread.id ? 'activation' : undefined) } as never)
+        expect(wired.limits(ofBot.childThreadId, ofBot.childRunId)).toEqual(NARROWEST)
         w.orch.setBotThreads(null as never)
       })
 

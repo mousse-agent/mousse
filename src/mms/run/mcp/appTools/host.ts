@@ -15,12 +15,13 @@ import type { QuickActionTools } from '../../../orchestrator/QuickActionTools'
 import type { WebTools } from '../../../orchestrator/WebTools'
 import type { TaskQueue } from '../../../tasks/TaskQueue'
 import type { ApprovalRefusal } from '../../approvalRights'
+import type { SteerStrategy } from '../../CommandPolicy'
 import type { RunEngine } from '../../RunEngine'
 import type { AnsweredBy } from '../../ThreadApprovals'
 import type { AgentActor, ModeCeiling } from '../../types'
 import type { AppearanceToolHost } from './appearance'
 import type { DelegationToolsHost } from './delegation'
-import type { LiveRunGate } from './registry'
+import type { LacksReport, LiveRunGate } from './registry'
 import type { AppToolTurn, ToolLedger } from './types'
 import type { SecretToolHost } from './secrets'
 import type { TerminalInfo } from '../../../terminals/PtyManager'
@@ -282,12 +283,6 @@ export interface AgentScheduleHost {
    */
   validate(job: ScheduledJobOptionsInput): { selection?: ModelOverride; threadId?: string }
   /**
-   * Whether a person started the caller's run (`startedByPerson`: an interactive turn from the app or the CLI). Fails
-   * closed: a scheduled or webhook run, an agent's message, a subagent, a wake, a continuation, a bot, a remote send, a run with
-   * no recorded binding or one that cannot be read is not a person's turn. Only a person's turn may create or start jobs.
-   */
-  startedByPerson(caller: { threadId: string; runId: string }): boolean
-  /**
    * What a job created or changed by this caller may run in: the permission mode its run is bound to, the narrowest
    * when the run is not a person's turn, which the tools refuse before they ask.
    */
@@ -377,6 +372,12 @@ export interface AppToolHost extends DelegationToolsHost {
   liveCeiling?(threadId: string): ModeCeiling | undefined
   /** The thread is a Mousse subagent, from its lineage. */
   subagentThread?(threadId: string): boolean
+  /** The run holds `person`: a person started it and its thread is not a subagent (§1.3 "Provenance"). */
+  personHeld?(caller: { threadId: string; runId: string }): boolean
+  /** The parent a subagent's lineage names; undefined for a thread that is not a subagent. */
+  parentThread?(threadId: string): string | undefined
+  /** Tells a subagent's parent, or the root of its tree, what the subagent was refused for lacking (§2.4). */
+  reportLacks?(report: LacksReport): void
   /** The thread's role when it is a personal bot's thread (PR 6 §5). */
   botRole?(threadId: string): 'activation' | 'context' | 'subagent' | undefined
   /**
@@ -480,6 +481,11 @@ export interface AppToolHost extends DelegationToolsHost {
    * is false when it already was so.
    */
   setThreadHidden?(threadId: string, hidden: boolean, options: { actor: AgentActor }): { hidden: boolean; changed: boolean }
+  /**
+   * How text reaches the thread's active run now (`steerStrategy`): `native` steer, `interrupt_restart` (a note waits
+   * for the run's next Mousse tool call), or neither; null when the thread's runtime is not known.
+   */
+  steerStrategyOf?(threadId: string): SteerStrategy | null
   /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */
   steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** The profile's scheduled jobs (`schedule_*`); absent: the host registers no schedule tools. */

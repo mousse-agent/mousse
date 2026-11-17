@@ -33,12 +33,15 @@ export function delegationFixture(
   const tools = new ToolInvocations(store)
   const engine = new RunEngine({ store, outbox, tools, now, pid: options.pid ?? 1 })
   const capabilities = new Map<string, ProviderCapabilities>()
+  /** Threads that wait on a person's answer to a question or an approval. */
+  const awaiting = new Set<string>()
   const reconciler = new Reconciler({
     store,
     outbox,
     tools,
     now,
-    capabilitiesFor: (threadId) => capabilities.get(threadId) ?? PI_TEST_CAPABILITIES
+    capabilitiesFor: (threadId) => capabilities.get(threadId) ?? PI_TEST_CAPABILITIES,
+    awaitsAnswer: (threadId) => awaiting.has(threadId)
   })
   const requests: DelegationRequest[] = []
   /** Child threads the host holds (created and not deleted). */
@@ -107,6 +110,7 @@ export function delegationFixture(
     engine,
     reconciler,
     capabilities,
+    awaiting,
     requests,
     threads,
     deleted,

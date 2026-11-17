@@ -8,6 +8,7 @@ import { runStdioBridge } from '../../src/mms/run/mcp/stdioBridge'
 import { PassThrough } from 'node:stream'
 import { appToolRegistry, appTurn, fakeAppToolHost, refusalOfResponse } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
+import type { CallAttribution } from '../../src/mms/run/nativeHelpers'
 
 async function rpc(url: string, token: string | null, body: unknown) {
   const response = await fetch(url, {
@@ -35,13 +36,13 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     fx = undefined
   })
 
-  const setup = async (hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}, options: { boundary?: McpToolBoundary } = {}) => {
+  const setup = async (hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}, options: { boundary?: McpToolBoundary; attribute?: (threadId: string, meta: unknown) => Promise<CallAttribution> } = {}) => {
     fx = delegationFixture()
     const run = await fx.runningRun('thread-a')
     const credentials = new McpCredentials(fx.store)
     const fake = fakeAppToolHost(hostOverrides)
     const { registry, turns } = appToolRegistry(fx.engine, fake.host)
-    server = new MousseMcpServer({ credentials, registry, ...(options.boundary ? { boundary: options.boundary } : {}) })
+    server = new MousseMcpServer({ credentials, registry, ...(options.boundary ? { boundary: options.boundary } : {}), ...(options.attribute ? { attribute: options.attribute } : {}) })
     await server.start()
     const registered = turns.register(appTurn({ threadId: 'thread-a', runId: run.runId }))
     const bearer = (input: { runId?: string; instanceId?: string; modeCeiling?: 'plan' | 'default'; binding?: McpTurnBinding; generation?: string } = {}) =>
@@ -123,6 +124,50 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       await expect(rpc(server.url, attachment.token, call(1, 'thread_read'))).rejects.toThrow()
       expect(boundary.deliver).toHaveBeenCalledTimes(1)
       await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1))
+    })
+  })
+
+  describe("a native helper's call under its hosting run's credential", () => {
+    const withMeta = (id: number, name: string, meta: Record<string, unknown>, args: Record<string, unknown> = {}) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args, _meta: meta } })
+    const attribution = (byToolUse: Record<string, CallAttribution>) => vi.fn(async (_threadId: string, meta: unknown) => byToolUse[String((meta as Record<string, unknown> | undefined)?.['claudecode/toolUseId'])] ?? { kind: 'host' as const })
+
+    it('holds delegable authority only and takes none of the run\'s notices; the run\'s own call keeps both', async () => {
+      const boundary: McpToolBoundary = { deliver: vi.fn(() => ({ text: 'a subagent finished', release: () => undefined })) }
+      const attribute = attribution({ toolu_h: { kind: 'helper', agentId: 'toolu_A' }, toolu_u: { kind: 'unattributed' } })
+      const { server, attachment } = await setup({}, { boundary, attribute })
+      for (const [id, toolUseId] of [[1, 'toolu_h'], [2, 'toolu_u']] as const) {
+        // Reading the hosting thread is delegable: it works, with no notice handed over.
+        const read = await rpc(server.url, attachment.token, withMeta(id, 'thread_read', { 'claudecode/toolUseId': toolUseId }))
+        expect(JSON.parse(read.body.result.content[0].text).threadId).toBe('thread-a')
+        expect(read.body.result.content).toHaveLength(1)
+        // Asking the person is the run's own: refused to a helper as to a subagent.
+        const ask = await rpc(server.url, attachment.token, withMeta(id + 10, 'ask_user', { 'claudecode/toolUseId': toolUseId }, { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
+        expect(refusalOfResponse(ask.body)).toMatchObject({ refused: { code: 'unavailable', message: expect.stringContaining('a helper cannot use it') } })
+      }
+      expect(boundary.deliver).not.toHaveBeenCalled()
+      expect(attribute).toHaveBeenCalledWith('thread-a', { 'claudecode/toolUseId': 'toolu_h' })
+      const own = await rpc(server.url, attachment.token, withMeta(3, 'thread_read', { 'claudecode/toolUseId': 'toolu_own' }))
+      expect(own.body.result.content[1]).toEqual({ type: 'text', text: `${BOUNDARY_NOTICE_HEADER}\n\na subagent finished` })
+    })
+
+    it('never holds person, in a run a person started; the run\'s own call does', async () => {
+      const archiveOwnThreadAfterTurn = vi.fn(() => ({ status: 'scheduled' as const }))
+      const attribute = attribution({ toolu_h: { kind: 'helper', agentId: 'toolu_A' } })
+      const { server, attachment } = await setup({ personHeld: () => true, archiveOwnThreadAfterTurn }, { attribute })
+      const helper = await rpc(server.url, attachment.token, withMeta(1, 'thread_archive', { 'claudecode/toolUseId': 'toolu_h' }, { threadId: 'thread-a' }))
+      expect(refusalOfResponse(helper.body)).toMatchObject({ refused: { code: 'lacks_capability', lacks: 'person' } })
+      expect(archiveOwnThreadAfterTurn).not.toHaveBeenCalled()
+      const own = await rpc(server.url, attachment.token, withMeta(2, 'thread_archive', { 'claudecode/toolUseId': 'toolu_own' }, { threadId: 'thread-a' }))
+      expect(JSON.parse(own.body.result.content[0].text)).toMatchObject({ threadId: 'thread-a', archived: 'after_this_turn' })
+      expect(archiveOwnThreadAfterTurn).toHaveBeenCalledTimes(1)
+    })
+
+    it('an attribution that fails holds delegable authority only', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const { server, attachment } = await setup({}, { attribute: async () => { throw new Error('lost') } })
+      const ask = await rpc(server.url, attachment.token, call(1, 'ask_user', { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
+      expect(refusalOfResponse(ask.body)).toMatchObject({ refused: { code: 'unavailable', message: expect.stringContaining('a helper cannot use it') } })
+      warn.mockRestore()
     })
   })
 

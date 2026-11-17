@@ -472,8 +472,52 @@ export interface ChildQuestionPayload {
   delegationId?: string
 }
 
+/**
+ * Payload of a `reconcile_notice` row that tells a thread a subagent below it was refused a capability it lacks
+ * (docs/plans/tool-api.md §2.4): its parent when the parent holds it (`to: 'parent'`), else the root of its tree, which
+ * is told what would give it (`fix`). Written once per capability of the subagent's work.
+ */
+export interface ChildLacksPayload {
+  kind: 'child_lacks'
+  childThreadId: string
+  childRunId: string
+  tool: string
+  lacks: string
+  fix?: string
+  to: 'parent' | 'root'
+  delegationId?: string
+}
+
 export function isChildQuestionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'child_question'
+}
+
+/**
+ * Payload of a `reconcile_notice` row that carries another agent's note (docs/plans/tool-api.md §2.2): information that
+ * grants nothing, labelled with who sent it and what it may do. It is delivered as any notice is: steered into a native
+ * run, handed over with a Mousse tool's result on a runtime that restarts its reply, or with the thread's next turn.
+ */
+export interface AgentNotePayload {
+  kind: 'agent_note'
+  senderThreadId: string
+  senderRunId: string
+  senderTitle: string | null
+  /** What the sender may do, for the label: a read-only subagent, a Plan ceiling, or an agent that may change files. */
+  senderAccess: 'read_only' | 'plan' | 'agent'
+  /** Who the sender is to the receiver. */
+  from: 'parent' | 'ancestor' | 'subagent' | 'sibling'
+  text: string
+  /** `needed` starts a notice turn on an idle thread; `none` waits for the thread's next turn. */
+  attention: 'needed' | 'none'
+}
+
+export function isAgentNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'agent_note'
+}
+
+/** A note sent with `attention: none`: it never starts a turn of its own. */
+export function isQuietNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return isAgentNoteRow(row) && (row.payload as AgentNotePayload).attention === 'none'
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */
