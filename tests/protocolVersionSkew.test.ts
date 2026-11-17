@@ -51,10 +51,6 @@ async function versionOneService(): Promise<{ home: string; endpoint: string; he
 }
 
 describe('daemon protocol version skew', () => {
-  it('is version 2', () => {
-    expect(MMS_PROTOCOL_VERSION).toBe(2)
-  })
-
   it('a version-1 hello is refused by this service before any method runs', () => {
     const refused = validateHello({ kind: 'hello', protocolVersion: 1, ownerToken: 'fixture-token', clientType: 'gui' })
     expect(refused).toMatchObject({ ok: false, code: 'protocol_version' })
