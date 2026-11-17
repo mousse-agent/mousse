@@ -2513,16 +2513,14 @@ export class NetService {
             latest.keys.sign
           )
           const hints = this.transport?.lanRoutes(node) ?? []
+          const remembered = this.lastAddressRoute(node, [...hints, ...fresh.routes])
           const result = await manager.connect(
             {
               node,
               user: self.user,
               transportKey: latest.keys.transport,
-              routes: [
-                ...hints,
-                ...this.lastAddressRoute(node, [...hints, ...fresh.routes]),
-                ...fresh.routes
-              ].slice(0, 32)
+              routes: [...hints, ...remembered, ...fresh.routes].slice(0, 32),
+              remembered: remembered.map((route) => route.address)
             },
             signal
           )

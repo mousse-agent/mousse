@@ -708,6 +708,11 @@ export interface PeerRef {
   user: UserId
   routes: Route[]
   transportKey: Base64Url
+  /**
+   * Addresses among `routes` that only this computer remembers, with no signature behind them: another device may hold
+   * one now, so a different key there fails that route alone and the race goes on (the pin is still checked).
+   */
+  remembered?: readonly string[]
 }
 
 export type RouteHealth = {

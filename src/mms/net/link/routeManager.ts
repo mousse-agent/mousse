@@ -301,7 +301,11 @@ export class RouteManagerImpl implements RouteManager {
           if (finished) return
           if (error.code !== 'cancelled') this.failed(state, error)
           lastError = error
+          // A remembered address that another device now answers on is a dead route, not a forged peer.
+          const stale =
+            error.code === 'peer_key_mismatch' && peer.remembered?.includes(route.address) === true
           if (
+            !stale &&
             !['route_unreachable', 'deadline_exceeded', 'peer_offline', 'rate_limited'].includes(
               error.code
             )
