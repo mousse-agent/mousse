@@ -45,6 +45,8 @@ describe('canAnswerApproval', () => {
     // Allowing or rejecting once is the person's decision on what they see, at any limit.
     for (const answer of [once, { decision: 'reject' as const }])
       expect(canAnswerApproval(request('child', 'command'), device('ask'), answer, lineage)).toEqual({ ok: true })
+    // A linked phone (no computer) still makes no rule.
+    expect(canAnswerApproval(request('child', 'edit'), { kind: 'user', via: 'bridge' }, always, lineage)).toEqual({ ok: false, code: 'bridge_no_standing_grant' })
     expect(describeApprovalRefusal('device_mode_forbids')).toMatch(/limit/)
   })
 
@@ -126,6 +128,10 @@ describe('canAnswerApproval for an agent with access beyond its subagents', () =
     expect(answers(manager('stranger', 'full', { answerApprovals: false }), 'unrelated')).toEqual({ ok: false, code: 'approvals_disabled' })
   })
 
+  it('never answers its own thread, with every switch on', () => {
+    expect(answers(manager('stranger', 'full'), 'stranger')).toEqual({ ok: false, code: 'own_request' })
+  })
+
   it('never answers for a thread of its own lineage beyond its direct subagents: not a grandchild, not its parent, not an ancestor', () => {
     // Below it: only the direct parent answers for a child.
     expect(answers(manager('parent', 'full'), 'grandchild')).toEqual({ ok: false, code: 'not_parent' })
@@ -135,6 +141,23 @@ describe('canAnswerApproval for an agent with access beyond its subagents', () =
     expect(answers(manager('grandchild', 'full'), 'child')).toEqual({ ok: false, code: 'not_parent' })
     // Its direct subagent stays the parent's own business, and the switch does not touch it.
     expect(answers(manager('parent', 'full', { answerApprovals: false }), 'child')).toEqual({ ok: true })
+  })
+
+  it('never approves what its own mode would ask about, so it widens nothing', () => {
+    for (const [mode, action, allowed] of [
+      ['ask', 'edit', false], ['ask', 'command', false], ['ask', 'tool', false],
+      ['accept_edits', 'edit', true], ['accept_edits', 'command', false], ['accept_edits', 'tool', false],
+      ['full', 'edit', true], ['full', 'command', true], ['full', 'tool', true]
+    ] as const)
+      expect(answers(manager('stranger', mode), 'unrelated', action), `${mode} / ${action}`).toEqual(allowed ? { ok: true } : { ok: false, code: 'mode_forbids' })
+    // A rejection widens nothing either, so it is held to the same mode as the approval is.
+    expect(answers(manager('stranger', 'ask'), 'unrelated', 'command', { decision: 'reject' })).toEqual({ ok: false, code: 'mode_forbids' })
+  })
+
+  it('never creates a standing rule, whatever the agent holds', () => {
+    expect(answers(manager('stranger', 'full'), 'unrelated', 'edit', { decision: 'allow', scope: 'always' })).toEqual({ ok: false, code: 'agent_no_standing_grant' })
+    // Rejecting "always" is no rule: a rejection carries no scope.
+    expect(answers(manager('stranger', 'full'), 'unrelated', 'edit', { decision: 'reject' })).toEqual({ ok: true })
   })
 
   it('checks the switch before the mode, and the mode before "always"', () => {

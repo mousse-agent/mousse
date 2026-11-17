@@ -487,6 +487,13 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
 
   const message = (index: number, content: string, role: ChatMessage['role'] = 'user'): ChatMessage => ({ id: `m${index}`, role, content, timestamp: NOW })
 
+  it('lists the tools that read and manage other threads for every caller', async () => {
+    const { registry } = await world()
+    expect(registry.listForThread('parent').map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'thread_send', 'thread_steer', 'thread_interrupt', 'thread_create', 'approval_respond'])
+    )
+  })
+
   describe('registration guard for tools that take a thread id', () => {
     const tool = (name: string, access: string, properties: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
       ({ name, description: name, inputSchema: { type: 'object', properties }, access, class: 'read', handler: () => ({ text: '' }), ...extra }) as never
@@ -525,11 +532,15 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     })
   })
 
-  it('the thread tools carry the class the plan names', async () => {
+  it('every access class registers, and the thread tools carry the class the plan names', async () => {
     const { registry } = await world()
     expect(registry.get('thread_list')).toMatchObject({ access: 'readsOthers', class: 'read' })
     expect(registry.get('thread_search')).toMatchObject({ access: 'readsOthers', class: 'read' })
     expect(registry.get('thread_read')).toMatchObject({ access: 'readsOthers' })
+    const bare = new ToolRegistry({ activeRunId: () => 'run-1' })
+    const tool = { name: 'x', description: 'x', inputSchema: { type: 'object' }, class: 'read', handler: () => ({ text: '' }) }
+    bare.register({ ...tool, access: 'readsOthers' } as never)
+    bare.register({ ...tool, name: 'y', access: 'managesOthers', class: 'mutation' } as never)
   })
 
   it('a thread that does not exist is refused like a private one, with no ledger row and no handler run', async () => {
@@ -919,7 +930,11 @@ describe('workspace-changing tools and the permission mode', () => {
     expect(asked).toEqual([])
   })
 
-  it('refuses a merge-back under Ask when the host has no way to ask', async () => {
+  it('asks a merge-back under Ask and refuses it without a way to ask', async () => {
+    const { call, asked } = await setup('ask', 'reject')
+    await expect(call('thread_merge_back', {})).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
+    expect(asked).toEqual([{ threadId: 'parent', approval: expect.objectContaining({ permissionKey: 'mousse:merge_back' }) }])
+
     fx?.dispose()
     fx = delegationFixture()
     const run = await fx.runningRun('parent')
