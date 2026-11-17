@@ -65,12 +65,17 @@ function render(messages: UIMessage[], status: 'ready' | 'streaming' = 'ready') 
 const toggles = () => [...host.querySelectorAll<HTMLButtonElement>('.turn-work-toggle')]
 const answerOf = (index: number) => host.querySelectorAll<HTMLElement>('.turn-answer')[index]!
 const visible = (index: number) => answerOf(index).textContent!.replace(/\s+/g, ' ')
+/** The name a screen reader gives a control from its content: its text, without what is hidden from it. */
+const nameOf = (node: Node): string =>
+  node.nodeType === Node.TEXT_NODE
+    ? node.textContent!
+    : (node as Element).getAttribute?.('aria-hidden') === 'true' ? '' : [...node.childNodes].map(nameOf).join('')
 
 describe('a finished turn', () => {
   it('shows only its answer under one "Worked for" line, folded by default', () => {
     render(turn(1, 0))
     expect(toggles()).toHaveLength(1)
-    expect(toggles()[0]!.textContent).toBe('Worked for 12s')
+    expect(nameOf(toggles()[0]!)).toBe('Worked for 12s, 1 reply inside')
     expect(toggles()[0]!.getAttribute('aria-expanded')).toBe('false')
     expect(visible(0).trim()).toBe('The key changed every run 1.')
     expect(host.querySelector('.turn-work-chevron')).not.toBeNull()
@@ -115,6 +120,50 @@ describe('a finished turn', () => {
     expect(toggles()).toHaveLength(1)
     expect(visible(0)).toContain('Overloaded')
     expect(visible(0)).not.toContain('Read ')
+  })
+})
+
+describe('the count of replies a finished turn folds', () => {
+  // A turn of three runs: each run closed on a reply, and the agent wrote a note beside its last calls.
+  const threeRuns = [
+    ask('u1', 'How should we test this?', 0),
+    call('r1', 'tool-Read', { file_path: 'src/cache.ts' }, 2),
+    said('p1', 'Here is the test plan: one table per input.', 10),
+    call('r2', 'tool-Read', { file_path: 'tests/cache.test.ts' }, 20),
+    said('p2', 'The fix is pushed.', 30),
+    {
+      id: 'n3',
+      role: 'assistant',
+      createdAt: at(40),
+      parts: [{ type: 'text', text: 'Cleaning up the worktree.' }, { type: 'tool-Bash', toolCallId: 'b3', state: 'output-available', input: { command: 'git worktree prune' }, output: 'ok' }]
+    } as unknown as UIMessage,
+    said('a1', 'Done.', 50)
+  ]
+
+  it('says how many replies the fold hides after the time, with the words in its tooltip and accessible name', () => {
+    render(threeRuns)
+    const line = toggles()[0]!
+    expect(line.textContent!.startsWith('Worked for 50s·3')).toBe(true)
+    expect(nameOf(line)).toBe('Worked for 50s, 3 replies inside')
+    const count = line.querySelector('[title="3 replies inside"]')!
+    expect(count.querySelector('svg')).not.toBeNull()
+    expect(visible(0).trim()).toBe('Done.')
+    // Opening the work shows the replies it counted.
+    act(() => line.click())
+    for (const reply of ['Here is the test plan: one table per input.', 'The fix is pushed.', 'Cleaning up the worktree.']) expect(visible(0)).toContain(reply)
+  })
+
+  it('shows no count while the turn is still working', () => {
+    render(threeRuns.slice(0, -1), 'streaming')
+    expect(toggles()).toHaveLength(0)
+    expect(host.querySelector('[title$="inside"]')).toBeNull()
+    expect(nameOf(host.querySelector('.turn-work')!)).not.toContain('repl')
+  })
+
+  it('shows no count when only calls and thoughts fold', () => {
+    render([ask('u1', 'Fix it', 0), thought('t1', 'Reading', 1), call('r1', 'tool-Read', { file_path: 'a.ts' }, 2), said('a1', 'Fixed.', 4)])
+    expect(toggles()).toHaveLength(1)
+    expect(nameOf(toggles()[0]!)).toBe('Worked for 4s')
   })
 })
 
