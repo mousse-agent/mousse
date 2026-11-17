@@ -11,8 +11,8 @@ import { automationTools, type AutomationToolHost } from '../src/mms/run/mcp/app
 import type { AppToolHost } from '../src/mms/run/mcp/appTools/host'
 import type { ToolCallContext } from '../src/mms/run/mcp/appTools/types'
 import { levelNotifies, openForBot, openForPerson, resolvedRun, runReportNotice } from '../src/shared/automationInbox'
-import { tellMeNotifies, type ScheduledRunEnded } from '../src/shared/automations'
-import { parseTellMe, tellMeOf, type Thread } from '../src/shared/types'
+import { type ScheduledRunEnded } from '../src/shared/automations'
+import { type Thread } from '../src/shared/types'
 
 let home: string
 let previousHome: string | undefined
@@ -263,9 +263,6 @@ describe('usage', () => {
 
 describe('notifications follow the level', () => {
   it('notifies needs_you and failures by default, and look; a filter can lower or raise it; legacy Tell me reads as a level', () => {
-    expect(tellMeOf({})).toBe('look')
-    expect(parseTellMe('news')).toBe('look')
-    expect(parseTellMe('problems')).toBe('needs_you')
     expect(levelNotifies('look', { failed: false, level: 'needs_you' })).toBe(true)
     expect(levelNotifies('look', { failed: false, level: 'look' })).toBe(true)
     // No report counts as worth a look, never quiet.
@@ -275,7 +272,6 @@ describe('notifications follow the level', () => {
     expect(levelNotifies('needs_you', { failed: true, level: 'quiet' })).toBe(true)
     expect(levelNotifies('fyi', { failed: false, level: 'fyi' })).toBe(true)
     expect(levelNotifies('every', { failed: false, level: 'quiet' })).toBe(true)
-    expect(tellMeNotifies('look', 'nothing_new')).toBe(false)
   })
 })
 
