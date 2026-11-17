@@ -408,7 +408,7 @@ export class BotActions {
       this.host.store.db.transaction(() => {
         if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent; carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(action))
       })
-      throw changed()
+      throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_withdrawn')
     }
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
     if (input.answer === 'not_now') {
