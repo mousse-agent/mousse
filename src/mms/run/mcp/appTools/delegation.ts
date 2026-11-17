@@ -326,7 +326,8 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
     // No delegation tool writes the caller's workspace: the retired merge tools only report a result.
     access: 'actsAsCaller',
     class: 'delegation',
-    hidden: !listed.has(definition.name),
+    // The older names are neither listed nor callable over MCP; they still run in process.
+    ...(listed.has(definition.name) ? {} : { listed: () => false, callable: 'in_process' as const }),
     // A read-only subagent may start (read-only) subagents and follow them; `delegateTask` checks the
     // workspace of each one.
     readOnlySafe: true,

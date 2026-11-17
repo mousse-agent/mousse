@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatMessage, PendingUserQuestions, Thread } from '../../src/shared/types'
 import {
   ATTEMPT_TOKEN_KEY,
+  checkedInHandler,
   McpToolError,
   refused,
   ToolRegistry,
@@ -516,18 +517,18 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
       registry.register(tool('reads_others', 'readsOthers', { threadId: id }))
       registry.register(tool('manages_others', 'managesOthers', { threadId: id }))
       registry.register(tool('writes_own', 'writesThreads', { threadId: id }))
-      registry.register(tool('declared', 'reads', { threadId: id, sourceThreadId: id }, { threadArgChecked: 'the handler accepts the caller\'s own thread only' }))
+      registry.register(tool('declared', 'reads', { threadId: id, sourceThreadId: id }, { authorize: checkedInHandler('the handler accepts the caller\'s own thread only') }))
       registry.register(tool('plain', 'reads', { query: id, projectId: id }))
-      expect(() => registry.register(tool('blank', 'reads', { threadId: id }, { threadArgChecked: '  ' }))).toThrow(/does not cover/)
+      expect(() => registry.register(tool('blank', 'reads', { threadId: id }, { authorize: checkedInHandler('  ') }))).toThrow(/does not cover/)
     })
 
     it('every tool of the Mousse registry passes it, so a new one must declare how it checks a thread', async () => {
       const { registry } = await world()
       for (const registered of registry.list()) {
         const names = JSON.stringify(registered.inputSchema).match(/"\w*[tT]hreadIds?"\s*:/g) ?? []
-        if (names.length) expect(['readsOthers', 'managesOthers', 'writesThreads'].includes(registered.access) || Boolean(registered.threadArgChecked), registered.name).toBe(true)
+        if (names.length) expect(['readsOthers', 'managesOthers', 'writesThreads'].includes(registered.access) || Boolean(registered.authorize?.where), registered.name).toBe(true)
       }
-      expect(registry.get('thread_fork')!.threadArgChecked).toBeTruthy()
+      expect(registry.get('thread_fork')!.authorize?.where).toBeTruthy()
     })
   })
 
@@ -920,7 +921,7 @@ describe('workspace-changing tools and the permission mode', () => {
     expect(delegation.reportResult).not.toHaveBeenCalled()
     expect(asked).toEqual([])
     // In process it stays dispatchable for replayed transcripts, and changes no workspace.
-    expect(registry.get('integrate_delegation')).toMatchObject({ hidden: true, access: 'actsAsCaller', readOnlySafe: true })
+    expect(registry.get('integrate_delegation')).toMatchObject({ callable: 'in_process', access: 'actsAsCaller', readOnlySafe: true })
   })
 
   it('refuses a call that names another thread before it asks the user anything', async () => {

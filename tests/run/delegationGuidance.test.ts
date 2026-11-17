@@ -212,7 +212,7 @@ describe('the delegation tools models are offered', () => {
       const listed = registry.listFor({ readOnly: false, modeCeiling: 'default' }).map((tool) => tool.name)
       for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations']) {
         expect(listed).not.toContain(hidden)
-        expect(registry.get(hidden)?.hidden).toBe(true)
+        expect(registry.get(hidden)?.callable).toBe('in_process')
         expect(pi.map((tool) => tool.name)).not.toContain(hidden)
       }
     } finally {

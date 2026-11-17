@@ -1,14 +1,13 @@
 import type { ToolCall } from '@earendil-works/pi-ai'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { APPROVALS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
-import { permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
+import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { PendingUserQuestions, UserQuestionAnswers } from '../../../../shared/types'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
-import { botAppToolRefusal, botBrowserNotAllowed, botBrowserWithheld } from '../../../../shared/bots/personal/walls'
-import { botMayBeOffered, isBotThreadTool, isBotTurnHeldTool } from '../../../../shared/bots/personal/manifest'
-import { BOT_USE_TOOL, botCoreTool } from '../../../../shared/bots/personal/catalogue'
+import { botMayBeOffered } from '../../../../shared/bots/personal/manifest'
+import { BOT_USE_TOOL } from '../../../../shared/bots/personal/catalogue'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -18,27 +17,37 @@ import type { RelayAdmission, RelayGrant } from '../relay/types'
 import { callForBot, type BotMcp } from '../../../bots/mcp/BotMcp'
 import type { AppToolTurns } from './turns'
 import type { AgentAccessLevel } from '../../../../shared/settings'
-import { callerThreadOnly } from './thread'
 import {
   ACCESS_CLASSES,
   McpToolError,
   plainSchema,
   refusalOutcome,
   TOOL_CLASSES,
-  unattendedRefusal,
   type AppToolTurn,
   type JsonSchema,
   type McpCaller,
   type MousseTool,
   type ToolCallContext,
   type ToolLedger,
-  type ThreadRelation,
   type ToolListing,
   type ToolOutcome,
-  type ToolScope,
   type ToolTimeline
 } from './types'
 import { asRefusal, refused } from './refusal'
+import {
+  compileTool,
+  listsTool,
+  offeredThisTurn,
+  READ_ONLY_TOOL_NAMES,
+  toolNeeds,
+  usableNow,
+  userMcpForReader,
+  userMcpSource,
+  type AskFirst,
+  type ToolAccessPolicy
+} from './authority'
+
+export { READ_ONLY_TOOL_NAMES, type ToolAccessPolicy } from './authority'
 
 /**
  * What a call that waited for a run the provider started (`awaitLiveRun`) learns: the run it must act as,
@@ -78,23 +87,6 @@ export interface McpCallRequest {
   toolCallId: string
   /** Aborted when the HTTP request closes or the caller's turn ends. */
   signal: AbortSignal
-}
-
-/**
- * What the central check of `readsOthers` and `managesOthers` tools asks of the thread owner (SPEC
- * §15.1), read at call time.
- */
-export interface ToolAccessPolicy {
-  /** How `threadId` is related to the caller, or null. */
-  relation(caller: McpCaller, threadId: string): ThreadRelation | null
-  threadExists(threadId: string): boolean
-  /** The thread is private (`Thread.localOnly`); absent: no thread is. */
-  localOnly?(threadId: string): boolean
-  /**
-   * Where a personal bot's thread tool ("use your threads") may reach: the scope for a thread (`botThreadReach`, the
-   * rule its list and search follow too) or a project, or the refusal's words. Absent: a bot reaches nothing.
-   */
-  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }, options?: { read?: boolean }): { scope: ToolScope } | { refused: string }
 }
 
 export interface ToolRegistryOptions {
@@ -189,33 +181,16 @@ function schemaPropertyNames(schema: unknown, depth = 0): string[] {
  * The thread-id inputs of a tool the central check does not cover. The check reads `threadId` of a
  * `readsOthers`, `managesOthers`, `writesThreads` or `editsWorkspace` tool; any other input that names a thread
  * (`sourceThreadId`, `threadIds`, ...) and `threadId` of any other class must be declared as checked
- * by the handler (`threadArgChecked`), so a new tool cannot read another thread by accident.
+ * by the tool's own `authorize` (`checkedInHandler`), so a new tool cannot read another thread by accident.
  */
 function uncoveredThreadArgs(tool: MousseTool): string[] {
-  if (tool.threadArgChecked?.trim()) return []
+  if (tool.authorize?.where?.trim()) return []
   const covered = tool.access === 'readsOthers' || tool.access === 'managesOthers' || tool.access === 'writesThreads' || tool.access === 'editsWorkspace'
   return [...new Set(schemaPropertyNames(tool.inputSchema))].filter((name) => {
     if (!/^(?:\w*ThreadIds?|threadIds?)$/i.test(name)) return false
     return !(name === 'threadId' && covered)
   })
 }
-
-/**
- * The tools that change nothing: they read, list, search or wait. Every other tool declares `clientRequestId`
- * (docs/plans/tool-api.md §1.2 "Retry"); a tool's `class` cannot say which, since `read` also covers writes to the
- * caller's own state (§6, finding 6).
- */
-export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'task_status', 'list_subagents', 'list_computers', 'list_models', 'list_tasks',
-  'thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'schedule_list', 'terminal_read',
-  'automation_list', 'list_skills', 'load_skill', 'tool_catalogue', 'mcp_servers', 'theme_read',
-  'web_search', 'web_fetch', 'browser_observe', 'browser_find', 'browser_wait', 'browser_extract', 'browser_screenshot',
-  'mousse_gui_screenshot', 'mousse_gui_console', 'mousse_gui_status',
-  'bot_list', 'bot_schedule_list', 'work_models', 'work_list', 'watch_list', 'reminder_list', 'subagent_wait', 'subagent_result',
-  'memory_search', 'memory_read', 'memory_list',
-  'profiler_overview', 'profiler_service_breakdown', 'profiler_window_breakdown', 'profiler_gpu_hints', 'profiler_children',
-  'profiler_sample_now', 'profiler_watch', 'profiler_heap_summary'
-])
 
 /** `clientRequestId` as a tool that does not keep its first result declares it: the key a retry reuses. */
 const RETRY_KEY_SCHEMA: JsonSchema = {
@@ -314,7 +289,7 @@ export class ToolRegistry {
     const uncovered = uncoveredThreadArgs(tool)
     if (uncovered.length)
       throw new Error(
-        `Mousse tool ${tool.name} takes a thread id (${uncovered.join(', ')}) that the access check does not cover: make it readsOthers, managesOthers, writesThreads or editsWorkspace (for threadId), or say where it is checked with threadArgChecked`
+        `Mousse tool ${tool.name} takes a thread id (${uncovered.join(', ')}) that the access check does not cover: make it readsOthers, managesOthers, writesThreads or editsWorkspace (for threadId), or say where it is checked with authorize: checkedInHandler(...)`
       )
     if (this.tools.has(tool.name)) throw new Error(`Mousse tool ${tool.name} is already registered`)
     this.tools.set(tool.name, declaringRetryKey(tool))
@@ -325,7 +300,7 @@ export class ToolRegistry {
     return this.tools.get(name)
   }
 
-  /** Every registered tool, hidden ones included. */
+  /** Every registered tool, unlisted ones included. */
   list(): MousseTool[] {
     return [...this.tools.values()]
   }
@@ -333,28 +308,10 @@ export class ToolRegistry {
   /**
    * The ListTools result of a thread's credential (PR 2 §2 "Tool lists across turns"): stable for
    * the thread, whatever the turn's mode, so a list a runtime cached on a plan turn still works on
-   * the next agent turn. What a turn may use is checked at call time.
+   * the next agent turn. What a turn may use is checked at call time. The authority compiler decides (`listsTool`).
    */
   listFor(listing: ToolListing): MousseTool[] {
-    return this.list().filter((tool) => {
-      if (tool.hidden) return false
-      if (listing.readOnly && tool.access !== 'reads' && tool.access !== 'readsOthers' && !tool.readOnlySafe) return false
-      if (listing.modeCeiling === 'plan' && (tool.access === 'startsThreads' || tool.access === 'changesSettings')) return false
-      // A bot's main thread lists the thread tools its grant allows: "use your threads" is what lets it use them. Only
-      // those its turn holds now are listed (none without the permission, with the switch off, or in a turn that only
-      // reads), and every call is held to it again. A consult never has them. The profiler's tools likewise follow "use
-      // the profiler": listed only when the turn holds them (and, as for anyone, while Labs lets agents read it). So do
-      // the theme tools, under "change how Mousse looks", scheduled jobs, secrets, quick actions and the task list. A
-      // subagent holds only what a thread's subagent may use (`compileBotThread`), and a consult none of them.
-      const botHeldTool = listing.botRole !== undefined && isBotTurnHeldTool(tool.name)
-      if (botHeldTool && (listing.botRole === 'context' || !listing.botTurnTools?.has(tool.name))) return false
-      // A bot's thread lists only what a bot can hold: the model is never shown delegation, queues or tools it can't use.
-      if (listing.botRole && !botMayBeOffered(tool.name)) return false
-      // A catalogue turn on Codex or Pi (docs/plans/bot-context.md §15) lists the core set only: the rest is looked up with
-      // `tool_catalogue` and called through `use_tool`, so the list never changes with what the bot looks up.
-      if (listing.botCatalogue === 'use_tool' && !botCoreTool(tool.name)) return false
-      return tool.listed?.(listing) ?? true
-    })
+    return this.list().filter((tool) => listsTool(tool, listing))
   }
 
   /** Whether `threadId` is a personal bot's thread. */
@@ -412,7 +369,7 @@ export class ToolRegistry {
     const plain = (tool: MousseTool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, class: tool.class })
     if (!turn?.definition || turn.threadId !== threadId) return listed.map(plain)
     return listed
-      .filter((tool) => !tool.offered || tool.offered(turn))
+      .filter((tool) => !tool.offered || offeredThisTurn(tool, turn, { requestPolicy: false }))
       .map((tool) => {
         const offered = tool.definition?.(turn)
         return offered ? { ...plain(tool), description: offered.description, inputSchema: plainSchema(offered) } : plain(tool)
@@ -429,17 +386,18 @@ export class ToolRegistry {
     const proxy = this.options.userMcp
     const turn = runId ? this.options.turns?.get(runId) : undefined
     if (!proxy || !turn || turn.threadId !== threadId) return []
+    // Where the turn's tools come from is the authority compiler's to say (`userMcpSource`).
+    const source = userMcpSource(turn, this.options.botMcp !== undefined)
+    if (source === 'none') return []
     // A bot's turn: only the granted tools it was offered (none in a chat turn), each held to its grant when called.
-    if (turn.bot) {
-      if (!this.options.botMcp) return []
-      return (turn.bot.mcpTools ?? []).filter((tool) => !this.tools.has(tool.providerName)).map((tool) => ({
+    if (source === 'bot') {
+      return (turn.bot!.mcpTools ?? []).filter((tool) => !this.tools.has(tool.providerName)).map((tool) => ({
         id: `${tool.server}:${tool.tool}`, serverId: tool.server, installationId: tool.server, serverName: tool.serverName, toolName: tool.tool,
         providerName: tool.providerName, description: tool.description, inputSchema: tool.inputSchema
       }))
     }
     let tools: readonly McpToolDescriptor[]
-    if (turn.definition) tools = turn.definition.mcpTools ?? []
-    else if (turn.modeFacts.build && !turn.subagent) return []
+    if (source === 'definition') tools = turn.definition!.mcpTools ?? []
     else {
       try {
         tools = await proxy.list(turn.projectPath, turn.actor)
@@ -449,7 +407,7 @@ export class ToolRegistry {
       }
     }
     const readOnly = this.options.readOnlyThread?.(threadId) === true
-    const offered = tools.filter((tool) => !this.tools.has(tool.providerName) && (!readOnly || turn.toolAccess?.allows(tool.providerName) === true))
+    const offered = userMcpForReader(tools.filter((tool) => !this.tools.has(tool.providerName)), turn, readOnly)
     this.rememberOffered(runId!, turn, offered)
     return offered
   }
@@ -492,7 +450,15 @@ export class ToolRegistry {
 
   /** The tools an in-process loop offers this turn, in registration order (none that a `never` run refuses). */
   offeredFor(turn: AppToolTurn): MousseTool[] {
-    return this.list().filter((tool) => (tool.offered ? tool.offered(turn) : tool.available?.(turn) ?? true) === true && !unattendedRefusal(tool, turn))
+    return this.list().filter((tool) => offeredThisTurn(tool, turn, { requestPolicy: true }))
+  }
+
+  /**
+   * The tools a turn's preamble names as usable now (`usableNow`): the thread's list as the turn's run reads it, less
+   * what the turn lacks before any argument.
+   */
+  usableNow(turn: AppToolTurn): string[] {
+    return this.listForThread(turn.threadId, 'default', turn.runId).filter((tool) => usableNow(tool, turn)).map((tool) => tool.name)
   }
 
   /**
@@ -503,7 +469,7 @@ export class ToolRegistry {
    */
   async call(name: string, rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<ToolOutcome> {
     const registered = this.tools.get(name)
-    const tool = registered && !registered.hidden ? registered : undefined
+    const tool = registered && toolNeeds(registered).callable ? registered : undefined
     // Any other name can only be one of the turn's proxied user MCP tools, looked up once the turn is known.
     if (!tool && (registered || !this.options.userMcp)) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
     const { threadId, active, turn, args, caller, boundToken } = await this.admit(rawArgs, request)
@@ -520,7 +486,7 @@ export class ToolRegistry {
         const named = this.tools.get(inner.name)
         if (!named && this.options.userMcp && turn.bot.mcpTools?.some((offered) => offered.providerName === inner.name))
           return await this.callUserMcp(inner.name, inner.args, { ...site, request: innerRequest })
-        if (!named || named.hidden || inner.name === BOT_USE_TOOL || !botMayBeOffered(inner.name))
+        if (!named || !toolNeeds(named).callable || inner.name === BOT_USE_TOOL || !botMayBeOffered(inner.name))
           return refused('unknown_tool', `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`)
         return await this.callAdmitted(inner.name, named, inner.args, caller, { ...site, request: innerRequest })
       }
@@ -533,46 +499,47 @@ export class ToolRegistry {
     }
   }
 
-  /** A call of the app tool `tool`, admitted (`admit`): the bot's grant, scope, availability, approvals, then its handler. */
+  /**
+   * A call of the app tool `tool`, admitted (`admit`), held to what the authority compiler compiled for it in this turn
+   * (`compileTool`), step by step: the bot's grant, the targets, what the turn lacks, a definition's grants, asking
+   * first, then its handler.
+   */
   private async callAdmitted(name: string, tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, site: CallSite): Promise<ToolOutcome> {
-    const { threadId, active, turn, credential, boundToken, request } = site
+    const { threadId, active, turn, request } = site
+    const compiled = compileTool(tool, {
+      turn,
+      readOnly: this.options.readOnlyThread?.(threadId) === true,
+      ceiling: caller.modeCeiling,
+      permissionMode: () => this.options.permissionModeFor?.(caller.runId)
+    })
     // A bot's thread tool ("use your threads"): its grant first, which this turn holds only in the lanes that may use the
     // tool and only while this computer allows it (a refusal there is the bot's ask, never a scope error), then where the
     // call may reach, decided by the bot's rules.
-    const botThreads = turn.bot !== undefined && isBotThreadTool(name)
-    if (botThreads) {
-      const refusal = botAppToolRefusal(turn.bot!, name, args)
-      if (refusal) return refused('not_granted', refusal)
+    if (compiled.botThreads) {
+      const refusal = compiled.grantRefusal(args)
+      if (refusal) return refusal
     }
-    // Scope is checked first: a refused call asks nobody anything and leaves no ledger row.
-    const scope = botThreads ? this.botThreadScope(tool, args, caller) : this.authorize(tool, args, caller, this.options.readOnlyThread?.(threadId) === true)
-    // A bot's thread lists the browser tools whatever it holds: one its owner has not allowed says so, and how to ask,
-    // not that no browser is bound to the turn. One the owner allowed after the turn started is answered as held: the
-    // bot is not sent to ask again, and its turn continues with the browser once it ends.
-    if (turn.bot && botBrowserWithheld(turn.bot, name)) return refused('not_granted', turn.bot.held?.({ tool: name }) ?? botBrowserNotAllowed(turn.bot))
-    const availability = tool.available?.(turn) ?? true
-    if (availability !== true) return refused('unavailable', availability)
-    const unattended = unattendedRefusal(tool, turn)
-    if (unattended) return refused('needs_person', unattended)
-    // A bot turn: every app tool is held to the bot's grant, on every call (a list cached before a
-    // narrower revision cannot reach a removed tool). Nobody is asked. A thread tool was checked above.
-    if (turn.bot && !botThreads) {
-      const refusal = botAppToolRefusal(turn.bot, name, args)
-      if (refusal) return refused('not_granted', refusal)
+    // Targets are checked first: a refused call asks nobody anything and leaves no ledger row.
+    const scope = compiled.authorize(caller, args, this.options.access)
+    const lacks = compiled.lacks()
+    if (lacks) return lacks
+    // A bot turn: every other app tool is held to the bot's grant, on every call. A thread tool was checked above.
+    if (!compiled.botThreads) {
+      const refusal = compiled.grantRefusal(args)
+      if (refusal) return refusal
     }
     // A definition run: its grants, policy and approvals hold for every call, as in the in-process loop.
     // A call the runtime's gate already authorized in full (approval included, before it was
     // charged) is revalidated without asking again; any other call is authorized here.
-    if (turn.definition) {
-      const refused = await this.authorizeDefinition(name, args, { threadId, active, turn, credential, boundToken, request })
+    if (compiled.definition) {
+      const refused = await this.authorizeDefinition(name, args, site)
       if (refused) return refused
     }
-    // A tool that changes the workspace asks first unless the run's permission mode allows edits (a
-    // definition run is held to its own grants above); a rejection ends the call before its handler
-    // runs and writes no ledger row. A bot's call of a tool its grant answers (`botGrantAnswers`) asks nobody: the
-    // grant, checked above, is its owner's answer.
-    if ((tool.access === 'editsWorkspace' || tool.access === 'changesSettings') && !turn.definition && !(turn.bot && tool.botGrantAnswers)) {
-      const refusal = await this.askBeforeEditing(tool, caller, request.signal, args, undefined, turn.approvals === 'never')
+    // A tool that changes the workspace or settings asks first unless the run's permission mode allows this variant of
+    // the call; a rejection ends the call before its handler runs and writes no ledger row.
+    const ask = compiled.askFirst(args)
+    if (ask) {
+      const refusal = await this.askFirst(tool, caller, request.signal, args, ask)
       if (refusal) return refusal
     }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
@@ -716,106 +683,13 @@ export class ToolRegistry {
   }
 
   /**
-   * Read-only children, thread scope and the plan ceiling, before anything runs. Returns how the caller reaches the target of a `readsOthers` or `managesOthers` tool.
+   * A call that asks first (`CompiledTool.askFirst`): the outcome it gets instead of running, or null when the person
+   * allowed it once. An owner that cannot ask rejects, and so does a run nobody answers: nothing runs unapproved.
    */
-  private authorize(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, readOnly: boolean): ToolScope | undefined {
-    if (tool.access !== 'reads' && tool.access !== 'readsOthers' && !tool.readOnlySafe && readOnly)
-      throw new McpToolError('mousse_read_only', `${tool.name} can change threads or the workspace; a read-only subagent cannot call it.`)
-    // Scope before any approval: a call refused for naming another thread must not prompt the user first.
-    if (tool.access === 'writesThreads' || tool.access === 'editsWorkspace') callerThreadOnly(args, caller)
-    if (tool.access === 'startsThreads' && caller.modeCeiling === 'plan')
-      throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} starts threads; a plan ceiling cannot.`)
-    if (tool.access === 'changesSettings' && caller.modeCeiling === 'plan')
-      throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} changes settings; a plan ceiling cannot.`)
-    return tool.access === 'readsOthers' || tool.access === 'managesOthers' ? this.checkOthers(tool, args, caller) : undefined
-  }
-
-  /**
-   * The central check of `readsOthers` and `managesOthers` tools (SPEC §15.1): how the caller reaches
-   * the target, or `mousse_scope_denied`. Every agent may read and manage every thread; what stays out
-   * of reach is a thread that does not exist and, across the private line, a private thread. A thread
-   * the caller may not reach is refused the same way whether it exists or not.
-   */
-  private checkOthers(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller): ToolScope {
-    const target = tool.target ? tool.target(args, caller) : { threadId: args.threadId as string | undefined }
-    if (!target) return 'own'
-    if (target.threadId !== undefined && (typeof target.threadId !== 'string' || !target.threadId))
-      throw new McpToolError('mousse_scope_denied', 'threadId must be a non-empty string.')
-    if (target.threadId === undefined && !tool.target) return 'own'
-    if (target.threadId === caller.threadId) return 'own'
-    const manages = tool.access === 'managesOthers'
-    const policy = this.options.access
-    // A private thread's content stays out of shared threads (their content reaches the user's other devices):
-    // a shared thread's agent never sees a private thread, and a private thread's agent never sends to or changes a shared one.
-    if (target.threadId !== undefined && policy?.localOnly) {
-      const callerPrivate = policy.localOnly(caller.threadId)
-      const targetPrivate = policy.localOnly(target.threadId)
-      if (targetPrivate && !callerPrivate)
-        throw new McpToolError('mousse_scope_denied', `Thread ${target.threadId} is not available to this credential.`)
-      if (callerPrivate && !targetPrivate && manages)
-        throw new McpToolError('mousse_scope_denied', 'This is a private thread: its agents cannot send to or change a thread that is shared with the user\'s other devices.')
-    }
-    if (target.threadId === undefined) {
-      // A listing; the handler filters what it returns.
-      if (!policy) throw new McpToolError('mousse_scope_denied', `${tool.name} is not available here.`)
-      return 'manage'
-    }
-    let relation: ThreadRelation | null = null
-    try {
-      relation = policy?.relation(caller, target.threadId) ?? null
-    } catch {
-      relation = null
-    }
-    // A thread the caller launched keeps that scope for the tools that treat it apart.
-    if (manages && relation === 'launched' && tool.launchedOk) return 'launched'
-    let exists = false
-    try {
-      exists = Boolean(policy?.threadExists(target.threadId))
-    } catch {
-      exists = false
-    }
-    if (exists) return 'manage'
-    if (!manages && relation) return relation
-    throw new McpToolError('mousse_scope_denied', `Thread ${target.threadId} is not available to this credential.`)
-  }
-
-  /**
-   * Where a bot's thread tool may reach (`"use your threads"`, already held by the turn), by the one rule its list,
-   * search and handlers follow too (`ToolAccessPolicy.botReach`, `botThreadReach`): the owner's ordinary threads of its
-   * projects, and the threads it started. Never its own chat or any bot's thread, the Automation manager's, a private
-   * thread or a subagent; a thread that does not exist is refused in the same words. Its scope is `manage` (the bot reads
-   * transcripts, bounded by the handler) or `launched` for one it started that is out of its projects.
-   */
-  private botThreadScope(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller): ToolScope {
-    const target = tool.target ? tool.target(args, caller) : { threadId: args.threadId as string | undefined }
-    const policy = this.options.access
-    if (!policy?.botReach) throw new McpToolError('mousse_scope_denied', `${tool.name} is not available here.`)
-    if (!target || (target.threadId === undefined && target.projectId === undefined)) return 'manage'
-    if (target.threadId !== undefined && (typeof target.threadId !== 'string' || !target.threadId))
-      throw new McpToolError('mousse_scope_denied', 'threadId must be a non-empty string.')
-    let reach: { scope: ToolScope } | { refused: string }
-    try {
-      // A tool that only reads reaches the subagents below the owner's threads too (#1365).
-      reach = policy.botReach(caller, target, { read: tool.class === 'read' })
-    } catch {
-      reach = { refused: target.threadId ? `Thread ${target.threadId} is not available to you.` : `${tool.name} is not available for this project.` }
-    }
-    if ('refused' in reach) throw new McpToolError('mousse_scope_denied', reach.refused)
-    return reach.scope
-  }
-
-  /**
-   * The outcome a rejected `editsWorkspace` or `changesSettings` call gets instead of running: null when the call may go
-   * ahead (the run's permission mode allows edits, or the user allowed it once). An owner that cannot
-   * ask rejects, and so does a run nobody answers: nothing runs unapproved.
-   */
-  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, turnMode?: PermissionMode, unattended = false): Promise<ToolOutcome | null> {
-    // An unknown mode is Ask: it fails closed (docs/plans/tool-api.md §1.3).
-    const mode = turnMode ?? this.options.permissionModeFor?.(caller.runId) ?? 'ask'
-    const needs = tool.runsWithoutAsking?.(args) ?? 'edit'
-    if (needs === 'full' ? mode === 'full' : permissionModeAllows(mode, 'edit')) return null
+  private async askFirst(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, ask: AskFirst): Promise<ToolOutcome | null> {
+    const { needs } = ask
     // A run nobody answers (`approvals: 'never'`) is refused at once rather than waiting for a person.
-    if (unattended) return refused('needs_person', APPROVALS_REFUSED_MESSAGE)
+    if (ask.unattended) return refused('needs_person', APPROVALS_REFUSED_MESSAGE)
     const notApproved = `The user did not approve ${tool.name}, so it did not run. Do not retry it unless they ask.`
     const rejected: ToolOutcome = refused('not_approved', notApproved)
     if (!this.options.askApproval) return rejected
