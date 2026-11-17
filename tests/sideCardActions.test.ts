@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -179,6 +180,13 @@ describe('quick actions sync start', () => {
     expect(fresh.startQuickActionsSync()).toBe(stop)
     expect(onCreated).toHaveBeenCalledTimes(1)
     stop()
+  })
+
+  it('has one start path: the store module, not the section', () => {
+    const section = readFileSync(new URL('../src/renderer/components/sideCard/ActionsSection.tsx', import.meta.url), 'utf8')
+    expect(section).not.toContain('startQuickActionsSync')
+    const store = readFileSync(new URL('../src/renderer/stores/quickActionsStore.ts', import.meta.url), 'utf8')
+    expect(store).toMatch(/window\.mousse\) startQuickActionsSync\(\)/)
   })
 })
 

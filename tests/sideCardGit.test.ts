@@ -546,6 +546,14 @@ describe('git section stylesheet', () => {
     return start < 0 ? '' : css.slice(start, css.indexOf('}', start))
   }
 
+  it('keeps the popover free of transitions, so focus can move in once it is positioned', () => {
+    expect(rule('.side-card-git-popover')).toMatch(/transition:\s*none/)
+  })
+
+  it('stops the pending pull request animation when reduced motion is asked for', () => {
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\.side-card-git-pr-pending \{\s*animation: none/)
+  })
+
   it('marks the selected branch with a neutral fill, not an accent tint', () => {
     const selected = rule(".side-card-git-option[aria-selected='true']")
     expect(selected).toMatch(/background:\s*var\(--ui-pressed\)/)
