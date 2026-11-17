@@ -405,7 +405,7 @@ export class BotMemoryStore {
   windowRows(botId: string, fromSeq: number): BotJournalRow[] {
     return this.all(`SELECT * FROM bot_journal WHERE bot_id = ? AND seq >= ? AND (
         (kind IN ('owner_msg','bot_msg','run_report') AND source_key LIKE 'bm:%')
-        OR (kind = 'notice' AND substr(source_key, 1, ?) = ?)
+        OR (kind = 'notice' AND (substr(source_key, 1, ?) = ? OR substr(source_key, 1, 13) = 'bm:bm_action_'))
       ) ORDER BY seq`, botId, fromSeq, BOT_CHAT_TURN_END_KEY.length, BOT_CHAT_TURN_END_KEY).map(journalRowOf)
   }
 
