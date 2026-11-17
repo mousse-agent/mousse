@@ -566,6 +566,11 @@ export interface TurnAppContext {
   modeCeiling: ModeCeiling
   /** The agent access level granted to the run (SPEC §15.1); absent is `lineage`. */
   accessLevel?: AgentAccessLevel
+  /**
+   * The thread's capability revision (`ToolRegistry.capabilityRevision`): when it differs from the last turn's, the
+   * turn gets a new credential epoch, so the runtime takes the list the thread holds now.
+   */
+  capabilityRevision?: string
   /** The turn may attach the Mousse MCP server (a run engine run). */
   mcpEligible: boolean
   /**
@@ -2040,6 +2045,13 @@ export class Harness implements HarnessGateway {
     const relayGrant = record.driver.relay && (botRelay || (app.relay && app.relay.runtimes[record.driver.kind as McpRelayRuntime] === true && !app.bot && !app.definition && binding.policy.authority?.kind !== 'bot'))
       ? { approvals: record.driver.relay.approvals }
       : undefined
+    // What the server's tool list depends on, apart from the bearer: the caller's policy, a level other than the default,
+    // and the thread's capability revision.
+    const listParts = [
+      ...(binding.policyDigest ? [binding.policyDigest] : []),
+      ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : []),
+      ...(app.capabilityRevision ? [`caps:${app.capabilityRevision}`] : [])
+    ]
     let attachment: { url: string; token: string; tokenHash: string; relayUrl: string } | null = null
     if (app.mcpEligible && this.mcp && mcpAttachable(caps)) {
       try {
@@ -2054,8 +2066,9 @@ export class Harness implements HarnessGateway {
           // A new runtime, a new epoch: driver, home, signed-in account and settings, and a caller's
           // policy (a narrower grant must not keep the tool list of the last one). So is a different agent
           // access level (SPEC §15.1): a runtime caches its tool list, so it takes the new level with a new
-          // bearer. The default level adds nothing, so a profile that never sets one is unchanged.
-          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
+          // bearer. The default level adds nothing, so a profile that never sets one is unchanged. So is a new
+          // capability revision: the list the thread holds changed, and no runtime is told so mid-epoch.
+          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...listParts].join('|')
         })
       } catch (error) {
         console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
@@ -2070,9 +2083,9 @@ export class Harness implements HarnessGateway {
       ? { url: attachment.relayUrl, revision: botRelay ? botRelayRevision(app.bot!) : app.relay!.revision }
       : undefined
     const texts = app.instructions(attachment !== null, relay !== undefined)
-    // What the server's tool list depends on, apart from the bearer: a runtime that keeps its process for a bearer
-    // renewed in place starts a new one when this changes, since it would keep offering a tool the list dropped.
-    const tools = [...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
+    // A runtime that keeps its process for a bearer renewed in place starts a new one when this changes, since it would
+    // keep offering a tool the list dropped.
+    const tools = listParts.join('|')
     return {
       bridge: {
         mcp: attachment ? { url: attachment.url, token: attachment.token, ...(tools ? { tools } : {}), ...(relay ? { relay } : {}) } : null,

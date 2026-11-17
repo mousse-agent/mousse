@@ -59,6 +59,8 @@ export const AGENT_QUEUE_MAX_PER_THREAD = 10
 export const AGENT_REPEAT_WINDOW_MS = 120_000
 /** A removed message's text is cut to this many characters in the transcript row (the event keeps more). */
 const REMOVED_TEXT_ROW_CHARS = 600
+/** The follow-up a subagent gets when `thread_update access … apply: now` stopped its turn. */
+export const ACCESS_LIFTED_CONTINUE = 'Your parent lifted your read-only access: you may now edit files and run commands in its folder, with its tools. Your last turn was stopped to apply it. Continue your task from where you stopped.'
 const THREAD_LIST_DEFAULT_LIMIT = 100
 const THREAD_LIST_MAX_LIMIT = 500
 const THREAD_SEARCH_DEFAULT_LIMIT = 50
@@ -853,6 +855,83 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       title: followUp.title,
       subagent: true,
       note: followUp.note
+    })
+  }
+  /**
+   * Hides a thread the calling bot started from its owner's sidebar, or shows it again: `thread_hide`, and
+   * `thread_update hidden` (docs/plans/tool-api.md §1.5), which the thread family's switch makes its only name.
+   */
+  const hideThread = (threadId: string, hidden: boolean, ctx: ToolCallContext, name: 'thread_hide' | 'thread_update'): ToolOutcome => {
+    const bot = botThreadCall(bots, ctx)
+    if (!bot) throw new McpToolError('mousse_scope_denied', `${name === 'thread_hide' ? 'thread_hide' : 'thread_update hidden'} is for personal bots: a thread an agent starts always shows in the sidebar.`)
+    if (!host.setThreadHidden) return notAvailable(name)
+    requireBotReach(host, engine, ctx.caller.threadId, threadId)
+    assertNotBotThread(host, threadId, name)
+    const actor = actorOf(ctx)
+    const result = host.setThreadHidden(threadId, hidden, { actor })
+    const title = titleOf(threadId)
+    if (result.changed) {
+      showAction(host, threadId, actor, hidden ? 'hid this thread from the sidebar' : 'showed this thread in the sidebar again')
+      botChip(bot, 'thread_hide', threadId, title, undefined, { hidden })
+    }
+    return json({
+      threadId,
+      link: threadLink(threadId),
+      title: title ?? null,
+      hidden,
+      changed: result.changed,
+      note: hidden ? 'It is out of your owner\'s sidebar; your chat lists it.' : 'It is in your owner\'s sidebar again.'
+    })
+  }
+  /**
+   * `thread_update access {readOnly: false}` (docs/plans/tool-api.md §2.4): the caller's own subagent loses the read-only
+   * narrowing the caller gave it. A caller under Plan does not hold edit, so it cannot give it. With `apply: now` the
+   * owner stops the subagent's running turn and the caller continues it on the same thread, as `continue_subagent` does.
+   */
+  const updateAccess = async (threadId: string, apply: 'next_turn' | 'now', expectedRevision: string | undefined, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => {
+    if (botThreadCall(bots, ctx)) throw new McpToolError('mousse_scope_denied', 'thread_update access is for a subagent\'s direct parent; a thread you started keeps the access it started with.')
+    if (ctx.caller.modeCeiling === 'plan')
+      return refused('lacks_capability', 'thread_update access lifts a subagent to editing, which a Plan ceiling does not hold.', { lacks: 'edit', fix: 'Leave Plan, then lift it.' })
+    if (!host.updateSubagentAccess) return notAvailable('thread_update access')
+    const delegation = apply === 'now' ? ctx.turn.delegation ?? (ctx.transport === 'mcp' ? host.delegation(ctx.caller) : undefined) : undefined
+    if (apply === 'now' && !delegation) return notAvailable('thread_update access with apply: now')
+    const result = await host.updateSubagentAccess(threadId, { readOnly: false }, {
+      actor: actorOf(ctx),
+      apply,
+      ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+      clientRequestId: `thread_update:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+    })
+    if (result.status === 'rejected') {
+      if (result.reason === 'not_parent') throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not your own subagent: only a subagent's direct parent changes its access.`)
+      if (result.reason === 'revision_changed')
+        throw new McpToolError('mousse_conflict', `Thread ${threadId}'s access changed since you read it${result.revision ? ` (revision ${result.revision} now)` : ''}; nothing was changed. Read it again before you change it.`, { conflict: 'revision_changed', ...(result.revision ? { revision: result.revision } : {}) })
+      if (result.reason === 'waiting_on_request')
+        throw new McpToolError('mousse_conflict', `Thread ${threadId} waits on a question or an approval, so its turn was not restarted and nothing was changed. Use apply next_turn, or answer it first.`, { conflict: 'waiting_on_request' })
+      throw new McpToolError('mousse_conflict', `Thread ${threadId} has subagents of its own working, which restarting its turn would stop; nothing was changed. Use apply next_turn.`, { conflict: 'subagents_working' })
+    }
+    // The person sees in the subagent's thread that it may now edit, and who allowed it.
+    if (result.changed) showAction(host, threadId, actorOf(ctx), 'lifted this subagent\'s read-only access: it may now edit files and run commands in its parent\'s folder')
+    const base = { threadId, link: threadLink(threadId), title: titleOf(threadId) ?? null, access: { readOnly: result.readOnly }, changed: result.changed, ...(result.revision ? { revision: result.revision } : {}) }
+    if (!result.stoppedRunId) {
+      return json({
+        ...base,
+        applied: result.changed ? 'next_turn' : 'unchanged',
+        note: !result.changed ? 'It already works with your tools.' : apply === 'now' ? 'It has no turn running: its next task runs with this access.' : 'Its next turn runs with this access.'
+      })
+    }
+    // Its turn was stopped: it goes on on the same thread, with its history, under the new access.
+    const followUp = await delegation!.continueSubagent({ subagent: threadId, prompt: ACCESS_LIFTED_CONTINUE }, { toolCallId: ctx.toolCallId }) as { started?: boolean; status?: string; delegationId?: string; childRunId?: string; note?: string }
+    return json({
+      ...base,
+      applied: 'now',
+      stoppedRunId: result.stoppedRunId,
+      ...(followUp.childRunId ? { runId: followUp.childRunId } : {}),
+      ...(followUp.delegationId ? { delegationId: followUp.delegationId } : {}),
+      note: followUp.started === false || !followUp.childRunId
+        ? `Its turn was stopped and the change made, but it did not continue: ${followUp.note ?? 'send it a follow-up.'}`
+        : followUp.status === 'queued'
+          ? 'Its turn was stopped and the change made, but the stopped turn had not ended yet, so the follow-up waits in its queue; it runs when the thread runs a turn again.'
+          : 'Its turn was stopped and continues now under the new access; Mousse sends you its result.'
     })
   }
   /**
@@ -2035,27 +2114,45 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
         if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
-        const hidden = args.hidden !== false
-        const bot = botThreadCall(bots, ctx)
-        if (!bot) throw new McpToolError('mousse_scope_denied', 'thread_hide is for personal bots: a thread an agent starts always shows in the sidebar.')
-        if (!host.setThreadHidden) return notAvailable('thread_hide')
-        requireBotReach(host, engine, ctx.caller.threadId, threadId)
-        assertNotBotThread(host, threadId, 'thread_hide')
-        const actor = actorOf(ctx)
-        const result = host.setThreadHidden(threadId, hidden, { actor })
-        const title = titleOf(threadId)
-        if (result.changed) {
-          showAction(host, threadId, actor, hidden ? 'hid this thread from the sidebar' : 'showed this thread in the sidebar again')
-          botChip(bot, 'thread_hide', threadId, title, undefined, { hidden })
+        return hideThread(threadId, args.hidden !== false, ctx, 'thread_hide')
+      }
+    },
+    {
+      name: 'thread_update',
+      description: 'Change a thread. One change per call. hidden (personal bots only, threads you started): hide one from your owner\'s sidebar or show it there again with hidden: false, as thread_hide does. access (your own subagent only): access {readOnly: false} lifts the read-only narrowing you gave a subagent that works in your folder, so it edits files and runs commands there with your tools, never more than you hold; you need to hold that yourself (not read-only, not under Plan). apply next_turn (the default) takes effect at its next turn; apply now stops its running turn and continues it on the same thread, with its history, under the new access (a follow-up task, as continue_subagent starts, whose result Mousse sends you). apply now is refused while the subagent waits on a person or has subagents of its own working. Returns its access and revision; pass that revision as expectedRevision to refuse a change if its access changed meanwhile.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+          hidden: { type: 'boolean', description: 'Personal bots only: true hides a thread you started from your owner\'s sidebar, false shows it again.' },
+          access: {
+            type: 'object',
+            properties: { readOnly: { type: 'boolean', description: 'false lifts the read-only narrowing of your own subagent.' } },
+            required: ['readOnly']
+          },
+          apply: { type: 'string', enum: ['next_turn', 'now'], description: 'When access takes effect: at its next turn (default), or now, restarting its running turn.' },
+          expectedRevision: { type: 'string', description: 'The revision thread_update returned last; the change is refused if it differs now.' }
+        },
+        required: ['threadId']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      offered: () => false,
+      handler: async (args, ctx) => {
+        const threadId = requiredId(args, 'threadId')
+        if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
+        if (args.apply !== undefined && args.apply !== 'next_turn' && args.apply !== 'now') throw new Error('apply must be next_turn or now')
+        if (args.expectedRevision !== undefined && (typeof args.expectedRevision !== 'string' || !args.expectedRevision)) throw new Error('expectedRevision must be the revision thread_update returned')
+        if ((args.hidden === undefined) === (args.access === undefined)) throw new Error('thread_update makes one change per call: give hidden or access.')
+        if (args.hidden !== undefined) {
+          if (args.apply !== undefined || args.expectedRevision !== undefined) throw new Error('apply and expectedRevision go with access only')
+          return hideThread(threadId, args.hidden, ctx, 'thread_update')
         }
-        return json({
-          threadId,
-          link: threadLink(threadId),
-          title: title ?? null,
-          hidden,
-          changed: result.changed,
-          note: hidden ? 'It is out of your owner\'s sidebar; your chat lists it.' : 'It is in your owner\'s sidebar again.'
-        })
+        const access = args.access as Record<string, unknown> | null
+        if (!access || typeof access !== 'object' || Array.isArray(access) || Object.keys(access).some((key) => key !== 'readOnly') || typeof access.readOnly !== 'boolean')
+          throw new Error('access must be {readOnly: false}')
+        if (access.readOnly !== false) throw new Error('access {readOnly: true} is not available: a subagent is made read-only when it starts (delegate_task readOnly: true).')
+        return updateAccess(threadId, (args.apply as 'next_turn' | 'now' | undefined) ?? 'next_turn', args.expectedRevision as string | undefined, args, ctx)
       }
     },
     {

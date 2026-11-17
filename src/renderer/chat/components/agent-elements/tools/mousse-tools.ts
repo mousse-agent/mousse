@@ -71,6 +71,7 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   thread_merge_back: ["merge", "a thread back in Mousse"],
   thread_archive: ["archive", "a thread in Mousse"],
   thread_hide: ["hide", "a thread in Mousse"],
+  thread_update: ["update", "a thread in Mousse"],
   // A thread's queue
   queue_list: ["read", "a thread's queue in Mousse"],
   queue_enqueue: ["queue", "a message in Mousse"],

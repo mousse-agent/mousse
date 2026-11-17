@@ -89,7 +89,7 @@ import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, steerStrategy, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
-import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, type LacksReport, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, type AgentAccessResult, type LacksReport, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation } from '../run/mcp/appTools/thread'
 import { botMessage } from '../run/mcp/appTools/agentMessage'
@@ -4383,10 +4383,13 @@ export class OrchestratorService extends EventEmitter {
     const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
     // What already runs for the turn's folder, read now: the agent reuses a running server instead of starting another.
     const running = await this.runningNoteFor(turn)
+    // The list the thread holds now; a definition's list is its turn's, and a bot's follows its grant.
+    const capabilityRevision = turn.definition || turn.bot ? undefined : this.capabilityRevisionOf(turn.threadId)
     return {
       turnToken: turn.turnToken,
       modeCeiling: turn.modeCeiling,
       ...(turn.accessLevel ? { accessLevel: turn.accessLevel } : {}),
+      ...(capabilityRevision ? { capabilityRevision } : {}),
       mcpEligible: Boolean(this.runEngine),
       ...(turn.definition ? { definition: turn.definition } : {}),
       ...(turn.bot ? { bot: turn.bot } : {}),
@@ -4426,6 +4429,16 @@ export class OrchestratorService extends EventEmitter {
   /** The Mousse tools a thread's credential lists that the turn may use now. */
   private usableAppTools(turn: AppToolTurn): string[] {
     return this.mcpToolRegistry().usableNow(turn)
+  }
+
+  /** `ToolRegistry.capabilityRevision` of a thread; undefined without a run engine or when it cannot be read. */
+  private capabilityRevisionOf(threadId: string): string | undefined {
+    if (!this.runEngine) return undefined
+    try {
+      return this.mcpToolRegistry().capabilityRevision(threadId)
+    } catch {
+      return undefined
+    }
   }
 
   /**
@@ -4622,6 +4635,7 @@ export class OrchestratorService extends EventEmitter {
       setThreadArchived: (threadId, archived, options) => this.setThreadArchivedAsAgent(threadId, archived, options),
       archiveOwnThreadAfterTurn: (options) => this.archiveOwnThreadAfterTurn(options),
       setThreadHidden: (threadId, hidden, options) => this.setThreadHiddenAsAgent(threadId, hidden, options),
+      updateSubagentAccess: (threadId, _access, options) => this.liftSubagentReadOnly(threadId, options),
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
       steerStrategyOf: (threadId) => {
         const caps = this.capabilitiesForThread(threadId)
@@ -5702,6 +5716,51 @@ export class OrchestratorService extends EventEmitter {
       payload: { action: hidden ? 'hid_thread' : 'unhid_thread', actorThreadId: options.actor.threadId, actorRunId: options.actor.runId, toolCallId: options.actor.toolCallId }
     })
     return { hidden, changed: true }
+  }
+
+  /**
+   * `thread_update access {readOnly: false}` (docs/plans/tool-api.md §2.4): the direct parent lifts the read-only
+   * narrowing it gave a subagent working in its folder (`workspaceBinding.access`), so the subagent works there with the
+   * parent's tools, never more (its permission mode stays the narrowest of its lineage). The registry refused a parent
+   * that does not hold edit (read-only, or under Plan). The next turn takes it: its runtime is no longer held read-only,
+   * and its capability revision changes, so it lists again. `apply: now` also stops the running turn, so the caller
+   * continues the subagent on the same thread; that is refused while the subagent waits on a person or has subagents of
+   * its own working, which a Stop would end. The change is recorded as an `agent.action` of the subagent's thread.
+   */
+  private async liftSubagentReadOnly(threadId: string, options: { actor: AgentActor; apply: 'next_turn' | 'now'; expectedRevision?: string; clientRequestId: string }): Promise<AgentAccessResult> {
+    const engine = this.requireRunEngine()
+    const lineage = engine.delegations.getLineage(threadId)
+    if (lineage?.relationship !== 'subagent' || lineage.parentThreadId !== options.actor.threadId) return { status: 'rejected', reason: 'not_parent' }
+    const revision = this.capabilityRevisionOf(threadId)
+    if (options.expectedRevision !== undefined && options.expectedRevision !== revision) return { status: 'rejected', reason: 'revision_changed', ...(revision ? { revision } : {}) }
+    if (!this.isReadOnlyChild(threadId)) return { status: 'accepted', readOnly: false, changed: false, ...(revision ? { revision } : {}) }
+    let stop: string | undefined
+    if (options.apply === 'now') {
+      const active = engine.getActiveRun(threadId)
+      if (active) {
+        if (this.questions.listPendingForThread(threadId).length > 0 || engine.approvals.listPending(threadId).length > 0) return { status: 'rejected', reason: 'waiting_on_request' }
+        if (subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? []).some((id) => engine.getActiveRun(id))) return { status: 'rejected', reason: 'subagents_working' }
+        stop = active.runId
+      }
+    }
+    const binding = this.threadStore?.getThread(threadId)?.workspaceBinding
+    if (binding) this.threadStore!.updateThreadMeta(threadId, { workspaceBinding: { ...binding, access: 'write' } })
+    const session = this.getOrCreateSession(threadId)
+    if (session.sharedWorkspace) session.sharedWorkspace = { ...session.sharedWorkspace, access: 'write' }
+    engine.store.appendEvent({
+      threadId,
+      runId: null,
+      type: 'agent.action',
+      payload: { action: 'lifted_read_only', actorThreadId: options.actor.threadId, actorRunId: options.actor.runId, toolCallId: options.actor.toolCallId }
+    })
+    if (stop) {
+      await this.stopThread(threadId, 'agent', { runId: stop, clientRequestId: options.clientRequestId, requesterThreadId: options.actor.threadId, actor: options.actor })
+      // The follow-up starts a turn only once the stopped one has ended: sent while it still ends, it would wait in the
+      // queue, which a Stop never drains.
+      await this.waitForTurnToSettle(session)
+    }
+    const now = this.capabilityRevisionOf(threadId)
+    return { status: 'accepted', readOnly: this.isReadOnlyChild(threadId), changed: true, ...(now ? { revision: now } : {}), ...(stop ? { stoppedRunId: stop } : {}) }
   }
 
   /**

@@ -421,6 +421,10 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(JSON.parse((await text('thread_hide', { threadId: 'mine', hidden: false })).text)).toMatchObject({ hidden: false, changed: true })
     expect(host.setThreadHidden).toHaveBeenLastCalledWith('mine', false, expect.anything())
     expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_hide', { threadId: 'mine', title: 'Fix the login page', hidden: false })
+    // thread_update hidden does the same.
+    expect(JSON.parse((await text('thread_update', { threadId: 'mine', hidden: true })).text)).toMatchObject({ threadId: 'mine', hidden: true, changed: true })
+    expect(host.setThreadHidden).toHaveBeenLastCalledWith('mine', true, { actor: expect.objectContaining({ threadId: 'home', runId }) })
+    expect((await text('thread_update', { threadId: 'mine', hidden: true, apply: 'now' })).text).toMatch(/apply and expectedRevision go with access only/)
     vi.mocked(host.showAgentAction!).mockClear()
     onAppResult.mockClear()
     vi.mocked(host.setThreadHidden!).mockReturnValueOnce({ hidden: false, changed: false })
@@ -437,6 +441,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const asAgent = (name: string, args: Record<string, unknown>) => fresh.registry.call(name, args, fresh.request({ threadId: 'mine', runId: agent.runId })).catch((error: Error) => ({ isError: true, text: error.message }))
     expect(await asAgent('thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y', hidden: true })).toMatchObject({ isError: true, text: expect.stringContaining('hidden is for personal bots') })
     expect(await asAgent('thread_hide', { threadId: 'archived' })).toMatchObject({ isError: true, text: expect.stringContaining('thread_hide is for personal bots') })
+    expect(await asAgent('thread_update', { threadId: 'archived', hidden: true })).toMatchObject({ isError: true, text: expect.stringContaining('thread_update hidden is for personal bots') })
     expect(fresh.host.createThread).not.toHaveBeenCalled()
     expect(fresh.host.setThreadHidden).not.toHaveBeenCalled()
   })
