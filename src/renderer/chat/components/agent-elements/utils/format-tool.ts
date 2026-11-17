@@ -120,7 +120,8 @@ function plainLine(text: string): string {
   return stripInlineMarkdown(text).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
 }
 
-const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+/** A code fence at any indent: a thought nests them in list items, and is no full markdown document. */
+const FENCE_LINE = /^\s*(`{3,}|~{3,})(.*)$/;
 
 /**
  * Which of `lines` belong to a fenced code block, its fence lines included. A fence still open at the end (being
@@ -193,8 +194,12 @@ export function thoughtHeadline(content: string | undefined): string {
     const title = titleOf(allLines[index]!);
     if (title) return cutCodePoints(title, HEADLINE_MAX);
   }
-  const paragraphs = content.split(/\n\s*\n/).filter((block) => block.trim());
-  const newest = paragraphs[paragraphs.length - 1]!;
+  // The newest paragraph of prose: a code block is no paragraph, so a thought that ends in code reads as the prose
+  // before it.
+  const prose = allLines.map((line, index) => (code[index] ? "" : line)).join("\n");
+  const paragraphs = prose.split(/\n\s*\n/).filter((block) => block.trim());
+  const newest = paragraphs[paragraphs.length - 1];
+  if (!newest) return "";
   const lines = newest.split("\n").map((line) => line.trim()).filter(Boolean);
   // List markers and quote marks are not words of the sentence.
   const body = lines

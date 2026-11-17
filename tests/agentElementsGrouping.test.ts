@@ -42,6 +42,13 @@ describe('thoughtHeadline', () => {
     ['bold inside a fence', 'Look at it.\n\n~~~md\n**Not a title**\n~~~\n\nThe file is fine. Next.', 'The file is fine.'],
     ['a real title above a fence, prose after it: the title wins', '**Checking the setup**\n\n```py\n# Load the config\nload()\n```\n\nIt reads the file twice.', 'Checking the setup'],
     ['a fence still being written', '**Checking the setup**\n\n```sh\n# not a title', 'Checking the setup'],
+    ['a fence nested in a list item', '**Checking the setup**\n\n- Install it:\n\n    ```sh\n    # install deps\n    npm ci\n    ```\n\nThen run it.', 'Checking the setup'],
+    ['an indented fence', '**Checking the setup**\n\n        ```\n        **not a title**\n        ```', 'Checking the setup'],
+    ['a nested fence still being written', '**Checking the setup**\n\n- Install it:\n    ```sh\n    # install deps', 'Checking the setup'],
+    // With no title, a code block is not the newest paragraph: the prose before it is.
+    ['no title, ending in a closed code block', 'Checking the script.\n\n```sh\n# install deps\nnpm ci\n```', 'Checking the script.'],
+    ['no title, ending in a code block still being written', 'Checking the script.\n\n```sh\n# install deps\nnpm', 'Checking the script.'],
+    ['no title, a code block straight after the prose', 'Run this first:\n```sh\nnpm ci\n```', 'Run this first:'],
     ['a sentence still being written is shown as far as it goes', 'Looking at the sto', 'Looking at the sto'],
     ['a question ends a sentence', 'Why does it remount? The key changes.', 'Why does it remount?'],
     ['a closing quote stays with its sentence', 'He said "stop." Then left.', 'He said "stop."'],

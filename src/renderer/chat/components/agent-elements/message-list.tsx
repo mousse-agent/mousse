@@ -38,7 +38,7 @@ import {
   formatTokens,
   formatTokensPerSecond,
 } from "../../../utils/assistantMessageActions";
-import { createToolOpenStore, ToolOpenContext } from "./tools/tool-open-state";
+import { createToolOpenStore, takeLiveRunFocus, ToolOpenContext } from "./tools/tool-open-state";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
 import { callTitle, TurnProgressRow, useTurnProgressState, type LiveRun } from "./turn-progress";
@@ -304,10 +304,16 @@ function TurnWorkStatus({
    * A finished turn whose work folds behind this line: the line is the control that opens it ("Worked for 32s ›"),
    * and `open` says whether the work shows.
    */
-  fold?: { open: boolean; onToggle: () => void };
+  fold?: { open: boolean; onToggle: () => void; hiddenRuns?: readonly string[] };
   /** How many replies with text the fold hides, said on a finished turn's line so an earlier answer is not missed. */
   foldedReplies?: number;
 }) {
+  // The live row's chevron had focus when the turn ended and folded that run away: the line that opens it takes focus.
+  const foldToggleRef = useRef<HTMLButtonElement>(null);
+  const hiddenRuns = fold?.hiddenRuns?.join("\n") ?? "";
+  useLayoutEffect(() => {
+    if (hiddenRuns && hiddenRuns.split("\n").some(takeLiveRunFocus)) foldToggleRef.current?.focus();
+  }, [hiddenRuns]);
   const fallbackStartRef = useRef<number | null>(null);
   if (!active) fallbackStartRef.current = null;
   else if (startedAt == null && fallbackStartRef.current == null) {
@@ -350,6 +356,7 @@ function TurnWorkStatus({
         <LiveWorkLabel working={label!} title={longLabel} />
       ) : fold ? (
         <button
+          ref={foldToggleRef}
           type="button"
           className="turn-work-label turn-work-toggle"
           aria-expanded={fold.open}
@@ -2708,6 +2715,14 @@ const TurnRow = memo(function TurnRow({
           const hasFold = folded.some((value, index) => value && rows[index]!.node != null);
           // Replies the fold hides, narration as well as answers that closed an earlier run, so none is missed.
           const foldedReplies = folded.filter((value, index) => value && rows[index]!.fold.text && rows[index]!.node != null).length;
+          // The open keys of the runs the closed fold hides, under the key the live row had for each (its first message).
+          const hiddenRuns = hasFold && !workOpen
+            ? segments.flatMap((segment, index) => {
+                if (!folded[index] || segment.kind === "cards") return [];
+                const first = segment.kind === "tools" ? segment.msgIndices[0]! : segment.msgIndex;
+                return [`${answerMsgs[first]!.id}-toolcalls`];
+              })
+            : undefined;
 
           return (
             <div className="group/assistant-turn">
@@ -2725,7 +2740,7 @@ const TurnRow = memo(function TurnRow({
                 }
                 end={turn.end}
                 endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
-                fold={hasFold ? { open: workOpen, onToggle: () => onToggleWork(turnKey) } : undefined}
+                fold={hasFold ? { open: workOpen, onToggle: () => onToggleWork(turnKey), hiddenRuns } : undefined}
                 foldedReplies={foldedReplies}
               />
               <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">

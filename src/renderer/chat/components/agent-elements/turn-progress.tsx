@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { UIMessage } from "ai";
 import { Collapse } from "../../../components/ui/Collapse";
-import { LiveRunBodyContext, liveRunToggleFocus, useToolOpen } from "./tools/tool-open-state";
+import { LiveRunBodyContext, dropLiveRunFocus, liveRunToggleFocus, useToolOpen } from "./tools/tool-open-state";
 import { IconChevronRight } from "../../../lib/icons";
 import { useReplyPacing } from "../../../lib/replyPacingSetting";
 import type { TurnPhase, TurnStep } from "../../../../shared/types";
@@ -526,6 +526,9 @@ export function TurnProgressRow({
   useCalmAnnouncement(statusRef, announcementOf(progress));
   const dots = !!progress && !THINKING_KINDS.has(progress.kind) && !progress.tool;
   const pauseDots = useOffscreenPause<HTMLSpanElement>(dots);
+  // Whatever took the chevron's focus took it as it mounted; no line that mounts later may take it.
+  const chevronKey = run && run.count > 0 ? run.openKey : undefined;
+  useEffect(() => () => dropLiveRunFocus(chevronKey), [chevronKey]);
   // The chevron follows the two lines, level with the first: one element whichever lines show, so focus stays on it.
   const chevron = run && run.count > 0 ? (
     <button

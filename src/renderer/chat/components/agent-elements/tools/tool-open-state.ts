@@ -66,7 +66,10 @@ export function useRowOpenState(initial: boolean): [boolean, (update: boolean | 
 
 /**
  * The open key of the live row whose chevron has keyboard focus. When the run ends, its group line replaces the live
- * row under the same key and takes the focus (`takeLiveRunFocus`), so it does not drop to the page.
+ * row under the same key and takes the focus (`takeLiveRunFocus`), or, when the finished turn folds the run away, the
+ * turn's "Worked for" line does; so focus does not drop to the page. Whatever takes it does so as it mounts, in the
+ * commit that removes the chevron; the live row then drops the hand-off (`dropLiveRunFocus`), so nothing that mounts
+ * later (a fold opened afterwards) takes focus.
  */
 let focusedLiveRun: string | null = null;
 
@@ -83,7 +86,15 @@ export function liveRunToggleFocus(key: string | undefined, focused: boolean, to
   });
 }
 
-/** Whether the group line for `key` should take focus from the live row it replaced (focus is on nothing now). */
+/**
+ * The chevron for `key` is gone and the commit that removed it is over: run from a passive effect's cleanup, which
+ * follows every layout effect of that commit, so a destination that mounted has already taken the focus.
+ */
+export function dropLiveRunFocus(key: string | undefined): void {
+  if (key && focusedLiveRun === key) focusedLiveRun = null;
+}
+
+/** Whether the line for `key` should take focus from the live row it replaced (focus is on nothing now). */
 export function takeLiveRunFocus(key: string | undefined): boolean {
   if (!key || focusedLiveRun !== key) return false;
   focusedLiveRun = null;
