@@ -133,7 +133,7 @@ describe('"use your threads" in the bot engine', () => {
     ['a question no one answered', { lane: 'chat', idempotencyKey: 'question:q1:default' }, true, ''],
     ['a thread outcome notice', { lane: 'chat', idempotencyKey: 'job:j1:a1' }, true, ''],
     ['a scheduled run', { lane: 'run', idempotencyKey: 'sched:b1:s1:2026-11-13T09:00:00.000Z' }, true, ''],
-    ['the bot\'s first message', { lane: 'chat', idempotencyKey: 'create:req-1' }, false, BOT_THREADS_NOT_OWNER_TEXT],
+    ['the bot\'s first message', { lane: 'chat', idempotencyKey: 'create:req-1' }, true, ''],
     ['another bot\'s message', { lane: 'chat', idempotencyKey: 'botmsg:m1' }, false, BOT_THREADS_NOT_OWNER_TEXT]
   ]
   it.each(turns)('%s', (_name, row, all, refusal) => {
