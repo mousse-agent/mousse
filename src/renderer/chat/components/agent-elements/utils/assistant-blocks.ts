@@ -587,9 +587,23 @@ function timeOf(value: unknown): number | null {
 }
 
 /**
+ * Mousse's `secret_request` call, however the runtime names it (`mcp__mousse__secret_request`, a bare
+ * `secret_request`, or the name an ACP agent leaves in the call's summary).
+ */
+function isSecretRequestCall(part: Record<string, unknown>): boolean {
+  if (typeof part.type !== "string" || !part.type.startsWith("tool-")) return false;
+  const bare = (name: string) => name.trim().split("__").pop() === "secret_request";
+  const summary = isRecord(part.input) && typeof part.input.summary === "string" ? part.input.summary : "";
+  return bare(part.type.slice(5)) || bare(summary);
+}
+
+/**
  * When a turn's messages say the agent waited on the person: an approval from when it was asked until it was answered
  * (still waiting while pending), a secret request while it is open, and a question until its answers when nothing
- * ran in between (a question asked without waiting lets the agent go on, so its time counts).
+ * ran in between (a question asked without waiting lets the agent go on, so its time counts). A `secret_request`
+ * call blocks until the person answers, declines or an hour passes, so its wait runs from the call to the turn's next
+ * message: that is also when an answered request's wait ends once the open request is gone. It includes the moment
+ * the agent takes to start again after the answer.
  */
 export function turnWaitSpans(messages: ReadonlyArray<SettleTurnMessage & { createdAt?: unknown }>): WaitSpan[] {
   const spans: WaitSpan[] = [];
@@ -607,6 +621,10 @@ export function turnWaitSpans(messages: ReadonlyArray<SettleTurnMessage & { crea
       } else if (part.type === SECRET_PART && isRecord(part.data)) {
         const from = at ?? timeOf(part.data.createdAt);
         if (from != null) spans.push({ from, to: null });
+      } else if (at != null && isSecretRequestCall(part)) {
+        const next = messages.slice(index + 1).map((later) => timeOf(later.createdAt)).find((time) => time != null && time >= at);
+        if (next != null) spans.push({ from: at, to: next });
+        else if (part.state === "input-streaming" || part.state === "input-available") spans.push({ from: at, to: null });
       } else if (part.type === "tool-Question" && at != null) {
         const next = messages[index + 1];
         const answered = next?.parts?.some((p) => isRecord(p) && p.type === "tool-QuestionAnswers");

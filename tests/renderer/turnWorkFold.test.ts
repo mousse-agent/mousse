@@ -177,6 +177,31 @@ describe('the count of replies a finished turn folds', () => {
   })
 })
 
+describe('a turn that waited on a secret', () => {
+  it('does not count the wait once the request is answered and the turn finishes', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const question = ask('u1', 'Deploy it', 0)
+      const before = [question, thought('t1', 'Need the deploy token', 2)]
+      const secretCall = (state: string) => call('s1', 'tool-mcp__mousse__secret_request', { label: 'Deploy token' }, 10, state)
+      // Open: the call waits, and the open request shows below it.
+      vi.setSystemTime(T0 + 60_000)
+      const open = { id: 'secret:1', role: 'assistant', createdAt: at(11), parts: [{ type: 'data-secret-request', data: { requestId: '1', label: 'Deploy token', createdAt: T0 + 11_000 } }] } as unknown as UIMessage
+      render([...before, secretCall('input-available'), open], 'streaming')
+      // Answered five minutes later: the open request is gone, the call has its output, and the work goes on.
+      vi.setSystemTime(T0 + 315_000)
+      const after = [secretCall('output-available'), call('d1', 'tool-Bash', { command: 'npm run deploy' }, 310)]
+      render([...before, ...after], 'streaming')
+      // Finished: ten seconds of work before the wait and ten after.
+      vi.setSystemTime(T0 + 320_000)
+      render([...before, ...after, said('a1', 'Deployed.', 320)], 'ready')
+      expect(host.querySelector('.turn-work-label')!.textContent).toBe('Worked for 20s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('a turn whose end the window learned late', () => {
   it('shows how long its work really took, not how long until the window heard it ended (#1042)', () => {
     vi.useFakeTimers({ toFake: ['Date'] })

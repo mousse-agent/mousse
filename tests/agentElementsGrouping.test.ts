@@ -381,6 +381,7 @@ describe('the time a turn worked, without the time it waited on the person', () 
   const question = (seconds: number, state = 'output-available') => ({ id: `q${seconds}`, role: 'assistant', createdAt: at(seconds), parts: [tool('tool-Question', `q${seconds}`, { state })] })
   const answers = (seconds: number) => ({ id: `a${seconds}`, role: 'assistant', createdAt: at(seconds), parts: [tool('tool-QuestionAnswers', `a${seconds}`)] })
   const step = (seconds: number) => ({ id: `c${seconds}`, role: 'assistant', createdAt: at(seconds), parts: [tool('tool-Bash', `c${seconds}`)] })
+  const secretCall = (seconds: number, type: string, state = 'output-available') => ({ id: `s${seconds}`, role: 'assistant', createdAt: at(seconds), parts: [tool(type, `s${seconds}`, { state })] })
 
   it.each([
     ['an answered approval, from when it was asked to when it was answered', [approval(5, { status: 'answered', settledAt: at(9) })], [[5, 9]]],
@@ -391,6 +392,11 @@ describe('the time a turn worked, without the time it waited on the person', () 
     ['a question asked without waiting: work ran before its answers', [question(3), step(4), answers(20)], []],
     ['a question still waiting', [step(1), question(3, 'input-available')], [[3, null]]],
     ['a secret request still open', [{ id: 'secret:1', role: 'assistant', createdAt: at(6), parts: [{ type: 'data-secret-request', data: { requestId: '1' } }] }], [[6, null]]],
+    ['a secret request call and its open request', [step(1), secretCall(5, 'tool-mcp__mousse__secret_request', 'input-available'), { id: 'secret:1', role: 'assistant', createdAt: at(6), parts: [{ type: 'data-secret-request', data: { requestId: '1' } }] }], [[5, 6], [6, null]]],
+    ['a secret request call still waiting, before its request shows', [step(1), secretCall(5, 'tool-mcp__mousse__secret_request', 'input-available')], [[5, null]]],
+    ['an answered secret request: until the next step', [secretCall(5, 'tool-mcp__mousse__secret_request'), step(300)], [[5, 300]]],
+    ['an answered secret request under a plain name', [secretCall(5, 'tool-secret_request'), step(300)], [[5, 300]]],
+    ['the last call of a finished turn, answered', [step(1), secretCall(5, 'tool-mcp__mousse__secret_request')], []],
     ['work alone', [step(1), step(2)], []],
   ])('turnWaitSpans: %s', (_name, messages, expected) => {
     expect(turnWaitSpans(messages).map(({ from, to }) => [from / 1000, to == null ? null : to / 1000])).toEqual(expected)
