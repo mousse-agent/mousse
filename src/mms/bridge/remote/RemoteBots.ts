@@ -361,7 +361,8 @@ function fitted(message: RemoteBotMessage, budget = RESULT_BYTES): RemoteBotMess
       actionId: action.actionId, digest: action.digest, title: action.title, serverName: action.serverName,
       args: null, hasHiddenValues: action.hasHiddenValues, hiddenPaths: [], status: action.status,
       ...(action.previous ? { previous: action.previous } : {}), ...(action.at ? { at: action.at } : {}),
-      ...(action.result?.notSentInTime ? { result: { text: action.result.text, notSentInTime: true } } : {}), tooLarge: true
+      ...(action.result?.notSentInTime ? { result: { text: action.result.text, notSentInTime: true } }
+        : action.result?.toolReportedError ? { result: { toolReportedError: true } } : {}), tooLarge: true
     } }
     if (bytes(message) <= budget) return message
   }
