@@ -146,7 +146,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
       }
       if (message.action) {
         const newest = latestAction.get(message.action.actionId) ?? message
-        ;(expired.row.expiredReviews ??= []).push(newest)
+        ;(expired.row.expiredReviews ??= []).push({ ...newest, action: message.action })
         if (newest.id !== message.id) (expired.row.actionHistory ??= []).push(message)
       }
       const reviews = expired.row.expiredReviews
