@@ -8,6 +8,11 @@
  * profile binds `ThreadApprovals`: it survives a reconnect and a daemon restart, any client can
  * answer it, and it has no timeout while a person is in the chat (SPEC §17). Without a store, an
  * approval behaves as a plain question.
+ *
+ * A third kind is a question an agent asked without waiting (`ask_user` with `wait: false`, `open`): saved in the Run
+ * Engine database once the profile binds `OpenQuestions`. Nothing waits on it: its answer reaches the agent through the
+ * thread's inbox. It is shown and answered like any question, but it never makes the thread wait for the user, so the
+ * `listPendingForThread` family leaves it out and a new message does not close it.
  */
 
 import { EventEmitter } from 'events'
@@ -23,6 +28,8 @@ import {
   type LineageLookup
 } from '../run/approvalRights'
 import { approvalFingerprint } from '../run/approvalFingerprint'
+import type { OpenQuestionCloseReason, OpenQuestionRecord, OpenQuestions } from '../run/OpenQuestions'
+import { describeQuestionAnswers } from './questionAnswers'
 import {
   answersFor,
   type AnsweredBy,
@@ -175,6 +182,7 @@ export class UserQuestionService extends EventEmitter {
   private stopped = false
   private lineage: LineageLookup = () => null
   private binding: ApprovalBinding | null = null
+  private openStore: OpenQuestions | null = null
   /** True after this process started; plain questions never survive process death. */
   readonly survivesDaemonRestart = false
 
@@ -197,6 +205,92 @@ export class UserQuestionService extends EventEmitter {
   /** The store approvals are saved in, or null. */
   get approvalStore(): ThreadApprovals | null {
     return this.binding?.store ?? null
+  }
+
+  /** Saves the questions agents ask without waiting in `store` from now on; `null` turns them off. */
+  setOpenQuestionStore(store: OpenQuestions | null): void {
+    this.openStore = store
+  }
+
+  /** The store open questions are saved in, or null. */
+  get openQuestionStore(): OpenQuestions | null {
+    return this.openStore
+  }
+
+  /**
+   * A question the agent asks without waiting: saved, shown at once, and answered later by `settle`, whose answer goes
+   * to the thread's inbox. Returns its id. Throws when nothing can keep it (no store bound, or the profile is stopping).
+   */
+  ask(questions: PendingUserQuestions['questions'], threadId: string, runId: string | null): string {
+    if (this.stopped) throw Object.assign(new Error('Profile questions are stopped'), { code: 'profile_draining' })
+    if (!this.openStore) throw new Error('Questions that do not wait are not available here; ask with wait true instead.')
+    const record = this.openStore.create({ requestId: `q_${crypto.randomUUID()}`, threadId, runId, questions })
+    this.emit('pending', openView(record))
+    return record.requestId
+  }
+
+  /** The agent of `threadId` no longer needs its open question. False when it was not open there. */
+  withdraw(requestId: string, threadId: string): boolean {
+    const record = this.openStore?.withdraw(requestId, threadId)
+    if (!record) return false
+    this.emit('cleared', { requestId, threadId })
+    return true
+  }
+
+  /** Closes every open question of the thread (a Stop, an archive, a delete). Returns the questions closed. */
+  closeOpenForThread(threadId: string, reason: OpenQuestionCloseReason): OpenQuestionRecord[] {
+    const closed = this.openStore?.closeForThread(threadId, reason) ?? []
+    for (const record of closed) this.emit('cleared', { requestId: record.requestId, threadId })
+    return closed
+  }
+
+  /** The thread's open questions (asked without waiting), oldest first. */
+  listOpenForThread(threadId: string): Array<PendingUserQuestions & { threadId: string }> {
+    return this.openRecords(threadId).map(openView)
+  }
+
+  /** What the thread shows to answer: the questions that wait, then the ones asked without waiting. */
+  listShownForThread(threadId: string): Array<PendingUserQuestions & { threadId: string }> {
+    return [...this.listPendingForThread(threadId), ...this.listOpenForThread(threadId)]
+  }
+
+  private openRecords(threadId?: string): OpenQuestionRecord[] {
+    if (!this.openStore) return []
+    try {
+      return this.openStore.listOpen(threadId)
+    } catch (error) {
+      console.warn('open questions could not be read', { error: error instanceof Error ? error.message : String(error) })
+      return []
+    }
+  }
+
+  /** An open question's answer (or dismissal) goes to its thread's inbox; the agent was never waiting for it. */
+  private settleOpen(record: OpenQuestionRecord, answers: UserQuestionAnswers | null, answeredBy: Answerer | undefined): SettleResult {
+    const by = storedAnswerer(answeredBy)
+    const outcome = answers
+      ? this.openStore!.answer(record.requestId, answers, by, describeQuestionAnswers(record.questions, answers))
+      : this.openStore!.dismiss(record.requestId, by)
+    if (!outcome.ok) {
+      const settled = outcome.record
+      return {
+        ok: false,
+        reason: outcome.reason,
+        ...(settled?.answeredBy ? { answeredBy: settled.answeredBy } : {}),
+        ...(settled?.closeReason ? { cancelReason: settled.closeReason } : settled?.status === 'withdrawn' ? { cancelReason: 'withdrawn' } : {})
+      }
+    }
+    this.emit('cleared', { requestId: record.requestId, threadId: record.threadId })
+    return { ok: true }
+  }
+
+  /** An open question by id, whatever its status, or null when this id is not one. */
+  private openRecord(requestId: string): OpenQuestionRecord | null {
+    if (!this.openStore || this.pending.has(requestId)) return null
+    try {
+      return this.openStore.get(requestId)
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -339,6 +433,8 @@ export class UserQuestionService extends EventEmitter {
    * answer, for a caller that asked to be told (`onAttachments`); an approval takes none.
    */
   settle(requestId: string, answers: UserQuestionAnswers, answeredBy?: Answerer, options: { continuation?: boolean; attachments?: UserQuestionAttachments } = {}): SettleResult {
+    const open = this.openRecord(requestId)
+    if (open) return this.settleOpen(open, answers, answeredBy)
     const pending = this.pending.get(requestId)
     if ((pending?.durable || (!pending && this.binding))) return this.settleSaved(requestId, answers, answeredBy, options)
     if (!pending) return { ok: false, reason: 'unknown' }
@@ -486,6 +582,10 @@ export class UserQuestionService extends EventEmitter {
    * request, a run ended, the profile shut down) and closes a saved request with `reason`.
    */
   dismiss(requestId: string, answeredBy?: Answerer, reason: ApprovalCancelReason = 'withdrawn'): boolean {
+    // An open question is closed only by a person (or the agent's `withdraw`): the service's own dismissals are for
+    // requests something waits on.
+    const open = this.openRecord(requestId)
+    if (open) return answeredBy !== undefined && this.settleOpen(open, null, answeredBy).ok
     const pending = this.pending.get(requestId)
     const saved = pending?.durable || (!pending && this.binding?.store.get(requestId)?.status === 'pending')
     if (saved) {
@@ -556,6 +656,7 @@ export class UserQuestionService extends EventEmitter {
     }
   }
 
+  /** The requests the thread waits on: open questions (asked without waiting) are left out; see `listShownForThread`. */
   listPendingForThread(threadId: string): Array<PendingUserQuestions & { threadId: string }> {
     const out: Array<PendingUserQuestions & { threadId: string }> = []
     for (const [requestId, p] of this.pending) {
@@ -573,7 +674,7 @@ export class UserQuestionService extends EventEmitter {
    * `canAnswerApproval` applies when the rule is asked for, so the card never offers what would be refused.
    */
   listPendingForDevice(threadId: string, limit: PermissionMode): Array<PendingUserQuestions & { threadId: string }> {
-    return this.listPendingForThread(threadId).map((entry) => {
+    return this.listShownForThread(threadId).map((entry) => {
       const action = this.pending.get(entry.requestId)?.approval?.action ?? this.binding?.store.get(entry.requestId)?.action
       const reserved = (entry as { approval?: PendingApprovalInfo }).approval?.reason !== undefined
       if (!entry.questions.some((question) => question.options?.some((option) => option.scope === 'always'))) return entry
@@ -587,7 +688,7 @@ export class UserQuestionService extends EventEmitter {
     for (const [requestId, p] of this.pending) {
       if (!p.durable) out.push({ requestId, threadId: p.threadId, questions: p.questions })
     }
-    return [...this.savedPending(), ...out]
+    return [...this.savedPending(), ...out, ...this.openRecords().map(openView)]
   }
 
   private savedPending(threadId?: string): Array<PendingUserQuestions & { threadId: string }> {
@@ -621,6 +722,8 @@ export class UserQuestionService extends EventEmitter {
 
   /** A request that is pending: a waiting callback, or a saved request in any state that still waits for an answer. */
   getPending(requestId: string): (PendingUserQuestions & { threadId: string }) | null {
+    const open = this.openRecord(requestId)
+    if (open) return open.status === 'open' ? openView(open) : null
     const p = this.pending.get(requestId)
     if (p && !p.durable) return { requestId, threadId: p.threadId, questions: p.questions }
     const record = this.binding?.store.get(requestId)
@@ -630,6 +733,17 @@ export class UserQuestionService extends EventEmitter {
 
   /** A request in any status, or null when nobody ever asked it. */
   getRequest(requestId: string): RequestView | null {
+    const open = this.openRecord(requestId)
+    if (open) {
+      return {
+        requestId,
+        threadId: open.threadId,
+        questions: open.questions,
+        status: open.status === 'open' ? 'pending' : open.status === 'answered' || open.status === 'dismissed' ? 'answered' : 'cancelled',
+        ...(open.answeredBy ? { answeredBy: open.answeredBy } : {}),
+        ...(open.closeReason ? { cancelReason: open.closeReason } : open.status === 'withdrawn' ? { cancelReason: 'withdrawn' } : {})
+      }
+    }
     const p = this.pending.get(requestId)
     if (p && !p.durable) return { requestId, threadId: p.threadId, questions: p.questions, status: 'pending' }
     const record = this.binding?.store.get(requestId)
@@ -778,6 +892,17 @@ function storedQuestions(questions: PendingUserQuestions['questions'], meanings:
       }
     })
   }))
+}
+
+/** An open question as clients show it: marked as one the agent does not wait for. */
+function openView(record: OpenQuestionRecord): PendingUserQuestions & { threadId: string } {
+  return { requestId: record.requestId, threadId: record.threadId, questions: record.questions, wait: false }
+}
+
+/** Who answered, as an open question keeps it; an unnamed answerer is the user. */
+function storedAnswerer(answerer: Answerer | undefined): AnsweredBy {
+  if (!answerer || answerer.kind === 'user') return { kind: 'user', ...(answerer?.via ? { via: answerer.via } : {}), ...(answerer?.node ? { node: answerer.node } : {}) }
+  return { kind: 'agent', threadId: answerer.threadId, runId: answerer.runId, ...(answerer.toolCallId ? { toolCallId: answerer.toolCallId } : {}) }
 }
 
 /**

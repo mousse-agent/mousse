@@ -43,7 +43,7 @@ it.each([
     if ('error' in entry) throw new Error(entry.error)
     const result = await call('memory_save', { kind: 'owner', text: 'Replacement', replaces: entry.ref })
     expect(result.isError === true).toBe(!ownerStarted)
-    if (!ownerStarted) expect(result.value.reason).toContain('A run or a turn you started yourself')
+    if (!ownerStarted) expect(result.value.refused.message).toContain('A run or a turn you started yourself')
   }
   const hand = store.save(botId, { lane: 'owner_ui', kind: 'note', text: 'Owner edited words.' })
   if ('error' in hand) throw new Error(hand.error)
@@ -62,7 +62,7 @@ it.each([
   const forgot = await call('memory_forget', { id: 'm1', refs: [`j${said}`], reason: 'Remove this' })
   if (ownerStarted) expect(forgot.isError).toBeUndefined()
   else {
-    expect(forgot).toMatchObject({ isError: true, value: { reason: 'Ask the owner in the chat.' } })
+    expect(forgot).toMatchObject({ isError: true, value: { refused: { code: 'scope_denied', message: 'Ask the owner in the chat.' } } })
     expect(store.active(botId).find((entry) => entry.id === 'm1')?.text).toBe('Original owner')
     expect(store.search(botId, { query: 'Original owner', kinds: ['chat'] }).some((hit) => hit.ref === `j${said}`)).toBe(true)
   }

@@ -12,6 +12,8 @@
   max-width: 480px;
   min-height: 0;
   --threads-sidebar-row-height: 32px;
+  /* The extra height of a row that shows its latest reply under the title. */
+  --threads-sidebar-preview-line: 16px;
   container-type: inline-size;
   /* pill-tabs: the tab bar's width rules (components/ui/PillTabs.tsx) read this container. */
   container-name: threads-sidebar pill-tabs;
@@ -354,6 +356,11 @@
   opacity: 0.5;
 }
 
+/* A thread a bot keeps out of the sidebar, listed while the eye shows hidden threads: quieter title. */
+.threads-sidebar-thread.hidden-thread :is(.threads-sidebar-thread-name, .threads-sidebar-card-title) {
+  opacity: 0.55;
+}
+
 /* No bottom margin: it sits inside the Collapse, so it would add to the project's own 8px instead of
    merging with it (polish.css and compact-shell.css follow the same rule). */
 .threads-sidebar-children {
@@ -469,13 +476,13 @@
 }
 
 .threads-sidebar-thread-list {
-  max-height: calc(var(--threads-sidebar-row-height) * 5);
+  max-height: calc(var(--threads-sidebar-row-height) * 5 + var(--threads-sidebar-preview-line) * var(--project-preview-shown, 0));
   overflow: hidden;
   transition: max-height calc(350ms * var(--ui-motion-scale)) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .threads-sidebar-thread-list.expanded {
-  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5));
+  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5) + var(--threads-sidebar-preview-line) * var(--project-preview-count, 0));
 }
 
 .threads-sidebar-thread-root {
@@ -1373,4 +1380,58 @@ html:not([data-acrylic='true']) .threads-sidebar:has(> .threads-sidebar-scroll[d
 ),
 :where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:has(.threads-sidebar-project-status--needs-me) > .threads-sidebar-project-toggle > :not(.threads-sidebar-project-status--needs-me, .project-icon) {
   filter: opacity(var(--sidebar-row-dim));
+}
+
+/* A thread's latest reply under its title, and its pull requests as a count (Settings > Appearance > Reply previews).
+   A row with a preview is one line taller; its title and count share the first line. */
+.threads-sidebar-thread.has-preview:not(.threads-sidebar-card) {
+  height: calc(var(--threads-sidebar-row-height) + var(--threads-sidebar-preview-line));
+}
+
+/* The marks and hover actions stay on the title line, so the preview runs the row's full width under them. */
+.threads-sidebar-thread-container > .threads-sidebar-thread.has-preview:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing,
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread.has-preview:not(.threads-sidebar-card)) > .threads-sidebar-thread-actions {
+  top: calc(var(--threads-sidebar-row-height) / 2);
+}
+
+.threads-sidebar-thread.has-preview:not(.threads-sidebar-card) .threads-sidebar-reply-preview {
+  margin-right: calc(var(--ui-row-x, 9px) - var(--thread-actions-room));
+}
+
+.threads-sidebar-thread-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.threads-sidebar-thread-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.threads-sidebar-reply-preview {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: var(--threads-sidebar-preview-line);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.threads-sidebar-pr-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }

@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { BOT_JOURNAL_ERROR } from '../../src/mms/bots/activation/BotEngine'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import { appTurn } from '../run/appToolsFixture'
@@ -13,16 +14,20 @@ beforeEach(async () => {
   await f.bots.reconcileOnStartup()
 })
 afterEach(() => { vi.restoreAllMocks(); f.close() })
+/** Nothing of the bot starts while its journal cannot be written, so a scheduled run that comes due waits in the queue. */
+const holdQueue = () => f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
 
-it('removing a schedule drops a queued occurrence before a slot opens', async () => {
-  const busy = []
-  for (let i = 0; i < 3; i++) busy.push(await f.bots.activate({ botId, input: 'Busy', clientRequestId: `busy-${i}` }))
+it('removing a schedule drops a queued occurrence before it can start', async () => {
+  const busy = await f.bots.activate({ botId, input: 'Busy', clientRequestId: 'busy' })
+  holdQueue()
   const own = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check' }, 'owner')
   await f.tickSchedules(new Date(T0 + 5 * 60_000))
   const queued = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
   expect(queued.status).toBe('queued')
   f.bots.removeSchedule(botId, own.scheduleId)
-  const first = await start(f, busy[0]!.id)
+  // The queue may start again: the next pump finds nothing of the removed schedule to start.
+  f.store.setError(botId, null)
+  const first = await start(f, busy.id)
   await finish(f, first.payload, 'completed', { text: 'Done.' })
   expect(f.store.activation(queued.id)!.status).toBe('cancelled')
   expect(f.store.dispatches(queued.id)).toHaveLength(0)
@@ -31,7 +36,7 @@ it('removing a schedule drops a queued occurrence before a slot opens', async ()
 // Removal paths and states: About, bot tool host, Automations; queued, waiting at a wall,
 // parked, paused, already running; deletion of the bot; a restart between the two stores.
 it.each(['about', 'bot', 'automations'])('%s removal cancels queued work quietly and leaves other schedules alone', async actor => {
-  for (let i = 0; i < 3; i++) await f.bots.activate({ botId, input: 'Busy', clientRequestId: `busy-${i}` })
+  holdQueue()
   const a = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
   const b = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'B' }, 'owner')
   await f.tickSchedules(new Date(T0 + 5 * 60_000))
@@ -75,7 +80,7 @@ it('a turn already running finishes its report after removal', async () => {
 })
 
 it('startup drops work left queued when only the shared-store removal committed', async () => {
-  for (let i = 0; i < 3; i++) await f.bots.activate({ botId, input: 'Busy', clientRequestId: `busy-${i}` })
+  holdQueue()
   const a = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
   await f.tickSchedules(new Date(T0 + 5 * 60_000))
   const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
@@ -86,7 +91,7 @@ it('startup drops work left queued when only the shared-store removal committed'
 })
 
 it('deleting the bot also cancels its queued schedule work', async () => {
-  for (let i = 0; i < 3; i++) await f.bots.activate({ botId, input: 'Busy', clientRequestId: `busy-${i}` })
+  holdQueue()
   f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
   await f.tickSchedules(new Date(T0 + 5 * 60_000))
   const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!

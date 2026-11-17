@@ -9,6 +9,7 @@ import type { BotToolHost } from '../../src/mms/bots/seams'
 import { RunCounters } from '../../src/mms/harness/budget'
 import { BOT_DEFAULT_APP_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { botTurnOffers } from '../../src/shared/bots/personal/walls'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -36,7 +37,7 @@ describe('app tools under a bot’s authority (MCP)', () => {
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: bot(['create_task']) }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
-    expect(await registry.call('ask_user', { questions: [] }, ctx())).toEqual({ text: 'This bot is not allowed to use ask_user.', isError: true })
+    expect(await registry.call('ask_user', { questions: [] }, ctx())).toEqual(refused('not_granted', 'This bot is not allowed to use ask_user.'))
     expect(fake.host.askUser).not.toHaveBeenCalled()
     expect((await registry.call('create_task', { description: 'fine' }, ctx())).isError).toBe(false)
   })
@@ -65,7 +66,7 @@ describe('the bot\'s own tools under its authority (Bot Phase 1 §5.10)', () => 
     const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost().host, { bots: () => ({ host }) })
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: bot(['web_search']) }))
-    expect(await registry.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' }, ctx())).toEqual({ text: 'This bot is not allowed to use bot_schedule_add.', isError: true })
+    expect(await registry.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' }, ctx())).toEqual(refused('not_granted', 'This bot is not allowed to use bot_schedule_add.'))
     expect(host.schedules.add).not.toHaveBeenCalled()
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: bot([...BOT_DEFAULT_APP_TOOLS]) }))
     expect(await registry.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' }, ctx())).toEqual({ text: JSON.stringify({ scheduleId: 's1', label: 'every 30 minutes' }) })

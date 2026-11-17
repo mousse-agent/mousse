@@ -1,4 +1,4 @@
-import { compareLaunched, launchedActive, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
+import { compareLaunched, launchedActive, launchedGoing, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
 import { askNoticeText } from '../../../shared/bots/personal/askText'
 
 /**
@@ -47,13 +47,16 @@ export function workSignalsOf(message: BotChatMessage): { titles: string[]; queu
  */
 export type BotChatRow =
   | { kind: 'message'; message: BotChatMessage }
-  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string; note?: 'info' | 'error' }
+  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string; note?: 'info' | 'error'; cut?: true }
+
+/** A row of this window only: a `/` command's line, or (`cut`) the words of a reply its turn stopped before finishing. */
+export interface BotWindowLine { id: string; at: string; text: string; error?: true; cut?: true }
 
 /**
- * `rows` with the owner's own lines from `/` commands (`notes`) among them by time: each before the first row that
- * came after it, the newest at the end.
+ * `rows` with this window's own lines (`notes`, oldest first: the owner's `/` commands, replies cut off) among them by
+ * time: each before the first row that came after it, the newest at the end.
  */
-export function withNotes(rows: readonly BotChatRow[], notes: ReadonlyArray<{ id: string; at: string; text: string; error?: true }>): BotChatRow[] {
+export function withNotes(rows: readonly BotChatRow[], notes: readonly BotWindowLine[]): BotChatRow[] {
   if (!notes.length) return rows as BotChatRow[]
   const merged: BotChatRow[] = []
   let next = 0
@@ -66,7 +69,9 @@ export function withNotes(rows: readonly BotChatRow[], notes: ReadonlyArray<{ id
   return merged
 }
 
-const noteRow = (note: { id: string; at: string; text: string; error?: true }): BotChatRow => ({ kind: 'system', id: note.id, at: note.at, text: note.text, note: note.error ? 'error' : 'info' })
+const noteRow = (note: BotWindowLine): BotChatRow => (note.cut
+  ? { kind: 'system', id: note.id, at: note.at, text: note.text, cut: true }
+  : { kind: 'system', id: note.id, at: note.at, text: note.text, note: note.error ? 'error' : 'info' })
 
 /** The quiet line an answer the owner tapped leaves in place of their bubble: "You answered “Flat B”". */
 export function tappedAnswerLine(label: string): string {
@@ -136,7 +141,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
       continue
     }
     if (message.systemLine) {
-      rows.push({ kind: 'system', id: message.id, at: message.at, text: message.text, of: message.id })
+      rows.push({ kind: 'system', id: message.id, at: message.at, text: message.text, of: message.id, ...(message.systemTitle ? { title: message.systemTitle } : {}) })
       continue
     }
     const signals = workSignalsOf(message)
@@ -190,8 +195,8 @@ export function leadWork(work: readonly BotWorkItem[]): BotWorkItem | undefined 
  * The bot's presence under its name: "typing…" while its chat turn writes, "System check +1" while work runs or waits
  * (the work running longest, and how many more, threads it manages included; never "+0"), "Managing Dictation mock-ups"
  * or "Managing 2 threads" while only threads it started still work, "paused", "waiting for internet", and "free"
- * otherwise. Threads that ended or sit idle are listed but never make it busy. Typing wins over work; the line still
- * opens the list.
+ * otherwise. Threads that ended, sit idle or are on hold for the owner are listed but never make it busy. Typing wins
+ * over work; the line still opens the list.
  */
 export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads' | 'watchers'>, chat: { typing: boolean; offline: boolean }): BotPresence {
   if (bot.state === 'paused') return { kind: 'paused', text: 'paused' }
@@ -214,12 +219,38 @@ export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads' | 
   return { kind: 'free', text: 'free' }
 }
 
+/** How a bot's line in the sidebar reads: `working` in purple, `needs` (it waits on its owner) in amber, `idle` in grey. */
+export type BotRowTone = 'working' | 'needs' | 'idle'
+
+/**
+ * The line under a bot's name in the sidebar's Bots list, in words coloured by `tone`: what waits on the owner ("Wants to
+ * use files on this computer"), what it works on (the header's line: "System check +1", "Typing…"), or "Paused",
+ * "Waiting for internet", "Waiting on …", and "Idle" when there is nothing at all. `resting` (only for "Idle"): its face
+ * sleeps.
+ */
+export function botRowLine(bot: Pick<BotSummary, 'state' | 'stateText' | 'needsOwner' | 'waiting' | 'chat' | 'work' | 'threads' | 'watchers'>): { tone: BotRowTone; text: string; resting: boolean } {
+  const line = (tone: BotRowTone, text: string, resting = false) => ({ tone, text, resting })
+  if (bot.state === 'paused') return line('idle', 'Paused')
+  if (bot.needsOwner || bot.state === 'needs_you' || bot.state === 'stuck') return line('needs', bot.stateText || 'Needs you')
+  const offline = Boolean(bot.chat?.offline) || bot.waiting === 'internet'
+  const presence = presenceOf(bot, { typing: Boolean(bot.chat) && !offline, offline })
+  if (presence.kind === 'offline') return line('idle', 'Waiting for internet')
+  if (presence.kind === 'typing') return line('working', 'Typing…')
+  if (presence.kind === 'busy') return line('working', presence.text)
+  if (bot.state === 'working') return line('working', bot.stateText || 'Working…')
+  if (presence.text !== 'free') return line('idle', presence.text)
+  return line('idle', 'Idle', true)
+}
+
 /** How a thread the bot started looks in its list: the tint of its row (`working` blue, `waiting` amber, `done` green, `failed` red), and its label. */
 export type LaunchedTone = 'working' | 'waiting' | 'idle' | 'done' | 'failed'
 
-/** The tone and the words for where a thread the bot started stands: "working", "waiting on subagents", "waiting on you", "done", "stopped". */
+/**
+ * The tone and the words for where a thread the bot started stands: "working", "waiting on subagents", "waiting on you"
+ * (a question, or on hold until the owner continues it), "done", "stopped".
+ */
 export function launchedLook(status: BotLaunchedThread['status']): { tone: LaunchedTone; label: string } {
-  if (status === 'needs_input') return { tone: 'waiting', label: 'waiting on you' }
+  if (status === 'needs_input' || status === 'on_hold') return { tone: 'waiting', label: 'waiting on you' }
   if (status === 'queued') return { tone: 'working', label: 'queued' }
   if (status === 'paused') return { tone: 'working', label: 'held' }
   if (status === 'subagents') return { tone: 'working', label: 'waiting on subagents' }
@@ -231,12 +262,12 @@ export function launchedLook(status: BotLaunchedThread['status']): { tone: Launc
 }
 
 /**
- * The threads the bot started, split for its list: those still going (working first, then waiting on the owner), and
- * the rest under "Done" (idle, then ended, the most recently updated first), in the summary's order (`compareLaunched`).
+ * The threads the bot started, split for its list: those still going (working first, then waiting on the owner, on hold
+ * too), and the rest under "Done" (idle, then ended, the most recently updated first), in the summary's order (`compareLaunched`).
  */
 export function launchedGroups(threads: readonly BotLaunchedThread[]): { going: BotLaunchedThread[]; ended: BotLaunchedThread[] } {
   const ordered = [...threads].sort(compareLaunched)
-  return { going: ordered.filter(launchedActive), ended: ordered.filter((thread) => !launchedActive(thread)) }
+  return { going: ordered.filter(launchedGoing), ended: ordered.filter((thread) => !launchedGoing(thread)) }
 }
 
 /** What the sticker on the header's face shows. */

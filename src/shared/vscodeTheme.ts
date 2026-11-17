@@ -572,6 +572,55 @@ export function clearVsCodeColors(): void {
   }
 }
 
+/** Each highlight.js class and the TextMate scope whose theme colour it shows, as an editor would colour that token. */
+const HLJS_SCOPES: ReadonlyArray<readonly [selector: string, scope: string]> = [
+  ['.hljs-keyword', 'keyword.control'],
+  ['.hljs-built_in', 'support.function'],
+  ['.hljs-type, .hljs-title.class_', 'entity.name.type'],
+  ['.hljs-literal', 'constant.language'],
+  ['.hljs-number', 'constant.numeric'],
+  ['.hljs-string', 'string.quoted'],
+  ['.hljs-regexp', 'string.regexp'],
+  ['.hljs-comment', 'comment.line'],
+  ['.hljs-title.function_', 'entity.name.function'],
+  ['.hljs-attr, .hljs-property', 'variable.other.property'],
+  ['.hljs-variable', 'variable.other'],
+  ['.hljs-params', 'variable.parameter'],
+  ['.hljs-name, .hljs-tag', 'entity.name.tag'],
+  ['.hljs-attribute', 'entity.other.attribute-name'],
+  ['.hljs-meta', 'meta.preprocessor']
+]
+
+/**
+ * The theme setting a token of `scope` takes: from the rule with the most specific matching scope, the later rule on a
+ * tie, looked up per setting (a rule that only makes things italic does not take the colour away).
+ */
+function tokenSetting(tokenColors: VsCodeTokenColor[], scope: string, setting: 'foreground' | 'fontStyle'): string | undefined {
+  let best: { length: number; value: string } | undefined
+  for (const rule of tokenColors) {
+    const value = rule.settings[setting]
+    if (value === undefined) continue
+    const scopes = (Array.isArray(rule.scope) ? rule.scope : rule.scope.split(',')).map((entry) => entry.trim())
+    for (const entry of scopes) {
+      if (!entry || entry.includes(' ')) continue
+      if (scope !== entry && !scope.startsWith(`${entry}.`)) continue
+      if (!best || entry.length >= best.length) best = { length: entry.length, value }
+    }
+  }
+  return best?.value
+}
+
+/** CSS that colours highlight.js code blocks from a theme's token colours. */
+export function hljsTokenRules(tokenColors: VsCodeTokenColor[]): string {
+  return HLJS_SCOPES.map(([selector, scope]) => {
+    const foreground = tokenSetting(tokenColors, scope, 'foreground')
+    const fontStyle = tokenSetting(tokenColors, scope, 'fontStyle')
+    const color = foreground ? `color: ${foreground} !important;` : ''
+    const style = fontStyle === undefined ? '' : `font-style: ${fontStyle.includes('italic') ? 'italic' : 'normal'}; font-weight: ${fontStyle.includes('bold') ? 'bold' : 'normal'};`
+    return color || style ? `${selector} { ${color} ${style} }` : ''
+  }).filter(Boolean).join('\n')
+}
+
 export function injectTokenColors(tokenColors: VsCodeTokenColor[]): void {
   let style = document.getElementById('vscode-token-colors') as HTMLStyleElement | null
   if (!style) {
@@ -579,14 +628,7 @@ export function injectTokenColors(tokenColors: VsCodeTokenColor[]): void {
     style.id = 'vscode-token-colors'
     document.head.appendChild(style)
   }
-  const rules = tokenColors.map((tc) => {
-    const scopes = Array.isArray(tc.scope) ? tc.scope.join(', ') : tc.scope
-    const fg = tc.settings.foreground ? `color: ${tc.settings.foreground} !important;` : ''
-    const bg = tc.settings.background ? `background: ${tc.settings.background} !important;` : ''
-    const fs = tc.settings.fontStyle ? `font-style: ${tc.settings.fontStyle.includes('italic') ? 'italic' : 'normal'}; font-weight: ${tc.settings.fontStyle.includes('bold') ? 'bold' : 'normal'}; ${tc.settings.fontStyle.includes('underline') ? 'text-decoration: underline;' : ''}` : ''
-    if (!fg && !bg && !fs) return ''
-    return `/* ${scopes} */ .hljs-keyword, .hljs-string, .hljs-comment, .chat-markdown code { ${fg} ${bg} ${fs} }`
-  }).join('\n')
+  const rules = hljsTokenRules(tokenColors)
   const syntaxVars = `
     :root {
       --syntax-string: ${tokenColors.find(c => c.scope === 'string')?.settings.foreground ?? '#E394DC'};

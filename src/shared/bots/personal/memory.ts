@@ -55,6 +55,34 @@ export const BOT_CHAT_PACK_TOKENS = 12_000
 /** When the verbatim window passes `BOT_CHAT_PACK_BUDGET.window`, its oldest rows fold into the summary down to this. */
 export const BOT_CHAT_WINDOW_KEEP_TOKENS = 4_000
 /**
+ * The model-written digest of a fold (docs/plans/bot-context.md §14), in estimated tokens. The chat summary keeps the
+ * newest `full` digests whole and condenses older ones into a dated timeline, about `summary` tokens in all.
+ */
+export const BOT_CHAT_DIGEST = Object.freeze({
+  /** Newest digests kept whole in the summary. */
+  full: 3,
+  /** One digest at most. */
+  digest: 700,
+  /** The timeline of older digests, one dated line each; the oldest lines fall off. */
+  timeline: 500,
+  /** The whole chat summary: timeline, digests, and lines for chat folded since the last digest. */
+  summary: 3_000,
+  /** Most chat one digest call reads; older rows of its range stay with the summary's lines. */
+  input: 60_000,
+  /** A digest call that has not answered by then is given up. */
+  timeoutMs: 5 * 60_000,
+  /** After a failed call, the next one waits this long; folds meanwhile are deterministic. */
+  retryMs: 10 * 60_000,
+  /** A fold that did not adopt a digest asks for one when at least this much chat is not in one yet. */
+  minimum: 8_000
+})
+
+/** The quiet chat line a fold leaves (`bm_fold_<activationId>`): one line, with the details on hover. */
+export const BOT_FOLD_LINE_PREFIX = 'bm_fold_'
+export const BOT_FOLD_LINE_TEXT = 'Older messages summarised'
+export const BOT_FOLD_LINE_TITLE = 'The chat got long, so the bot now keeps its older part as a summary. Every message is still saved and it can search them.'
+
+/**
  * The journal key prefix of the line a chat turn leaves when it ends without its reply (failed, interrupted, stopped):
  * `turn:<activationId>:<end>`. The verbatim window keeps these notices beside the chat's own rows.
  */

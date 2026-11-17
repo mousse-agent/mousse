@@ -4,6 +4,7 @@ import { isNeutralTool, type NeutralTool } from '../../harness/tools'
 import { DEFAULT_BOT_ACTIVE_MS, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
+import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
@@ -156,8 +157,8 @@ export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_
  * What changes threads: start one, message one, steer or stop one's turn, archive or unarchive one, hide one it started
  * from the owner's sidebar or show it again, fork one and hand a fork's work back, change what waits in a thread's queue,
  * and answer an approval in a thread (only while the owner lets agents answer approvals). A run (work, a reminder, a wake,
- * a schedule) and a chat turn the owner's message or tapped answer started get them; the bot's first message and a turn
- * another bot's message started do not.
+ * a schedule), a chat turn the owner's message or tapped answer started, and the bot's first message get them; a turn
+ * another bot's message started does not.
  */
 export const BOT_THREAD_ACT_TOOLS: readonly string[] = [
   'thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide', 'thread_steer', 'thread_fork', 'thread_merge_back',
@@ -303,7 +304,9 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_QUESTION_ANSWER_TOOL,
   BOT_CARD_TOOL,
   ...BOT_MESSAGE_TOOLS,
-  'list_skills', 'load_skill', 'escalate', 'consult'
+  'list_skills', 'load_skill', 'escalate', 'consult',
+  // The tool catalogue (docs/plans/bot-context.md §15): looking up a group, and calling its tools on Codex and Pi.
+  BOT_CATALOGUE_TOOL, BOT_USE_TOOL
 ])
 
 /** Whether a bot's turn can ever be offered the Mousse app tool `name` (`BOT_OFFERABLE_APP_TOOLS`). */

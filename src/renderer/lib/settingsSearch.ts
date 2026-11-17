@@ -30,6 +30,7 @@ export interface SettingsSearchEntry {
 /** Every setting the search finds. Rows that exist once per item (a provider, a shortcut, a device) are found by their page. */
 export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Color theme', section: 'appearance', anchor: 'appearance-theme', keywords: ['appearance', 'dark', 'light', 'high contrast', 'custom theme', 'import theme'] },
+  { title: 'Wallpaper', section: 'appearance', anchor: 'appearance-wallpaper', keywords: ['image', 'picture', 'photo', 'backdrop', 'theme'] },
   { title: 'Custom CSS', section: 'appearance', anchor: 'appearance-custom-css', keywords: ['theme', 'css', 'stylesheet', 'custom theme'] },
   { title: 'Accent color', section: 'appearance', anchor: 'appearance-accent', keywords: ['colour', 'appearance'] },
   { title: 'Thread path in title bar', section: 'appearance', anchor: 'appearance-thread-path', keywords: ['breadcrumb', 'back', 'forward', 'history', 'navigation', 'subagent', 'parent'] },
@@ -39,6 +40,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },
   { title: 'Code font', section: 'appearance', anchor: 'appearance-code-font', keywords: ['monospace', 'typeface', 'terminal', 'editor'] },
   { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },
+  { title: 'Reply previews', section: 'appearance', anchor: 'appearance-reply-previews', keywords: ['sidebar', 'last message', 'latest reply', 'preview', 'threads', 'bots'] },
   { title: 'Conversation', section: 'chat', anchor: 'chat-conversation', keywords: ['transcript', 'replies'] },
   { title: 'Chat width', section: 'chat', anchor: 'chat-width', keywords: ['wide', 'full', 'narrow', 'column', 'layout', 'transcript', 'conversation'] },
   { title: 'Render math', section: 'chat', anchor: 'chat-render-math', keywords: ['latex', 'equations'] },
@@ -52,6 +54,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Finished', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'when a thread finishes', 'completion sound', 'toast', 'system notification', 'done'] },
   { title: 'Needs you', section: 'general', anchor: 'general-notify-needs-you', keywords: ['notifications', 'when a thread needs you', 'question', 'approval', 'toast', 'sound'] },
   { title: 'Stopped', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'when a thread stops', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
+  { title: 'Keep computer awake', section: 'general', anchor: 'general-keep-awake', keywords: ['sleep', 'awake', 'power', 'caffeinate', 'suspend', 'idle', 'battery'] },
   { title: 'Goal turn limit', section: 'general', anchor: 'general-goal-turns', keywords: ['goal', '/goal', 'turns', 'continue', 'keep working', 'limit', 'autonomous'] },
   { title: 'Delete private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto delete', 'timer', 'incognito', 'chats'] },
   { title: 'All threads on my other devices', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote', 'computers'] },

@@ -13,6 +13,7 @@ import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
 import type { DelegationToolHost } from './delegation'
+import { legacyRefusal, REFUSAL_FAULT_CODES } from './refusal'
 
 /**
  * What a tool may touch (docs/run-engine/SPEC.md §15.1):
@@ -90,7 +91,8 @@ export interface AppToolTurn {
   modeCeiling: ModeCeiling
   /**
    * The permission mode the turn runs in; an MCP turn's is
-   * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent: no tool asks.
+   * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent, nothing runs unasked that a
+   * known mode would have asked for.
    */
   permissionMode?: PermissionMode
   /**
@@ -173,6 +175,11 @@ export interface ToolImage {
 export interface ToolOutcome {
   text: string
   isError?: boolean
+  /**
+   * The tool ran and `text` is what it produced (a command's output and exit code, what the browser reported): an error
+   * result keeps its text as it is rather than becoming a refusal (`asRefusal`). Never sent to the caller.
+   */
+  ran?: boolean
   /** Images the result carries; the MCP server sends them as `image` content. */
   images?: ToolImage[]
 }
@@ -209,6 +216,11 @@ export interface ToolListing {
    * so a bot is shown what it can call in that turn; with no turn running, none.
    */
   botTurnTools?: ReadonlySet<string>
+  /**
+   * A bot thread's turn reaches its tool catalogue so (`BotAuthority.catalogue`): `use_tool` lists the core set only
+   * (docs/plans/bot-context.md §15). Absent or `search`: every tool it may be offered, as before.
+   */
+  botCatalogue?: 'search' | 'use_tool'
 }
 
 export interface MousseTool {
@@ -303,8 +315,14 @@ export type McpToolErrorCode =
   | 'mousse_conflict'
   | 'mousse_unknown_tool'
 
-/** A refusal the server reports as a JSON-RPC error, not as a tool result; `details` go into its `data`. */
+/**
+ * A refusal a tool throws. The registry and the MCP server turn it into an error result in the refusal shape
+ * (`legacyRefusal`), with `details` under its `data`; only the faults in `REFUSAL_FAULT_CODES` (the credential's turn
+ * is over, no such tool) stay JSON-RPC errors.
+ */
 export class McpToolError extends Error {
+  /** The message without the code in front. */
+  readonly reason: string
   constructor(
     readonly code: McpToolErrorCode,
     message: string,
@@ -312,7 +330,14 @@ export class McpToolError extends Error {
   ) {
     super(`${code}: ${message}`)
     this.name = 'McpToolError'
+    this.reason = message
   }
+}
+
+/** A thrown refusal as an error result, or undefined for a fault that stays a JSON-RPC error (and anything else). */
+export function refusalOutcome(error: unknown): ToolOutcome | undefined {
+  if (!(error instanceof McpToolError) || REFUSAL_FAULT_CODES.has(error.code)) return undefined
+  return legacyRefusal(error.code, error.reason, error.details)
 }
 
 export type ToolLedger = {

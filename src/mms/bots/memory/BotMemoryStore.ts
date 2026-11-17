@@ -34,7 +34,7 @@ import {
   type BotMemoryWrittenIn
 } from '../../../shared/bots/personal/memory'
 import type { BotJournalInput, BotStoreTx } from '../seams'
-import { type ChatSummaryState, foldChatSummary } from './chatSummary'
+import { CHAT_DIGEST_KEY, type ChatDigest, type ChatSummaryState, chatFingerprint, foldChatSummary, staleDigests } from './chatSummary'
 import { shortChipText } from '../../../shared/bots/personal/chips'
 import { classifyMemorySearchText, guardMemoryText, maskMemoryCredentials, relativeDateRefusal } from './guard'
 import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens } from './render'
@@ -463,6 +463,11 @@ export class BotMemoryStore {
     return row ? journalRowOf(row) : undefined
   }
 
+  /** The bot's journal rows of `kind` after `afterSeq`, oldest first. */
+  rowsOfKindAfter(botId: string, kind: BotJournalKind, afterSeq: number): BotJournalRow[] {
+    return this.all('SELECT * FROM bot_journal WHERE bot_id = ? AND kind = ? AND seq > ? ORDER BY seq', botId, kind, afterSeq).map(journalRowOf)
+  }
+
   // -- Search and read ---------------------------------------------------------------------------
 
   /**
@@ -510,7 +515,8 @@ export class BotMemoryStore {
       ref: `j${num(row.seq)!}`,
       at: row.at as string,
       ago: agoLabel(row.at as string, now),
-      kind: row.kind as string,
+      // A digest of the chat is a notice row of its own key: the hit says what it is.
+      kind: String(row.source_key).startsWith(CHAT_DIGEST_KEY) ? 'chat digest' : row.kind as string,
       who: row.who as string,
       snippet: snippet(row, (text) => cut(text, 240))
     })
@@ -985,7 +991,7 @@ export class BotMemoryStore {
           }
         }
       }
-      this.dropForgotten(botId, redactedSeqs)
+      this.dropForgotten(botId, redactedSeqs, { holds: matches, redact })
       const memIds = [...ids].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
       const removed = [...memIds, ...redacted]
       this.appendInTx(this.db, {
@@ -1048,20 +1054,47 @@ export class BotMemoryStore {
   }
 
   /**
-   * After a forget, in its transaction: the chat summary is folded again from the rows left when
-   * one of its lines came from a redacted row, and every frozen pack is dropped (each may carry a
-   * forgotten entry or row), so the activation's next dispatch builds its pack from what is left.
+   * After a forget, in its transaction: a digest that used a redacted row or holds forgotten words is marked to be
+   * written again (its row in the journal is redacted, and it shows the deterministic lines of what is left until then),
+   * the chat summary's lines are folded again from the rows left when one of them came from a redacted row, a digest
+   * being prepared is dropped, and every frozen pack is dropped (each may carry a forgotten entry or row), so the
+   * activation's next dispatch builds its pack from what is left.
    */
-  private dropForgotten(botId: string, redacted: ReadonlySet<number>): void {
-    const summary = this.getState<ChatSummaryState>(botId, 'chat_summary')
+  private dropForgotten(botId: string, redacted: ReadonlySet<number>, forgotten: { holds: (text: string) => boolean; redact: (row: BotJournalRow) => void }): void {
+    let summary = this.getState<ChatSummaryState>(botId, 'chat_summary')
+    if (summary?.digests?.length) {
+      const result = staleDigests(summary, {
+        fingerprintOf: (digest) => chatFingerprint(this.digestRows(botId, digest)),
+        holdsForgotten: forgotten.holds,
+        rowsOf: (digest) => this.digestRows(botId, digest)
+      }, this.zone(), this.now())
+      for (const digest of result.stale) {
+        const row = digest.seq === undefined ? undefined : this.journalRow(botId, digest.seq)
+        if (row) forgotten.redact(row)
+      }
+      if (result.stale.length) {
+        this.setState(botId, 'chat_summary', result.state)
+        summary = result.state
+      }
+    }
     const sources = summary?.sources
     // A line of unknown source (a summary from before sources were kept) may come from any folded row.
-    const stale = summary && [...redacted].some((seq) => seq <= summary.throughSeq && (!sources || sources.includes(seq) || sources.includes(0)))
+    const stale = summary && [...redacted].some((seq) => seq <= summary!.throughSeq && (!sources || sources.includes(seq) || sources.includes(0)))
     if (summary && stale) {
-      const folded = this.windowRows(botId, 0).filter((row) => row.seq <= summary.throughSeq)
-      this.setState(botId, 'chat_summary', { ...foldChatSummary(folded, undefined, this.zone(), this.now()), throughSeq: summary.throughSeq })
+      const folded = this.windowRows(botId, 0).filter((row) => row.seq <= summary!.throughSeq)
+      this.setState(botId, 'chat_summary', { ...foldChatSummary(folded, { lines: [], ...(summary.digests ? { digests: summary.digests } : {}) }, this.zone(), this.now()), throughSeq: summary.throughSeq })
     }
+    // A digest being written may have read what was forgotten: it is dropped, and asked for again from what is left.
+    this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key = 'chat_digest_pending'", botId)
     this.dropPacks(botId)
+    // Privacy beats the cache: the chat's runtime conversation may hold what was forgotten, so its epoch ends now and the
+    // next chat turn starts from a cleared context (docs/plans/bot-context.md §14).
+    this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key = 'chat_epoch'", botId)
+  }
+
+  /** The chat rows a digest summarised (`windowRows` of its range), as they are now. */
+  digestRows(botId: string, digest: Pick<ChatDigest, 'fromSeq' | 'throughSeq'>): BotJournalRow[] {
+    return this.windowRows(botId, digest.fromSeq).filter((row) => row.seq <= digest.throughSeq)
   }
 
   /** Drops every frozen pack of the bot: each activation's next dispatch builds its pack again. */
@@ -1126,6 +1159,10 @@ export class BotMemoryStore {
   setState(botId: string, key: string, value: unknown): void {
     this.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value',
       botId, key, JSON.stringify(value))
+  }
+
+  deleteState(botId: string, key: string): void {
+    this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)
   }
 
   /** Keeps the newest `keep` state rows (by their `at`) whose key starts with `prefix`: the frozen packs. */

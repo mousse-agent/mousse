@@ -7,6 +7,7 @@ import { FileAttachment } from "./input/file-attachment";
 import { ImageLightbox } from "./image-lightbox";
 import { useImageGallery } from "./image-gallery";
 import { userMessageImages, userMessageImageTiles } from "./image-sources";
+import { imageDragItem, startDragOut } from "../../../lib/fileDragOut";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
 import { openFileInPanel, openLinkedThread, routeLink } from "../../../utils/chatLinks";
@@ -297,9 +298,12 @@ export const UserMessage = memo(function UserMessage({
               alt={label}
               loading="lazy"
               decoding="async"
+              draggable={false}
               className="block h-[120px] w-[184px] object-cover rounded-an-message-inner"
             />
           );
+          // Dragged out of the window, the tile drops the image as a file under its name.
+          const dragImage = (event: React.DragEvent) => startDragOut(event, { name: name ?? label, item: () => imageDragItem(url, name) });
           const tileClass = "chat-user-image h-[132px] w-[196px] shrink-0 p-1.5 bg-an-foreground/4 rounded-an-message";
           return enableImagePreview ? (
             <button
@@ -309,11 +313,13 @@ export const UserMessage = memo(function UserMessage({
               aria-label={name ? `Open ${name}` : `Open image ${i + 1}`}
               title={name}
               onClick={() => openImage(i)}
+              draggable
+              onDragStart={dragImage}
             >
               {image}
             </button>
           ) : (
-            <div key={i} className={tileClass}>
+            <div key={i} className={tileClass} draggable onDragStart={dragImage}>
               {image}
             </div>
           );
@@ -343,6 +349,15 @@ export const UserMessage = memo(function UserMessage({
               isImage={file.isImage}
               title={file.path}
               onOpen={file.path ? () => openFileInPanel({ path: file.path! }) : undefined}
+              onDragStart={file.path ? (event) => {
+                const started = startDragOut(event, {
+                  name: file.filename,
+                  threadId: useAppStore.getState().activeThreadId,
+                  item: { kind: "attachment", path: file.path!, name: file.filename },
+                });
+                // A thread on another computer: the chip has nothing to drag.
+                if (!started) event.preventDefault();
+              } : undefined}
             />
           ))}
         </div>

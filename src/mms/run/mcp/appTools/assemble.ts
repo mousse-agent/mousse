@@ -162,12 +162,19 @@ export function offeredDefinitions(registry: ToolRegistry, families: Record<AppT
 export const RELAY_SESSION_INSTRUCTION = 'The user\'s MCP servers set up in Mousse are also available through the "mousse-relay" server as <server>__<tool>.'
 
 /**
- * Stable session text for a runtime with its own loop, delivered where the runtime applies session
- * text: Mousse's tool guidance when its MCP server is attached (with one sentence for the MCP relay
- * when that is attached too), and the applet guidance when applets are on. Empty when there is neither.
+ * The session sentence every thread agent gets, with or without Mousse's tools. A finished turn shows only its last
+ * reply; the earlier ones fold behind its "Worked for" line, so an answer given before more work is easily missed.
+ */
+export const LAST_REPLY_SESSION_INSTRUCTION = 'Your last reply of a turn is the only one the person sees. Put every answer they asked for in it, including ones you gave earlier in the turn.'
+
+/**
+ * Stable session text for a thread agent's runtime with its own loop, delivered where the runtime applies session
+ * text: the last-reply sentence, Mousse's tool guidance when its MCP server is attached (with one sentence for the
+ * MCP relay when that is attached too), and the applet guidance when applets are on.
  */
 export function sessionInstructions(input: { mcp: boolean; relay?: boolean; appletGuidance?: string }): string {
   return [
+    LAST_REPLY_SESSION_INSTRUCTION,
     ...(input.mcp ? [mousseOrchestrationInstructions()] : []),
     ...(input.mcp && input.relay ? [RELAY_SESSION_INSTRUCTION] : []),
     ...(input.appletGuidance?.trim() ? [input.appletGuidance.trim()] : [])

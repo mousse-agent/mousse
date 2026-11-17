@@ -6,10 +6,10 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
 import { PLAN_TURN_NOTE } from '../../src/mms/run/mcp/appTools/assemble'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { callTool, listTools, VendorAdapter, vendorDaemon, type Mcp, type ToolCallResult, type VendorDaemon } from './appToolVendorFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 import { piAdapter, waitFor } from './phase6Fixture'
@@ -41,7 +41,7 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
 
     expect(onPlan.tools).toEqual(onAgent.tools)
     expect(onPlan.tools).toContain('thread_fork')
-    expect(onPlan.fork.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_ceiling_exceeded, data: { reason: 'mousse_ceiling_exceeded' } })
+    expect(refusalOf(onPlan.fork)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'ceiling_exceeded' } })
 
     // Claude's per_call binding keeps the bearer and re-binds it to the next run with that turn's ceiling.
     expect(onAgent.mcp.token).toBe(onPlan.mcp.token)
@@ -100,7 +100,7 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
       if (input.prompt !== 'Survey it') return 'Noted.'
       const started = await callTool(mcp!, 'delegate_task', {
         prompt: 'Survey the run engine', title: 'Surveyor', provider: 'openai', model: 'gpt-replay',
-        workspace: 'shared', role: 'research', modeCeiling: 'plan', clientRequestId: 'survey-1'
+        workspace: 'shared', role: 'research', readOnly: true, modeCeiling: 'plan', clientRequestId: 'survey-1'
       })
       delegationId = JSON.parse(started.text!).delegationId
       return 'Delegated.'
@@ -168,10 +168,12 @@ describe('listing and per-turn availability over the server', () => {
     const tools = await listTools(mcp)
     expect(tools).toEqual(expect.arrayContaining(['ask_user', 'browser_open']))
     const off = await callTool(mcp, 'ask_user', { questions: [{ id: 'q1', question: 'Which?', options: [{ label: 'A' }] }] })
-    expect(off).toMatchObject({ status: 200, error: undefined, isError: true, text: 'Tool "ask_user" is disabled in Settings → Skills & MCP.' })
+    expect(off).toMatchObject({ status: 200, error: undefined, isError: true })
+    expect(refusalOf(off)).toMatchObject({ message: 'Tool "ask_user" is disabled in Settings → Skills & MCP.', refused: { code: 'unavailable' } })
     expect(host.askUser).not.toHaveBeenCalled()
     const unbound = await callTool(mcp, 'browser_open', {})
-    expect(unbound).toMatchObject({ status: 200, error: undefined, isError: true, text: expect.stringMatching(/^Browser tools are not bound for this turn/) })
+    expect(unbound).toMatchObject({ status: 200, error: undefined, isError: true })
+    expect(refusalOf(unbound)?.message).toMatch(/^Browser tools are not bound for this turn/)
   })
 
   it('the list follows the thread\'s ceiling, not the credential\'s turn ceiling', async () => {
@@ -200,6 +202,6 @@ describe('listing and per-turn availability over the server', () => {
     expect(tools).not.toContain('thread_fork')
     expect(tools).not.toContain('queue_enqueue')
     const refused = await callTool(mcp, 'queue_enqueue', { content: 'x' })
-    expect(refused.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_read_only })
+    expect(refusalOf(refused)).toMatchObject({ code: 'mousse_read_only', refused: { code: 'read_only' } })
   })
 })

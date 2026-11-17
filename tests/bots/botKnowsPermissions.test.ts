@@ -11,6 +11,7 @@ import { claudeLockedTools, type ClaudeLockedTurn } from '../../src/mms/harness/
 import { ClaudeSubscriptionAdapter } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
 import { delegationFixture } from '../run/delegationFixture'
 import { compileBotThread, botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
@@ -238,9 +239,9 @@ describe("a bot's thread lists only tools a bot can hold", () => {
       const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost().host)
       turns.register(appTurn({ threadId: 'bot-home', runId: run.runId, bot: authority(['escalate']) }))
       // Not "Browser tools are not bound for this turn": the bot is told it is not allowed, and to escalate.
-      expect(await registry.call('browser_open', { url: 'https://example.com' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual({ text: NOT_ALLOWED, isError: true })
+      expect(await registry.call('browser_open', { url: 'https://example.com' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', NOT_ALLOWED))
       // Any other tool outside the grant keeps its wall.
-      expect(await registry.call('ask_user', { questions: [] }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual({ text: 'This bot is not allowed to use ask_user.', isError: true })
+      expect(await registry.call('ask_user', { questions: [] }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', 'This bot is not allowed to use ask_user.'))
     } finally {
       fx.dispose()
     }

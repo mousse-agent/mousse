@@ -20,7 +20,7 @@ import {
 } from '../../src/shared/bots/personal/manifest'
 import { BOT_SCHEDULES_NOT_OWNER_TEXT } from '../../src/shared/bots/personal/walls'
 import type { ScheduledJob, Thread } from '../../src/shared/types'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-11-16T10:00:00.000Z'
@@ -99,7 +99,8 @@ describe('a bot uses what a thread\'s agent can', () => {
     const call = async (name: string, args: Record<string, unknown> = {}) => {
       try {
         const outcome = await registry.call(name, args, request({ threadId: 'work', runId: workRun.runId }))
-        return { error: outcome.isError === true, text: outcome.text }
+        // A refusal reads as its words; its shape is checked in toolRefusalShape.test.ts.
+        return { error: outcome.isError === true, text: refusalOf(outcome)?.message ?? outcome.text }
       } catch (error) {
         return { error: true, text: error instanceof Error ? error.message : String(error) }
       }

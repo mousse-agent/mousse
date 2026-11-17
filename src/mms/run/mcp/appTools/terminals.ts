@@ -4,6 +4,7 @@ import { TERMINAL_READ_DEFAULT_LINES, TERMINAL_READ_MAX_CHARS, TERMINAL_READ_MAX
 import type { AppToolHost, TerminalReadHost } from './host'
 import { isBotThread } from './thread'
 import { McpToolError, type MousseTool, type ToolOutcome } from './types'
+import { refusalText } from './refusal'
 
 export const TERMINAL_READ_TOOL = 'terminal_read'
 
@@ -59,19 +60,21 @@ export function readTerminals(terminals: TerminalReadHost, threadId: string, arg
   if (args.terminalId !== undefined && (typeof args.terminalId !== 'string' || !args.terminalId)) throw new Error('terminalId must be a terminal id from this tool\'s list.')
   const lines = boundedInt(args.lines, 'lines', 1, TERMINAL_READ_MAX_LINES)
   const before = boundedInt(args.before, 'before', 1, Number.MAX_SAFE_INTEGER)
+  // One masker for the whole read, before the output is cut into pages: the store's secrets and the thread's retired values.
+  const mask = (text: string): string => terminals.mask(text, threadId)
   const listed = titled(terminals.list(threadId))
   if (listed.length === 0 && args.terminalId === undefined) {
-    return { text: terminals.mask(JSON.stringify({ threadId, terminals: [], note: 'This thread has no terminal open in its panel, and none ended in the last few hours.' })) }
+    return { text: mask(JSON.stringify({ threadId, terminals: [], note: 'This thread has no terminal open in its panel, and none ended in the last few hours.' })) }
   }
   const newest = (terminal: TerminalInfo): number => terminal.lastOutputAt ?? terminal.startedAt
   const chosen = typeof args.terminalId === 'string'
     ? listed.find((terminal) => terminal.ptyId === args.terminalId)
     : [...listed].sort((a, b) => newest(b) - newest(a))[0]
   if (!chosen) {
-    return { text: terminals.mask(JSON.stringify({ threadId, terminals: listed.map(terminalView), error: `This thread has no terminal ${String(args.terminalId)} now: pick one from terminals.` })), isError: true }
+    return { text: mask(refusalText('invalid_arguments', `This thread has no terminal ${String(args.terminalId)} now: pick one from terminals.`, { data: { threadId, terminals: listed.map(terminalView) } })), isError: true }
   }
   const kept = terminals.output(chosen.ptyId)
-  const page = terminalPage(kept?.scrollback ?? '', { ...(lines ? { lines } : {}), ...(before ? { before } : {}), droppedLines: kept?.droppedLines ?? 0, ...(kept?.columns ? { columns: kept.columns } : {}), mask: terminals.mask })
+  const page = terminalPage(kept?.scrollback ?? '', { ...(lines ? { lines } : {}), ...(before ? { before } : {}), droppedLines: kept?.droppedLines ?? 0, ...(kept?.columns ? { columns: kept.columns } : {}), mask })
   const output = {
     terminalId: chosen.ptyId,
     title: chosen.title,
@@ -82,7 +85,7 @@ export function readTerminals(terminals: TerminalReadHost, threadId: string, arg
     ...(page.cut ? { cut: 'Long lines were shortened, or fewer lines fit the size limit.' } : {}),
     text: page.text
   }
-  return { text: terminals.mask(JSON.stringify({ threadId, terminals: listed.map(terminalView), output, note: DATA_NOTE })) }
+  return { text: mask(JSON.stringify({ threadId, terminals: listed.map(terminalView), output, note: DATA_NOTE })) }
 }
 
 /**

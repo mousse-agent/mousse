@@ -68,8 +68,19 @@
   padding-left: 1.4em;
 }
 
+/* The base reset takes list markers off; a document's lists keep theirs. */
+.chat-markdown ul { list-style: disc; }
+.chat-markdown ul ul { list-style: circle; }
+.chat-markdown ul ul ul { list-style: square; }
+.chat-markdown ol { list-style: decimal; }
+.chat-markdown ul.contains-task-list { list-style: none; padding-left: 0.3em; }
+
 .chat-markdown li {
   margin: 0.12em 0;
+}
+
+.chat-markdown li::marker {
+  color: var(--text-secondary);
 }
 
 .chat-markdown li > p {

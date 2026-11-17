@@ -51,6 +51,7 @@ const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { SelectionReplyButton } = await import('../../src/renderer/components/SelectionReplyButton')
 const { botMessageScroller } = await import('../../src/renderer/components/bots/BotChatView')
+const { SETTLE_MS, clearBotLiveReplies } = await import('../../src/renderer/stores/botLiveReplies')
 
 let root: Root
 let host: HTMLElement
@@ -114,7 +115,9 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   setBotsClient(null)
+  clearBotLiveReplies()
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
   useAppStore.setState({ settingsOpen: appInitial.settingsOpen })
@@ -307,10 +310,35 @@ describe('the transcript', () => {
     let localFiles: Record<string, ReturnType<typeof vi.fn>>
     /** Every picture file reads as a PNG, each with its own preview address. */
     const install = () => {
-      localFiles = { showInFolder: vi.fn(async () => undefined), saveCopy: vi.fn(async () => '/home/me/Downloads/a.png'), copyImage: vi.fn(async () => undefined) }
+      localFiles = { showInFolder: vi.fn(async () => undefined), saveCopy: vi.fn(async () => '/home/me/Downloads/a.png') }
+      writeImage = vi.fn(async () => undefined)
       let made = 0
       URL.createObjectURL = vi.fn(() => `blob:picture-${++made}`)
-      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async () => ({ mimeType: 'image/png', data: [137, 80, 78, 71] })) }, localFiles })
+      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async () => ({ mimeType: 'image/png', data: [137, 80, 78, 71] })) }, localFiles, clipboard: { writeImage } })
+    }
+    let writeImage: ReturnType<typeof vi.fn>
+    /**
+     * jsdom draws nothing: a picture "loads" at 3 by 2 unless its address is `blob:broken`, and the canvas encodes
+     * PNG bytes that name the picture drawn on it, so a test can tell which picture reached the clipboard.
+     */
+    const drawing = () => {
+      const PNG = [137, 80, 78, 71, 13, 10, 26, 10]
+      class LoadingImage {
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        naturalWidth = 3
+        naturalHeight = 2
+        width = 3
+        height = 2
+        private address = ''
+        get src() { return this.address }
+        set src(value: string) { this.address = value; queueMicrotask(() => (value === 'blob:broken' ? this.onerror?.() : this.onload?.())) }
+      }
+      vi.stubGlobal('Image', LoadingImage)
+      let drawn = ''
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({ drawImage: (image: LoadingImage) => { drawn = image.src } }) as never)
+      vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((done: BlobCallback) => done(new Blob([new Uint8Array([...PNG, ...new TextEncoder().encode(drawn)])], { type: 'image/png' })))
+      return (bytes: Uint8Array) => ({ png: [...bytes.slice(0, 8)].join() === PNG.join(), picture: new TextDecoder().decode(bytes.slice(8)) })
     }
     const article = (id: string) => transcript().querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
     const contextMenu = async (target: Element) => {
@@ -430,21 +458,29 @@ describe('the transcript', () => {
 
     it('a right-click offers Open, Save as…, Show in folder and Copy image, each on that picture', async () => {
       install()
+      const copied = drawing()
       fake.chats.inbox = [message(1, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')})` })]
       await open()
       await settle()
       const second = button('Open picture: b', article('b1'))!
       const menuItems = () => [...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')]
-      for (const [label, action] of [['Save as…', 'saveCopy'], ['Show in folder', 'showInFolder'], ['Copy image', 'copyImage']] as const) {
+      for (const label of ['Save as…', 'Show in folder', 'Copy image']) {
         await contextMenu(second)
         expect(menuItems().map((item) => item.textContent)).toEqual(['Open', 'Save as…', 'Show in folder', 'Copy image'])
         // The tools beside the bubble (reactions, Read aloud, Copy, Reply) step aside while the menu is open.
         expect(article('b1').classList.contains('is-menu-open')).toBe(true)
         await click(menuItems().find((item) => item.textContent === label))
-        expect(localFiles[action]).toHaveBeenCalledWith(picture('b.png'))
+        await settle()
         expect(document.querySelector('.bot-picture-menu')).toBeNull()
         expect(article('b1').classList.contains('is-menu-open')).toBe(false)
       }
+      expect(localFiles.saveCopy).toHaveBeenCalledWith(picture('b.png'))
+      expect(localFiles.showInFolder).toHaveBeenCalledWith(picture('b.png'))
+      // Copy image puts the picture itself on the clipboard, as PNG bytes: the second picture, not its path.
+      expect(writeImage).toHaveBeenCalledTimes(1)
+      const shown = second.querySelector('img')!.getAttribute('src')!
+      expect(copied(writeImage.mock.calls[0][0] as Uint8Array)).toEqual({ png: true, picture: shown })
+      expect(composerError()).toBeNull()
       await contextMenu(second)
       await click(menuItems()[0])
       expect(document.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe('b')
@@ -453,6 +489,50 @@ describe('the transcript', () => {
       await contextMenu(second)
       await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
       expect(document.querySelector('.bot-picture-menu')).toBeNull()
+    })
+
+    // A picture with no file (a `data:` image, a GIF or WebP drawn by the window) is copied as the window shows it.
+    it('a picture with no file offers Open and Copy image, and Copy image puts that picture on the clipboard', async () => {
+      install()
+      const copied = drawing()
+      const gif = 'data:image/gif;base64,R0lGODlhAQABAAAAACw='
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![dance](${gif})` })]
+      await open()
+      await settle()
+      await contextMenu(button('Open picture: dance', article('b1'))!)
+      const items = [...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')]
+      expect(items.map((item) => item.textContent)).toEqual(['Open', 'Copy image'])
+      await click(items[1])
+      await settle()
+      expect(copied(writeImage.mock.calls[0][0] as Uint8Array)).toEqual({ png: true, picture: gif })
+      expect(localFiles.saveCopy).not.toHaveBeenCalled()
+    })
+
+    it("a picture that can't be drawn is said above the composer, and the clipboard is left alone", async () => {
+      install()
+      drawing()
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![x](${picture('unreadable.png')})` })]
+      URL.createObjectURL = vi.fn(() => 'blob:broken')
+      await open()
+      await settle()
+      await contextMenu(button('Open picture: x', article('b1'))!)
+      await click([...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')].find((item) => item.textContent === 'Copy image'))
+      await settle()
+      expect(writeImage).not.toHaveBeenCalled()
+      expect(composerError()?.textContent).toBe("This picture can't be copied.")
+    })
+
+    it('a clipboard that refuses the picture is said in its own words above the composer', async () => {
+      install()
+      drawing()
+      writeImage.mockRejectedValue(new Error("Error invoking remote method 'clipboard:writeImage': Error: This picture can't be copied."))
+      fake.chats.inbox = [message(1, { id: 'b1', text: '![y](data:image/png;base64,iVBORw0KGgo=)' })]
+      await open()
+      await settle()
+      await contextMenu(button('Open picture: y', article('b1'))!)
+      await click([...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')].find((item) => item.textContent === 'Copy image'))
+      await settle()
+      expect(composerError()?.textContent).toBe("This picture can't be copied.")
     })
   })
 
@@ -901,6 +981,136 @@ describe('while it works', () => {
     await open({ ...inbox, state: 'paused', stateText: 'Paused until 14:00' })
     expect(presence()?.textContent).toBe('paused')
     expect(sticker()?.getAttribute('data-kind')).toBe('paused')
+  })
+})
+
+describe('a reply as it is written', () => {
+  // The bot's chat turns run in its home thread, whose messages reach the window as a thread's do.
+  const thread = { added: [] as Array<(event: { threadId: string; message: unknown }) => void>, updated: [] as Array<(event: { threadId: string; message: unknown }) => void> }
+  const writer = summary('inbox', { name: 'Inbox helper', state: 'working', stateText: 'Working…', homeThreadId: 'home1', chat: { activationId: 'act_c1' } })
+  const frame = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)) })
+  const add = async (message: object, threadId = 'home1') => { await act(async () => { for (const cb of thread.added) cb({ threadId, message }) }); await frame() }
+  const write = async (content: string, over: object = {}) => {
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content, timestamp: AT, streaming: true, ...over } }) })
+    await frame()
+  }
+  const live = () => transcript().querySelector('.bot-live-reply')
+  const stopped = () => transcript().querySelector('.bot-cut-reply')
+  async function openWriting(bot = writer) {
+    thread.added.length = 0
+    thread.updated.length = 0
+    installPreload(fake, { app: { setViewedBot }, orchestrator: { onThreadMessage: (cb: never) => { thread.added.push(cb); return () => {} }, onThreadMessageUpdated: (cb: never) => { thread.updated.push(cb); return () => {} } } })
+    fake.chats.inbox = [message(1, { id: 'o1', author: 'owner', text: 'Compare the two drives.' })]
+    await open(bot)
+    await add({ id: 'u1', role: 'user', content: 'Compare the two drives.', timestamp: AT })
+  }
+
+  it('shows the turn a finished block at a time before it ends, then only its posted message', async () => {
+    await openWriting()
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+    // A sentence still being written is not shown: the dots stay.
+    await write('The first drive')
+    expect(live()).toBeNull()
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+    await write('The first drive is faster.\n\nThe second one is')
+    expect(live()?.textContent).toBe('The first drive is faster.')
+    expect(transcript().querySelector('.bot-typing')).toBeNull()
+    // Another chat's thread is not this bot's.
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'other', message: { id: 'x', role: 'assistant', content: 'Not mine.\n\n', timestamp: AT, streaming: true } }) })
+    await frame()
+    expect(transcript().textContent).not.toContain('Not mine.')
+    // Its message posted: the live bubble goes, and the words show once, as the message.
+    await act(async () => fake.emit.message('inbox', message(2, { text: 'The first drive is faster.\n\nThe second one is cheaper.', activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    expect(transcript().querySelectorAll('.bot-message:not(.bot-typing)')).toHaveLength(1)
+    expect(stopped()).toBeNull()
+  })
+
+  it('a step after its words makes them the status beside the dots: the bubble goes until the reply after it', async () => {
+    await openWriting()
+    await write('Let me check the prices.\n\n')
+    expect(live()?.textContent).toBe('Let me check the prices.')
+    await add({ id: 't1', role: 'assistant', kind: 'tool_call', content: '', timestamp: AT })
+    expect(live()).toBeNull()
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+  })
+
+  it('never shows an applet’s source or the runtime’s placeholder, and draws nothing for words that finish no block', async () => {
+    await openWriting()
+    await write('Here it is.\n\n```mousse-applet\n{"schemaVersion":1,\n')
+    expect(live()?.textContent).toBe('Here it is.')
+    markdown.renders = 0
+    await write('Here it is.\n\n```mousse-applet\n{"schemaVersion":1,"title":"Budget",\n')
+    expect(markdown.renders).toBe(0)
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r2', role: 'assistant', content: 'No response requested.\n\n', timestamp: AT, streaming: true } }) })
+    await frame()
+    expect(transcript().textContent).not.toContain('No response requested')
+  })
+
+  /** The chat's turn ends (the service's summary no longer names it), and its settle wait passes. */
+  async function endTurn(before: () => void = () => {}) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await act(async () => before())
+      fake.bots = [{ ...writer, state: 'idle', stateText: '', chat: undefined }]
+      await act(async () => { await useBotsStore.getState().refresh() })
+      expect(stopped()).toBeNull()
+      await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_MS + 50) })
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  it('a quiet turn’s silent marker never shows, and a turn that ends with no message leaves nothing behind', async () => {
+    await openWriting()
+    await write('[SIL')
+    await write('[SILENT]')
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)) })
+    expect(live()).toBeNull()
+    expect(transcript().textContent).not.toContain('SIL')
+    // Words it showed, then a turn that ends with nothing posted and no Stop or failure: no "Stopped" reply.
+    await write('Checked the build.\n\n')
+    expect(live()?.textContent).toBe('Checked the build.')
+    await endTurn()
+    expect(live()).toBeNull()
+    expect(stopped()).toBeNull()
+  })
+
+  it('a turn that fails before its message keeps its words marked Stopped beside the error', async () => {
+    await openWriting()
+    await write('The first drive is faster.\n\n')
+    await endTurn(() => fake.emit.message('inbox', message(2, { kind: 'error', text: '', error: { text: 'Claude stopped answering.' }, activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    expect(stopped()?.querySelector('.bot-markdown')?.textContent).toBe('The first drive is faster.')
+    expect(stopped()?.querySelector('.bot-cut-mark')?.textContent).toBe('Stopped')
+    expect(transcript().textContent).toContain('Claude stopped answering.')
+  })
+
+  it('a turn the owner stops before its message leaves its words muted and marked Stopped, never as a sent message', async () => {
+    await openWriting()
+    await write('The first drive is faster.\n\nThe second')
+    await act(async () => { await useBotsStore.getState().stop('inbox') })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fake.bots = [{ ...writer, state: 'idle', stateText: '', chat: undefined }]
+      await act(async () => { await useBotsStore.getState().refresh() })
+      // It waits a moment for its message first.
+      expect(live()).not.toBeNull()
+      expect(stopped()).toBeNull()
+      await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_MS + 50) })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(live()).toBeNull()
+    // All it had written, the sentence it was in the middle of too, as a thread keeps a stopped reply.
+    expect(stopped()?.querySelector('.bot-markdown')?.textContent).toBe('The first drive is faster.The second')
+    expect(stopped()?.querySelector('.bot-cut-mark')?.textContent).toBe('Stopped')
+    // Not a message: nothing to reply to, react to or quote.
+    expect(stopped()?.querySelector('button')).toBeNull()
+    expect(stopped()?.hasAttribute('data-message-id')).toBe(false)
+    // A message of that turn that still comes takes its place.
+    await act(async () => fake.emit.message('inbox', message(2, { at: new Date(Date.now() + 1000).toISOString(), text: 'Late reply.', activationId: 'act_c1' })))
+    expect(stopped()).toBeNull()
   })
 })
 
@@ -1517,6 +1727,15 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(rows().slice(2)).toEqual([['Never ran', 'idle', 'idle'], ['Broken', 'failed', 'failed'], ['Halted', 'stopped', 'failed'], ['Old run', 'done', 'done']])
     })
 
+    it('a thread on hold for the owner is listed as waiting on you while the bot reads free, and the rest fold under Done', async () => {
+      await open({ ...inbox, state: 'idle', stateText: 'Done.', threads: [thread('t8', 'Fix login', 'on_hold', 20), thread('t3', 'Old run', 'done', 90)] })
+      expect(presence().textContent).toBe('free')
+      await click(presence())
+      expect(rows()).toEqual([['Fix login', 'waiting on you', 'waiting']])
+      const fold = host.querySelector<HTMLButtonElement>('.bot-thread-fold')!
+      expect([fold.textContent, fold.getAttribute('aria-expanded')]).toEqual(['Done1', 'false'])
+    })
+
     it('opens a thread from its row, moves along the list with the arrow keys, and closes on Escape or a click away', async () => {
       opened.ids.length = 0
       await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })
@@ -1755,7 +1974,7 @@ describe('loading and labels', () => {
   it('opens a bot with its messages: the click marks its face, and the pane changes once they are here', async () => {
     const release = await withSlowFirstPage()
     await click(button('Message Inbox helper'))
-    expect(button('Message Inbox helper')!.className).toContain('bot-roster-active')
+    expect(button('Message Inbox helper')!.getAttribute('aria-current')).toBe('true')
     // Nothing of the bot shows without its messages: no empty chat, no Loading line.
     expect(host.querySelector('.chat-transcript')).toBeNull()
     expect(loadState()).toBeNull()

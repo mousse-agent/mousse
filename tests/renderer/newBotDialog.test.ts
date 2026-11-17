@@ -188,6 +188,39 @@ describe('New bot', () => {
     expect(creates()[0]![1]).not.toHaveProperty('model')
   })
 
+  it('Devices on Runs on: Everywhere unless This computer only is picked, after the model, which keeps the focus', async () => {
+    vi.mocked(fake.client.modelChoices).mockImplementation(async () => ({ models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }], reachOnCreate: true }))
+    const devices = () => dialog()!.querySelector<HTMLElement>('[aria-label="Devices that reach the new bot"]')
+    await open([])
+    await toRunsOn('Remind me to water the plants.')
+    expect(document.activeElement).toBe(modelPicker())
+    expect(devices()?.textContent).toContain('Everywhere')
+    await click(createButton())
+    await act(async () => {})
+    expect(creates()[0]![1]).toMatchObject({ access: { mode: 'all' } })
+    // The next bot starts on Everywhere again.
+    await act(async () => useBotsStore.setState({ newBotOpen: true }))
+    await toRunsOn('Keep my diary.')
+    expect(devices()?.textContent).toContain('Everywhere')
+    await click(devices()!)
+    expect([...document.querySelectorAll('[role="option"]')].map((option) => option.textContent)).toEqual(['EverywhereYour connected devices and phones', 'This computer only'])
+    await pickOption('This computer only')
+    await click(createButton())
+    await act(async () => {})
+    expect(creates()[1]![1]).toMatchObject({ access: { mode: 'this_computer' } })
+  })
+
+  it('has no Devices row with a home that can\'t take the choice at creation, and sends none', async () => {
+    // The default service here answers model choices without `reachOnCreate`: one from before this choice.
+    await open([])
+    await toRunsOn('Remind me to water the plants.')
+    expect(dialog()!.querySelector('[aria-label="Devices that reach the new bot"]')).toBeNull()
+    expect(dialog()!.textContent).not.toMatch(/device|everywhere/i)
+    await click(createButton())
+    await act(async () => {})
+    expect(creates()[0]![1]).not.toHaveProperty('access')
+  })
+
   it('says so on Runs on when the picked model is gone by Create bot, and shows it as not available now', async () => {
     await open([])
     await toRunsOn('Remind me to water the plants.')

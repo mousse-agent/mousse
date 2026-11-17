@@ -11,6 +11,7 @@ import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
 import { normalizeContextSettings, type ContextSettings, type LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
+  ChatMessage,
   ContextUsageSnapshot,
   QueuedMessage,
   SendExpectation,
@@ -36,9 +37,10 @@ import {
 import { MMS_PROTOCOL_MAX_TEXT_LENGTH } from '../../mms/protocol/types'
 import { attachedFilesIn, formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
+import { withSteersOnTheWay } from '../lib/steersOnTheWay'
 import { nextSteerableQueueItem } from '../lib/queuedContent'
 import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
-import { contextTokens } from '../lib/promptCache'
+import { historyTokens as historyTokensOf } from '../lib/promptCache'
 import { cachedContextUsage, contextUsageKey, rememberContextUsage } from '../lib/threadContextUsage'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
@@ -56,6 +58,8 @@ import { createTurnActions, type TurnActions } from '../chat/components/agent-el
 import { countRender } from '../chat/components/agent-elements/render-counts'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
+import { useSubagents } from '../hooks/useSubagents'
+import { isWorkingSubagent } from '../../shared/subagents'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromTurn, reuseUIMessages } from '../chat/adapters/mousseToUI'
@@ -89,7 +93,7 @@ import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/message
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
 import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerListsModel, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
-import { errorText, readableError, sendErrorLine } from '../lib/errorText'
+import { compactNowFailureLine, errorText, isRequestTimeout, readableError, sendErrorLine } from '../lib/errorText'
 import { showToast } from './ui/Toast'
 import { editablePrompt, PromptUndoNotice } from './PromptUndoControls'
 import { invalidateThreadActionHistory, readThreadActionHistory } from '../utils/threadActionHistory'
@@ -184,6 +188,17 @@ function sameModel(
     has.llmProvider === wanted.llmProvider &&
     has.model === wanted.model &&
     (has.effort ?? '') === (wanted.effort ?? '')
+}
+
+/** The transcript shows a prompt with these words that was not there before the send (`seenBefore`): its turn started. */
+function startedAsPrompt(messages: readonly ChatMessage[], seenBefore: ReadonlySet<string>, content: string): boolean {
+  // New rows come last: read back to the first one that was already there.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!
+    if (seenBefore.has(message.id)) return false
+    if (message.role === 'user' && !message.id.startsWith('optimistic:') && message.content === content) return true
+  }
+  return false
 }
 
 export function OrchestratorChat() {
@@ -442,7 +457,7 @@ export function OrchestratorChat() {
     [messages]
   )
   // The history Send now keeps when it skips the compaction ("182K"), from the context snapshot.
-  const historyTokens = contextTokens(contextUsage) || undefined
+  const historyTokens = historyTokensOf(contextUsage) || undefined
   const queueHold = useMemo(() => (compactionRunning ? { historyTokens } : null), [compactionRunning, historyTokens])
   // An unsaved edit of a queued message that started meanwhile goes to its thread's composer (shown or not) with the
   // message's images, browser elements and references. Files are kept by thread here, like a paste.
@@ -470,6 +485,9 @@ export function OrchestratorChat() {
     lastPromptQueueItemId: lastUserMessage?.queueItemId ?? null,
     hiddenRequestIds: steersOnTheWay
   })
+  // Read when a message is sent: whether something waits in the queue ahead of it.
+  const queueItemsRef = useRef(queue.items)
+  queueItemsRef.current = queue.items
   // The notice about the moved edit goes once the composer is empty again (sent or cleared).
   const { draftMoved: queueDraftMoved, dismissDraftMoved } = queue
   useEffect(() => { if (queueDraftMoved && !input.trim()) dismissDraftMoved() }, [queueDraftMoved, input, dismissDraftMoved])
@@ -494,7 +512,9 @@ export function OrchestratorChat() {
   // Permission requests show inline in the turn that asked them, with the answer they got; agent questions keep the dialog.
   const permissionRequests = usePermissionRequests(activeThreadId, setSendError, describeAnswerOutcome)
   const placePermissionRequests = permissionRequests.place
-  const uiMessages = useMemo(() => mousseToUIMessages(messages, turnSenders), [messages, turnSenders])
+  // Steers sent here show in the reply from the click, until the copy the service writes there arrives.
+  const transcript = useMemo(() => withSteersOnTheWay(messages, queue.steersOnTheWay, queue.threadId), [messages, queue.steersOnTheWay, queue.threadId])
+  const uiMessages = useMemo(() => mousseToUIMessages(transcript, turnSenders), [transcript, turnSenders])
   // Placed in a separate pass, so a permission request arriving or being answered does not convert the transcript again.
   // Messages a delta did not change stay the same objects, so only the turn that changed renders again.
   const shownMessagesRef = useRef<UIMessage[]>([])
@@ -975,9 +995,9 @@ export function OrchestratorChat() {
       const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
       // During a reply or a compaction the message goes to the queue, so it is painted there; so does one sent while
       // an earlier prompt is still on its way (its turn is not reported running yet), or while messages wait in the
-      // queue (between two queued turns).
+      // queue (between two queued turns). Messages a Stop held wait for the person: a send starts its turn at once.
       const onTheWay = targetThreadId ? promptsOnTheWay.current.get(targetThreadId) ?? 0 : 0
-      const queueWaiting = Boolean(targetThreadId) && targetThreadId === queue.threadId && queue.items.length > 0
+      const queueWaiting = Boolean(targetThreadId) && targetThreadId === queue.threadId && queueItemsRef.current.some((item) => !item.heldAfterStop)
       const queuesNow = loading || turnActive || compactionRunning || onTheWay > 0 || queueWaiting
       const optimisticMessageId = !queuesNow && targetThreadId
         ? `optimistic:${crypto.randomUUID()}`
@@ -985,6 +1005,8 @@ export function OrchestratorChat() {
       const promptThread = optimisticMessageId ? targetThreadId : null
       if (promptThread) promptsOnTheWay.current.set(promptThread, onTheWay + 1)
       if (steer) setSteersOnTheWay((current) => new Set(current).add(requestId))
+      // A steer queued first shows in the reply from now on, not only once it is sent now.
+      const steerRow = steer && queuesNow && targetThreadId === queue.threadId ? queue.beginComposerSteer(request.content, images) : null
       if (optimisticMessageId) {
         useAppStore.getState().addMessage({
           id: optimisticMessageId,
@@ -1012,6 +1034,16 @@ export function OrchestratorChat() {
           clientRequestId: requestId
         }])
       }
+      // Painted in the queue, but the service started its turn at once: the copy leaves the queue as the transcript
+      // shows the message, not when the send answers (at the end of that turn).
+      const stopWatchingStart = optimisticQueueId && targetThreadId
+        ? useAppStore.subscribe((state, previous) => {
+          if (state.messages === previous.messages || state.activeThreadId !== targetThreadId) return
+          if (!startedAsPrompt(state.messages, seenBefore, request.content)) return
+          stopWatchingStart?.()
+          setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
+        })
+        : undefined
       // Optimistically mark the selected thread busy; queue accepts keep loading true.
       setLoading(true)
       // Promote drafts immediately and pin the thread to the top of its group
@@ -1048,7 +1080,9 @@ export function OrchestratorChat() {
         }
         // Steered while the turn could not take it: the queued message is sent now, by its id, so it joins the turn
         // as soon as it can (or goes first), and never twice.
-        if (steer && result.queued && result.queueItem && targetThreadId === queue.threadId) void queue.steer(result.queueItem.id)
+        if (steer && result.queued && result.queueItem && targetThreadId === queue.threadId) void queue.steer(result.queueItem.id, result.queueItem)
+        // Sent now: the queue paints it from here (the same render, so it never leaves the reply).
+        if (steerRow) queue.endComposerSteer(steerRow, false)
         // A message the service queued (a turn started meanwhile, or a run is paused by a usage limit) waits in the
         // queue: it is shown there, not also in the transcript.
         if (result.queued && optimisticMessageId) {
@@ -1141,14 +1175,16 @@ export function OrchestratorChat() {
         return false
       } finally {
         if (steer) setSteersOnTheWay((current) => { const next = new Set(current); next.delete(requestId); return next })
+        if (steerRow) queue.endComposerSteer(steerRow, false)
         if (promptThread) {
           const left = (promptsOnTheWay.current.get(promptThread) ?? 1) - 1
           if (left > 0) promptsOnTheWay.current.set(promptThread, left)
           else promptsOnTheWay.current.delete(promptThread)
         }
+        stopWatchingStart?.()
       }
     },
-    [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, setLoading, queue.threadId, queue.items.length, queue.steer]
+    [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, setLoading, queue.threadId, queue.items.length, queue.steer, queue.beginComposerSteer, queue.endComposerSteer]
   )
 
   const handleStop = useCallback(async () => {
@@ -1219,15 +1255,25 @@ export function OrchestratorChat() {
 
   // Compact now (the composer's chip, the context popover): it starts at once and runs while the person types.
   // Until the daemon's compaction row arrives, and while the request is out, the chip reads Compacting….
+  // Never offered beside work in progress: a running turn, or working subagents whose results come back to this thread.
+  const subagentsWorking = useSubagents(newChat ? null : activeThreadId).some(isWorkingSubagent)
   const [compactingThread, setCompactingThread] = useState<string | null>(null)
   const handleCompactNow = useCallback(() => {
     const threadId = activeThreadId
-    if (!threadId) return
+    if (!threadId || turnActive || loading || subagentsWorking) return
     setCompactingThread(threadId)
+    // The compaction rows already in the conversation: a new one means this compaction started, and its row says how it ended.
+    const compactionRows = () => useAppStore.getState().messages.filter((message) => message.kind === 'context_compaction').map((message) => message.id)
+    const rowsBefore = new Set(compactionRows())
     void window.mousse.threads.compact(threadId)
-      .catch((error: unknown) => setSendError(error instanceof Error ? error.message : String(error)))
+      .catch((error: unknown) => {
+        // Only a refusal before the compaction started is said here, and only on the thread that asked.
+        const line = compactNowFailureLine(error)
+        if (!line) console.warn('[compact] Compact now got no answer', { threadId, error: errorText(error) })
+        else if (useAppStore.getState().activeThreadId === threadId && compactionRows().every((id) => rowsBefore.has(id))) setSendError(line)
+      })
       .finally(() => setCompactingThread((current) => (current === threadId ? null : current)))
-  }, [activeThreadId])
+  }, [activeThreadId, turnActive, loading, subagentsWorking])
 
   // What composer commands act on: this thread (none yet on a blank chat) and whether a turn is running.
   const slashCommandEnv = (hasAttachments: boolean): SlashCommandEnv => ({
@@ -1239,7 +1285,15 @@ export function OrchestratorChat() {
     steer: (text) => window.mousse.orchestrator.steer(text, activeThreadId ?? undefined),
     newThread: async (title) => { await window.mousse.threads.createAndSelect(title) },
     clearContext: async (threadId) => { await window.mousse.threads.clearContext(threadId) },
-    compact: async (threadId, focus) => { await window.mousse.threads.compact(threadId, focus) },
+    // A compaction that got no answer in time may still be running; its row in the conversation says how it ends.
+    compact: async (threadId, focus) => {
+      try {
+        await window.mousse.threads.compact(threadId, focus)
+      } catch (error) {
+        if (!isRequestTimeout(error)) throw error
+        console.warn('[compact] /compact got no answer', { threadId, error: errorText(error) })
+      }
+    },
     fork: async (threadId) => { await window.mousse.threads.fork(threadId) },
     rename: async (threadId, title) => { await window.mousse.threads.rename(threadId, title) },
     // The sidebar cancels the event when it opened the thread's rename box.
@@ -1357,6 +1411,10 @@ export function OrchestratorChat() {
       // A /steer no turn took: next-turn guidance, sent as an ordinary message.
       text = command.text
       if (command.adoptGoal) goalToAdopt = command.text
+    } else if (options?.steer && !skillMode && images.length > 0 && !trimmed.startsWith('/')) {
+      // A steer with images: the text-only steer call cannot carry them, so the message is queued with them and sent
+      // into the reply by its id (`queue.steer`), as a steer the turn could not take yet is. The images go with it.
+      steerQueued = true
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
       // Steer (Ctrl/Cmd+Enter) during a run: the text goes into the running turn instead of the queue. The composer
       // clears at once, as a send does: what is typed while this steer is on its way is the next message, and a clear
@@ -1364,6 +1422,8 @@ export function OrchestratorChat() {
       clearComposer(false)
       const steerThread = activeThreadId
       const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
+      // It shows in the reply at once, as sent, until the copy the service writes there arrives.
+      const steerRow = steerThread && steerThread === queue.threadId ? queue.beginComposerSteer(trimmed) : null
       let steered: boolean | 'queued' | 'uncertain'
       try {
         steered = await window.mousse.orchestrator.steer(trimmed, steerThread ?? undefined)
@@ -1372,6 +1432,7 @@ export function OrchestratorChat() {
         // read again, and the text comes back to the composer only if it did not arrive.
         steered = 'uncertain'
       }
+      if (steerRow) queue.endComposerSteer(steerRow, steered === true)
       if (steered === 'uncertain') {
         setSendError(STEER_UNCONFIRMED)
         if (steerThread) {
@@ -1909,7 +1970,7 @@ export function OrchestratorChat() {
                 contextCompactionSetting,
                 contextOpen,
                 onContextOpenChange: setContextOpen,
-                ...(!newChat && activeThreadId ? { onCompactNow: handleCompactNow } : {}),
+                ...(!newChat && activeThreadId && !subagentsWorking ? { onCompactNow: handleCompactNow } : {}),
                 compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId),
                 ...(activeThread?.botOwned ? { contextHidden: true } : {})
               }}

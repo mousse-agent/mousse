@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The Chats tab's Bots section (bot-ui §4.1): Bots where Roster was, + opens New bot, each bot by
- * its face (its state in the face, and in words on hover), and Recent with the direct chats.
+ * The Chats tab's Bots section (bot-ui §4.1): Bots where Roster was, + opens New bot, a row per bot (its face, its
+ * name and latest time, and what it does now in coloured words; an idle bot's face sleeps), Recent with the direct
+ * chats, and sections that fold and stay folded.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -31,11 +32,13 @@ const { ChatWorkspace } = await import('../../src/renderer/components/chats/Chat
 const NewBotDialogHost = ((await import('../../src/renderer/components/bots/NewBotDialog')) as { NewBotDialogHost?: () => null }).NewBotDialogHost ?? (() => null)
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
+const { useAppStore } = await import('../../src/renderer/stores/appStore')
 
 let root: Root
 let host: HTMLElement
 let fake: FakeBots
 const chatsInitial = useChatsStore.getInitialState()
+const foldedInitial = useAppStore.getState().chatsSidebarCollapsed
 const botsInitial = useBotsStore.getInitialState()
 
 const direct = (id: string, name: string, at: string) => ({
@@ -52,6 +55,10 @@ async function show(bots = fake.bots, chats: ChatSummary[] = [], pane = true) {
   await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), pane && createElement(ChatWorkspace), createElement(NewBotDialogHost))))
 }
 const headings = () => [...host.querySelectorAll('.chats-sidebar-content .chat-section-heading h2')].map((element) => element.textContent)
+const rows = () => [...host.querySelectorAll<HTMLButtonElement>('.chats-sidebar-content button[aria-label^="Message "]')]
+const rowNames = () => rows().map((row) => row.getAttribute('aria-label')!.replace('Message ', ''))
+const stateLine = (name: string) => button(`Message ${name}`)!.querySelector('[data-tone]')!
+const fold = (title: string) => [...host.querySelectorAll<HTMLButtonElement>('.chat-section-heading h2 button')].find((element) => element.textContent === title)!
 const button = (label: string) => [...host.querySelectorAll('button')].find((element) => element.getAttribute('aria-label') === label || element.textContent === label)
 const click = async (element: Element | undefined | null) => { await act(async () => { (element as HTMLElement).click() }) }
 
@@ -70,6 +77,7 @@ afterEach(() => {
   setBotsClient(null)
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
+  useAppStore.setState({ chatsSidebarCollapsed: foldedInitial })
 })
 
 describe('the Bots section', () => {
@@ -98,16 +106,51 @@ describe('the Bots section', () => {
     expect(useBotsStore.getState().newBotOpen).toBe(true)
   })
 
-  it('lists each bot by its face, at 48 px, with its state in the face', async () => {
-    await show([summary('a', { name: 'Inbox helper', look: { colour: 'blue', accessory: 'crown' } }), summary('b', { name: 'Garden', state: 'working', stateText: 'Working…' })])
-    const row = [...host.querySelectorAll('.bot-roster button')]
-    expect(row.map((element) => element.querySelector('span')?.textContent)).toEqual(['Inbox helper', 'Garden'])
-    const face = row[0]!.querySelector('.bot-face')!
-    expect(face.getAttribute('width')).toBe('48')
+  it('lists a row per bot, the one that spoke last first, each with its face, its latest time and what it does now', async () => {
+    await show([
+      summary('a', { name: 'Inbox helper', look: { colour: 'blue', accessory: 'crown' }, last: { text: 'Hi', at: '2026-11-07T08:00:00.000Z', author: 'bot' } }),
+      summary('b', { name: 'Garden', state: 'working', stateText: 'Working…', work: [{ id: 'w', title: 'Watering plan', status: 'running', startedAt: '2026-11-07T09:30:00.000Z' }], last: { text: 'On it', at: '2026-11-07T10:00:00.000Z', author: 'bot' } }),
+      summary('c', { name: 'Mail', state: 'needs_you', stateText: 'Wants to send 2 replies' })
+    ])
+    expect(rowNames()).toEqual(['Garden', 'Mail', 'Inbox helper'])
+    const face = button('Message Inbox helper')!.querySelector('.bot-face')!
+    expect(face.getAttribute('width')).toBe('36')
     expect(face.getAttribute('data-colour')).toBe('blue')
     expect(face.getAttribute('data-accessory')).toBe('crown')
-    expect(row[1]!.querySelector('.bot-face')?.getAttribute('data-state')).toBe('working')
+    expect(button('Message Garden')!.querySelector('.bot-face')?.getAttribute('data-state')).toBe('working')
+    expect(button('Message Garden')!.textContent).toContain('Nov 7')
+    // What each does, in words, and its tone: working, waiting on the owner, idle.
+    expect([stateLine('Garden'), stateLine('Mail'), stateLine('Inbox helper')].map((line) => [line.textContent, line.getAttribute('data-tone')]))
+      .toEqual([['Watering plan', 'working'], ['Wants to send 2 replies', 'needs'], ['Idle', 'idle']])
     expect(host.textContent).not.toContain('No bots yet')
+  })
+
+  it('shows an idle bot\'s latest reply in place of Idle, a busy bot what it does, and Idle again with reply previews off', async () => {
+    const { setReplyPreviews } = await import('../../src/renderer/lib/replyPreviewSetting')
+    await show([
+      summary('a', { name: 'Inbox helper', lastReply: 'Sorted 12 emails into Later.' }),
+      summary('b', { name: 'Garden', state: 'working', stateText: 'Working…', lastReply: 'Watered the tomatoes.' })
+    ])
+    expect([stateLine('Inbox helper'), stateLine('Garden')].map((line) => line.textContent)).toEqual(['Sorted 12 emails into Later.', 'Working…'])
+    try {
+      act(() => setReplyPreviews(false))
+      expect(stateLine('Inbox helper').textContent).toBe('Idle')
+    } finally {
+      act(() => setReplyPreviews(true))
+    }
+  })
+
+  it('lets an idle bot sleep, at full colour with its z, while a paused bot sleeps faded and a busy one stays awake', async () => {
+    await show([summary('a', { name: 'Resting' }), summary('b', { name: 'Off', state: 'paused', stateText: 'Paused' }), summary('c', { name: 'Busy', state: 'working', stateText: 'Working…' })])
+    const face = (name: string) => button(`Message ${name}`)!.querySelector<SVGElement>('.bot-face')!
+    expect(face('Resting').getAttribute('data-state')).toBe('paused')
+    expect(face('Resting').style.opacity).toBe('1')
+    const z = (name: string) => face(name).querySelector('text')?.textContent
+    expect(z('Resting')).toBe('z')
+    expect(face('Off').style.opacity).toBe('0.6')
+    expect(z('Off')).toBe('z')
+    expect(face('Busy').getAttribute('data-state')).toBe('working')
+    expect(z('Busy')).toBeUndefined()
   })
 
   it('lists each bot once, in the Bots row with its state on hover; Recent has the direct chats only', async () => {
@@ -123,6 +166,21 @@ describe('the Bots section', () => {
     expect(button('Message Flight deals')?.title).toBe('Flight deals: Paused')
   })
 
+  it('puts a lock before a bot that some of the owner\'s devices don\'t reach, and none before one every device does', async () => {
+    await show([
+      summary('a', { name: 'Diary', reach: 'this_computer' }),
+      summary('b', { name: 'Notes', reach: 'chosen' }),
+      summary('c', { name: 'Shopping', reach: 'all' }),
+      // A service that does not say: no lock, as before.
+      summary('d', { name: 'Flights' })
+    ])
+    const lock = (name: string) => button(`Message ${name}`)!.querySelector('.bot-row-head [aria-label="Private"]')
+    expect(lock('Diary')?.getAttribute('title')).toBe('Only this computer reaches this bot. Change it in About.')
+    expect(lock('Notes')?.getAttribute('title')).toBe('Only the devices picked in About reach this bot.')
+    expect(lock('Shopping')).toBeNull()
+    expect(lock('Flights')).toBeNull()
+  })
+
   it('opens a bot’s chat from its face', async () => {
     fake.chats.a = [message(1, { text: 'Good morning.' })]
     await show([summary('a', { name: 'Inbox helper' })])
@@ -130,25 +188,26 @@ describe('the Bots section', () => {
     expect(useChatsStore.getState()).toMatchObject({ activeBotId: 'a', activeChatId: null })
     expect(host.querySelector('.chat-conversation-header h1')?.textContent).toBe('Inbox helper')
     expect(host.querySelector('.chat-transcript')?.textContent).toContain('Good morning.')
-    expect(host.querySelector('.bot-roster button.bot-roster-active')).not.toBeNull()
+    expect(button('Message Inbox helper')!.getAttribute('aria-current')).toBe('true')
   })
 
-  it('marks the open bot in the Bots row, and a bot with unread messages with a dot that opening its chat clears', async () => {
+  it('marks the open bot, and counts a bot’s unread messages until its chat opens', async () => {
     fake.chats.a = [message(1, { text: 'Good morning.' })]
     fake.chats.b = [message(1, { text: 'Two emails need a reply.' })]
     await show([summary('a', { name: 'Inbox helper' }), summary('b', { name: 'Garden', unread: 2 })])
-    const face = (label: string) => button(`Message ${label}`)!
-    expect(face('Inbox helper').querySelector('.bot-roster-unread')).toBeNull()
-    expect(face('Garden').querySelector('.bot-roster-unread')?.getAttribute('aria-label')).toBe('2 unread')
-    expect(host.querySelector('.bot-roster button.bot-roster-active')).toBeNull()
-    await click(face('Inbox helper'))
-    expect(face('Inbox helper').classList.contains('bot-roster-active')).toBe(true)
-    expect(face('Garden').querySelector('.bot-roster-unread')).not.toBeNull()
-    await click(face('Garden'))
+    const row = (label: string) => button(`Message ${label}`)!
+    const unread = (label: string) => row(label).querySelector('[aria-label$=" unread"]')
+    expect(unread('Inbox helper')).toBeNull()
+    expect([unread('Garden')?.textContent, unread('Garden')?.getAttribute('aria-label')]).toEqual(['2', '2 unread'])
+    expect(rows().filter((element) => element.getAttribute('aria-current') === 'true')).toEqual([])
+    await click(row('Inbox helper'))
+    expect(row('Inbox helper').getAttribute('aria-current')).toBe('true')
+    expect(unread('Garden')).not.toBeNull()
+    await click(row('Garden'))
     await act(async () => {})
-    expect(face('Garden').classList.contains('bot-roster-active')).toBe(true)
-    expect(face('Inbox helper').classList.contains('bot-roster-active')).toBe(false)
-    expect(face('Garden').querySelector('.bot-roster-unread')).toBeNull()
+    expect(row('Garden').getAttribute('aria-current')).toBe('true')
+    expect(row('Inbox helper').getAttribute('aria-current')).toBeNull()
+    expect(unread('Garden')).toBeNull()
     expect(useBotsStore.getState().bots.find((bot) => bot.id === 'b')?.unread).toBe(0)
     expect(fake.calls).toContainEqual(['markRead', 'b', 1])
   })
@@ -156,7 +215,7 @@ describe('the Bots section', () => {
   it('finds bots with the chat search', async () => {
     await show([summary('a', { name: 'Inbox helper' }), summary('b', { name: 'Garden' })])
     await act(async () => useChatsStore.setState({ searchOpen: true, search: 'gar' }))
-    expect([...host.querySelectorAll('.bot-roster button > span')].map((element) => element.textContent)).toEqual(['Garden'])
+    expect(rowNames()).toEqual(['Garden'])
   })
 
   it('follows bots.changed and plays done when a working bot finishes well', async () => {
@@ -164,7 +223,52 @@ describe('the Bots section', () => {
     fake.bots = [summary('a', { name: 'Inbox helper', state: 'idle', stateText: 'All done', lastOutcome: 'ok' })]
     await act(async () => { fake.emit.changed('a') })
     await act(async () => {})
-    expect(host.querySelector('.bot-roster .bot-face')?.getAttribute('data-state')).toBe('happy')
+    expect(button('Message Inbox helper')!.querySelector('.bot-face')?.getAttribute('data-state')).toBe('happy')
+  })
+})
+
+describe('folding the sections', () => {
+  it('folds a section from its title, each on its own, and keeps it folded when the sidebar comes back', async () => {
+    await show([summary('a', { name: 'Inbox helper' })], [direct('c1', 'Reviewer', '2026-11-07T09:00:00.000Z')], false)
+    expect([fold('Bots'), fold('Groups'), fold('Recent')].map((element) => element.getAttribute('aria-expanded'))).toEqual(['true', 'true', 'true'])
+    await click(fold('Bots'))
+    expect(fold('Bots').getAttribute('aria-expanded')).toBe('false')
+    // jsdom has no matchMedia, so the fold applies at once (Collapse).
+    expect(rowNames()).toEqual([])
+    expect(button('New bot')).toBeDefined()
+    expect(fold('Groups').getAttribute('aria-expanded')).toBe('true')
+    expect(host.textContent).toContain('No groups')
+    expect(host.textContent).toContain('Reviewer')
+    await click(fold('Recent'))
+    expect(host.textContent).not.toContain('Reviewer')
+    act(() => root.unmount())
+    root = createRoot(host)
+    await show(fake.bots, [direct('c1', 'Reviewer', '2026-11-07T09:00:00.000Z')], false)
+    expect([fold('Bots'), fold('Groups'), fold('Recent')].map((element) => element.getAttribute('aria-expanded'))).toEqual(['false', 'true', 'false'])
+    await click(fold('Bots'))
+    expect(rowNames()).toEqual(['Inbox helper'])
+  })
+
+  it('shows the matches of a search in a folded section', async () => {
+    await show([summary('a', { name: 'Inbox helper' }), summary('b', { name: 'Garden' })], [], false)
+    await click(fold('Bots'))
+    expect(rowNames()).toEqual([])
+    await act(async () => useChatsStore.setState({ searchOpen: true, search: 'gar' }))
+    expect(rowNames()).toEqual(['Garden'])
+  })
+
+  it('remembers the folds for each profile, read back when it opens again', async () => {
+    const key = (profileId: string) => `mousse-profile-${profileId}-workspace`
+    act(() => { useAppStore.getState().activateProfile('fold-a') })
+    await show([summary('a', { name: 'Inbox helper' })], [], false)
+    await click(fold('Groups'))
+    expect((JSON.parse(window.localStorage.getItem(key('fold-a')) ?? '{}') as { chatsSidebarCollapsed?: unknown }).chatsSidebarCollapsed).toEqual({ groups: true })
+    // Another profile starts with every section open; coming back reads the first one's folds from storage.
+    act(() => { useAppStore.getState().activateProfile('fold-b') })
+    expect(fold('Groups').getAttribute('aria-expanded')).toBe('true')
+    act(() => { useAppStore.getState().activateProfile('fold-a') })
+    expect([fold('Bots'), fold('Groups')].map((element) => element.getAttribute('aria-expanded'))).toEqual(['true', 'false'])
+    for (const profileId of ['fold-a', 'fold-b']) window.localStorage.removeItem(key(profileId))
   })
 })
 
@@ -175,7 +279,7 @@ describe('after a restart', () => {
     // The sidebar comes back on the Chats tab while the pane opens on Projects: the sidebar alone.
     await act(async () => root.render(createElement(ChatsSidebar)))
     await act(async () => {})
-    expect(host.querySelector('.bot-roster')?.textContent).toContain('noobesh')
+    expect(rowNames()).toEqual(['noobesh'])
   })
 
   it('shares one 30-second fallback poll between the sidebar and the pane, and stops it when both are gone', async () => {

@@ -17,7 +17,7 @@
  * - what a tap never does: widen the grant, or let the work act on threads or models
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_JOURNAL_ERROR, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
@@ -136,11 +136,9 @@ async function restart() {
 }
 
 describe('work that asks', () => {
-  it('shows its question at once under the owner’s message, refuses the rest of its turn, and waits without its slot so queued work starts', async () => {
+  it('shows its question at once under the owner’s message, refuses the rest of its turn, and waits while other work runs', async () => {
     const others = [await handOff('Train times', 'w2'), await handOff('Weather', 'w3')]
     const { workId, work, asked, bubble } = await workThatAsks()
-    const queued = await handOff('Recipes', 'w4')
-    expect(f.store.activation(queued.workId)?.status).toBe('queued')
     // The bubble is the bot's own words from its work, under the message that asked for the work, with its answers.
     expect(bubble).toMatchObject({ kind: 'notice', author: 'bot', replyTo: { id: asked.id }, question: { status: 'open', choices: [{ label: 'Flat A' }, { label: 'Flat B' }] } })
     expect(bubble.text.slice(0, bubble.plainFrom)).toBe(FLATS.question)
@@ -152,9 +150,8 @@ describe('work that asks', () => {
     expect(work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'x' })).toBe(QUESTION_END_TURN_TEXT)
     expect(f.store.escalations({ botId })).toEqual([])
     await endTurn(work)
-    // It waits for the answer, holding no run slot: the queued work started in it. Its last words are not posted.
+    // It waits for the answer. Its last words are not posted.
     expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'question' })
-    expect(f.store.activation(queued.workId)?.status).toBe('running')
     expect(chatOf(f, botId).some((message) => message.activationId === workId && message.text.includes('I asked which flat'))).toBe(false)
     // The owner is needed, and the work line says why it waits; the chat's work list too.
     expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}` })
@@ -326,6 +323,8 @@ describe('nothing is left waiting', () => {
   it('a full queue drops the oldest waiting work with its line, and withdraws its question', async () => {
     const { workId, work, questionId } = await workThatAsks()
     await endTurn(work)
+    // Nothing starts while the bot's journal cannot be written, so the runs asked for queue.
+    f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     for (let i = 0; i < 20; i += 1) {
       f.clock.now += 1_000
       await f.bots.activate({ botId, input: `Run ${i}`, clientRequestId: `q${i}` })
@@ -337,21 +336,24 @@ describe('nothing is left waiting', () => {
 })
 
 describe('Forget', () => {
-  /** Fills the bot's three run slots, so answered work waits for one. */
-  const fillSlots = async () => [await handOff('Train times', 'f1'), await handOff('Weather', 'f2'), await handOff('Recipes', 'f3')]
+  /** Holds the bot's queue (its journal cannot be written), so answered work waits to go on; returns the release. */
+  const holdQueue = () => {
+    f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
+    return () => f.store.setError(botId, null)
+  }
 
   it('of the answer before the work read it: the question is open again and the work waits for an answer again', async () => {
     const memory = memoryStore()
     const { workId, work, questionId } = await workThatAsks()
     await endTurn(work)
-    const busy = await fillSlots()
+    const release = holdQueue()
     const { message } = await tap(questionId, 'Flat B')
     expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'question_answered' })
     memory.forget(botId, { refs: [journaled(memory, message, 'owner_msg')], by: 'owner_ui' })
     expect(f.store.question(questionId)).toMatchObject({ status: 'open', answer: null })
     expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'question' })
-    // A free slot now does not carry it on: it has no answer.
-    await finish(f, payloadOf(f, busy[0]!.workId), 'completed', { text: 'Trains at 9.' })
+    // The queue going again does not carry it on: it has no answer.
+    release()
     await f.bots.maintain()
     expect(mainDispatches(workId)).toHaveLength(1)
     expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'question' })

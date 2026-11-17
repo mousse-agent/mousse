@@ -1,3 +1,5 @@
+import type { AnsweredQuestion } from './types'
+
 /**
  * What the app shows about one thread's subagents. Built by the daemon from delegations, lineage,
  * runs, pending questions and thread names (`src/mms/run/delegation/subagentView.ts`).
@@ -103,10 +105,15 @@ export interface SubagentNoticeItem {
   /**
    * What the notice says when it is not a task's result: its subagent waits for an answer (`question`), or the task
    * was stopped before it finished (`stopped`). Such an item has nothing to read with `task_status`.
+   * `answer` is not about a subagent: the person answered (or dismissed) a question this thread's own agent asked
+   * without waiting. Its `childThreadId` is the thread itself. The transcript shows nothing for it: the answers row was
+   * recorded when the person answered. A queued copy that waits for its turn shows `answers`.
    */
-  event?: 'question' | 'stopped'
-  /** With `event: 'question'`: the question the subagent waits on. */
+  event?: 'question' | 'stopped' | 'answer'
+  /** With `event: 'question'`: the question the subagent waits on. With `event: 'answer'`: the question answered. */
   requestId?: string
+  /** With `event: 'answer'`: the answers as the transcript shows them. */
+  answers?: AnsweredQuestion[]
 }
 
 /**
@@ -127,6 +134,20 @@ export interface SubagentsUpdatedEvent {
 
 /** States of a subagent that has not finished: it is working, queued, needs input, or waits on its own subagents. */
 const RUNNING_SUBAGENT_STATES: ReadonlySet<SubagentState> = new Set<SubagentState>(['needs_input', 'queued', 'starting', 'working', 'paused', 'waiting'])
+
+/** States of a subagent doing work now: its run is queued, starting or working. */
+const WORKING_SUBAGENT_STATES: ReadonlySet<SubagentState> = new Set<SubagentState>(['queued', 'starting', 'working'])
+
+/**
+ * True while a subagent is doing work now, unlike `isRunningSubagent`: one paused on a usage limit or waiting for a
+ * person's answer is not, however long that lasts. One waiting on subagents of its own is while one of those works
+ * (or while it waits on something that is not a subagent).
+ */
+export function isWorkingSubagent(subagent: Pick<SubagentSummary, 'state' | 'waitingOn'>): boolean {
+  if (WORKING_SUBAGENT_STATES.has(subagent.state)) return true
+  if (subagent.state !== 'waiting') return false
+  return subagent.waitingOn.length === 0 || subagent.waitingOn.some((entry) => entry.state === 'waiting' || WORKING_SUBAGENT_STATES.has(entry.state))
+}
 
 /** True while a subagent is still going, so a list can count it as "running". */
 export function isRunningSubagent(subagent: Pick<SubagentSummary, 'state'>): boolean {

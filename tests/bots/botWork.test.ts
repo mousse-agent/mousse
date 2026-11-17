@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
-import { BOT_FAILURE_PAUSE_STREAK, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomText, sayOnce, stoppedShortText } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_FAILURE_PAUSE_STREAK, BOT_JOURNAL_ERROR, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomText, sayOnce, stoppedShortText } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
@@ -77,22 +77,19 @@ describe('the chat is the front desk', () => {
     expect(summary().work).toBeUndefined()
   })
 
-  it('up to three pieces run at once: a fourth says what it waits behind and starts when one ends', async () => {
+  it('every piece runs at once: a fourth starts beside the other three', async () => {
     const first = await chat('Four jobs', 'm1')
     const jobs = []
-    for (const name of ['A', 'B', 'C']) {
+    for (const name of ['A', 'B', 'C', 'D']) {
       f.clock.now += 1_000
       jobs.push(await f.bots.tools.work.start(botId, first.activation.id, { title: `Job ${name}`, brief: `Do ${name}.`, key: name }))
     }
-    expect(jobs.map((job) => job.status)).toEqual(['started', 'started', 'started'])
-    const d = await f.bots.tools.work.start(botId, first.activation.id, { title: 'Job D', brief: 'Do D.', key: 'd' })
-    expect(d).toMatchObject({ status: 'queued', ahead: ['Job A', 'Job B', 'Job C'] })
+    expect(jobs.map((job) => job.status)).toEqual(['started', 'started', 'started', 'started'])
     // The same call again starts nothing new.
-    expect((await f.bots.tools.work.start(botId, first.activation.id, { title: 'Job D', brief: 'Do D.', key: 'd' })).workId).toBe(d.workId)
+    expect((await f.bots.tools.work.start(botId, first.activation.id, { title: 'Job D', brief: 'Do D.', key: 'D' })).workId).toBe(jobs[3]!.workId)
     await finish(f, first.payload, 'completed', { text: 'All on my list.' })
-    expect(f.bots.tools.work.list(botId).now.map((item) => [item.title, item.status])).toEqual([['Job A', 'running'], ['Job B', 'running'], ['Job C', 'running'], ['Job D', 'queued']])
+    expect(f.bots.tools.work.list(botId).now.map((item) => [item.title, item.status])).toEqual([['Job A', 'running'], ['Job B', 'running'], ['Job C', 'running'], ['Job D', 'running']])
     await runDispatch(f, jobs[0]!.workId, 1, { text: 'A done.' })
-    expect(f.store.activation(d.workId)!.status).toBe('running')
     expect(f.bots.tools.work.list(botId).recent[0]).toMatchObject({ workId: jobs[0]!.workId, title: 'Job A', status: 'done', report: 'A done.' })
   })
 
@@ -167,12 +164,15 @@ describe('notes to work', () => {
   })
 
   it('waiting work gets the note with its request; ended work says so', async () => {
-    const first = await chat('Four jobs', 'm1')
+    const first = await chat('Two jobs', 'm1')
     const a = await f.bots.tools.work.start(botId, first.activation.id, { title: 'A', brief: 'Do A.', key: 'a' })
-    for (const key of ['a2', 'a3']) await f.bots.tools.work.start(botId, first.activation.id, { title: key, brief: `Do ${key}.`, key })
+    // Nothing starts while the bot's journal cannot be written, so B waits.
+    f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     const b = await f.bots.tools.work.start(botId, first.activation.id, { title: 'B', brief: 'Do B.', key: 'b' })
+    expect(b.status).toBe('queued')
     expect(f.bots.tools.work.note(botId, b.workId, 'In French.')).toBe('noted')
     expect(f.bots.tools.work.reach!(botId, b.workId)).toBe('start')
+    f.store.setError(botId, null)
     await finish(f, first.payload, 'completed', { text: 'On them.' })
     await runDispatch(f, a.workId, 1, { text: 'A done.' })
     expect(f.store.dispatch(b.workId, 1)!.prompt.text).toContain('In French.')
@@ -244,12 +244,13 @@ describe('reminders', () => {
 
   it('forgetting the message that asked for work cancels it if it has not started, and scrubs its brief everywhere', async () => {
     const turn = await chat('Two jobs about Dr Ames', 'm1')
-    // Two other pieces hold slots, so the second job waits.
-    for (const key of ['x', 'y']) await f.bots.tools.work.start(botId, turn.activation.id, { title: key, brief: `Do ${key}.`, key })
     const a = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Ames records', brief: 'Collect the Dr Ames letters.', key: 'a' })
-    const b = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Ames summary', brief: 'Summarise the Dr Ames letters.', key: 'b' })
     f.bots.tools.work.note(botId, a.workId, 'Include the biopsy one from Ames.')
     await finish(f, turn.payload, 'completed', { text: 'On both.' })
+    // Nothing starts while the bot's journal cannot be written, so the second job waits.
+    f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
+    const b = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Ames summary', brief: 'Summarise the Dr Ames letters.', key: 'b' })
+    expect(b.status).toBe('queued')
     const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
     f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'owner_msg', lane: 'chat', sourceKey: `bm:${turn.message.id}`, who: 'owner', text: turn.message.text }))
     const row = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${turn.message.id}`)!
@@ -611,23 +612,6 @@ describe('long work', () => {
       expect(f.store.dispatches(workId)).toHaveLength(2)
     })
 
-    it('Allow while other work holds every slot carries it on when one frees, before anything queued later', async () => {
-      const { workId } = await outOfTime()
-      const askId = chatOf(f, botId).at(-1)!.ask!.askId
-      const turn = await chat('Check the weather', 'm2')
-      const weather = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Weather', brief: 'Check the weather.', key: 'k-weather' })
-      for (const key of ['k-news', 'k-mail']) await f.bots.tools.work.start(botId, turn.activation.id, { title: key, brief: `Do ${key}.`, key })
-      const later = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Trains', brief: 'Check the trains.', key: 'k-trains' })
-      await finish(f, turn.payload, 'completed', { text: 'On it.' })
-      await f.bots.service.answer(botId, askId, 'allow')
-      await flush()
-      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'room_allowed' })
-      expect(f.bots.tools.work.list(botId).now.find((item) => item.workId === workId)).toMatchObject({ status: 'queued' })
-      await runDispatch(f, weather.workId, 1, { text: 'Sunny.' })
-      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
-      expect(f.store.activation(later.workId)).toMatchObject({ status: 'queued' })
-    })
-
     it('takes over an earlier run\'s open ask; Allow on that card before its turn ended carries it on once the turn let go', async () => {
       // A run started by hand ran out first: it ended, and its ask waits in the chat.
       const run = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
@@ -938,31 +922,29 @@ describe('long work', () => {
       expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(120 * MIN)
     })
 
-    it('work that waits more than a week ends at the next tick, whatever it waits for', async () => {
+    it('work that waits keeps waiting, however long, until something wakes, answers or stops it', async () => {
       const { workId } = await outOfTime()
-      f.clock.now += 6 * 24 * 60 * MIN
+      f.clock.now += 30 * 24 * 60 * MIN
       await f.bots.maintain(new Date(f.clock.now))
-      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked' })
-      f.clock.now += 2 * 24 * 60 * MIN
-      await f.bots.maintain(new Date(f.clock.now))
-      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'waited_too_long' })
-      expect(chatOf(f, botId).at(-1)!.text).toBe('"Vacuums" waited too long, so I stopped it. Ask me again if you still want it.')
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'budget_exhausted' })
+      expect(chatOf(f, botId).some((message) => message.text.includes('waited too long'))).toBe(false)
     })
 
-    it('waiting work counts toward the run lane\'s 20: the oldest is dropped with a line when more is queued', async () => {
+    it('waiting work counts toward the run lane\'s 20 queued: the oldest is dropped with a line when more is queued', async () => {
       const { workId } = await outOfTime()
+      // Nothing starts while the bot's journal cannot be written, so what is asked for queues.
+      f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
       for (let i = 0; i < 19; i += 1) {
         f.clock.now += 1_000
         await f.bots.activate({ botId, input: `Run ${i}`, clientRequestId: `q${i}` })
       }
-      // Three run, sixteen wait in the queue, and the waiting work is the twentieth.
-      expect(f.store.laneActivations(botId, 'run', ['running'])).toHaveLength(3)
-      expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(16)
+      // Nineteen wait in the queue, and the waiting work is the twentieth.
+      expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(19)
       expect(f.store.activation(workId)).toMatchObject({ status: 'blocked' })
       f.clock.now += 1_000
       await f.bots.activate({ botId, input: 'Run 19', clientRequestId: 'q19' })
       expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'queue_full' })
-      expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(17)
+      expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(20)
       expect(chatOf(f, botId).at(-1)!.text).toBe('I had too much waiting, so I dropped "Vacuums". Ask me again when I\'m less busy.')
     })
 

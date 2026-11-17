@@ -75,7 +75,7 @@ export interface CursorChatInput {
    * one of those deliveries. A drain is read (`steerTaken`, then `onSteer` with its token) only once the run that
    * carries it started, and handed back (`returnSteer`) when that never happens.
    */
-  drainSteerEntry?(opts?: { expect?: Array<'cut' | 'native' | 'hold'> }): { text: string; token: string } | undefined
+  drainSteerEntry?(opts?: { expect?: Array<'cut' | 'native' | 'hold'> }): { text: string; token: string; images?: ChatImageAttachment[] } | undefined
   /** The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. */
   peekSteer?(): { delivery: 'cut' | 'native' | 'hold' } | undefined
   /** The check right before the run is cancelled for a drained steer (`TurnControl.mayCut`): false hands it back. */
@@ -313,10 +313,11 @@ interface Turn {
   handBack?: () => void
 }
 
-/** A steer the turn drained; `token` names its drain when it had one. */
+/** A steer the turn drained, with the images sent with it; `token` names its drain when it had one. */
 interface DrainedSteer {
   text: string
   token?: string
+  images?: ChatImageAttachment[]
 }
 
 /** What a turn produced so far; kept when it ends early. */
@@ -763,7 +764,7 @@ export class CursorSessions {
         }
         const steer = entry?.text.trim()
         if (!entry || !steer) return
-        const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}) }
+        const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}), ...(entry.images?.length ? { images: entry.images } : {}) }
         // The check at dispatch: a tool that started since the decision is not cancelled for this steer.
         if (running && !cancelling && drained.token && input.mayCut && !input.mayCut(drained.token)) {
           input.returnSteer?.(drained.text, drained.token)
@@ -826,7 +827,8 @@ export class CursorSessions {
       if (!pendingSteers.length) return { text: progress.text, interrupted: false, ...(progress.usage ? { usage: progress.usage } : {}) }
       carried = pendingSteers.splice(0)
       prompt = carried.map((entry) => entry.text).join('\n')
-      images = []
+      // The run a steer becomes carries its images.
+      images = carried.flatMap((entry) => entry.images ?? []).map((image) => ({ data: image.data, mimeType: image.mimeType }))
     }
   }
 

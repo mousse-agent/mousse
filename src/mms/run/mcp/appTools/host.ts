@@ -181,6 +181,16 @@ export type AgentArchiveResult =
   | { status: 'accepted'; archived: boolean; changed: boolean }
   | { status: 'rejected'; reason: 'thread_running' }
 
+/**
+ * What asking to archive the caller's own thread did (`thread_archive` from a thread's agent): `scheduled` archives it
+ * when the running turn ends well, `changed: false` when it already is archived. Refused for a subagent, a bot's thread,
+ * a turn no person started, or a run that is not the thread's running turn.
+ */
+export type AgentArchiveOwnResult =
+  | { status: 'scheduled' }
+  | { status: 'accepted'; changed: false }
+  | { status: 'rejected'; reason: 'subagent' | 'not_started_by_person' | 'not_running' }
+
 /** A thread's queue as a reader sees it: what is waiting, what a turn has claimed, and the revision a change must name. */
 export interface QueueSnapshot {
   /** Pending and steering items, in order; internal items are left out. */
@@ -301,8 +311,8 @@ export interface TerminalReadHost {
   list(threadId: string): TerminalInfo[]
   /** `columns`: its width, where its long lines wrap. */
   output(ptyId: string): { scrollback: string; droppedLines: number; columns?: number } | undefined
-  /** Masks every secret in the profile's store. */
-  mask(text: string): string
+  /** Masks every secret in the profile's store, and the values the thread had that were removed or changed while it ran. */
+  mask(text: string, threadId: string): string
 }
 
 /**
@@ -317,6 +327,13 @@ export interface AppToolHost extends DelegationToolsHost {
   ): Promise<UserQuestionAnswers>
   /** Dismisses the thread's open questions (an in-process `ask_user` whose turn stopped). */
   dismissQuestions?(threadId: string): void
+  /**
+   * `ask_user` with `wait: false`: the question is saved and shown, and its id comes back at once. The answer reaches the
+   * thread later, through its inbox. Absent: questions always wait.
+   */
+  askWithoutWaiting?(threadId: string, questions: PendingUserQuestions['questions'], runId: string | null): string
+  /** `withdraw_question`: the thread's agent no longer needs its open question. False when it was not open there. */
+  withdrawQuestion?(threadId: string, requestId: string): boolean
   /** Secret requests and commands that use them (`secret_request`, `secret_run`); absent: those tools refuse. */
   secrets?(): SecretToolHost | undefined
   /** The threads' terminals as `terminal_read` reads them (never writes); absent: the tool is not listed. */
@@ -386,9 +403,13 @@ export interface AppToolHost extends DelegationToolsHost {
    * (which threads the caller may see) and `titlesOnly` are applied before the limit and before any
    * transcript is read.
    */
-  searchThreads?(query: string, limit: number, options?: Pick<ThreadSearchOptions, 'allow' | 'titlesOnly' | 'maxMessageThreads'>): ThreadSearchHit[] | Promise<ThreadSearchHit[]>
+  searchThreads?(query: string, limit: number, options?: Pick<ThreadSearchOptions, 'allow' | 'titlesOnly' | 'maxMessageThreads' | 'hideSubagents'>): ThreadSearchHit[] | Promise<ThreadSearchHit[]>
   /** The thread's visible transcript. */
   threadMessages?(threadId: string): ChatMessage[]
+  /** The questions and approvals the thread's run waits on now (not the open questions it asked without waiting). */
+  pendingRequests?(threadId: string): PendingUserQuestions[]
+  /** Calls `listener` with the thread each time a question or approval is asked; returns the function that stops it. */
+  onRequestPending?(listener: (threadId: string) => void): () => void
   /** What waits on a thread: its queued messages and unanswered questions. */
   threadActivity?(threadId: string): { queuedCount: number; pendingQuestions: PendingUserQuestions[] }
   /** Records a change an agent made to another thread: an `agent.action` event and a transcript row. */
@@ -406,11 +427,6 @@ export interface AppToolHost extends DelegationToolsHost {
    */
   sendToThread?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentSendResult>
   /**
-   * The first result of a send that `clientRequestId` already made to the thread, found without admitting anything; undefined
-   * when the key made none. A retry past the send cap is answered with it.
-   */
-  earlierSend?(threadId: string, clientRequestId: string): AgentSendResult | undefined
-  /**
    * Watches the message `messageKey` sent to `targetThreadId` (`notify` on `thread_send` and `thread_create`): Mousse
    * tells the sending thread when the work it started waits on a person (once) and when it ends (SPEC §15.1). Once per
    * message: a retry keeps its watch. With `targetNode`, `targetThreadId` is a thread this caller launched on that
@@ -426,11 +442,6 @@ export interface AppToolHost extends DelegationToolsHost {
    */
   createThread?(input: AgentThreadRequest, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentCreatedThread>
   /**
-   * The key has a stored creation already: a retry finishes that one thread (or its first message) and does not use up a place
-   * under the caller's cap on new threads.
-   */
-  creationStarted?(clientRequestId: string): boolean
-  /**
    * `thread_create` with `computer` (issue #1160): a top-level thread on another of the user's computers, in its project
    * that is the caller's repository. The launch is recorded before any call (`remote_launches`), every call is marked as
    * the caller's, and a retry with the same `clientRequestId` continues that one launch. Refusals are returned, not thrown.
@@ -439,8 +450,8 @@ export interface AppToolHost extends DelegationToolsHost {
   /** The thread tools on threads launched on other computers; absent without Bridge's run engine. */
   remoteThreads?: RemoteThreadsHost
   /**
-   * Adds a note row to the thread's transcript (the creator's: what it launched, and on which model). `launched` names
-   * the thread it started, which the transcript draws as a chip.
+   * Adds a note row to the thread's record (the creator's: what it launched, and on which model). `launched` names
+   * the thread it started. The chat does not show the note.
    */
   noteOnThread?(threadId: string, text: string, launched?: { threadId: string; summary?: string }): void
   /**
@@ -458,6 +469,8 @@ export interface AppToolHost extends DelegationToolsHost {
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Archives (`archived`) or unarchives another thread through the app's own Archive, as a personal bot's call (`thread_archive`). */
   setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult>
+  /** Archives the caller's own thread once its running turn ends well (`thread_archive` from a thread's agent). */
+  archiveOwnThreadAfterTurn?(options: { actor: AgentActor }): AgentArchiveOwnResult
   /**
    * Hides a thread the calling bot started from its owner's sidebar, or shows it there again (`thread_hide`). `changed`
    * is false when it already was so.

@@ -2,7 +2,7 @@ import { tellMeOf } from '../shared/types'
 import { OwnerQuietHours } from './notifications/OwnerQuietHours'
 import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
-import { SecretVault } from './secrets/SecretVault'
+import { SecretVault, secretThreadBusy } from './secrets/SecretVault'
 import { SecretRequests } from './secrets/SecretRequests'
 import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
@@ -52,9 +52,10 @@ import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { personTurnRequest } from './run/mcp/appTools/agentMessage'
-import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
+import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
-import { launchedThreadsOf, watchLaunchedThreads } from './bots/launchedThreads'
+import { jobThreadIn, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
+import { readRunResultText } from './run/delegation/hold'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
@@ -76,6 +77,7 @@ import { botAsksFirst } from './bots/actions/BotActions'
 import { createProfileBotMemory } from './bots/memory/profileMemory'
 import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
+import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -163,6 +165,7 @@ import { buildAutomationIndex, mergeRemoteAutomations } from './automations/Auto
 import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAutomations'
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
 import { usedWallpapers, WallpaperStore } from './appearance/WallpaperStore'
+import { ThemeRestoreStore } from './appearance/ThemeRestoreStore'
 import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
 import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
 import type { AutomationIndex, ManagerTurn } from '../shared/automations'
@@ -422,7 +425,6 @@ export class MmsProfileServices {
   private readonly ownerHandle: MmsOwnerHandle | null
   private readonly homeDir: string
   private readonly installationHome: string
-  private readonly effectFibres: Partial<EffectWorkerFibres> | undefined
 
   constructor(
     config: MousseConfigStore,
@@ -443,15 +445,9 @@ export class MmsProfileServices {
       listProfiles?: () => Array<{ id: string; displayName?: string }>
       /** Whether another profile still has an unmoved provider entry `instanceId` (the profile host's answer for a profile it builds). */
       otherProfilesUse?: (instanceId: string) => boolean
-      /**
-       * Effect worker fibres per lane class (SPEC §12.3). `turn` caps this profile's concurrent
-       * turns (default 8); control fibres keep Stop and steer responsive while turns run.
-       */
-      effectFibres?: Partial<EffectWorkerFibres>
     }
   ) {
     this.config = config
-    this.effectFibres = shared.effectFibres
     this.ownerHandle = ownerHandle
     this.homeDir = homeDir
     this.installationHome = shared.installationHome
@@ -602,7 +598,8 @@ export class MmsProfileServices {
     this.mcpServer = new MousseMcpServer({
       credentials: this.mcpCredentials,
       registry: this.orchestrator.mcpToolRegistry(),
-      relay: this.orchestrator.relayHandler()
+      relay: this.orchestrator.relayHandler(),
+      boundary: this.orchestrator.mcpToolBoundary()
     })
     this.orchestrator.setAppletStore(this.applets)
     // Registry agents install once per installation; each profile records which versions it uses.
@@ -784,14 +781,23 @@ export class MmsProfileServices {
         pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
       }, repo, number),
       // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works.
-      launchedThreads: (creators) => launchedThreadsOf({
-        creators,
-        threads: this.threads.listAllThreads(),
-        activeRuns: this.runEngine.store.listNonTerminalRuns(),
-        lastRun: (id) => this.runEngine.store.listRuns(id, { limit: 1 })[0],
+      launchedThreads: (creators) => launchedThreadsIn({
+        threads: this.threads,
+        engine: this.runEngine,
         asks: (id) => this.questions.listPendingForThread(id).length > 0,
         projectName: (id) => this.projects.getProject(id)?.name
-      }),
+      }, creators),
+      // A thread a bot handed a job to, for its ledger: how it stands and its last answer.
+      jobThread: (threadId) => jobThreadIn({
+        threads: this.threads,
+        engine: this.runEngine,
+        asks: (id) => this.questions.listPendingForThread(id).length > 0,
+        trashed: (id) => {
+          const record = this.threads.lifecycleStore.get(id)
+          return Boolean(record && record.state !== 'active')
+        },
+        result: (id, runId) => readRunResultText(this.runEngine.store, id, runId)
+      }, threadId),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
@@ -814,6 +820,21 @@ export class MmsProfileServices {
       models: botModels,
       activity: botActivity,
       clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
+      // A turn's Mousse tools as its runtime lists them (`bot_turn_usage`): how many, and their characters.
+      toolList: (threadId, runId) => {
+        const tools = this.orchestrator.mcpToolRegistry().listForTurn(threadId, runId)
+        return { count: tools.length, chars: tools.reduce((sum, tool) => sum + tool.name.length + tool.description.length + JSON.stringify(tool.inputSchema ?? {}).length, 0) }
+      },
+      // Bot chat epochs (docs/plans/bot-context.md §14) run where the runtime resumes the thread's own session: Claude
+      // Code and Codex. Pi's bot process is made for each turn and seeds a new session from the transcript, which holds
+      // none of the packs, so its chat starts every turn from a cleared context, as before.
+      // A bot's tool catalogue (docs/plans/bot-context.md §15): Claude Code loads listed tools on demand with its own tool
+      // search; every other runtime (Codex, Pi, an ACP agent) is listed the core set and calls the rest through `use_tool`.
+      toolCatalogue: (instanceId) => (this.providerInstances.get(instanceId)?.driver === 'claude' ? 'search' : 'use_tool'),
+      chatResumes: (instanceId) => {
+        const driver = this.providerInstances.get(instanceId)?.driver
+        return driver === 'claude' || driver === 'codex'
+      },
       archiveThread: (threadId) => { this.threads.setThreadSettled(threadId, true) },
       // Naming a new bot: one short call on the model its activations would use.
       oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
@@ -845,6 +866,8 @@ export class MmsProfileServices {
       // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
       computerName: () => computerNameIfKnown() || hostname(),
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
+      // Which devices reach each bot: a new bot's choice is saved before the bot is published.
+      deviceAccess: this.botDeviceAccess,
       // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers,
@@ -872,8 +895,19 @@ export class MmsProfileServices {
           filesFolder: (botId) => botFilesFolder(homeDir, botId),
           situation: (botId) => this.botSituation(botId),
           scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
+          jobs: (botId, limit, since) => store.recentJobs(botId, limit, since),
           reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
-            .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') }))
+            .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') })),
+          // The digest of a fold (docs/plans/bot-context.md §14): one call with no tools on the bot's chat model.
+          digest: async ({ selection, system, prompt, signal }) => (await harness.oneShot({
+            selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model },
+            signal,
+            purpose: 'title',
+            task: 'chat_digest',
+            system,
+            prompt,
+            maxChars: BOT_CHAT_DIGEST.digest * 8
+          })).text
         }
       })
       botMemory = memory
@@ -904,6 +938,15 @@ export class MmsProfileServices {
       return { journal, context, progress: memory, memory: admin, supervision: botProcesses }
     })
     this.botStore = opened?.store ?? null
+    // A new bot's choice of devices is saved before the bot: one left by a crash between the two names a bot that was
+    // never made, and goes now, before any call can make a bot.
+    if (opened) {
+      try {
+        this.botDeviceAccess.dropBots((botId) => opened.store.registry(botId) !== undefined)
+      } catch (error) {
+        console.warn('bot device choices could not be tidied', error instanceof Error ? error.message : String(error))
+      }
+    }
     // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
     if (opened) {
       try {
@@ -975,7 +1018,7 @@ export class MmsProfileServices {
     })
     // A thread a bot started began, was held, asks the owner or ended: that bot's header reads busy or free again.
     if (personalBots) {
-      const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, threads: this.threads, thread: (id) => this.threads.getThread(id), changed: (creator) => personalBots.launchedThreadChanged(creator) })
+      const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, threads: this.threads, thread: (id) => this.threads.getThread(id), changed: (creator, threadId) => personalBots.launchedThreadChanged(creator, threadId) })
       this.platform.onDispose(stop)
     }
     // A step of a bot's turn began: its words just before it are what it is doing now, beside its typing dots.
@@ -1120,7 +1163,8 @@ export class MmsProfileServices {
       threads: this.threads
     })
     this.agentJobAsks = new AgentJobAskStore(homeDir)
-    this.wallpapers = new WallpaperStore(homeDir, { used: () => usedWallpapers(this.settings.get().appearance.userThemes) })
+    this.themeRestore = new ThemeRestoreStore(homeDir)
+    this.wallpapers = new WallpaperStore(homeDir, { used: () => this.usedWallpaperIds() })
     // The agents' theme tools: a change is saved like one made in Settings and reaches every window of the profile.
     this.orchestrator.setAppearanceTools({
       get: () => this.settings.get().appearance,
@@ -1130,7 +1174,8 @@ export class MmsProfileServices {
         return settings.appearance
       },
       // An agent's path: never a network share (signing in to a host the agent named would hand it the person's credentials).
-      importWallpaper: (path) => this.wallpapers.importFile(path, { network: false })
+      importWallpaper: (path) => this.wallpapers.importFile(path, { network: false }),
+      restorePoint: this.themeRestore
     })
     this.orchestrator.setScheduledJobs({
       // A thread whose first ask the person allowed; a profile that turned the old switch on lets every thread add them.
@@ -1209,13 +1254,23 @@ export class MmsProfileServices {
       profileRoot: homeDir,
       threadAlive: (threadId) => Boolean(this.threads.getThread(threadId)),
       threadTitle: (threadId) => this.threads.getThread(threadId)?.name,
+      // A subagent's thread is masked with its parents' secrets: their agents may hand it the value.
+      ancestorsOf: (threadId) => {
+        const lineage = this.threads.getThread(threadId)?.lineage
+        if (!lineage) return []
+        const ancestors = [lineage.rootThreadId]
+        for (let id: string | undefined = lineage.parentThreadId; id && !ancestors.includes(id) && ancestors.length < 32; id = this.threads.getThread(id)?.lineage?.parentThreadId) ancestors.push(id)
+        return ancestors
+      },
+      threadBusy: (threadId) => secretThreadBusy(threadId, this.orchestrator, this.runEngine),
       changed: () => this.secretsChanged.emit('changed')
     })
     this.secretRequests = new SecretRequests(this.secretVault)
     const vault = this.secretVault
     this.orchestrator.setSecrets({
       masker: (threadId) => vault.maskerFor(threadId),
-      storeMasker: () => vault.maskerForStore(),
+      storeMasker: (threadId) => vault.maskerForStore(threadId),
+      copies: { allow: (threadId) => vault.allowCopies(threadId, true), hold: (threadIds) => vault.holdCopies(threadIds) },
       tools: createSecretToolHost({ vault, requests: this.secretRequests, scratchRoot: join(homeDir, 'secrets', 'run') })
     })
     try {
@@ -1456,6 +1511,7 @@ export class MmsProfileServices {
       },
       runStore: () => this.runEngine.store,
       notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
+      noteStates: (details) => { this.threads.notePullRequestStates(details) },
       onRunEnd: (listener) => {
         const handler = (event: ThreadEvent): void => {
           if (event.type !== 'run.status') return
@@ -1891,6 +1947,15 @@ export class MmsProfileServices {
 
   /** The profile's wallpaper images (`<profileHome>/wallpapers`); settings name them by id only. */
   wallpapers!: WallpaperStore
+
+  /** The theme from before agents changed it, which `theme_set { restore: true }` puts back. */
+  themeRestore!: ThemeRestoreStore
+
+  /** The wallpaper images to keep: the user themes', and those of the themes a restore would put back. */
+  private usedWallpaperIds(): Set<string> {
+    const kept = Object.values(this.themeRestore?.get()?.themes ?? {}).filter((theme) => theme !== null)
+    return usedWallpapers([...this.settings.get().appearance.userThemes, ...kept])
+  }
 
   /**
    * Answers an agent's first-creation ask. Allow makes the automation as the agent asked, ending after the lifetime
@@ -2533,7 +2598,7 @@ export class MmsProfileServices {
     // Threads still on JSON files move to thread.db in the background, one at a time.
     this.threads.startBackgroundImport()
     // Wallpaper images no theme has used for a week go, in the background.
-    void this.wallpapers.collect(usedWallpapers(this.settings.get().appearance.userThemes)).catch(() => 0)
+    void this.wallpapers.collect(this.usedWallpaperIds()).catch(() => 0)
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
@@ -2653,8 +2718,7 @@ export class MmsProfileServices {
     const worker = new EffectWorker({
       outbox: engine.outbox,
       executors: this.orchestrator.effectExecutors(),
-      owner: engine.leaseOwner,
-      fibres: this.effectFibres
+      owner: engine.leaseOwner
     })
     const reconciler = new Reconciler({
       store: engine.store,

@@ -22,14 +22,14 @@ import { PI, phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 class PolicyAdapter implements ProviderAdapter {
   readonly driver = 'pi' as const
   readonly capabilities = PI_TEST_CAPABILITIES
-  readonly turns: Array<{ threadId: string; cwd: string | null; toolAccess: AdapterHost['tools']['toolAccess'] }> = []
+  readonly turns: Array<{ threadId: string; cwd: string | null; child: TurnInput['child']; toolAccess: AdapterHost['tools']['toolAccess'] }> = []
 
   configured(): boolean {
     return true
   }
 
   async startTurn(input: TurnInput, sink: TurnSink, _ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
-    this.turns.push({ threadId: input.threadId, cwd: input.cwd, toolAccess: host.tools.toolAccess })
+    this.turns.push({ threadId: input.threadId, cwd: input.cwd, child: input.child, toolAccess: host.tools.toolAccess })
     sink.providerRef({ provider: input.llmProvider, model: input.model })
     const text = `answer to ${input.prompt}`
     sink.text({ phase: 'complete', content: text, contentIndex: 0 })
@@ -84,7 +84,13 @@ describe('delegation policy fixes', () => {
     return { parent, parentRunId: sent.runId! }
   }
 
-  it('a shared read-only child keeps SHARED_READER_POLICY after its session is rebuilt from storage', async () => {
+  // A `shared` child works in its parent's folder; only one asked read-only is held to the read-only tools. After a
+  // restart its binding says which, and a binding saved before `access` existed is a read-only child's.
+  it.each([
+    ['asked read-only', { readOnly: true }, false, { readOnly: true }, false],
+    ['not asked read-only', {}, false, { readOnly: false }, true],
+    ['saved before access existed', {}, true, { readOnly: true }, false]
+  ] as const)('a shared child %s keeps its tools after its session is rebuilt from storage', async (_name, asked, olderBinding, child, writes) => {
     const { d, adapter, home: dir } = setup()
     const projectDir = join(dir, 'project')
     mkdirSync(projectDir)
@@ -96,22 +102,29 @@ describe('delegation policy fixes', () => {
       prompt: 'Read the module',
       role: 'research',
       workspace: 'shared',
+      ...asked,
       wake: 'settled_only'
     })
     expect(d.engine.delegations.get(accepted.delegationId)).toMatchObject({ workspace: 'shared', role: 'research' })
     await waitFor(() => d.engine.getRun(accepted.childRunId)?.status === 'completed', 'the child run')
-    const readOnly = (turn: (typeof adapter.turns)[number] | undefined) => ({
+    const tools = (turn: (typeof adapter.turns)[number] | undefined) => ({
       cwd: turn?.cwd,
-      write: turn?.toolAccess?.allows('write_file'),
-      read: turn?.toolAccess?.allows('read_file')
+      child: turn?.child,
+      write: turn?.toolAccess?.allows('write_file') ?? true,
+      bash: turn?.toolAccess?.allows('bash') ?? true,
+      read: turn?.toolAccess?.allows('read_file') ?? true
     })
-    expect(readOnly(adapter.turns.at(-1))).toEqual({ cwd: projectDir, write: false, read: true })
+    if (!olderBinding) expect(tools(adapter.turns.at(-1))).toEqual({ cwd: projectDir, child, write: writes, bash: writes, read: true })
+    else {
+      const binding = d.store.getThread(accepted.childThreadId)!.workspaceBinding!
+      d.store.updateThreadMeta(accepted.childThreadId, { workspaceBinding: { policy: binding.policy, sharedPath: binding.sharedPath } })
+    }
 
     // The in-memory session is gone (a restart, an eviction): the policy comes back from the row.
     ;(d.orch as unknown as { sessions: Map<string, unknown> }).sessions.delete(accepted.childThreadId)
     await d.orch.send('Read it again', false, { threadId: accepted.childThreadId, clientRequestId: 'child-2' })
     expect(adapter.turns.at(-1)!.threadId).toBe(accepted.childThreadId)
-    expect(readOnly(adapter.turns.at(-1))).toEqual({ cwd: projectDir, write: false, read: true })
+    expect(tools(adapter.turns.at(-1))).toEqual({ cwd: projectDir, child, write: writes, bash: writes, read: true })
   })
 
   it('an integration run an older version queued merges nothing: it ends cancelled with an integration_failed notice, even while another run holds the thread', async () => {

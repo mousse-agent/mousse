@@ -335,3 +335,46 @@ describe('what is told of each entry', () => {
     expect(runningNote([], { threadId: 't' }, { thread: () => undefined }, 0)).toBe('')
   })
 })
+
+describe('where working folders cannot be read (Windows)', () => {
+  /** A registry on a Windows-shaped system that counts its process table reads. */
+  function windowsRegistry(sources: Partial<RunningSources> = {}) {
+    let reads = 0
+    const registry = new RunningRegistry(
+      { terminals: () => [], terminalOutput: () => '', watchers: () => [], thread: () => undefined, ...sources },
+      {
+        processes: async () => {
+          reads++
+          return [{ pid: 7, ppid: 5, command: 'node.exe server.js' }]
+        },
+        listeners: async () => [],
+        workingFolders: async () => new Map(),
+        selfPid: 1,
+        now: () => 0,
+        platform: 'win32'
+      }
+    )
+    return { registry, reads: () => reads }
+  }
+  const scope = { threadId: 't-bot', folders: ['C:\bots\pip'], botId: 'pip' }
+
+  it('nothing that could be listed for the scope: the list is empty without reading the process table', async () => {
+    // A terminal of another thread in another folder, and an agent's command still in its call.
+    const { registry, reads } = windowsRegistry({ terminals: () => [{ ptyId: 'p1', pid: 5, threadId: 't-far', cwd: 'C:\elsewhere' }] })
+    registry.noteCommand({ threadId: 't-bot', callId: 'c1', command: 'node server.js', ended: false })
+    expect(await registry.list(scope)).toEqual([])
+    expect(reads()).toBe(0)
+  })
+
+  it.each([
+    ['a terminal in its folder', (registry: RunningRegistry) => registry, { terminals: () => [{ ptyId: 'p1', pid: 5, threadId: '__unbound__', cwd: 'C:\bots\pip' }] }],
+    ['an agent command of its thread that ended', (registry: RunningRegistry) => {
+      registry.noteCommand({ threadId: 't-bot', callId: 'c1', command: 'node server.js', ended: true })
+      return registry
+    }, {}]
+  ] as const)('%s: the process table is read', async (_name, prepare, sources) => {
+    const { registry, reads } = windowsRegistry(sources)
+    await prepare(registry).list(scope)
+    expect(reads()).toBe(1)
+  })
+})

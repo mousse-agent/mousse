@@ -1190,7 +1190,8 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
       const glY = canvas.height - y - side
       context.viewport(x, glY, side, side)
       context.uniform2f(uniforms.uRes, side, side)
-      context.uniform2f(uniforms.uOrg, x, glY)
+      // The picture's origin, moved by its pan: the shader draws the scene beyond it, so nothing is cut off.
+      context.uniform2f(uniforms.uOrg, x + u.pan[0] * side, glY + u.pan[1] * side)
       context.uniform3fv(uniforms.uCol, u.uCol)
       context.uniform4fv(uniforms.uAC, u.uAC)
       context.uniform1f(uniforms.uAcc, u.uAcc)

@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type DragEvent, type FocusEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { answerText } from '../chat/components/agent-elements/question/answered-questions-tool'
 import { flushSync } from 'react-dom'
 import type { QueuedMessage } from '../../shared/types'
 import { ArrowTurnForward, Check, ChevronDown, ChevronUp, GripVertical, Loader2, Pencil, Trash2, X } from '../lib/icons'
@@ -26,6 +27,9 @@ export function skipCompactionLabel(historyTokens?: number): string {
 }
 
 /** Threads whose long queue is shown in full. A thread is forgotten when its queue empties. */
+/** What sends a message a Stop held: the reply to the person's next message ends, or they send it now. */
+export const HELD_AFTER_STOP_TITLE = 'Sends after the reply to your next message, or send it now'
+
 const openQueueFolds = new Set<string>()
 
 /** The queue as last measured: how many messages show from the top, and where the last of them ends. */
@@ -70,12 +74,17 @@ function moveId(ids: string[], id: string, to: number): string[] {
 
 /** A queued message drawn as the prompt it will be, so it reads the same once it is sent. */
 const QueuedBubble = memo(function QueuedBubble({ item }: { item: QueuedMessage }) {
+  // Answers to the agent's open questions that missed the reply they were sent into: shown as the answers, not the
+  // text the agent reads.
+  const answers = useMemo(() => item.subagentNotice?.filter((entry) => entry.event === 'answer').flatMap((entry) => entry.answers ?? []) ?? [], [item.subagentNotice])
+  const notice = item.subagentNotice?.filter((entry) => entry.event !== 'answer') ?? []
+  const content = answers.length && !notice.length ? answers.map((answer) => `${answer.prompt}\n${answerText(answer)}`).join('\n\n') : item.content
   const message = useMemo(
     // A message another thread's agent queued is labelled as that agent's before it runs, as it will be once it has.
-    () => mousseToUIMessages([{ id: `queued:${item.id}`, role: 'user', content: item.content, timestamp: item.enqueuedAt, images: item.images, ...(item.origin?.kind === 'agent' ? { origin: item.origin } : {}) }])[0],
-    [item.id, item.content, item.enqueuedAt, item.images, item.origin]
+    () => mousseToUIMessages([{ id: `queued:${item.id}`, role: 'user', content, timestamp: item.enqueuedAt, images: item.images, ...(item.origin?.kind === 'agent' ? { origin: item.origin } : {}) }])[0],
+    [item.id, content, item.enqueuedAt, item.images, item.origin]
   )
-  if (item.subagentNotice?.length) return <SubagentNotice items={item.subagentNotice} />
+  if (notice.length) return <SubagentNotice items={notice} />
   if (item.settleNotice?.length) return <SettleNotice items={item.settleNotice} />
   return message ? <UserMessage message={message} /> : null
 })
@@ -411,7 +420,10 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
         const sendLabel = fixed
           ? item.subagentNotice?.length || item.inboxIds?.length ? 'Runs as a turn of its own' : 'Sent into the running reply'
           : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : `Steer: send now (${steerKey})`
-        const label = !last ? null : hold
+        // After a Stop nothing drains the queue: the next turn the person starts lifts the hold, and it sends after that.
+        const label = !last ? null : item.heldAfterStop
+          ? <span className="queued-message-state" title={HELD_AFTER_STOP_TITLE}>Held after Stop</span>
+          : hold
           ? <span className="queued-message-state is-held" title="Sends after compacting"><Loader2 size={12} className="animate-spin" aria-hidden="true" />Queued</span>
           : <span className="queued-message-state" title="Sends when the current reply ends">Queued</span>
         return (

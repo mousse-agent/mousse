@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Bell, Brain, ChevronRight, Clock, Shield, X } from '../../lib/icons'
-import type { BotReminderItem, BotSummary } from '../../../shared/bots/personal/chat'
+import { Bell, Brain, ChevronRight, Clock, Gauge, Shield, X } from '../../lib/icons'
+import type { BotReminderItem, BotSummary, BotTurnUsageSummary } from '../../../shared/bots/personal/chat'
 import type { BotModelPick } from '../../../shared/bots/personal/definition'
 import type { BotShownRows, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
@@ -162,6 +162,21 @@ function Memory({ botId, detail }: { botId: string; detail: unknown }) {
   </button>
 }
 
+/** A token count as About shows it: `850`, `12k`, `1.2M`. */
+function tokensText(tokens: number): string {
+  if (tokens < 1000) return String(Math.round(tokens))
+  if (tokens < 1_000_000) return `${tokens < 10_000 ? (tokens / 1000).toFixed(1).replace(/\.0$/, '') : Math.round(tokens / 1000)}k`
+  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+}
+
+/** What a chat turn costs, as one quiet line: input a turn and the share read from the cache; the rest in its tooltip. */
+export function usageLine(usage: BotTurnUsageSummary): { text: string; title: string } {
+  return {
+    text: `${tokensText(usage.inputPerTurn)} tokens a turn · ${Math.round(usage.cachedShare * 100)}% from cache`,
+    title: `Chat turns in the last 7 days: ${usage.turns}. Input a turn includes cache reads and writes; output a turn: ${tokensText(usage.outputPerTurn)}.`
+  }
+}
+
 /**
  * About this bot (bot-ui §4.8): the whole mouse and the name, then its prompt (the description, which the owner edits
  * here); what it can use and when it runs, each with Remove; how much it remembers, which opens Memory; what it runs on, by hand or by usage (#673), and
@@ -214,9 +229,12 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
       </button>
       : null}
     <Memory botId={bot.id} detail={detail} />
+    {detail?.usage && ((line) => <p className="bot-about-row bot-about-usage" data-testid="bot-about-usage" title={line.title}>
+      <Gauge size={14} aria-hidden /><span className="bot-about-next">{line.text}</span>
+    </p>)(usageLine(detail.usage))}
     <h3>RUNS ON</h3>
     <RunsOn botId={bot.id} name={bot.name} refresh={`${bot.last?.at ?? ''}|${bot.error?.text ?? ''}`} />
-    <BotDevicesRow botId={bot.id} name={bot.name} />
+    <BotDevicesRow botId={bot.id} name={bot.name} reach={bot.reach} />
     <div className="bot-about-foot">
       <button type="button" className="bot-ghost-button" onClick={() => void (paused ? store().resume(bot.id) : store().pause(bot.id))}>{paused ? 'Resume' : 'Pause'}</button>
       <button type="button" className="bot-ghost-button is-danger" onClick={() => useBotsStore.setState({ dialog: { kind: 'delete', botId: bot.id }, error: null })}>Delete</button>

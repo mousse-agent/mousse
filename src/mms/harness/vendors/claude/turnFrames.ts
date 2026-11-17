@@ -48,6 +48,9 @@ export interface TurnFrameSink {
  * session id. Both ways of running a turn (a one-shot query and a live one) feed their frames here;
  * what a result means stays with the caller.
  */
+/** The model Claude Code names on a message it made up itself, with no request to the model. */
+const SYNTHETIC_MODEL = '<synthetic>'
+
 export class TurnFrames {
   text = ''
   thinking = ''
@@ -80,6 +83,12 @@ export class TurnFrames {
   private readonly inputComplete = new Set<string>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
+  /**
+   * What Claude Code wrote as the model's words without asking the model (`<synthetic>` assistant messages, such as the
+   * "No response requested." it writes on resuming an interrupted session). A result that only repeats one of them is
+   * not the model's answer (`resultText`).
+   */
+  private readonly syntheticTexts = new Set<string>()
   /** The turn was stopped (the caller's cancel): a call a Stop's aborted result drops reads as stopped. */
   stopped: () => boolean = () => false
   /** The plan windows Claude Code rejected during this turn (a one-shot query; a live run keeps its own). */
@@ -162,12 +171,14 @@ export class TurnFrames {
   }
 
   /**
-   * The turn's own calls it waits for (Send now stops them): open root calls that are not subagents, or subagents that
-   * could not be moved, with the task each runs as when Claude Code named one.
+   * The turn's own calls a person's steer stops: open root calls that are not subagents, or subagents that could not be
+   * moved, with the task each runs as when Claude Code named one. A call whose input still streams is left out: the
+   * steer's push alone drops it before it runs (spike S1), and an interrupt would also stop background work.
    */
   foregroundCalls(): Array<{ callId: string; taskId?: string; toolName: string }> {
     return [...this.tools.keys()]
-      .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)))
+      .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)) &&
+        (this.inputComplete.has(callId) || this.taskIds.has(callId)))
       .map((callId) => {
         const taskId = this.taskIds.get(callId)
         const toolName = this.tools.get(callId)!
@@ -184,6 +195,14 @@ export class TurnFrames {
   breakParagraph(): void {
     if (this.text) this.text += '\n\n'
     this.segmentStart = this.text.length
+  }
+
+  /**
+   * A result's text when it may fill in a segment that streamed nothing: never one that only repeats a message Claude
+   * Code made up itself, which would reach the reader as the model's answer.
+   */
+  resultText(result: string): string {
+    return this.syntheticTexts.has(result.trim()) ? '' : result
   }
 
   /** The turn streamed no text of its own since the last break. */
@@ -249,6 +268,10 @@ export class TurnFrames {
           ...(parent ? { parentCallId: parent } : {})
         })
       }
+    }
+    if (message.type === 'assistant' && (message.message as { model?: unknown }).model === SYNTHETIC_MODEL && Array.isArray(message.message.content)) {
+      const said = message.message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('').trim()
+      if (said) this.syntheticTexts.add(said)
     }
     // A tool_use block's arguments are complete only in the assistant message that holds it.
     if (message.type === 'assistant' && Array.isArray(message.message.content))

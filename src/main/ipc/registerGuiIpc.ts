@@ -51,7 +51,8 @@ import {
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
-import { copyImageFile, openLocalPath, saveFileCopy, showFileInFolder } from '../localFiles'
+import { openLocalPath, saveFileCopy, showFileInFolder } from '../localFiles'
+import { startFileDrag } from './fileDragIpc'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
 import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { askForEditorAccess } from '../remoteEditorAsk'
@@ -90,7 +91,7 @@ import {
 } from '../../shared/settings'
 import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
-import { showCopyMenu } from '../contextMenu'
+import { showCopyMenu, writePngToClipboard } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
 import { stageBotAttachment, stageThreadAttachment } from './botAttachments'
 import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
@@ -338,6 +339,11 @@ function registerHandler(
  * `params` with the thread a call is about, when the window named one. The daemon routes a call
  * about a thread on another computer by it and ignores it for a thread of this one.
  */
+/** An activity event the service marked as a turn a person stopped (theirs, or the one that launched it). */
+function stoppedByPerson(data: unknown): boolean {
+  return (data as { stoppedByPerson?: unknown } | null)?.stoppedByPerson === true
+}
+
 function withThreadId<T extends object>(params: T, threadId: unknown): T & { threadId?: string } {
   return typeof threadId === 'string' && threadId.length > 0 ? { ...params, threadId } : params
 }
@@ -1002,8 +1008,8 @@ export function registerGuiIpc(
             notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
             notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
-          } else if (state === 'idle' || state === 'paused') {
-            // A run that hit a usage limit stopped and waits for the person (or the reset).
+          } else if ((state === 'idle' && !stoppedByPerson(event.data)) || state === 'paused') {
+            // A run that hit a usage limit stopped and waits for the person (or the reset). A turn a person stopped is not news.
             notifyThread(event.threadId, 'idle', currentPresentation().getActiveThreadId())
           }
         }
@@ -1014,7 +1020,8 @@ export function registerGuiIpc(
       // event. If the thread is still tracked as working, flip it and ding;
       // if the activity event already landed, that path already notified.
       if (isThreadActivityActive(activityTrackerFor().getState(event.threadId))) {
-        setThreadActivity(event.threadId, 'awaiting_input')
+        // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
+        if ((event.data as { wait?: unknown } | null)?.wait !== false) setThreadActivity(event.threadId, 'awaiting_input')
         notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
       }
     }
@@ -1201,7 +1208,8 @@ export function registerGuiIpc(
       // Working → Waiting is still the same work cycle; only its end notifies. A scheduled occurrence's end is the
       // automation's to announce (`scheduled.runEnded`, as its Tell me says), unless it stopped to ask.
       const scheduledTurn = (event.data as { scheduled?: unknown } | null)?.scheduled === true
-      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input')) {
+      // A turn a person stopped (theirs, or the thread that launched it) is not announced to them as stopped.
+      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input') && !(state === 'idle' && stoppedByPerson(event.data))) {
         const kind: ThreadNotificationKind = state === 'completed'
           ? 'completed'
           : state === 'awaiting_input'
@@ -1221,8 +1229,11 @@ export function registerGuiIpc(
     if (event.type === 'bots.message' && !replay && !guiMms.tellsForSender?.(senderId)) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
     if (event.type === 'scheduled.runEnded' && !replay) notifyAutomationRun(event.data, win, presentationForSender(senderId).getActiveThreadId(), windowSettings.get(senderId) ?? settings.get())
     if (event.type === 'questions.pending' && event.threadId && isThreadActivityActive(tracker.getState(event.threadId))) {
-      tracker.setState(event.threadId, 'awaiting_input')
-      target('threads:activity', tracker.getSnapshot())
+      // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
+      if ((event.data as { wait?: unknown } | null)?.wait !== false) {
+        tracker.setState(event.threadId, 'awaiting_input')
+        target('threads:activity', tracker.getSnapshot())
+      }
       if (!replay) notifyThread(
         event.threadId,
         'question',
@@ -1269,7 +1280,7 @@ export function registerGuiIpc(
     const full = snap as {
       agents?: unknown[]
       tasks?: unknown[]
-      pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
+      pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown; wait?: false }>
       turnSnapshot?: TurnStateSnapshot
     }
     const profileId = out.profileId ?? currentProfileKey()
@@ -1305,7 +1316,8 @@ export function registerGuiIpc(
         questions: q.questions,
         // The window shows the question only while it shows this thread.
         threadId,
-        ...(q.approval ? { approval: q.approval } : {})
+        ...(q.approval ? { approval: q.approval } : {}),
+        ...(q.wait === false ? { wait: false } : {})
       })
     }
     out.send('orchestrator:turn-state', turn)
@@ -1708,7 +1720,7 @@ export function registerGuiIpc(
       const full = snap as {
         agents?: unknown[]
         tasks?: unknown[]
-        pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
+        pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown; wait?: false }>
       }
       syncDaemonTurnSnapshot(snap)
       broadcastThreadSnapshot(
@@ -1731,7 +1743,8 @@ export function registerGuiIpc(
           requestId: q.requestId,
           questions: q.questions,
           threadId: activeId,
-          ...(q.approval ? { approval: q.approval } : {})
+          ...(q.approval ? { approval: q.approval } : {}),
+          ...(q.wait === false ? { wait: false } : {})
         })
       }
       const projects = await guiMms.request<{ projects: unknown[] }>('projects.list')
@@ -3329,7 +3342,16 @@ export function registerGuiIpc(
   registerHandler('localFiles:showInFolder', async (_e, path: unknown) => { await showFileInFolder(path) })
   registerHandler('localFiles:saveCopy', async (event, path: unknown) =>
     saveFileCopy(path, BrowserWindow.fromWebContents(event.sender) ?? getWindow(), app.getPath('downloads')))
-  registerHandler('localFiles:copyImage', async (_e, path: unknown) => { await copyImageFile(path) })
+  // A file dragged out of the window into Finder, Explorer or another app (fileDrag.ts): the window names it, this
+  // process checks that it belongs to the thread and starts the system's drag.
+  registerHandler('files:startDrag', async (event, request: unknown) => startFileDrag(event.sender, request, {
+    temp: app.getPath('temp'),
+    filesRoot: async (scope) => (await guiMms.request<{ root?: string }>('files.root', scope)).root,
+    messageTexts: async (threadId) => {
+      const snapshot = await guiMms.request<{ messages?: Array<{ content?: unknown }> }>('thread.snapshot', { threadId, newest: 200 })
+      return (snapshot.messages ?? []).flatMap((message) => (typeof message.content === 'string' ? [message.content] : []))
+    }
+  }))
   // A thread of another computer: its folder opens in an editor of this one over SSH. The window names the
   // thread only; the folder is the one the owner answers, and the SSH address is read here from this
   // computer's own records.
@@ -3806,6 +3828,7 @@ export function registerGuiIpc(
   registerHandler('clipboard:showCopyMenu', (_e, x: number, y: number, text: string) => {
     showCopyMenu(getWindow, x, y, text)
   })
+  registerHandler('clipboard:writeImage', (_e, png: unknown) => { writePngToClipboard(png) })
 
   return { syncDaemonTurnSnapshot }
 }

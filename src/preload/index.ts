@@ -6,6 +6,7 @@ import { RENDERER_ERROR_CHANNEL, type RendererErrorReport } from '../shared/diag
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import { MAX_STAGED_FILE_BYTES, stagedFileTooLargeText } from '../shared/attachedFilesMarker'
+import { MAX_DRAG_BYTES, type FileDragAnswer, type FileDragRequest } from '../shared/fileDrag'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
 import type { NetStatus } from '../shared/net/local'
 import type { ThreadToastPayload } from '../shared/threadToast'
@@ -707,9 +708,29 @@ const api = {
     /** Shows the file or folder selected in the computer's file manager. */
     showInFolder: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:showInFolder', path),
     /** Saves a copy where the person picks; the path it was saved to, or null when they closed the dialog. */
-    saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path),
-    /** Puts a picture file on the clipboard as an image. */
-    copyImage: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:copyImage', path)
+    saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path)
+  },
+  /**
+   * Dragging a file out of the window into Finder, File Explorer or another app. Call from a `dragstart` handler that
+   * cancelled the window's own drag; the app starts the system's drag while the mouse button is still down.
+   */
+  fileDrag: {
+    /** A file of the thread's folder, an attached file by its path, or bytes with a name. */
+    start: (request: FileDragRequest): Promise<FileDragAnswer> => ipcRenderer.invoke('files:startDrag', request),
+    /**
+     * A file the composer holds: its bytes under its name, or, for a file too large to hand over, its own path on
+     * this computer (which the app drags only when it belongs to the thread).
+     */
+    startComposerFile: async (file: File, scope: { threadId?: string; projectId?: string }): Promise<FileDragAnswer> => {
+      const path = webUtils.getPathForFile(file)
+      if (file.size > MAX_DRAG_BYTES) {
+        if (!path) return { refused: `${file.name} is too large to drag.` }
+        return ipcRenderer.invoke('files:startDrag', { ...scope, item: { kind: 'attachment', path, name: file.name } })
+      }
+      return ipcRenderer.invoke('files:startDrag', { ...scope, item: { kind: 'bytes', name: file.name, data: new Uint8Array(await file.arrayBuffer()) } })
+    },
+    /** Where a dropped file is on this computer; empty when it has no path (a pasted one). */
+    pathOf: (file: File): string => webUtils.getPathForFile(file)
   },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
@@ -1464,7 +1485,9 @@ const api = {
   },
   clipboard: {
     showCopyMenu: (x: number, y: number, text: string): Promise<void> =>
-      ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text)
+      ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text),
+    /** Puts a picture, as PNG bytes, on the clipboard as an image that other apps paste. */
+    writeImage: (png: Uint8Array): Promise<void> => ipcRenderer.invoke('clipboard:writeImage', png)
   },
   dialog: {
     /** Native open-file dialog; resolves to the chosen absolute path, or null when cancelled. */

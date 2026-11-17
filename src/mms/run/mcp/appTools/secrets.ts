@@ -29,7 +29,11 @@ const REQUEST_DEFINITION: Tool = {
   description: [
     'Ask the user for a secret you need (an API key, access token or password) through a private card in the thread.',
     'Never ask for a secret in a message: the value would sit in the conversation. The user types it into the card;',
-    'Mousse keeps it and you get only its name, which you use with secret_run or as ${secret:NAME} in an MCP server\'s settings.',
+    'Mousse keeps it out of the chat and gives you its name, and, on a runtime whose tool results Mousse can mask, a private',
+    'file holding it; the result says which. With the file, use it directly (commands, config files, API calls, logins) by',
+    'passing it inside the command, e.g. gh auth login --with-token < file, so the value never comes back as output, and never',
+    'open it to look at it. Without one, use secret_run. ${secret:NAME} reads it in an MCP server\'s settings.',
+    'Never print or echo the value into the chat.',
     'Blocks until the user answers (at most one hour) or your turn ends.'
   ].join(' '),
   parameters: Type.Object({
@@ -47,7 +51,8 @@ const RUN_DEFINITION: Tool = {
     'Run one shell command in the thread\'s project folder with secrets the user gave this thread (through secret_request).',
     'Each secret is the environment variable of its name (as: "env", the default), or a private file whose path is in NAME_FILE',
     '(as: "file"); the file is deleted when the command ends. Refer to the variable in the command (e.g. "$HF_TOKEN"), never the value.',
-    'The output comes back with every secret masked, and Authorization headers hidden. Use this tool, not your own shell, for any command that needs a secret.',
+    'The output comes back with every secret masked, and Authorization headers hidden.',
+    'When the secret_request result gave you a private file, you may also pass that file to commands you run yourself.',
     'Prefer a program option that reads the secret from the environment or a file (e.g. curl -H @file, or a tool that reads NAME itself):',
     'a value expanded onto a program\'s command line ("$NAME" as an argument) can be seen by other processes on this computer while it runs.'
   ].join(' '),
@@ -149,7 +154,7 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       const contain = workspace ? { scratch: workspace.scratch, folders: [...new Set([cwd, workspace.scratch])] } : undefined
       const result = await service.run({ threadId, cwd, command, secrets: wanted, timeoutMs, signal: ctx.signal, ...(contain ? { contain } : {}) })
       const status = result.stopped ? 'Stopped.' : result.timedOut ? `Timed out after ${Math.round(timeoutMs / 1000)} seconds.` : `Exit code ${result.exitCode ?? 'unknown'}.`
-      outcome = { text: truncateForModel(`${status}\n${result.output || '(no output)'}`), ...(result.exitCode === 0 && !result.timedOut && !result.stopped ? {} : { isError: true }) }
+      outcome = { text: truncateForModel(`${status}\n${result.output || '(no output)'}`), ...(result.exitCode === 0 && !result.timedOut && !result.stopped ? {} : { isError: true, ran: true }) }
     } catch (error) {
       // The host's own refusals name a secret, never its value; anything else is reported by kind only.
       const message = error instanceof Error ? error.message : ''

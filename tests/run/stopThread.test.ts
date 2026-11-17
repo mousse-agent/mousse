@@ -168,7 +168,7 @@ describe('RunEngine.stopSubtree (issue #142)', () => {
       const [notice] = f!.engine.inbox.listPending('parent')
       expect(notice).toMatchObject({ kind: 'reconcile_notice', payload: { kind: 'delegation_stopped', delegationId: c.delegationId, childThreadId: 'child-1' } })
       const planned = planWakeNotice([notice], { titleOf: () => 'Reviewer' })
-      expect(planned.text).toBe(`Subagent "Reviewer" (thread child-1) was stopped before it finished task ${c.delegationId}.`)
+      expect(planned.text).toBe(`<mousse_notice kind="subagent_stopped" ref="${c.delegationId}">\nSubagent "Reviewer" (thread child-1) was stopped before it finished its task.\n</mousse_notice>`)
       expect(planned.items).toMatchObject([{ event: 'stopped', childThreadId: 'child-1', title: 'Reviewer' }])
       // The subagent's own task into child-2 is inside the subtree: no notice for it.
       expect(f!.engine.inbox.listForThread('child-1')).toEqual([])
@@ -1036,8 +1036,6 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     it('the follow-up is a queued run from the start: it holds the task by itself, with no session in memory, and survives a restart', async () => {
       const { s, followUp } = await heldBySteer()
       expect(followUp.status).toBe('queued')
-      // It is the person's text, so its turn takes a free slot ahead of background turns.
-      expect(followUp.outcome?.sentByPerson).toBe(true)
       expect(followUp.outcome?.sentByAgent).toBeUndefined()
       expect(s.d.store.loadMessageQueue(s.childThreadId).map((item) => item.runId)).toEqual([followUp.runId])
       expect(s.task(s.delegation.delegationId).status).toBe('running')

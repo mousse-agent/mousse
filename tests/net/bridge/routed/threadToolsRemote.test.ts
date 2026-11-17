@@ -27,7 +27,7 @@ import type { RemoteComputersPort } from '../../../../src/mms/protocol/remoteCom
 import type { SqliteNodePolicy } from '../../../../src/mms/net/store/nodePolicy'
 import { localized, RemoteLaunchedThreads, remoteReachRefusal } from '../../../../src/mms/orchestrator/RemoteLaunchedThreads'
 import type { AppToolHost } from '../../../../src/mms/run/mcp/appTools'
-import { appToolRegistry, appTurn } from '../../../run/appToolsFixture'
+import { appToolRegistry, appTurn, refusalOf, type ReadRefusal } from '../../../run/appToolsFixture'
 import { cleanups, cleanupAll, linked } from './routerFixture'
 
 type Loose = Record<string, any>
@@ -98,8 +98,11 @@ async function launcher(options: { mode?: 'auto' | 'full' | 'accept_edits' | 'as
   const host = (t.caller.orchestrator as unknown as { mcpToolHost(): AppToolHost }).mcpToolHost()
   const { registry, turns: appTurns, request } = appToolRegistry(t.caller.runEngine, host)
   appTurns.register(appTurn({ threadId: thread.id, runId: sent.runId }))
-  const tool = async (name: string, args: Record<string, unknown>): Promise<{ isError?: boolean; body: Loose; text: string }> => {
+  /** A refusal's `body` is the fields kept beside it with its words and how it may be retried; `text` is its words. */
+  const tool = async (name: string, args: Record<string, unknown>): Promise<{ isError?: boolean; body: Loose; text: string; refusal?: ReadRefusal }> => {
     const out = await registry.call(name, args, request({ threadId: thread.id, runId: sent.runId }))
+    const refusal = refusalOf(out)
+    if (refusal) return { isError: true, body: { ...refusal.details, message: refusal.message, refused: refusal.refused }, text: refusal.message, refusal }
     let body: Loose = {}
     try {
       body = JSON.parse(out.text)
@@ -247,7 +250,7 @@ describe('the thread tools on a thread launched on another computer (issue #1160
     const { far, id } = await launch()
     policy.set(t.callerNode, { maxPermissionMode: 'full' })
     const run = await personRun(far, 'full')
-    await expect(tool('thread_steer', { threadId: id, runId: run, text: 'Faster.' })).rejects.toMatchObject({ code: 'mousse_conflict', details: { conflict: 'ceiling_exceeded' } })
+    expect((await tool('thread_steer', { threadId: id, runId: run, text: 'Faster.' })).refusal).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'ceiling_exceeded' } })
   }, 120_000)
 
   it('stops a run an agent here started there, and leaves the run of a person who took the thread over', async () => {
@@ -262,7 +265,7 @@ describe('the thread tools on a thread launched on another computer (issue #1160
 
     const taken = await launch()
     const person = await personRun(taken.far)
-    await expect(tool('thread_interrupt', { threadId: taken.id, runId: person })).rejects.toMatchObject({ code: 'mousse_scope_denied', message: expect.stringContaining('person') })
+    expect((await tool('thread_interrupt', { threadId: taken.id, runId: person })).refusal).toMatchObject({ code: 'mousse_scope_denied', message: expect.stringContaining('person'), refused: { retry: 'never' } })
     expect(t.owner.runEngine.getRun(person)!.status).toBe('running')
   }, 120_000)
 
@@ -350,7 +353,7 @@ describe('the thread tools on a thread launched on another computer (issue #1160
       expect(calls).not.toHaveBeenCalled()
       // No agent answers an approval on another computer.
       const own = t.thread('The owner\'s own')
-      await expect(tool('approval_respond', { threadId: t.qualified(own.id), requestId: 'q-1', answers: { a: 'allow_once' } })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      expect((await tool('approval_respond', { threadId: t.qualified(own.id), requestId: 'q-1', answers: { a: 'allow_once' } })).refusal).toMatchObject({ code: 'mousse_scope_denied' })
     }, 120_000)
 
     it('offline: tried once more a second later, then named offline, from this call\'s answer', async () => {
@@ -418,8 +421,13 @@ describe('thread_list, thread_search and any thread of an allowed computer (issu
     expect(list.body.threads.find((entry: Loose) => entry.id === launched.id)).toMatchObject({ startedByYou: true })
     for (const entry of list.body.threads) expect(entry.id.startsWith(`${t.node}:`), entry.id).toBe(true)
     expect(list.text).not.toContain(secret.id)
+    // Archived there, the launched thread leaves the default list and comes back marked with includeSettled.
+    await t.owner.orchestrator.settleThread(launched.far, true)
+    expect((await tool('thread_list', { computer: nameOf() })).body.threads.map((entry: Loose) => entry.id)).not.toContain(launched.id)
+    const settled = await tool('thread_list', { computer: nameOf(), includeSettled: true })
+    expect(settled.body.threads.find((entry: Loose) => entry.id === launched.id)).toMatchObject({ archived: true, archivedAt: expect.any(String), startedByYou: true })
 
-    const search = await tool('thread_search', { computer: nameOf(), query: word })
+    const search =await tool('thread_search', { computer: nameOf(), query: word })
     expect(search.isError, search.text).toBeUndefined()
     expect(search.body.notSearched).toBeUndefined()
     // Its title and its transcript both match: each hit names the thread qualified, with its link and computer.
@@ -486,7 +494,7 @@ describe('thread_list, thread_search and any thread of an allowed computer (issu
     await vi.waitFor(() => expect(isTerminal(sent.body.runId)).toBe(true))
 
     const person = await personRun(theirs.id)
-    await expect(tool('thread_interrupt', { threadId: t.qualified(theirs.id), runId: person })).rejects.toMatchObject({ code: 'mousse_scope_denied', details: { conflict: 'not_started_by_this_computer' } })
+    expect((await tool('thread_interrupt', { threadId: t.qualified(theirs.id), runId: person })).refusal).toMatchObject({ code: 'mousse_scope_denied', details: { conflict: 'not_started_by_this_computer' } })
     expect(t.owner.runEngine.getRun(person)!.status).toBe('running')
   }, 120_000)
 

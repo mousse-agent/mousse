@@ -99,8 +99,17 @@ export class NetDatabase {
       if (version > 1) fail('downgrade_unsupported', 'Net database has a newer schema.')
       this.database.exec('BEGIN IMMEDIATE')
       try {
+        // A store this transaction creates is born with every one-time step already done.
+        const created = !this.database
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='net_schema_migrations'")
+          .get()
         this.database.exec(SCHEMA)
         this.addMissingColumns()
+        if (created)
+          for (const marker of BORN_MARKERS)
+            this.database
+              .prepare('INSERT OR IGNORE INTO net_local_markers VALUES(?,?)')
+              .run(marker, integer(this.clock.now()))
         this.database
           .prepare('INSERT OR IGNORE INTO net_schema_migrations VALUES(1,?)')
           .run(integer(this.clock.now()))
@@ -181,6 +190,11 @@ export class NetDatabase {
     if (!has('net_node_policy', 'agent_reach'))
       this.database.exec(
         "ALTER TABLE net_node_policy ADD COLUMN agent_reach TEXT NOT NULL DEFAULT 'launched'"
+      )
+    // "Work on threads from this device": on for every device that already has a row, as before the switch.
+    if (!has('net_node_policy', 'work'))
+      this.database.exec(
+        'ALTER TABLE net_node_policy ADD COLUMN work INTEGER NOT NULL DEFAULT 1 CHECK(work IN (0,1))'
       )
     // Who made a routed call: null for a person on the device, `agent` for a call marked as an agent's.
     if (!has('bridge_audit', 'actor'))
@@ -324,6 +338,13 @@ export class NetDatabase {
   }
 }
 
+/**
+ * One-time steps a store records as done in `net_local_markers`, kept out of `user_version` so an older build still
+ * opens the store. A new store is born with all of them.
+ */
+export const CONNECTIONS_MARKER = 'connections.v1'
+const BORN_MARKERS = [CONNECTIONS_MARKER]
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS net_schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS net_streams(id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, space_id TEXT, kind TEXT NOT NULL, epoch INTEGER NOT NULL, head INTEGER NOT NULL, cursor INTEGER NOT NULL, retained INTEGER NOT NULL, active_generation TEXT NOT NULL) STRICT;
@@ -350,11 +371,13 @@ CREATE TABLE IF NOT EXISTS net_quota_reservations(scope TEXT NOT NULL REFERENCES
 CREATE TABLE IF NOT EXISTS net_rate_config(scope TEXT NOT NULL, principal TEXT NOT NULL, max_units INTEGER NOT NULL, window_ms INTEGER NOT NULL, last_now INTEGER NOT NULL, PRIMARY KEY(scope,principal)) STRICT;
 CREATE TABLE IF NOT EXISTS net_rate_charges(scope TEXT NOT NULL, principal TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, units INTEGER NOT NULL, PRIMARY KEY(scope,principal,id), FOREIGN KEY(scope,principal) REFERENCES net_rate_config(scope,principal)) STRICT;
 CREATE INDEX IF NOT EXISTS net_rate_window ON net_rate_charges(scope,principal,created_at);
-CREATE TABLE IF NOT EXISTS net_node_policy(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1)), bots INTEGER NOT NULL DEFAULT 1 CHECK(bots IN (0,1)), agent_reach TEXT NOT NULL DEFAULT 'launched', created_at INTEGER NOT NULL) STRICT;
+CREATE TABLE IF NOT EXISTS net_node_policy(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1)), bots INTEGER NOT NULL DEFAULT 1 CHECK(bots IN (0,1)), agent_reach TEXT NOT NULL DEFAULT 'launched', work INTEGER NOT NULL DEFAULT 1 CHECK(work IN (0,1)), created_at INTEGER NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS bridge_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, node TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('change','refused')), method TEXT NOT NULL, thread TEXT, project TEXT, outcome TEXT NOT NULL, actor TEXT) STRICT;
 CREATE INDEX IF NOT EXISTS bridge_audit_node ON bridge_audit(node,kind,id);
 CREATE TABLE IF NOT EXISTS bridge_audit_reads(node TEXT NOT NULL, hour INTEGER NOT NULL, calls INTEGER NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(node,hour)) STRICT;
 CREATE TABLE IF NOT EXISTS remote_thread_order(node TEXT NOT NULL, thread TEXT NOT NULL, position REAL NOT NULL, PRIMARY KEY(node,thread)) STRICT;
 CREATE TABLE IF NOT EXISTS remote_thread_opened(node TEXT NOT NULL, thread TEXT NOT NULL, opened_at INTEGER NOT NULL, PRIMARY KEY(node,thread)) STRICT;
+CREATE TABLE IF NOT EXISTS net_local_markers(name TEXT PRIMARY KEY, at INTEGER NOT NULL) STRICT;
+CREATE TABLE IF NOT EXISTS net_connections(node TEXT PRIMARY KEY, state TEXT NOT NULL, source TEXT NOT NULL, at INTEGER NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS remote_lists_cache(node TEXT PRIMARY KEY, saved_at INTEGER NOT NULL, snapshot TEXT NOT NULL) STRICT;
 `

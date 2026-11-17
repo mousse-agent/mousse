@@ -457,7 +457,7 @@ export type FoldRow = {
   kind: TurnSegment["kind"];
   /** Tool calls and thoughts only. */
   toolsOnly?: boolean;
-  /** A reply row with text (narration, or the answer). */
+  /** A reply row with text (narration, or the answer); on a `toolsOnly` row, text written beside its calls. */
   text?: boolean;
   /** A person's message steered into the turn. */
   steer?: boolean;

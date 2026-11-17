@@ -4,8 +4,10 @@
 .bot-face-canvas { display: block; width: 100%; height: 100%; }
 /* The flat drawing a face showed, kept over its canvas until the renderer first draws into it. */
 .bot-face-live .bot-face-cover { position: absolute; inset: 0; }
-/* Paused: asleep and faded (bot-ui §4.9), as the still fallback draws it. */
-.bot-face-live[data-state="paused"] .bot-face-canvas { opacity: 0.6; }
+/* Paused: asleep and faded (bot-ui §4.9), as the still fallback draws it. A resting idle face (`sleep`) keeps its colour. */
+.bot-face-live[data-state="paused"]:not([data-resting]) .bot-face-canvas { opacity: 0.6; }
+/* The flat drawing over a live face until its first frame: the live face shows the z. */
+.bot-face-cover .bot-face-z-still { display: none; }
 
 /* Paused: a floating "z". It rests visible, so reduced motion keeps it. */
 .bot-face-z {

@@ -75,8 +75,10 @@ export interface HostedNetHost {
   createIdentity(name: string): Promise<void>
   /** Readies protected keys for joining; the fingerprint pins the invite to them. */
   prepareJoin(): Promise<{ transportFingerprint: string }>
-  /** `bridge.join` with an invite that arrived through Mousse ID. */
+  /** `bridge.join` with an invite that arrived through Mousse ID; queues itself. */
   joinWithInvite(invite: string, name: string): Promise<void>
+  /** Sets aside the keys of a join that never sent its request; queues itself. */
+  dropUnsentJoin(): Promise<void>
 }
 
 /** The module's side, called by NetService at the points where hosted behavior joins core. */

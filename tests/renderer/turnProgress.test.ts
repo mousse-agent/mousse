@@ -108,17 +108,8 @@ describe('the line under Working', () => {
     expectLive('Thinking…')
   })
 
-  it('1. waiting for a free turn slot: says so, with how many turns run, and no thinking icon', () => {
-    render([ask()], 'submitted', { phase: 'queued', step: { kind: 'waiting_slot', running: 8, limit: 8 } })
-    expectLive('Waiting for a free slot · 8 turns running')
-    expect(line()!.title).toBe('Mousse runs up to 8 turns at once. This one starts when one of them ends.')
-    // A background turn waits while the slots kept for people are free: the limit is all slots, not the running count.
-    render([ask()], 'submitted', { phase: 'queued', step: { kind: 'waiting_slot', running: 6, limit: 8, keptForPeople: 2 } })
-    expectLive('Waiting for a free slot · 6 turns running')
-    expect(line()!.title).toBe('Mousse runs up to 8 turns at once, and 2 are kept for messages people send. This background turn starts when one of the others ends.')
-    expect(line()!.querySelector('svg.thinking-icon')).toBeNull()
-    // Once its turn starts, the line is the turn's own.
-    render([ask()], 'streaming', { phase: 'thinking', step: { kind: 'starting' } })
+  it('1. an older service that still reports a wait for a free slot: the line of a turn not started yet', () => {
+    render([ask()], 'submitted', { phase: 'queued', step: { kind: 'waiting_slot', running: 8, limit: 8 } as never })
     expectLive('Thinking…')
   })
 

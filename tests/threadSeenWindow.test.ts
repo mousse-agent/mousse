@@ -20,6 +20,7 @@ vi.mock('electron', () => ({
   clipboard: {},
   powerMonitor: { getSystemIdleTime: () => 0 },
   nativeTheme: { on: () => undefined },
+  screen: { on: () => undefined, getAllDisplays: () => [] },
   session: {},
   webContents: {}
 }))

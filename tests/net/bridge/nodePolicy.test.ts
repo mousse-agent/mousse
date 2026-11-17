@@ -724,7 +724,8 @@ describe('blocking a device on a computer', () => {
       terminal: false,
       editor: false,
       bots: true,
-      agentReach: 'launched'
+      agentReach: 'launched',
+      work: true
     })
 
     await a.request('bridge.policy', { node: one.node, maxPermissionMode: 'full', terminal: true })
@@ -734,7 +735,8 @@ describe('blocking a device on a computer', () => {
       terminal: true,
       editor: false,
       bots: true,
-      agentReach: 'launched'
+      agentReach: 'launched',
+      work: true
     })
     // The editor switch is its own: it changes neither of the others, and nothing else changes it.
     await a.request('bridge.policy', { node: one.node, editor: true })
@@ -744,7 +746,8 @@ describe('blocking a device on a computer', () => {
       terminal: true,
       editor: true,
       bots: true,
-      agentReach: 'launched'
+      agentReach: 'launched',
+      work: true
     })
     // Bots on this computer is its own too: off for one device only, and nothing else moves.
     await a.request('bridge.policy', { node: one.node, bots: false })
@@ -759,7 +762,8 @@ describe('blocking a device on a computer', () => {
       terminal: false,
       editor: false,
       bots: true,
-      agentReach: 'launched'
+      agentReach: 'launched',
+      work: true
     })
     await expect(
       a.request('bridge.policy', { node: one.node, editor: 'yes' })

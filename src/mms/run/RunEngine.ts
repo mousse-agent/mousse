@@ -23,6 +23,7 @@ import type { RunStore } from './RunStore'
 import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale } from './stopGeneration'
 import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
+import { OpenQuestions } from './OpenQuestions'
 import { ThreadApprovals, type BootRecovery } from './ThreadApprovals'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
@@ -94,8 +95,6 @@ export type RunCommand =
        * writes no event and does not refuse a paused thread (the queue holds such an item while a pause lasts).
        */
       agentOrigin?: { hops: number }
-      /** A person's leftover steer queued as a turn of its own (`RunOutcome.sentByPerson`). */
-      sentByPerson?: true
       /**
        * The run delivers settle notices (SPEC §15.1): it carries the count of agent messages in a row of the runs the
        * notices are about and adds none of its own. It is not an agent's message.
@@ -274,6 +273,11 @@ export interface DelegationRequest {
   model?: string
   role?: string
   workspace: 'isolated' | 'shared'
+  /**
+   * A read-only child (`delegate_task` `readOnly`): it works in the parent's folder (`workspace: 'shared'`) with the
+   * read-only tools only. Absent: the child has every tool its parent has, in either workspace.
+   */
+  readOnly?: boolean
   wake: DelegationWake
   title?: string
   /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */
@@ -477,6 +481,8 @@ export class RunEngine extends EventEmitter {
   readonly remoteLaunches: RemoteLaunchRecords
   /** Saved approval requests (SPEC §17). */
   readonly approvals: ThreadApprovals
+  /** Questions agents asked without waiting (`ask_user` with `wait: false`). */
+  readonly openQuestions: OpenQuestions
   /** Context handoffs (SPEC §16.1). */
   readonly handoffs: HandoffService
   /** Fork and merge-back transfers (SPEC §16.2). */
@@ -512,6 +518,7 @@ export class RunEngine extends EventEmitter {
     this.remoteSubagents = new RemoteSubagentRecords(opts.store)
     this.remoteLaunches = new RemoteLaunchRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
+    this.openQuestions = new OpenQuestions(opts.store)
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
     this.pid = opts.pid ?? process.pid
@@ -2009,8 +2016,7 @@ export class RunEngine extends EventEmitter {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.
         ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : command.agentOrigin ? { sentByAgent: true as const, agentHops: command.agentOrigin.hops } : {}),
-        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {}),
-        ...(command.sentByPerson && !command.actor && !command.agentOrigin ? { sentByPerson: true as const } : {})
+        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {})
       }
       const run = store.createRun({
         threadId: command.threadId,

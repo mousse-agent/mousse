@@ -20,9 +20,8 @@ export interface WorkWaitFacts {
   usageStranded(row: BotActivationRow): boolean
 }
 interface WaitRule {
-  /** Stored end reasons, including the marker written by the wake source before a slot is free. */
-  weekExemptWhenReady: boolean
   rank: number
+  /** Stored end reasons, including the marker written by the wake source before a slot is free. */
   reasons: readonly string[]
   allows(row: Pick<BotActivationRow, 'lane' | 'trigger'>): boolean
   ready(row: BotActivationRow, facts: WorkWaitFacts): boolean
@@ -53,7 +52,7 @@ export function workWaitInput(wait: BotReminderRow, clock: (iso: string) => stri
 /** One row per reason. Wake sources keep their existing transactions, messages and stored markers. */
 export const WORK_WAIT_RULES = {
   approval: {
-    weekExemptWhenReady: false, rank: 0, reasons: ['approval', 'approval_answered'], allows: (row) => workOnly(row) || row.lane === 'run' && row.trigger.kind === 'schedule',
+    rank: 0, reasons: ['approval', 'approval_answered'], allows: (row) => workOnly(row) || row.lane === 'run' && row.trigger.kind === 'schedule',
     ready: (row, facts) => row.endReason === 'approval_answered' && facts.approvalReady(row),
     stranded: (row, facts) => !facts.approvalExists(row),
     endReason: 'action_gone', endLine: nothingToWaitFor, resume: 'continue', checkBeforeResume: true,
@@ -66,7 +65,7 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: true, republishQuestion: false
   },
   waiting: {
-    weekExemptWhenReady: true, rank: 1, reasons: ['waiting', 'wait_ready'], allows: workOnly,
+    rank: 1, reasons: ['waiting', 'wait_ready'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'wait_ready',
     stranded: (row, facts) => !facts.timerExists(row),
     endReason: 'wait_gone', endLine: nothingToWaitFor, resume: 'continue',
@@ -83,7 +82,7 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: true, republishQuestion: false
   },
   question: {
-    weekExemptWhenReady: false, rank: 0, reasons: ['question', 'question_answered'], allows: workOnly,
+    rank: 0, reasons: ['question', 'question_answered'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'question_answered',
     stranded: (row, facts) => !facts.questionExists(row),
     endReason: 'question_gone', endLine: questionGoneText, resume: 'continue', continuation: (_row, _facts) => ({ questionAnswered: true }), checkBeforeResume: true,
@@ -99,7 +98,7 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: false, republishQuestion: true
   },
   budget_exhausted: {
-    weekExemptWhenReady: false, rank: 0, reasons: ['budget_exhausted', 'room_allowed'], allows: workOnly,
+    rank: 0, reasons: ['budget_exhausted', 'room_allowed'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'room_allowed',
     stranded: (row, facts) => row.endReason === 'budget_exhausted' && facts.roomStranded(row),
     endReason: 'nothing_to_wait_for', endLine: nothingToWaitFor, resume: 'continue', continuation: (_row, _facts) => ({ moreRoom: true }), checkBeforeResume: false,
@@ -113,7 +112,7 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: false, republishQuestion: false
   },
   usage_limit: {
-    weekExemptWhenReady: false, rank: 0, reasons: ['usage_limit'], allows: workOnly,
+    rank: 0, reasons: ['usage_limit'], allows: workOnly,
     ready: (row, facts) => facts.usageResumable(row),
     stranded: (row, facts) => facts.usageStranded(row),
     endReason: 'nothing_to_wait_for', endLine: nothingToWaitFor, resume: 'usageReset', continuation: (_row, _facts) => ({ usageReset: true }), checkBeforeResume: false,

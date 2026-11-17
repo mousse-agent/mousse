@@ -207,6 +207,10 @@ describe("Cursor's one host shared by threads", () => {
         setTimeout(() => fake.emit({ event: 'delta', runId, update: { type: 'text-delta', text: `Reply to ${prompt}` } }), 3)
         setTimeout(() => fake.emit({ event: 'run_end', runId, status: 'finished' }), 5)
         return { runId }
+      },
+      cancel: (params, fake) => {
+        setTimeout(() => fake.emit({ event: 'run_end', runId: params.runId as string, status: 'cancelled' }), 2)
+        return { cancelled: true }
       }
     })
     // The host writes every line from the context it was started in: the first chat that needed it.
@@ -272,32 +276,30 @@ describe("Cursor's one host shared by threads", () => {
     expect(texts(b.id).filter((text) => text.includes('first in A'))).toEqual([])
   })
 
-  it("holds a second thread's steer during its own command on the shared host, and delivers it once, in that thread", async () => {
+  it("a second thread's steer during its own command on the shared host cancels that thread's run at once, and goes in once, in that thread", async () => {
     const a = store.createThread('A')
     const b = store.createThread('B')
     await orch.send('first in A', false, { threadId: a.id })
     let runB: string | undefined
     scripted.set('work in B', (runId) => {
       runB = runId
+      // The command never ends by itself: only the steer's cancel ends the run.
       host.emit({ event: 'delta', runId, update: { type: 'tool-call-started', callId: 'cmd-b', toolCall: { type: 'shell', args: { command: 'npm test' } } } } as never)
     })
     const turnB = orch.send('work in B', false, { threadId: b.id })
     await waitFor(() => orch.getMessages(b.id).some((message) => message.activity?.callId === 'cmd-b'), "B's command running")
     expect(orch.steerThreadOrEnqueueExternal(b.id, 'use pnpm')).toMatchObject({ steered: true })
-    await waitFor(() => orch.getTurnState(b.id).heldSteer !== undefined, "B's steer held")
-    expect(orch.getTurnState(b.id).heldSteer).toMatchObject({ waitsFor: 'Bash', tools: 1 })
-    expect(orch.getTurnState(a.id).heldSteer).toBeUndefined()
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(host.calls('cancel')).toEqual([])
-    // The command ends, and then the run: the steer goes in as B's next run, with no cancel.
-    host.emit({ event: 'delta', runId: runB!, update: { type: 'tool-call-completed', callId: 'cmd-b', toolCall: { type: 'shell', args: { command: 'npm test' }, result: { status: 'success', value: { exitCode: 0 } } } } } as never)
-    host.emit({ event: 'run_end', runId: runB!, status: 'finished' } as never)
+    await waitFor(() => host.calls('cancel').length > 0, "B's run cancelled")
+    expect(host.calls('cancel')).toEqual([{ runId: runB }])
+    expect(orch.getTurnState(b.id).heldSteer).toBeUndefined()
+    // The steer goes in as B's next run.
     await turnB
     await waitFor(() => !orch.isTurnActive(b.id), 'B ended')
     expect(host.transports).toHaveLength(1)
     expect(host.calls('send').map((params) => params.text).filter((text) => text === 'use pnpm')).toHaveLength(1)
-    expect(host.calls('cancel')).toEqual([])
+    expect(host.calls('cancel')).toEqual([{ runId: runB }])
     expect(texts(b.id).filter((text) => text.includes('Reply to use pnpm'))).toHaveLength(1)
     expect(texts(a.id).filter((text) => text.includes('pnpm'))).toEqual([])
+    expect(orch.getTurnState(a.id).heldSteer).toBeUndefined()
   })
 })

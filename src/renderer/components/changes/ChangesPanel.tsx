@@ -78,6 +78,7 @@ import { readScopeList, type ScopeList } from './scopeList'
 import { ChangesDiff, type HunkActions, type LineRange } from './ChangesDiff'
 import { ChangesFooter } from './ChangesFooter'
 import { ChangesHeader, type SyncChipModel } from './ChangesHeader'
+import { startDragOut } from '../../lib/fileDragOut'
 import { FileJump, type JumpRow } from './FileJump'
 import { MenuButton } from './MenuButton'
 import './changes.css'
@@ -920,6 +921,18 @@ export function ChangesPanel() {
                 tabIndex={0}
                 aria-expanded={open}
                 title={row.oldPath ? `${row.oldPath} → ${row.path}` : row.path}
+                // A file still in the folder drags out to Finder or Explorer as the real file.
+                draggable={row.status !== 'deleted' && Boolean(result) ? true : undefined}
+                onDragStart={(event) => {
+                  if (!result || row.status === 'deleted') return
+                  const started = startDragOut(event, {
+                    name: row.path.split('/').pop() ?? row.path,
+                    ...(threadId ? { threadId } : { projectId: scopeProjectId }),
+                    item: { kind: 'workspace', path: joinReviewPath(result.root, row.path) }
+                  })
+                  // A thread on another computer: the row has nothing to drag.
+                  if (!started) event.preventDefault()
+                }}
                 onClick={() => setOpen(open ? null : row.path)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && event.target === event.currentTarget) {

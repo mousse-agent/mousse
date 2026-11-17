@@ -1,5 +1,5 @@
 import { addMs, type EffectOutbox, type EffectSettlement } from './EffectOutbox'
-import { effectLaneClass, type EffectKind, type EffectLaneClass, type EffectRecord } from './types'
+import type { EffectKind, EffectLaneClass, EffectRecord } from './types'
 
 export type EffectExecutor = (
   effect: EffectRecord,
@@ -7,28 +7,20 @@ export type EffectExecutor = (
 ) => Promise<void>
 
 /**
- * Fibres per lane class (SPEC §12.3). `turn` fibres claim only `turn.start` and so cap the
- * profile's concurrent turns; `control` fibres claim only interrupts, steers and answers, so a
- * Stop runs however many turns are live; `replaySafe` fibres claim the replay-safe kinds.
+ * Fibres per lane class (SPEC §12.3) for the effects that are not turns: `control` fibres claim only interrupts,
+ * steers and answers, so a Stop reaches a live turn however many turns run; `replaySafe` fibres claim the replay-safe
+ * kinds. `turn.start` has no fibres: one claimer starts every turn as soon as it is due, with no limit on how many
+ * run at once.
  */
 export interface EffectWorkerFibres {
-  turn: number
   control: number
   replaySafe: number
 }
 
 export const DEFAULT_EFFECT_WORKER_FIBRES: Readonly<EffectWorkerFibres> = {
-  turn: 8,
   control: 2,
   replaySafe: 2
 }
-
-/**
- * Of the `turn` fibres, how many claim only a turn a person is waiting for (a message from the app, CLI
- * or phone). The rest claim any turn, a person's first. So background turns hold at most
- * `turn - DEFAULT_PERSON_TURN_FIBRES` slots, and a person's message never waits for all of them to end.
- */
-export const DEFAULT_PERSON_TURN_FIBRES = 2
 
 export interface EffectWorkerOptions {
   outbox: EffectOutbox
@@ -37,8 +29,6 @@ export interface EffectWorkerOptions {
   owner: string
   /** Fibres per lane class; missing classes use `DEFAULT_EFFECT_WORKER_FIBRES`. */
   fibres?: Partial<EffectWorkerFibres>
-  /** `turn` fibres kept for a person's turns; default `DEFAULT_PERSON_TURN_FIBRES`, at most `turn - 1`. */
-  personTurnFibres?: number
   now?: () => string
   /** Safety poll. Default 30 s. */
   pollMs?: number
@@ -84,9 +74,10 @@ class EffectCancelledError extends Error {
 }
 
 /**
- * In-process effect worker (SPEC §12.3): async fibres, grouped by lane class, claim from the
- * outbox, execute under a deadline and settle by CAS on the lease. Wake sources: outbox commits
- * (`subscribe`), `notify()`, the next `available_at` and a safety poll.
+ * In-process effect worker (SPEC §12.3): one turn claimer and async fibres for the other lane classes claim from
+ * the outbox, execute under a deadline and settle by CAS on the lease. The turn claimer starts each `turn.start` it
+ * claims without waiting for it and claims again, so every due turn runs at once; the outbox's lanes still keep one
+ * turn per thread. Wake sources: outbox commits (`subscribe`), `notify()`, the next `available_at` and a safety poll.
  *
  * Settlement rules: success → `succeed`; `EffectDeferredError` → `defer` (pending again later);
  * failure → `fail(message)` (`'timeout'` when the deadline fired); `cancelInFlight` →
@@ -99,7 +90,6 @@ export class EffectWorker {
   private readonly executors: Partial<Record<EffectKind, EffectExecutor>>
   private readonly owner: string
   private readonly fibres: Readonly<EffectWorkerFibres>
-  private readonly personTurnFibres: number
   private readonly now: () => string
   private readonly pollMs: number
   private stopController: AbortController | null = null
@@ -108,10 +98,8 @@ export class EffectWorker {
   private readonly wakers = new Set<() => void>()
   private generation = 0
   private readonly running = new Map<string, AbortController>()
-  /** Executions in flight per lane class: a full `turn` lane means a new turn waits for a free slot. */
-  private readonly busy: Record<EffectLaneClass, number> = { turn: 0, control: 0, replaySafe: 0 }
-  /** Turns running on the fibres kept for people. */
-  private busyKept = 0
+  /** Turn executions the turn claimer started that have not settled yet (`stop()` waits for them). */
+  private readonly turns = new Set<Promise<void>>()
   /** Executor promises still running, including ones a race already gave up on. */
   private readonly executing = new Set<Promise<unknown>>()
 
@@ -121,14 +109,9 @@ export class EffectWorker {
     this.owner = options.owner
     const fibres = { ...DEFAULT_EFFECT_WORKER_FIBRES, ...(options.fibres ?? {}) }
     this.fibres = {
-      turn: Math.max(1, Math.floor(fibres.turn)),
       control: Math.max(1, Math.floor(fibres.control)),
       replaySafe: Math.max(1, Math.floor(fibres.replaySafe))
     }
-    this.personTurnFibres = Math.min(
-      this.fibres.turn - 1,
-      Math.max(0, Math.floor(options.personTurnFibres ?? DEFAULT_PERSON_TURN_FIBRES))
-    )
     this.now = options.now ?? (() => new Date().toISOString())
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS
   }
@@ -138,23 +121,17 @@ export class EffectWorker {
     const controller = new AbortController()
     this.stopController = controller
     this.unsubscribe = this.outbox.subscribe(() => this.notify())
-    const lanes = Object.keys(this.fibres) as EffectLaneClass[]
-    this.loops = lanes.flatMap((lane) =>
-      Array.from({ length: this.fibres[lane] }, (_, index) =>
-        this.loop(controller.signal, [lane], lane === 'turn' && index < this.personTurnFibres)
-      )
-    )
-  }
-
-  /** Fibres per lane class; `turn` is the profile's concurrent-turn cap, people's reserved turns included. */
-  get fibreCounts(): Readonly<EffectWorkerFibres> {
-    return this.fibres
+    const lanes = Object.keys(this.fibres) as Array<keyof EffectWorkerFibres>
+    this.loops = [
+      this.turnLoop(controller.signal),
+      ...lanes.flatMap((lane) => Array.from({ length: this.fibres[lane] }, () => this.loop(controller.signal, [lane])))
+    ]
   }
 
   /**
-   * Interrupts every fibre and its in-flight execution, then waits for the fibres and for every
-   * executor promise to settle: an aborted executor may still be unwinding (writing its run's
-   * terminal state) after its fibre has moved on.
+   * Interrupts the turn claimer, every fibre and every in-flight execution, then waits for them, for every turn the
+   * claimer started and for every executor promise to settle: an aborted executor may still be unwinding (writing
+   * its run's terminal state) after its execution has moved on.
    */
   async stop(): Promise<void> {
     const controller = this.stopController
@@ -166,10 +143,11 @@ export class EffectWorker {
     this.notify()
     await Promise.all(this.loops)
     this.loops = []
+    while (this.turns.size) await Promise.allSettled([...this.turns])
     while (this.executing.size) await Promise.allSettled([...this.executing])
   }
 
-  /** Wakes idle fibres to claim again. */
+  /** Wakes the idle turn claimer and fibres to claim again. */
   notify(): void {
     this.generation++
     const wakers = [...this.wakers]
@@ -190,31 +168,47 @@ export class EffectWorker {
   }
 
   /**
-   * The profile's turn slots: how many run a turn now and how many it has, and how many of them only a person's turn
-   * takes (`keptForPeople`). A background turn waits while the other `limit - keptForPeople` (`shared`) all run one.
+   * Claims every due `turn.start` and starts each at once, without waiting for it to end, then claims again; idles
+   * only when nothing is claimable. A turn waits only for its own thread's lane (one turn per thread at a time).
    */
-  turnSlots(): { running: number; limit: number; keptForPeople: number; sharedRunning: number } {
-    return {
-      running: this.busy.turn,
-      limit: this.fibres.turn,
-      keptForPeople: this.personTurnFibres,
-      sharedRunning: this.busy.turn - this.busyKept
-    }
-  }
-
-  private async loop(signal: AbortSignal, lanes: readonly EffectLaneClass[], personOnly = false): Promise<void> {
+  private async turnLoop(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
       const generation = this.generation
       const now = this.now()
       let effect: EffectRecord | null
       try {
-        effect = this.outbox.claimNext(this.owner, now, personOnly ? { lanes, personOnly } : { lanes })
+        effect = this.outbox.claimNext(this.owner, now, { lanes: ['turn'] })
       } catch (error) {
         console.warn(`[effect-worker] claim failed: ${messageOf(error)}`)
         await this.idle(signal, generation, this.pollMs)
         continue
       }
-      if (effect) await this.execute(effect, signal, personOnly)
+      if (effect) this.startTurn(effect, signal)
+      else await this.idle(signal, generation, this.idleDelay(now))
+    }
+  }
+
+  private startTurn(effect: EffectRecord, signal: AbortSignal): void {
+    const execution = this.execute(effect, signal).catch((error: unknown) => {
+      console.warn(`[effect-worker] executing ${effect.effectId} failed: ${messageOf(error)}`)
+    })
+    this.turns.add(execution)
+    void execution.then(() => this.turns.delete(execution))
+  }
+
+  private async loop(signal: AbortSignal, lanes: readonly EffectLaneClass[]): Promise<void> {
+    while (!signal.aborted) {
+      const generation = this.generation
+      const now = this.now()
+      let effect: EffectRecord | null
+      try {
+        effect = this.outbox.claimNext(this.owner, now, { lanes })
+      } catch (error) {
+        console.warn(`[effect-worker] claim failed: ${messageOf(error)}`)
+        await this.idle(signal, generation, this.pollMs)
+        continue
+      }
+      if (effect) await this.execute(effect, signal)
       else await this.idle(signal, generation, this.idleDelay(now))
     }
   }
@@ -248,16 +242,13 @@ export class EffectWorker {
     })
   }
 
-  private async execute(effect: EffectRecord, stopSignal: AbortSignal, kept = false): Promise<void> {
+  private async execute(effect: EffectRecord, stopSignal: AbortSignal): Promise<void> {
     const { effectId } = effect
     const cancel = new AbortController()
     const lease = new AbortController()
     const timeout = AbortSignal.timeout(effect.timeoutMs)
     const signal = AbortSignal.any([stopSignal, cancel.signal, timeout, lease.signal])
     this.running.set(effectId, cancel)
-    const lane = effectLaneClass(effect.kind)
-    this.busy[lane]++
-    if (kept) this.busyKept++
     const renewLease = (): boolean => {
       let renewed = false
       try {
@@ -289,8 +280,6 @@ export class EffectWorker {
     } finally {
       clearInterval(renewer)
       this.running.delete(effectId)
-      this.busy[lane]--
-      if (kept) this.busyKept--
     }
 
     let settlement: EffectSettlement

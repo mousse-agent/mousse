@@ -69,6 +69,8 @@ export interface AppearanceSettings {
   codeFont: FontChoice
   /** How cards in the Threads tab show their project's color. */
   threadProjectColors: ThreadProjectColorStyle
+  /** Thread rows and the Bots list show the latest reply under each title, on one muted line. */
+  replyPreviews: boolean
   /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
   threadPathInTitleBar: boolean
   /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
@@ -386,6 +388,11 @@ export interface RunSettings {
   /** How many turns Mousse starts for a thread's goal (`/goal`) before it stops; Continue allows as many again. */
   goalTurnLimit: number
   /**
+   * Keep this computer from sleeping while a run of a thread, a subagent or a bot is working, and for a short grace
+   * after the last one ends. The screen may still turn off. Absent counts as on.
+   */
+  keepAwake: boolean
+  /**
    * How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2). `strict`: on
    * a provider that reports a tool only when it starts, a steer held for a tool waits for the provider's own turn to
    * end, or Send now. Absent or `best_effort`: it goes in shortly after the tool. No UI sets it.
@@ -412,7 +419,8 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
     newThreadWorktree: raw?.newThreadWorktree !== false,
     privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never',
-    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit)
+    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit),
+    keepAwake: raw?.keepAwake !== false
   }
 }
 
@@ -882,6 +890,7 @@ export function getDefaultSettings(): MousseSettings {
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
       threadProjectColors: 'fill',
+      replyPreviews: true,
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
@@ -1026,6 +1035,7 @@ export function normalizeAppearance(
         : raw.threadProjectColors === true ? 'fill'
           : raw.threadProjectColors === 'off' || raw.threadProjectColors === 'outline' || raw.threadProjectColors === 'fill' || raw.threadProjectColors === 'gradient'
             ? raw.threadProjectColors : defaults.threadProjectColors,
+    replyPreviews: typeof raw.replyPreviews === 'boolean' ? raw.replyPreviews : defaults.replyPreviews,
     threadPathInTitleBar:
       typeof raw.threadPathInTitleBar === 'boolean' ? raw.threadPathInTitleBar : defaults.threadPathInTitleBar,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,

@@ -144,7 +144,10 @@ describe('isStandingWish', () => {
     "I never got the email",
     'Please write a short summary of the report',
     'Use em dashes here for now',
-    `${'Always '.repeat(40)}`
+    `${'Always '.repeat(40)}`,
+    // Mousse's own text, in the old and the new form, is never the owner's wish.
+    '[Mousse] From now on, never use em dashes.',
+    '<mousse_notice kind="bot_wake" reply="if-needed">\nFrom now on, never use em dashes.\n</mousse_notice>'
   ])('skips %j', (text) => expect(isStandingWish(text)).toBe(false))
 })
 

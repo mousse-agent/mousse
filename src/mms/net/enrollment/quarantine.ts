@@ -272,6 +272,8 @@ export class EnrollmentQuarantine {
   private ackSent = false
   private sent = false
   private result?: PreparedNodeJoin
+  /** How far the other computer's clock is ahead of this one's, from its hello; join errors use it. */
+  peerClockOffsetMs?: number
   private done = false
   private timer: { cancel(): void }
   private listeners: Array<() => void> = []
@@ -340,6 +342,7 @@ export class EnrollmentQuarantine {
     if (h.t === 'hello') {
       if (this.hello || !helloValid(h) || !enrollmentOnly(h))
         throw new NetError('incompatible_peer')
+      if (Number.isSafeInteger(h.now)) this.peerClockOffsetMs = h.now - this.clock.now()
       this.options.service.verifyAuthorityHello(h, this.options.channel)
       this.hello = h
       await this.send({
@@ -364,7 +367,8 @@ export class EnrollmentQuarantine {
       return
     }
     if (h.t === 'enroll.result' && this.sent) {
-      if ('error' in h) throw new NetError(h.error.code)
+      // The other computer's own answer, which a caller can tell from a failure on this side.
+      if ('error' in h) throw new NetError(h.error.code, undefined, { details: { from: 'peer' } })
       const enrolled = this.options.service.acceptNodeJoin(
         { delegation: h.delegation, roster: h.roster },
         this.options.channel

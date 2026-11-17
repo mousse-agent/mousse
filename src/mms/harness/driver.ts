@@ -212,14 +212,18 @@ export interface OneShotSpec {
   onActivity(): void
 }
 
-/** What a one-shot writes on the title model: a chat title, a pull request draft or a commit message. */
-export type OneShotTask = 'title' | 'pull_request' | 'commit_message'
+/**
+ * What a one-shot writes: a chat title, a pull request draft or a commit message on the title model, or the digest of a
+ * bot's chat on the bot's own model.
+ */
+export type OneShotTask = 'title' | 'pull_request' | 'commit_message' | 'chat_digest'
 
 /** What each one-shot task does, for a refusal that names it ("… cannot name chats"). */
 export const ONE_SHOT_TASK_TEXT: Readonly<Record<OneShotTask, string>> = {
   title: 'name chats',
   pull_request: 'draft pull requests',
-  commit_message: 'write commit messages'
+  commit_message: 'write commit messages',
+  chat_digest: "summarise a bot's chat"
 }
 
 /**
@@ -523,6 +527,12 @@ export interface HarnessDriver {
    * on/off, not the Compact context size. Absent: a thread on it compacts at the Compact context size.
    */
   readonly compactsNearWindow?: boolean
+  /**
+   * Mousse masks a secret's value in the runtime's tool results before the runtime keeps them (Claude Code's
+   * `PostToolUse` hook), so its turns may read the thread's secret copies while they run. Absent: the runtime keeps
+   * its tools' results as they are, and a turn on it holds the copies off until it settles.
+   */
+  readonly masksToolResults?: boolean
   /**
    * What turns the agent's own telemetry off, as its vendor documents it: variables, and arguments
    * for the processes that take launch arguments. Set last, over the entry's own launch settings, on

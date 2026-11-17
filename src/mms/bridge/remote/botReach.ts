@@ -2,6 +2,7 @@ import type { BotReachPort } from '../../protocol/botReachPort'
 import { botDeviceAllowed, HIDDEN_BOT_NAME, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import type { NodeDelegation, NodeId, Roster } from '../../../shared/net'
 import type { NetIdentityService } from '../../net/identity/NetIdentityService'
+import type { BotDeviceAccessStore } from '../../bots/definitions/BotDeviceAccessStore'
 
 /**
  * The owner's other devices on the account now: every node of the signed roster that is not revoked, but this one.
@@ -110,6 +111,24 @@ export function createBotReach(options: {
       for (const off of offs) off()
       listeners.clear()
     }
+  }
+}
+
+/**
+ * `remoteBotMethods`' `madeBy`: a bot a device just made, which that device can't reach, gains that device, so it is not
+ * locked out of what it made (a bot made without a choice where what is stored can't be read stands at this computer
+ * alone). A bot with a choice of its own saved, the one the device asked for at creation or one set since, is never
+ * widened: it stays as it was chosen.
+ */
+export function keepMakerInReach(
+  store: Pick<BotDeviceAccessStore, 'saved' | 'set'>,
+  reach: Pick<BotReachPort, 'canReach' | 'deviceOn'>,
+  changed?: (botId: string) => void
+): (botId: string, node: string) => void {
+  return (botId, node) => {
+    if (store.saved(botId) || reach.canReach(botId, node) || !reach.deviceOn(node)) return
+    store.set(botId, { mode: 'chosen', nodes: [node] })
+    changed?.(botId)
   }
 }
 

@@ -20,6 +20,7 @@ import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import { createBashToolDefinition, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { guardProvider, guardStreams, isGuarded, type GuardObserver, type RequestGate } from './guard'
 import { BUDGET_EXHAUSTED, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './messages'
+import { refusalText } from '../../../run/mcp/appTools/refusal'
 import { brokerOAuth, type PiCredentialPost } from './oauth'
 import { inputBound, sizedMaxTokens, wirePlan, type PiReasoning, type ThinkingBudgets } from '../reservation'
 import { botBashSpawn, containedBashOperations } from './shell'
@@ -340,10 +341,11 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
       ...(tool.class === 'delegation' ? { executionMode: 'sequential' as const } : {}),
       execute: async (toolCallId, params, signal) => {
         const current = turn
-        if (!current?.mcp) throw new Error(`${tool.name} is not available in this turn`)
+        // Refused here as the Mousse MCP server refuses: an error whose text is the refusal shape.
+        if (!current?.mcp) throw new Error(refusalText('unavailable', `${tool.name} is not available in this turn`))
         if (tool.class === 'delegation') {
           const quiet = await call<PiQuiesceResponse>('quiesce', { attemptToken: current.attemptToken, toolCallId }, signal)
-          if (!quiet.ok) throw new Error(quiet.reason)
+          if (!quiet.ok) throw new Error(refusalText('conflict', quiet.reason, { retry: 'later' }))
         }
         const response = await postJson<{ result?: { content?: Array<Record<string, unknown>>; isError?: boolean }; error?: { message?: string } }>(
           current.mcp.url,

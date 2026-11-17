@@ -3,6 +3,7 @@ import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
 import { askUserTools } from './askUser'
 import { botMemoryTools, type BotMemoryToolHost } from './botMemory'
+import { botCatalogueTools } from './botCatalogue'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
 import { delegationTools } from './delegation'
@@ -24,9 +25,10 @@ import type { AppToolTurns } from './turns'
 import { webTools } from './web'
 
 export * from './types'
+export * from './refusal'
 export * from './registry'
 export * from './turns'
-export type { AgentActionDetails, AgentApprovalResult, AgentArchiveResult, AgentCreatedThread, AgentRemoteThreadRequest, AgentRemoteThreadResult, RemoteProjectCandidate, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, RemoteThreadsHost, ThreadSearchHit } from './host'
+export type { AgentActionDetails, AgentApprovalResult, AgentArchiveResult, AgentArchiveOwnResult, AgentCreatedThread, AgentRemoteThreadRequest, AgentRemoteThreadResult, RemoteProjectCandidate, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, RemoteThreadsHost, ThreadSearchHit } from './host'
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, cleanRemoteSenderTitle, BOT_MESSAGE_END, BOT_MESSAGE_PREFIX, botMessage, botMessageText, isPersonMessage, personTurnRequest } from './agentMessage'
 export type { BotAppToolDeps } from './bots'
 export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
@@ -63,8 +65,8 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
       return lineage === 'descendant' ? 'descendant' : lineage ? 'ancestor_or_sibling' : null
     },
     // A personal bot: its own rule for threads; it reaches every project.
-    botReach: (caller, target) => {
-      if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId)
+    botReach: (caller, target, options) => {
+      if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId, options)
       return { scope: 'manage' }
     }
   }
@@ -115,7 +117,7 @@ export function createAppToolRegistry(input: {
   add('web', webTools(host))
   add('browser', browserTools(host))
   add('applets', appletTools())
-  add('bots', [...botTools(input.bots), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
+  add('bots', [...botTools(input.bots), ...botCatalogueTools(() => registry), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))

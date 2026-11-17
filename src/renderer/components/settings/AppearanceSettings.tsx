@@ -290,6 +290,18 @@ export function AppearanceSettings({
             />
           }
         />
+        <SettingsRow
+          title="Reply previews"
+          anchor="appearance-reply-previews"
+          description="The latest reply under each thread and bot."
+          control={
+            <Switch
+              label="Reply previews"
+              checked={appearance.replyPreviews}
+              onChange={(replyPreviews) => void onUpdate({ appearance: { ...appearance, replyPreviews } })}
+            />
+          }
+        />
       </SettingsGroup>
 
       {userTheme && (

@@ -641,6 +641,11 @@ export interface PendingUserQuestions {
   threadId?: string
   /** Present on a provider's, the Pi agent's or a Mousse tool's saved approval request. */
   approval?: PendingApprovalInfo
+  /**
+   * `false`: the agent asked without waiting (`ask_user` with `wait: false`) and keeps working. The question stays
+   * open until it is answered, dismissed or withdrawn; a new message does not close it.
+   */
+  wait?: false
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
@@ -933,9 +938,9 @@ export interface ChatMessage {
    */
   scheduledRun?: { jobId: string; threadId: string; runId?: string }
   /**
-   * Set on the note Mousse writes on a thread whose agent started another thread (`thread_create`): that thread, which
-   * the transcript draws as a chip with its title and live status, and what was chosen for it (model, mode, where it
-   * runs). Notes written before this field stay plain text.
+   * Set on the note Mousse writes on a thread whose agent started another thread (`thread_create`): that thread, and
+   * what was chosen for it (model, mode, where it runs). The note is kept in the thread's record and read by agents
+   * (`thread_read`); the chat does not show it, as the agent's reply names the thread.
    */
   launchedThread?: { threadId: string; summary?: string }
   /**
@@ -1098,6 +1103,8 @@ export interface OrchestratorResponse {
   message: string
   /** With `error`, on a bot's turn whose work goes on (it reached its runtime's turn cap): the words it said last. */
   partial?: string
+  /** On a bot's turn: a steer cut it and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
+  steerUnanswered?: boolean
   actions: OrchestratorAction[]
   /**
    * When true, the send was accepted onto the thread queue instead of starting a turn.
@@ -1341,6 +1348,12 @@ export interface ContextUsageSnapshot {
    * new thread, or the history changed since, which starts a fresh session).
    */
   promptCache?: ContextPromptCache
+  /**
+   * A runtime that reports no context (an ACP agent, Cursor): Mousse's estimate of the history the next send
+   * carries, sent with `promptCache` so the composer can still suggest compacting once it goes cold. The gauge
+   * itself stays empty.
+   */
+  historyEstimate?: number
 }
 
 export interface ContextPromptCache {
@@ -1440,8 +1453,13 @@ export interface ThreadLineage {
 export interface SubagentWorkspaceBinding {
   /** `primary`: a scheduled run on the project's own checkout, never a provisioned worktree. */
   policy: 'shared' | 'isolated' | 'primary'
-  /** The parent's workspace path a `shared` child observes read-only. */
+  /** The parent's workspace path a `shared` child works in. */
   sharedPath?: string
+  /**
+   * What a `shared` child may do there: `write`, every tool its parent has; `read-only` (and absent, on a child saved
+   * before this existed), the read-only tools only (`delegate_task` `readOnly`).
+   */
+  access?: 'read-only' | 'write'
   /**
    * An `isolated` child started with "Give each subagent its own worktree" on: the parent's HEAD when it was started. Its
    * worktree is made from this commit before its first turn, whatever that turn's mode.
@@ -1626,6 +1644,17 @@ export interface Thread {
   worktreeBaseBranch?: string
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
   pullRequest?: ThreadPullRequestLink
+  /**
+   * Every pull request the thread has been linked to, oldest first, with its state as last read, for the sidebar's count.
+   * Written when a link is made and when the app reads, merges or closes one of them. Read through `threadPullRequestsOf`,
+   * which counts the `pullRequest` of a thread linked before this list was kept.
+   */
+  pullRequests?: import('./pullRequests').ThreadPullRequestSummary[]
+  /**
+   * The latest reply of the thread's agent as one clipped line of plain text (`replyPreviewText`), for its sidebar row.
+   * Written when a turn ends; absent until the first turn that ends with this field known.
+   */
+  lastReply?: string
   /** The thread's goal (`/goal`): Mousse keeps starting turns while it is working. Set by the daemon. */
   goal?: import('./threadGoal').ThreadGoal
   /** Explicit sidebar position within this thread's project (or standalone group). */
@@ -1676,6 +1705,8 @@ export interface TurnPause {
   autoResume: boolean
   /** The reset passed while Mousse was off for more than a day: the timer was dropped and only Resume now (or a message) continues the run. */
   stale?: true
+  /** The paused run was itself the continue turn of an earlier pause: resuming ran into the limit again. */
+  again?: true
 }
 
 export interface TurnState {
@@ -1744,12 +1775,6 @@ export type TurnStep =
    * nothing back in time (its own retry, outside the attempt count).
    */
   | { kind: 'retrying'; attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: true }
-  /**
-   * The turn has not started: the profile runs `running` turns of the `limit` it runs at once, and this one starts when
-   * one of them ends. `keptForPeople`: set on a background turn (a subagent, a wake, a resume), which waits while every
-   * slot but those kept for people's turns is taken. Only with phase `queued`. `limit` is absent from an older daemon.
-   */
-  | { kind: 'waiting_slot'; running: number; limit?: number; keptForPeople?: number }
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'

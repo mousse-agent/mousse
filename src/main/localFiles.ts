@@ -1,16 +1,13 @@
 import { copyFile, stat } from 'node:fs/promises'
 import { basename, isAbsolute, join, resolve } from 'node:path'
-import { clipboard, dialog, nativeImage, shell, type BrowserWindow } from 'electron'
+import { dialog, shell, type BrowserWindow } from 'electron'
 
 /**
  * A file or folder of this computer that the window names by its path (a bot's file chip or picture): shown selected
- * in its folder, opened (a folder, in the file manager), saved as a copy where the person picks, or, for a picture,
- * copied to the clipboard. Each call takes only an existing file or folder by its absolute path: never a device, a
- * relative path or a path with a NUL in it. Saving a copy and copying a picture take a file only.
+ * in its folder, opened (a folder, in the file manager), or saved as a copy where the person picks. Each call takes
+ * only an existing file or folder by its absolute path: never a device, a relative path or a path with a NUL in it.
+ * Saving a copy takes a file only.
  */
-
-/** Pictures the clipboard takes. */
-const PICTURE = /\.(?:png|jpe?g|gif|webp)$/i
 
 /** What a path names on this computer. */
 export type LocalPathKind = 'file' | 'folder'
@@ -71,13 +68,4 @@ export async function saveFileCopy(path: unknown, window: BrowserWindow | null, 
   // Saving over the file itself leaves it as it is.
   if (resolve(picked.filePath) !== resolve(source)) await copyFile(source, picked.filePath)
   return picked.filePath
-}
-
-/** Puts a picture file on the clipboard as an image; refused for anything the clipboard can't take as one. */
-export async function copyImageFile(path: unknown): Promise<void> {
-  const source = await assertLocalFile(path)
-  if (!PICTURE.test(source)) throw new Error('Only a picture can be copied as an image.')
-  const image = nativeImage.createFromPath(source)
-  if (image.isEmpty()) throw new Error("This picture can't be copied.")
-  clipboard.writeImage(image)
 }

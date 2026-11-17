@@ -187,6 +187,8 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       const next = { ...(fake.devices[botId] ?? { devices: [] }), access }
       delete (next as { unreadable?: true }).unreadable
       fake.devices[botId] = next
+      // The list says it too, as the service's own summaries do on the home computer.
+      fake.bots = fake.bots.map((bot) => (bot.id === botId && bot.reach !== undefined ? { ...bot, reach: access.mode } : bot))
       return next
     }))
   }

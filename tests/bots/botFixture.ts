@@ -21,6 +21,7 @@ import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
 import type { BotChip, BotLaunchedThread } from '../../src/shared/bots/personal/chat'
 import type { BotDepth, BotModelPick } from '../../src/shared/bots/personal/definition'
+import type { BotDeviceAccess } from '../../src/shared/bots/personal/deviceAccess'
 import type { ProviderSelection } from '../../src/shared/harness/types'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
@@ -79,7 +80,7 @@ export interface BotFixture {
   close(): void
 }
 
-export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> & { realWipe?: boolean } = {}): BotFixture {
+export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'deviceAccess'> & { realWipe?: boolean } = {}): BotFixture {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-p1-')))
   const profile = join(base, 'profile')
   mkdirSync(profile, { recursive: true })
@@ -258,9 +259,9 @@ export async function start(f: BotFixture, activationId: string, n = 1): Promise
 }
 
 /** The run ends and the executor settles it with its final message; then everything that follows runs. */
-export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; outcome?: RunOutcome } = {}): Promise<void> {
+export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; outcome?: RunOutcome; unanswered?: boolean } = {}): Promise<void> {
   f.runs.markTerminal(payload.runId, status, options.outcome)
-  f.bots.settle(payload, options.text !== undefined ? { text: options.text } : {})
+  f.bots.settle(payload, { ...(options.text !== undefined ? { text: options.text } : {}), ...(options.unanswered ? { unanswered: true } : {}) })
   await flush()
 }
 
@@ -273,8 +274,8 @@ export async function runDispatch(f: BotFixture, activationId: string, n = 1, op
 }
 
 /** A new bot through `bots.create`, its first chat message answered with `reply`. */
-export async function createBot(f: BotFixture, options: { name?: string; description?: string; reply?: string } = {}): Promise<{ botId: string; firstActivation: string }> {
-  const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, ...(options.name ? { name: options.name } : {}), description: options.description ?? 'Check my inbox every morning and tell me what matters.', clientRequestId: `create-${Math.random().toString(16).slice(2)}` })
+export async function createBot(f: BotFixture, options: { name?: string; description?: string; reply?: string; access?: BotDeviceAccess; clientRequestId?: string } = {}): Promise<{ botId: string; firstActivation: string }> {
+  const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, ...(options.name ? { name: options.name } : {}), description: options.description ?? 'Check my inbox every morning and tell me what matters.', clientRequestId: options.clientRequestId ?? `create-${Math.random().toString(16).slice(2)}`, ...(options.access ? { access: options.access } : {}) })
   const first = f.store.listActivations(bot.id).find((activation) => activation.lane === 'chat')!
   if (options.reply !== undefined) await runDispatch(f, first.id, 1, { text: options.reply })
   return { botId: bot.id, firstActivation: first.id }

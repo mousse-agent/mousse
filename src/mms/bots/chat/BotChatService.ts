@@ -19,6 +19,8 @@ import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } fro
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
 import type { BotQuestionRow, BotStore } from '../store/BotStore'
+import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
+import { botDeviceAccessProblem, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import { lateAnsweringLine, plainChoices, type BotQuestionLateAnswer, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { grantedPermissions, permissionId, starterManifest, withoutPermission } from './projection'
 
@@ -240,6 +242,8 @@ export class BotChatService {
     computerName?(): string
     /** The person's other computers, online or not. */
     otherComputers?(): Array<{ node: string; name: string; online: boolean }>
+    /** Which devices reach each bot (`BotEngineHost.deviceAccess`). */
+    deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget'>
   }) {}
 
   private get store(): BotStore {
@@ -247,11 +251,18 @@ export class BotChatService {
   }
 
   private summaryOf(botId: string): BotSummary {
-    return this.engine.chat.summary(this.engine.definitionOf(botId), this.options.now())
+    return this.withReach(this.engine.chat.summary(this.engine.definitionOf(botId), this.options.now()))
   }
 
   private detailOf(botId: string): BotDetail {
-    return this.engine.chat.detail(this.engine.definitionOf(botId), this.options.now())
+    const detail = this.engine.chat.detail(this.engine.definitionOf(botId), this.options.now())
+    return { ...detail, summary: this.withReach(detail.summary) }
+  }
+
+  /** The summary with which devices reach the bot, for the Bots list's lock. */
+  private withReach(summary: BotSummary): BotSummary {
+    const access = this.options.deviceAccess
+    return access ? { ...summary, reach: access.get(summary.id).access.mode } : summary
   }
 
   /** `bots.personal.list`: every bot that is not deleted, oldest first. */
@@ -270,8 +281,17 @@ export class BotChatService {
    * The models (#673, `slots`) are the owner's picks on every row, each offered now: one that is not is refused in plain
    * words, never swapped for another. The bot names itself and says its first message on its Talk pick. An app from
    * before rows sends one `model` by name (on every row), and one from before picks none (by usage).
+   * `access`: which devices reach it (New bot's Devices row, or what the device that made it asked for). It is saved
+   * before the bot is published, so a device outside it never lists the bot, not even for a moment; a repeat that finds
+   * the bot made changes nothing.
    */
-  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<{ bot: BotSummary }> {
+  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: BotDeviceAccess }): Promise<{ bot: BotSummary }> {
+    if (input.access) {
+      const problem = botDeviceAccessProblem(input.access)
+      if (problem) throw new BotEngineError('invalid_params', problem)
+      // Without a place to keep the choice, a bot that should be held from some devices is not made at all.
+      if (!this.options.deviceAccess && input.access.mode !== 'all') throw new BotEngineError('invalid_params', 'Which devices reach a bot can only be set on its own computer.')
+    }
     const description = input.description.trim()
     if (!description || description.length > MAX_BOT_DESCRIPTION_CHARS) throw new BotEngineError('invalid_params', `Say what the bot should do in 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
     const given = input.name?.trim()
@@ -326,9 +346,38 @@ export class BotChatService {
       await this.engine.finishCreation(key)
       return { bot: this.summaryOf(raced.botId) }
     }
-    this.engine.createBot(definition, { key, input: firstMessagePrompt(description, !named.chosen) })
+    // Which devices reach it is saved first: the bot is listed nowhere until `createBot` publishes it, and from then on
+    // every list and call reads this choice. A crash between the two leaves only a choice for a bot that does not exist,
+    // which the next start takes off (`BotDeviceAccessStore.dropBots`); a retry makes the bot under a new id.
+    const held = this.holdNewBot(botId, input.access)
+    try {
+      this.engine.createBot(definition, { key, input: firstMessagePrompt(description, !named.chosen) })
+    } catch (error) {
+      // Not published: its choice goes too. Published but a later step failed: the choice stays with the bot.
+      if (held && !this.store.registry(botId)) {
+        try { this.options.deviceAccess?.forget(botId) } catch { /* the next start takes it off */ }
+      }
+      throw error
+    }
     await this.engine.enqueueChat(botId, key, firstMessagePrompt(description, !named.chosen))
     return { bot: this.summaryOf(botId) }
+  }
+
+  /**
+   * Saves which devices reach a bot about to be made; true when something was written. Every device (the default) is
+   * written only when the stored default is something else (a file that can't be read), so a bot made the usual way
+   * leaves the file as it is. A choice that can't be saved refuses the create.
+   */
+  private holdNewBot(botId: string, access: BotDeviceAccess | undefined): boolean {
+    const store = this.options.deviceAccess
+    if (!access || !store) return false
+    if (access.mode === 'all' && store.get(botId).access.mode === 'all') return false
+    try {
+      store.set(botId, access)
+    } catch {
+      throw new BotEngineError('bot_create_failed', "Which devices reach the bot couldn't be saved, so it wasn't made. Try again.")
+    }
+    return true
   }
 
   /**
@@ -887,7 +936,7 @@ export class BotChatService {
       const pick = slots[row]
       return pick && !isPinned(pick) ? [[row, pick.model]] : []
     })) as Partial<Record<BotModelSlotKey, string>>
-    const { last: _last, ...offered } = choices
+    const { last: _last, reachOnCreate: _reach, ...offered } = choices
     const images = this.options.images ? { image: shownPick(this.engine.imagePick(botId)), images: this.options.images.usage(botId) } : {}
     // The custom slots, their picks shown as the rows' are: never what the sign-in was.
     const custom = this.engine.customSlots(botId).map((slot) => ({ name: slot.name, pick: shownPick(slot.pick)!, ...(slot.description ? { description: slot.description } : {}) }))
@@ -945,6 +994,7 @@ export class BotChatService {
       ...imageChoices,
       ...(Object.keys(notes).length ? { notes } : {}),
       ...(last ? { last: { talk: offeredNow(last.talk), light: offeredNow(last.light), medium: offeredNow(last.medium), hard: offeredNow(last.hard) } } : {}),
+      ...(this.options.deviceAccess ? { reachOnCreate: true as const } : {}),
       computer: 'this_computer',
       computers: [
         { id: 'this_computer', name: computer },

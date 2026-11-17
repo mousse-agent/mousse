@@ -32,7 +32,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, RowTools, Square } from "../../../lib/icons";
+import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, MessageSquare, RowTools, Square } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -58,7 +58,6 @@ import { readSubagentNotice } from "../../adapters/subagentNotice";
 import { readSettleNoticeMeta } from "../../adapters/settleNotice";
 import { readBackgroundNotice } from "../../adapters/nativeSubagents";
 import { openThread } from "../../../lib/openThread";
-import { ThreadChip } from "../../../components/ThreadChip";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import { getToolStatus } from "./utils/format-tool";
 import {
@@ -234,20 +233,6 @@ function ThreadNotice({ text }: { text: string }) {
   </div>;
 }
 
-/** The thread a note says this thread's agent started (`ChatMessage.launchedThread`), else undefined. */
-function readLaunchedThread(message: UIMessage): { threadId: string; summary?: string } | undefined {
-  const launched = (message.metadata as { launchedThread?: { threadId?: unknown; summary?: unknown } } | undefined)?.launchedThread;
-  if (typeof launched?.threadId !== "string") return undefined;
-  return { threadId: launched.threadId, ...(typeof launched.summary === "string" && launched.summary ? { summary: launched.summary } : {}) };
-}
-
-/** Mousse's line for a thread this thread's agent started: "Started", the thread as a chip, then what was chosen for it. */
-function LaunchedThreadNote({ threadId, summary }: { threadId: string; summary?: string }) {
-  return <div role="note" className="launched-thread-note w-full py-1.5 text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">
-    Started <ThreadChip threadId={threadId} />{summary ? ` · ${summary}` : null}
-  </div>;
-}
-
 /** When a reply stopped streaming (`completedAt`), or when it started for one saved without it. */
 function readEndedAt(message: UIMessage): number | null {
   const raw = (message as { completedAt?: string }).completedAt;
@@ -303,6 +288,7 @@ function TurnWorkStatus({
   end,
   endYieldsToNotice = false,
   fold,
+  foldedReplies = 0,
 }: {
   active: boolean;
   startedAt?: number | null;
@@ -318,6 +304,8 @@ function TurnWorkStatus({
    * and `open` says whether the work shows.
    */
   fold?: { open: boolean; onToggle: () => void };
+  /** How many replies with text the fold hides, said on a finished turn's line so an earlier answer is not missed. */
+  foldedReplies?: number;
 }) {
   const fallbackStartRef = useRef<number | null>(null);
   if (!active) fallbackStartRef.current = null;
@@ -368,6 +356,7 @@ function TurnWorkStatus({
           onClick={fold.onToggle}
         >
           {shown}{mark}
+          {foldedReplies > 0 ? <FoldedRepliesCount count={foldedReplies} /> : null}
           <IconChevronRight className="turn-work-chevron" data-open={fold.open || undefined} aria-hidden="true" />
         </button>
       ) : (
@@ -375,6 +364,22 @@ function TurnWorkStatus({
       )}
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
+  );
+}
+
+/**
+ * " · (message icon) 3" after a finished turn's time: how many replies its fold hides. Only the icon and number show;
+ * the tooltip and screen readers get "3 replies inside".
+ */
+function FoldedRepliesCount({ count }: { count: number }) {
+  const label = `${count} ${count === 1 ? "reply" : "replies"} inside`;
+  return (
+    <span className="turn-work-replies" title={label}>
+      <span aria-hidden="true">·</span>
+      <MessageSquare className="turn-work-replies-icon" aria-hidden="true" />
+      <span aria-hidden="true">{count}</span>
+      <span className="sr-only">, {label}</span>
+    </span>
   );
 }
 
@@ -1967,6 +1972,55 @@ export const MessageList = memo(function MessageList({
     });
   }, [messageRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
 
+  // `revealSubagent` from Nest: a runtime's own subagent has no thread, so its card is what opens. The request
+  // waits in the store while its turn lands, so the folded group and the card open themselves as they mount.
+  const subagentRequest = useChatNavigationStore((state) => state.subagent);
+  const takenSubagentRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!subagentRequest || takenSubagentRef.current === subagentRequest.seq) return;
+    const { settleSubagent } = useChatNavigationStore.getState();
+    if (isStale(subagentRequest)) {
+      settleSubagent(subagentRequest.seq);
+      return;
+    }
+    const { toolCallId, seq } = subagentRequest;
+    let messageId: string | null = null;
+    const index = turns.findIndex((turn) =>
+      turn.assistantMsgs.some((message) => {
+        const found = (message.parts as Array<{ toolCallId?: unknown }> | undefined)?.some((part) => part?.toolCallId === toolCallId);
+        if (found) messageId = message.id;
+        return Boolean(found);
+      }),
+    );
+    const container = chatContainerRef.current;
+    const rows = rowsRef.current;
+    const virtualization = virtualizationRef.current;
+    if (index < 0 || !messageId || !container || !rows || !virtualization) return;
+    takenSubagentRef.current = seq;
+    dispatchFollow({ type: "navigate" });
+    const navigation = virtualization.beginNavigation();
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(toolCallId) : toolCallId.replace(/["\\]/g, "\\$&");
+    void revealMessage(
+      {
+        turnKey: resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current),
+        messageId,
+        element: (root) => root.querySelector<HTMLElement>(`[data-native-subagent="${escaped}"]`),
+      },
+      navigation,
+      {
+        container,
+        rows,
+        scrollToKey: windowed ? (key, target) => virtualization.scrollToKey(key, target, navigation) : undefined,
+        onProgrammaticScroll: markProgrammaticScroll,
+      },
+    ).then((element) => {
+      settleSubagent(seq);
+      if (!element) return;
+      flashLocated(element);
+      element.querySelector<HTMLButtonElement>("button.subagent-card")?.focus({ preventScroll: true });
+    });
+  }, [subagentRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
+
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
     const lastMessage = normalizedMessages[normalizedMessages.length - 1];
@@ -2222,7 +2276,7 @@ function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boo
     }
   }
   // Text written beside calls in one message is part of the work.
-  if (work) return { kind: "message", toolsOnly: true };
+  if (work) return { kind: "message", toolsOnly: true, text };
   return { kind: "message", text };
 }
 
@@ -2609,6 +2663,8 @@ const TurnRow = memo(function TurnRow({
           // A finished turn folds its work behind its "Worked for" line; the line opens it in place.
           const folded = isTurnStreaming ? rows.map(() => false) : foldTurnWork(rows.map((row) => row.fold));
           const hasFold = folded.some((value, index) => value && rows[index]!.node != null);
+          // Replies the fold hides, narration as well as answers that closed an earlier run, so none is missed.
+          const foldedReplies = folded.filter((value, index) => value && rows[index]!.fold.text && rows[index]!.node != null).length;
 
           return (
             <div className="group/assistant-turn">
@@ -2627,6 +2683,7 @@ const TurnRow = memo(function TurnRow({
                 end={turn.end}
                 endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
                 fold={hasFold ? { open: workOpen, onToggle: () => onToggleWork(turnKey) } : undefined}
+                foldedReplies={foldedReplies}
               />
               <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
                 <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
@@ -2959,11 +3016,7 @@ const AssistantParts = memo(function AssistantParts({
     toolRenderers,
   ]);
 
-  if (isThreadNotice(msg)) {
-    const launched = readLaunchedThread(msg);
-    if (launched) return <LaunchedThreadNote threadId={launched.threadId} summary={launched.summary} />;
-    return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
-  }
+  if (isThreadNotice(msg)) return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   const handoff = (msg.metadata as { contextHandoff?: HandoffMarker } | undefined)?.contextHandoff;
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   if ((msg.metadata as { contextCleared?: boolean } | undefined)?.contextCleared)

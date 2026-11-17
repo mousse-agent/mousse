@@ -130,10 +130,10 @@ function permissionFieldsAfterAgentEdit(job: ScheduledJob, editor: PermissionMod
 /**
  * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_run` and `schedule_delete`: an
  * agent's hand on the jobs its own thread made (docs/run-engine/SPEC.md §15.1). `schedule_delete` also removes a job one
- * of the thread's subagents made, and is refused to every subagent. The
+ * of the thread's subagents made; a subagent has these tools as its parent has them. The
  * first automation a thread's agent adds is an ask the person answers (Allow or Not now); after Allow it adds more
- * within the limits. Only a turn a person started may create or start a job or change what one does, so
- * no scheduled run, agent message, subagent or remote send can make jobs of its own and no chain of jobs can form. A job an
+ * within the limits. Only a turn a person started, or a subagent of one, may create or start a job or change what one
+ * does, so no scheduled run, agent message or remote send can make jobs of its own and no chain of jobs can form. A job an
  * agent creates runs no wider than the agent that made it (its permission mode is recorded on the job, and a later
  * change can only narrow it), ends after the profile's lifetime for such jobs unless a person
  * extends it, and counts against a profile-wide cap. The three limits are settings only a person changes
@@ -175,6 +175,14 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     const lineage = engine.delegations.getLineage(threadId)
     return lineage?.relationship === 'subagent' ? lineage.parentThreadId : undefined
   }
+  /** Whether `threadId` is someone's subagent; a lineage that can't be read counts as one, so the person is asked. */
+  const isSubagent = (threadId: string): boolean => {
+    try {
+      return subagentParent(threadId) !== undefined
+    } catch {
+      return true
+    }
+  }
   /** Whether a subagent of the caller (or a subagent of one of those) made the job through these tools. */
   const madeBySubagent = (job: ScheduledJob, ctx: ToolCallContext): boolean => {
     let current = job.createdBy?.threadId
@@ -212,7 +220,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     if (!person)
       throw new McpToolError(
         'mousse_scope_denied',
-        `${what} is only for a turn a person started. This run was started by a job, an agent's message, a subagent, a wake, a continuation, a bot or a remote send, or its origin cannot be read; ask from the person's own turn.`
+        `${what} is only for a turn a person started, or a subagent of one. This run was started by a job, an agent's message, a wake, a continuation, a bot or a remote send (or is a subagent of one), or its origin cannot be read; ask from the person's own turn.`
       )
   }
   /** Every change an agent makes is an `agent.action` event on its own thread, with a row in its transcript. */
@@ -318,7 +326,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       // Read at every listing: the tool is built once, and a person may change the limits at any time.
       get description() {
         const limits = limitsNow()
-        return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs a turn a person started: a job, another agent, a subagent or a remote send cannot create jobs; the first time, the person is asked and the job is made only if they allow it). The job outlives this run. It runs no wider than you do: its runs get at most your permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
+        return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs a turn a person started, or a subagent of one: a job, another agent's message or a remote send cannot create jobs; the first time, the person is asked and the job is made only if they allow it; a subagent's every job is asked). The job outlives this run. It runs no wider than you do: its runs get at most your permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
       },
       // A personal bot ("schedule work in your threads"): its owner allowed its jobs once, and it names where they run.
       get botDescription() {
@@ -406,7 +414,9 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         }
         // The first time, the person is asked; the job is made only when they allow it, which also lets this thread add more.
         // A personal bot's owner allowed "schedule work in your threads" once: that is their Allow for the bot's jobs.
-        if (!bot && !allowed(ctx.caller.threadId)) {
+        // A subagent's job is always asked: its person-started root may be long over, and a later run of its parent can
+        // still steer it, so no earlier Allow speaks for it.
+        if (!bot && (!allowed(ctx.caller.threadId) || isSubagent(ctx.caller.threadId))) {
           const ask = schedules.askFirst({ threadId: ctx.caller.threadId, requestKey, job })
           return json({
             waiting: true,
@@ -562,13 +572,10 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       ...common,
       name: 'schedule_delete',
       description:
-        'Remove a scheduled job your thread created, or one your subagents created, for good: it leaves Automations and schedule_list and starts no further runs. A run that already started, or already waits in its thread\'s queue, still runs and finishes in that thread; its result is not recorded on any job. A person\'s job and another thread\'s job are never removed. A subagent cannot remove any job, not even its own: the thread that delegated it does. Any turn of your thread may remove one, so a job bound to your thread can remove itself when its work is done. The removal is recorded in your thread with the job\'s name. A repeat for a job already removed, or a retry with the same clientRequestId, says it is gone and changes nothing.',
+        'Remove a scheduled job your thread created, or one your subagents created, for good: it leaves Automations and schedule_list and starts no further runs. A run that already started, or already waits in its thread\'s queue, still runs and finishes in that thread; its result is not recorded on any job. A person\'s job and another thread\'s job are never removed. A subagent removes the jobs it made, as its parent does. Any turn of your thread may remove one, so a job bound to your thread can remove itself when its work is done. The removal is recorded in your thread with the job\'s name. A repeat for a job already removed, or a retry with the same clientRequestId, says it is gone and changes nothing.',
       inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, clientRequestId: CLIENT_REQUEST_ID_SCHEMA }, required: ['jobId'] },
       class: 'mutation',
       handler: (args, ctx) => {
-        // No delete permission for a subagent, whoever started its turn: its parent removes the job.
-        if (subagentParent(ctx.caller.threadId) !== undefined)
-          throw new McpToolError('mousse_scope_denied', 'A subagent cannot remove scheduled jobs, not even one it made. The thread that delegated you can remove it: say which job in your result.')
         const id = requiredId(args, 'jobId')
         const requestKey = `schedule_delete:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
         const replay = removals.get(requestKey)

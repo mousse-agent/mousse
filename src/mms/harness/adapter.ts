@@ -60,17 +60,18 @@ export interface ProviderCapabilities {
   /** `featureGates.mcpAttachable` (Phase 5). */
   mcp: boolean
   /**
-   * `featureGates.subagentTargetRefusal`. `enforced`: the adapter holds a delegated child to its
-   * policy (read-only for a `shared` child, no provider-native subagents, no user MCP servers for a
-   * read-only child). `isolated_only`: it cannot hold a child to read-only, so it is refused as the target of a `shared` child and still runs `isolated` ones.
+   * `featureGates.subagentTargetRefusal`. `enforced`: the adapter holds a read-only child to its policy (the
+   * read-only tools only, no user MCP servers). `isolated_only`: it cannot hold a child to read-only, so it is refused
+   * as the target of a read-only child and still runs every other one.
    */
   childPolicy: 'enforced' | 'isolated_only'
 }
 
 /**
  * The policy of a delegated child's turn (issue #142), absent for a thread that is not a subagent.
- * Every turn of a child carries it, first or resumed. `readOnly` is a `shared` child, which
- * observes its parent's workspace and must not change it.
+ * Every turn of a child carries it, first or resumed. `readOnly` is a child asked read-only
+ * (`delegate_task` `readOnly`), which reads its parent's folder and must not change it; any other
+ * child has every tool its parent has.
  */
 export interface ChildTurnPolicy {
   readOnly: boolean
@@ -257,6 +258,26 @@ export interface ProviderMetrics {
    * requests wrote (absent when they wrote none or the provider does not say).
    */
   promptCache?: { at?: number; ttlMs?: number }
+  /**
+   * The plan's usage windows as the runtime last reported them during the turn (Claude Code's rate-limit events,
+   * Codex's rate-limit snapshot): how much of each is used, 0-100, and when it resets (epoch seconds). Absent when the
+   * runtime reports none (Pi, an API key).
+   */
+  quota?: PlanWindowUse[]
+  /**
+   * The turn was to continue the runtime's saved conversation, and the runtime ran it in a new one instead (Claude Code
+   * answered a resume with another session, Codex's resume gave another thread or failed). What the conversation held
+   * is not in the new one, unless the turn's prompt carried the history.
+   */
+  resumeLost?: true
+}
+
+/** How much of one plan usage window is used (`ProviderMetrics.quota`). */
+export interface PlanWindowUse {
+  /** The window as the runtime names it (`five_hour`, `seven_day`, `primary`, `secondary`). */
+  kind: string
+  usedPercent: number
+  resetsAt?: number
 }
 
 export interface TurnControl {
@@ -272,8 +293,10 @@ export interface TurnControl {
    * hand back several: `returnSteer(text, token)` then restores what that drain took and nothing else.
    * `cut`: the drain holds a person's message, which the model must read now. A provider whose own steer
    * waits for the current reply or command to end cuts the reply instead and continues with the text.
+   * `images`: the images the drained messages carry, in order, for a provider whose steer can take them; one that
+   * cannot sends the text alone. The orchestrator keeps them with the drain, so the transcript shows them either way.
    */
-  drainSteerEntry?(opts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut?: boolean; forced?: boolean } | undefined
+  drainSteerEntry?(opts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut?: boolean; forced?: boolean; images?: ChatImageAttachment[] } | undefined
   /**
    * What a drain now would do, without taking anything; undefined when nothing is pending
    * (docs/design/steer-and-interruptions.md §2.2). An adapter on the hold (`steerBoundary` not `none`)
@@ -337,6 +360,11 @@ export interface TurnResult {
    * text has no reply to show: the thread gets no "Done." placeholder.
    */
   noReply?: boolean
+  /**
+   * A steer cut the turn and was read, and the model wrote nothing after it: the runtime closed the turn with a line of
+   * its own (Claude Code's "No response requested."), so what the steer said was never answered.
+   */
+  steerUnanswered?: boolean
 }
 
 /**
@@ -363,6 +391,11 @@ export interface ToolHost {
   browser?: BrowserExecutionBinding
   /** Whether the turn's run is still its thread's active run; an app tool call after that is refused. */
   runActive?: () => boolean
+  /**
+   * What hides the secrets the thread may use (and ones removed while it runs), read at each tool result: a runtime that
+   * runs its own tools masks their results with it before its model sees them or its session file keeps them.
+   */
+  secretMasker?: () => ((text: string) => string) | undefined
 }
 
 /** One compaction of the thread's transcript: the compacted context to (re)send. */
@@ -509,6 +542,11 @@ export interface ProviderAdapter {
   stopThread?(threadId: string): Promise<'stopped' | 'not_active'>
   /** Whether the adapter keeps a process for `threadId` between turns now (Claude's live query). */
   hasLiveProcess?(threadId: string): boolean
+  /**
+   * Closes the process a bot's chat keeps warm on `threadId` between its turns (its bot was paused or deleted, or its
+   * permissions or model changed); one running a turn closes when that turn ends. True when there was one.
+   */
+  releaseBotProcess?(threadId: string): boolean
   /**
    * SPEC §16.2 native fork: a new provider session branched from `ref` after `atTurnOrdinal`, or
    * null when the runtime cannot branch it (the fork then falls back to a portable handoff). Only

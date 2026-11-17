@@ -11,6 +11,7 @@ import type { BotBrowserHost } from '../../src/mms/bots/activation/dispatcher'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
 import { delegationFixture } from '../run/delegationFixture'
 import { botFixture, chatOf, createBot, finish, flush, payloadOf, PI, start, type BotFixture } from './botFixture'
 
@@ -105,14 +106,14 @@ describe('work that was running when the owner pressed Allow', () => {
       turns.register(appTurn({ threadId: 'bot-home', runId: run.runId, bot: work.prepared.authority }))
       const open = () => registry.call('browser_open', { url: 'https://example.com' }, request({ threadId: 'bot-home', runId: run.runId }))
       // Not allowed yet: it is told how to ask, and nothing is asked for it.
-      expect(await open()).toEqual({ text: 'Not allowed: you may not use the browser on this turn. If you need it, ask your owner with escalate (tool "browser").', isError: true })
+      expect(await open()).toEqual(refused('not_granted', 'Not allowed: you may not use the browser on this turn. If you need it, ask your owner with escalate (tool "browser").'))
       expect(cards()).toEqual([])
       // The owner allows the browser from the chat; the work never calls escalate.
       const other = await chat('Use the browser from now on', 'm2')
       expect(other.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'For the weather.' })).toBe(BOT_ASK_DEFERRED_TEXT)
       await finish(f, other.payload, 'completed', { text: 'Asked.' })
       await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-      expect(await open()).toEqual({ text: BOT_ASK_HELD_NEXT_TEXT, isError: true })
+      expect(await open()).toEqual(refused('not_granted', BOT_ASK_HELD_NEXT_TEXT))
       expect(cards()).toHaveLength(1)
     } finally {
       fx.dispose()

@@ -155,6 +155,25 @@ describe('bots.chat.send', () => {
       .toEqual([['text', 'What came in today?'], ['text', 'Two invoices.'], ['run_report', 'Nothing new.']])
   })
 
+  it('the run reports of every piece that ran side by side are written at startup, however many; an older one is not', async () => {
+    const engine = f.bots as unknown as { postReply: (...args: unknown[]) => void }
+    const postReply = engine.postReply
+    engine.postReply = () => {}
+    // An older run whose report is gone (the chat was cleared, say) ended before the others were asked for.
+    const older = await f.bots.activate({ botId, input: 'Old job', clientRequestId: 'old' })
+    await runDispatch(f, older.id, 1, { text: 'Old report.' })
+    f.clock.now += 60_000
+    const runs = []
+    for (let i = 0; i < 5; i += 1) runs.push(await f.bots.activate({ botId, input: `Job ${i}`, clientRequestId: `r${i}` }))
+    for (const [i, run] of runs.entries()) await runDispatch(f, run.id, 1, { text: `Report ${i}.` })
+    engine.postReply = postReply
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    const reports = chatOf(f, botId).filter((message) => message.kind === 'run_report').map((message) => message.text)
+    expect(reports.sort()).toEqual(['Report 0.', 'Report 1.', 'Report 2.', 'Report 3.', 'Report 4.'])
+  })
+
   it('each chat row and its journal row share one transaction; the owner\'s row is journaled before any dispatch starts', async () => {
     const dispatchesAtAppend: Array<{ kind: string; started: number }> = []
     const append = f.host.journal!.appendInTx.bind(f.host.journal)

@@ -104,7 +104,7 @@ describe('no model name on any bot screen', () => {
   })
 
   it('is absent from the Bots section and the empty page', async () => {
-    expect(host.querySelector('.bot-roster')).not.toBeNull()
+    expect(host.querySelector('.bot-list')).not.toBeNull()
     expect(found()).toEqual([])
   })
 

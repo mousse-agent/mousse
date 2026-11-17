@@ -43,4 +43,18 @@ describe('the secret tools', () => {
     expect(BOT_APP_TOOLS.has('secret_request')).toBe(false)
     expect(BOT_APP_TOOLS.has('secret_run')).toBe(false)
   })
+
+  // The wording is the behaviour here: agents held back from a token they were given because these said they could use
+  // it by name only. What a runtime lists to the model is each tool's definition.
+  it('tell the agent it may use the secret directly through its file, and never to print it', () => {
+    const asks = request.definition!().description
+    expect(asks).toMatch(/private file/)
+    expect(asks).toMatch(/--with-token < file/)
+    expect(asks).toMatch(/Never print or echo the value/)
+    expect(asks).not.toMatch(/only its name/)
+    const runs = run.definition!().description
+    expect(runs).not.toMatch(/not your own shell/)
+    expect(runs).toMatch(/private file .* to commands you run yourself/)
+    expect(request.description).toBe(asks)
+  })
 })

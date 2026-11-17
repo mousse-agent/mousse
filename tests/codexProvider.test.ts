@@ -345,13 +345,17 @@ describe('CodexProviderService options (managed Codex)', () => {
   type Turn = { status: 'completed' | 'failed'; error?: unknown }
 
   /** A server that runs turns: threads answer with `provider`, every turn ends as `turn` says. */
-  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown' } = {}) {
+  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another' } = {}) {
     let threads = 0
     const server = scriptedServer((message) => {
       const method = message.method!
       if (method === 'account/read') return chatgpt
-      if (['thread/start', 'thread/resume', 'thread/fork'].includes(method))
-        return { result: { thread: { id: method === 'thread/resume' ? 'thr-saved' : `thr-${++threads}` }, model: 'gpt-x', modelProvider: options.provider?.(method) ?? 'openai', cwd: home } }
+      if (method === 'thread/resume' && options.resume === 'missing') return { error: { code: -32600, message: 'no rollout found for thread id' } }
+      if (['thread/start', 'thread/resume', 'thread/fork'].includes(method)) {
+        // A resume opens the thread it names, unless the test makes it open another one.
+        const resumed = options.resume === 'another' ? 'thr-other' : (message.params as { threadId: string }).threadId
+        return { result: { thread: { id: method === 'thread/resume' ? resumed : `thr-${++threads}` }, model: 'gpt-x', modelProvider: options.provider?.(method) ?? 'openai', cwd: home } }
+      }
       if (method === 'turn/start') {
         const turn = options.turn ? options.turn() : { status: 'completed' }
         const threadId = (message.params as { threadId: string }).threadId
@@ -416,6 +420,21 @@ describe('CodexProviderService options (managed Codex)', () => {
     const service = create(server)
     await allRoutes(service, server)
     expect(pinned(server)).toEqual([['openai', 'openai'], ['openai', 'openai'], ['openai', 'openai']])
+  })
+
+  it.each([
+    ['opens the saved thread', undefined, undefined],
+    ['answers that the thread is gone', 'missing', true],
+    ['opens another thread', 'another', true]
+  ] as const)('a resume that %s: the turn reports the resume as lost only when it was', async (_name, resume, lost) => {
+    const server = turnServer({ resume })
+    const service = create(server)
+    await chat(service)
+    service.commitConversation('t', 'h')
+    await service.stopAll('test')
+    const result = await chat(service, { history: 'h' })
+    expect(server.requests('thread/resume')).toHaveLength(1)
+    expect(result.resumeLost).toBe(lost)
   })
 
   it('opens the thread with the compaction threshold, and reopens it when the threshold changes', async () => {

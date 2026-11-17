@@ -2,6 +2,7 @@ import type { AppletReference } from '../../applets'
 import type { BotLook } from './look'
 import type { BotChatQuestion } from './questions'
 import type { BotChatCard } from './cards'
+import type { BotDeviceAccessMode } from './deviceAccess'
 
 export type { BotChatQuestion } from './questions'
 export type { BotChatCard } from './cards'
@@ -92,6 +93,8 @@ export interface BotChatMessage {
   kind: BotMessageKind
   /** A quiet service line; older apps show its notice as a message. */
   systemLine?: true
+  /** A service line's details, shown on hover. */
+  systemTitle?: string
   /** Markdown. */
   text: string
   chips: BotChip[]
@@ -173,6 +176,8 @@ export interface BotSummary {
   waiting?: 'internet'
   error?: BotError
   last?: { text: string; at: string; author: 'owner' | 'bot' }
+  /** The bot's latest reply with text, as one clipped line (`replyPreviewText`), for its row in the Bots list. */
+  lastReply?: string
   /** How the last activation ended. */
   lastOutcome?: 'ok' | 'failed' | 'stopped'
   unread: number
@@ -188,12 +193,17 @@ export interface BotSummary {
   work?: BotWorkItem[]
   /**
    * The owner's threads the bot started ("use your threads"), hidden ones too: those that work (oldest first), then those
-   * that wait on the owner, then the most recent of those that sit idle or ended (`BOT_LAUNCHED_ENDED_SHOWN`).
-   * The bot is busy while any is active (`launchedActive`). Absent from older services and while it started none.
+   * that wait on the owner (a question, or on hold), then the most recent of those that sit idle or ended (`BOT_LAUNCHED_ENDED_SHOWN`).
+   * The bot is busy while any is active (`launchedActive`); one on hold never makes it busy. Absent from older services and while it started none.
    */
   threads?: BotLaunchedThread[]
   /** Background commands it runs now (`watch_start`), oldest first: the chat's Background work, each with Stop. Absent from older services and while none runs. */
   watchers?: BotWatcherItem[]
+  /**
+   * Which devices reach it (About's Devices), on its own computer's window only: anything but `all` shows a lock in the
+   * Bots list. Absent from older services and from what other devices get.
+   */
+  reach?: BotDeviceAccessMode
 }
 
 /** A background command a bot runs now: its title, the command, when it started and when its time limit ends. */
@@ -212,29 +222,38 @@ export const BOT_LAUNCHED_ENDED_SHOWN = 30
 
 /**
  * A thread the bot started: its title, its project, and how it stands now: its run works, waits its turn, is held (a
- * usage limit), or waits on the owner (a question or approval in it or in one of its subagents); or its own run ended but
- * its subagents still work (`subagents`); or nothing works and it never ran (`idle`), or its last run finished (`done`), failed (`failed`) or was stopped or cut off (`stopped`). `startedAt`: when its current run
+ * usage limit it resumes from by itself), or waits on the owner (a question or approval in it or in one of its subagents); or its own run ended but
+ * its subagents still work (`subagents`); or nothing in it moves until the owner continues it (`on_hold`: a pause only
+ * Resume now ends, messages a Stop held for Send now, or a queue stopped at a message whose turn could not start); or nothing works and it never ran (`idle`), or its last run finished (`done`), failed (`failed`) or was stopped or cut off (`stopped`). `startedAt`: when its current run
  * started (the thread's creation once none runs); `updatedAt`: when it last changed.
  */
 export interface BotLaunchedThread {
   threadId: string
   title: string
   project?: string
-  status: 'running' | 'queued' | 'paused' | 'subagents' | 'needs_input' | 'idle' | 'done' | 'failed' | 'stopped'
+  status: 'running' | 'queued' | 'paused' | 'subagents' | 'needs_input' | 'on_hold' | 'idle' | 'done' | 'failed' | 'stopped'
   startedAt: string
   updatedAt: string
   /** Kept out of the owner's sidebar (`Thread.hidden`): this list is where the owner finds it, and shows it again. */
   hidden?: true
 }
 
-/** Whether a thread the bot started keeps it busy: a run of it works, waits its turn, is held, waits on its subagents, or waits on the owner. */
+/**
+ * Whether a thread the bot started keeps it busy: a run of it works, waits its turn, is held, waits on its subagents, or
+ * waits on the owner's answer. A thread on hold (`on_hold`) does not: nothing in it runs until the owner continues it.
+ */
 export function launchedActive(thread: Pick<BotLaunchedThread, 'status'>): boolean {
   return thread.status === 'running' || thread.status === 'queued' || thread.status === 'paused' || thread.status === 'subagents' || thread.status === 'needs_input'
 }
 
+/** Whether a thread the bot started is listed with what still goes: it keeps the bot busy, or it is on hold for the owner. */
+export function launchedGoing(thread: Pick<BotLaunchedThread, 'status'>): boolean {
+  return launchedActive(thread) || thread.status === 'on_hold'
+}
+
 /** Where a thread the bot started goes in its list: what works, then what waits on the owner, then idle, then ended. */
 function launchedRank(status: BotLaunchedThread['status']): number {
-  if (status === 'needs_input') return 1
+  if (status === 'needs_input' || status === 'on_hold') return 1
   if (status === 'idle') return 2
   if (status === 'done' || status === 'failed' || status === 'stopped') return 3
   return 0
@@ -246,7 +265,7 @@ function launchedRank(status: BotLaunchedThread['status']): number {
  */
 export function compareLaunched(a: BotLaunchedThread, b: BotLaunchedThread): number {
   return launchedRank(a.status) - launchedRank(b.status)
-    || (launchedActive(a) ? a.startedAt.localeCompare(b.startedAt) : b.updatedAt.localeCompare(a.updatedAt))
+    || (launchedGoing(a) ? a.startedAt.localeCompare(b.startedAt) : b.updatedAt.localeCompare(a.updatedAt))
     || a.threadId.localeCompare(b.threadId)
 }
 
@@ -334,4 +353,17 @@ export interface BotDetail {
   runs: BotRunItem[]
   /** Waiting reminders, soonest first; absent from older services. */
   reminders?: BotReminderItem[]
+  /** What its chat turns of the last week cost; absent before one reported usage, and from older services. */
+  usage?: BotTurnUsageSummary
+}
+
+/**
+ * The bot's chat turns of the last week, as the runtimes reported them: how many, the input tokens a turn sent (fresh
+ * input, cache reads and cache writes together), its output, and the share of input read from the prompt cache (0-1).
+ */
+export interface BotTurnUsageSummary {
+  turns: number
+  inputPerTurn: number
+  outputPerTurn: number
+  cachedShare: number
 }

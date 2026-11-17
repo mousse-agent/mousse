@@ -6,8 +6,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { threadsActOf, threadsReadOnlyOf } from '../../src/mms/bots/activation/BotEngine'
-import { BOT_THREADS_NOT_OWNER_TEXT, botAppToolRefusal } from '../../src/shared/bots/personal/walls'
+import { BOT_SCHEDULES_NOT_OWNER_TEXT, BOT_THREADS_NOT_OWNER_TEXT, botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { botInstructions } from '../../src/mms/bots/instructions'
+import { botCatalogueGroup } from '../../src/shared/bots/personal/catalogue'
 import { THREADS_TEXT } from '../../src/shared/bots/personal/askText'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from './botFixture'
@@ -69,8 +70,10 @@ describe('"use your threads" in the bot engine', () => {
     expect(threadTools(owner.prepared.policy.tools!.allow)).toEqual(['thread_archive', 'thread_create', 'thread_fork', 'thread_hide', 'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_wait'])
     expect(line(owner.prepared.instructions)).toMatch(/: yes: .*start, message, steer, stop, fork or archive one, or change its queue, when your owner's message asks for it/)
     expect(owner.prepared.instructions).toMatch(/A thread you start runs with full access/)
-    // When to start one hidden: short background jobs out of the sidebar, work the owner follows visible.
-    expect(owner.prepared.instructions).toMatch(/Start a short background job your owner won't follow .* with hidden: true/)
+    // When to start one hidden (short background jobs out of the sidebar, work the owner follows visible) is in the threads
+    // group, which the chat reads before it starts one.
+    expect(owner.prepared.instructions).toContain('Before you start one, read the threads group once in the conversation')
+    expect(botCatalogueGroup('threads')!.guidance).toMatch(/Start a short background job your owner won't follow .* with hidden: true/)
     // The chip of the thread it started keeps that thread in the posted message, for its Open.
     f.chips.set(f.store.dispatch(owner.activation.id, 1)!.clientRequestId, [{ icon: 'think', text: 'started thread', highlight: 'Fix the login page', thread: 't-new' }])
     await finish(f, owner.payload, 'completed', { text: 'Started it.' })
@@ -117,16 +120,20 @@ describe('"use your threads" in the bot engine', () => {
     await finish(f, running.payload, 'completed', { text: 'Stopped.' })
   })
 
-  // A chat turn the owner's message or tapped answer started, and every run, may start, message, stop or archive
-  // threads; a chat turn no person started is told why not.
+  // A chat turn the owner's message or tapped answer started, a turn a thread's outcome or an unanswered question
+  // started, and every run, may start, message, stop or archive threads; a chat turn another message started is told why not.
   const turns: Array<[string, { lane: 'chat' | 'run'; idempotencyKey: string }, boolean, string]> = [
     ['the owner\'s message', { lane: 'chat', idempotencyKey: 'chat:req-1' }, true, ''],
     ['the owner\'s tapped answer', { lane: 'chat', idempotencyKey: 'answer:req-1' }, true, ''],
     ['work the chat handed off', { lane: 'run', idempotencyKey: 'work:act-1:call-1' }, true, ''],
     ['a reminder\'s work', { lane: 'run', idempotencyKey: 'reminder:r1' }, true, ''],
     ['a wake', { lane: 'run', idempotencyKey: 'wake:w1' }, true, ''],
+    // A turn a thread's outcome starts in the chat may carry on the work it was told about (#1359).
+    ['a wake in the chat', { lane: 'chat', idempotencyKey: 'wake:w1' }, true, ''],
+    ['a question no one answered', { lane: 'chat', idempotencyKey: 'question:q1:default' }, true, ''],
+    ['a thread outcome notice', { lane: 'chat', idempotencyKey: 'job:j1:a1' }, true, ''],
     ['a scheduled run', { lane: 'run', idempotencyKey: 'sched:b1:s1:2026-11-13T09:00:00.000Z' }, true, ''],
-    ['the bot\'s first message', { lane: 'chat', idempotencyKey: 'create:req-1' }, false, BOT_THREADS_NOT_OWNER_TEXT],
+    ['the bot\'s first message', { lane: 'chat', idempotencyKey: 'create:req-1' }, true, ''],
     ['another bot\'s message', { lane: 'chat', idempotencyKey: 'botmsg:m1' }, false, BOT_THREADS_NOT_OWNER_TEXT]
   ]
   it.each(turns)('%s', (_name, row, all, refusal) => {
@@ -135,6 +142,11 @@ describe('"use your threads" in the bot engine', () => {
     const readOnly = threadsReadOnlyOf(row)
     const bot = { check: () => ({ ok: true as const }), skills: new Set<string>(), appTools: new Set(['thread_list', 'thread_read']), ...(readOnly ? { threadsReadOnly: readOnly } : {}) }
     expect(all ? undefined : botAppToolRefusal(bot, 'thread_create', {})).toBe(all ? undefined : refusal)
+    // A chat turn is offered every thread tool whatever started it (#1360), and the call is refused where it may not act.
+    const offered = { ...bot, appTools: new Set(['thread_list', 'thread_read', 'thread_create', 'schedule_list', 'schedule_create']) }
+    expect(botAppToolRefusal(offered, 'thread_create', {})).toBe(all ? undefined : refusal)
+    expect(botAppToolRefusal(offered, 'schedule_create', {})).toBe(all ? undefined : BOT_SCHEDULES_NOT_OWNER_TEXT)
+    expect(botAppToolRefusal(offered, 'thread_read', {})).toBeUndefined()
   })
 
   it('a chat turn another device\'s message started is held to that device\'s limit; this computer\'s own window is not', async () => {

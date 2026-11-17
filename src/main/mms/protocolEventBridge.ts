@@ -127,7 +127,9 @@ export function bridgeProtocolEvent(
           questions: (event.data as { questions?: unknown })?.questions,
           threadId,
           // A saved approval request says so: the chat shows it inline instead of in the question dialog.
-          ...(approval ? { approval } : {})
+          ...(approval ? { approval } : {}),
+          // A question the agent asked without waiting: the card says the agent keeps working.
+          ...((event.data as { wait?: unknown })?.wait === false ? { wait: false } : {})
         })
       }
       return true

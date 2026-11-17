@@ -80,13 +80,19 @@ const defaultFrame = () => new Promise<void>((resolve) => requestAnimationFrame(
  * null when the navigation was cancelled (the reader scrolled) or nothing could be found.
  */
 export async function revealMessage(
-  target: { turnKey: string; messageId: string },
+  target: {
+    turnKey: string;
+    messageId: string;
+    /** A more precise element to show than the message's, such as a card inside it. */
+    element?: (rows: HTMLElement) => HTMLElement | null;
+  },
   navigation: RevealNavigation,
   deps: RevealMessageDeps,
 ): Promise<HTMLElement | null> {
   const nextFrame = deps.nextFrame ?? defaultFrame;
   const { container, rows } = deps;
-  const find = () => messageElement(rows, target.messageId) ?? turnRow(rows, target.turnKey);
+  const find = () =>
+    target.element?.(rows) ?? messageElement(rows, target.messageId) ?? turnRow(rows, target.turnKey);
   try {
     let element = find();
     if ((!element || !isNearViewport(element, container)) && deps.scrollToKey) {

@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NetError, newId } from '../../../../src/shared/net'
 import type { RpcContext, RpcMethod } from '../../../../src/mms/net/contracts'
 import {
@@ -16,7 +16,7 @@ import {
   validateRemoteBotParams,
   type RemoteBotMethod
 } from '../../../../src/mms/bridge/remote/RemoteBots'
-import { createBotReach, withHiddenBots } from '../../../../src/mms/bridge/remote/botReach'
+import { createBotReach, keepMakerInReach, withHiddenBots } from '../../../../src/mms/bridge/remote/botReach'
 import { MmsListsSource, type ListsServices } from '../../../../src/mms/bridge/remote/MmsListsSource'
 import { BotDeviceAccessStore, BOT_DEVICE_ACCESS_FILE } from '../../../../src/mms/bots/definitions/BotDeviceAccessStore'
 import { registerBotDeviceMethods, type BotDevicesSource } from '../../../../src/mms/bots/deviceMethods'
@@ -48,6 +48,7 @@ function paramsFor(botId: string): Record<Exclude<RemoteBotMethod, 'bots.create'
     'bots.work.stop': { botId, workId: WORK },
     'bots.chat.markRead': { botId, seq: 1 },
     'bots.asks.answer': { botId, askId: ASK, answer: 'allow' },
+    'bots.actions.answer': { botId, actionId: 'action-1', digest: 'digest-1', answer: 'not_now' },
     'bots.questions.answer': { botId, questionId: 'q_00000000-0000-0000-0000-000000000000', choice: 'Yes', clientRequestId: 'r-q' },
     'bots.personal.pause': { botId },
     'bots.personal.resume': { botId },
@@ -102,7 +103,7 @@ let store: BotDeviceAccessStore
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'bot-device-access-'))
   store = new BotDeviceAccessStore(dir)
-  f = botFixture()
+  f = botFixture({ deviceAccess: store })
 })
 afterEach(() => {
   f.close()
@@ -276,6 +277,9 @@ describe('who changes it', () => {
     for (const extra of [{ access: { mode: 'all' } }, { devices: [PHONE] }, { mode: 'all' }])
       expect(() => validateRemoteBotParams('bots.update', { botId: 'bot-0123456789ab', name: 'Pip', ...extra })).toThrow(NetError)
     expect(() => validateRemoteBotParams('bots.create', { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy', clientRequestId: 'c1', access: { mode: 'all' } })).toThrow(NetError)
+    // A device making a bot asks for every device or for the home and itself; it can't name other devices or leave itself out.
+    for (const reach of ['this_computer', 'chosen', { mode: 'chosen', nodes: [LAPTOP] }, [PHONE]])
+      expect(() => validateRemoteBotParams('bots.create', { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy', clientRequestId: 'c1', reach }), JSON.stringify(reach)).toThrow(NetError)
   })
 
   it('only this computer\'s window or command line may read or set it: a call through Bridge or any other client is refused', async () => {
@@ -305,14 +309,7 @@ describe('who changes it', () => {
     // What is stored can't be read: every bot, a new one too, stands at this computer alone.
     writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), '{ not json')
     const { reach } = reachOver(store)
-    const methods = remoteBotMethods({
-      bots: () => f.bots.service,
-      reach,
-      madeBy: (botId, node) => {
-        const held = store.get(botId).access
-        if (!reach.canReach(botId, node)) store.set(botId, { mode: 'chosen', nodes: [...(held.mode === 'chosen' ? held.nodes : []), node] })
-      }
-    })
+    const methods = remoteBotMethods({ bots: () => f.bots.service, reach, madeBy: keepMakerInReach(store, reach) })
     const params = { look: { colour: 'teal', accessory: 'cap' }, name: 'Notes', description: 'Tidy my notes', clientRequestId: 'phone-c1' }
     const method = methods.find((entry) => entry.method === 'bots.create')!
     const made = (await method.handle(method.validate!(params), as(PHONE))) as { bot: { id: string } }
@@ -323,6 +320,118 @@ describe('who changes it', () => {
     // The same request id again names that bot; the laptop, which does not reach it, gets nothing and widens nothing.
     expect(await outcome(methods, 'bots.create', params, as(LAPTOP))).toMatchObject({ code: 'stream_unknown' })
     expect(store.get(made.bot.id).access).toEqual({ mode: 'chosen', nodes: [PHONE] })
+  })
+})
+
+/**
+ * Which devices reach a bot, chosen as it is made. The inputs: who makes it (New bot on this computer, a device asking for
+ * the home and itself, a device asking for every device, a device asking for nothing), what is stored before (nothing, a
+ * file that can't be read), and what follows (a device watching its lists all along, a retry of the same request, a
+ * failure before or after the bot is published, the owner walling it off while the device's create is finishing). A
+ * crash and restart is in `tests/bots/botReachRestart.test.ts`.
+ */
+describe('a choice made when the bot is made', () => {
+  const LOOK = { colour: 'teal', accessory: 'cap' }
+  /** Every bot a device's lists carried at any moment something about bots changed: a bot announced, or a choice saved. */
+  function watchLists(reach: BotReachPort, reader?: string) {
+    const seen = new Set<string>()
+    const look = () => { for (const bot of new MmsListsSource(listsServices(f, reach), undefined, reader ? { reader } : {}).snapshot().bots) seen.add(bot.id) }
+    for (const event of ['changed', 'message', 'activity']) f.bots.events.on(event, look)
+    store.onChange(look)
+    return seen
+  }
+  const ids = (reach: BotReachPort, reader: string) => new MmsListsSource(listsServices(f, reach), undefined, { reader }).snapshot().bots.map((bot) => bot.id)
+  const stored = () => (JSON.parse(readFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), 'utf8')) as { bots: Record<string, BotDeviceAccess> }).bots
+
+  it('New bot for this computer only: a device watching its lists never sees it, where walling it off after it is made does', async () => {
+    const { reach } = reachOver(store)
+    const phone = watchLists(reach, PHONE)
+    const everyone = watchLists(reach)
+    const diary = (await createBot(f, { name: 'Diary', reply: 'Hi.', access: { mode: 'this_computer' } })).botId
+    expect(phone.has(diary)).toBe(false)
+    expect(everyone.has(diary)).toBe(false)
+    expect(stored()).toEqual({ [diary]: { mode: 'this_computer' } })
+    // This computer's window lists it, with what the lock reads.
+    expect(f.bots.service.list().bots.find((bot) => bot.id === diary)?.reach).toBe('this_computer')
+    // The way it was before: made for every device, then walled off in About. The phone had it in between.
+    const notes = (await createBot(f, { name: 'Notes', reply: 'Hi.' })).botId
+    store.set(notes, { mode: 'this_computer' })
+    expect(phone.has(notes)).toBe(true)
+  })
+
+  it('Everywhere on New bot is the bot as it always started: every device, and nothing written', async () => {
+    const { reach } = reachOver(store)
+    const botId = (await createBot(f, { name: 'Penny', access: { mode: 'all' } })).botId
+    expect(existsSync(join(dir, BOT_DEVICE_ACCESS_FILE))).toBe(false)
+    expect(ids(reach, PHONE)).toEqual([botId])
+    expect(f.bots.service.list().bots[0]?.reach).toBe('all')
+    // What is stored can't be read: Everywhere, picked, is saved for this bot, and the others stay on this computer.
+    writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), '{ nope')
+    const picked = (await createBot(f, { name: 'Notes', access: { mode: 'all' } })).botId
+    expect(store.get(picked).access).toEqual({ mode: 'all' })
+    expect(store.get(botId).access).toEqual({ mode: 'this_computer' })
+  })
+
+  it('a retry of the same request finds the bot it made and changes nothing, whatever it asks for now', async () => {
+    const first = await createBot(f, { name: 'Diary', access: { mode: 'this_computer' }, clientRequestId: 'desk-1' })
+    const again = await createBot(f, { name: 'Diary', access: { mode: 'all' }, clientRequestId: 'desk-1' })
+    expect(again.botId).toBe(first.botId)
+    expect(f.bots.service.list().bots.map((bot) => bot.id)).toEqual([first.botId])
+    expect(stored()).toEqual({ [first.botId]: { mode: 'this_computer' } })
+  })
+
+  it('a create that fails before the bot is published leaves no choice behind; one that fails after keeps it, and its retry finishes the bot', async () => {
+    const { reach } = reachOver(store)
+    const phone = watchLists(reach, PHONE)
+    vi.spyOn(f.bots, 'createBot').mockImplementationOnce(() => { throw new Error('disk full') })
+    await expect(createBot(f, { name: 'Diary', access: { mode: 'this_computer' }, clientRequestId: 'desk-1' })).rejects.toThrow('disk full')
+    expect(f.bots.service.list().bots).toEqual([])
+    expect(stored()).toEqual({})
+    // Published, and then its home thread could not be made: the bot is there, so its choice stays with it.
+    const ensureHome = vi.spyOn(f.bots as unknown as { ensureHome(botId: string, name: string): void }, 'ensureHome').mockImplementationOnce(() => { throw new Error('thread store busy') })
+    await expect(createBot(f, { name: 'Diary', access: { mode: 'this_computer' }, clientRequestId: 'desk-2' })).rejects.toThrow('thread store busy')
+    const [made] = f.bots.service.list().bots
+    expect(made?.reach).toBe('this_computer')
+    ensureHome.mockRestore()
+    expect((await createBot(f, { name: 'Diary', access: { mode: 'this_computer' }, clientRequestId: 'desk-2' })).botId).toBe(made!.id)
+    expect(stored()).toEqual({ [made!.id]: { mode: 'this_computer' } })
+    expect(phone.size).toBe(0)
+  })
+
+  it('a device asking for the home and itself: no other device sees the bot, ever; asking for every device, every device does', async () => {
+    const { reach } = reachOver(store)
+    const laptop = watchLists(reach, LAPTOP)
+    const methods = remoteBotMethods({ bots: () => f.bots.service, reach, madeBy: keepMakerInReach(store, reach) })
+    const create = methods.find((entry) => entry.method === 'bots.create')!
+    const made = (await create.handle(create.validate!({ look: LOOK, name: 'Notes', description: 'Tidy my notes', clientRequestId: 'phone-c1', reach: 'home_and_maker' }), as(PHONE))) as { bot: { id: string } }
+    expect(store.get(made.bot.id).access).toEqual({ mode: 'chosen', nodes: [PHONE] })
+    expect(laptop.has(made.bot.id)).toBe(false)
+    expect(ids(reach, PHONE)).toEqual([made.bot.id])
+    // Which devices reach it stays on this computer: the device's answer does not say.
+    expect(made.bot).not.toHaveProperty('reach')
+    const open = (await create.handle(create.validate!({ look: LOOK, name: 'Shopping', description: 'Keep my list', clientRequestId: 'phone-c2', reach: 'all' }), as(PHONE))) as { bot: { id: string } }
+    expect(store.get(open.bot.id).access).toEqual({ mode: 'all' })
+    expect(ids(reach, LAPTOP)).toEqual([open.bot.id])
+  })
+
+  it('the device that made a bot never widens a choice saved for it, such as the owner walling it off while the create finished', async () => {
+    const { reach } = reachOver(store)
+    // What is stored can't be read: a bot made without a choice would stand at this computer alone, and gain its maker.
+    writeFileSync(join(dir, BOT_DEVICE_ACCESS_FILE), '{ nope')
+    const service = f.bots.service
+    // The owner sees the new bot on this computer and makes it private before the phone's create has answered.
+    const port = Object.assign(Object.create(service) as typeof service, {
+      create: async (input: Parameters<typeof service.create>[0]) => {
+        const result = await service.create(input)
+        store.set(result.bot.id, { mode: 'this_computer' })
+        return result
+      }
+    })
+    const methods = remoteBotMethods({ bots: () => port, reach, madeBy: keepMakerInReach(store, reach) })
+    const create = methods.find((entry) => entry.method === 'bots.create')!
+    const made = (await create.handle(create.validate!({ look: LOOK, name: 'Notes', description: 'Tidy my notes', clientRequestId: 'phone-c1' }), as(PHONE))) as { bot: { id: string } }
+    expect(store.get(made.bot.id).access).toEqual({ mode: 'this_computer' })
+    expect(reach.canReach(made.bot.id, PHONE)).toBe(false)
   })
 })
 

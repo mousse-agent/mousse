@@ -160,6 +160,18 @@ html[data-theme='light'] {
   background: color-mix(in srgb, var(--text-primary) 8%, transparent);
   border-radius: 4px;
 }
+/* " · (message icon) 3": how many replies the fold hides, in the line's own colour. */
+.an-message-list .turn-work-replies {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+.an-message-list .turn-work-replies-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
 .an-message-list .turn-work-chevron {
   width: 14px;
   height: 14px;

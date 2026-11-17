@@ -5,9 +5,9 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../../src/shared/types'
-import { McpToolError, type AgentApprovalResult, type ApprovalRequestInfo, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
+import type { AgentApprovalResult, ApprovalRequestInfo, McpCallRequest } from '../../src/mms/run/mcp/appTools'
 import { describeApprovalRefusal, type ApprovalRefusal } from '../../src/mms/run/approvalRights'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-10-12T00:00:00.000Z'
@@ -70,7 +70,7 @@ describe('approval_respond (SPEC §15.1)', () => {
       request({ threadId: 'caller', runId: callerRun.runId, ...extra })
     const call = (args: Record<string, unknown> = ANSWER, extra: Partial<Parameters<typeof request>[0]> = {}) =>
       registry.call('approval_respond', args, as(extra))
-    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    const denied = refusalIn
     const result = async (promise: Promise<{ text: string }>) => JSON.parse((await promise).text)
     return { state, threads, requests, ledger, call, denied, result, callerRun, ...fake }
   }
@@ -149,7 +149,7 @@ describe('approval_respond (SPEC §15.1)', () => {
 
     it('a host that cannot answer says so', async () => {
       const { call } = await world({ answerApproval: undefined })
-      expect(await call()).toMatchObject({ isError: true, text: 'approval_respond is not available in this host.' })
+      expect(refusalOf(await call())).toMatchObject({ message: 'approval_respond is not available in this host.' })
     })
 
     it('a bot\'s thread cannot be answered from another thread', async () => {
@@ -205,7 +205,11 @@ describe('approval_respond (SPEC §15.1)', () => {
         state.outcome = { ok: false, reason: code }
         const outcome = await call()
         expect(outcome.isError).toBe(true)
-        expect(JSON.parse(outcome.text)).toMatchObject({ ok: false, reason: code, threadId: 'target', requestId: 'req-1', message: describeApprovalRefusal(code) })
+        expect(refusalOf(outcome)).toMatchObject({
+          message: describeApprovalRefusal(code),
+          details: { ok: false, reason: code, threadId: 'target', requestId: 'req-1' },
+          refused: { code: 'not_granted', retry: code === 'approvals_disabled' ? 'after_change' : 'never' }
+        })
         expect(ledger.failed).toHaveBeenCalledTimes(1)
       }
     )

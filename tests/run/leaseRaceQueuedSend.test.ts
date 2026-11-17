@@ -386,7 +386,7 @@ describe('a send that lost the race for the thread lease', () => {
     expect(listPendingQueue(store.loadMessageQueue(thread.id)).map((item) => item.content)).toEqual(['HELD-OLD before the Stop', 'ADDED after the Stop'])
   })
 
-  it('drains threads whose lease wait began at startup a few at a time', async () => {
+  it('starts every thread whose lease wait began at startup without waiting for another thread, one turn per thread', async () => {
     // Every thread has a Stop-held queue and a message that waited for the lease of the old process.
     const threads = Array.from({ length: 5 }, (_, index) => store.createThread(`Startup lease wait ${index}`))
     const now = new Date().toISOString()
@@ -401,19 +401,26 @@ describe('a send that lost the race for the thread lease', () => {
     await orch.shutdown(5_000)
 
     let running = 0
-    let most = 0
+    const active = new Map<string, number>()
+    const mostAtOnce = new Map<string, number>()
     const gates: Array<() => void> = []
-    const gated = piAdapter(() => {
+    const gated = piAdapter((input) => {
       running++
-      most = Math.max(most, running)
-      return new Promise<string>((resolve) => gates.push(() => { running--; resolve('ok') }))
+      active.set(input.threadId, (active.get(input.threadId) ?? 0) + 1)
+      mostAtOnce.set(input.threadId, Math.max(mostAtOnce.get(input.threadId) ?? 0, active.get(input.threadId)!))
+      return new Promise<string>((resolve) => gates.push(() => {
+        running--
+        active.set(input.threadId, active.get(input.threadId)! - 1)
+        resolve('ok')
+      }))
     })
     orch = createOrchestrator(home, store, [gated])
     orch.recoverAndDrainPendingQueues()
     orch.scheduleStartupQueueRecovery()
-    await waitFor(() => gates.length >= 2, 'the first startup turns', 3_000)
+    // No first turn ends until every thread's first turn runs: a drain that holds threads back times out here.
+    await waitFor(() => gates.length >= threads.length, 'every thread\'s first startup turn', 5_000)
     await settle(400)
-    expect(running).toBe(2)
+    expect(running).toBe(threads.length)
 
     // Let every turn end as it comes, until each thread ran its own message and then its held one.
     const deadline = Date.now() + 10_000
@@ -423,10 +430,14 @@ describe('a send that lost the race for the thread lease', () => {
       await settle(20)
     }
     await settle(200)
-    expect(most).toBe(2)
-    for (const index of threads.keys()) {
-      const order = gated.turns.map((turn) => turn.prompt).filter((prompt) => prompt.includes(`HELD-OLD-${index}`) || prompt.includes(`LEASE-C${index}`))
-      expect(order.map((prompt) => (prompt.includes('LEASE') ? 'B' : 'OLD'))).toEqual(['B', 'OLD'])
+    // Every message ran once: each thread's own message, then its held one, never two turns of a thread at once.
+    expect(gated.turns).toHaveLength(2 * threads.length)
+    for (const [index, thread] of threads.entries()) {
+      expect(mostAtOnce.get(thread.id), `thread ${index}`).toBe(1)
+      const order = gated.turns.filter((turn) => turn.threadId === thread.id).map((turn) => turn.prompt)
+      expect(order).toHaveLength(2)
+      expect(order[0]).toContain(`LEASE-C${index}`)
+      expect(order[1]).toContain(`HELD-OLD-${index}`)
     }
   }, 20_000)
 
