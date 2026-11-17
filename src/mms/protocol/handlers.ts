@@ -2387,7 +2387,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const turnRunning = ctx.mms.orchestrator.isActiveTurnRunning(threadId)
       // A person on another computer is offered "Always" only for what that computer's permission limit allows.
       const limit = deviceLimit(ctx)
-      const pendingQuestions = limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listPendingForThread(threadId)
+      const pendingQuestions = limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listShownForThread(threadId)
       const common = {
         thread,
         agents: rt.agents.list(),
@@ -3033,6 +3033,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ? ctx.mms.questions.settle(requestId, sent, questionAnswerer(ctx), { attachments })
         : ctx.mms.questions.settle(requestId, sent, questionAnswerer(ctx))
       if (!settled.ok && savedFolder) removeAnswerImages(savedFolder)
+      // A question asked without waiting is recorded the same way, at once: its answer reaches the agent later, through
+      // the thread's inbox, and the message that delivers it shows nothing more.
       if (settled.ok && pending) {
         // Answers reach the model through the tool result; the transcript records them too, shown
         // as a step of the agent's turn (`questionAnswers`), with the images under the answers they came with.
@@ -3077,7 +3079,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (threadId) {
         // A person on another computer is offered "Always" only for what that computer's permission limit allows.
         const limit = deviceLimit(ctx)
-        return { pending: limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listPendingForThread(threadId).map(shown) }
+        return { pending: limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listShownForThread(threadId).map(shown) }
       }
       return { pending: ctx.mms.questions.listAllPending().map(shown) }
     }

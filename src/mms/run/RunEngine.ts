@@ -23,6 +23,7 @@ import type { RunStore } from './RunStore'
 import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale } from './stopGeneration'
 import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
+import { OpenQuestions } from './OpenQuestions'
 import { ThreadApprovals, type BootRecovery } from './ThreadApprovals'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
@@ -475,6 +476,8 @@ export class RunEngine extends EventEmitter {
   readonly remoteLaunches: RemoteLaunchRecords
   /** Saved approval requests (SPEC §17). */
   readonly approvals: ThreadApprovals
+  /** Questions agents asked without waiting (`ask_user` with `wait: false`). */
+  readonly openQuestions: OpenQuestions
   /** Context handoffs (SPEC §16.1). */
   readonly handoffs: HandoffService
   /** Fork and merge-back transfers (SPEC §16.2). */
@@ -510,6 +513,7 @@ export class RunEngine extends EventEmitter {
     this.remoteSubagents = new RemoteSubagentRecords(opts.store)
     this.remoteLaunches = new RemoteLaunchRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
+    this.openQuestions = new OpenQuestions(opts.store)
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
     this.pid = opts.pid ?? process.pid

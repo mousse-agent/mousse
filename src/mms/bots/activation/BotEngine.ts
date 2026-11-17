@@ -89,7 +89,7 @@ import {
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { allPinned, copyPick, customSlotsOf, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
-import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
+import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, keepsWorking, openQuestionAnswerNote, questionWorkKeepsWorkingText, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
 import { nudgeSlot } from './questionFollowUps'
@@ -4981,6 +4981,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const next = this.recorded(row, () => {
         // A chat turn the owner wrote to again while it answered, and that never read it, answers it now in its thread;
         // without the time for it the turn ends and the message gets a turn of its own (`requeueChatNotes`).
+        // Too little time left to go on with notes: an answer to a question asked without waiting that this turn never read
+        // becomes the work's unread answer again, so the work goes on with it below (`question_answered`), once.
+        if (!reload && run.status === 'completed' && row.lane === 'run' && (this.remainingMs(row) ?? 0) < 2 * ACTIVE_TIME_CHUNK_MS) this.returnUnreadAnswersInTx(row.id)
         noted = retryUnanswered || (!reload && run.status === 'completed' && (this.store.pendingWorkNotes(row.id).length > 0 || allowed.length > 0) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS)
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         // Work that asked its owner a question (`ask_owner`) waits for the answer, holding no run slot, and never reports
@@ -5449,7 +5452,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       if (current.endReason === 'waiting' || this.store.workWait(current.id)?.status === 'waiting') return { kind: this.park(current, 'waiting') ? 'question' : 'none' }
       const question = current.lane === 'run' && !input.usageRetry ? this.store.workQuestion(row.id) : undefined
-      if (question?.status === 'open') {
+      // A question asked without waiting does not hold the work up here: it goes on, and the answer reaches it later.
+      if (question?.status === 'open' && !keepsWorking(question.spec)) {
         return { kind: this.park(current, 'question') ? 'question' : 'none' }
       }
       // Its question was forgotten before it carried on with the answer: it has nothing to go on with, and ends saying so.
@@ -7294,7 +7298,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const question = row.lane === 'run' ? this.store.workQuestion(row.id) : undefined
-    if (question) {
+    // Work cut off while a question it asked without waiting is still open was working, not waiting: it restarts as any
+    // cut-off work does below, and the question stays open for its answer.
+    if (question && !(question.status === 'open' && keepsWorking(question.spec))) {
       if (this.park(row, 'question', ['running'], question.status === 'open' ? 'question' : 'question_answered'))
         this.parkForQuestion(this.store.activation(row.id) ?? row, main)
       return
@@ -8026,8 +8032,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Its card, a gallery's pictures checked as `show_card` checks them.
     const card = given.card ? checkedCard(this.filesFolder(botId), given.card) : undefined
     if (card && 'problem' in card) return { asked: false, text: `card: ${card.problem}` }
-    const spec: BotQuestionSpec = card ? { ...given, card } : given
+    const spec: BotQuestionSpec = { ...given, ...(card ? { card } : {}) }
     if (row.lane === 'run') return this.askFromWork(row, spec, follow)
+    // A chat turn's question never waits (the turn ends, and the answer is the owner's next message): `wait` is work's.
+    delete spec.wait
     const result = this.store.db.transaction((): 'asked' | 'after_ask' | 'enough' | 'ended' => {
       const current = this.store.activation(activationId)
       if (current?.status === 'waiting_grant') return 'after_ask'
@@ -8051,9 +8059,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * ends (`askedIn`), and the work then waits for the answer without holding a run slot (`advance`: `blocked`,
    * `question`); the answer carries it on in the same thread (`question_answered`, `resumeWork`). One question at a time
    * per piece of work, within the bot's caps.
+   *
+   * Asked without waiting (`wait: false`, issue #1372), the turn goes on: nothing is refused. An answer that comes while
+   * the work still runs reaches it as a note (`deliverToRunningWorkInTx`); one still open when the turn ends makes the
+   * work wait for it then, as above.
    */
   private askFromWork(row: BotActivationRow, spec: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string } {
     const n = this.live.get(row.id)?.n ?? this.store.lastMainDispatch(row.id)?.n ?? 1
+    let questionId = ''
     const result = this.recorded(row, (): 'asked' | 'enough' | 'ended' => {
       const current = this.store.activation(row.id)
       if (current?.status !== 'running') return 'ended'
@@ -8061,6 +8074,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if ((this.store.workQuestion(row.id) ? 1 : 0) >= MAX_OPEN_QUESTIONS_PER_WORK || this.store.countOpenQuestions(row.botId) >= MAX_OPEN_QUESTIONS_PER_BOT ||
           this.store.countQuestions(row.botId, { since }) >= MAX_NEW_QUESTIONS_PER_DAY) return 'enough'
       const id = `q_${randomUUID()}`
+      questionId = id
       this.store.insertQuestion({ id, botId: row.botId, activationId: row.id, dispatchN: n, lane: 'run', spec, createdAt: this.store.now(), ...(follow ? { follow } : {}) })
       // Its bubble: the bot's words from its work, under the owner's message that asked for it. Its id is its place among
       // the work's questions, so it is written once.
@@ -8072,11 +8086,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return 'asked'
     })
     if (result === 'asked') {
-      this.askedIn.set(row.id, n)
+      if (!keepsWorking(spec)) this.askedIn.set(row.id, n)
       // Its follow-up is timed now that its bubble is shown.
       this.armDue()
       this.changed({ botId: row.botId, activationId: row.id })
-      return { asked: true, text: QUESTION_WORK_ASKED_TEXT }
+      return { asked: true, text: keepsWorking(spec) ? questionWorkKeepsWorkingText(questionId) : QUESTION_WORK_ASKED_TEXT }
     }
     if (result === 'enough') return { asked: false, text: QUESTIONS_ENOUGH_TEXT }
     return { asked: false, text: 'This work has ended; nothing was asked.' }
@@ -8112,7 +8126,44 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (question.status !== 'open' && !unreadDefault) return false
     if (!this.store.answerQuestion(questionId, answer, messageId, [question.status])) return false
     if (answer.by !== 'default') this.resetWorkWaitChain(question.activationId)
-    this.store.wakeWork(question.activationId)
+    if (!this.deliverToRunningWorkInTx(questionId, messageId)) this.store.wakeWork(question.activationId)
+    return true
+  }
+
+  /**
+   * A question work asked without waiting (`wait: false`), answered or defaulted while that work still runs: the answer
+   * goes into the running turn as a note naming the question (at its next step, or when the turn ends), and the question
+   * counts as read, so the work does not stop on it at the turn's end and no continuation carries it again. Inside the
+   * caller's transaction. False when the answer goes the usual way: the work waits on the question, or is not running.
+   */
+  /**
+   * The answers `deliverToRunningWorkInTx` sent to work as notes that the work never read: each note goes, and its
+   * question is unread again, so the usual way on carries the answer (a continuation with it, or the one more room brings
+   * when the work is out of time). Inside the caller's transaction.
+   */
+  private returnUnreadAnswersInTx(activationId: string): void {
+    const pending = this.store.pendingWorkNotes(activationId)
+    for (const question of this.store.activationQuestions(activationId)) {
+      if (question.lane !== 'run' || !keepsWorking(question.spec) || question.readAt === null) continue
+      if (question.status !== 'answered' && question.status !== 'defaulted') continue
+      const line = question.answer?.sent?.line
+      const note = line ? pending.find((entry) => entry.text === openQuestionAnswerNote(question.id, line)) : undefined
+      if (!note) continue
+      this.store.applyWorkNotes([note.id])
+      this.store.markQuestionsUnread([question.id])
+    }
+  }
+
+  private deliverToRunningWorkInTx(questionId: string, messageId?: string): boolean {
+    const question = this.store.question(questionId)
+    if (!question || question.lane !== 'run' || !keepsWorking(question.spec) || question.readAt !== null) return false
+    if (question.status !== 'answered' && question.status !== 'defaulted') return false
+    const work = this.store.activation(question.activationId)
+    if (work?.status !== 'running') return false
+    const line = this.workAnswerOf(question)
+    // The note goes with the owner's answer on Forget (`from_message`), and the line with the question (`answer_json.sent`).
+    this.store.addWorkNote(work.id, work.botId, openQuestionAnswerNote(question.id, line), messageId)
+    this.store.markAnswerSent(question.id, this.live.get(work.id)?.n ?? this.store.lastMainDispatch(work.id)?.n ?? 1, line, true)
     return true
   }
 
@@ -9241,7 +9292,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       const applied = this.store.db.transaction(() => {
         if (!this.store.defaultQuestion(question.id, answer)) return false
-        this.store.wakeWork(question.activationId)
+        if (!this.deliverToRunningWorkInTx(question.id)) this.store.wakeWork(question.activationId)
         return true
       })
       if (applied) this.afterWorkAnswer(question.id)

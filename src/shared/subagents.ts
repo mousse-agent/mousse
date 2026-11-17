@@ -1,3 +1,5 @@
+import type { AnsweredQuestion } from './types'
+
 /**
  * What the app shows about one thread's subagents. Built by the daemon from delegations, lineage,
  * runs, pending questions and thread names (`src/mms/run/delegation/subagentView.ts`).
@@ -103,10 +105,15 @@ export interface SubagentNoticeItem {
   /**
    * What the notice says when it is not a task's result: its subagent waits for an answer (`question`), or the task
    * was stopped before it finished (`stopped`). Such an item has nothing to read with `task_status`.
+   * `answer` is not about a subagent: the person answered (or dismissed) a question this thread's own agent asked
+   * without waiting. Its `childThreadId` is the thread itself. The transcript shows nothing for it: the answers row was
+   * recorded when the person answered. A queued copy that waits for its turn shows `answers`.
    */
-  event?: 'question' | 'stopped'
-  /** With `event: 'question'`: the question the subagent waits on. */
+  event?: 'question' | 'stopped' | 'answer'
+  /** With `event: 'question'`: the question the subagent waits on. With `event: 'answer'`: the question answered. */
   requestId?: string
+  /** With `event: 'answer'`: the answers as the transcript shows them. */
+  answers?: AnsweredQuestion[]
 }
 
 /**

@@ -327,6 +327,13 @@ export interface AppToolHost extends DelegationToolsHost {
   ): Promise<UserQuestionAnswers>
   /** Dismisses the thread's open questions (an in-process `ask_user` whose turn stopped). */
   dismissQuestions?(threadId: string): void
+  /**
+   * `ask_user` with `wait: false`: the question is saved and shown, and its id comes back at once. The answer reaches the
+   * thread later, through its inbox. Absent: questions always wait.
+   */
+  askWithoutWaiting?(threadId: string, questions: PendingUserQuestions['questions'], runId: string | null): string
+  /** `withdraw_question`: the thread's agent no longer needs its open question. False when it was not open there. */
+  withdrawQuestion?(threadId: string, requestId: string): boolean
   /** Secret requests and commands that use them (`secret_request`, `secret_run`); absent: those tools refuse. */
   secrets?(): SecretToolHost | undefined
   /** The threads' terminals as `terminal_read` reads them (never writes); absent: the tool is not listed. */

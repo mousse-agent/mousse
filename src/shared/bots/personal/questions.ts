@@ -23,6 +23,16 @@ export interface BotQuestionSpec {
   other: boolean
   /** One card for context (a few options as facts, a gallery), shown on the question's bubble above its answers. */
   card?: BotCard
+  /**
+   * `false`: work asked without waiting (issue #1372) and keeps working. The answer reaches it as a note while it runs,
+   * or carries it on in its thread when its turn has ended. Only work keeps it; a chat turn's question never waits.
+   */
+  wait?: false
+}
+
+/** Whether work keeps working while this question is open (`ask_owner` with `wait: false`). */
+export function keepsWorking(spec: Pick<BotQuestionSpec, 'wait'>): boolean {
+  return spec.wait === false
 }
 
 /**
@@ -114,6 +124,11 @@ export const QUESTION_ASKED_TEXT = "The owner sees it under your reply, with its
 
 /** `ask_owner`'s answer in work: the question is in the chat now, and the work waits for the answer. */
 export const QUESTION_WORK_ASKED_TEXT = 'Asked: your owner sees it in the chat, with its buttons. Stop here and end your turn now; you carry on in this thread with their answer.'
+
+/** `ask_owner`'s answer in work that asked without waiting: the work goes on, and the answer comes as a note. */
+export function questionWorkKeepsWorkingText(questionId: string): string {
+  return `Asked (${questionId}): your owner sees it in the chat, with its buttons. Keep working on what doesn't need the answer, and don't do the part that does yet. Their answer reaches you as a note naming this question while you work; if your turn ends first, you carry on in this thread with it.`
+}
 
 /** What every call of work's turn after it asked is refused with: the turn ends, and the answer continues the work. */
 export const QUESTION_END_TURN_TEXT = 'You asked your owner a question. End your turn now; you continue with their answer.'
@@ -233,6 +248,11 @@ export function workAnswerLine(question: string, answer: string, by: BotQuestion
   return `Your owner answered your question "${quoteOf(question, 200)}"${by === 'chat' ? ' in the chat' : ''}: ${answer.trim()}`
 }
 
+/** The answer to a question work asked without waiting, delivered as a note while the work runs: tagged with the question. */
+export function openQuestionAnswerNote(questionId: string, line: string): string {
+  return `[${questionId}] ${line} Carry on with the part that needed it.`
+}
+
 /** The line work posts when it ends because the question it waited on is gone (forgotten, or withdrawn). */
 export function questionGoneText(title: string): string {
   return `I stopped "${title}": the question I was waiting on is gone. Ask me again if you still want it.`
@@ -266,11 +286,12 @@ export function questionSpecOf(args: Record<string, unknown>): BotQuestionSpec |
   if (question.length > MAX_QUESTION_CHARS) return { problem: `Keep the question under ${MAX_QUESTION_CHARS} characters.` }
   if (args.yesNo !== undefined && args.yesNo !== true) return { problem: 'yesNo is true, or left out.' }
   if (args.other !== undefined && typeof args.other !== 'boolean') return { problem: 'other is true or false.' }
+  if (args.wait !== undefined && typeof args.wait !== 'boolean') return { problem: 'wait is true or false.' }
   const other = args.other !== false
   // One card for context, checked as `show_card` checks it.
   const card = args.card === undefined ? undefined : cardOf(args.card)
   if (card && 'problem' in card) return { problem: `card: ${card.problem}` }
-  const carded = card ? { card } : {}
+  const carded = { ...(card ? { card } : {}), ...(args.wait === false ? { wait: false as const } : {}) }
   if (args.yesNo === true) {
     if (args.choices !== undefined) return { problem: 'Give choices or yesNo, not both.' }
     return { question, choices: [{ label: 'Yes' }, { label: 'No' }], other, ...carded }

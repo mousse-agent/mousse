@@ -1,4 +1,6 @@
 import { profilerService } from '../diagnostics/profilerService'
+import { describeQuestionAnswers } from './questionAnswers'
+import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
 import type { SecretToolHost } from '../run/mcp/appTools/secrets'
 import { maskedCopy, maskInPlace, type SecretMasker } from '../secrets/secretMasking'
 import { admittedSelection, modelChangeNote, previousTurnModel, turnMarker, turnMarkerText } from './contextHandoff'
@@ -469,39 +471,10 @@ export function formatQuestionAnswersMessage(
     .join('\n\n')
 }
 
-/**
- * The answers as the transcript keeps them (`ChatMessage.questionAnswers`): option ids resolve to
- * their labels; text that names no option is the reply typed instead.
- */
-export function describeQuestionAnswers(
-  questions: UserQuestion[],
-  answers: UserQuestionAnswers,
-  /** Which of the answer message's images each question got, by question id. */
-  imageIndexes?: Record<string, number[]>
-): AnsweredQuestion[] {
-  return questions.map((question) => {
-    const value = answers[question.id]
-    const values = (value === undefined ? [] : Array.isArray(value) ? value : [value])
-      .map((entry) => String(entry).trim())
-      .filter((entry) => entry.length > 0)
-    const chosen: string[] = []
-    const typed: string[] = []
-    for (const entry of values) {
-      const option = question.options.find((each) => each.id === entry)
-      if (option) chosen.push(option.label.trim() || entry)
-      else typed.push(entry)
-    }
-    const images = imageIndexes && Object.hasOwn(imageIndexes, question.id) ? imageIndexes[question.id] : undefined
-    return {
-      prompt: question.prompt,
-      chosen,
-      ...(typed.length ? { reply: typed.join('\n') } : {}),
-      ...(images?.length ? { images } : {})
-    }
-  })
-}
 
 /** Render an explicit dismissal as transcript text. */
+export { describeQuestionAnswers }
+
 export function formatQuestionDismissMessage(questions: UserQuestion[]): string {
   const first = questions[0]
   return first ? `Dismissed question: ${first.prompt}` : 'Dismissed the question.'
@@ -2721,12 +2694,31 @@ export class OrchestratorService extends EventEmitter {
       continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy),
       ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}).`)
     })
+    // Questions agents ask without waiting are kept there too; their answers go to the thread's inbox.
+    this.questions.setOpenQuestionStore(engine.openQuestions)
   }
 
   /** Only the binding this orchestrator made: a service shared with a newer orchestrator keeps theirs. */
   private unbindApprovals(): void {
     const store = this.runEngine?.approvals
     if (store && this.questions.approvalStore === store) this.questions.setApprovalStore(null)
+    const open = this.runEngine?.openQuestions
+    if (open && this.questions.openQuestionStore === open) this.questions.setOpenQuestionStore(null)
+  }
+
+  /**
+   * A Stop, an archive or a delete closes the questions the thread's agent asked without waiting: nothing would act on
+   * their answers. The thread says which were closed, so the card's going away is explained.
+   */
+  private closeOpenQuestions(threadId: string, reason: OpenQuestionCloseReason): void {
+    try {
+      const closed = this.questions.closeOpenForThread(threadId, reason)
+      if (closed.length === 0 || reason === 'thread_deleted') return
+      const what = closed.length === 1 ? `The open question "${closed[0]!.questions[0]?.prompt.replace(/\s+/g, ' ').slice(0, 120) ?? ''}" was` : `${closed.length} open questions were`
+      this.noteProviderNotice(threadId, `${what} closed because the thread was ${reason === 'archived' ? 'archived' : 'stopped'}.`)
+    } catch (error) {
+      console.warn('open questions could not be closed', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**
@@ -3734,6 +3726,7 @@ export class OrchestratorService extends EventEmitter {
           engine.approvals.cancelForThread(id, 'stopped')
           // And what was answered but not yet delivered, or granted but not yet used: nothing before a Stop may act after it.
           engine.approvals.retireDelivery(id)
+          this.closeOpenQuestions(id, reason === 'settled' ? 'archived' : 'stopped')
           // A scheduled prompt that waited behind those approvals may run now.
           const waiting = this.sessions.get(id)
           if (waiting) this.scheduleQueueDrain(waiting)
@@ -4329,6 +4322,8 @@ export class OrchestratorService extends EventEmitter {
       delegation: (caller: McpCaller) =>
         this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling),
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
+      askWithoutWaiting: (threadId, questions, runId) => this.questions.ask(questions, threadId, runId),
+      withdrawQuestion: (threadId, requestId) => this.questions.withdraw(requestId, threadId),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       secrets: () => this.secretTools,
       // The thread's terminals, read from memory: no lease, nothing written to them (`terminal_read`).
@@ -5721,7 +5716,7 @@ export class OrchestratorService extends EventEmitter {
       /* An unreadable queue file counts as empty here; the queue tools report it. */
     }
     // An agent never makes a standing rule, so the requests it reads do not offer "Always for this thread".
-    return { queuedCount, pendingQuestions: this.questions.listPendingForThread(threadId).map(withoutStandingRules) }
+    return { queuedCount, pendingQuestions: this.questions.listShownForThread(threadId).map(withoutStandingRules) }
   }
 
   /**
@@ -9187,6 +9182,8 @@ export class OrchestratorService extends EventEmitter {
       this.runEngine?.approvals.cancelForThread(threadId, 'thread_deleted')
       // Prompts and answers never outlive the thread they belong to.
       this.runEngine?.approvals.deleteForThread(threadId)
+      this.closeOpenQuestions(threadId, 'thread_deleted')
+      this.runEngine?.openQuestions.deleteForThread(threadId)
     } catch (error) {
       console.warn('a deleted thread\'s approval requests could not be closed', { threadId, error: error instanceof Error ? error.message : String(error) })
     }

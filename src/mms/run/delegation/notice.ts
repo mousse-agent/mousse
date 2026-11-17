@@ -1,4 +1,5 @@
 import type { SubagentNoticeItem } from '../../../shared/subagents'
+import { isQuestionAnswerRow, type QuestionAnswerPayload } from '../OpenQuestions'
 import { isChildQuestionRow, type ChildQuestionPayload, type ChildResultPayload, type InboxRecord } from '../types'
 
 /** Characters of one subagent's result a notice shows (issue #142: the result is inlined once). */
@@ -71,6 +72,20 @@ export function planWakeNotice(rows: readonly InboxRecord[], context: NoticeCont
  * subagent adds what the app shows for it to `items`.
  */
 function noticeText(row: InboxRecord, context: NoticeContext, items: SubagentNoticeItem[]): string {
+  if (isQuestionAnswerRow(row)) {
+    const payload = row.payload as QuestionAnswerPayload
+    items.push({
+      delegationId: '',
+      childThreadId: row.threadId,
+      title: null,
+      runStatus: payload.dismissed ? 'dismissed' : 'answered',
+      fullyShown: true,
+      event: 'answer',
+      requestId: payload.requestId,
+      answers: payload.answered
+    })
+    return questionAnswerNotice(payload)
+  }
   if (isChildQuestionRow(row)) {
     const payload = row.payload as ChildQuestionPayload
     items.push({
@@ -102,6 +117,22 @@ function questionNotice(payload: ChildQuestionPayload, context: NoticeContext): 
   const prompts = context.questionPrompts?.(payload.requestId) ?? []
   const asking = prompts.length ? `\n${prompts.map((prompt) => head(prompt)).join('\n')}` : ''
   return `${who} is waiting for an answer to question ${payload.requestId}.${asking}\nAnswer it with answer_subagent (subagent "${title ?? payload.childThreadId}", requestId ${payload.requestId}), or ask the user.`
+}
+
+/**
+ * What the agent is told when the person answers (or dismisses) a question it asked without waiting: the question's id,
+ * and each question by its id with the answer. An answer the person typed is quoted as their words.
+ */
+function questionAnswerNotice(payload: QuestionAnswerPayload): string {
+  if (payload.dismissed)
+    return `The user dismissed your open question ${payload.requestId} without answering it. Decide it yourself, and say what you chose.`
+  const lines = payload.answered.map((answer, index) => {
+    const id = payload.questionIds[index] ?? String(index + 1)
+    const parts = [...answer.chosen.map((label) => JSON.stringify(label))]
+    if (answer.reply?.trim()) parts.push(`in their words: ${JSON.stringify(answer.reply.trim())}`)
+    return `- ${id} (${JSON.stringify(head(answer.prompt))}): ${parts.join('; ') || 'no answer'}`
+  })
+  return `The user answered your open question ${payload.requestId}:\n${lines.join('\n')}`
 }
 
 /** One line per inbox row; server-authored, never model-supplied. */

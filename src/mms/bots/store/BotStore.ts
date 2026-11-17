@@ -2228,6 +2228,11 @@ export class BotStore {
   }
 
   /** A continuation told the turn about these questions. */
+  /** Questions whose answer the work never read after all (a note it did not take): unread again, so it carries them. */
+  markQuestionsUnread(ids: readonly string[]): void {
+    for (const id of ids) this.run('UPDATE bot_questions SET read_at = NULL WHERE id = ?', id)
+  }
+
   markQuestionsRead(ids: readonly string[]): void {
     const at = this.now()
     for (const id of ids) this.run('UPDATE bot_questions SET read_at = ? WHERE id = ? AND read_at IS NULL', at, id)
@@ -2272,10 +2277,14 @@ export class BotStore {
     this.run("UPDATE bot_questions SET read_at = CASE WHEN ? THEN ? ELSE read_at END, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", read ? 1 : 0, this.now(), n, line, questionId)
   }
 
-  /** The bot's questions that work waits on now (the work is `blocked` with `question`), oldest first. */
+  /**
+   * The bot's questions that work waits on now (the work is `blocked` with `question`), and the ones running work asked
+   * without waiting (`wait: false`, issue #1372), still open: each needs the owner's answer. Oldest first.
+   */
   waitingQuestions(botId: string): BotQuestionRow[] {
     return this.all(`SELECT q.* FROM bot_questions q JOIN bot_activations a ON a.id = q.activation_id WHERE q.bot_id = ? AND q.lane = 'run'
-      AND q.status = 'open' AND q.message_id IS NOT NULL AND a.status = 'blocked' AND a.end_reason = 'question' ORDER BY q.created_at, q.rowid`, botId).map(questionOf)
+      AND q.status = 'open' AND q.message_id IS NOT NULL AND ((a.status = 'blocked' AND a.end_reason = 'question')
+        OR (a.status = 'running' AND json_extract(q.spec_json, '$.wait') = 0)) ORDER BY q.created_at, q.rowid`, botId).map(questionOf)
   }
 
   /**
