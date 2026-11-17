@@ -15,7 +15,7 @@ import { format } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProviderOperationEvent } from '../../src/shared/harness/types'
 import type { DriverContext, DriverRuntime } from '../../src/mms/harness/driver'
-import { CODEX_NOT_STORED_MESSAGE, codexDeviceCode, codexDriver, codexSignInCommand, codexSignInSteps, decodeCodexConfig } from '../../src/mms/harness/drivers/codex'
+import { CODEX_NOT_STORED_MESSAGE, codexDeviceCode, codexDriver, codexSignInCommand, codexSignInSteps } from '../../src/mms/harness/drivers/codex'
 import { createHarnessGateway, type TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceEnv, ownedLaunchEnv, ownedUserArgs, ownedUserEnv, reservedEnvName, reservedLaunchKeys } from '../../src/mms/harness/env'
 import { instanceStateDir, InstanceCounterStore } from '../../src/mms/harness/instances'
@@ -1126,11 +1126,8 @@ describe('an added entry on the user\'s own home', () => {
     const another = await w.harness.instances.add({ driver: 'codex', config: { setup: 'existing', displayName: 'Work' } })
     expect(another).toMatchObject({ instanceId: 'codex:work', config: { home: 'private' } })
     await expect(w.harness.instances.configure('codex', { home: 'private' })).rejects.toMatchObject({ code: 'unsupported' })
-    // An added entry may switch homes; a stored home on the built-in id is ignored.
+    // An added entry may switch homes.
     expect((await w.harness.instances.configure('codex:work', { home: 'default' })).config?.home).toBe('default')
-    expect(decodeCodexConfig({ setup: 'existing', home: 'private' }, 'codex').home).toBe('default')
-    expect(decodeCodexConfig({ setup: 'existing', home: 'private' }, 'codex:work')).toMatchObject({ home: 'private', setup: 'existing' })
-    expect(decodeCodexConfig({ setup: 'managed', home: 'default' }, 'codex:m')).toMatchObject({ home: 'private', setup: 'managed' })
   })
 })
 

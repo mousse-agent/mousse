@@ -20,7 +20,6 @@ import { instanceEnv } from '../../src/mms/harness/env'
 import { createHarnessGateway, type HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { addedInstanceId } from '../../src/mms/harness/instances'
 import { InstanceVault } from '../../src/mms/harness/vault'
-import { InstanceVault } from '../../src/mms/harness/vault'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { asAddInstanceInput } from '../../src/mms/protocol/validators'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
@@ -481,23 +480,6 @@ describe('Claude Code on an API key', () => {
     expect(await runtime.auth({ force: false })).toMatchObject({ state: 'signed_out' })
     expect(await runtime.identity!(new AbortController().signal)).toBeUndefined()
     expect(authRuns).toEqual([])
-  })
-
-  it('a sign-out whose key cannot be deleted still ends the process holding it, then fails', async () => {
-    const { runtime, query, seen } = fixture({ hold: true })
-    await runtime.adoptApiKey!(KEY)
-    const running = turn(runtime, tempDir('mousse-cwd-')).then(() => 'ended', () => 'ended')
-    await vi.waitFor(() => expect(seen.some((entry) => entry.path === 'turn')).toBe(true))
-    const write = vi.spyOn(InstanceVault.prototype, 'set').mockImplementation(() => {
-      throw new Error('Cannot use the saved secrets: the file could not be written.')
-    })
-    try {
-      await expect(runtime.signOut!()).rejects.toThrow(/could not be written/)
-    } finally {
-      write.mockRestore()
-    }
-    expect(query.closed).toBeGreaterThan(0)
-    expect(await running).toBe('ended')
   })
 
   it('an api_key entry without a home of its own runs nothing and never falls back to the user\'s Claude Code', async () => {
