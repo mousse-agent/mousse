@@ -582,6 +582,16 @@ it('a duplicate refusal explains the earlier card without borrowing its outcome'
   expect(f.store.dispatches(duplicate!.id)).toHaveLength(1)
   expect(f.store.unreadWorkActions(duplicate!.id)).toEqual([])
 })
+it.each(['send', 'not_now'] as const)('the open-card limit describes pending requests while %s still settles its card', async answer => {
+  const t = await fanOut(true, false, 4, true)
+  expect(t.results.at(-1)?.text).toBe('Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
+  const first = t.works[0]!
+  await finish(f, first.run.payload)
+  const a = f.bots.actions.forWork(first.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })
+  expect(f.bots.actions.forWork(first.id)?.status).toBe(answer === 'send' ? 'done' : 'declined')
+  expect(f.store.lastMainDispatch(first.id)?.prompt.text).toContain(answer === 'send' ? 'Your owner sent it' : 'chose not to send')
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
