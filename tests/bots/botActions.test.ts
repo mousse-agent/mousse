@@ -403,6 +403,14 @@ it('Send withdraws a stale schedule card even if the edit hook was missed', asyn
   expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
 })
+it('schedule_done explains why a later asks-first call cannot wait', async () => {
+  const t = await scheduledCall()
+  f.bots.tools.schedules.done(t.run.payload.threadId, 'All done')
+  const result = await t.call()
+  expect(result).toMatchObject({ isError: true, text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent." })
+  expect(f.bots.actions.forWork(t.id)).toBeUndefined()
+  expect(t.calls).toEqual([])
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
