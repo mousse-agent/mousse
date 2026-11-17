@@ -21,7 +21,7 @@ export interface LanPeer {
  * Discovery is only a hint: the normal pinned TLS and signed hello still authenticate every dial.
  */
 export class LanDiscovery {
-  private readonly direct: DirectTransport
+  private direct: DirectTransport
   private socket?: Socket
   private timer?: { cancel(): void }
   private stopped = false
@@ -35,15 +35,38 @@ export class LanDiscovery {
       clock: Clock
       peers(): LanPeer[]
       changed(): void
+      /** The port kept from the last start; another is chosen when it is taken. */
+      port?: number
     }
   ) {
-    this.direct = new DirectTransport({ enabled: true, host: '0.0.0.0', clock: options.clock })
+    this.direct = this.listener(options.port)
   }
   async start(accept: (raw: Duplex, info: InboundInfo) => void): Promise<void> {
-    await this.direct.provision()
-    await this.direct.listen(accept)
+    try {
+      await this.direct.provision()
+      await this.direct.listen(accept)
+    } catch (error) {
+      if (!this.options.port) throw error
+      // The kept port is taken (or no longer bindable): take a new one; peers learn it by beacon or the next link.
+      await this.direct.teardown()
+      this.direct = this.listener(0)
+      await this.direct.provision()
+      await this.direct.listen(accept)
+    }
     this.port = Number(new URL(this.direct.status().routes[0].address).port)
     this.tick()
+  }
+  /** The port the listener is on, once started. */
+  listeningPort(): number | undefined {
+    return this.port || undefined
+  }
+  private listener(port: number | undefined): DirectTransport {
+    return new DirectTransport({
+      enabled: true,
+      host: '0.0.0.0',
+      ...(port ? { port } : {}),
+      clock: this.options.clock
+    })
   }
   markAuthenticated(raw: Duplex): void {
     this.direct.markAuthenticated(raw)

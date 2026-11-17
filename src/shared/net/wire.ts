@@ -307,6 +307,11 @@ export interface RosterUpdateMessage {
   t: 'rosterUpdate'
   roster: Signed
 }
+/** The port of the sender's automatic LAN listener (`lan.port.v1`). A hint, never a route: dials still authenticate. */
+export interface LanPortMessage {
+  t: 'lan.port'
+  port: number
+}
 
 export interface EnrollRequestMessage {
   t: 'enroll.request'
@@ -424,6 +429,7 @@ export type WireMessage =
   | EphemeralMessage
   | RevokedMessage
   | RosterUpdateMessage
+  | LanPortMessage
   | EnrollRequestMessage
   | EnrollResultMessage
   | SpaceJoinRequestMessage

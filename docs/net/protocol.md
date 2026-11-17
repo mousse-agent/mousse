@@ -135,6 +135,7 @@ Directions: A is a stream authority, S its subscriber/writer; Q is an RPC caller
 | ephemeral | both/authorized relay | control/presence.v1 | stream,kind:typing|delta,data; never persisted or executable |
 | revoked | both | control/base | subject; notification only, adopt signed roster evidence before trust change |
 | rosterUpdate | both | control/base | roster:Signed; verify pinned root, ordering, lineage and conflicts |
+| lan.port | both | control/lan.port.v1 | port(1..65535); sent once after open, same-user only; the sender's automatic LAN listener port, an unsigned hint (`docs/net/lan.md`), never a route; a peer that did not negotiate it is never sent one |
 | enroll.request | E→I | control/enroll.v1 | invite,node,keys,name,proof; quarantine only |
 | enroll.result | I→E | control/enroll.v1 | either delegation:Signed,roster:Signed or error |
 | space.join.request | joiner→host | control/enroll.v1 | invite,space,user,rootKey,node,delegation:Signed,roster:Signed,name,proof; bounded quarantine admission |
