@@ -759,6 +759,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly reminderRetryAt = new Map<string, number>()
   /** The same for a question's follow-up (a nudge or a default) that failed. */
   private readonly questionRetryAt = new Map<string, number>()
+  private readonly upkeepRetryAt = new Map<string, number>()
+  private dueFloorAt = 0
+  /** Independent action steps cannot starve reminders, questions or another bot's tellings. */
+  private tryActionUpkeep(key: string, now: number, step: () => void): void {
+    if ((this.upkeepRetryAt.get(key) ?? 0) > now) return
+    try { step(); this.upkeepRetryAt.delete(key) } catch (error) {
+      this.upkeepRetryAt.set(key, now + REMINDER_RETRY_MS)
+      this.dueFloorAt = Math.max(this.dueFloorAt, now + 1000)
+      console.warn('bot action upkeep failed; trying again in a minute', { step: key, error })
+    }
+  }
   private followUpNudgeBudget: { at: number; times: Map<string, number[]> } | undefined
   /** When each waiting wake on a pull request last read it (`PR_WAKE_READ_MS`). */
   private readonly wakeReadAt = new Map<string, number>()
@@ -9022,9 +9033,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
-      () => this.actions.nextDueAt(botId),
       () => {
-        const times = this.actionNudgeFollowUps(botId).map(row => Math.max(row.at, forTimer ? this.questionRetryAt.get(row.id) ?? 0 : 0))
+        const retry = forTimer ? this.upkeepRetryAt.get('actions') : undefined
+        return retry && retry > this.now() ? retry : this.actions.nextDueAt(botId)
+      },
+      () => {
+        let times: number[] = []
+        this.tryActionUpkeep('action-nudges', this.now(), () => {
+          times = this.actionNudgeFollowUps(botId).map(row => Math.max(row.at, forTimer ? this.questionRetryAt.get(row.id) ?? 0 : 0))
+        })
+        const retry = this.upkeepRetryAt.get('action-nudges')
+        if (forTimer && retry) times.push(retry)
         return times.length ? Math.min(...times) : undefined
       },
       () => this.tellings.next(botId),
@@ -9066,9 +9085,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.reminderTimer?.clear()
     this.reminderTimer = undefined
     if (!this.startupPassed || this.closed) return
-    const due = this.dueAt(undefined, true)
+    let due: number | undefined
+    try { due = this.dueAt(undefined, true) } catch (error) {
+      this.dueFloorAt = this.now() + REMINDER_RETRY_MS
+      due = this.dueFloorAt
+      console.warn('bot due times could not be read; trying again in a minute', error)
+    }
+    const holdRetry = this.upkeepRetryAt.get('nudge-holds')
+    if (holdRetry) due = Math.min(due ?? Infinity, holdRetry)
     if (due === undefined) return
-    const wait = Math.min(Math.max(0, due - this.now()), REMINDER_REARM_MS)
+    const wait = Math.min(Math.max(0, this.dueFloorAt - this.now(), due - this.now()), REMINDER_REARM_MS)
     this.reminderTimer = (this.host.setTimer ?? defaultTimer)(() => {
       this.reminderTimer = undefined
       void this.deliverDueReminders().catch((error: unknown) => {
@@ -9092,8 +9118,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       await Promise.resolve()
       try {
         this.followUpNudgeBudget = { at: now.getTime(), times: new Map() }
-        this.actions.withdrawDisabled()
-        this.actions.expireDue()
+        this.tryActionUpkeep('actions', now.getTime(), () => {
+          this.actions.withdrawDisabled()
+          this.actions.expireDue()
+        })
         // Reminders cancelled, forgotten or purged since they failed are no longer tried.
         for (const id of this.reminderRetryAt.keys()) if (this.store.reminder(id)?.status !== 'waiting') this.reminderRetryAt.delete(id)
         for (const reminder of this.store.dueReminders(now.toISOString())) {
@@ -9109,7 +9137,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         // Questions answered, withdrawn or purged since their follow-up failed are no longer tried.
         for (const id of this.questionRetryAt.keys()) if (this.store.question(id)?.status !== 'open' && this.actions.get(id)?.status !== 'open') this.questionRetryAt.delete(id)
-        for (const question of [...this.store.dueQuestions(now.toISOString()), ...this.actionNudgeFollowUps(undefined, now.getTime()).filter(row => row.at <= now.getTime())]) {
+        let actionNudges: ActionNudgeFollowUp[] = []
+        this.tryActionUpkeep('action-nudges', now.getTime(), () => { actionNudges = this.actionNudgeFollowUps(undefined, now.getTime()).filter(row => row.at <= now.getTime()) })
+        for (const question of [...this.store.dueQuestions(now.toISOString()), ...actionNudges]) {
           if ((this.questionRetryAt.get(question.id) ?? 0) > now.getTime()) continue
           try {
             await this.followUpQuestion(question, now)
@@ -9119,13 +9149,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             console.warn('a bot question could not be followed up; trying again in a minute', { questionId: question.id, error: error instanceof Error ? error.message : String(error) })
           }
         }
-        if (botAsksFirst(this.host.settings?.get())) {
+        this.tryActionUpkeep('nudge-holds', now.getTime(), () => {
+          if (!botAsksFirst(this.host.settings?.get())) return
           for (const row of this.store.all("SELECT id, bot_id FROM bot_messages WHERE id GLOB 'bm_action_*_n[12]' AND tell = 'soon' AND told_at IS NULL")) {
             const allowed = this.followUpTime(String(row.bot_id), now.getTime())
             if (allowed > now.getTime()) this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(allowed).toISOString(), String(row.id))
           }
-        }
+        })
         this.tellings.release(now.getTime())
+      } catch (error) {
+        this.dueFloorAt = now.getTime() + REMINDER_RETRY_MS
+        console.warn('bot delivery pass failed; trying again in a minute', error)
       } finally {
         if (this.delivering === pass) this.delivering = undefined
         try { this.armDue() } finally { this.followUpNudgeBudget = undefined }
