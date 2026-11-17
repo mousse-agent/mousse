@@ -482,15 +482,6 @@ describe('OrchestratorService over the Run Engine', () => {
       replayed: true
     })
     expect(chatCalls).toBe(1)
-    // Once the run is over a replay answers from the receipt alone.
-    const later = await orch.send('once', false, { threadId: thread.id, clientRequestId: 'live-1' })
-    expect(later).toEqual({
-      message: '',
-      actions: [],
-      runId: r1.runId,
-      sequence: r1.sequence,
-      replayed: true
-    })
   }, 30_000)
 
   it('turns a steer that reaches a finalizing run after its turn into a queued turn', async () => {

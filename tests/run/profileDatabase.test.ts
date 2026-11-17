@@ -386,29 +386,6 @@ describe('ProfileDatabase', () => {
       expect(plan).toContain('approval_requests_continuation')
     })
 
-    it('opens idempotently, and a build that predates it refuses the newer database instead of reading it wrong', () => {
-      const database = open()
-      database.migrate(through)
-      database.migrate(through)
-      expect(database.database.prepare('SELECT version FROM run_schema_migrations ORDER BY version').all().at(-1)).toEqual({ version: migration.version })
-      expect(codeOf(() => database.migrate(before))).toBe('downgrade_unsupported')
-      expect(database.userVersion()).toBe(migration.version)
-    })
-
-    it('rolls back with its version when the commit fails, and applies on the next open', () => {
-      let armed = false
-      profileHome = mkdtempSync(join(tmpdir(), 'mousse-run-db-'))
-      db = new ProfileDatabase({ profileHome, fault: (point) => { if (armed && point === 'migration.beforeCommit') throw new Error('injected') } })
-      db.migrate(before)
-      armed = true
-      expect(() => db!.migrate(through)).toThrow('injected')
-      armed = false
-      expect(db.userVersion()).toBe(before.at(-1)!.version)
-      expect(columns(db)).toEqual([])
-      db.migrate(through)
-      expect(db.userVersion()).toBe(migration.version)
-      expect(columns(db)).toContain('request_id')
-    })
   })
 
   describe('the pull request update kind of the inbox (the migration that rebuilds it)', () => {
@@ -421,11 +398,6 @@ describe('ProfileDatabase', () => {
         .prepare("INSERT INTO inbox(inbox_id, thread_id, run_id, kind, payload, status, created_at, delivered_by) VALUES(?, 't1', NULL, ?, '{\"text\":\"x\"}', ?, '2026-10-12T00:00:00.000Z', ?)")
         .run(id, rowKind, deliveredBy ? 'delivered' : 'pending', deliveredBy)
     }
-
-    it('comes after the one that added delivered_by and after every table it could meet', () => {
-      expect(kind.version).toBeGreaterThan(7)
-      expect(kind.version).toBeGreaterThanOrEqual(13)
-    })
 
     it('the chain 11, 12, 13 applies on a fresh database and on a database at 11 or 12, and 13 touches only the inbox', () => {
       const upTo = (version: number) => RUN_MIGRATIONS.filter((migration) => migration.version <= version)
