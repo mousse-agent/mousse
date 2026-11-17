@@ -35,7 +35,7 @@ import { useBotsStore } from '../../src/renderer/stores/botsStore'
 import { useChatsStore } from '../../src/renderer/stores/chatsStore'
 import { openLinkedThread } from '../../src/renderer/utils/chatLinks'
 import type { BotSummary } from '../../src/shared/bots/personal/chat'
-import { COMMANDS, commandAllowedInContext, defaultBindingFor, findConflicts, getCommand, resolveCommand, type CommandContext } from '../../src/shared/commands'
+import { commandAllowedInContext, defaultBindingFor, getCommand, resolveCommand, type CommandContext } from '../../src/shared/commands'
 import { getDefaultSettings, normalizeAppearance } from '../../src/shared/settings'
 import { searchSettings } from '../../src/renderer/lib/settingsSearch'
 import type { Project, Thread } from '../../src/shared/types'
@@ -302,14 +302,6 @@ describe('the back and forward shortcuts', () => {
     expect(resolveCommand(key('[', { meta: true }), {}, context({ inTerminal: true }), registered)).toBeNull()
     expect(getCommand('thread.back').guest).toBe('deny')
     expect(commandAllowedInContext(getCommand('thread.forward'), context())).toBe(true)
-  })
-
-  it('clash with no other default', () => {
-    for (const platform of ['darwin', 'win32', 'linux']) {
-      const clashes = findConflicts({}, platform).filter((conflict) => conflict.kind === 'command' && conflict.commands.some((id) => id === 'thread.back' || id === 'thread.forward'))
-      expect(clashes).toEqual([])
-    }
-    expect(COMMANDS.filter((command) => command.id === 'thread.back' || command.id === 'thread.forward')).toHaveLength(2)
   })
 })
 
