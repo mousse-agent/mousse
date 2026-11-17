@@ -545,7 +545,7 @@ describe('ACP sessions', () => {
     })
   })
 
-  describe("the hold: a person's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
+  describe("the hold: a person's steer cuts in at once; an agent's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
     const STEER = 'Use pnpm, not npm'
     const gate = () => {
       let open!: () => void
@@ -589,7 +589,7 @@ describe('ACP sessions', () => {
       }
     }
 
-    it('strict boundary drain: a steer held during a tool goes in as the next prompt when the prompt ends, and nothing is cancelled', async () => {
+    it('strict boundary drain: an agent\'s steer held during a tool goes in as the next prompt when the prompt ends, and nothing is cancelled', async () => {
       const toolStarted = gate()
       const finishTool = gate()
       const endPrompt = gate()
@@ -610,7 +610,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       finishTool.open()
       // The tool ended and the agent wrote: an agent whose gaps were never measured still holds (strict release).
@@ -649,7 +649,7 @@ describe('ACP sessions', () => {
       expect(turn.promptsWhenAccepted).toEqual([['work', STEER]])
     })
 
-    it('a tool that starts between the drain and the cancel keeps the steer: it is handed back, held, and goes in at the boundary', async () => {
+    it('a tool that starts between the drain and the cancel keeps an agent\'s steer: it is handed back, held, and goes in at the boundary', async () => {
       const endPrompt = gate()
       const agent = scriptedAgent({
         prompt: async (text, ctx) => {
@@ -666,7 +666,7 @@ describe('ACP sessions', () => {
       await vi.waitFor(() => expect(turn.events()).toContain('text:working'))
       // The tool's start arrives while the cut is on its way.
       turn.hold.beforeMayCut = () => turn.sink.tool({ kind: 'mcp_tool_call', phase: 'start', callId: 'late', title: 'npm test', summary: '', details: [] })
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.events()).toContain(`returned:${STEER}`))
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       turn.sink.tool({ kind: 'mcp_tool_result', phase: 'complete', callId: 'late', title: 'npm test', summary: '', details: [] })
@@ -677,7 +677,7 @@ describe('ACP sessions', () => {
       expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-2`])
     })
 
-    it('Send now during a tool cancels at once, and the steer goes in once', async () => {
+    it('a person\'s steer during a tool cancels at once, holds nothing, and the turn goes on with it as the next prompt, once', async () => {
       const toolStarted = gate()
       const agent = scriptedAgent({
         prompt: async (text, ctx) => {
@@ -685,6 +685,7 @@ describe('ACP sessions', () => {
             await ctx.notify(`then ${text}`)
             return 'end_turn'
           }
+          // The tool never ends by itself: only the cut ends the prompt.
           await ctx.update(toolCall('call-1', 'sleep 20'))
           toolStarted.open()
           await ctx.cancelled
@@ -694,11 +695,11 @@ describe('ACP sessions', () => {
       const turn = holdTurn(agent)
       await toolStarted.opened
       turn.hold.steer(STEER)
-      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
-      turn.hold.sendNow()
-      await turn.result
+      expect((await turn.result).text).toBe('then Use pnpm, not npm')
+      expect(turn.hold.held()).toBe(false)
       expect(agent.cancels).toEqual(['native-1'])
       expect(turn.prompts()).toEqual(['work', STEER])
+      order(turn.events(), 'tool:start:call-1', `drain:${STEER}`, 'mayCut:true', 'taken:drain-1', `accepted:${STEER}@drain-1`)
       expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
     })
 
@@ -743,7 +744,7 @@ describe('ACP sessions', () => {
       order(turn.events(), 'awaiting:tool-1:true', `drain:${STEER}`, 'awaiting:tool-1:false')
     })
 
-    it('strict release: a steer already held for a tool does not wait for a person\'s answer to the next call: it cuts and answers it', async () => {
+    it('strict release: an agent\'s steer already held for a tool does not wait for a person\'s answer to the next call: it cuts and answers it', async () => {
       const toolStarted = gate()
       const finishTool = gate()
       const agent = scriptedAgent({
@@ -763,7 +764,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       finishTool.open()
       await turn.result
@@ -771,7 +772,7 @@ describe('ACP sessions', () => {
       order(turn.events(), 'tool:complete:call-1', 'awaiting:tool-1:true', `drain:${STEER}`, `accepted:${STEER}@drain-1`)
     })
 
-    it('Grok, with its measured window: the steer goes in about 100 ms after the tool\'s result when the agent shows nothing', async () => {
+    it('Grok, with its measured window: an agent\'s steer goes in about 100 ms after the tool\'s result when the agent shows nothing', async () => {
       const toolStarted = gate()
       const finishTool = gate()
       const agent = scriptedAgent({
@@ -790,7 +791,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent, GROK_CAPS)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       finishTool.open()
       await turn.result
@@ -821,7 +822,7 @@ describe('ACP sessions', () => {
       expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
     })
 
-    it('Grok: a subagent reporting progress does not keep a steer held after the turn\'s own tool ends', async () => {
+    it('Grok: a subagent reporting progress does not keep an agent\'s steer held after the turn\'s own tool ends', async () => {
       const toolStarted = gate()
       const finishTool = gate()
       const agent = scriptedAgent({
@@ -848,7 +849,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent, GROK_CAPS)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       finishTool.open()
       await turn.result
@@ -893,11 +894,11 @@ describe('ACP sessions', () => {
         return answer
       }
 
-      it('a steer held for a tool goes in once Mousse asks the person', async () => {
+      it('an agent\'s steer held for a tool goes in once Mousse asks the person', async () => {
         const script = asks(true)
         const turn = holdTurn(script.agent)
         await script.toolStarted.opened
-        turn.hold.steer(STEER)
+        turn.hold.steer(STEER, { person: false })
         await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
         script.finishTool.open()
         await script.asking.opened
@@ -923,7 +924,7 @@ describe('ACP sessions', () => {
       })
     })
 
-    it.each(['mousse/docs', 'Mousse.md'])('a call titled %s is no Mousse question: it holds a steer while a question is pending, like any call', async (title) => {
+    it.each(['mousse/docs', 'Mousse.md'])('a call titled %s is no Mousse question: it holds an agent\'s steer while a question is pending, like any call', async (title) => {
       const toolStarted = gate()
       const finishTool = gate()
       const agent = scriptedAgent({
@@ -944,7 +945,7 @@ describe('ACP sessions', () => {
       await toolStarted.opened
       const answer = turn.questions.requestAnswers([{ id: 'q', prompt: 'Which one?', options: [{ id: 'a', label: 'A' }] }], 't')
       answer.catch(() => undefined)
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       await sleep(300)
       expect(turn.hold.drained()).toEqual([])
@@ -956,7 +957,7 @@ describe('ACP sessions', () => {
       expect(turn.prompts()).toEqual(['work', STEER])
     })
 
-    it('strict release with a tool the agent never reports complete: the steer is never cut in, and stays for the follow-up', async () => {
+    it('strict release with a tool the agent never reports complete: an agent\'s steer is never cut in, and stays for the follow-up', async () => {
       const toolStarted = gate()
       const endPrompt = gate()
       const agent = scriptedAgent({
@@ -970,7 +971,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       endPrompt.open()
       expect((await turn.result).text).toBe('done, I think')

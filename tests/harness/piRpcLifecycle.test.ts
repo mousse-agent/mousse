@@ -592,7 +592,9 @@ function onHold(t: ReturnType<typeof turn>) {
     /** Send now on the hold shown. */
     sendNow: () => hold.requestForce({ holdGeneration: hold.holdGeneration!, requestId: `now-${++seq}`, itemIds: [] }),
     /** Until the turn reported its first tool call (announced or running). */
-    toolStarted: () => vi.waitFor(() => expect(record.toolStarts.length).toBeGreaterThan(0), { timeout: 10_000, interval: 10 })
+    toolStarted: () => vi.waitFor(() => expect(record.toolStarts.length).toBeGreaterThan(0), { timeout: 10_000, interval: 10 }),
+    /** Until the turn reported its first tool call's result. */
+    toolEnded: () => vi.waitFor(() => expect(record.toolEnds.length).toBeGreaterThan(0), { timeout: 10_000, interval: 10 })
   }
 }
 
@@ -604,6 +606,11 @@ const firstAt = (cwd: string, match: (entry: StubLog) => boolean) => stubLog(cwd
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
 /** A tool step whose `turn_end` releases a steer held during it as Pi's native steer. */
 const toolStep = (runMs = 300) => ({ tools: [{ name: 'bash', args: { command: 'sleep 1' }, runMs }] })
+/**
+ * A tool step whose `turn_end` comes 600 ms after the tool's result. A person's steer sent in that gap does not cut
+ * (the step's end is a moment away): it goes in natively at `turn_end`, so its release machinery runs (§3.2).
+ */
+const gapStep = (runMs = 300) => ({ ...toolStep(runMs), endMs: 600 })
 
 
 /**
@@ -716,19 +723,18 @@ describe('Pi cuts in (stub Pi)', () => {
     expect(stubLog(cwd).filter((entry) => entry.command === 'steer').map((entry) => entry.images)).toEqual([[shotContent]])
   }, 30_000)
 
-  it('a person’s steer held during a tool goes in natively at its end, and cuts the next reply Pi started without it (release at turn_end)', async () => {
+  it('a person’s steer after a tool’s result goes in natively at the step’s end, and cuts the next reply Pi started without it (release at turn_end)', async () => {
     const { engine, project } = setup()
-    const cwd = project('p', { onPrompt: 'script', runs: [[toolStep(), { forever: true }], [{ text: 'answered' }]] })
+    const cwd = project('p', { onPrompt: 'script', runs: [[gapStep(), { forever: true }], [{ text: 'answered' }]] })
     const t = turn(cwd)
     const h = onHold(t)
     const pending = run(engine, t)
-    await h.toolStarted()
+    await h.toolEnded()
     h.steer('wait, use pnpm')
     const result = await pending
     expect(result.aborted).toBeFalsy()
-    // Held for the tool, never cut while it ran.
-    expect(h.record.held).toContain('bash')
-    expect(firstAt(cwd, (entry) => entry.command === 'abort')!).toBeGreaterThanOrEqual(h.record.toolEnds[0])
+    // Never cut before the step's end: it went in natively there.
+    expect(firstAt(cwd, (entry) => entry.command === 'steer')!).toBeGreaterThanOrEqual(firstAt(cwd, (entry) => entry.event === 'turn_end')!)
     expect(commandsIn(cwd)).toEqual(['prompt', 'steer', 'clear_queue', 'abort', 'prompt'])
     expect(promptsIn(cwd)).toEqual(['hi', 'wait, use pnpm'])
     expect(h.record.accepted).toEqual(['wait, use pnpm'])
@@ -751,11 +757,11 @@ describe('Pi cuts in (stub Pi)', () => {
 
   it('(a) the reply starts before the native steer is answered and never ends: the cut lands once the answer comes', async () => {
     const { engine, project } = setup()
-    const cwd = project('p', { onPrompt: 'script', steerDelayMs: 500, runs: [[toolStep(), { forever: true }], [{ text: 'answered' }]] })
+    const cwd = project('p', { onPrompt: 'script', steerDelayMs: 500, runs: [[gapStep(), { forever: true }], [{ text: 'answered' }]] })
     const t = turn(cwd)
     const h = onHold(t)
     const pending = run(engine, t)
-    await h.toolStarted()
+    await h.toolEnded()
     h.steer('stop and use pnpm')
     const result = await pending
     expect(result.aborted).toBeFalsy()
@@ -768,11 +774,11 @@ describe('Pi cuts in (stub Pi)', () => {
   for (const order of ['okThenStart', 'startThenOk'] as const) {
     it(`(b) the native steer's answer and the reply's start in one stdout chunk (${order}): cut once`, async () => {
       const { engine, project } = setup()
-      const cwd = project('p', { onPrompt: 'script', runs: [[toolStep(), { waitSteer: order, forever: true }], [{ text: 'answered' }]] })
+      const cwd = project('p', { onPrompt: 'script', runs: [[gapStep(), { waitSteer: order, forever: true }], [{ text: 'answered' }]] })
       const t = turn(cwd)
       const h = onHold(t)
       const pending = run(engine, t)
-      await h.toolStarted()
+      await h.toolEnded()
       h.steer('use pnpm')
       const result = await pending
       expect(result.aborted).toBeFalsy()
@@ -784,11 +790,11 @@ describe('Pi cuts in (stub Pi)', () => {
 
   it('a native steer Pi reads before answering it is taken once, and its answer changes nothing: no cut', async () => {
     const { engine, project } = setup()
-    const cwd = project('p', { onPrompt: 'script', runs: [[toolStep(), { waitSteer: 'readFirst', text: 'answering the steer' }]] })
+    const cwd = project('p', { onPrompt: 'script', runs: [[gapStep(), { waitSteer: 'readFirst', text: 'answering the steer' }]] })
     const t = turn(cwd)
     const h = onHold(t)
     const pending = run(engine, t)
-    await h.toolStarted()
+    await h.toolEnded()
     h.steer('use pnpm')
     const result = await pending
     expect(result.aborted).toBeFalsy()
@@ -798,23 +804,27 @@ describe('Pi cuts in (stub Pi)', () => {
     expect(h.record.returned).toEqual([])
   }, 30_000)
 
-  it('a tool announced while the cut waits for the native steer’s answer: no abort, the steer is held again and goes in after the tool', async () => {
+  it('a tool announced while the cut waits for the native steer’s answer: that cut gives up, and the steer, handed back once, stops the tool at once', async () => {
     const { engine, project } = setup()
     const cwd = project('p', {
       onPrompt: 'script', steerDelayMs: 500,
-      runs: [[toolStep(), { text: 'checking', tools: [{ name: 'bash', args: { command: 'npm test' }, runMs: 1500 }] }, { forever: true }], [{ text: 'answered' }]]
+      runs: [[gapStep(), { text: 'checking', tools: [{ name: 'bash', args: { command: 'npm test' }, runMs: 5000 }] }, { forever: true }], [{ text: 'answered' }]]
     })
     const t = turn(cwd)
     const h = onHold(t)
     const pending = run(engine, t)
-    await h.toolStarted()
+    await h.toolEnded()
     h.steer('use pnpm')
     const result = await pending
     expect(result.aborted).toBeFalsy()
-    // The check at dispatch handed it back once; nothing was aborted until the second command had its result.
+    // The check at dispatch handed it back once; the person's steer then cut the second command while it ran.
     expect(h.record.returned).toEqual(['use pnpm'])
+    expect(h.record.held).toEqual([])
     expect(h.record.toolEnds).toHaveLength(2)
-    expect(firstAt(cwd, (entry) => entry.command === 'abort')!).toBeGreaterThanOrEqual(h.record.toolEnds[1])
+    const abortAt = firstAt(cwd, (entry) => entry.command === 'abort')!
+    expect(abortAt).toBeGreaterThanOrEqual(h.record.toolStarts[1])
+    expect(abortAt - h.record.toolStarts[1]).toBeLessThan(3000)
+    expect(h.record.closed.get('call_2')).not.toBe('done')
     expect(h.record.accepted).toEqual(['use pnpm'])
     expect(promptsIn(cwd)).toEqual(['hi', 'use pnpm'])
   }, 30_000)
@@ -914,20 +924,21 @@ describe('Pi cuts in (stub Pi)', () => {
     expect(h.record.accepted).toEqual(['use pnpm'])
   }, 30_000)
 
-  it('Send now during a running tool cuts it at once', async () => {
+  it('a person’s steer during a running tool cuts it at once: it is never held', async () => {
     const { engine, project } = setup()
     const cwd = project('p', { onPrompt: 'script', runs: [[{ tools: [{ name: 'bash', args: { command: 'sleep 60' }, runMs: 60_000 }] }], [{ text: 'answered' }]] })
     const t = turn(cwd)
     const h = onHold(t)
     const pending = run(engine, t)
     await h.toolStarted()
-    h.steer('use pnpm')
-    await vi.waitFor(() => expect(h.record.held).toContain('bash'), { timeout: 5000, interval: 20 })
     await sleep(300)
-    expect(commandsIn(cwd)).toEqual(['prompt'])
-    h.sendNow()
+    const steeredAt = Date.now()
+    h.steer('use pnpm')
+    await vi.waitFor(() => expect(commandsIn(cwd)).toContain('abort'), { timeout: 5000, interval: 20 })
+    expect(firstAt(cwd, (entry) => entry.command === 'abort')! - steeredAt).toBeLessThan(2000)
     const result = await pending
     expect(result.aborted).toBeFalsy()
+    expect(h.record.held).toEqual([])
     expect(h.record.forced).toHaveLength(1)
     expect(commandsIn(cwd)).toEqual(['prompt', 'clear_queue', 'abort', 'prompt'])
     expect(h.record.accepted).toEqual(['use pnpm'])
@@ -987,11 +998,11 @@ describe('Pi cuts in (stub Pi)', () => {
 
     it('Stop while the cut waits for a native steer’s answer gives the steers back once; nothing starts after it', async () => {
       const { engine, project } = setup()
-      const cwd = project('p', { onPrompt: 'script', steerDelayMs: 1000, runs: [[toolStep(), { forever: true }], [{ text: 'answered' }]] })
+      const cwd = project('p', { onPrompt: 'script', steerDelayMs: 1000, runs: [[gapStep(), { forever: true }], [{ text: 'answered' }]] })
       const t = turn(cwd)
       const h = onHold(t)
       const pending = run(engine, t)
-      await h.toolStarted()
+      await h.toolEnded()
       h.steer('use pnpm')
       await vi.waitFor(() => expect(commandsIn(cwd)).toContain('steer'), { timeout: 10_000 })
       await sleep(200)
@@ -1215,7 +1226,7 @@ describe('Pi cuts in (stub Pi)', () => {
       expect(h.record.closed.get('call_1')).toBeDefined()
     }, 30_000)
 
-    it('Send now while a call waits for the writer cuts at once: the abort does not wait for the writer', async () => {
+    it('a person’s steer while a call waits for the writer cuts at once: the abort does not wait for the writer', async () => {
       const { engine, project } = setup()
       const cwd = project('p', { onPrompt: 'script', runs: [[{ tools: [gated('npm run build')] }], [{ text: 'answered' }]] })
       const t = turn(cwd, { permissionMode: 'full' })
@@ -1224,14 +1235,14 @@ describe('Pi cuts in (stub Pi)', () => {
       const h = onHold(t)
       const pending = run(engine, t)
       await h.toolStarted()
-      h.steer('skip the build')
-      await vi.waitFor(() => expect(h.record.held).toContain('bash'), { timeout: 5000, interval: 20 })
       await sleep(200)
-      const nowAt = Date.now()
-      h.sendNow()
+      const steeredAt = Date.now()
+      h.steer('skip the build')
+      await vi.waitFor(() => expect(promptsIn(cwd)).toEqual(['hi', 'skip the build']), { timeout: 5000, interval: 20 })
+      expect(Date.now() - steeredAt).toBeLessThan(5000)
       const result = await pending
       expect(result.aborted).toBeFalsy()
-      expect(Date.now() - nowAt).toBeLessThan(5000)
+      expect(h.record.held).toEqual([])
       expect(promptsIn(cwd)).toEqual(['hi', 'skip the build'])
     }, 30_000)
 
@@ -1331,11 +1342,11 @@ describe('Pi cuts in (stub Pi)', () => {
 
     it('Pi reads the steer and settles while the cut waits for the steer’s answer: the turn settles, with no abort', async () => {
       const { engine, project } = setup()
-      const cwd = project('p', { onPrompt: 'script', steerDelayMs: 1500, runs: [[toolStep(), { text: 'one two three four five six', deltaMs: 40 }]] })
+      const cwd = project('p', { onPrompt: 'script', steerDelayMs: 1500, runs: [[gapStep(), { text: 'one two three four five six', deltaMs: 40 }]] })
       const t = turn(cwd)
       const h = onHold(t)
       const pending = run(engine, t)
-      await h.toolStarted()
+      await h.toolEnded()
       h.steer('use pnpm')
       const result = await pending
       expect(result.aborted).toBeFalsy()
@@ -1344,11 +1355,11 @@ describe('Pi cuts in (stub Pi)', () => {
       expect(h.record.returned).toEqual([])
     }, 30_000)
 
-    it('a retry starts while the cut clears and a call is announced: the cut gives up and the turn runs again, so the steer goes in at the step’s end', async () => {
+    it('a retry starts while the cut clears and a call is announced: the cut goes on and stops the call, and the steer goes in once', async () => {
       const { engine, project } = setup()
       const cwd = project('p', {
         onPrompt: 'script', clearDelayMs: 700,
-        runs: [[{ fail: true, delayMs: 300 }, { tools: [{ name: 'bash', args: { command: 'npm test' }, runMs: 900 }] }, { forever: true }], [{ text: 'answered' }]]
+        runs: [[{ fail: true, delayMs: 300 }, { tools: [{ name: 'bash', args: { command: 'npm test' }, runMs: 5000 }] }, { forever: true }], [{ text: 'answered' }]]
       })
       const t = turn(cwd)
       const h = onHold(t)
@@ -1357,22 +1368,28 @@ describe('Pi cuts in (stub Pi)', () => {
       h.steer('use pnpm')
       const result = await pending
       expect(result.aborted).toBeFalsy()
-      expect(commandsIn(cwd)).toEqual(['prompt', 'clear_queue', 'steer', 'clear_queue', 'abort', 'prompt'])
+      expect(commandsIn(cwd)).toEqual(['prompt', 'clear_queue', 'abort', 'prompt'])
+      // The call started before the abort, which ended it long before its own end.
+      const abortAt = firstAt(cwd, (entry) => entry.command === 'abort')!
+      expect(abortAt).toBeGreaterThanOrEqual(firstAt(cwd, (entry) => entry.event === 'tool_execution_start')!)
+      expect(abortAt - firstAt(cwd, (entry) => entry.event === 'tool_execution_start')!).toBeLessThan(3000)
+      expect(h.record.returned).toEqual([])
       expect(promptsIn(cwd)).toEqual(['hi', 'use pnpm'])
       expect(h.record.accepted).toEqual(['use pnpm'])
     }, 30_000)
 
-    it('Send now whose clear_queue lands as Pi starts a compaction waits for it: a steer never stops a compaction', async () => {
+    it('a person’s steer whose clear_queue lands as Pi starts a compaction waits for it: a steer never stops a compaction', async () => {
       const { engine, project } = setup()
       const cwd = project('p', { onPrompt: 'script', clearDelayMs: 400, runs: [[toolStep(600), { compactMs: 1000, forever: true }], [{ text: 'answered' }]] })
       const t = turn(cwd)
       const h = onHold(t)
       const pending = run(engine, t)
       await h.toolStarted()
-      h.steer('use pnpm')
-      await vi.waitFor(() => expect(h.record.held).toContain('bash'), { timeout: 5000, interval: 20 })
       await sleep(250)
-      h.sendNow()
+      h.steer('use pnpm')
+      // The cut starts while the tool runs; Pi answers its clear_queue once the tool ended and the compaction began.
+      await vi.waitFor(() => expect(commandsIn(cwd)).toContain('clear_queue'), { timeout: 2000, interval: 20 })
+      expect(firstAt(cwd, (entry) => entry.command === 'clear_queue')!).toBeLessThan(firstAt(cwd, (entry) => entry.event === 'compaction_start') ?? Infinity)
       const result = await pending
       expect(result.aborted).toBeFalsy()
       expect(stubLog(cwd).filter((entry) => entry.event === 'compaction_end' && entry.aborted)).toEqual([])
