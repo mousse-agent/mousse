@@ -550,6 +550,8 @@ export interface Listener {
 export interface InboundInfo {
   remoteAddress?: string
   transport: TransportId
+  /** Accepted on the automatic LAN listener: `remoteAddress` is the peer's address on the local network. */
+  lan?: boolean
 }
 
 /** Who a dial is for. Only transports that must check local permission for a peer read it. */

@@ -20,6 +20,7 @@ import type {
   NodeId,
   PresenceMessage,
   Roster,
+  Route,
   RoutesRecord,
   Signed,
   StoredRecord,
@@ -85,6 +86,7 @@ import {
   type ConnectionEvent,
   type ConnectionState
 } from './store/connections'
+import { SqliteLanMemory, lanAddress } from './store/lanMemory'
 import { SqliteBridgeAudit } from './store/audit'
 import { SqliteRemoteLists } from './store/remoteLists'
 import { FileBlobStore } from './store/blobs'
@@ -208,6 +210,12 @@ interface NetConfiguration {
 }
 /** Transports that carry a session through a relay server rather than straight to the peer. */
 const RELAY_TRANSPORTS = new Set(['relay', HOSTED_RELAY_TRANSPORT])
+/**
+ * Where a device's last address is dialled: after the live LAN hints (-10), which are fresher, and before the signed
+ * routes (0 and up), since on the same network it is the likeliest to answer. A dead one delays the next only by the
+ * dial stagger.
+ */
+const LAST_ADDRESS_PRIORITY = -5
 /** The other computer’s own answer to a join, as `EnrollmentQuarantine` marks it. */
 const fromPeer = (error: NetError) => (error.details as { from?: unknown } | undefined)?.from === 'peer'
 /** How long a join waits for its first session with the computer it joined through. */
@@ -400,6 +408,9 @@ export class NetService {
   private accountSyncedFor?: string
   private domain?: NetDomainComposition
   private presenceStore?: PeerPresence
+  private lanMemoryStore?: SqliteLanMemory
+  /** Sessions accepted on the automatic LAN listener, and the peer's address there. */
+  private readonly lanInbound = new WeakMap<object, string>()
   private presenceTimer?: { cancel(): void }
   /** How each session was carried, for the device list; only own-device sessions are recorded. */
   private readonly sessionLinks = new WeakMap<object, PeerLink>()
@@ -1585,6 +1596,7 @@ export class NetService {
     this.domainClosed = false
     this.tunnels = undefined
     this.presenceStore = undefined
+    this.lanMemoryStore = undefined
     this.config = defaults()
     this.lastError = undefined
     // Mousse ID's session was bound to the closed runtime; it starts again from the next one.
@@ -1770,8 +1782,10 @@ export class NetService {
         const nodes = new Set(
           roster.nodes.map((row) => rt.identity.verifySigned<NodeDelegation>(row, root).subject)
         )
+        // Beacons go to and are accepted from only devices a session with would be admitted; a revoked one has no
+        // current delegation below. Discovery reads this list again on every tick, so a record change applies there.
         return [...nodes]
-          .filter((node) => node !== self.node)
+          .filter((node) => node !== self.node && this.admitted({ node, user: self.user }))
           .flatMap((node) => {
             try {
               const peer = this.currentNode(node)
@@ -1785,6 +1799,10 @@ export class NetService {
               return []
             }
           })
+      },
+      lanPort: {
+        kept: () => this.lanMemory().port(),
+        keep: (port) => this.lanMemory().keepPort(port)
       },
       onLanChanged: () => {
         this.refreshPeers()
@@ -1818,7 +1836,9 @@ export class NetService {
           raw.destroy()
           return
         }
-        this.track(this.accept(raw, deadline, info.transport)).catch((error) => {
+        this.track(
+          this.accept(raw, deadline, info.transport, info.lan ? info.remoteAddress : undefined)
+        ).catch((error) => {
           this.lastError = error instanceof NetError ? error.code : 'internal'
           this.emit()
         })
@@ -2056,7 +2076,13 @@ export class NetService {
       throw error
     }
   }
-  private async accept(raw: Duplex, deadline: number, carrier?: string): Promise<void> {
+  private async accept(
+    raw: Duplex,
+    deadline: number,
+    carrier?: string,
+    /** The peer's source address, when it dialled the automatic LAN listener. */
+    lanRemote?: string
+  ): Promise<void> {
     try {
       this.assertEnabled()
       const rt = this.requireEnrolled()
@@ -2090,7 +2116,7 @@ export class NetService {
             : undefined,
           onEnrolled: () => this.markAuthenticated(raw),
           normalSession: (secure, mux, context) =>
-            this.makeSession(secure, mux, context, raw, { carrier })
+            this.makeSession(secure, mux, context, raw, { carrier, lanRemote })
         })
         this.gateways.add(gateway)
         try {
@@ -2119,6 +2145,8 @@ export class NetService {
       /** The only node this connection may authenticate as (a WebRTC ticket's node). */
       node?: NodeId
       onAuthenticated?: () => void
+      /** The peer's source address on the automatic LAN listener. */
+      lanRemote?: string
     }
   ): NetSyncSession {
     this.assertEnabled()
@@ -2221,6 +2249,13 @@ export class NetService {
       localRoutes: () => this.signedRoutes(),
       onPeerRoutes: (routes, peer) =>
         this.adoptRoutes(routes, peer.node, peer.user, peer.delegation),
+      // Each side tells the other its LAN listener port, unsigned. The side that accepted on its own LAN listener
+      // keeps the peer's source address with that port, so it can dial back after both restart.
+      lanPort: () => this.transport?.lanPort(),
+      onPeerLanPort: (port, peer) => {
+        const remote = this.lanInbound.get(session)
+        if (remote) this.rememberAddress(peer.node, lanAddress(remote, port))
+      },
       // Two members of this user's list open a session only once each has connected the other; the keeper and a
       // member always do, and carry only control traffic until connected. The routes above are kept either way.
       admitPeer: (peer) => {
@@ -2241,6 +2276,7 @@ export class NetService {
     })
     this.sessions.add(session)
     if (inbound) this.sessionLinks.set(session, { direction: 'in', transport: inbound.carrier })
+    if (inbound?.lanRemote) this.lanInbound.set(session, inbound.lanRemote)
     session.onClosed((error) => {
       this.sessions.delete(session)
       // Closing a carrier does not prove its async source/provider jobs settled.
@@ -2454,7 +2490,12 @@ export class NetService {
       } catch {
         continue
       }
-      if (!routes.routes.length && !this.transport?.lanRoutes(node).length) continue
+      if (
+        !routes.routes.length &&
+        !this.transport?.lanRoutes(node).length &&
+        !this.lastAddressRoute(node, []).length
+      )
+        continue
       const supervisor = new SyncSupervisor({
         identity: rt.identity,
         clock: this.clock,
@@ -2471,12 +2512,17 @@ export class NetService {
             parseProtocolJson(Buffer.from(String(held.signed))) as Signed,
             latest.keys.sign
           )
+          const hints = this.transport?.lanRoutes(node) ?? []
           const result = await manager.connect(
             {
               node,
               user: self.user,
               transportKey: latest.keys.transport,
-              routes: [...(this.transport?.lanRoutes(node) ?? []), ...fresh.routes].slice(0, 32)
+              routes: [
+                ...hints,
+                ...this.lastAddressRoute(node, [...hints, ...fresh.routes]),
+                ...fresh.routes
+              ].slice(0, 32)
             },
             signal
           )
@@ -2490,6 +2536,8 @@ export class NetService {
           signal.addEventListener('abort', abort, { once: true })
           session.onClosed(() => signal.removeEventListener('abort', abort))
           await session.opened
+          // A LAN hint or a direct route (never a relay) is where the next dial starts, even with no beacons.
+          if (result.route.transport === 'direct') this.rememberAddress(node, result.route.address)
           return session
         }
       })
@@ -3939,6 +3987,7 @@ export class NetService {
           live.add(delegation.subject)
       }
       this.presences().prune(live)
+      this.lanMemory().prune(live)
     } catch {
       // Presence is a convenience; pruning runs again on the next roster change.
     }
@@ -3955,6 +4004,30 @@ export class NetService {
     const db = this.runtime().db
     if (this.presenceStore?.db !== db) this.presenceStore = new PeerPresence(db, this.clock)
     return this.presenceStore
+  }
+  private lanMemory(): SqliteLanMemory {
+    const db = this.runtime().db
+    if (this.lanMemoryStore?.db !== db) this.lanMemoryStore = new SqliteLanMemory(db, this.clock)
+    return this.lanMemoryStore
+  }
+  /** The last address a session with `node` opened over, as a dial candidate after the live LAN hints. */
+  private lastAddressRoute(node: NodeId, others: readonly Route[]): Route[] {
+    try {
+      const address = this.lanMemory().lastAddress(node)
+      if (!address || others.some((route) => route.address === address)) return []
+      return [{ transport: 'direct', address, priority: LAST_ADDRESS_PRIORITY }]
+    } catch {
+      return []
+    }
+  }
+  /** Remembers where a session with one of this user's devices opened, unless it came through a relay. */
+  private rememberAddress(node: NodeId, address: string | undefined): void {
+    if (!address) return
+    try {
+      this.lanMemory().remember(node, address)
+    } catch {
+      // A hint only: the next session writes it again.
+    }
   }
   /**
    * What this computer knows about a device beyond its roster entry: version, how it is connected

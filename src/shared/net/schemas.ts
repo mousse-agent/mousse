@@ -666,6 +666,7 @@ export const wireMessageSchemas = {
   }),
   revoked: message('revoked', { subject }),
   rosterUpdate: message('rosterUpdate', { roster: signed }),
+  'lan.port': message('lan.port', { port: integer(1, 65535) }),
   'enroll.request': message('enroll.request', {
     invite: id('inv'),
     node: id('nod'),

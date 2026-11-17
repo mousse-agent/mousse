@@ -64,6 +64,14 @@ export interface ManagedTransportStatus {
   detail?: string
 }
 
+function kept(store?: { kept(): number | undefined }): number | undefined {
+  try {
+    return store?.kept()
+  } catch {
+    return undefined
+  }
+}
+
 /** Profiles select listeners; verified remote endpoints remain dialable without local tunnel accounts/binaries. */
 export class ProfileTransports {
   readonly admission: PreauthAdmission
@@ -85,6 +93,8 @@ export class ProfileTransports {
       onChanged?(): void
       lanPeers?(): LanPeer[]
       onLanChanged?(): void
+      /** Where the automatic LAN listener's port is kept across restarts. */
+      lanPort?: { kept(): number | undefined; keep(port: number): void }
       relayRendezvous?: RelayRendezvous
       addons?: TransportAddon[]
       /** Mousse ID relay carriers; without them hosted relay routes are refused. */
@@ -190,11 +200,13 @@ export class ProfileTransports {
       const lan = new LanDiscovery({
         clock: this.options.clock,
         peers: this.options.lanPeers,
-        changed: () => this.options.onLanChanged?.()
+        changed: () => this.options.onLanChanged?.(),
+        port: kept(this.options.lanPort)
       })
       this.lan = lan
       try {
-        await lan.start((raw, info) => {
+        await lan.start((raw, inbound) => {
+          const info = { ...inbound, lan: true }
           if (this.stopping) {
             raw.destroy()
             return
@@ -208,6 +220,14 @@ export class ProfileTransports {
           raw.once('close', () => this.sockets.delete(raw))
           accept(raw, info, deadline)
         })
+        const port = lan.listeningPort()
+        if (port && port !== kept(this.options.lanPort)) {
+          try {
+            this.options.lanPort?.keep(port)
+          } catch {
+            // Not kept this time: the next start chooses again, and peers learn the port by beacon or the next link.
+          }
+        }
       } catch {
         await lan.teardown()
         this.lan = undefined
@@ -430,6 +450,10 @@ export class ProfileTransports {
   }
   lanRoutes(node: import('../../../shared/net').NodeId): Route[] {
     return this.lan?.routes(node) ?? []
+  }
+  /** The automatic LAN listener's port, told to peers on a session. */
+  lanPort(): number | undefined {
+    return this.stopping ? undefined : this.lan?.listeningPort()
   }
   markAuthenticated(raw: Duplex): void {
     this.lan?.markAuthenticated(raw)
