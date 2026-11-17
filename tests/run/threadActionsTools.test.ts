@@ -8,7 +8,7 @@ import type { Thread } from '../../src/shared/types'
 import type { AgentRunCommandResult, AgentSendResult, McpCallRequest } from '../../src/mms/run/mcp/appTools'
 import { AGENT_MESSAGE_END, agentMessage, agentMessageText } from '../../src/mms/run/mcp/appTools/agentMessage'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
-import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, THREAD_RESULT_MAX_CHARS, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, THREAD_RESULT_MAX_CHARS } from '../../src/mms/run/mcp/appTools/thread'
 import type { RunPause } from '../../src/mms/run/types'
 import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -238,30 +238,11 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(sent[0].options.clientRequestId).not.toBe('thread_send:target:retry-1')
     })
 
-    it(`is capped at ${THREAD_SEND_MAX_PER_RUN} messages per caller run: a loop of sends is cut off, retries and failures do not count, another run starts fresh`, async () => {
-      const { call, denied, answers, host, sent, fx, turns, runs, callerRun } = await world()
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1)
+    it('has no count of sends per run: one run sends 50 messages and none is refused', async () => {
+      const { call, host } = await world()
+      for (let index = 0; index < 50; index += 1)
         expect((await call('thread_send', { threadId: 'target', content: `m${index}` })).isError, `send ${index}`).toBeUndefined()
-      const over = await denied(call('thread_send', { threadId: 'target', content: 'one too many' }))
-      expect(over).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'sends_per_run_exceeded', limit: THREAD_SEND_MAX_PER_RUN } })
-      expect(over!.message).toContain(`limited to ${THREAD_SEND_MAX_PER_RUN}`)
-      expect(host.sendToThread).toHaveBeenCalledTimes(THREAD_SEND_MAX_PER_RUN)
-      expect(sent).toHaveLength(THREAD_SEND_MAX_PER_RUN)
-
-      // A new run of the same thread has its own count (a new turn, not the loop of the old one).
-      fx.finish(callerRun.runId, 'done')
-      const next = await fx.runningRun('caller')
-      turns.register(appTurn({ threadId: 'caller', runId: next.runId }))
-      runs.caller = next.runId
-      // Replays and refused sends are not sends: they leave the budget alone.
-      answers.send = async () => ({ runId: 'run:first', sequence: 10, queued: false, replayed: true })
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN + 5; index += 1) await call('thread_send', { threadId: 'target', content: 'retry' })
-      answers.send = async () => { throw refusal('questions_pending') }
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN + 5; index += 1) await call('thread_send', { threadId: 'target', content: 'busy' }).catch(() => undefined)
-      answers.send = async () => ({ runId: 'run:fresh', sequence: 10, queued: false, replayed: false })
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1)
-        expect((await call('thread_send', { threadId: 'target', content: `n${index}` })).isError, `fresh ${index}`).toBeUndefined()
-      expect(await denied(call('thread_send', { threadId: 'target', content: 'over again' }))).toMatchObject({ details: { conflict: 'sends_per_run_exceeded' } })
+      expect(host.sendToThread).toHaveBeenCalledTimes(50)
     })
 
     it('validates its input before it reaches the host', async () => {
@@ -338,21 +319,8 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
   })
 
   describe('limits and boundaries (review of PR 3)', () => {
-    it('a retry of an earlier send is answered with its first result after the run has used its budget; a new send is still refused', async () => {
-      const { call, denied, host, answers } = await world()
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1) await call('thread_send', { threadId: 'target', content: `m${index}`, clientRequestId: `req-${index}` })
-      // The host knows what `req-19` sent; it knows nothing of `brand-new`.
-      host.earlierSend = vi.fn((_threadId: string, key: string) => key === 'thread_send:caller:req-19' ? { runId: 'run:first', sequence: 3, queued: true, replayed: true } : undefined)
-      const retry = await call('thread_send', { threadId: 'target', content: 'm19', clientRequestId: 'req-19' })
-      expect(JSON.parse(retry.text)).toEqual({ threadId: 'target', runId: 'run:first', sequence: 3, queued: true, delivery: 'queued', replayed: true })
-      const fresh = await denied(call('thread_send', { threadId: 'target', content: 'one more', clientRequestId: 'brand-new' }))
-      expect(fresh).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'sends_per_run_exceeded' } })
-      expect(host.sendToThread).toHaveBeenCalledTimes(THREAD_SEND_MAX_PER_RUN)
-      expect(answers).toBeDefined()
-    })
-
     // Each limit the owner enforces has its own code and says which limit it is and what to do (one "limit reached" sends
-    // agents looking for the wrong cause). The send-per-run count is the tool's own, tested above.
+    // agents looking for the wrong cause).
     it.each([
       ['agent_hops_exceeded', /agent messages in a row/],
       ['agent_queue_full_per_sender', new RegExp(`${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread .*the most one thread may have`)],

@@ -12,7 +12,6 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BOT_MESSAGE_PREFIX, McpToolError, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
-import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { AGENT_MESSAGE_MAX_HOPS } from '../../src/mms/orchestrator/OrchestratorService'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { RunSettings } from '../../src/shared/settings'
@@ -233,13 +232,13 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.d.engine.listRuns(full.id, { limit: 5 })).toEqual([])
   })
 
-  it(`has no count per chat turn or per day: one turn starts more than ${THREAD_CREATE_MAX_PER_RUN} threads and sends more than ${THREAD_SEND_MAX_PER_RUN} messages`, async () => {
+  it('has no count per chat turn or per day: one turn starts 25 threads and sends 21 messages', async () => {
     const w = world()
     // More than a day's worth under the old daily cap, all in one chat turn.
     const starts = 25
     for (let index = 0; index < starts; index += 1) await w.create(`a${index}`, { title: `A${index}`, firstMessage: undefined, mode: undefined })
     expect(w.d.store.listAllThreads().filter((thread) => thread.createdByThreadId === w.chat.id)).toHaveLength(starts)
-    const targets = Array.from({ length: THREAD_SEND_MAX_PER_RUN + 1 }, (_, index) => w.d.store.createThread(`Target ${index}`, w.project.id))
+    const targets = Array.from({ length: 21 }, (_, index) => w.d.store.createThread(`Target ${index}`, w.project.id))
     const sent: string[] = []
     for (const [index, target] of targets.entries()) sent.push((await w.send(target.id, `m${index}`)).runId)
     expect(new Set(sent).size).toBe(targets.length)
@@ -276,7 +275,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     }
   })
 
-  it(`has no cap at once and no limit on agent messages in a row: more than ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} of its threads work at once, and a turn deep in a chain still starts and messages threads`, async () => {
+  it('has no cap at once and no limit on agent messages in a row: 11 of its threads work at once, and a turn deep in a chain still starts and messages threads', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const w = world({ script: async () => { await gate; return 'done' } })
@@ -284,9 +283,9 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const deep = w.d.engine.store.createRun({ threadId: w.chat.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: AGENT_MESSAGE_MAX_HOPS } })
     w.turnRun('act-deep', deep.runId)
     const made: AgentCreatedThread[] = []
-    for (let index = 0; index <= THREAD_CREATE_MAX_ACTIVE_PER_THREAD; index += 1) made.push(await w.create(`busy${index}`, { title: `Busy ${index}` }))
+    for (let index = 0; index < 11; index += 1) made.push(await w.create(`busy${index}`, { title: `Busy ${index}` }))
     const runs = made.map((thread) => (thread.firstMessage as { sent: true; runId: string }).runId)
-    // Every one of them is working now, past the agents' cap of ten at once.
+    // Every one of them is working now.
     expect(runs.filter((runId) => !['completed', 'failed', 'cancelled', 'interrupted'].includes(w.d.engine.getRun(runId)?.status ?? ''))).toHaveLength(runs.length)
     const target = w.d.store.createThread('Target', w.project.id)
     const sent = await w.send(target.id, 'deep-send')

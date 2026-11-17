@@ -1,8 +1,8 @@
 /**
  * `thread_create` end to end (docs/run-engine/SPEC.md §15.1): a real `OrchestratorService`, Run Engine, effect
  * worker, thread store and Mousse MCP server, with a scripted provider runtime whose turns call the tool over
- * HTTP. Covers what the new thread is (project, workspace, model, mode, creator), the first
- * message, the hop chain and the per-run cap, and a creation that is retried, raced, or interrupted by a crash at
+ * HTTP. Covers what the new thread is (project, workspace, model, mode, creator), the first message, the hop chain,
+ * that a run has no count of threads it creates, and a creation that is retried, raced, or interrupted by a crash at
  * each step.
  */
 import { execFileSync } from 'node:child_process'
@@ -17,7 +17,6 @@ import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, T
 import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import { heuristicTitle } from '../../src/shared/threadTitleText'
-import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { PermissionMode } from '../../src/shared/permissionMode'
@@ -502,59 +501,30 @@ describe('thread_create end to end (SPEC §15.1)', () => {
     })
   })
 
-  describe('the cap per run', () => {
-    it(`a run creates ${THREAD_CREATE_MAX_PER_RUN} threads and is refused the next`, async () => {
-      const results: Rpc[] = []
-      const w = world(async (input, mcp) => {
-        if (input.threadId !== w.parent.id) return 'ok'
-        for (let index = 0; index <= THREAD_CREATE_MAX_PER_RUN; index += 1) results.push(await w.create(mcp!, { clientRequestId: `cap-${index}` }))
-        return 'ok'
-      })
-      await w.attach()
-      await w.run(w.parent.id, GO, 'go')
-      expect(results.slice(0, THREAD_CREATE_MAX_PER_RUN).every((reply) => !reply.error && !reply.result?.isError)).toBe(true)
-      expect(refusal(results.at(-1)!)).toMatch(new RegExp(`limited to ${THREAD_CREATE_MAX_PER_RUN} threads per run`))
-      expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_PER_RUN)
-    })
-  })
-
-  describe('the cap on launched threads that are still working', () => {
-    it('holds across runs of the creator, unlike the per-run count: a fresh run is refused while enough of its launched threads have work', async () => {
+  describe('how many', () => {
+    it('has no count per run and none on launched threads still working: a run creates 12, all get work, and the next run creates more', async () => {
       const replies: Rpc[] = []
       const w = world(async (input, mcp) => {
         if (input.threadId !== w.parent.id) return 'ok'
+        const count = input.prompt === 'run-a' ? 12 : 1
         // Bare threads: the test gives each one queued work, so no turn occupies the worker.
-        for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) replies.push(await w.create(mcp!, { clientRequestId: `${input.prompt}-${index}` }))
+        for (let index = 0; index < count; index += 1) replies.push(await w.create(mcp!, { clientRequestId: `${input.prompt}-${index}` }))
         return 'ok'
       })
       await w.attach()
-      const giveWork = async () => {
-        for (const launched of w.launchedBy(w.parent.id)) {
-          if (w.d.engine.listRuns(launched.id).length) continue
-          const queued = await w.d.engine.dispatch({ kind: 'send', threadId: launched.id, clientRequestId: `work:${launched.id}`, source: 'gui' })
-          if (queued.status !== 'accepted') throw new Error('send rejected')
-        }
-      }
-      // Two runs of the creator, five threads each: ten launched threads have a queued run.
       await w.run(w.parent.id, 'run-a', 'go-a')
-      await giveWork()
+      for (const launched of w.launchedBy(w.parent.id)) {
+        const queued = await w.d.engine.dispatch({ kind: 'send', threadId: launched.id, clientRequestId: `work:${launched.id}`, source: 'gui' })
+        if (queued.status !== 'accepted') throw new Error('send rejected')
+      }
       await w.run(w.parent.id, 'run-b', 'go-b')
-      await giveWork()
+      expect(replies).toHaveLength(13)
       expect(replies.every((reply) => !reply.error && !reply.result?.isError)).toBe(true)
-      expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
-      // A third run has a fresh per-run count and is still refused: the launched threads have work.
-      replies.length = 0
-      await w.run(w.parent.id, 'run-c', 'go-c')
-      expect(refusal(replies[0])).toMatch(/still working/)
-      expect(refusalOfResponse(replies[0])).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'creation_limit' }, refused: { retry: 'later' } })
-      expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
-      // Once their work is over the creator may launch again.
-      for (const run of w.d.engine.store.listNonTerminalRuns().filter((entry) => entry.threadId !== w.parent.id)) w.d.engine.markTerminal(run.runId, 'cancelled')
-      replies.length = 0
-      await w.run(w.parent.id, 'run-d', 'go-d')
-      expect(replies.slice(0, THREAD_CREATE_MAX_PER_RUN).every((reply) => !reply.error && !reply.result?.isError)).toBe(true)
+      expect(w.launchedBy(w.parent.id)).toHaveLength(13)
     })
+  })
 
+  describe('a person\'s Stop', () => {
     it('a person\'s Stop of the creator stops the launched threads that run work an agent started, and leaves one a person is working in', async () => {
       const release = deferred()
       const seen: { made?: AgentCreatedThread[] } = {}

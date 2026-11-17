@@ -91,7 +91,7 @@ import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/Com
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
 import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
-import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
+import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation } from '../run/mcp/appTools/thread'
 import { botMessage } from '../run/mcp/appTools/agentMessage'
 
 /**
@@ -144,7 +144,6 @@ import { REMOTE_THREAD_COMMAND, remoteThreadFingerprint, remoteThreadRefusal } f
 import type { RemoteLaunchRecord } from '../run/delegation/remoteLaunches'
 import { RemoteSubagents } from './RemoteSubagents'
 import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
-import { MAX_REMOTE_MINUTES } from '../run/mcp/appTools/delegation'
 import { isRunningSubagent, isWorkingSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
 import type { SettleNoticeItem } from '../../shared/settleNotice'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
@@ -1119,10 +1118,16 @@ class LeaseWaitGone extends Error {}
 const SHARED_READER_POLICY: AgentWorkspacePolicy = { version: 1, workspace: 'shared', access: 'read-only' }
 /** What a read-only subagent's own subagents must be, since authority only narrows down the tree. */
 const READ_ONLY_CALLER_MESSAGE = 'You are a read-only subagent, so your own subagents must be read-only too: start them with readOnly true.'
-/** Most named assignments one `create_subagents` call may start. */
-const NAMED_BATCH_LIMIT = 8
-/** How long a remote subagent may run when `delegate_task` gives no `maxMinutes`: as long as a local turn may. */
-const DEFAULT_REMOTE_MINUTES = 360
+
+/** The latest time a JavaScript `Date` holds; a `maxMinutes` past it sets no deadline. */
+const MAX_DATE_MS = 8.64e15
+
+/** When a remote subagent given `maxMinutes` is stopped; null without one: it runs until it ends or is stopped. */
+function remoteDeadlineAt(maxMinutes: number | undefined, now = Date.now()): string | null {
+  if (maxMinutes === undefined) return null
+  const at = now + maxMinutes * 60_000
+  return Number.isFinite(at) && at <= MAX_DATE_MS ? new Date(at).toISOString() : null
+}
 
 /** In-process result of a `turn.start` effect, settled by its executor. */
 interface TurnResult {
@@ -4459,13 +4464,11 @@ export class OrchestratorService extends EventEmitter {
       recordAgentAction: (target, actor, action, details) => this.recordAgentAction(target, actor, action, details),
       showAgentAction: (target, actor, summary, options) => this.showAgentAction(target.threadId, actor, summary, options),
       sendToThread: (threadId, input, options) => this.sendToThreadAsAgent(threadId, input, options),
-      earlierSend: (threadId, clientRequestId) => this.earlierAgentSend(threadId, clientRequestId),
       watchSettle: (input) => {
         if (!this.settleNotices) throw new Error('Mousse cannot watch threads without the run engine.')
         return { watchId: this.settleNotices.watch(input).watchId }
       },
       createThread: (input, options) => this.createThreadAsAgent(input, options),
-      creationStarted: (clientRequestId) => this.agentCreationStarted(clientRequestId),
       createRemoteThread: (input, options) => this.createRemoteThreadAsAgent(input, options),
       ...(this.remoteThreads ? { remoteThreads: this.remoteThreadsHost(this.remoteThreads) } : {}),
       noteOnThread: (threadId, text, launched) => this.noteAgentLaunch(threadId, text, launched),
@@ -4867,12 +4870,6 @@ export class OrchestratorService extends EventEmitter {
     // A worktree needs Git: on any other project a "new worktree" thread would write in the project folder, beside others.
     if (input.workspace === 'new_worktree' && !gitBacked)
       throw new Error('workspace "new_worktree" needs a Git project: this project is not backed by a Git repository, so a thread there would work in the project folder. Use workspace "project". No thread was created.')
-    // However many runs this thread has made, only so many of its launched threads may be working at once. The owner's
-    // bot is not held to it: it starts as many as the owner's work needs.
-    const busy = options.bot ? undefined : new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
-    const working = busy ? this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && busy.has(thread.id)).length : 0
-    if (busy && working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
-      throw new McpToolError('mousse_conflict', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish (thread_wait) before launching more.`, { conflict: 'creation_limit', working })
     // A bot's thread never takes the bot's own model: the one it names, or the profile's default.
     const modelOverride = this.agentThreadModel(input, options.actor.threadId, project.id, options.bot !== undefined)
     // The thread runs no wider than its creator, and a looser default later cannot widen it: its mode is the stricter of
@@ -5034,17 +5031,11 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** The key has a stored creation: a retry finishes that one thread and needs no new place under the caller's cap. */
-  private agentCreationStarted(clientRequestId: string): boolean {
-    const engine = this.requireRunEngine()
-    return readAgentThreadReceipt(engine.store.getReceipt(clientRequestId)) !== undefined || engine.remoteLaunches.get(clientRequestId) !== null
-  }
-
   /**
    * `thread_create` with `computer` (issue #1160): a top-level thread on another of the user's computers, in its project
    * that is this thread's repository. Everything that can be checked here is checked before anything is recorded: the
    * caller may reach other computers (not private, not itself started from another device, the switch on and that
-   * computer ticked), the computer is online, knows the agent mark and has the repository, the caps and the hop count.
+   * computer ticked), the computer is online, knows the agent mark and has the repository, and the hop count.
    * Then the launch is recorded with its receipt, and `RemoteThreadLaunches` runs it: a retry with the same key continues
    * that one launch, and one a restart cut off is finished later. Refusals are returned with their code.
    */
@@ -5101,10 +5092,6 @@ export class OrchestratorService extends EventEmitter {
       const failed = remoteThreadRefusal(error, computer.name)
       return refuse(failed.code, failed.message, at)
     }
-    // However many runs this thread has made, only so many of the threads it launched may be working at once.
-    const working = await this.launchedThreadsWorking(callerThreadId)
-    if (working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
-      return refuse('creation_limit', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish before launching more.`, at)
     // The first message counts as the next agent message in a row: a launch cannot start a chain the limit would stop.
     let hops = (engine.getRun(options.actor.runId)?.outcome?.agentHops ?? 0) + 1
     if (input.firstMessage !== undefined) {
@@ -5177,18 +5164,6 @@ export class OrchestratorService extends EventEmitter {
     if (!access.computers.includes(node))
       return { code: 'computer_not_allowed', message: `The user has not turned on ${name} under "Let agents work on your other devices". They can turn it on in Settings → Agents → Agent access.` }
     return undefined
-  }
-
-  /**
-   * The threads `launcherThreadId` launched that are working: here, with a run going, and on other computers, as each
-   * computer says (a launch still open, or one that computer cannot be asked about, counts as working).
-   */
-  private async launchedThreadsWorking(launcherThreadId: string): Promise<number> {
-    const engine = this.requireRunEngine()
-    const busy = new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
-    const here = this.threadStore?.listAllThreads().filter((thread) => thread.createdByThreadId === launcherThreadId && busy.has(thread.id)).length ?? 0
-    const there = this.remoteThreads ? await this.remoteThreads.working(launcherThreadId) : 0
-    return here + there
   }
 
   /**
@@ -5506,7 +5481,7 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
-  /** Whether any of these threads launched a thread on another computer that is still working there (`launchedThreadsWorking`). */
+  /** Whether any of these threads launched a thread on another computer that is still working there (a launch still open, or one that computer cannot be asked about, counts as working). */
   private async remoteLaunchesWorking(launcherThreadIds: readonly string[]): Promise<boolean> {
     const remote = this.remoteThreads
     if (!remote) return false
@@ -7690,8 +7665,8 @@ export class OrchestratorService extends EventEmitter {
       named: {
         create: async (request, call) => ({ name: request.name, ...(await delegateTask(named(request), call)) }),
         createBatch: async (requests, call) => {
-          if (requests.length === 0 || requests.length > NAMED_BATCH_LIMIT)
-            throw new Error(`Named batches start 1–${NAMED_BATCH_LIMIT} assignments`)
+          if (requests.length === 0)
+            throw new Error('A named batch starts at least one assignment')
           const results: unknown[] = []
           for (const [index, request] of requests.entries()) {
             try {
@@ -7869,7 +7844,6 @@ export class OrchestratorService extends EventEmitter {
     const permissionMode = narrowPermissionMode(this.requestedPermissionMode(parentThreadId), this.runPermissionMode(parentRunId))
     // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
     const remoteModel = input.model?.trim() ? agentModelId(input.model.trim(), input.effort) : undefined
-    const minutes = input.maxMinutes ?? DEFAULT_REMOTE_MINUTES
     const title = input.title?.trim() || undefined
     let accepted: Awaited<ReturnType<RunEngine['requestDelegation']>>
     try {
@@ -7899,7 +7873,7 @@ export class OrchestratorService extends EventEmitter {
           projectId: farProjectId,
           instanceId: input.instanceId?.trim() || input.provider?.trim() || null,
           model: remoteModel ?? null,
-          deadlineAt: new Date(Date.now() + Math.min(minutes, MAX_REMOTE_MINUTES) * 60_000).toISOString()
+          deadlineAt: remoteDeadlineAt(input.maxMinutes)
         }
       })
     } catch (error) {
@@ -8258,7 +8232,8 @@ export class OrchestratorService extends EventEmitter {
           projectId: base?.projectId ?? null,
           instanceId: null,
           model: null,
-          deadlineAt: new Date(Date.now() + DEFAULT_REMOTE_MINUTES * 60_000).toISOString(),
+          // A follow-up has no deadline of its own: it runs until it ends or is stopped.
+          deadlineAt: null,
           remoteThreadId: first?.remoteThreadId ?? null
         }
       })

@@ -128,14 +128,13 @@ const LATER_CONFLICTS: ReadonlySet<string> = new Set([
   'agent_queue_full_per_sender',
   'agent_queue_full',
   'duplicate_message',
-  'creation_limit',
   'merge_back_pending',
   'steer_target_not_ready',
   'run_paused'
 ])
 
 /** Conflicts no retry gets past in this turn. */
-const NEVER_CONFLICTS: ReadonlySet<string> = new Set(['agent_hops_exceeded', 'sends_per_run_exceeded', 'device_limit', 'not_started_by_this_computer'])
+const NEVER_CONFLICTS: ReadonlySet<string> = new Set(['agent_hops_exceeded', 'device_limit', 'not_started_by_this_computer'])
 
 /** Codes of another computer's refusals that no retry from this one gets past. */
 const REMOTE_SCOPE_CODES: ReadonlySet<string> = new Set(['outside_agent_reach', 'computer_not_shared', 'computer_not_allowed', 'remote_from_remote', 'private_thread', 'computer_forbidden'])

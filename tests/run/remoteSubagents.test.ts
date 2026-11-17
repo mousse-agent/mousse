@@ -259,6 +259,25 @@ describe('remote subagents (issue #469)', () => {
     expect(d.engine.inbox.listPending(parent.id).length + d.engine.inbox.listByStatus(parent.id, 'delivered').length + d.engine.inbox.listByStatus(parent.id, 'acknowledged').length).toBeGreaterThan(0)
   })
 
+  it('has no default time limit and no longest one: without maxMinutes it runs on after days, and a limit past a day is kept as given', async () => {
+    const { d, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    steps['go'] = async (tools) => {
+      out.started = await startOnMac(tools, 'Mac tester')
+      out.long = await startOnMac(tools, 'Mac soak', { maxMinutes: 3000 })
+    }
+    await say('go')
+    const clock = (service as unknown as { deps: { now: () => number } }).deps
+    clock.now = () => Date.now() + 2 * 24 * 60 * 60_000
+    await service.pass()
+    expect(d.engine.delegations.get(out.started.delegationId)!.result).toBeFalsy()
+    expect(d.engine.delegations.get(out.long.delegationId)!.result).toBeFalsy()
+    expect(mac.methods()).not.toContain('orchestrator.abort')
+    clock.now = () => Date.now() + 3001 * 60_000
+    await service.pass()
+    expect(d.engine.delegations.get(out.long.delegationId)!.result!.error).toContain('3000-minute limit on Studio Mac')
+    expect(d.engine.delegations.get(out.started.delegationId)!.result).toBeFalsy()
+  })
+
   it('continues on the same thread there once the last task finished, and never merges here', async () => {
     const { d, steps, out, say, mac, service, startOnMac } = remoteWorld()
     steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
