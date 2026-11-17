@@ -2246,3 +2246,18 @@ it('six adjacent expired schedule cards fold to one quiet line, keeping the wait
   expect(transcript().textContent).toContain('Waiting for your answer')
   expect([...host.querySelectorAll('[role="note"]')].filter(el => el.textContent?.includes('expired · not sent'))).toHaveLength(1)
 })
+
+it('a chat digest line separates expired-card folds and leaves the waiting row visible', async () => {
+  fake.chats[inbox.id] = [
+    message(1, { text: 'Expired · not sent', expiredActionSchedule: 'mail' }),
+    message(2, { text: 'Older chat summarised', systemLine: true }),
+    message(3, { text: 'Expired · not sent', expiredActionSchedule: 'mail' }),
+    message(4, { text: 'Expired · not sent', expiredActionSchedule: 'mail' }),
+    message(5, { text: 'Waiting for your answer' })
+  ]
+  await open()
+  expect(transcript().textContent).toContain('Older chat summarised')
+  expect(transcript().textContent).toContain('2 expired · not sent')
+  expect(transcript().textContent).not.toContain('3 expired · not sent')
+  expect(transcript().textContent).toContain('Waiting for your answer')
+})
