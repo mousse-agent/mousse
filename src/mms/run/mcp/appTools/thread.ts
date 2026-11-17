@@ -2065,6 +2065,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         }
       },
       access: 'managesOthers',
+      // An independent thread, as `thread_fork` starts: a Plan ceiling and a read-only child do not hold it.
+      capabilities: ['threads.start'],
       class: 'mutation',
       offered: () => false,
       // A new thread has no id yet: the project is what the central check holds the caller to. A project of another
@@ -2081,7 +2083,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         // A bot names what it starts: a title the owner will see, and the first message that sets it working.
         if (bot && (typeof args.title !== 'string' || !args.title.trim())) throw new Error('Give the thread a title your owner will recognise.')
         if (bot && (typeof args.firstMessage !== 'string' || !args.firstMessage.trim())) throw new Error('Give the thread its first message: what it should do, standing on its own.')
-        // Defence in depth: a plan ceiling is held to `read` and never gets here.
+        // Defence in depth: a plan ceiling lacks `threads.start` and is refused before this.
         if (ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller cannot start threads.')
         if (args.title !== undefined && typeof args.title !== 'string') throw new Error('title must be a string')
         const title = typeof args.title === 'string' ? args.title.trim() : ''

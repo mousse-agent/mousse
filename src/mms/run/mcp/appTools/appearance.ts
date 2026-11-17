@@ -144,14 +144,14 @@ function state(appearance: AppearanceSettings): Record<string, unknown> {
 }
 
 /**
- * Refused where settings may not change: read-only and Plan turns, discovery, and subagents, a bot's included. A bot's
- * own turn may, once its owner allowed "change how Mousse looks" (the registry holds every call to that).
+ * Refused where settings may not change: read-only and Plan turns, and a bot's subagents and consults. A Mousse
+ * subagent never holds the owner's `themes` (the authority compiler refuses it). A bot's own turn may, once its owner
+ * allowed "change how Mousse looks" (the registry holds every call to that).
  */
 function mayChangeSettings(turn: AppToolTurn): Availability {
   if (!turn.settingsEnabled(THEME_SET_TOOL)) return disabledInSettings(THEME_SET_TOOL)
-  if (turn.modeFacts.readOnly || turn.modeCeiling === 'plan' || turn.discovery)
+  if (turn.modeFacts.readOnly || turn.modeCeiling === 'plan')
     return 'Changing the theme changes Mousse\'s settings, which a read-only turn cannot do. Ask the person to switch to Agent mode.'
-  if (turn.subagent) return 'Only the thread\'s own agent can change the theme, not a subagent.'
   if (turn.bot && turn.bot.role !== 'activation') return 'Only the bot itself can change how Mousse looks, not a subagent or a consult.'
   return true
 }
@@ -289,6 +289,8 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
         }
       },
       access: 'changesSettings',
+      // The owner's own look: it never passes down to a subagent.
+      capabilities: ['themes'],
       permissionKey: PERMISSION_KEYS.mousseAppearance,
       class: 'mutation',
       approvalPrompt: (args) => {

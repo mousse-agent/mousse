@@ -28,10 +28,11 @@ export function goalTools(host: AppToolHost): MousseTool[] {
     access: 'actsAsCaller',
     class: 'read',
     available: (turn) => {
-      if (turn.subagent || turn.bot || turn.discovery) return 'Only the thread\'s own agent reports on its goal.'
+      // A goal is a thread's own (`/goal`): whichever agent runs the thread reports on it, a bot's never.
+      if (turn.bot) return 'Only the thread\'s own agent reports on its goal.'
       return goals.working(turn.threadId) ? true : 'This thread has no goal that is being worked on; goal_status is only for a thread whose person set one with /goal.'
     },
-    offered: (turn) => !turn.subagent && !turn.bot && !turn.discovery && goals.working(turn.threadId),
+    offered: (turn) => !turn.bot && goals.working(turn.threadId),
     listed: (listing) => listing.botRole === undefined && !listing.readOnly,
     describe: (args) => `Goal status: ${typeof args.status === 'string' ? args.status : 'report'}`,
     handler: (args, ctx) => {

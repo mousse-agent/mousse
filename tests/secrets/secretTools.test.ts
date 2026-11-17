@@ -9,7 +9,7 @@ const [request, run] = secretTools({ secrets: () => ({}) as SecretToolHost } as 
 const [requestOff, runOff] = secretTools({} as AppToolHost)
 
 const turn = (patch: Partial<AppToolTurn> & { readOnly?: boolean }): AppToolTurn => ({
-  threadId: 't', runId: 'r', subagent: false, discovery: false, projectPath: '/p',
+  threadId: 't', runId: 'r', subagent: false, projectPath: '/p',
   ...patch,
   modeFacts: { readOnly: patch.readOnly ?? false, agent: !(patch.readOnly ?? false), build: false }
 } as AppToolTurn)
@@ -19,7 +19,6 @@ const ROWS: Array<[string, AppToolTurn, boolean, boolean]> = [
   ['Agent mode', turn({}), true, true],
   ['Plan mode: a request card only', turn({ readOnly: true }), true, false],
   ['a subagent', turn({ subagent: true }), false, false],
-  ['a discovery phase', turn({ discovery: true }), false, false],
   ['no project folder', turn({ projectPath: undefined }), true, false]
 ]
 

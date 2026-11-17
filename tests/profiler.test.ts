@@ -295,7 +295,7 @@ function toolsFor(
 
 const turn = {
   threadId: 'own-1', runId: 'run-1', turnToken: 'tok', mode: 'agent', modeFacts: { readOnly: false, agent: true, build: false }, modeCeiling: 'default',
-  subagent: false, discovery: false, actor: { kind: 'main' }, enabledSkills: [], loadedSkills: [], settingsEnabled: () => true
+  subagent: false, actor: { kind: 'main' }, enabledSkills: [], loadedSkills: [], settingsEnabled: () => true
 } as unknown as AppToolTurn
 function ctx(signal = new AbortController().signal): ToolCallContext {
   return { caller: { threadId: 'own-1', runId: 'run-1', provider: 'claude', modeCeiling: 'default', accessLevel: 'manage' }, turn, toolCallId: 'call-1', signal, transport: 'mcp' }
@@ -314,7 +314,6 @@ describe('the profiler tools', () => {
     let settings: ProfilerSettings = normalizeProfilerSettings()
     const registry = toolsFor(() => settings, service)
     const listed = () => registry.listFor({ readOnly: false, modeCeiling: 'default' }).map((tool) => tool.name).filter((name) => name.startsWith('profiler_'))
-    const offered = () => registry.offeredFor(turn).map((tool) => tool.name).filter((name) => name.startsWith('profiler_'))
     expect(listed()).toEqual([])
     expect(registry.get('profiler_overview')!.available!(turn)).toMatch(/profiler is off/)
     settings = { ...settings, enabled: true }
@@ -323,14 +322,12 @@ describe('the profiler tools', () => {
     settings = { ...settings, agentAccess: true }
     const allButHeap = PROFILER_TOOL_NAMES.filter((name) => name !== 'profiler_heap_summary')
     expect(listed()).toEqual(allButHeap)
-    expect(offered()).toEqual(allButHeap)
     expect(registry.get('profiler_heap_summary')!.available!(turn)).toMatch(/turned off/)
     settings = { ...settings, tools: { ...settings.tools, profiler_watch: false, profiler_heap_summary: true } }
     expect(listed()).toEqual(PROFILER_TOOL_NAMES.filter((name) => name !== 'profiler_watch'))
     // Off again: every tool disappears, and a runtime that cached the list is refused at the call.
     settings = { ...settings, enabled: false }
     expect(listed()).toEqual([])
-    expect(offered()).toEqual([])
     expect(registry.get('profiler_overview')!.available!(turn)).toMatch(/profiler is off/)
   })
 

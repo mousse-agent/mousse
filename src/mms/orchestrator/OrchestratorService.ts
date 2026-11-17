@@ -1644,8 +1644,7 @@ export class OrchestratorService extends EventEmitter {
       modeFacts: modeFactsFor(this.modeRegistry, 'agent', projectPath),
       modeCeiling,
       accessLevel,
-      subagent: false,
-      discovery: false,
+      subagent: this.isSubagentThread(threadId),
       ...(projectPath ? { projectPath } : {}),
       actor: definitionActor(turn.grants),
       ...(extras.browser && hostBrowser ? { browserRuntime: hostBrowser } : {}),
@@ -4185,8 +4184,8 @@ export class OrchestratorService extends EventEmitter {
       modeFacts: modeFactsFor(this.modeRegistry, mode, projectPath),
       modeCeiling,
       accessLevel,
-      subagent: false,
-      discovery: false,
+      // From the thread's lineage (§6, finding 8): what never passes down is refused to a subagent's turn.
+      subagent: this.isSubagentThread(session.threadId),
       projectPath,
       actor: defaultIntegrationActor(false),
       enabledSkills: [],
@@ -4438,6 +4437,9 @@ export class OrchestratorService extends EventEmitter {
       projectPathFor: (threadId) => this.getOrCreateSession(threadId).projectCwd ?? undefined,
       // The ceiling the thread's delegations gave it: a Plan turn narrows only its own calls.
       threadCeiling: (threadId) => this.modeCeilingFor(threadId, 'agent'),
+      // Narrowing from above: an ancestor's running Plan turn narrows the subtree at its next call.
+      liveCeiling: (threadId) => this.ancestorCeiling(threadId),
+      subagentThread: (threadId) => this.isSubagentThread(threadId),
       // Only a bot's threads list the bot tools (`escalate`; `consult` on its activation thread).
       botRole: (threadId) => this.botThreads?.roleOf(threadId),
       botHomeOf: (threadId) => this.botThreads?.homeOf?.(threadId),
@@ -7116,6 +7118,34 @@ export class OrchestratorService extends EventEmitter {
   /** Whether `threadId` is a read-only delegated child (`delegate_task` `readOnly`); its Mousse tools may not write threads. */
   private isReadOnlyChild(threadId: string): boolean {
     return isReadOnlyShared(this.getOrCreateSession(threadId).sharedWorkspace) || this.readOnlyBinding(threadId)
+  }
+
+  /** Whether `threadId` is a Mousse subagent by its lineage: the owner's own preferences never pass down to it. */
+  private isSubagentThread(threadId: string): boolean {
+    try {
+      return this.runEngine?.delegations.getLineage(threadId)?.relationship === 'subagent'
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Narrowing from above (docs/plans/tool-api.md §1.3 "Subagents"): `plan` while any ancestor of a subagent runs a Plan
+   * turn, so the person switching a parent to Plan narrows the whole subtree at its next call. Read at every call; a
+   * lineage that cannot be read throws, and the registry then narrows to `plan`.
+   */
+  private ancestorCeiling(threadId: string): ModeCeiling | undefined {
+    const engine = this.runEngine
+    if (!engine) return undefined
+    let thread = threadId
+    for (let depth = 0; depth < 64; depth += 1) {
+      const lineage = engine.delegations.getLineage(thread)
+      if (!lineage || lineage.relationship !== 'subagent') return undefined
+      thread = lineage.parentThreadId
+      const active = engine.getActiveRun(thread)?.runId
+      if (active && this.appToolTurns.get(active)?.modeCeiling === 'plan') return 'plan'
+    }
+    throw new Error(`The lineage of thread ${threadId} is deeper than 64.`)
   }
 
   /** Whether the thread's saved binding says read-only, folder or not: a read-only child never runs unheld for lack of one. */

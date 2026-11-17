@@ -62,7 +62,6 @@ export function appTurn(overrides: Partial<AppToolTurn> & Pick<AppToolTurn, 'thr
     modeFacts: { readOnly: false, agent: true, build: false },
     modeCeiling: 'default',
     subagent: false,
-    discovery: false,
     actor: { kind: 'main' },
     enabledSkills: [],
     loadedSkills: [],

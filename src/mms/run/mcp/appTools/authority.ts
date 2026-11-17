@@ -16,17 +16,18 @@ import { McpToolError, type AppToolTurn, type McpCaller, type MousseTool, type T
  * now" line and every call's dispatch read what it compiles, from five inputs:
  * 1. provenance: who started the run (`holdsPerson`, from the run's source and its binding's origin); unknown
  *    provenance grants no person authority;
- * 2. lineage: whether the thread is a read-only child, and its role when it is a personal bot's. The tool modules'
- *    own exclusions for subagents and discovery turns (`AppToolTurn.subagent`, `discovery`) are not lineage yet:
- *    every turn the orchestrator registers passes false for both, so they hold for no turn (§6, finding 8);
+ * 2. lineage: whether the thread is a read-only child, whether it is a subagent (`AppToolTurn.subagent`, from the
+ *    thread's lineage: the owner's own preferences never pass down to one), and its role when it is a personal bot's;
  * 3. the stored ceiling the thread's delegations gave it (`ToolRegistryOptions.threadCeiling`);
- * 4. narrowing: the ceiling of the turn's credential and the turn's mode;
+ * 4. narrowing: the ceiling of the turn's credential, the turn's mode, and an ancestor's running Plan turn, read again
+ *    at every call (`ToolRegistryOptions.liveCeiling`);
  * 5. the run's request policy (`approvals`, its permission mode) and its request channel (a bot's grant or owner).
  *
  * Each tool's declaration is read here and nowhere else (`toolNeeds`). What a call holds is `held`, `ask_first` (it
- * asks the person before it runs) or `lacks` (refused). This PR keeps every answer as it was (the parity table in
- * tests/run/toolAuthorityParity.test.ts); where the list, the "usable now" line and dispatch still answer differently,
- * that difference is written down here, in one place.
+ * asks the person before it runs) or `lacks`: a listed tool the turn does not hold a capability of is refused with
+ * `lacks_capability`, naming it. The turn's "usable now" line and dispatch read the same checks
+ * (`heldBeforeArguments`); a tool held only for some arguments (a bot grant's variants) is usable, and the call's
+ * own arguments decide.
  */
 
 /**
@@ -37,6 +38,7 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_status', 'list_subagents', 'list_computers', 'list_models', 'list_tasks',
   'thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'schedule_list', 'terminal_read',
   'automation_list', 'list_skills', 'load_skill', 'tool_catalogue', 'mcp_servers', 'theme_read',
+  'git_status', 'git_diff',
   'web_search', 'web_fetch', 'browser_observe', 'browser_find', 'browser_wait', 'browser_extract', 'browser_screenshot',
   'mousse_gui_screenshot', 'mousse_gui_console', 'mousse_gui_status',
   'bot_list', 'bot_schedule_list', 'work_models', 'work_list', 'watch_list', 'reminder_list', 'subagent_wait', 'subagent_result',
@@ -62,6 +64,12 @@ export interface ToolNeeds {
   readOnlyChild: boolean
   /** Callable over MCP (§6, finding 7: `hidden` meant both unlisted and uncallable; `listed` now says the first). */
   callable: boolean
+  /** It starts an independent thread or a fork (`threads.start`), which a Plan ceiling and a read-only child lack. */
+  starts: boolean
+  /** The capability a read-only child lacks for it, when it may not call it. */
+  readOnlyLacks?: string
+  /** The owner's own preference it changes: it never passes down to a subagent (§1.3 "Subagents"). */
+  owner?: 'themes' | 'quick_actions'
   /** A plan ceiling refuses it, and why. */
   planRefuses?: 'starts threads' | 'changes settings'
   /** What a call waits for: the person's approval or their answer to a question. */
@@ -74,16 +82,40 @@ export interface ToolNeeds {
   launchedScope: boolean
 }
 
+/** The capability (§1.3) a tool of each access needs that a read-only child does not hold. */
+const WRITE_CAPABILITY: Readonly<Record<ToolAccess, string>> = {
+  reads: 'read',
+  readsOthers: 'threads.read',
+  actsAsCaller: 'edit',
+  writesThreads: 'threads.write',
+  startsThreads: 'threads.start',
+  editsWorkspace: 'edit',
+  managesOthers: 'threads.manage',
+  changesSettings: 'settings'
+}
+
+/** What a turn that lacks a capability is told would give it (`fix`). */
+const READ_ONLY_FIX = 'This thread is a read-only subagent: its parent can do this, or start a subagent that is not read-only.'
+const PLAN_FIX = 'A Plan turn, and a subagent of one, does not hold this; an Agent turn does.'
+const OWNER_FIX = 'Only the thread\'s own agent changes the owner\'s preferences: tell your parent what you need.'
+
 /** A tool's needs, read from its declaration: the only reader of its access flags. */
 export function toolNeeds(tool: MousseTool): ToolNeeds {
   const reads = tool.access === 'reads' || tool.access === 'readsOthers'
   const edits = tool.access === 'editsWorkspace' || tool.access === 'changesSettings'
+  // `threads.start`: `thread_create` and `thread_fork` alike (§6, finding 9), whatever their `access`.
+  const starts = tool.access === 'startsThreads' || tool.capabilities?.includes('threads.start') === true
+  const readOnlyChild = reads || tool.readOnlySafe === true
+  const owner = tool.capabilities?.find((capability): capability is 'themes' | 'quick_actions' => capability === 'themes' || capability === 'quick_actions')
   return {
     access: tool.access,
     effect: tool.class === 'delegation' ? 'delegates' : tool.class === 'mutation' ? 'changes' : READ_ONLY_TOOL_NAMES.has(tool.name) ? 'none' : 'own',
-    readOnlyChild: reads || tool.readOnlySafe === true,
+    readOnlyChild,
     callable: tool.callable !== 'in_process',
-    ...(tool.access === 'startsThreads' ? { planRefuses: 'starts threads' as const } : tool.access === 'changesSettings' ? { planRefuses: 'changes settings' as const } : {}),
+    starts,
+    ...(readOnlyChild ? {} : { readOnlyLacks: starts ? 'threads.start' : WRITE_CAPABILITY[tool.access] }),
+    ...(owner ? { owner } : {}),
+    ...(starts ? { planRefuses: 'starts threads' as const } : tool.access === 'changesSettings' ? { planRefuses: 'changes settings' as const } : {}),
     ...(tool.asksUser ? { waitsFor: tool.asksUser } : {}),
     ...(tool.botGrantAnswers ? { botAnswers: 'grant' as const } : tool.botAsksOwner ? { botAnswers: 'owner' as const } : {}),
     ...(edits ? { asksFirst: (args: Record<string, unknown>) => tool.runsWithoutAsking?.(args) ?? 'edit' } : {}),
@@ -127,6 +159,8 @@ export function listsTool(tool: MousseTool, listing: ToolListing): boolean {
   const needs = toolNeeds(tool)
   if (listing.readOnly && !needs.readOnlyChild) return false
   if (listing.modeCeiling === 'plan' && needs.planRefuses) return false
+  // A subagent's thread never holds the owner's own preferences, so it never lists them.
+  if (listing.subagent && needs.owner) return false
   // A bot's main thread lists the thread tools its grant allows: "use your threads" is what lets it use them. Only
   // those its turn holds now are listed (none without the permission, with the switch off, or in a turn that only
   // reads), and every call is held to it again. A consult never has them. The profiler's tools likewise follow "use
@@ -223,8 +257,13 @@ export function compileTool(tool: MousseTool, inputs: AuthorityInputs): Compiled
   }
 }
 
-/** What the turn lacks for a tool whatever the call's arguments: the bot's browser, availability, the request policy. */
+/**
+ * What the turn lacks for a tool whatever the call's arguments: the owner's preferences in a subagent, the bot's
+ * browser, availability, the request policy.
+ */
 function turnLacks(tool: MousseTool, needs: ToolNeeds, turn: AppToolTurn): ToolOutcome | undefined {
+  if (turn.subagent && needs.owner)
+    return refused('lacks_capability', `${tool.name} changes the owner's own preferences; a subagent does not hold that.`, { lacks: needs.owner, fix: OWNER_FIX })
   // A bot's thread lists the browser tools whatever it holds: one its owner has not allowed says so, and how to ask,
   // not that no browser is bound to the turn. One the owner allowed after the turn started is answered as held: the
   // bot is not sent to ask again, and its turn continues with the browser once it ends.
@@ -237,12 +276,12 @@ function turnLacks(tool: MousseTool, needs: ToolNeeds, turn: AppToolTurn): ToolO
 
 /** Read-only children, the caller's own thread, the plan ceiling, then how the caller reaches another thread. */
 function centralScope(tool: MousseTool, needs: ToolNeeds, args: Record<string, unknown>, caller: McpCaller, inputs: AuthorityInputs, targets: ToolAccessPolicy | undefined): ToolScope | undefined {
-  if (!needs.readOnlyChild && inputs.readOnly)
-    throw new McpToolError('mousse_read_only', `${tool.name} can change threads or the workspace; a read-only subagent cannot call it.`)
+  if (needs.readOnlyLacks && inputs.readOnly)
+    throw new McpToolError('mousse_read_only', `${tool.name} can change threads or the workspace; a read-only subagent cannot call it.`, { lacks: needs.readOnlyLacks, fix: READ_ONLY_FIX })
   // Scope before any approval: a call refused for naming another thread must not prompt the user first.
   if (needs.access === 'writesThreads' || needs.access === 'editsWorkspace') callerThreadOnly(args, caller)
   if (needs.planRefuses && inputs.ceiling === 'plan')
-    throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} ${needs.planRefuses}; a plan ceiling cannot.`)
+    throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} ${needs.planRefuses}; a plan ceiling cannot.`, { lacks: needs.starts ? 'threads.start' : 'settings', fix: PLAN_FIX })
   return needs.access === 'readsOthers' || needs.access === 'managesOthers' ? othersScope(tool, needs, args, caller, targets) : undefined
 }
 
@@ -319,33 +358,25 @@ function botThreadScope(tool: MousseTool, needs: ToolNeeds, args: Record<string,
 }
 
 /**
- * Whether a turn's preamble names the tool as usable now: one the thread lists that the turn holds before any
- * argument. It reads the turn's own ceiling and, for a bot, whether its grant offers the tool at all; a call is
- * checked again in full when it is made (a read-only child's and a plan ceiling's refusals are already left out of
- * the thread's list, and a tool that asks first is usable).
+ * Whether the turn holds the tool before any argument, as dispatch checks it: not a read-only child's or a Plan
+ * ceiling's refusal, nothing the turn lacks (`turnLacks`), and for a bot a grant that allows some variant of it. The
+ * turn's "usable now" line is the thread's list less what this refuses; a call is then checked in full, its arguments
+ * included (a bot grant's variants, the thread it names), and a tool that asks first is usable.
  */
-export function usableNow(tool: MousseTool, turn: AppToolTurn): boolean {
+export function heldBeforeArguments(tool: MousseTool, turn: AppToolTurn, inputs: { readOnly: boolean; ceiling: ModeCeiling }): boolean {
   const needs = toolNeeds(tool)
-  // A Plan turn cannot start threads; everything else listed is usable when available now (a tool that changes
-  // settings says it is unavailable under Plan itself).
-  if (turn.modeCeiling === 'plan' && needs.planRefuses === 'starts threads') return false
-  if ((tool.available?.(turn) ?? true) !== true) return false
-  // A bot turn may use only its granted app tools; every other one is refused if called.
-  if (!botTurnOffers(turn.bot, tool.name)) return false
-  // A run nobody answers does not offer the tools that wait for the person (they are refused if called).
-  if (unattendedRefusal(needs, turn)) return false
-  // A screenshot is refused when it cannot reach the model; the preamble does not offer it.
-  return !(tool.name === 'browser_screenshot' && turn.browser && !turn.browser.vision)
+  if (needs.readOnlyLacks && inputs.readOnly) return false
+  if (needs.planRefuses && inputs.ceiling === 'plan') return false
+  if (turnLacks(tool, needs, turn)) return false
+  return botTurnOffers(turn.bot, tool.name)
 }
 
 /**
- * Whether a runtime that is sent the turn's own tools (an in-process loop, a definition's turn on Pi) is sent the tool:
- * `offered` where the tool says (a browser tool outside the binding, a screenshot a model without vision cannot see),
- * else whether it is available now; never one the run's request policy refuses.
+ * Whether a definition's turn on a runtime that takes its tools per turn (Pi) is sent the tool: the per-turn filter
+ * the tool declares (`offered`: a browser tool outside the binding, a screenshot a model without vision cannot see).
  */
-export function offeredThisTurn(tool: MousseTool, turn: AppToolTurn, options: { requestPolicy: boolean }): boolean {
-  if ((tool.offered ? tool.offered(turn) : tool.available?.(turn) ?? true) !== true) return false
-  return !options.requestPolicy || !unattendedRefusal(toolNeeds(tool), turn)
+export function offeredThisTurn(tool: MousseTool, turn: AppToolTurn): boolean {
+  return !tool.offered || tool.offered(turn)
 }
 
 /**

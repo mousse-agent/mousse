@@ -21,8 +21,8 @@ export const PUBLISH_APPLET_TOOL: Tool = {
 }
 
 /**
- * The turn stages applets (`AppToolTurn.onPublishApplet`): the main agent's turns when applets are
- * on, whatever runtime runs them. Subagents never publish. A personal bot's turn publishes as a thread's does when it
+ * The turn stages applets (`AppToolTurn.onPublishApplet`): a thread's turns when applets are on, whatever runtime runs
+ * them, a subagent's included (its applet shows in its own thread, docs/plans/tool-api.md §1.5). A personal bot's turn publishes as a thread's does when it
  * holds the tool (its main turns, never a consult: `compileBotThread`); its chat shows them (`replyApplets`).
  */
 export function appletTools(): MousseTool[] {
@@ -34,8 +34,8 @@ export function appletTools(): MousseTool[] {
     access: 'actsAsCaller',
     class: 'read',
     listed: (listing) => !listing.botRole || (listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_APPLET_TOOL))),
-    available: (turn) => (turn.onPublishApplet && !turn.subagent && (!turn.bot || turn.bot.appTools.has(BOT_APPLET_TOOL)) ? true : 'Applets are off for this turn.'),
-    offered: (turn) => Boolean(turn.onPublishApplet) && !turn.subagent && (!turn.bot || turn.bot.appTools.has(BOT_APPLET_TOOL)),
+    available: (turn) => (turn.onPublishApplet && (!turn.bot || turn.bot.appTools.has(BOT_APPLET_TOOL)) ? true : 'Applets are off for this turn.'),
+    offered: (turn) => Boolean(turn.onPublishApplet) && (!turn.bot || turn.bot.appTools.has(BOT_APPLET_TOOL)),
     describe: (args) => `Publish applet${typeof args.title === 'string' ? ` ${args.title}` : ''}`,
     handler: (args, ctx) => {
       const publish = ctx.turn.onPublishApplet
