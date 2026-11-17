@@ -9,6 +9,8 @@ import type { Thread } from '../../src/shared/types'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { READ_ONLY_TOOL_NAMES, REFUSAL_CODES, readRefusal, type ToolOutcome } from '../../src/mms/run/mcp/appTools'
+import type { SecretToolHost } from '../../src/mms/run/mcp/appTools/secrets'
+import type { SecretRunResult } from '../../src/mms/secrets/runWithSecrets'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -93,6 +95,45 @@ describe('a refused Mousse tool call', () => {
     const { overMcp, inProcess } = await setup()
     expect((await overMcp('no_such_tool', {})).error).toMatchObject({ code: MCP_ERROR_CODES.mousse_unknown_tool, data: { reason: 'mousse_unknown_tool' } })
     await expect(inProcess('no_such_tool', {})).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
+  })
+})
+
+describe('a tool that ran and failed', () => {
+  let fx: DelegationFixture | undefined
+  let server: MousseMcpServer | undefined
+  afterEach(async () => {
+    await server?.stop()
+    server = undefined
+    fx?.dispose()
+    fx = undefined
+  })
+
+  it('is not a refusal: secret_run with a non-zero exit keeps its exit code and output as plain text, over MCP and in process', async () => {
+    fx = delegationFixture()
+    const run = await fx.runningRun('thread-a')
+    const output = 'Fetching model...\nerror: 401 Unauthorized'
+    const secrets: SecretToolHost = {
+      request: async () => { throw new Error('not asked') },
+      endThread: () => undefined,
+      usableIn: () => true,
+      run: async () => ({ exitCode: 2, output, timedOut: false, stopped: false }) as SecretRunResult,
+      masker: () => undefined
+    }
+    const fake = fakeAppToolHost({ secrets: () => secrets, permissionModeFor: () => 'full' })
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
+    server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
+    await server.start()
+    turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, projectPath: '/project' }))
+    const args = { command: 'download', secrets: [{ name: 'HF_TOKEN' }] }
+    const expected = `Exit code 2.\n${output}`
+
+    const token = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!.token
+    const body = await rpc(server.url, token, call('secret_run', args))
+    expect(body.result).toMatchObject({ isError: true, content: [{ type: 'text', text: expected }] })
+
+    const local = await registry.call('secret_run', args, request({ threadId: 'thread-a', runId: run.runId }))
+    expect(local).toMatchObject({ isError: true, text: expected })
+    expect(readRefusal(local.text)).toBeNull()
   })
 })
 

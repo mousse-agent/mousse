@@ -154,7 +154,7 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       const contain = workspace ? { scratch: workspace.scratch, folders: [...new Set([cwd, workspace.scratch])] } : undefined
       const result = await service.run({ threadId, cwd, command, secrets: wanted, timeoutMs, signal: ctx.signal, ...(contain ? { contain } : {}) })
       const status = result.stopped ? 'Stopped.' : result.timedOut ? `Timed out after ${Math.round(timeoutMs / 1000)} seconds.` : `Exit code ${result.exitCode ?? 'unknown'}.`
-      outcome = { text: truncateForModel(`${status}\n${result.output || '(no output)'}`), ...(result.exitCode === 0 && !result.timedOut && !result.stopped ? {} : { isError: true }) }
+      outcome = { text: truncateForModel(`${status}\n${result.output || '(no output)'}`), ...(result.exitCode === 0 && !result.timedOut && !result.stopped ? {} : { isError: true, ran: true }) }
     } catch (error) {
       // The host's own refusals name a secret, never its value; anything else is reported by kind only.
       const message = error instanceof Error ? error.message : ''

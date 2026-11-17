@@ -101,9 +101,12 @@ export function readRefusal(text: string): Refusal | null {
   }
 }
 
-/** An error result in the refusal shape: one already in it as it is, any other with its text as the message. */
-export function asRefusal<T extends { text: string; isError?: boolean }>(outcome: T, code: RefusalCode = 'failed'): T {
-  if (!outcome.isError || readRefusal(outcome.text)) return outcome
+/**
+ * An error result in the refusal shape: one already in it as it is, any other with its text as the message. A tool
+ * that ran and failed (`ran`, such as a command's non-zero exit with its output) is not refused: its text stays as it is.
+ */
+export function asRefusal<T extends { text: string; isError?: boolean; ran?: boolean }>(outcome: T, code: RefusalCode = 'failed'): T {
+  if (!outcome.isError || outcome.ran || readRefusal(outcome.text)) return outcome
   return { ...outcome, text: refusalText(code, outcome.text || 'The tool failed.') }
 }
 

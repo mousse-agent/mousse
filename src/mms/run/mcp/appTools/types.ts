@@ -175,6 +175,11 @@ export interface ToolImage {
 export interface ToolOutcome {
   text: string
   isError?: boolean
+  /**
+   * The tool ran and `text` is what it produced (a command's output and exit code, what the browser reported): an error
+   * result keeps its text as it is rather than becoming a refusal (`asRefusal`). Never sent to the caller.
+   */
+  ran?: boolean
   /** Images the result carries; the MCP server sends them as `image` content. */
   images?: ToolImage[]
 }
