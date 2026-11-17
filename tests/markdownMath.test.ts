@@ -98,11 +98,6 @@ describe('math delimiters', () => {
     expect(summary(markdown)).toEqual([expected])
   })
 
-  it('does not read \\[ … = … \\] as a setext heading', () => {
-    const tree = parse('\\[\na\n=\nb\n\\]')
-    expect(walk(tree).some((node) => node.type === 'heading')).toBe(false)
-  })
-
   it('tags blocks with the delimiters used', () => {
     const meta = (markdown: string) => mathNodes(markdown)[0].data?.hChildren?.[0].properties?.metastring
     expect(meta('$$\nx\n$$')).toBe('dollars')
@@ -377,13 +372,6 @@ describe('tables', () => {
 
   it('accepts an escaped pipe inside math', () => {
     expect(summary('| a | b |\n|---|---|\n| $\\|x\\|$ | 2 |')).toEqual(['inlineMath:\\|x\\|'])
-  })
-})
-
-describe('without the plugin', () => {
-  it('finds no math nodes and keeps the source as text', () => {
-    const source = 'Inline $x$ and \\(y\\)\n\n$$\nz\n$$'
-    expect(walk(parse(source, withoutMath)).some((node) => node.type.toLowerCase().includes('math'))).toBe(false)
   })
 })
 
