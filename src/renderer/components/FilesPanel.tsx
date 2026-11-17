@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
-import { AlertTriangle, ArrowShrink, ChevronRight, Code2, Eye, FolderTree, Maximize, Search, WrapText, X } from '../lib/icons'
+import { AlertTriangle, ArrowShrink, ChevronRight, Code2, Eye, Maximize, Search, WrapText, X } from '../lib/icons'
 import { profilePreferenceKey } from '../lib/profilePreferences'
 import { useCommand } from '../commands/commandRegistry'
 import { useActiveProjectLocation, useFilesRoot } from '../hooks/useActiveProjectPath'
@@ -184,7 +184,6 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   /** Source or preview, per Markdown file; it outlives the editor, which unmounts while the panel is hidden. */
   const [markdownViews, setMarkdownViews] = useState<Record<string, MarkdownEditorViewMode>>({})
   /** The file tree beside an open file. Off by default: the file gets the panel's whole width. */
-  const [explorerOpen, setExplorerOpen] = useStoredFlag(profilePreferenceKey(profileId, 'mousse:files-explorer-open'), false)
   const [wordWrap, setWordWrap] = useStoredFlag(profilePreferenceKey(profileId, 'mousse:files-word-wrap'), true)
   /** Images show at their own size instead of fitted to the panel. */
   const [imageActualSize, setImageActualSize] = useState(false)
@@ -502,12 +501,14 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     for (const key of loadSequences.current.keys()) {
       loadSequences.current.set(key, (loadSequences.current.get(key) ?? 0) + 1)
     }
-    replaceFiles((current) => Object.fromEntries(Object.entries(current).map(([key, file]) => {
-      if (file.loading) return [key, { ...file, loading: false, saveState: 'error', error: 'File load was interrupted. Retry to open it.', initialLoadFailed: true }]
+    // A file still loading holds nothing yet: drop it, and the open-files effect loads it again for whoever is
+    // active next (including React's development remount, which runs this cleanup at startup).
+    replaceFiles((current) => Object.fromEntries(Object.entries(current).flatMap<[string, OpenFileState]>(([key, file]) => {
+      if (file.loading) return []
       if (interruptedSaves.has(key) && file.content !== file.savedContent && file.saveState !== 'conflict') {
-        return [key, { ...file, saveState: 'error', error: 'Save paused when the active profile changed.' }]
+        return [[key, { ...file, saveState: 'error', error: 'Save paused when the active profile changed.' }]]
       }
-      return [key, file]
+      return [[key, file]]
     })))
   }, [profileId, replaceFiles])
 
@@ -790,9 +791,8 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       event.preventDefault()
       setPathEditRequest((request) => request + 1)
     }}>
-      {/* Files is the browser tab; each picked file has its own sibling tab. */}
-      {/* Files is the browser tab; each picked file has its own sibling tab, with the tree beside it when asked for. */}
-      {(!selectedPath || explorerOpen) && <ResizablePanelSidebar className="files-sidebar" defaultWidth={240} fill={!selectedPath}>
+      {/* Files is the browser tab; each picked file has its own sibling tab and fills the panel alone. */}
+      {!selectedPath && <ResizablePanelSidebar className="files-sidebar" defaultWidth={240} fill>
         {browser}
       </ResizablePanelSidebar>}
       {selectedPath && <div className="files-editor" role="region" aria-label={selectedPath} onKeyDown={(event) => {
@@ -821,9 +821,6 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
             {showsSource && <BarButton label="Wrap lines" pressed={wordWrap} onClick={() => setWordWrap(!wordWrap)}>
               <WrapText size={14} strokeWidth={2} />
             </BarButton>}
-            <BarButton label={explorerOpen ? 'Hide file tree' : 'Show file tree'} pressed={explorerOpen} onClick={() => setExplorerOpen(!explorerOpen)}>
-              <FolderTree size={14} strokeWidth={2} />
-            </BarButton>
             <BarButton label="Close preview" shortcut="Esc" onClick={closePreview}><X size={14} strokeWidth={2} /></BarButton>
           </div>
         </div>
