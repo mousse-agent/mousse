@@ -290,9 +290,9 @@ export class BotActions {
     const existing = this.host.store.get('SELECT id FROM bot_actions WHERE call_key = ?', callKey)
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
-    // Work's refusals belong to that work; occurrences share their schedule's owner intervention.
+    // Work's refusals belong to that work; scheduled occurrences share the bot's tool refusal history.
     const scope = row.trigger.kind === 'schedule'
-      ? this.host.store.all("SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id WHERE a.bot_id = ? AND json_extract(w.trigger_json, '$.kind') = 'schedule' AND json_extract(w.trigger_json, '$.scheduleId') = ? AND a.target_json = ? ORDER BY a.rowid DESC", row.botId, row.trigger.scheduleId, JSON.stringify({ server: tool.server, tool: tool.tool }))
+      ? this.host.store.all("SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id WHERE a.bot_id = ? AND json_extract(w.trigger_json, '$.kind') = 'schedule' AND a.target_json = ? ORDER BY a.rowid DESC", row.botId, JSON.stringify({ server: tool.server, tool: tool.tool }))
       : this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool }))
     const history = scope as unknown as ActionRow[]
     const removed = history.find(action => JSON.parse(action.card_json ?? '{}').ownerRemoved && !this.ownerWroteAfter(action, true))

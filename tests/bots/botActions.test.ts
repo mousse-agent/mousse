@@ -351,7 +351,7 @@ it.each(['repeat', 'three', 'forgotten'] as const)('recreating a schedule or sta
     const a = f.bots.actions.forWork(id)!
     if (rule === 'forgotten') {
       const memory = new BotMemoryStore({ db: f.store.db })
-      const seq = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', 'bm:' + a.message_id)!.seq
+      const seq = memory.append({ botId: t.botId, sourceKey: 'bm:' + a.message_id, kind: 'notice', who: 'bot', text: 'call' })!
       memory.forget(t.botId, { refs: ['j' + seq], by: 'owner_ui' })
     }
     else await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })

@@ -1629,7 +1629,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const same = (row: BotActivationRow) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === scheduleId
       if (this.store.laneActivations(botId, 'run', ['queued']).some(same)) { skip = 'previous_run_still_queued'; return false }
       const parked = this.store.laneActivations(botId, 'run', ['blocked']).find(row => same(row) && workWaits(row))
-      const previous = parked ?? this.holding(botId, 'run').find(same)
+      const previous = parked ?? this.store.laneActivations(botId, 'run', ['running', 'waiting_grant']).find(same)
       // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
       if (previous) { skip = previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' || this.actions.forWork(previous.id) ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
       const inserted = this.store.insertActivationOnce({
