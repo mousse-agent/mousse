@@ -208,6 +208,24 @@ html[data-theme='light'] {
 .an-message-list .turn-work + .turn-answer {
   margin-top: var(--space-16);
 }
+/* A turn's folded work (a Collapse in its column, message-list.tsx) takes the column's gap (12px) inside its clip,
+   so the gap closes with the rows instead of snapping shut when the fold unmounts. */
+.an-message-list .turn-answer > .ui-collapse:not(:first-child) {
+  margin-top: -12px;
+}
+.an-message-list .turn-answer > .ui-collapse:not(:first-child) > .ui-collapse-clip > * {
+  padding-top: 12px;
+}
+.an-message-list .turn-answer > .ui-collapse:first-child:not(:last-child) {
+  margin-bottom: -12px;
+}
+.an-message-list .turn-answer > .ui-collapse:first-child:not(:last-child) > .ui-collapse-clip > * {
+  padding-bottom: 12px;
+}
+/* The line of a part of a steered turn ("Continued for 8s ›") sits under the steered message, in the column. */
+.an-message-list .turn-answer > .turn-work {
+  margin-top: 0;
+}
 /* A reply's text with no block shown yet (reply pacing) renders nothing and takes no gap, nor does a
    reply that holds only such text: the live line under it stays put until the first block shows. */
 .an-message-list .group\/assistant-text:empty,
@@ -276,6 +294,11 @@ html[data-theme='light'] {
 /* While the list follows the end it writes scrollTop itself, once per frame
    (message-list.tsx): native anchoring would only move the view a second time. */
 .an-message-list[data-following-end] {
+  overflow-anchor: none;
+}
+/* While a finished turn's work folds, virtual/fold-hold.ts keeps the reader's row in place itself: the native anchor
+   may be the row that folds. */
+.an-message-list[data-fold-hold] {
   overflow-anchor: none;
 }
 /* A block that appears in a reply while it streams fades in, and so does a new item in a list.

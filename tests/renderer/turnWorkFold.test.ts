@@ -8,6 +8,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
+import { forgetThreadOpenMemory, hasThreadOpenMemory } from '../../src/renderer/chat/components/agent-elements/thread-open-memory'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -92,8 +93,17 @@ describe('a finished turn', () => {
     // The narration is prose, like the answer, not a row of the activity.
     const narration = [...answerOf(0).querySelectorAll('[data-find-text]')].map((node) => node.textContent)
     expect(narration).toEqual(["I'll read how the key is built 1.", 'The key changed every run 1.'])
-    act(() => toggles()[0]!.click())
-    expect(visible(0).trim()).toBe('The key changed every run 1.')
+    vi.useFakeTimers()
+    try {
+      act(() => toggles()[0]!.click())
+      // It closes as motion: hidden from screen readers at once, gone when the close ends.
+      const closing = [...answerOf(0).querySelectorAll('[aria-hidden="true"]')].find((node) => node.textContent!.includes("I'll read how the key"))
+      expect(closing).toBeDefined()
+      act(() => vi.advanceTimersByTime(400))
+      expect(visible(0).trim()).toBe('The key changed every run 1.')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('remembers which turns are open while the thread is open', () => {
@@ -216,5 +226,67 @@ describe('a running turn', () => {
     const live = host.querySelector<HTMLElement>('[data-turn-live]')!
     expect(answerOf(0).lastElementChild!.previousElementSibling).toBe(live)
     expect(live.querySelector('[data-turn-progress]')!.textContent).toBe('Running Bash…npm test')
+  })
+})
+
+describe('a steered turn', () => {
+  const steer = (id: string, text: string, seconds: number): UIMessage =>
+    ({ id, role: 'user', parts: [{ type: 'text', text }], createdAt: at(seconds), metadata: { steered: true } }) as unknown as UIMessage
+  const steered = [
+    ask('u1', 'Fix the cache', 0),
+    call('r1', 'tool-Read', { file_path: 'src/cache.ts' }, 2),
+    said('n1', 'Reading done, running the tests next.', 10),
+    steer('s1', 'use pnpm', 12),
+    call('b1', 'tool-Bash', { command: 'pnpm test' }, 14),
+    said('a1', 'Tests pass with pnpm.', 20)
+  ]
+
+  it('folds each part behind its own line, with its own time, and keeps each part\'s last reply in view', () => {
+    render(steered)
+    expect(toggles().map(nameOf)).toEqual(['Worked for 12s', 'Continued for 8s'])
+    const text = visible(0)
+    for (const piece of ['Reading done, running the tests next.', 'use pnpm', 'Tests pass with pnpm.']) expect(text).toContain(piece)
+    expect(['Worked for', 'Reading done', 'use pnpm', 'Continued for', 'Tests pass'].map((piece) => text.indexOf(piece))).toEqual(
+      ['Worked for', 'Reading done', 'use pnpm', 'Continued for', 'Tests pass'].map((piece) => text.indexOf(piece)).sort((x, y) => x - y)
+    )
+    expect(text).not.toContain('pnpm test')
+    // Each line opens its own part.
+    act(() => toggles()[1]!.click())
+    expect(toggles().map((line) => line.getAttribute('aria-expanded'))).toEqual(['false', 'true'])
+  })
+})
+
+describe('a turn stopped before its answer', () => {
+  it('keeps what it last said in view and folds only the work', () => {
+    render([ask('u1', 'Fix it', 0), said('n1', 'Looking at the cache first.', 2), call('r1', 'tool-Read', { file_path: 'src/cache.ts' }, 3)])
+    expect(toggles()).toHaveLength(1)
+    expect(visible(0)).toContain('Looking at the cache first.')
+    expect(visible(0)).not.toContain('Read ')
+  })
+})
+
+describe('what you opened in a thread', () => {
+  const show = (threadId: string, messages: UIMessage[]) =>
+    act(() => root.render(createElement(MessageList, { key: threadId, threadId, messages, status: 'ready' })))
+  const groupLine = () => answerOf(0).querySelector<HTMLElement>('[aria-expanded]:not(.turn-work-toggle)')!
+
+  it('stays open after switching to another thread and back', () => {
+    show('thread-a', turn(1, 0))
+    act(() => toggles()[0]!.click())
+    act(() => groupLine().click())
+    expect(groupLine().getAttribute('aria-expanded')).toBe('true')
+    show('thread-b', turn(2, 0))
+    expect(toggles()[0]!.getAttribute('aria-expanded')).toBe('false')
+    show('thread-a', turn(1, 0))
+    expect(toggles()[0]!.getAttribute('aria-expanded')).toBe('true')
+    expect(groupLine().getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('is forgotten when the thread is deleted', () => {
+    expect(hasThreadOpenMemory('thread-a')).toBe(true)
+    forgetThreadOpenMemory(['thread-a'])
+    expect(hasThreadOpenMemory('thread-a')).toBe(false)
+    show('thread-a', turn(1, 0))
+    expect(toggles()[0]!.getAttribute('aria-expanded')).toBe('false')
   })
 })

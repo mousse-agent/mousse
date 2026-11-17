@@ -165,6 +165,9 @@ export type AgentChatProps = {
    */
   enableFind?: boolean;
 
+  /** The thread shown: what the person opens in its transcript is kept for it while the app runs. */
+  threadId?: string | null;
+
   suggestions?: InputSuggestions;
 
   emptyStatePosition?: "default" | "center";
