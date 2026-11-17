@@ -673,12 +673,27 @@ export interface MuxMessage {
   parts: Uint8Array[]
 }
 
+export interface MuxSendOptions {
+  /**
+   * A softer cancel than `signal`. When it aborts, a message not yet started is withdrawn at once, and one
+   * whose first bytes are already written is finished, so the connection stays up. The caller checks it
+   * afterwards and starts nothing new. `signal` still closes the connection when it aborts a started
+   * message, since the peer cannot resynchronize after half a message.
+   */
+  stop?: AbortSignal
+}
+
 /**
  * Three lanes (control, bulk, tunnel) with independent credit windows. Control is always scheduled first;
  * bulk and tunnel take turns.
  */
 export interface Mux {
-  send(lane: Lane, message: MuxMessage, signal?: AbortSignal): Promise<void>
+  send(
+    lane: Lane,
+    message: MuxMessage,
+    signal?: AbortSignal,
+    options?: MuxSendOptions
+  ): Promise<void>
   onMessage(listener: (lane: Lane, message: MuxMessage) => void): () => void
   onClose(listener: (error?: Error) => void): () => void
   /** Bytes queued and not yet written, per lane. */
@@ -909,6 +924,11 @@ export interface RpcMethod {
    * skips this and gets its saved result; a refusal fails the admitted execution as a plain error.
    */
   authorizeNew?(params: unknown, context: RpcContext): void
+  /**
+   * Checked before a saved result is handed back by request id (`rpc.result.get`), where the call's parameters are no
+   * longer at hand: a caller that lost its access since the call ran gets nothing. Throwing refuses the result.
+   */
+  authorizeResult?(execution: ExecutionId, caller: RpcContext['caller']): void
   handle(params: unknown, context: RpcContext): Promise<unknown>
 }
 

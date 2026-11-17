@@ -377,7 +377,9 @@ describe('the repository lease, round 2', () => {
     await vi.waitFor(() => expect(logged).toHaveBeenCalled(), { timeout: 10_000 })
     const later = JSON.parse(readFileSync(getRepositoryLeasePath(identity), 'utf8')) as { heartbeatAt: string }
     expect(Date.parse(later.heartbeatAt)).toBeGreaterThan(Date.parse(first.heartbeatAt))
-    const older = child(['legacy-try', root, '300', '1500'])
+    // The heartbeat runs on this test's own event loop, which a busy machine can stall for a few hundred ms: the stale
+    // window is ten heartbeats, not three, and the older build still tries over several windows.
+    const older = child(['legacy-try', root, '1000', '3000'])
     expect(await said(older)).toBe('busy')
     const error = await busy(identity, { maxWaitMs: 300 })
     expect(error.message).toContain(`A stopped git command is still running (pid ${first.stoppedGitPids![0]}`)

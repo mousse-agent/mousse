@@ -84,6 +84,11 @@ export function cutOffActivityOf(messages: readonly ChatMessage[], runIds: reado
   return entries.sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind])
 }
 
+/** The transcript line of a turn a restart cut off (shared: the transcript reads older lines by their text). */
+export { RESTART_INTERRUPTED_TEXT } from '../../shared/types'
+/** After a message whose turn a restart cut off before it started, when the thread has moved on since: it never ran. */
+export const RESTART_UNSENT_TEXT = 'Not sent: Mousse restarted before this message started.'
+
 /** A compaction row a daemon restart cut short: the compaction never finished, so nothing was cut. */
 export const COMPACTION_INTERRUPTED_TEXT = 'Compaction interrupted · full history kept'
 

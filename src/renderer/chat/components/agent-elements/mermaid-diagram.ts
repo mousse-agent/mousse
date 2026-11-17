@@ -6,9 +6,15 @@ export const MERMAID_SOURCE_LIMIT = 50_000;
 const MERMAID_MAX_EDGES = 5_000;
 /** Settled results kept so a remounted message shows its diagram at once. */
 const RESULT_CACHE_SIZE = 64;
+/** Node text matches reply text (14px) instead of Pele's 16px default. */
+export const DIAGRAM_FONT_SIZE = 14;
+// Tighter than Pele's defaults (40 between nodes, 48 between ranks) so a short
+// flowchart reads at a glance. A diagram's own `config:` still wins.
+const DIAGRAM_SPACING = { nodeSpacing: 28, rankSpacing: 28 };
 
 export type DiagramOutcome =
-  | { status: "ready"; svg: string }
+  /** `height` is the drawing's natural height in CSS pixels. */
+  | { status: "ready"; svg: string; height: number }
   /** The source cannot be drawn; `message` explains why. */
   | { status: "error"; message: string }
   /** The renderer chunk failed to load; trying again may work. */
@@ -32,6 +38,12 @@ export function sanitizeDiagramSvg(svg: string, purifier: Purifier): string {
   const clean = purifier.sanitize(svg, SVG_PURIFY_CONFIG);
   if (!clean.trimStart().startsWith("<svg")) throw new Error("The diagram was empty after sanitizing.");
   return clean;
+}
+
+/** The interface font the SVG inherits (agent-ui.css), so labels are measured in it too. */
+function interfaceFont(): string | undefined {
+  if (typeof document === "undefined" || !document.body) return undefined;
+  return getComputedStyle(document.body).fontFamily || undefined;
 }
 
 function describe(error: unknown): string {
@@ -87,14 +99,17 @@ async function drawDiagram(source: string): Promise<DiagramOutcome> {
     return { status: "unavailable", message: describe(error) };
   }
   try {
-    const { svg } = engine.pele.render(source, {
+    const { svg, height } = engine.pele.render(source, {
+      fontSize: DIAGRAM_FONT_SIZE,
+      fontFamily: interfaceFont(),
+      config: { flowchart: DIAGRAM_SPACING, state: DIAGRAM_SPACING },
       links: false,
       images: false,
       limit: MERMAID_SOURCE_LIMIT,
       maxEdges: MERMAID_MAX_EDGES,
       idPrefix: idPrefixFor(source),
     });
-    return { status: "ready", svg: sanitizeDiagramSvg(svg, engine.purifier) };
+    return { status: "ready", svg: sanitizeDiagramSvg(svg, engine.purifier), height };
   } catch (error) {
     return { status: "error", message: describe(error) };
   }

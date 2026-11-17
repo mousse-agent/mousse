@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import {
   CLAUDE_BUILTIN_TOOLS,
+  CLAUDE_LOCKED_MAX_TURNS,
   claudeLockedCaps,
   claudeLockedHoldsBots,
   claudeLockedOptions,
@@ -27,6 +28,9 @@ import {
   type ClaudeLockedTurn
 } from '../../src/mms/harness/claude/locked'
 import { CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../../src/mms/harness/compatibility'
+import { isProviderTurnCap, PROVIDER_TURN_CAP, providerFailureText } from '../../src/shared/harness/types'
+import { normalizeAppError, serializeAppError } from '../../src/shared/errors'
+import { botFixture, createBot, finish as botFinish, runDispatch, start as botStart } from '../bots/botFixture'
 import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type PolicyCommandRunner } from '../../src/mms/harness/claude/managedPolicy'
 import { checkPolicy } from '../../src/mms/harness/policy'
 import type { DriverContext, InstanceConfig } from '../../src/mms/harness/driver'
@@ -70,8 +74,24 @@ function authorityFor(tools: NeutralTool[], workspace: { root: string; scratch: 
 
 type Probe = (options: Options) => Promise<void>
 
+/** The settings file each query was started with, read while the turn runs (it goes when the turn ends), by its options. */
+const settingsRead = new Map<Options, Record<string, unknown>>()
+const readSettings = (options: Options) => {
+  if (typeof options.settings === 'string') settingsRead.set(options, JSON.parse(readFileSync(options.settings, 'utf8')) as Record<string, unknown>)
+}
+const settingsOf = (options: Options): Record<string, unknown> => settingsRead.get(options) ?? {}
+
+/** The servers each query was given over its input (`setMcpServers`, #358), by its options. */
+const registered = new Map<Options, Record<string, unknown>>()
+const registering = (options: Options) => ({
+  setMcpServers: vi.fn(async (servers: Record<string, unknown>) => {
+    registered.set(options, servers)
+    return { added: Object.keys(servers), removed: [], errors: {} }
+  })
+})
+
 /** A locked entry's service with a fake `query` that runs `probe` on the options before its result. */
-function lockedService(probe: Probe) {
+function lockedService(probe: Probe, result: Record<string, unknown> = { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'locked-session' }) {
   const home = temp('claude-locked-profile-')
   const binary = join(home, 'claude')
   writeFileSync(binary, 'fixture')
@@ -83,11 +103,12 @@ function lockedService(probe: Probe) {
   const captured: Options[] = []
   const query = ({ options }: { options: Options }): Query => {
     captured.push(options)
+    readSettings(options)
     const generator = (async function* () {
       await probe(options)
-      yield { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'locked-session' }
+      yield result
     })()
-    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}), ...registering(options) }) as unknown as Query
   }
   const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
     query,
@@ -131,15 +152,16 @@ function ownerService(probe: Probe, result: Record<string, unknown> = { subtype:
   const captured: Options[] = []
   const query = ({ options }: { options: Options }): Query => {
     captured.push(options)
+    readSettings(options)
     const generator = (async function* () {
       await probe(options)
       yield { type: 'result', ...result, session_id: 'owner-session' }
     })()
-    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}), ...registering(options) }) as unknown as Query
   }
   const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
     query,
-    // A live process would be kept warm: a bot turn never takes one.
+    // Live processes are on: a bot turn without the chat's key (`BotAuthority.warm`) still never takes one.
     live: true,
     runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
     launchConfig: () => ({ binaryPath: binary, env: { USER_VARIABLE: 'from-settings' } })
@@ -148,7 +170,100 @@ function ownerService(probe: Probe, result: Record<string, unknown> = { subtype:
 }
 
 describe('a bot on the owner\'s own Claude Code entry', () => {
-  it('runs one query in Claude Code\'s asking mode with the owner\'s environment, none of their settings files, and no process of its own to supervise', async () => {
+  it.each(['owner', 'locked'] as const)('%s entry starts a bot without unrelated environment secrets', async (entry) => {
+    const secrets = ['GITHUB_TOKEN', 'OPENAI_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'MY_SECRET']
+    for (const name of secrets) vi.stubEnv(name, `planted-${name}`)
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'signin-token')
+    const root = temp('claude-clean-root-')
+    const scratch = temp('claude-clean-scratch-')
+    const { service, captured } = entry === 'owner' ? ownerService(async () => {}) : lockedService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ...(entry === 'owner' ? { ownerEntry: true as const } : {}), cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const env = captured.find((options) => options.hooks)!.env!
+    for (const name of secrets) expect(env, name).not.toHaveProperty(name)
+    expect(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB).toBe('1')
+    // A bot turn always loads Mousse's tools on demand (its tool catalogue): the list it starts with is names only.
+    expect(env.ENABLE_TOOL_SEARCH).toBe('true')
+    if (entry === 'owner' && process.platform !== 'win32') expect(env.TMPDIR).toBe(join(scratch, 'tmp'))
+    if (entry === 'owner') {
+      expect(env.ANTHROPIC_AUTH_TOKEN).toBe('signin-token')
+      expect(env.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
+    }
+  })
+
+  const cloudSignIns = {
+    aws: { AWS_PROFILE: 'work', AWS_REGION: 'eu-west-1', AWS_ACCESS_KEY_ID: 'aws-id', AWS_SECRET_ACCESS_KEY: 'aws-secret', AWS_SESSION_TOKEN: 'aws-session', AWS_BEARER_TOKEN_BEDROCK: 'aws-bearer' },
+    google: { GOOGLE_APPLICATION_CREDENTIALS: '/signin/google.json', CLOUDSDK_CONFIG: '/signin/gcloud', GCLOUD_PROJECT: 'project', GOOGLE_CLOUD_PROJECT: 'cloud-project', GOOGLE_CLOUD_LOCATION: 'global', GOOGLE_CLOUD_QUOTA_PROJECT: 'quota-project', CLOUD_ML_REGION: 'us-east5' },
+    azure: { AZURE_CLIENT_ID: 'client', AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_SECRET: 'azure-secret', AZURE_PASSWORD: 'azure-password', AZURE_AUTHORITY_HOST: 'https://login.microsoftonline.com', AZURE_FEDERATED_TOKEN_FILE: '/signin/token', AZURE_CLIENT_CERTIFICATE_PATH: '/signin/client.pem', AZURE_CLIENT_CERTIFICATE_PASSWORD: 'certificate-password', AZURE_CLIENT_SEND_CERTIFICATE_CHAIN: 'true', AZURE_ADDITIONALLY_ALLOWED_TENANTS: 'other-tenant', AZURE_USERNAME: 'test-user', AZURE_CONFIG_DIR: '/signin/azure', AZURE_TOKEN_CREDENTIALS: 'prod' }
+  }
+  it.each([
+    { route: '', cloud: {} },
+    { route: 'CLAUDE_CODE_USE_BEDROCK', cloud: cloudSignIns.aws },
+    { route: 'CLAUDE_CODE_USE_MANTLE', cloud: cloudSignIns.aws },
+    { route: 'CLAUDE_CODE_USE_ANTHROPIC_AWS', cloud: cloudSignIns.aws },
+    { route: 'CLAUDE_CODE_USE_VERTEX', cloud: cloudSignIns.google },
+    { route: 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', cloud: cloudSignIns.google },
+    { route: 'CLAUDE_CODE_USE_FOUNDRY', cloud: cloudSignIns.azure }
+  ].flatMap((row) => ['environment', 'settings'].map((source) => ({ ...row, source }))))('keeps $route sign-in from $source only for the active cloud', async ({ route, cloud, source }) => {
+    const root = temp('claude-cloud-root-')
+    const scratch = temp('claude-cloud-scratch-')
+    const unrelated = { ...cloudSignIns.aws, ...cloudSignIns.google, ...cloudSignIns.azure,
+      GOOGLE_API_KEY: 'unrelated-google-key', GOOGLE_CLIENT_SECRET: 'unrelated-google-secret',
+      AZURE_OPENAI_API_KEY: 'unrelated-azure-key', AZURE_STORAGE_CONNECTION_STRING: 'unrelated-azure-storage',
+      GOOGLE_GENERATIVE_AI_API_KEY: 'unrelated-generative-key', AZURE_STORAGE_KEY: 'unrelated-storage-key',
+      GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js' }
+    const variables = { ...unrelated, ...cloud, ...(route ? { [route]: '1' } : {}), ANTHROPIC_AUTH_TOKEN: 'signin-token' }
+    if (source === 'environment') for (const [name, value] of Object.entries(variables)) vi.stubEnv(name, value)
+    else writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: variables }))
+    const { service, captured } = ownerService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const env = captured.find((entry) => entry.hooks)!.env!
+    expect(env).toMatchObject({ ...cloud, ...(route ? { [route]: '1' } : {}), ANTHROPIC_AUTH_TOKEN: 'signin-token' })
+    for (const name of Object.keys(unrelated).filter((name) => !(name in cloud))) expect(env, name).not.toHaveProperty(name)
+  })
+
+  it.each(['', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
+    .flatMap((route) => ['environment', 'settings'].map((source) => ({ route, source }))))('keeps Claude configuration families from $source with route "$route"', async ({ route, source }) => {
+    const root = temp('claude-model-root-')
+    const scratch = temp('claude-model-scratch-')
+    const choices = {
+      ANTHROPIC_MODEL: 'proxy-primary', ANTHROPIC_DEFAULT_MODEL: 'proxy-default',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'profile/opus', ANTHROPIC_DEFAULT_SONNET_MODEL: 'profile/sonnet',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'profile/haiku', ANTHROPIC_DEFAULT_FABLE_MODEL: 'profile/fable',
+      ANTHROPIC_SMALL_FAST_MODEL: 'proxy-small', ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION: 'eu-west-1',
+      ANTHROPIC_CUSTOM_MODEL_OPTION: 'proxy-custom', ANTHROPIC_BEDROCK_REGION_PREFIX: 'eu',
+      ANTHROPIC_FOUNDRY_RESOURCE: 'my-resource', ANTHROPIC_GOOGLE_CLOUD_LOCATION: 'global',
+      ANTHROPIC_GOOGLE_CLOUD_PROJECT: 'google-project', ANTHROPIC_VERTEX_PROJECT_ID: 'vertex-project',
+      VERTEX_REGION_CLAUDE_4_6_SONNET: 'europe-west1',
+      ANTHROPIC_BASE_URL: 'https://proxy.test', ANTHROPIC_AWS_BASE_URL: 'https://aws.test',
+      ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock.test', ANTHROPIC_BEDROCK_MANTLE_BASE_URL: 'https://mantle.test',
+      ANTHROPIC_FOUNDRY_BASE_URL: 'https://foundry.test', ANTHROPIC_GOOGLE_CLOUD_BASE_URL: 'https://google.test',
+      ANTHROPIC_VERTEX_BASE_URL: 'https://vertex.test',
+      ANTHROPIC_FUTURE_SETTING: 'future-value', VERTEX_REGION_CLAUDE_FUTURE: 'europe-west1',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'effort,thinking',
+      ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES: 'effort,thinking',
+      ANTHROPIC_BEDROCK_SERVICE_TIER: 'flex', ENABLE_PROMPT_CACHING_1H_BEDROCK: '1',
+      ENABLE_PROMPT_CACHING_FUTURE: '1', CLAUDE_FUTURE_CONFIG_DIR: '/signin/future',
+      ANTHROPIC_CUSTOM_HEADERS: 'Authorization: Bearer proxy-key',
+      NODE_EXTRA_CA_CERTS: '/certs/extra.pem', SSL_CERT_FILE: '/certs/cert.pem', HTTPS_PROXY: 'https://proxy.test:8443',
+      ANTHROPIC_UNLISTED_MODEL: 'unknown', ANTHROPIC_DEFAULT_CUSTOM_MODEL: 'unknown',
+      ANTHROPIC_SMALL_FAST_MODEL_EXTRA: 'unknown', VERTEX_REGION_CLAUDE_UNKNOWN: 'unknown',
+      ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: 'display copy'
+    }
+    const excluded = { GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js' }
+    const variables = { ...choices, ...excluded, ...(route ? { [route]: '1' } : {}) }
+    if (source === 'environment') for (const [name, value] of Object.entries(variables)) vi.stubEnv(name, value)
+    else writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: variables }))
+    const { service, captured } = ownerService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const env = captured.find((entry) => entry.hooks)!.env!
+    expect(env).toMatchObject(choices)
+    for (const name of Object.keys(excluded)) expect(env, name).not.toHaveProperty(name)
+  })
+
+  it('runs one query in Claude Code\'s asking mode with the owner\'s sign-in, none of their settings files, and no process of its own to supervise', async () => {
     const root = temp('claude-owner-root-')
     const scratch = temp('claude-owner-scratch-')
     const { service, captured } = ownerService(async () => {})
@@ -157,9 +272,11 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     const options = captured.find((entry) => entry.hooks)!
     expect(options).toMatchObject({ cwd: root, settingSources: [], strictMcpConfig: true, plugins: [], permissionMode: 'default', tools: ['Read', 'ToolSearch'] })
     for (const name of ['allowDangerouslySkipPermissions', 'additionalDirectories', 'allowedTools', 'sandbox', 'resume', 'spawnClaudeCodeProcess']) expect(options, name).not.toHaveProperty(name)
-    expect(Object.keys(options.mcpServers ?? {})).toEqual(['mousse'])
-    // The owner's own sign-in: their entry's environment, not a locked one.
-    expect(options.env?.USER_VARIABLE).toBe('from-settings')
+    // Mousse's own server only, over Claude Code's input; none on its command line (#358).
+    expect(options.mcpServers).toEqual({})
+    expect(Object.keys(registered.get(options) ?? {})).toEqual(['mousse'])
+    // The owner's own sign-in, without unrelated launch variables.
+    expect(options.env).not.toHaveProperty('USER_VARIABLE')
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
     // One query per turn: no live process is kept for the bot's thread.
     expect(captured.filter((entry) => entry.hooks)).toHaveLength(1)
@@ -174,7 +291,7 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
     const options = captured.find((entry) => entry.hooks)!
     expect(options.settingSources).toEqual([])
-    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key', USER_VARIABLE: 'from-settings' })
+    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key' })
   })
 
   it('a failed turn reports Claude Code\'s own reason', async () => {
@@ -269,7 +386,7 @@ describe('"run commands" on the owner\'s own Claude Code entry', () => {
     expect(options.tools).toEqual(['Bash', 'Read', 'ToolSearch'])
     expect(options.disallowedTools).not.toContain('Bash')
     // Writable: the files folder and scratch; the read-only folder is denied; the network is closed.
-    expect(options.sandbox).toMatchObject({ enabled: true, allowUnsandboxedCommands: false, filesystem: { allowWrite: [files, scratch], denyWrite: expect.arrayContaining([root]) }, network: { allowedDomains: [] } })
+    expect(settingsOf(options).sandbox).toMatchObject({ enabled: true, allowUnsandboxedCommands: false, filesystem: { allowWrite: [files, scratch], denyWrite: expect.arrayContaining([root]) }, network: { allowedDomains: [] } })
     // Any command is allowed by the grant (it goes on to canUseTool, never the person); the sandbox is never left.
     expect(decisions.command).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
     expect(decisions.escape).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
@@ -295,7 +412,7 @@ describe('"run commands" on the owner\'s own Claude Code entry', () => {
       expect(turn).toMatchObject({ ownerEntry: true, shellContained: false, shellOpen: true })
       expect(claudeLockedTools(turn, false).tools).toEqual(['Bash', 'Read'])
       expect(new ClaudeLockedGate({ ...turn, ledger: fakeLedger().ledger }, false).preToolUse('Bash', { command: 'make' })).toEqual({ ok: true })
-      expect(claudeLockedOptions(turn, { env: {}, mcpServers: {}, mousseTools: false })).not.toHaveProperty('sandbox')
+      expect(claudeLockedOptions(turn, { env: {}, mousseTools: false }).settings).not.toHaveProperty('sandbox')
     }
   })
 })
@@ -309,8 +426,11 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
     const { service, captured, instanceHome } = lockedService(async () => {})
     const authority = authorityFor(['read', 'search'], { root, scratch })
     const locked: ClaudeLockedTurn = { authority, cwd: scratch, shellContained: false, temps: [], systemPrompt: 'You are a bot.', ledger: fakeLedger().ledger }
-    await service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'sonnet', prompt: 'go', permissionMode: 'full', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer' }, mcpTurnToken: 'tok', locked, onText: vi.fn() })
+    // A relay the bridge offered is never attached to a bot's turn.
+    await service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'sonnet', prompt: 'go', permissionMode: 'full', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer', relay: { url: 'http://127.0.0.1:1/mcp/relay', revision: 'r1' } }, mcpTurnToken: 'tok', locked, onText: vi.fn() })
     const options = captured[0]
+    // The bot's own system text replaces Claude Code's, rendered fresh on each request (never kept from the first).
+    expect(options!.systemPrompt).toEqual({ type: 'custom', prompt: 'You are a bot.', snapshot: false })
     expect(options).toMatchObject({
       cwd: scratch,
       settingSources: [],
@@ -318,12 +438,14 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
       plugins: [],
       extraArgs: { 'thinking-display': 'summarized' },
       permissionMode: 'default',
-      systemPrompt: 'You are a bot.',
-      maxTurns: 100,
+      maxTurns: CLAUDE_LOCKED_MAX_TURNS,
       tools: ['Glob', 'Grep', 'Read', 'ToolSearch']
     })
+    expect(CLAUDE_LOCKED_MAX_TURNS).toBe(300)
     for (const name of ['allowDangerouslySkipPermissions', 'additionalDirectories', 'allowedTools', 'sandbox', 'resume']) expect(options, name).not.toHaveProperty(name)
-    expect(Object.keys(options.mcpServers ?? {})).toEqual(['mousse'])
+    // Mousse's own server only, without the MCP relay, over Claude Code's input; none on its command line (#358).
+    expect(options.mcpServers).toEqual({})
+    expect(registered.get(options)).toEqual({ mousse: expect.objectContaining({ type: 'http', url: 'http://127.0.0.1:1/mcp', headers: { Authorization: 'Bearer bearer' } }) })
     expect(typeof options.spawnClaudeCodeProcess).toBe('function')
     // Every other built-in is turned off as well (item 4).
     expect(options.disallowedTools).toEqual(CLAUDE_BUILTIN_TOOLS.filter((name) => !['Glob', 'Grep', 'Read', 'ToolSearch'].includes(name)))
@@ -335,6 +457,37 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
     expect(env.USER_VARIABLE).toBeUndefined()
     expect(env.CLAUDE_CONFIG_DIR).toBe(instanceHome)
     if (process.platform !== 'win32') expect(env.TMPDIR).toBe(join(scratch, 'tmp'))
+  })
+
+  it('a turn that reaches the cap on model turns ends with provider_turn_cap, so the bot carries the work on', async () => {
+    const scratch = temp('claude-locked-scratch-')
+    const { service } = lockedService(async () => {}, { type: 'result', subtype: 'error_max_turns', is_error: true, errors: [], num_turns: CLAUDE_LOCKED_MAX_TURNS, session_id: 'locked-session' })
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root: scratch, scratch }), cwd: scratch, shellContained: false, temps: [], systemPrompt: 'You are a bot.', ledger: fakeLedger().ledger }
+    const failure = await service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'sonnet', prompt: 'go', permissionMode: 'full', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer' }, mcpTurnToken: 'tok', locked, onText: vi.fn() })
+      .then(() => undefined, (error: unknown) => error)
+    expect(failure).toMatchObject({ code: PROVIDER_TURN_CAP })
+    // End to end: the orchestrator turns the provider's failure into the run's error as it does for every turn
+    // (`normalizeAppError`, `serializeAppError`, `providerFailureText`), and the bot engine reads that error as the turn
+    // cap: the work goes on in the same thread instead of failing.
+    const runError = providerFailureText(serializeAppError(normalizeAppError(failure, 'orchestrator_turn_failed')))
+    expect(isProviderTurnCap(runError)).toBe(true)
+    const f = botFixture()
+    try {
+      await f.bots.reconcileOnStartup()
+      const { botId } = await createBot(f, { name: 'Pip', reply: 'Hello.' })
+      await f.bots.service.chatSend({ botId, text: 'Compare vacuums', clientRequestId: 'm1' })
+      const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+      const { workId } = await f.bots.tools.work.start(botId, turn.id, { title: 'Vacuums', brief: 'Compare vacuums.', key: 'k1' })
+      await runDispatch(f, turn.id, 1, { text: 'On it.' })
+      const work = await botStart(f, workId)
+      f.clock.now += 60_000
+      work.prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} })
+      await botFinish(f, work.payload, 'failed', { text: 'Two picks so far.', outcome: { error: runError } })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      expect(f.store.dispatch(workId, 2)).toMatchObject({ kind: 'continue', send: { turnCap: true } })
+    } finally {
+      f.close()
+    }
   })
 
   it('a bot without a folder runs in an empty folder of Mousse\'s own, never the thread\'s project', async () => {
@@ -788,10 +941,11 @@ describe('locked Claude Code: shell (item 15)', () => {
   })
 
   it('compiles the sandbox: explicit denials, scratch as the only extra write for a read-only grant, no network, no key', () => {
-    const sandbox = claudeLockedSandbox({ workspace: { roots: ['/home/me/site'], access: 'read', scratch: '/p/bots/scratch/a' }, temps: ['/tmp', '/var/tmp'], home: '/home/me' })
+    // macOS: the home folder closed (Linux closes every top folder but the system's own: botApprovalRuntimes.test.ts).
+    const sandbox = claudeLockedSandbox({ workspace: { roots: ['/home/me/site'], access: 'read', scratch: '/p/bots/scratch/a' }, temps: ['/nowhere/tmp', '/nowhere/var/tmp'], home: '/home/me', platform: 'darwin' })
     expect(sandbox).toMatchObject({
       enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: false, excludedCommands: [], enableWeakerNestedSandbox: false,
-      filesystem: { allowWrite: ['/p/bots/scratch/a'], denyWrite: ['/home/me/site', '/tmp', '/var/tmp'], denyRead: ['/home/me'], allowRead: ['/home/me/site', '/p/bots/scratch/a'] },
+      filesystem: { allowWrite: ['/p/bots/scratch/a'], denyWrite: ['/home/me/site', '/nowhere/tmp', '/nowhere/var/tmp'], denyRead: ['/home/me'], allowRead: ['/home/me/site', '/p/bots/scratch/a'] },
       network: { allowedDomains: [], strictAllowlist: true, allowLocalBinding: false, allowAllUnixSockets: false }
     })
     expect(sandbox.credentials?.envVars).toEqual(expect.arrayContaining([{ name: 'ANTHROPIC_API_KEY', mode: 'deny' }]))

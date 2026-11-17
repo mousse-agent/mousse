@@ -1,7 +1,10 @@
 import type { UIMessage } from "ai";
 import { readSubagentNotice } from "../../../adapters/subagentNotice";
+import { readSettleNoticeMeta } from "../../../adapters/settleNotice";
 import { isTextPart } from "../utils/assistant-blocks";
 import { markdownToSearchBlocks, plainTextToSearchBlocks } from "./search-text";
+import { promptDisplayText } from "../prompt-links";
+import { hasLiveText, liveTextOver } from "../../../../stores/liveTextStore";
 
 /** A turn as the list groups it, with the key its row is mounted under. */
 export type FindTurn = {
@@ -99,10 +102,15 @@ function sourceOf(message: UIMessage): unknown[] {
   const source: unknown[] = [
     message.role,
     Boolean(metadata?.contextHandoff || metadata?.compaction || metadata?.contextCleared),
-    message.role === "user" && readSubagentNotice(message) !== null,
+    message.role === "user" && (readSubagentNotice(message) !== null || readSettleNoticeMeta(message) !== null),
   ];
-  for (const part of message.parts ?? []) source.push(isTextPart(part) ? part.text : null);
+  for (const part of message.parts ?? []) source.push(isTextPart(part) ? replyText(message, part.text) : null);
   return source;
+}
+
+/** A reply's text as shown: its live text while it streams in (see liveTextStore). */
+function replyText(message: UIMessage, text: string): string {
+  return message.role === "assistant" ? liveTextOver(message.id, text) : text;
 }
 
 function sameSource(a: readonly unknown[], b: readonly unknown[]): boolean {
@@ -139,7 +147,8 @@ export class FindIndex {
   /** The message's entry when it is current, else null. */
   private current(message: UIMessage): Entry | null {
     const known = this.byMessage.get(message);
-    if (known) return known;
+    // A reply streaming into its live text keeps its message object while its text changes.
+    if (known && !(message.role === "assistant" && hasLiveText(message.id))) return known;
     const entry = this.byId.get(message.id);
     if (!entry || !sameSource(entry.source, sourceOf(message))) return null;
     this.byMessage.set(message, entry);
@@ -271,12 +280,13 @@ export function searchableParts(message: UIMessage, math = false): SearchablePar
 function readParts(message: UIMessage, math: boolean): SearchablePart[] {
   const parts = message.parts ?? [];
   if (message.role === "user") {
-    if (readSubagentNotice(message)) return [];
+    if (readSubagentNotice(message) || readSettleNoticeMeta(message)) return [];
     const text = parts
       .filter(isTextPart)
       .map((part) => part.text)
       .join("");
-    const blocks = plainTextToSearchBlocks(text);
+    // The bubble shows each link as its label, so that is what find reads.
+    const blocks = plainTextToSearchBlocks(promptDisplayText(text));
     return blocks.length > 0 ? [{ partIndex: 0, blocks }] : [];
   }
   if (message.role !== "assistant") return [];
@@ -285,7 +295,7 @@ function readParts(message: UIMessage, math: boolean): SearchablePart[] {
   const result: SearchablePart[] = [];
   parts.forEach((part, partIndex) => {
     if (!isTextPart(part) || !part.text) return;
-    const blocks = markdownToSearchBlocks(part.text, { math });
+    const blocks = markdownToSearchBlocks(replyText(message, part.text), { math });
     if (blocks.length > 0) result.push({ partIndex, blocks });
   });
   return result;

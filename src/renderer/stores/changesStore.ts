@@ -57,6 +57,8 @@ interface ChangesStoreState {
   openTurn: (threadId: string, turnId: string, file?: string) => void
   /** Shows the whole thread since its base; `file` opens that file. */
   openThread: (threadId: string, file?: string) => void
+  /** Shows the uncommitted changes, which is all a thread without a worktree of its own has; `file` opens that file. */
+  openUncommitted: (threadId: string, file?: string) => void
   /** The user picked a scope; Last turn pins to `pinTurnId`. */
   choose: (threadId: string, scopeId: ChangesScopeId, pinTurnId?: string | null) => void
   /** The panel settled on a scope by itself (a default or a request): not the user's choice. */
@@ -112,6 +114,8 @@ export const useChangesStore = create<ChangesStoreState>()(
         }),
       openThread: (threadId, file) =>
         set((s) => ({ byThread: update(s.byThread, threadId, { requested: 'thread', openPath: null, pendingFile: file ? { path: file } : undefined }) })),
+      openUncommitted: (threadId, file) =>
+        set((s) => ({ byThread: update(s.byThread, threadId, { requested: 'uncommitted', openPath: null, pendingFile: file ? { path: file } : undefined }) })),
       choose: (threadId, scopeId, pinTurnId) =>
         set((s) => ({
           byThread: update(s.byThread, threadId, {

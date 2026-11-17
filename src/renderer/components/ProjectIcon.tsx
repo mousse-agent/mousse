@@ -21,10 +21,12 @@ interface ProjectIconProps {
 export function ProjectIcon({ project, fallback, size = 16, expanded, className }: ProjectIconProps) {
   const url = useProjectIcon(project)
   const [broken, setBroken] = useState<string | null>(null)
-  if (!url || broken === url) return <>{fallback}</>
+  // The fallback keeps its own layout (`display: contents`); theme CSS can still reach it through the wrapper.
+  if (!url || broken === url) return <span data-mousse="project-icon" style={{ display: 'contents' }}>{fallback}</span>
   const state = expanded === undefined ? '' : expanded ? ' project-icon-open' : ' project-icon-closed'
   return (
     <img
+      data-mousse="project-icon"
       src={url}
       alt=""
       aria-hidden="true"

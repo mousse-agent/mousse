@@ -1,15 +1,14 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 
-import { expiresAtAfter, expiresInLabel } from '../../shared/threadExpiry'
+import { expiresAtAfter } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Clock, Layers, ListTree, Loader2, Lock, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, Eye, EyeOff, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pin, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
-import { isThreadActivityActive, type Project, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
-import { pausedStatusLabel } from '../lib/pausedRun'
+import type { Project, Thread, ThreadActivitySnapshot, ThreadActivityState } from '../../shared/types'
 import { worktreeMark } from '../lib/worktreeMark'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { arrangeThreadFeed, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
@@ -17,20 +16,25 @@ import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../s
 import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention } from '../../shared/threadAttention'
 import { needsMeThreads } from '../lib/needsMe'
 import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
+import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
+import { workspaceModeFor } from '../stores/sidebarTabAgreement'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
-import { createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
-import { runWithToast, showUndoToast } from '../lib/actionToast'
+import { archiveThread, createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
+import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
+import { runWithToast } from '../lib/actionToast'
+import { readHiddenThreadsShown, writeHiddenThreadsShown } from '../lib/hiddenThreadsShown'
 import { Modal } from './ui/Modal'
 import { PillTabs, type PillTab } from './ui/PillTabs'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
 import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
+import { threadsForList, useArchiveMotionRows } from '../lib/archiveMotion'
 import { Collapse, motionAllowed } from './ui/Collapse'
-import { scaleMotionMs, useMotionScale } from '../lib/motion'
+import { scaleMotionMs, useMotionScale, VIEW_SWAP_IN_MS } from '../lib/motion'
 
 import {
   ThreadsContextMenu,
@@ -52,9 +56,14 @@ import { ProjectIcon } from './ProjectIcon'
 import { projectIconMenuActions } from '../lib/projectIconActions'
 import { projectTooltip, thisHomeFolder } from '../lib/projectTooltip'
 import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
+import { useReplyPreviews } from '../lib/replyPreviewSetting'
+import { threadPullRequestsOf, type ThreadPullRequestSummary } from '../../shared/pullRequests'
+import { ThreadPullRequestCount, ThreadReplyPreview } from './ThreadRowExtras'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import { ProjectRunsDot } from './automations/inbox/ProjectRunsDot'
+import { countRender } from '../chat/components/agent-elements/render-counts'
+import { plainThreads, sameListedActivity, ThreadCardStatus, ThreadExpiryIcon, ThreadRowStatusIcon } from './ThreadRowStatus'
 import '../styles/threads-sidebar.css'
 import '../styles/sidebar-view-motion.css'
 
@@ -101,22 +110,9 @@ const SIDEBAR_TABS = [
   { id: 'chats', label: 'Chats', icon: MessagesSquare }
 ] as const satisfies readonly PillTab<string>[]
 type SidebarView = (typeof SIDEBAR_TABS)[number]['id']
-/** How long the old view fades out on a tab switch; matches the leaving rule in sidebar-view-motion.css. */
-const SIDEBAR_VIEW_OUT_MS = 140
 
 /** Shift+F10 or the context-menu key: open a row's menu from the keyboard. */
 const isMenuKey = (event: KeyboardEvent) => event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)
-
-function threadAge(iso?: string): string {
-  if (!iso) return ''
-  const delta = Date.now() - new Date(iso).getTime()
-  if (!Number.isFinite(delta) || delta < 45_000) return 'now'
-  const minutes = Math.round(delta / 60_000)
-  if (minutes < 60) return `${minutes}m`
-  const hours = Math.round(minutes / 60)
-  if (hours < 36) return `${hours}h`
-  return `${Math.round(hours / 24)}d`
-}
 
 function projectInitials(name: string): string {
   const parts = name.split(/[\s/._-]+/).filter(Boolean)
@@ -264,10 +260,10 @@ function ThreadCardBody({
   projectName,
   project,
   hue,
+  threadId,
   activity,
+  liveActivity,
   awaitsApproval,
-  startedAt,
-  pause,
   isRenaming,
   renamingName,
   isGeneratingTitle,
@@ -275,7 +271,9 @@ function ThreadCardBody({
   fullTitle,
   onRename,
   onCancelRename,
-  onStartRename
+  onStartRename,
+  preview,
+  pullRequests
 }: {
   thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun'>
   projectName?: string
@@ -283,12 +281,12 @@ function ThreadCardBody({
   project?: Project
   /** The project's hue (`--hue-N`), shared with the row's tint. */
   hue?: number
+  threadId: string
+  /** The activity the list shows for the thread; with `liveActivity`, its status reads the thread's own (`ThreadCardStatus`). */
   activity?: ThreadActivityState
+  liveActivity: boolean
   /** The input it waits for is a permission request. */
-  awaitsApproval?: boolean
-  startedAt?: string
-  /** This thread's own pause (not one a subagent below it is in): when its limit resets. */
-  pause?: Pick<TurnPause, 'until' | 'estimated'>
+  awaitsApproval: boolean
 
   isRenaming: boolean
   renamingName: string
@@ -301,9 +299,10 @@ function ThreadCardBody({
   onCancelRename: () => void
   /** Double-click on the title starts a rename. */
   onStartRename?: (event: React.MouseEvent<HTMLElement>) => void
+  /** The latest reply, shown under the title; absent when it has none or previews are off. */
+  preview?: string
+  pullRequests: readonly ThreadPullRequestSummary[]
 }) {
-  const age = threadAge(isThreadActivityActive(activity) ? startedAt ?? thread.updatedAt : thread.updatedAt)
-  const status = threadStatus(activity, awaitsApproval)
   return (
     <>
       {projectName ? (
@@ -317,39 +316,8 @@ function ThreadCardBody({
         <span className="threads-sidebar-card-meta">
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
-          {status === 'working' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
-              <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
-              Working{age && age !== 'now' ? ` ${age}` : ''}
-            </span>
-          ) : status === 'waiting' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-waiting">
-              <CircleDotDashed size={12} strokeWidth={2} aria-hidden="true" />
-              Waiting{age && age !== 'now' ? ` ${age}` : ''}
-            </span>
-          ) : status === 'approval' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-input" title="Needs your approval">
-              <Shield size={12} strokeWidth={2} aria-hidden="true" />
-              Approval
-            </span>
-          ) : status === 'question' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
-              <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />
-              Input
-            </span>
-          ) : status === 'paused' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-paused">
-              <Pause size={12} strokeWidth={2} aria-hidden="true" />
-              {pausedStatusLabel(pause, Date.now())}
-            </span>
-          ) : status === 'done' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
-              <CircleCheck size={12} strokeWidth={2} aria-hidden="true" />
-              Done
-            </span>
-          ) : (
-            <span className="threads-sidebar-card-age">{age}</span>
-          )}
+          <ThreadPullRequestCount pullRequests={pullRequests} />
+          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} />
         </span>
         {isRenaming ? (
           <SidebarRenameInput initialName={renamingName} onSubmit={onRename} onCancel={onCancelRename} />
@@ -358,10 +326,11 @@ function ThreadCardBody({
         ) : (
           <span className="threads-sidebar-card-title" onDoubleClick={onStartRename} onMouseEnter={tooltipIfTruncated(fullTitle)}>
             {thread.localOnly && <Lock size={11} strokeWidth={2} className="thread-private-icon" aria-label="Private" />}
-            {thread.expiresAt && <span className="thread-expiry-icon" title={`Deletes ${expiresInLabel(thread.expiresAt)}`}><Clock size={11} strokeWidth={2} aria-label="Deletes itself" /></span>}
+            {thread.expiresAt && <ThreadExpiryIcon expiresAt={thread.expiresAt} size={11} />}
             {thread.name}
           </span>
         )}
+        {preview && !isRenaming && !isGeneratingTitle && <ThreadReplyPreview text={preview} className="threads-sidebar-card-preview" />}
         {(worktree || thread.node) && (
           <span className="threads-sidebar-card-sub">
             <ThreadComputerBadge thread={thread} withName className="threads-sidebar-card-device" />
@@ -379,19 +348,45 @@ function ThreadCardBody({
 }
 
 export function ThreadsSidebar({ className = '' }: { className?: string }) {
+  countRender('ThreadsSidebar')
 
   const tabsId = useId()
   const projects = useAppStore((s) => s.projects)
 
-  const threads = useAppStore((s) => s.threads)
+  const listedInStore = useAppStore((s) => s.threads)
   const agentChats = useChatsStore((s) => s.snapshot.chats)
   const agentThreadIds = useMemo(() => new Set(agentChats.map((chat) => chat.threadId)), [agentChats])
 
-  const activeThreadId = useAppStore((s) => s.activeThreadId)
+  // A thread being opened is highlighted from the click on, while the chat still shows the one before (`openingThreadId`).
+  const storeActiveThreadId = useAppStore((s) => s.openingThreadId ?? s.activeThreadId)
   const speakingThreadId = useSpeakingThreadId()
 
-  const threadActivity = useAppStore((s) => s.threadActivity)
-  const turnStates = useAppStore((s) => s.turnStates)
+  // The activity the list is drawn from. A push that only swaps Working and Waiting on a plain thread keeps the one
+  // held, so the list and its other rows stay as they are; that thread's status reads its own (`ThreadRowStatus`).
+  const plainThreadIds = useMemo(() => plainThreads(listedInStore), [listedInStore])
+  const plainRef = useRef(plainThreadIds)
+  plainRef.current = plainThreadIds
+  const heldActivity = useRef<ThreadActivitySnapshot | null>(null)
+  const storeActivity = useAppStore((s) => {
+    const held = heldActivity.current
+    if (held && sameListedActivity(held, s.threadActivity, plainRef.current)) return held
+    heldActivity.current = s.threadActivity
+    return s.threadActivity
+  })
+  // A thread a send is starting is listed from the click on, before the service has made it (`pendingThreadRows`).
+  const shownProfileId = useAppStore((s) => s.profileId)
+  const pendingRows = usePendingThreadRows((s) => s.rows)
+  const pendingRowKeys = usePendingThreadRows((s) => s.rowKeys)
+  const { threads, activity: threadActivity, openRowId: activeThreadId, rowKeys, unmade: unmadeRows } = useMemo(
+    // A bot's chat thread is never taken for a pending send's thread.
+    () => withPendingRows(listedInStore, pendingRows.filter((row) => row.profileId === shownProfileId), storeActivity, storeActiveThreadId, pendingRowKeys, agentThreadIds),
+    [listedInStore, pendingRows, shownProfileId, storeActivity, storeActiveThreadId, pendingRowKeys, agentThreadIds]
+  )
+  // A pending row goes once the service shows the same (its thread listed, named and with a state); its key a minute on.
+  useEffect(() => {
+    dropPendingThreadRows(servedPendingRows(pendingRows, listedInStore, storeActivity))
+    pruneRowKeys(new Set(listedInStore.map((thread) => thread.id)))
+  }, [pendingRows, listedInStore, storeActivity])
   const approvalThreads = useThreadsAwaitingApproval()
 
   const upsertThread = useAppStore((s) => s.upsertThread)
@@ -422,34 +417,20 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const workspaceMode = useAppStore((s) => s.sidebarMode)
   const setSidebarView = async (view: SidebarView) => {
     const state = useAppStore.getState()
-    const nextMode = view === 'chats' ? 'chats' : 'projects'
-    if (state.sidebarMode !== nextMode && !await confirmNavigation()) return
-    state.setThreadsSidebarView(view)
-    if (state.sidebarMode !== nextMode) state.setSidebarMode(nextMode)
+    if (state.sidebarMode !== workspaceModeFor(view) && !await confirmNavigation()) return
+    // The workspace follows the tab (`agreeWithTab`).
+    useAppStore.getState().setThreadsSidebarView(view)
   }
 
-  // Tab switch motion (sidebar-view-motion.css). The tabs follow `sidebarView` at once; the content shows
-  // `shownView`, which trails it by the old view's fade-out, then the new view fades in as its panel unhides.
-  // Clicks during the fade-out restart nothing: the view chosen last is the one that comes in. With motion
-  // off (the setting, the OS, or no renderer) the content follows the tabs at once.
+  // Tab switch motion (sidebar-view-motion.css). The content follows the tabs at once: the new view shows in
+  // the click's own update and settles in with a short lift as its panel unhides. With motion off (the setting,
+  // the OS, or no renderer) it does not move.
   const instantViews = useMotionScale() === 0 || !motionAllowed()
-  const [shownView, setShownView] = useState(sidebarView)
-  const contentView = instantViews ? sidebarView : shownView
-  const viewLeaving = contentView !== sidebarView
-  useEffect(() => {
-    if (instantViews) setShownView(sidebarView)
-  }, [instantViews, sidebarView])
-  useEffect(() => {
-    if (!viewLeaving) return
-    const timer = setTimeout(() => setShownView(useAppStore.getState().threadsSidebarView), scaleMotionMs(SIDEBAR_VIEW_OUT_MS))
-    return () => clearTimeout(timer)
-  }, [viewLeaving])
+  const contentView = sidebarView
 
-  // The Archived footer is not under Chats: it folds away while the old view fades out and unfolds as the
-  // new one comes in, so the list above it takes or gives the room smoothly. `footerAway` is set from the
-  // click; the footer is `hidden` once Chats shows.
+  // The Archived footer is not under Chats: it is hidden as Chats shows and unfolds as another view comes in,
+  // so the list above it gives the room smoothly.
   const footerRef = useRef<HTMLDivElement>(null)
-  const footerAway = sidebarView === 'chats' || contentView === 'chats'
   const footerHidden = contentView === 'chats'
   const footerWasHidden = useRef(footerHidden)
   useLayoutEffect(() => {
@@ -457,20 +438,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const wasHidden = footerWasHidden.current
     footerWasHidden.current = footerHidden
     if (!footer || typeof footer.animate !== 'function') return
-    const running = footer.getAnimations().filter((animation) => animation.id === 'footer-swap')
-    if (footerHidden || instantViews) { for (const animation of running) animation.cancel(); return }
-    const from = wasHidden ? { height: 0, opacity: 0 } : { height: footer.getBoundingClientRect().height, opacity: Number(getComputedStyle(footer).opacity) }
-    for (const animation of running) animation.cancel()
-    const to = footerAway ? { height: 0, opacity: 0 } : { height: footer.getBoundingClientRect().height, opacity: 1 }
-    if (Math.abs(from.height - to.height) < 0.5 && Math.abs(from.opacity - to.opacity) < 0.01) return
+    for (const animation of footer.getAnimations()) if (animation.id === 'footer-swap') animation.cancel()
+    if (footerHidden || instantViews || !wasHidden) return
+    const height = footer.getBoundingClientRect().height
+    if (height < 0.5) return
     const frame = (at: { height: number; opacity: number }) => ({ blockSize: `${at.height}px`, opacity: at.opacity, overflow: 'hidden' })
-    const animation = footer.animate([frame(from), frame(to)], {
-      duration: scaleMotionMs(footerAway ? SIDEBAR_VIEW_OUT_MS : 180),
-      easing: footerAway ? 'cubic-bezier(0.5, 1, 0.89, 1)' : 'cubic-bezier(0.22, 1, 0.36, 1)',
-      fill: footerAway ? 'forwards' : 'none',
+    const animation = footer.animate([frame({ height: 0, opacity: 0 }), frame({ height, opacity: 1 })], {
+      duration: scaleMotionMs(VIEW_SWAP_IN_MS),
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
     })
     animation.id = 'footer-swap'
-  }, [footerAway, footerHidden, instantViews])
+  }, [footerHidden, instantViews])
 
   // Add project leaves with the Projects tab; the tab list then eases out over its room instead of jumping.
   // `tabsWidth` is the list's settled width, so the layout effect still sees the width from before the change.
@@ -529,8 +507,28 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  // Subagent threads sit under their parent, not beside it: the list holds the threads people started.
-  const listedThreads = useMemo(() => visibleThreads(threads), [threads])
+  // Subagent threads sit under their parent, not beside it: the list holds the threads people started. A thread a bot
+  // keeps out of the sidebar (`Thread.hidden`) is listed in the bot's chat instead, unless the eye shows them all here
+  // (a view preference of this profile; the threads stay hidden).
+  const [hiddenShown, setHiddenShown] = useState(() => readHiddenThreadsShown(shownProfileId))
+  useEffect(() => setHiddenShown(readHiddenThreadsShown(shownProfileId)), [shownProfileId])
+  const toggleHiddenShown = () => {
+    const next = !hiddenShown
+    setHiddenShown(next)
+    writeHiddenThreadsShown(shownProfileId, next)
+  }
+  const hiddenCount = useMemo(
+    () => visibleThreads(threads).filter((thread) => thread.hidden && isThreadStarted(thread) && !agentThreadIds.has(thread.id)).length,
+    [threads, agentThreadIds]
+  )
+  const showsHidden = hiddenShown && hiddenCount > 0
+  const listedThreads = useMemo(() => visibleThreads(threads).filter((thread) => showsHidden || !thread.hidden), [threads, showsHidden])
+  // A thread archived or unarchived, by any means, leaves its list and arrives in its new place with motion: for a
+  // moment its old row stays in the old list (`threadsForList`) while it fades and closes (archiveMotion.ts).
+  const asideRef = useRef<HTMLElement>(null)
+  const { moves: archiveMoves, motionOf: archiveMotionOfRow } = useArchiveMotionRows(asideRef, listedThreads)
+  const unarchivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, false), [listedThreads, archiveMoves])
+  const archivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, true), [listedThreads, archiveMoves])
   // A parent row shows what its subagents are doing, however deep they are nested.
   const rolledUpActivity = useMemo(() => rollUpActivities(threads, threadActivity), [threads, threadActivity])
   // While a subagent's thread is open, the row it sits under is highlighted instead.
@@ -542,27 +540,35 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // Empty drafts are composer state, not conversations. They become visible
   // only when the first message is committed.
   const availableThreads = useMemo(
-    () => sortSidebarThreads(listedThreads.filter((thread) => !thread.settledAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
-    [listedThreads, agentThreadIds]
+    () => sortSidebarThreads(unarchivedListThreads.filter((thread) => !thread.settledAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    [unarchivedListThreads, agentThreadIds]
   )
   // The Threads tab: in the order its rows were dragged into, with threads started since on top, newest
   // first. Later messages do not move a row.
   const feedThreads = useMemo(() => sortThreadFeed(availableThreads, threadFeedOrder), [availableThreads, threadFeedOrder])
   const archivedThreads = useMemo(
-    () => sortThreadFeed(listedThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
-    [listedThreads, agentThreadIds]
+    () => sortThreadFeed(archivedListThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    [archivedListThreads, agentThreadIds]
   )
   const attentionOf = (threadId: string) => threadAttention(rolledUpActivity[threadId] ?? threadActivity[threadId])
   // Threads that wait for an answer or an approval, from every project and computer, at the top of the list.
   const needsMe = useMemo(() => needsMeThreads(threads, threadActivity, agentThreadIds), [threads, threadActivity, agentThreadIds])
   // With one thread in all, its own row already says it: a group of it would only repeat it.
   const showNeedsMe = needsMe.length > 0 && availableThreads.length > 1
+  // The Threads tab lists a thread in one place: while "Needs me" shows it, the list below leaves it out.
+  // Dragging still arranges `feedThreads`, so the thread comes back where it was.
+  const feedRows = useMemo(() => {
+    if (!showNeedsMe) return feedThreads
+    const waiting = new Set(needsMe.map((thread) => thread.id))
+    return feedThreads.filter((thread) => !waiting.has(thread.id))
+  }, [feedThreads, needsMe, showNeedsMe])
 
   // A project that several computers hold for the same repository is one group; the others' projects that
   // match none of this computer's stay groups of their own, named with their computer.
   const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
   const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
   const threadProjectColors = useThreadProjectColors()
+  const replyPreviews = useReplyPreviews()
   const hueByGroup = useMemo(
     () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
     [projectGroups]
@@ -593,19 +599,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // The group in focus: the open thread's (a draft's project too), whose header stays bright while the other
   // groups dim (threads-sidebar.css). None for a Chats thread or with nothing open, and then nothing dims.
   const focusedThread = threads.find((thread) => thread.id === (openSubagentParentId ?? activeThreadId))
-  const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) ? listGroupOf(focusedThread.projectId) : undefined
+  const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) && (showsHidden || !focusedThread.hidden) ? listGroupOf(focusedThread.projectId) : undefined
   // The Threads tab dims its other cards only while the open thread has a card there.
-  const feedHasActive = Boolean(focusedThread && availableThreads.some((thread) => thread.id === focusedThread.id))
+  const feedHasActive = Boolean(focusedThread && feedRows.some((thread) => thread.id === focusedThread.id))
 
   // Reveal the highlighted row once per thread: open its group, show the group's whole list when it is past
-  // the first 5, or open "Archived". A draft is revealed when it is started and gets its row.
+  // the first 5, or open "Archived". A draft is revealed when it is started and gets its row. Before the frame is
+  // drawn, so a row a send just listed shows in the frame that lists it.
   const revealedRow = useRef<string | null>(null)
-  useEffect(() => {
+  useLayoutEffect(() => {
     // The row to reveal is the highlighted one, which for a subagent is its parent's.
     const shownId = openSubagentParentId ?? activeThreadId
     if (!shownId || revealedRow.current === shownId) return
     const shown = threads.find((thread) => thread.id === shownId)
-    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id)) return
+    // A hidden thread has no row to reveal (`Thread.hidden`), unless the eye shows hidden threads.
+    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id) || (shown.hidden && !showsHidden)) return
     revealedRow.current = shownId
     if (shown.settledAt) {
       setArchivedExpanded(true)
@@ -624,7 +632,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
     // listGroupOf reads groupOf and groupById, which are listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeThreadId, openSubagentParentId, threads, availableThreads, agentThreadIds, groupOf, groupById])
+  }, [activeThreadId, openSubagentParentId, threads, availableThreads, agentThreadIds, groupOf, groupById, showsHidden])
 
   const toggleProject = (projectId: string) => {
     toggledProjectRef.current = projectId
@@ -650,6 +658,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   }
 
+  // The row of a thread a send is starting is scrolled into view in the frame that lists it.
+  const scrolledPendingRow = useRef<string | null>(null)
+  useLayoutEffect(() => {
+    const id = activeThreadId
+    if (!id || scrolledPendingRow.current === id || !pendingRows.some((row) => row.key === id)) return
+    const scroller = scrollRef.current
+    const row = scroller ? [...scroller.querySelectorAll<HTMLElement>('.threads-sidebar-thread[data-thread-id]')].find((item) => item.dataset.threadId === id && item.offsetParent !== null) : undefined
+    if (!scroller || !row) return
+    scrolledPendingRow.current = id
+    const delta = revealDelta(scroller.getBoundingClientRect(), row.getBoundingClientRect())
+    if (delta) scroller.scrollTop += delta
+  }, [activeThreadId, pendingRows, expandedProjects, expandedProjectThreadLists])
+
   // A project opened by the person shows its first rows, even under a tall "Needs me".
   useEffect(() => {
     const id = revealProject.current
@@ -660,6 +681,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const delta = revealDelta(scroller.getBoundingClientRect(), target.getBoundingClientRect())
     if (delta) scroller.scrollTop += delta
   }, [expandedProjects])
+
+  // A project the title bar's path asked to show (`showProjectInSidebar`): its group opens and scrolls into view.
+  const revealRequest = useSidebarRevealStore((s) => s.project)
+  const handledReveal = useRef(0)
+  useEffect(() => {
+    if (!revealRequest || revealRequest.seq === handledReveal.current) return
+    handledReveal.current = revealRequest.seq
+    if (Date.now() - revealRequest.at > SIDEBAR_REVEAL_TIMEOUT_MS) return
+    const groupId = listGroupOf(revealRequest.projectId)
+    toggledProjectRef.current = groupId
+    revealProject.current = groupId
+    // A new set even when the group is open already, so the scroll above runs.
+    setExpandedProjects((prev) => new Set(prev).add(groupId))
+    // listGroupOf reads groupOf and groupById, which are listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealRequest, groupOf, groupById])
 
   // Marks the list while rows sit below its fold, for the fade and the drawn scrollbar.
   useEffect(() => {
@@ -806,7 +843,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (!dragged?.feed || dragged.id === target) return
     suppressClick.current = true
     window.setTimeout(() => { suppressClick.current = false }, 0)
-    setThreadFeedOrder(arrangeThreadFeed(feedThreads.map((thread) => thread.id), dragged.id, target, after))
+    setThreadFeedOrder(arrangeThreadFeed(feedThreads.flatMap((thread) => (unmadeRows.has(thread.id) ? [] : [thread.id])), dragged.id, target, after))
   }
 
   const reorderBefore = async (target: DraggedSidebarItem) => {
@@ -824,7 +861,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
     // Reorder must include every thread in the group (including hidden drafts), the other computers' threads
     // of the same repository among them; the project is the one that names the group.
-    const group = threads.filter((thread) => groupIdOf(thread.projectId) === dragged.projectId)
+    const group = threads.filter((thread) => groupIdOf(thread.projectId) === dragged.projectId && !isPendingRowId(thread.id))
     const ids = group.map((thread) => thread.id)
     ids.splice(ids.indexOf(dragged.id), 1)
     ids.splice(ids.indexOf(target.id), 0, dragged.id)
@@ -881,10 +918,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const setPinned = (type: 'thread' | 'project', id: string, pinned: boolean) =>
     runWithToast(pinned ? 'pin' : 'unpin', () => (type === 'thread' ? window.mousse.threads.pin(id, pinned) : window.mousse.projects.pin(id, pinned)), { retry: true })
 
-  const setArchived = async (threadId: string, archived: boolean) => {
-    const done = await runWithToast(archived ? 'archive' : 'unarchive', () => window.mousse.threads.settle(threadId, archived), { retry: true })
-    if (done && archived) showUndoToast('Archived', 'unarchive', () => window.mousse.threads.settle(threadId, false))
-  }
+  // Archiving shows no toast: the row moving to Archived says it. Only a failure toasts.
+  const setArchived = (threadId: string, archived: boolean) =>
+    runWithToast(archived ? 'archive' : 'unarchive', () => (archived ? archiveThread(threadId) : window.mousse.threads.settle(threadId, false)), { retry: true })
 
   // A thread is archived first; deleting an archived thread is permanent, so it asks first and has no Undo.
   const askDelete = (request: DeleteRequest) => {
@@ -1041,70 +1077,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     return runWithToast('rename', () => (type === 'thread' ? window.mousse.threads.rename(id, name) : window.mousse.projects.rename(id, name)), { retry: true })
   }
 
+  /** The activity a row shows: rolled up over its subagents, or Working for a send that is starting it. */
+  const shownActivityOf = (threadId: string) => rolledUpActivity[threadId] ?? threadActivity[threadId]
+  /**
+   * A plain thread's row reads its own activity: the list's may be one push behind on Working and Waiting. One with
+   * subagents, or one a starting send shows Working, shows what the list computed.
+   */
+  const liveActivityOf = (threadId: string) =>
+    plainThreadIds.has(threadId) && rolledUpActivity[threadId] === undefined && threadActivity[threadId] === storeActivity[threadId]
   const renderThreadStatus = (threadId: string) => {
-    const status = threadStatus(rolledUpActivity[threadId] ?? threadActivity[threadId], approvalThreads.has(threadId))
-    switch (status) {
-      case 'working':
-        return (
-          <Loader2
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-spinner icon-spin"
-            aria-hidden="true"
-          />
-        )
-      case 'done':
-        return (
-          <CircleCheck
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--completed"
-            aria-label="Agent finished"
-          />
-        )
-      case 'approval':
-        return (
-          <Shield
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
-            aria-label="Agent needs approval"
-          />
-        )
-      case 'question':
-        return (
-          <MessageQuestion
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
-            aria-label="Agent needs input"
-          />
-        )
-      case 'waiting':
-        return (
-          <CircleDotDashed
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--waiting"
-            aria-label="Agent is waiting"
-          />
-        )
-      case 'paused': {
-        const turn = turnStates[threadId]
-        const own = turn?.phase === 'paused' ? turn.pause : undefined
-        const label = pausedStatusLabel(own, Date.now())
-        return (
-          <Pause
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--paused"
-            aria-label={label}
-          />
-        )
-      }
-      case 'quiet':
-        return null
-    }
+    // A quiet thread shows nothing, whichever of Working and Waiting the list holds.
+    if (threadStatus(shownActivityOf(threadId), approvalThreads.has(threadId)) === 'quiet') return null
+    return <ThreadRowStatusIcon threadId={threadId} activity={shownActivityOf(threadId)} live={liveActivityOf(threadId)} awaitsApproval={approvalThreads.has(threadId)} />
   }
 
   useEffect(() => {
@@ -1190,18 +1174,27 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     inTree?: boolean
     clipped?: boolean
   } = {}) => {
-
+    countRender(`SidebarRow:${thread.id}`)
     const isArchived = Boolean(thread.settledAt)
+    // While the thread moves between its list and Archived: the row leaving (not clickable) or the one arriving.
+    const archiveMotion = inNeedsMe ? undefined : archiveMotionOfRow(thread)
+    // A pending row whose thread the service has not made yet: it is the open one already, and has nothing to act on.
+    const unmade = unmadeRows.has(thread.id)
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id && Boolean(renaming.inNeedsMe) === inNeedsMe
-    const isGeneratingTitle = pendingTitleIds.has(thread.id)
+    // A row already named (a pending send's, from its prompt) shows its name, not a placeholder.
+    const isGeneratingTitle = pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name)
     const statusNode = renderThreadStatus(thread.id)
+    const preview = replyPreviews ? thread.lastReply : undefined
+    const pullRequests = threadPullRequestsOf(thread)
+    // A row with a preview is two lines tall (`rowShowsPreview` sizes its group's list to match).
+    const rowPreview = layout === 'row' && preview && !isRenaming && !isGeneratingTitle ? preview : undefined
     const worktree = worktreeMark(thread, projects)
     const showTrailing = Boolean(statusNode || worktree || thread.node)
     const groupId = groupIdOf(thread.projectId)
     const group = groupId ? groupById.get(groupId) : undefined
     // Only the Threads tab's cards carry the project's tint, unless Appearance turns it off; a thread without a
     // project has none.
-    const hue = layout === 'card' && threadProjectColors && group ? hueByGroup.get(group.id) : undefined
+    const hue = layout === 'card' && threadProjectColors !== 'off' && group ? hueByGroup.get(group.id) : undefined
     const menuTarget: ThreadsContextMenuTarget = {
       type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived,
       ...(thread.node ? { node: thread.node, computerName: nameOfComputer(thread.node) } : {}),
@@ -1217,6 +1210,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // Double-click on the title renames; focus goes back to the row afterwards.
     const renameFromTitle = (event: React.MouseEvent<HTMLElement>) => {
       event.stopPropagation()
+      if (unmade) return
       startRename({ type: 'thread', id: thread.id, name: thread.name, inNeedsMe, returnFocus: event.currentTarget.closest('button') })
     }
     // In the tree the row's own buttons leave the Tab order: the tree is one stop, and the row menu has them all.
@@ -1234,9 +1228,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     return (
 
       <div
-        key={thread.id}
+        key={rowKeys.get(thread.id) ?? thread.id}
         className={`threads-sidebar-thread-container${speakingThreadId === thread.id ? ' speaking' : ''}${dropLine}`}
-        inert={clipped || undefined}
+        inert={clipped || archiveMotion === 'leave' || undefined}
+        aria-hidden={archiveMotion === 'leave' || undefined}
+        data-archive-motion={archiveMotion}
+        data-archive-thread={archiveMotion ? thread.id : undefined}
         // The row whose menu is open, however it was opened: an archived row stays lit while it is (threads-sidebar.css).
         data-menu-open={(contextMenu?.target.type === 'thread' && contextMenu.target.id === thread.id && Boolean(contextMenu.inNeedsMe) === inNeedsMe) || undefined}
       >
@@ -1249,11 +1246,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           isActive ? ' active' : openSubagentParentId === thread.id ? ' has-open-subagent' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${hue ? ' project-tinted' : ''}`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${thread.hidden ? ' hidden-thread' : ''}${rowPreview ? ' has-preview' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
 
         style={hue ? ({ '--project-tint': projectHueColor(hue) } as CSSProperties) : undefined}
 
         aria-current={isActive ? 'page' : undefined}
+
+        aria-description={thread.hidden ? 'Hidden thread' : undefined}
 
         {...(inTree ? {
           role: 'treeitem',
@@ -1266,7 +1265,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         data-thread-id={thread.id}
 
-        draggable={!isRenaming && !isArchived && !inNeedsMe}
+        draggable={!isRenaming && !isArchived && !inNeedsMe && !unmade}
 
         onDragStart={(event) => {
           event.stopPropagation()
@@ -1274,7 +1273,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         }}
 
         onDragOver={(event) => {
-          if (inNeedsMe || !canDropOn(dragItem)) return
+          // Nothing drops onto a row the service has not made yet.
+          if (inNeedsMe || unmade || !canDropOn(dragItem)) return
           event.preventDefault()
           if (!feed) return
           event.stopPropagation()
@@ -1285,7 +1285,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         onDrop={(event) => {
           event.stopPropagation()
           event.preventDefault()
-          if (inNeedsMe) return
+          if (inNeedsMe || unmade) return
           if (feed) dropFeedThread(thread.id, dropsAfter(event))
           else void reorderBefore(dragItem)
         }}
@@ -1294,12 +1294,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         onClick={() => {
 
-          if (!isRenaming && !suppressClick.current) void selectThread(thread.id)
+          if (!isRenaming && !suppressClick.current && !unmade) void selectThread(thread.id)
 
         }}
 
         onKeyDown={(event) => {
-          if (isRenaming) return
+          if (isRenaming || unmade) return
           if (event.key === 'F2') {
             event.preventDefault()
             startRename({ type: 'thread', id: thread.id, name: thread.name, inNeedsMe, returnFocus: event.currentTarget })
@@ -1313,7 +1313,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           }
         }}
 
-        onContextMenu={(event) => openContextMenu(event, menuTarget, inNeedsMe)}
+        onContextMenu={(event) => (unmade ? event.preventDefault() : openContextMenu(event, menuTarget, inNeedsMe))}
 
       >
 
@@ -1323,10 +1323,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             projectName={group?.project.name}
             project={group?.project}
             hue={hue}
-            activity={rolledUpActivity[thread.id] ?? threadActivity[thread.id]}
+            threadId={thread.id}
+            activity={shownActivityOf(thread.id)}
+            liveActivity={liveActivityOf(thread.id)}
             awaitsApproval={approvalThreads.has(thread.id)}
-            startedAt={turnStates[thread.id]?.startedAt}
-            pause={turnStates[thread.id]?.phase === 'paused' ? turnStates[thread.id]?.pause : undefined}
             isRenaming={isRenaming}
             renamingName={renaming?.name ?? ''}
             isGeneratingTitle={isGeneratingTitle}
@@ -1335,6 +1335,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             onRename={(name) => void submitRename(name)}
             onCancelRename={endRename}
             onStartRename={renameFromTitle}
+            preview={preview}
+            pullRequests={pullRequests}
           />
         ) : (
           <>
@@ -1350,11 +1352,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           </span>
         )}
 
-        {thread.expiresAt && (
-          <span className="thread-expiry-icon" title={`Deletes ${expiresInLabel(thread.expiresAt)}`}>
-            <Clock size={12} strokeWidth={2} aria-label="Deletes itself" />
-          </span>
-        )}
+        {thread.expiresAt && <ThreadExpiryIcon expiresAt={thread.expiresAt} size={12} />}
 
         {isRenaming ? (
 
@@ -1371,6 +1369,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         ) : isGeneratingTitle ? (
 
           <span className="threads-sidebar-skeleton" aria-label="Generating title" />
+
+        ) : rowPreview || pullRequests.length ? (
+
+          <span className="threads-sidebar-thread-text">
+            <span className="threads-sidebar-thread-line">
+              <ThreadTitle name={thread.name} fullTitle={fullTitle} provisional={thread.titleSource === 'provisional'} onDoubleClick={renameFromTitle} />
+              <ThreadPullRequestCount pullRequests={pullRequests} />
+            </span>
+            {rowPreview && <ThreadReplyPreview text={rowPreview} />}
+          </span>
 
         ) : (
 
@@ -1396,7 +1404,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       {speakingThreadId === thread.id && <ThreadSpeechIndicator />}
 
-      {!isRenaming && (
+      {!isRenaming && !unmade && (
         <span className="threads-sidebar-thread-actions">
           <button
             type="button"
@@ -1510,6 +1518,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     )
   }
 
+  /** Whether a tree row shows a reply preview (and is two lines tall), as `renderThreadRow` decides it. */
+  const rowShowsPreview = (thread: Thread) => replyPreviews && Boolean(thread.lastReply) &&
+    !(renaming?.type === 'thread' && renaming.id === thread.id && !renaming.inNeedsMe) &&
+    !(pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name))
+
   /** A group's thread rows: the first 5, and Show more for the rest. */
   const renderGroupThreads = (groupId: string, groupThreads: Thread[]) => {
     const showAll = expandedProjectThreadLists.has(groupId)
@@ -1517,7 +1530,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       <>
         <div
           className={`threads-sidebar-thread-list ui-collapse-items${showAll ? ' expanded' : ''}`}
-          style={{ '--project-thread-count': groupThreads.length } as CSSProperties}
+          style={{
+            '--project-thread-count': groupThreads.length,
+            // Rows with a reply preview are a line taller; the list's height counts them.
+            '--project-preview-count': groupThreads.filter(rowShowsPreview).length,
+            '--project-preview-shown': groupThreads.slice(0, PROJECT_THREAD_PREVIEW_LIMIT).filter(rowShowsPreview).length
+          } as CSSProperties}
           role="none"
         >
           {groupThreads.map((thread, index) => renderThreadRow(thread, {
@@ -1600,10 +1618,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   return (
 
     // While a menu is open, the rows under the pointer do not light their actions (see threads-sidebar.css).
-    <aside className={`threads-sidebar${contextMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
+    <aside ref={asideRef} data-mousse="sidebar" className={`threads-sidebar${contextMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-tabs-row">
         <PillTabs tabsRef={tabsRef} tabs={SIDEBAR_TABS} value={sidebarView} onSelect={setSidebarView} ariaLabel="Sidebar" idPrefix={tabsId} />
+        {/* Only where threads are listed, and only while a bot keeps some out of the sidebar. */}
+        {contentView !== 'chats' && hiddenCount > 0 && (
+          <button
+            type="button"
+            className="threads-sidebar-toolbar-button threads-sidebar-hidden-toggle"
+            onClick={toggleHiddenShown}
+            title={hiddenShown ? 'Hide bot threads' : `Show hidden bot threads (${hiddenCount})`}
+            aria-label={hiddenShown ? 'Hide bot threads' : `Show hidden bot threads (${hiddenCount})`}
+          >
+            {hiddenShown ? <Eye size={16} strokeWidth={1.8} aria-hidden="true" /> : <EyeOff size={16} strokeWidth={1.8} aria-hidden="true" />}
+          </button>
+        )}
         {/* Only beside Projects; on the other tabs the tabs take the whole row. */}
         {addProjectShown && (
           <button type="button" className="threads-sidebar-toolbar-button threads-sidebar-add-project" onClick={() => void openProject()} title="Add project" aria-label="Add project">
@@ -1612,9 +1642,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         )}
       </div>
 
-      <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-view-leaving={viewLeaving || undefined} data-more-below={moreBelow || undefined}>
+      <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-more-below={moreBelow || undefined}>
 
-      <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={contentView !== 'projects'} inert={viewLeaving && contentView === 'projects'}>
+      <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={contentView !== 'projects'}>
 
         {contentView === 'projects' && renderNeedsMe()}
 
@@ -1885,7 +1915,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-      <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={contentView !== 'threads'} inert={viewLeaving && contentView === 'threads'}>
+      <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={contentView !== 'threads'}>
         {contentView === 'threads' && renderNeedsMe()}
         <div
           className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-feed-list"
@@ -1896,7 +1926,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             event.preventDefault()
             const rows = event.currentTarget.querySelectorAll('.threads-sidebar-thread-container')
             const bottom = rows[rows.length - 1]?.getBoundingClientRect().bottom
-            const last = feedThreads[feedThreads.length - 1]
+            const last = [...feedRows].reverse().find((thread) => !unmadeRows.has(thread.id))
             if (last && bottom !== undefined && event.clientY > bottom && (feedDrop?.id !== last.id || !feedDrop.after)) {
               setFeedDrop({ id: last.id, after: true })
             }
@@ -1907,24 +1937,25 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             if (feedDrop) dropFeedThread(feedDrop.id, feedDrop.after)
           }}
         >
-          {feedThreads.length === 0 ? (
+          {/* Cards render only while the tab shows (or is coming in), so a change to the list does not redraw a hidden copy of it. */}
+          {contentView !== 'threads' && sidebarView !== 'threads' ? null : feedThreads.length === 0 ? (
             <div className="threads-sidebar-empty">No threads</div>
           ) : (
             <>
-              {feedThreads.map((thread) => renderThreadRow(thread, { root: true, layout: 'card' }))}
+              {feedRows.map((thread) => renderThreadRow(thread, { root: true, layout: 'card' }))}
             </>
           )}
         </div>
       </div>
 
-      <div className="threads-sidebar-section threads-sidebar-section-chats" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={contentView !== 'chats'} inert={viewLeaving && contentView === 'chats'}>
+      <div className="threads-sidebar-section threads-sidebar-section-chats" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={contentView !== 'chats'}>
         {contentView === 'chats' && <ChatsSidebar />}
       </div>
 
       </div>
 
       {/* The same footer under Projects and Threads: one "Archived" disclosure; the whole heading opens and closes it. */}
-      <div ref={footerRef} className="threads-sidebar-footer" hidden={contentView === 'chats'} inert={footerAway || undefined}>
+      <div ref={footerRef} className="threads-sidebar-footer" hidden={footerHidden}>
 
         <section className={`threads-sidebar-section threads-sidebar-section-settled${archivedExpanded ? ' expanded' : ' collapsed'}`} aria-label="Archived">
 

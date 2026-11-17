@@ -1,15 +1,14 @@
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { PROFILER_TOOL_NAMES } from '../../../shared/diagnostics/profiler'
 import type { McpAttachment } from './MousseMcpServer'
 
-/** Name of the Mousse server in every runtime's MCP configuration; tools appear as `mcp__mousse__*`. */
-export const MOUSSE_MCP_SERVER_NAME = 'mousse'
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../shared/harness/mcpNames'
+export { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../shared/harness/mcpNames'
 /** Environment variable that carries the bearer token to the stdio bridge (never argv). */
 export const MOUSSE_MCP_TOKEN_ENV = 'MOUSSE_MCP_TOKEN'
 /** Per-call timeout runtimes should allow: `ask_user` may wait up to an hour. */
 export const MOUSSE_MCP_TOOL_TIMEOUT_MS = 60 * 60 * 1000
-/** Name of the MCP relay in a runtime's MCP configuration: the user's Mousse MCP servers, relayed. */
-export const MOUSSE_RELAY_SERVER_NAME = 'mousse-relay'
 /** Per-call timeout of a relayed tool: under the stdio bridge's 300 s fetch ceiling. */
 export const RELAY_CALL_TIMEOUT_MS = 4 * 60_000
 
@@ -62,7 +61,11 @@ export function chatgptTokenCommand(endpoint: string, leaseId: string, cli?: Cli
   return { command: command.command, args: [...command.args, 'engine', 'chatgpt-token', endpoint, leaseId], env: { ...command.env } }
 }
 
-/** Claude Agent SDK `mcpServers` (SPEC §15.2): the Mousse server over HTTP, or none. */
+/**
+ * Claude Code's MCP servers for the Mousse server (SPEC §15.2): over HTTP, or none. They are registered over Claude
+ * Code's input once it starts (`registerClaudeMcpServers`), never passed as the Agent SDK's `mcpServers` option, which
+ * would put the bearer on its command line (#358).
+ */
 export function claudeMcpServers(attachment: McpAttachment | null | undefined): Record<string, {
   type: 'http'
   url: string
@@ -107,6 +110,44 @@ export const CLAUDE_MOUSSE_TOOL_PREFIX = `mcp__${MOUSSE_MCP_SERVER_NAME}__`
 /** Tool-name prefix Claude gives the MCP relay's tools. Never auto-allowed: the runtime's approvals apply. */
 export const CLAUDE_RELAY_TOOL_PREFIX = `mcp__${MOUSSE_RELAY_SERVER_NAME}__`
 
+/**
+ * Which server Mousse serves a call's tool name belongs to, and the tool's own name there, however the runtime names
+ * an MCP call: `mcp__mousse__ask_user` (Claude, Codex, Cursor), and the forms some ACP agents use, `mousse__ask_user`,
+ * `mousse.ask_user`, `mousse/ask_user`, `mousse: ask_user` or `ask_user (mousse MCP Server)`. The server's name is
+ * matched exactly (lower case, as Mousse names it). A Mousse tool's name must be snake case, as Mousse's tools are, so a
+ * title such as `Mousse.md` is no Mousse call; a relayed tool's may be any of letters, digits and `_`, as the relay
+ * names it (`github__createIssue`). `exact`: the `mcp__<server>__` form, which only an MCP call has.
+ * Undefined for any other name, a bare tool name included.
+ */
+export function mousseServerToolOf(toolName: string): { server: 'mousse' | 'relay'; tool: string; exact: boolean } | undefined {
+  const name = toolName.trim()
+  if (name.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) return { server: 'relay', tool: name.slice(CLAUDE_RELAY_TOOL_PREFIX.length), exact: true }
+  if (name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) return { server: 'mousse', tool: name.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length), exact: true }
+  // A relayed tool keeps its integration's spelling, capitals included (`sanitizeToolNamePart`: letters, digits, `_`).
+  const relay = /^mousse-relay(?:__|[./:] ?)([A-Za-z0-9_]+)$/.exec(name) ?? /^([A-Za-z0-9_]+) \(mousse-relay MCP Server\)$/.exec(name)
+  if (relay) return { server: 'relay', tool: relay[1]!, exact: false }
+  const own = /^mousse(?:__|[./:] ?)([a-z][a-z0-9_]*)$/.exec(name) ?? /^([a-z][a-z0-9_]*) \(mousse MCP Server\)$/.exec(name)
+  return own ? { server: 'mousse', tool: own[1]!, exact: false } : undefined
+}
+
+/**
+ * While the thread has a question pending, whether a call named `toolName` may be the one asking it: a relayed tool
+ * (its approval), or a Mousse tool that asks the person (`asksUser`: `ask_user`, a quick action's approval) or asks
+ * before it edits (`editsWorkspace`, `changesSettings`), by its exact name in `lookup`. A tool `lookup` does not know counts only in the
+ * exact MCP form (`mcp__mousse__<tool>`, a Mousse tool newer than the registry); in a looser form, or as a bare name,
+ * an unknown tool is no Mousse call, and it runs as any call does.
+ */
+export function mousseCallAsksPerson(
+  toolName: string,
+  lookup: (tool: string) => { asksUser?: unknown; access?: string } | undefined
+): boolean {
+  const served = mousseServerToolOf(toolName)
+  if (served?.server === 'relay') return true
+  const tool = lookup(served ? served.tool : toolName)
+  if (!tool) return served?.exact === true
+  return Boolean(tool.asksUser) || tool.access === 'editsWorkspace' || tool.access === 'changesSettings'
+}
+
 /** A tool of a server Mousse serves (`mcp__mousse__*` or `mcp__mousse-relay__*`): its calls reach Mousse. */
 export function isMousseServerTool(toolName: string): boolean {
   return toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX) || toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX)
@@ -117,7 +158,7 @@ export function isMousseServerTool(toolName: string): boolean {
  * the listed `reads` and `readsOthers` tools and the `readOnlySafe` ones of the app-tool registry (a test keeps them equal).
  * Runtimes that decide per tool name use it; the server refuses the rest in any case.
  */
-export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'ask_user', 'present_plan', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_computers', 'list_skills', 'load_skill', 'web_search', 'web_fetch', 'git_status', 'git_diff'])
+export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'ask_user', 'withdraw_question', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_computers', 'list_models', 'list_skills', 'load_skill', 'web_search', 'web_fetch', 'git_status', 'git_diff', 'theme_read', 'terminal_read', 'running_list', 'tool_catalogue', ...PROFILER_TOOL_NAMES])
 
 export type AcpMcpServer =
   | { name: string; type: 'http'; url: string; headers: Array<{ name: string; value: string }> }

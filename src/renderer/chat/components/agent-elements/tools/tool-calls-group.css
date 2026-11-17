@@ -1,0 +1,52 @@
+/* An open group of calls (tool-calls-group.tsx): capped at about 18rem (half the window on a short one) and
+   scrolled on its own, so a long run of calls never pushes the answer far down. Where more rows are above or
+   below, the edge fades out. The fades follow the box's own scroll position (a scroll-driven animation), so they
+   cost no script; a box that does not scroll has no timeline and no fade. */
+@property --an-group-fade-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --an-group-fade-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+.an-tool-group-scroll {
+  max-height: min(18rem, 50dvh);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--an-group-fade-top),
+    #000 calc(100% - var(--an-group-fade-bottom)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--an-group-fade-top),
+    #000 calc(100% - var(--an-group-fade-bottom)),
+    transparent 100%
+  );
+  animation: an-group-fade linear both;
+  animation-timeline: scroll(self);
+}
+
+@keyframes an-group-fade {
+  0% {
+    --an-group-fade-top: 0px;
+    --an-group-fade-bottom: 24px;
+  }
+  8%,
+  92% {
+    --an-group-fade-top: 24px;
+    --an-group-fade-bottom: 24px;
+  }
+  100% {
+    --an-group-fade-top: 24px;
+    --an-group-fade-bottom: 0px;
+  }
+}

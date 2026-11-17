@@ -1,11 +1,18 @@
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import type { Provider } from '@earendil-works/pi-ai'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PiBridge, type PiBridgeHandlers } from '../../src/mms/harness/pi/bridge'
 import { isGuarded } from '../../src/mms/harness/pi/extension/guard'
 import mousseExtension from '../../src/mms/harness/pi/extension/index'
 import { GATE_REFUSALS } from '../../src/mms/harness/pi/extension/messages'
 import { PI_BRIDGE_ENV, type PiGateRequest, type PiReadyRequest, type PiTurnResponse } from '../../src/mms/harness/pi/extension/protocol'
+
+const shellExec = vi.hoisted(() => vi.fn(async (_command: string, _cwd: string, _options: { env?: NodeJS.ProcessEnv }) => ({ exitCode: 0 })))
+vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@earendil-works/pi-coding-agent')>()
+  return { ...actual, createBashToolDefinition: (cwd: string, options: Parameters<typeof actual.createBashToolDefinition>[1]) =>
+    actual.createBashToolDefinition(cwd, { ...options, operations: { exec: shellExec } }) }
+})
 
 // Mousse's extension against a fake ExtensionAPI and the engine's real bridge, in process.
 
@@ -29,6 +36,8 @@ function fakePi() {
 const cleanups: Array<() => unknown> = []
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+  vi.unstubAllEnvs()
+  shellExec.mockClear()
   delete process.env[PI_BRIDGE_ENV]
 })
 
@@ -69,6 +78,24 @@ async function loaded(gate: (request: PiGateRequest) => ReturnType<PiBridgeHandl
 }
 
 describe('Mousse’s Pi extension', () => {
+  it.each(process.platform === 'win32' ? [true] : [true, false])('registered Bash keeps credentials out only for a bot (%s)', async (bot) => {
+    vi.stubEnv('OPENAI_API_KEY', 'provider-key')
+    vi.stubEnv('AWS_SECRET_ACCESS_KEY', 'cloud-key')
+    vi.stubEnv('GITHUB_TOKEN', 'github-key')
+    vi.stubEnv('MY_SECRET', 'arbitrary-secret')
+    vi.stubEnv('TMPDIR', '/activation/scratch/tmp')
+    vi.stubEnv('MOUSSE_BOT_ACTIVATION', bot ? 'act-1' : '')
+    const { tools } = await loaded(async () => ({ allow: true }))
+    const bash = tools.find((tool) => tool.name === 'bash')! as unknown as ReturnType<typeof import('@earendil-works/pi-coding-agent').createBashToolDefinition>
+    await bash.execute('call-1', { command: 'env' }, new AbortController().signal)
+    const env = shellExec.mock.calls[0][2].env!
+    expect(env.TMPDIR).toBe('/activation/scratch/tmp')
+    for (const name of ['OPENAI_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'MY_SECRET']) {
+      if (bot) expect(env, name).not.toHaveProperty(name)
+      else expect(env[name]).toBe(process.env[name])
+    }
+  })
+
   it('scrubs its bridge variable and registers every built-in provider guarded, the instance one with the stored key', async () => {
     const { providers, firsts } = await loaded(async () => ({ allow: true }))
     expect(process.env[PI_BRIDGE_ENV]).toBeUndefined()

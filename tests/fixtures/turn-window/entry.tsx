@@ -7,6 +7,11 @@ import { runCommand } from '../../../src/renderer/commands/commandRegistry'
 import { attachCommandShortcuts } from '../../../src/renderer/commands/useCommandShortcuts'
 import { useAppStore } from '../../../src/renderer/stores/appStore'
 import '../../../src/renderer/styles/app.css'
+import { setReplyPacing } from '../../../src/renderer/lib/replyPacingSetting'
+
+// The checks here hold the reading line frame by frame as text streams in, so streamed text shows as
+// it arrives (pacing is in replyPacing.test.ts).
+setReplyPacing(false)
 
 // Ctrl/Cmd+F goes through the command registry like in the app: a thread is open and the dispatcher listens.
 useAppStore.setState({ activeThreadId: 'fixture', appInfo: { platform: 'win32', repoRoot: '', llmProvider: '' } })
@@ -231,8 +236,8 @@ function streamChunk(step: number): string {
   return ` streamed text ${step} that keeps the answer growing line after line.`
 }
 
-const groupTriggers = (index: number) =>
-  Array.from(row(index)?.querySelectorAll<HTMLButtonElement>('button') ?? []).filter((button) => /^\s*Tool calls/.test(button.textContent ?? ''))
+/** A finished turn's work folds behind its "Worked" line: that line is the turn's one way into its tool calls. */
+const groupTriggers = (index: number) => Array.from(row(index)?.querySelectorAll<HTMLButtonElement>('button.turn-work-toggle') ?? [])
 
 const qa = {
   /** Mounts `count` turns (two messages or more each); resolves once every thumbnail has decoded. */
@@ -246,6 +251,38 @@ const qa = {
     await Promise.all(
       Array.from(container().querySelectorAll('img'), (image) => (image.complete ? undefined : new Promise((done) => { image.onload = image.onerror = done }))),
     )
+  },
+  /**
+   * Opens a thread of `count` turns in a new transcript and returns how many turn rows the open added to the page,
+   * counting rows that a later commit removed again. `afterLoad` opens it the way the app does when the thread is not
+   * cached: the transcript mounts empty while the thread loads, then the turns arrive. Otherwise it mounts with them.
+   */
+  async openCounted(count: number, afterLoad: boolean): Promise<number> {
+    turnCount = count
+    epoch += 1
+    streaming = false
+    const turns = Array.from({ length: count }, (_, index) => turnMessages(index)).flat()
+    if (afterLoad) {
+      messages = []
+      render()
+      await frames(2)
+    }
+    let added = 0
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of Array.from(record.addedNodes)) {
+          if (!(node instanceof HTMLElement)) continue
+          if (node.matches('[data-turn-key]')) added += 1
+          added += node.querySelectorAll('[data-turn-key]').length
+        }
+      }
+    })
+    observer.observe(document.getElementById('root')!, { childList: true, subtree: true })
+    messages = turns
+    render()
+    await frames(3)
+    observer.disconnect()
+    return added
   },
   messageCount: () => messages.length,
   mountedTurns: () => document.querySelectorAll('[data-turn-key]').length,
@@ -361,7 +398,7 @@ const qa = {
     }))
     return { rowHeight: turn?.offsetHeight ?? 0, bodies }
   },
-  /** Opens or closes the `which` group of tool calls in a row; resolves with its top edge before the click. */
+  /** Opens or closes the `which` work fold of a row; resolves with its top edge after the click. */
   toggleGroup(index: number, which: 'first' | 'second'): number | null {
     const trigger = groupTriggers(index)[which === 'first' ? 0 : 1]
     if (!trigger) return null

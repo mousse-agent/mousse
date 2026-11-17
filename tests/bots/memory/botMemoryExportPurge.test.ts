@@ -83,6 +83,97 @@ describe('purge', () => {
   })
 })
 
+describe('wiping a bot\'s memory (/forget, /forget history, /reset)', () => {
+  /**
+   * What each wipe meets, for two bots: the owner's entry, the bot's note, a run note, a run note the owner edited into a
+   * note, a forgotten entry, the chat in the journal (folded into a summary), frozen packs, and a thread capture copied.
+   */
+  function seeded() {
+    const fx = memoryFixture()
+    const { store } = fx
+    const thread = new Map([['th-home', [{ id: 'u1', role: 'user' as const, content: 'Old thread words about turnips.', timestamp: new Date(fx.clock.now).toISOString() }]]])
+    const journal = createBotJournal({ store, readThread: (id) => ({ messages: thread.get(id) ?? [] }), listThreads: () => [] })
+    const packs = createBotContextProvider({ store, journal })
+    for (const botId of ['ada', 'bob']) {
+      fx.message({ botId, id: `${botId}-o1`, author: 'owner', text: 'I grow turnips on the allotment.', activationId: `${botId}-a1` })
+      fx.message({ botId, id: `${botId}-b1`, author: 'bot', text: 'Turnips noted.', activationId: `${botId}-a1` })
+      store.save(botId, { lane: 'chat', kind: 'owner', text: 'The owner keeps an allotment.', activationId: `${botId}-a1` })
+      store.save(botId, { lane: 'chat', kind: 'note', text: 'Reports go out on Mondays.' })
+      store.save(botId, { lane: 'run', kind: 'note', text: 'The seed shop closes at 5.', activationId: `${botId}-r1` })
+      store.save(botId, { lane: 'run', kind: 'note', text: 'The council site moved.', activationId: `${botId}-r1` })
+      store.save(botId, { lane: 'chat', kind: 'owner', text: 'The owner has a dog called Rex.' })
+      store.setState(botId, 'chat_summary', { text: 'Owner: talked about turnips', throughSeq: 1 })
+    }
+    for (const botId of ['ada', 'bob']) {
+      createBotMemoryAdmin({ store }).edit(botId, 'm4', 'The council site moved to /plots.')
+      store.forget(botId, { id: 'm5', by: 'owner_ui' })
+    }
+    journal.syncNow({ botId: 'ada', threadId: 'th-home', lane: 'chat', activationId: 'ada-a1' })
+    return { fx, store, journal, packs, thread }
+  }
+
+  const current = (store: ReturnType<typeof seeded>['store'], botId: string) => store.list(botId).entries.map((entry) => [entry.id, entry.kind, entry.text])
+
+  it('/forget history keeps the owner\'s entries and the bot\'s notes, readable and in the pack, and nothing of the old chat', async () => {
+    const { store, journal, packs, thread } = seeded()
+    const bob = { list: current(store, 'bob'), journal: store.journal('bob').length }
+    const admin = createBotMemoryAdmin({ store })
+    // m3 is the one run note left: m4 was edited into a note, m5 was forgotten.
+    expect(admin.wipeHistory('ada')).toBe(1)
+    expect(current(store, 'ada')).toEqual([['m1', 'owner', 'The owner keeps an allotment.'], ['m2', 'note', 'Reports go out on Mondays.'], ['m4', 'note', 'The council site moved to /plots.']])
+    expect(store.read('ada', { ref: 'm1' })).toMatchObject({ rows: [{ ref: 'm1', text: 'The owner keeps an allotment.' }] })
+    expect(store.read('ada', { ref: 'm4' })).toMatchObject({ rows: [{ ref: 'm4' }, { ref: 'm4v2', text: 'The council site moved to /plots.' }] })
+    expect(store.search('ada', { query: 'allotment' }).map((hit) => hit.ref)).toEqual(['m1'])
+    expect(store.search('ada', { query: 'turnips' })).toEqual([])
+    expect(store.journal('ada')).toEqual([])
+    // The forgotten entry stays forgotten: the bot can't learn it again.
+    expect(store.save('ada', { lane: 'chat', kind: 'owner', text: 'The owner has a dog called Rex.' })).toMatchObject({ error: 'refused' })
+    const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'ada-a2' })
+    expect(pack).toContain('The owner keeps an allotment.')
+    expect(pack).toContain('The council site moved to /plots.')
+    expect(pack).not.toContain('seed shop')
+    expect(pack).not.toContain('turnips')
+    expect(pack).toContain('Recent chat: (nothing yet)')
+    expect(pack).toContain('The owner has not written yet.')
+    // Its threads' words already copied are never copied back in.
+    journal.syncNow({ botId: 'ada', threadId: 'th-home', lane: 'chat', activationId: 'ada-a1' })
+    expect(store.journal('ada')).toEqual([])
+    thread.get('th-home')!.push({ id: 'u2', role: 'user', content: 'New words.', timestamp: new Date().toISOString() })
+    journal.syncNow({ botId: 'ada', threadId: 'th-home', lane: 'chat', activationId: 'ada-a2' })
+    expect(store.journal('ada').map((row) => row.text)).toEqual(['New words.'])
+    // The other bot is untouched.
+    expect(current(store, 'bob')).toEqual(bob.list)
+    expect(store.journal('bob')).toHaveLength(bob.journal)
+  })
+
+  it('/forget forgets every current entry as Forget does one, and their words leave the chat\'s history', async () => {
+    const { store } = seeded()
+    expect(createBotMemoryAdmin({ store }).forgetAll('ada')).toBe(4)
+    expect(store.list('ada').entries).toEqual([])
+    expect(store.list('ada', true).entries.filter((entry) => entry.status !== 'superseded').every((entry) => entry.status === 'forgotten' && entry.text === null)).toBe(true)
+    expect(store.search('ada', { query: 'allotment', kinds: ['memory'] })).toEqual([])
+    // The chat itself is history, not memory: it stays.
+    expect(store.search('ada', { query: 'turnips' }).length).toBeGreaterThan(0)
+    expect(store.save('ada', { lane: 'chat', kind: 'note', text: 'Reports go out on Mondays.' })).toMatchObject({ error: 'refused' })
+    expect(current(store, 'bob')).toHaveLength(4)
+    expect(createBotMemoryAdmin({ store }).forgetAll('ada')).toBe(0)
+  })
+
+  it('/reset removes every entry, the journal and the state, but keeps the capture cursors', async () => {
+    const { store, journal } = seeded()
+    createBotMemoryAdmin({ store }).reset('ada')
+    expect(store.list('ada', true).entries).toEqual([])
+    expect(store.journal('ada')).toEqual([])
+    expect(store.getState('ada', 'chat_summary')).toBeUndefined()
+    expect(store.getState('ada', 'cursor:th-home')).toBeDefined()
+    journal.syncNow({ botId: 'ada', threadId: 'th-home', lane: 'chat', activationId: 'ada-a1' })
+    expect(store.journal('ada')).toEqual([])
+    // A forgotten entry is gone too: a reset bot starts with no memory at all.
+    expect(store.save('ada', { lane: 'chat', kind: 'owner', text: 'The owner has a dog called Rex.' })).toMatchObject({ id: 'm1' })
+    expect(current(store, 'bob')).toHaveLength(4)
+  })
+})
+
 describe('bots.memory.* handlers', () => {
   it('validate their params and answer through the admin', async () => {
     const fx = memoryFixture()

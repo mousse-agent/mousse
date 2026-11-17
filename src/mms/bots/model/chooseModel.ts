@@ -19,6 +19,8 @@ export interface BotModelCandidate {
   defaultEffort?: string
   tier: BotModelTier
   credential: 'subscription' | 'api_key' | 'ambient' | 'unknown'
+  /** The account the entry is signed in to: the gateway's salted hash, when it can tell (#673: a pick remembers it). */
+  account?: string
   /** `YYYY-MM-DD`, from the catalog. */
   released?: string
   /** ISO time until which the instance is at its usage limit. */
@@ -39,16 +41,25 @@ export type BotModelChoiceResult =
 /**
  * The tiers each depth tries, best first. "Maybe not Haiku": small is used for `quick` only when
  * no standard model exists, and for the others only when nothing else does. Unknown tiers come last.
+ * `deep` tries a frontier model first only on a subscription, where it costs nothing more; one paid
+ * by use (an API key, a gateway) comes after the standard tier, as for `normal`, so work by usage
+ * never runs on a pricier model than the chat would.
  */
-const TIER_ORDER: Record<BotDepth, readonly BotModelTier[]> = {
-  quick: ['standard', 'small', 'frontier', 'unknown'],
-  normal: ['standard', 'frontier', 'small', 'unknown'],
-  deep: ['frontier', 'standard', 'small', 'unknown']
+type TierStep = { tier: BotModelTier; subscriptionOnly?: boolean }
+const TIER_ORDER: Record<BotDepth, readonly TierStep[]> = {
+  quick: [{ tier: 'standard' }, { tier: 'small' }, { tier: 'frontier' }, { tier: 'unknown' }],
+  normal: [{ tier: 'standard' }, { tier: 'frontier' }, { tier: 'small' }, { tier: 'unknown' }],
+  deep: [{ tier: 'frontier', subscriptionOnly: true }, { tier: 'standard' }, { tier: 'frontier' }, { tier: 'small' }, { tier: 'unknown' }]
 }
 
 const LEVEL = new Map<string, number>(REASONING_LEVELS.map((level, index) => [level, index]))
 const byLevel = (efforts: readonly string[]) =>
   [...efforts].filter((effort) => effort !== 'none' && effort !== 'off').sort((a, b) => (LEVEL.get(a) ?? 99) - (LEVEL.get(b) ?? 99))
+
+/** The reasoning levels a model offers for a pick by hand (#673), lowest first: every one it lists but `off`. */
+export function offeredEfforts(efforts: readonly string[]): string[] {
+  return [...new Set(efforts)].filter((effort) => effort !== 'off').sort((a, b) => (LEVEL.get(a) ?? 99) - (LEVEL.get(b) ?? 99))
+}
 
 /**
  * The effort a depth runs at: `quick` low (else the lowest offered), `deep` high (else the
@@ -107,7 +118,7 @@ function earliestReset(limited: readonly BotModelCandidate[]): { until?: string;
 }
 
 /**
- * Picks a model. `auto`: the best tier for the depth, then subscriptions, newer releases and a
+ * Picks a model. `auto`: the best tier for the depth (`TIER_ORDER`), then subscriptions, newer releases and a
  * stable order. `named`: the candidates the owner's words name (exact names before family words),
  * ranked the same way; none: `named_unavailable`. Candidates at their usage limit are left out;
  * when that leaves none, `all_limited` with the earliest reset.
@@ -124,8 +135,8 @@ export function chooseBotModel(choice: BotModelChoice, candidates: readonly BotM
   const ready = pool.filter((candidate) => !limitedNow(candidate, now))
   if (!ready.length) return { problem: 'all_limited', ...earliestReset(pool) }
   if (choice.mode === 'named') return selectionOf(ready.sort(compareCandidates)[0]!, choice.depth)
-  for (const tier of TIER_ORDER[choice.depth]) {
-    const inTier = ready.filter((candidate) => candidate.tier === tier)
+  for (const { tier, subscriptionOnly } of TIER_ORDER[choice.depth]) {
+    const inTier = ready.filter((candidate) => candidate.tier === tier && (!subscriptionOnly || candidate.credential === 'subscription'))
     if (inTier.length) return selectionOf(inTier.sort(compareCandidates)[0]!, choice.depth)
   }
   return { problem: 'no_provider' }

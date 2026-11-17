@@ -11,7 +11,7 @@ import { statSync } from 'node:fs'
 import type { BinaryFingerprint } from '../../shared/harness/types'
 import { parseCliVersion } from './cliConfig'
 import { knownProblemOf } from './compatibility'
-import { compareVersions, installOwner, type AuthReading, type DriverRuntime, type HarnessDriver, type InstanceConfig, type ManagedInstall } from './driver'
+import { compareVersions, installOwnerOf, updateNeedsElevation, type AuthReading, type DriverRuntime, type HarnessDriver, type InstanceConfig, type ManagedInstall } from './driver'
 import { resolveBinary, type InstanceEnv } from './env'
 import { runHarness } from './spawn'
 
@@ -61,14 +61,16 @@ export function compatibilityOf(driver: Pick<HarnessDriver, 'testedVersions' | '
 
 /**
  * One-click update through Mousse's own install when Mousse owns it; otherwise the owner's command,
- * which Update runs (`ownerUpdate.ts`) and the page also shows to copy.
+ * which Update runs (`ownerUpdate.ts`) and the page also shows to copy. A command that needs rights
+ * Mousse lacks is `manual`: shown to copy, never run. `untested` marks a version newer than the
+ * driver's tested range; it is still offered.
  * Offered when the version is older than tested, has a known problem that a later version fixes,
  * or when `latest` (the newest published version known, from `LatestVersionCache`) is newer than
  * the installed one. An owner Mousse cannot prove has no command: a newer version is then reported
  * as a notice only, with nothing to run or click.
  */
 export function updateAffordance(
-  driver: HarnessDriver,
+  driver: Pick<HarnessDriver, 'canInstall' | 'updateCommand' | 'testedVersions'>,
   binary: InstanceBinary | undefined,
   compatibility: ProbeResult['compatibility'],
   latest?: string
@@ -77,13 +79,14 @@ export function updateAffordance(
   const outdated = compatibility.state === 'too_old' || (compatibility.state === 'known_broken' && Boolean(compatibility.knownProblem?.fixedIn))
   const newer = Boolean(latest && binary.version && compareVersions(latest, binary.version) > 0)
   if (!outdated && !newer) return undefined
-  const latestVersion = newer && latest ? { latestVersion: latest } : {}
+  const untested = newer && latest && driver.testedVersions && compareVersions(latest, driver.testedVersions.max) > 0 ? { untested: true } : {}
+  const latestVersion = newer && latest ? { latestVersion: latest, ...untested } : {}
   const owner = binary.owner ?? 'unknown'
   if (owner === 'managed' && driver.canInstall) return { kind: 'one_click', owner, ...latestVersion }
   const command = driver.updateCommand?.(owner)
-  if (command) return { kind: 'advisory', command, ...latestVersion }
+  if (command) return { kind: 'advisory', command, ...latestVersion, ...(binary.needsElevation ? { manual: true } : {}) }
   // The version is worth showing; without a proven owner there is nothing to run or click.
-  return newer && latest ? { kind: 'notice', latestVersion: latest } : undefined
+  return newer && latest ? { kind: 'notice', latestVersion: latest, ...untested } : undefined
 }
 
 function withDeadline<T>(work: Promise<T>, ms: number): Promise<{ value: T } | { timedOut: true }> {
@@ -193,7 +196,8 @@ export async function probeVersion(input: {
     }
   }
 
-  const binary: InstanceBinary = { path: resolved.launch.path, source: resolved.source, owner: installOwner(resolved.launch.path, resolved.source) }
+  const owner = installOwnerOf(resolved.launch.path, resolved.source)
+  const binary: InstanceBinary = { path: resolved.launch.path, source: resolved.source, owner, ...(updateNeedsElevation(resolved.launch.path, owner) ? { needsElevation: true } : {}) }
   const fingerprint = fingerprintOf(resolved.launch.path)
   const fromReceipt = resolved.source === 'managed' && managed?.receiptHash ? { receiptHash: managed.receiptHash } : {}
   let runs: ProbeResult['runs'] = { state: 'yes' }

@@ -13,6 +13,8 @@ export type CommandId =
   | 'thread.newPrivate'
   | 'thread.next'
   | 'thread.previous'
+  | 'thread.back'
+  | 'thread.forward'
   | 'threads.search'
   | 'thread.rename'
   | 'thread.pin'
@@ -26,10 +28,13 @@ export type CommandId =
   | 'sidebar.toggle'
   | 'mainArea.toggle'
   | 'terminal.open'
+  | 'theme.builtIn'
+  | 'window.reload'
   | 'settings.open'
   | 'automations.open'
   | 'usage.open'
   | 'composer.focus'
+  | 'composer.dictate'
   | 'files.quickOpen'
   | 'files.textSearch'
   | 'surface.browser'
@@ -49,6 +54,8 @@ export type CommandId =
   | 'workflow.redo'
   | 'editor.save'
   | 'git.commit'
+  | 'composer.steer'
+  | 'composer.switchSendMode'
 
 /** Where a command is meant to run. A scoped command only exists while its surface is mounted. */
 export type CommandScope = 'global' | 'surface-picker' | 'model-picker' | 'workflow-editor'
@@ -56,7 +63,9 @@ export type CommandScope = 'global' | 'surface-picker' | 'model-picker' | 'workf
 /** The kind of overlay that is topmost. While one is open it owns the keyboard. */
 export type OverlayScope = 'modal' | 'palette' | 'model-picker'
 
-export type CommandCategory = 'Thread' | 'View' | 'Go' | 'Surfaces' | 'Model picker' | 'Workflow editor' | 'Editor'
+/** The command groups, in the order the Shortcuts page and the palette list them. */
+export const COMMAND_CATEGORIES = ['Go', 'Threads', 'Composer', 'View', 'Surfaces', 'Model picker', 'Workflow editor', 'Editor'] as const
+export type CommandCategory = (typeof COMMAND_CATEGORIES)[number]
 
 /** Per-profile overrides: a binding string replaces the default, `null` unbinds. */
 export type ShortcutOverrides = Partial<Record<CommandId, string | null>>
@@ -158,7 +167,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.new',
     title: 'New thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['chat', 'create', 'start'],
     defaultBinding: `${MOD}+N`,
     scope: 'global',
@@ -169,7 +178,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.newPrivate',
     title: 'New private thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['chat', 'create', 'start', 'private', 'local', 'incognito', 'this computer'],
     defaultBinding: `${MOD}+Shift+N`,
     scope: 'global',
@@ -180,7 +189,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.next',
     title: 'Next thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['chat', 'switch'],
     defaultBinding: 'Ctrl+Tab',
     scope: 'global',
@@ -191,7 +200,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.previous',
     title: 'Previous thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['chat', 'switch'],
     defaultBinding: 'Ctrl+Shift+Tab',
     scope: 'global',
@@ -200,9 +209,33 @@ export const COMMANDS: readonly CommandDefinition[] = [
     guest: 'allow'
   },
   {
+    // The window's thread history, like a browser's. Never from a text field, where the chords move the
+    // caret or indent; the browser surface keeps them for its own page.
+    id: 'thread.back',
+    title: 'Back',
+    category: 'Go',
+    searchTerms: ['history', 'previous thread', 'last thread', 'navigate'],
+    defaultBinding: { mac: 'Cmd+[', other: 'Alt+Left' },
+    scope: 'global',
+    textInput: 'deny',
+    terminal: 'deny',
+    guest: 'deny'
+  },
+  {
+    id: 'thread.forward',
+    title: 'Forward',
+    category: 'Go',
+    searchTerms: ['history', 'next thread', 'navigate'],
+    defaultBinding: { mac: 'Cmd+]', other: 'Alt+Right' },
+    scope: 'global',
+    textInput: 'deny',
+    terminal: 'deny',
+    guest: 'deny'
+  },
+  {
     id: 'threads.search',
     title: 'Search threads',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['find', 'chat', 'messages'],
     defaultBinding: `${MOD}+Shift+O`,
     scope: 'global',
@@ -213,7 +246,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.rename',
     title: 'Rename thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['title', 'name'],
     defaultBinding: null,
     scope: 'global',
@@ -225,7 +258,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.pin',
     title: 'Pin or unpin thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['unpin', 'favourite', 'favorite'],
     defaultBinding: null,
     scope: 'global',
@@ -237,7 +270,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.archive',
     title: 'Archive thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['settle', 'hide', 'done'],
     defaultBinding: null,
     scope: 'global',
@@ -249,7 +282,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'project.open',
     title: 'Add project',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['open', 'folder', 'repository'],
     defaultBinding: null,
     scope: 'global',
@@ -258,23 +291,24 @@ export const COMMANDS: readonly CommandDefinition[] = [
     guest: 'allow'
   },
   {
-    // The transcript's own find bar. A text field may be focused (the composer); a terminal or the
-    // browser surface keeps the key, and the handler also leaves Monaco its own find widget.
+    // The transcript's own find bar, in a thread or (under the Chats tab) a bot's chat. A text field may be
+    // focused (the composer); a terminal or the browser surface keeps the key, and the handler also leaves
+    // Monaco its own find widget.
     id: 'chat.findInThread',
     title: 'Find in thread',
-    category: 'Thread',
-    searchTerms: ['search', 'text', 'messages', 'transcript'],
+    category: 'Threads',
+    searchTerms: ['search', 'text', 'messages', 'transcript', 'chat'],
     defaultBinding: `${MOD}+F`,
     scope: 'global',
     textInput: 'allow',
     terminal: 'deny',
     guest: 'deny',
-    when: threadIsOpen
+    when: (ctx) => ctx.threadOpen || !ctx.projectsMode
   },
   {
     id: 'run.stop',
     title: 'Stop run',
-    category: 'Thread',
+    category: 'Composer',
     searchTerms: ['interrupt', 'cancel', 'abort', 'halt'],
     defaultBinding: `${MOD}+Shift+Backspace`,
     scope: 'global',
@@ -288,7 +322,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
     // waits and, from the composer, only while the composer is empty (with text, the key sends).
     id: 'approval.allow',
     title: 'Approve request',
-    category: 'Thread',
+    category: 'Composer',
     searchTerms: ['approval', 'permission', 'allow', 'accept'],
     defaultBinding: `${MOD}+Enter`,
     scope: 'global',
@@ -301,7 +335,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
     // No default key, so a slip cannot deny.
     id: 'approval.deny',
     title: 'Deny request',
-    category: 'Thread',
+    category: 'Composer',
     searchTerms: ['approval', 'permission', 'reject', 'refuse'],
     defaultBinding: null,
     scope: 'global',
@@ -357,6 +391,31 @@ export const COMMANDS: readonly CommandDefinition[] = [
     guest: 'allow'
   },
   {
+    // Reachable from the View menu even when a theme's CSS hides the window, so a broken theme can always be undone.
+    id: 'theme.builtIn',
+    title: 'Turn off custom theme',
+    category: 'View',
+    searchTerms: ['theme', 'appearance', 'css', 'reset', 'default'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'allow',
+    guest: 'allow'
+  },
+  {
+    // Recovers a broken layout without quitting. Saves autosaved edits first and refuses while unsaved edits remain.
+    // No key: a slip of the hand must not reload the window.
+    id: 'window.reload',
+    title: 'Reload window',
+    category: 'View',
+    searchTerms: ['refresh', 'restart', 'layout', 'developer'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'allow',
+    guest: 'allow'
+  },
+  {
     id: 'settings.open',
     title: 'Open settings',
     category: 'Go',
@@ -392,7 +451,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'composer.focus',
     title: 'Focus composer',
-    category: 'Go',
+    category: 'Composer',
     searchTerms: ['input', 'message', 'type'],
     defaultBinding: `${MOD}+Shift+M`,
     scope: 'global',
@@ -400,6 +459,19 @@ export const COMMANDS: readonly CommandDefinition[] = [
     terminal: 'allow',
     guest: 'allow',
     when: threadIsOpen
+  },
+  {
+    // Starts dictation in the shown composer, and pressed again while recording finishes it (Done: the text goes
+    // in). Its handler is enabled only while the composer offers the microphone or is recording.
+    id: 'composer.dictate',
+    title: 'Start or finish dictation',
+    category: 'Composer',
+    searchTerms: ['dictate', 'voice', 'microphone', 'speech', 'record', 'talk'],
+    defaultBinding: `${MOD}+Shift+Space`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny'
   },
   {
     // Only while the key is typed inside the Files panel (its tree, search box or editor): Ctrl/Cmd+P
@@ -511,8 +583,58 @@ export const COMMANDS: readonly CommandDefinition[] = [
     terminal: 'deny',
     guest: 'deny',
     fixed: true
+  },
+  {
+    // The composer and the queued messages handle this key themselves (`lib/steerKey.ts`): while a reply runs it
+    // does what Enter does not. In a thread set to Queue it sends the composer's text into the reply now; in one set
+    // to Steer it queues it. In an empty composer it sends the next queued message now; on a focused queued message,
+    // that message.
+    id: 'composer.steer',
+    title: 'Steer: send into the running reply (queues in Steer mode)',
+    category: 'Composer',
+    searchTerms: ['steer', 'send now', 'queue'],
+    defaultBinding: `${MOD}+Enter`,
+    scope: 'global',
+    textInput: 'deny',
+    terminal: 'deny',
+    guest: 'deny',
+    fixed: true
+  },
+  {
+    // While a reply runs, switches what Enter does in the open thread's composer: Queue or Steer. Its handler is
+    // enabled only while the composer shows the mode button. It never sends.
+    id: 'composer.switchSendMode',
+    title: 'Switch send mode (Queue or Steer)',
+    category: 'Composer',
+    searchTerms: ['steer', 'queue', 'enter', 'send mode'],
+    defaultBinding: `${MOD}+Shift+Enter`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny',
+    when: approvalTarget
   }
 ]
+
+/** Rows that lead their group where commands are listed, in this order; the rest follow in table order. */
+const LEADING_ROWS: readonly CommandId[] = ['palette.open', 'thread.back', 'thread.forward', 'composer.focus', 'composer.dictate', 'composer.steer', 'composer.switchSendMode']
+
+/**
+ * The commands as the Shortcuts page and the palette list them: by group (`COMMAND_CATEGORIES`), the
+ * leading rows first. `COMMANDS` keeps its own order, because it decides which of two commands on one
+ * chord runs; so a custom binding that shares a chord behaves as it did.
+ */
+export const COMMANDS_IN_DISPLAY_ORDER: readonly CommandDefinition[] = COMMANDS
+  .map((command, index) => ({
+    command,
+    rank: [
+      COMMAND_CATEGORIES.indexOf(command.category),
+      LEADING_ROWS.includes(command.id) ? LEADING_ROWS.indexOf(command.id) : LEADING_ROWS.length,
+      index
+    ]
+  }))
+  .sort((a, b) => a.rank[0]! - b.rank[0]! || a.rank[1]! - b.rank[1]! || a.rank[2]! - b.rank[2]!)
+  .map(({ command }) => command)
 
 const COMMAND_BY_ID: ReadonlyMap<CommandId, CommandDefinition> = new Map(COMMANDS.map((command) => [command.id, command]))
 

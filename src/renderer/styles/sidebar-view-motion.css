@@ -1,35 +1,22 @@
-/* Sidebar tab switch motion (ThreadsSidebar: `shownView`, `data-view-leaving`).
-   Switching tabs: the open view folds up and fades out (140ms), then the new view unfolds and fades in
-   (180ms, from @starting-style as its panel stops being hidden). Panels stay `hidden` whenever they are not
-   on screen; the leaving one is `inert` while it fades. Transform and opacity only, so the scroll area, its
-   scroll position and the footer do not move. Durations follow Settings > Animation speed
-   (`--ui-motion-scale`, SIDEBAR_VIEW_OUT_MS); with motion off (that setting or the OS reduced-motion
-   setting) views swap at once (lib/motion.ts, global.css).
-   `.view-swap` gives another tab bar's panels the same swap (useViewSwap, `data-view-leaving`). */
+/* Sidebar tab switch motion (ThreadsSidebar: `contentView`).
+   Switching tabs: the new view shows at once, fully drawn, as its panel stops being hidden, and settles into
+   place with a short lift (180ms, from @starting-style). Nothing waits for the old view to fade out, and nothing
+   starts transparent, so a switch has no empty frames. Transform only, so the scroll area, its scroll position
+   and the footer do not move. Durations follow Settings > Animation speed (`--ui-motion-scale`); with motion off
+   (that setting or the OS reduced-motion setting) views swap without moving (lib/motion.ts, global.css).
+   `.view-swap` gives another tab bar's panels the same settle. */
 
 .threads-sidebar-scroll > .threads-sidebar-section[role='tabpanel'],
 .view-swap > [role='tabpanel'] {
   transform-origin: 50% 0;
-  transition:
-    opacity calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
-    transform calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
+  transition: transform calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
 }
 
 @starting-style {
   .threads-sidebar-scroll > .threads-sidebar-section[role='tabpanel'],
   .view-swap > [role='tabpanel'] {
-    opacity: 0;
-    transform: translateY(-4px) scaleY(0.97);
+    transform: translateY(-4px);
   }
-}
-
-.threads-sidebar-scroll[data-view-leaving] > .threads-sidebar-section[role='tabpanel']:not([hidden]),
-.view-swap[data-view-leaving] > [role='tabpanel'] {
-  opacity: 0;
-  transform: translateY(-4px) scaleY(0.97);
-  pointer-events: none;
-  transition-duration: calc(140ms * var(--ui-motion-scale, 1));
-  transition-timing-function: var(--ui-collapse-ease-close);
 }
 
 /* The tabs: the selected highlight (background and its ring) crossfades between tabs. */
@@ -81,35 +68,24 @@
 }
 
 /* The workspace beside the sidebar (App: `workspaceMode`, `data-workspace-swap`) swaps with the tabs, in step
-   with the lists: going to or from Chats, the conversation and app panel (or the chats pane) fade out with a
-   slight lift (140ms, inert), then the other side fades in from it (180ms). Only during a swap, so hiding the
-   app panel or opening Usage stays as it was. Same speed scale and motion-off rules as the lists. */
+   with the lists: going to or from Chats, the other side shows at once, in the click's own update, and settles
+   with the same short lift (180ms). Only during a swap, so hiding the app panel or opening Usage stays as it
+   was. Same speed scale and motion-off rules as the lists. */
 .app-workspace[data-workspace-swap] > :is(.sidebar, .keep-mounted-pane, .resizer, .main-area) {
   transform-origin: 50% 0;
-  transition:
-    opacity calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
-    transform calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
+  transition: transform calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
 }
 
 @starting-style {
   .app-workspace[data-workspace-swap='in'] > :is(.sidebar, .keep-mounted-pane, .resizer, .main-area) {
-    opacity: 0;
     transform: translateY(-4px);
   }
 }
 
 /* The app panel stays laid out while inactive (KeepMounted preserveLayout), so it comes back from here. A lift
    only, no scale: KeepMounted remembers the panel's measured size for its live browser views. */
-.app-workspace[data-workspace-swap] > .main-area.keep-mounted-layout-inactive,
-.app-workspace[data-workspace-swap='out'] > :is(.sidebar, .keep-mounted-pane, .resizer, .main-area) {
+.app-workspace[data-workspace-swap] > .main-area.keep-mounted-layout-inactive {
   transform: translateY(-4px);
-}
-
-.app-workspace[data-workspace-swap='out'] > :is(.sidebar, .keep-mounted-pane, .resizer, .main-area) {
-  opacity: 0;
-  pointer-events: none;
-  transition-duration: calc(140ms * var(--ui-motion-scale, 1));
-  transition-timing-function: var(--ui-collapse-ease-close);
 }
 
 @media (prefers-reduced-motion: reduce) {

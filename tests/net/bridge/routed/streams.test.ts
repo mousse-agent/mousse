@@ -339,19 +339,21 @@ describe('opening a private stream', () => {
     const onWarning = (warning: Error) => warnings.push(warning.name)
     process.on('warning', onWarning)
     try {
-      // Two shared streams fill the shared cap; private streams are counted apart from it.
+      // Two shared streams fill the shared cap; a third makes room by releasing one no one reads.
       adapter!.activate(threads[0].id)
       adapter!.activate(threads[1].id)
-      expect(() => adapter!.activate(threads[2].id)).toThrow(
-        expect.objectContaining({ code: 'rate_limited' })
-      )
+      expect(() => adapter!.activate(threads[2].id)).not.toThrow()
+      // Private streams are counted apart from it: opening them takes no room from phones, and a full shared
+      // cap never releases one of them.
       const readers = [newId('node'), newId('node'), newId('node')]
-      for (const reader of readers)
-        for (const t of threads) adapter!.openPrivate({ reader, kind: 'thread', subject: t.id })
-      expect(adapter!.privateReaders()).toHaveLength(3)
-      expect(() => adapter!.activate(threads[2].id)).toThrow(
-        expect.objectContaining({ code: 'rate_limited' })
+      const opened = readers.flatMap((reader) =>
+        threads.map((t) => adapter!.openPrivate({ reader, kind: 'thread', subject: t.id }))
       )
+      expect(adapter!.privateReaders()).toHaveLength(3)
+      expect(() => adapter!.activate(threads[3].id)).not.toThrow()
+      expect(() => adapter!.activate(threads[4].id)).not.toThrow()
+      for (const descriptor of opened)
+        expect(adapter!.privateAccess(descriptor.id)).toMatchObject({ open: true })
       // Many streams listen to the same services without the "too many listeners" warning.
       await new Promise((resolve) => setImmediate(resolve))
     } finally {
@@ -568,6 +570,9 @@ describe('what a private stream carries', () => {
         threadId: t.id,
         error: 'no model'
       })
+      // A Send now click's outcome, for the window on another computer that clicked it.
+      f.mms.orchestrator.emit('steer-now', { threadId: t.id, requestId: 'click-1', outcome: 'stale' })
+      f.mms.orchestrator.emit('steer-now', { threadId: 'other', requestId: 'click-2', outcome: 'applied' })
       // A save or an Undo, raised through the protocol server for this thread; another thread's is not heard.
       f.mms.events.broadcast('thread:event', {
         type: 'actions.updated',
@@ -588,10 +593,12 @@ describe('what a private stream carries', () => {
         'tasks.updated',
         'pullRequests.updated',
         'thread.title-generation-failed',
+        'steer.now',
         'actions.updated'
       ])
     )
     expect(heard(private_).filter((type) => type === 'actions.updated')).toHaveLength(1)
+    expect(heard(private_).filter((type) => type === 'steer.now')).toHaveLength(1)
     // A phone's stream carries none of them.
     expect(heard(shared)).toEqual([])
   }, 60_000)

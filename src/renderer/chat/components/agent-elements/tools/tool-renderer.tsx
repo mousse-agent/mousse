@@ -1,4 +1,4 @@
-import React, { memo } from "react";
+import React, { memo, useMemo } from "react";
 import { IconSparkles } from "../../../../lib/icons";
 import { toolRegistry, parseMcpToolType } from "./tool-registry";
 import { getToolStatus } from "../utils/format-tool";
@@ -10,13 +10,13 @@ import { PlanTool } from "./plan-tool";
 import { ToolGroup } from "./tool-group";
 import { McpTool, unwrapMcpOutput } from "./mcp-tool";
 import { ThinkingTool } from "./thinking-tool";
-import { NoteTool } from "./note-tool";
 import { SearchTool } from "./search-tool";
 import { QuestionTool } from "../question/question-tool";
 import { AnsweredQuestionsTool } from "../question/answered-questions-tool";
 import { QuickActionTool } from "./quick-action-tool";
 import { NativeSubagentCard, SubagentTool } from "./SubagentCard";
 import { useSubagentCard } from "./subagent-cards-context";
+import { ToolRowContext } from "./tool-icon";
 import type { CustomToolRendererProps } from "../types";
 
 export type ToolRendererProps = {
@@ -48,6 +48,8 @@ export function failedToolTitle(title: string, toolName: string): string {
  */
 function AgentTool({ part, nestedTools, chatStatus }: { part: any; nestedTools?: any[]; chatStatus?: string }) {
   const card = useSubagentCard(part.toolCallId);
+  // Still starting: the turn's progress line says so until the card has a name and a task.
+  if (card?.spawning) return null;
   if (card?.native) return <NativeSubagentCard card={card} nestedTools={nestedTools ?? []} chatStatus={chatStatus} />;
   const labelBase = part.type === "tool-Agent" ? "Agent" : "Task";
   return (
@@ -64,7 +66,22 @@ function AgentTool({ part, nestedTools, chatStatus }: { part: any; nestedTools?:
   );
 }
 
-export const ToolRenderer = memo(function ToolRenderer({
+/** A call's row, with what the row shows beyond its part: its start time and whether the agent got past its failure. */
+export const ToolRenderer = memo(function ToolRenderer(props: ToolRendererProps) {
+  const { createdAt, failureRecovered } = props.part as { createdAt?: string; failureRecovered?: boolean };
+  const toolCallId = (props.part as { toolCallId?: string }).toolCallId;
+  const info = useMemo(
+    () => ({ at: createdAt, recovered: failureRecovered === true, openKey: toolCallId }),
+    [createdAt, failureRecovered, toolCallId],
+  );
+  return (
+    <ToolRowContext.Provider value={info}>
+      <ToolRendererBody {...props} />
+    </ToolRowContext.Provider>
+  );
+});
+
+function ToolRendererBody({
   part,
   nestedTools,
   chatStatus,
@@ -101,8 +118,6 @@ export const ToolRenderer = memo(function ToolRenderer({
       return <AgentTool part={part} nestedTools={nestedTools} chatStatus={chatStatus} />;
     case "tool-Thinking":
       return <ThinkingTool part={part} />;
-    case "tool-Note":
-      return <NoteTool part={part} />;
   }
 
   // Custom renderers: user-defined tools, and the host's own cards for its app tools (keyed by the bare tool name,
@@ -146,6 +161,7 @@ export const ToolRenderer = memo(function ToolRenderer({
         title={title}
         failedTitle={failedToolTitle(title, partType.replace(/^tool-/, ""))}
         subtitle={meta.subtitle?.(part)}
+        detailTitle={meta.detailTitle?.(part)}
         isPending={isPending}
         isError={isError}
       />
@@ -163,4 +179,4 @@ export const ToolRenderer = memo(function ToolRenderer({
       isError={isError}
     />
   );
-});
+}

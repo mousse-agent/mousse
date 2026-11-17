@@ -9,19 +9,21 @@ import type {
   ChatMessage,
   NativeCompactionCheckpoint,
   NativeCompactionDirective,
+  NativeContextBase,
   NativeLastTurnUsage,
   NativeLlmContext,
   NativePromptCache
 } from '../../shared/types'
 import { contextCompactionPoint, DEFAULT_COMPACTION_RESERVE_TOKENS } from '../../shared/settings'
 import { STEER_MARKER_CLOSE, STEER_MARKER_OPEN } from './steer'
-import { isMissingPlaceholder } from '../data/threadDb/threadBlobs'
+import { estimateMessageTokens, MESSAGE_OVERHEAD, withoutMissingImages } from './contextEstimate'
+import { isMousseContext } from '../../shared/mousseContext'
 
 // Shared with Settings, which shows where a thread compacts.
 export { DEFAULT_COMPACTION_RESERVE_TOKENS, EXACT_COMPACTION_USAGE_RATIO } from '../../shared/settings'
+export { estimateMessageTokens } from './contextEstimate'
 export const NATIVE_CONTEXT_VERSION = 2 as const
 export const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000
-const MESSAGE_OVERHEAD = 4
 const MAX_DIRECTIVE_CHARS = 24_000
 const MAX_PROGRESS_CHARS = 2_000
 const MAX_OBSERVATION_CHARS = 1_000
@@ -84,6 +86,13 @@ export function isNativeLastTurnUsage(value: unknown): value is NativeLastTurnUs
   )
 }
 
+export function isNativeContextBase(value: unknown): value is NativeContextBase {
+  if (!value || typeof value !== 'object') return false
+  const base = value as Partial<NativeContextBase>
+  return typeof base.modelKey === 'string' && base.modelKey.length > 0 &&
+    typeof base.tokens === 'number' && Number.isFinite(base.tokens) && base.tokens >= 0
+}
+
 export function isNativePromptCache(value: unknown): value is NativePromptCache {
   if (!value || typeof value !== 'object') return false
   const cache = value as Partial<NativePromptCache>
@@ -106,18 +115,22 @@ export function promptCacheOf(context: NativeLlmContext): NativePromptCache | un
 }
 
 /**
- * The record after a turn whose last request was answered at `at`: the lifetime its requests wrote, or,
+ * The record after a turn whose last request was made at `at`: the lifetime its requests wrote, or,
  * when they only read the cache (or the provider reports none), the lifetime recorded before. A read
- * keeps what the earlier write said; the provider refreshes the lifetime on every hit.
+ * keeps what the earlier write said; the provider refreshes the lifetime on every hit. A shorter write
+ * does not shorten a longer lifetime still live at `at`: the history written before it is cached for that
+ * long, and reading it uncached (`promptCacheGoneCold` turning caching off) costs ten times its cached read.
  */
 export function nextPromptCache(
   context: NativeLlmContext,
   turn: { at: number; ttlMs?: number; modelKey?: string; instanceId?: string }
 ): NativePromptCache {
-  const previous = isNativePromptCache(context.promptCache) && context.promptCache.modelKey === turn.modelKey && context.promptCache.instanceId === turn.instanceId
-    ? context.promptCache.ttlMs
+  const record = isNativePromptCache(context.promptCache) && context.promptCache.modelKey === turn.modelKey && context.promptCache.instanceId === turn.instanceId
+    ? context.promptCache
     : undefined
-  const ttlMs = turn.ttlMs ?? previous
+  const previous = record?.ttlMs
+  const previousLive = previous !== undefined && record!.lastRequestAt + previous > turn.at
+  const ttlMs = turn.ttlMs !== undefined && previousLive && previous! > turn.ttlMs ? previous : turn.ttlMs ?? previous
   return {
     lastRequestAt: turn.at,
     ...(ttlMs ? { ttlMs } : {}),
@@ -184,24 +197,6 @@ function emptyUsage(): AssistantMessage['usage'] {
 /** Provider-visible native messages. Generated compaction memory is supplied separately. */
 export function getActiveMessages(context: NativeLlmContext): Message[] {
   return withoutMissingImages(structuredClone(context.messages.slice(Math.max(0, context.activeStartIndex))))
-}
-
-/**
- * An image whose stored bytes could not be read (its data is a missing-blob placeholder) is sent to the model as a
- * short note instead, never as image data. The stored context keeps its reference, so the image comes back if its
- * file does.
- */
-function withoutMissingImages(messages: Message[]): Message[] {
-  for (const message of messages) {
-    const content = (message as { content?: unknown }).content
-    if (!Array.isArray(content)) continue
-    content.forEach((part, index) => {
-      if (part && typeof part === 'object' && (part as { type?: unknown }).type === 'image' && isMissingPlaceholder((part as { data?: unknown }).data)) {
-        content[index] = { type: 'text', text: '[image unavailable]' }
-      }
-    })
-  }
-  return messages
 }
 
 export function getCompactionSummary(context: NativeLlmContext): string | undefined {
@@ -271,29 +266,6 @@ export function appendNativeMessage(context: NativeLlmContext, message: Message)
     revision: (normalized.revision ?? 0) + 1,
     lastTurnUsage: undefined
   }
-}
-
-export function estimateMessageTokens(message: Message): number {
-  let chars = 0
-  let images = 0
-  if (message.role === 'user') {
-    if (typeof message.content === 'string') chars = message.content.length
-    else {
-      chars = message.content.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length : 0), 0)
-      images = message.content.filter((block) => block.type === 'image').length
-    }
-  } else if (message.role === 'assistant') {
-    chars = message.content.reduce((sum, block) => {
-      if (block.type === 'text') return sum + block.text.length
-      if (block.type === 'thinking') return sum + block.thinking.length
-      return sum + block.name.length + block.id.length + JSON.stringify(block.arguments).length
-    }, 0)
-  } else {
-    chars = message.toolCallId.length + message.toolName.length + message.content.reduce(
-      (sum, block) => sum + (block.type === 'text' ? block.text.length : 0), 0)
-    images = message.content.filter((block) => block.type === 'image').length
-  }
-  return Math.ceil(chars / 4) + MESSAGE_OVERHEAD + images * 1_024
 }
 
 export function estimateMessagesTokens(messages: Message[]): number {
@@ -488,7 +460,7 @@ function extractDirective(message: Message): NativeCompactionDirective[] {
     ? message.content.trim()
     : message.content.filter((block): block is TextContent => block.type === 'text').map((block) => block.text).join('').trim()
   if (!text) return []
-  if (text.startsWith('[Mousse ')) return []
+  if (isMousseContext(text)) return []
   if (text.includes(STEER_MARKER_OPEN)) {
     const start = text.indexOf(STEER_MARKER_OPEN) + STEER_MARKER_OPEN.length
     const end = text.indexOf(STEER_MARKER_CLOSE, start)

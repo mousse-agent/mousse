@@ -80,6 +80,7 @@ export class EffectOutbox {
     // (SPEC §12.3: a lane is FIFO). Each thread has four lanes: the thread lane (turns and
     // replay-safe work), the control lane (interrupt, steer and answers, which must reach a live
     // turn), the title lane and the resume lane (a `run.resume` timer waiting for a usage limit).
+    // The oldest claimable row comes first.
     this.claimSql = `UPDATE effects SET status = 'running', attempts = attempts + 1,
         lease_owner = :owner, updated_at = :now,
         lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', :now,
@@ -155,15 +156,25 @@ export class EffectOutbox {
   }
 
   /**
-   * Claims the oldest claimable effect for `owner`, or null. One `UPDATE … RETURNING`. `lanes`
-   * restricts the claim to effect kinds of those lane classes (a worker fibre group, SPEC §12.3);
-   * without it any kind may be claimed.
+   * Records an effect that has already happened outside the worker (a notice handed over with a tool's
+   * result): inserted and `succeeded` in one transaction, so no executor ever claims it. Same ids and
+   * events as `enqueue`.
    */
-  claimNext(
-    owner: string,
-    now: string,
-    options: { lanes?: readonly EffectLaneClass[] } = {}
-  ): EffectRecord | null {
+  recordDone(input: { threadId: string; runId: string; kind: EffectKind; payload?: unknown }): EffectRecord {
+    return this.db.transaction(() => {
+      const pending = this.enqueue(input)
+      if (pending.status !== 'pending') return pending
+      const now = this.now()
+      return this.write(pending, { status: 'succeeded', attempts: 1, updatedAt: now, completedAt: now })
+    })
+  }
+
+  /**
+   * Claims the next claimable effect for `owner`, or null. One `UPDATE … RETURNING`; the oldest
+   * comes first. `lanes` restricts the claim to effect kinds of those lane classes (the worker's turn
+   * claimer or a fibre group, SPEC §12.3); without it any kind may be claimed.
+   */
+  claimNext(owner: string, now: string, options: { lanes?: readonly EffectLaneClass[] } = {}): EffectRecord | null {
     const sql = options.lanes ? this.claimSqlFor(options.lanes) : this.claimSql
     if (sql === null) return null
     return this.db.transaction(() => {

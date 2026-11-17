@@ -35,9 +35,13 @@ describe('the application menu template', () => {
     ])
     expect(submenu(template, 'View').filter((item) => item.id).map((item) => [item.id, item.accelerator])).toEqual([
       ['sideCard.toggle', 'CommandOrControl+Shift+D'],
-      ['terminal.open', 'CommandOrControl+J']
+      ['terminal.open', 'CommandOrControl+J'],
+      // No key: a menu item that works even when a theme's CSS hides the window.
+      ['theme.builtIn', undefined]
     ])
     expect(submenu(template, 'Go').map((item) => [item.id, item.accelerator])).toEqual([
+      ['thread.back', 'Alt+Left'],
+      ['thread.forward', 'Alt+Right'],
       ['palette.open', 'CommandOrControl+K'],
       ['composer.focus', 'CommandOrControl+Shift+M']
     ])
@@ -47,6 +51,8 @@ describe('the application menu template', () => {
     const mac = build({}, { platform: 'darwin' })
     expect(mac[0]?.label).toBe('Mousse')
     expect(commandItems(mac).get('thread.new')?.accelerator).toBe('CommandOrControl+N')
+    expect(commandItems(mac).get('thread.back')?.accelerator).toBe('Cmd+[')
+    expect(commandItems(mac).get('thread.forward')?.accelerator).toBe('Cmd+]')
     expect(build().some((menu) => menu.label === 'Mousse')).toBe(false)
   })
 

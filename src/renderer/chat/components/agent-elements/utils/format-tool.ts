@@ -86,39 +86,101 @@ export function getToolStatus(part: any, chatStatus?: string) {
   return { isPending, isError, isSuccess, isInterrupted };
 }
 
-/**
- * Heading for a thinking row: first non-empty line of the thought content,
- * truncated. Shown beside the thinking icon, and as an activity-group title.
- */
-export function thoughtHeading(content: string | undefined): string {
-  if (!content) return "";
-  const firstLine =
-    content
-      .split("\n")
-      .map((line) => line.trim())
-      .find((line) => line.length > 0) ?? "";
-  const plainText = stripInlineMarkdown(
-    firstLine.replace(/^#{1,6}\s+/, "").replace(/^>\s?/, ""),
-  ).trim();
-  if (plainText.length <= 64) return plainText;
-  return `${plainText.slice(0, 61).trimEnd()}...`;
+/** The newest paragraph of a thought, whole, in plain text: the tooltip of a line that shows its headline. */
+export function liveThoughtText(content: string | undefined): string {
+  if (!content?.trim()) return "";
+  const paragraphs = content.split(/\n\s*\n/).filter((block) => block.trim());
+  const latest = paragraphs[paragraphs.length - 1]!
+    .split("\n")
+    .map((line) => line.trim().replace(/^#{1,6}\s+/, "").replace(/^>\s?/, ""))
+    .filter(Boolean)
+    .join(" ");
+  return stripInlineMarkdown(latest).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
+}
+
+/** Longest headline, in code points: a row cuts it at its width well before this. */
+const HEADLINE_MAX = 200;
+
+/** Words that end in a dot without ending a sentence, lower case and without their last dot. */
+const ABBREVIATIONS = new Set([
+  "e.g", "i.e", "eg", "ie", "etc", "vs", "cf", "approx", "incl", "esp", "resp", "viz", "al", "fig", "no", "nos",
+  "mr", "mrs", "ms", "dr", "st", "jr", "sr", "inc", "ltd", "co", "corp", "dept", "est", "min", "max", "ca",
+]);
+
+/** A paragraph's title line: `**Title**`, `__Title__` or a markdown heading. The title in plain text, or undefined. */
+function titleOf(line: string): string | undefined {
+  const trimmed = line.trim();
+  const bold = /^(\*\*|__)(?=\S)(.+?)\1[:.]?$/.exec(trimmed);
+  if (bold) return plainLine(bold[2]!).replace(/:$/, "");
+  const heading = /^#{1,6}\s+(.+)$/.exec(trimmed);
+  return heading ? plainLine(heading[1]!) : undefined;
+}
+
+function plainLine(text: string): string {
+  return stripInlineMarkdown(text).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
+}
+
+/** `text` cut to `max` code points (never inside a surrogate pair), with an ellipsis when cut. */
+function cutCodePoints(text: string, max: number): string {
+  const points = Array.from(text);
+  return points.length <= max ? text : `${points.slice(0, max - 1).join("").trimEnd()}…`;
 }
 
 /**
- * One line for the newest part of a thought. A thought made of titled
- * summaries ("**Title**" lines, as Codex sends them) gives its last title;
- * any other gives the first line of its last paragraph.
+ * Where the first sentence of `text` ends (the index after its closing mark), or -1 while it has not ended. A sentence
+ * ends at `.`, `?` or `!` (with any closing quotes, brackets or emphasis after it) followed by white space or the end.
+ * It does not end inside inline code, on an abbreviation ("e.g.", "etc.", "vs."), on a single initial, or on a dot
+ * inside a name or path ("config.ts", "v1.2"), which has no space after it.
  */
-export function latestThoughtHeading(content: string | undefined): string {
-  if (!content?.trim()) return "";
-  const lines = content.split("\n").map((line) => line.trim());
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (/^(\*\*|__)[^*_].*\1$/.test(lines[index]!)) {
-      return thoughtHeading(lines[index]);
+function firstSentenceEnd(text: string): number {
+  let inCode = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (char === "`") {
+      inCode = !inCode;
+      continue;
     }
+    if (inCode || (char !== "." && char !== "?" && char !== "!")) continue;
+    let end = index + 1;
+    while (end < text.length && /["'”’)\]*_]/.test(text[end]!)) end += 1;
+    if (end < text.length && !/\s/.test(text[end]!)) continue;
+    if (char === ".") {
+      // The word the dot closes: an abbreviation or an initial does not end the sentence; nor does "..." mid-thought.
+      const word = /([\p{L}\p{N}.]*)$/u.exec(text.slice(0, index))?.[1] ?? "";
+      const bare = word.toLowerCase();
+      if (ABBREVIATIONS.has(bare) || /^\p{L}$/u.test(word)) continue;
+    }
+    return end;
+  }
+  return -1;
+}
+
+/**
+ * A thought's headline: one still line that stands for it, used wherever a thought is summarised (the live line, a
+ * finished thought's row, a group's heading). A thought written in titled sections reads as its latest title: a
+ * `**Title**` or `# Heading` line heads every paragraph after it, until the next title. Text with no title above it
+ * reads as its newest paragraph's first sentence. Plain text, cut by code point.
+ *
+ * So the line changes only when a new section or a new untitled paragraph starts (and while a paragraph's first words
+ * are still arriving): a long thought moves on section by section, and never reflows with every word.
+ */
+export function thoughtHeadline(content: string | undefined): string {
+  if (!content?.trim()) return "";
+  const allLines = content.split("\n");
+  for (let index = allLines.length - 1; index >= 0; index -= 1) {
+    const title = titleOf(allLines[index]!);
+    if (title) return cutCodePoints(title, HEADLINE_MAX);
   }
   const paragraphs = content.split(/\n\s*\n/).filter((block) => block.trim());
-  return thoughtHeading(paragraphs[paragraphs.length - 1]);
+  const newest = paragraphs[paragraphs.length - 1]!;
+  const lines = newest.split("\n").map((line) => line.trim()).filter(Boolean);
+  // List markers and quote marks are not words of the sentence.
+  const body = lines
+    .map((line) => line.replace(/^>\s?/, "").replace(/^(?:[-*+]|\d+[.)])\s+/, ""))
+    .join(" ");
+  const end = firstSentenceEnd(body);
+  const sentence = plainLine(end === -1 ? body : body.slice(0, end));
+  return cutCodePoints(sentence, HEADLINE_MAX);
 }
 
 /** Remove inline markdown formatting, keeping the readable text. */
@@ -131,6 +193,12 @@ function stripInlineMarkdown(line: string): string {
     .replace(/~~(.*?)~~/g, "$1")
     .replace(/`([^`]*)`/g, "$1")
     .trim();
+}
+
+/** How many a code or file search found (`numFiles` on its output), or undefined when it does not say. */
+export function searchResultCount(output: unknown): number | undefined {
+  const value = output && typeof output === "object" ? (output as { numFiles?: unknown }).numFiles : undefined;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 /**

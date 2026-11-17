@@ -2,7 +2,8 @@ import React, { memo, Suspense, useContext } from "react";
 import type { FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep } from "../types/timeline";
-import { File, FilePlus, GitCompare, IconChevronRight, Pencil } from "../../../../lib/icons";
+import { File, GitCompare, IconChevronRight, RowEdit } from "../../../../lib/icons";
+import { useRowOpenState } from "./tool-open-state";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
@@ -17,6 +18,9 @@ import { openTurnInChanges } from "../../../../components/changes/openChanges";
 import { useAppStore } from "../../../../stores/appStore";
 import { lazyNamed } from "../../../../lib/lazyComponent";
 import { TurnIdContext } from "../turn-context";
+import { NO_ROW_INFO, RecoveredFailureMark, ToolRowContext, ToolRowTime, ToolStateIcon, useToolRowInfo } from "./tool-icon";
+
+const RECOVERED_ONLY = { recovered: true };
 
 /** What one file's diff is drawn from. */
 export type DiffSource =
@@ -250,7 +254,7 @@ function rowLabel(verb: FileVerb, status: RowStatus): string {
 
 // 28px targets that overhang the 22px line (negative margin), so showing them does not make the row taller.
 const ROW_ICON_BUTTON =
-  "inline-flex items-center justify-center size-7 -my-[3px] shrink-0 rounded-md text-muted-foreground hover:text-an-foreground hover:bg-an-background-secondary focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color";
+  "inline-flex items-center justify-center size-7 -my-[3px] shrink-0 rounded-md text-muted-foreground hover:text-an-foreground hover:bg-an-background-secondary focus-visible:outline-none focus-visible:bg-an-background-secondary";
 
 /**
  * The quiet line a tool row draws: an icon, the verb, the file name in the foreground colour (mono, 500), the line
@@ -291,12 +295,14 @@ function EditLine({
 }) {
   const isPending = status === "pending";
   const isFailed = status === "failed";
+  // A failure the agent got past stays grey: only its icon dims toward red, with a small ×.
+  const { at, recovered = false } = useToolRowInfo();
   const text = (
     <>
-      <span className={cn("font-[450] shrink-0 whitespace-nowrap", isFailed && "text-red-400")}>{label}</span>
+      <span className={cn("font-normal shrink-0 whitespace-nowrap", isFailed && !recovered && "text-red-400")}>{label}</span>
       {name &&
         (isFileName ? (
-          <span className="an-edit-row-name min-w-0 truncate font-mono font-medium text-[13px] text-an-foreground">{name}</span>
+          <span className="an-edit-row-name min-w-0 truncate font-mono font-medium text-[13px] text-an-foreground/80">{name}</span>
         ) : (
           <span className="an-edit-row-count shrink-0 whitespace-nowrap">{name}</span>
         ))}
@@ -305,12 +311,12 @@ function EditLine({
   return (
     <div className="an-edit-row flex flex-col min-w-0" data-status={status}>
       {/* The hover group is the line alone, so hovering a call's line does not show the actions of the file rows under it. */}
-      <div className="an-tool-chrome group/edit-line flex items-center gap-1 min-w-0">
+      <div className="an-tool-chrome an-tool-row-line group/edit-line flex items-center gap-1 min-w-0">
         <button
           type="button"
           className={cn(
-            "an-edit-row-toggle flex items-center gap-2 min-w-0 text-left text-[15px] leading-[22px] text-muted-foreground rounded-sm",
-            "focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color",
+            "an-edit-row-toggle flex items-center gap-2 min-w-0 text-left text-[14px] leading-[22px] text-an-foreground-muted rounded-sm",
+            "focus-visible:outline-none focus-visible:bg-an-foreground/10",
             canOpen ? "cursor-pointer" : "cursor-default",
           )}
           aria-expanded={canOpen ? open : undefined}
@@ -318,15 +324,7 @@ function EditLine({
           title={title}
           onClick={canOpen ? onToggle : undefined}
         >
-          <span
-            className={cn(
-              "flex items-center justify-center size-[18px] shrink-0",
-              isFailed && "text-red-400",
-            )}
-            aria-hidden="true"
-          >
-            {icon}
-          </span>
+          <ToolStateIcon state={isPending ? "running" : isFailed ? "failed" : "done"}>{icon}</ToolStateIcon>
           {isPending ? (
             <TextShimmer as="span" duration={1.2} className="flex items-center gap-2 min-w-0 m-0">
               {text}
@@ -335,6 +333,7 @@ function EditLine({
             text
           )}
           {!isPending && <Stat added={added} removed={removed} />}
+          {isFailed && recovered && <RecoveredFailureMark />}
           {canOpen && (
             <IconChevronRight
               aria-hidden="true"
@@ -348,15 +347,19 @@ function EditLine({
             {actions}
           </span>
         )}
+        <ToolRowTime at={at} />
       </div>
-      <Collapse open={open}>{children}</Collapse>
+      {/* File rows under the call keep its failure state but not its time. */}
+      <Collapse open={open}>
+        <ToolRowContext.Provider value={recovered ? RECOVERED_ONLY : NO_ROW_INFO}>{children}</ToolRowContext.Provider>
+      </Collapse>
     </div>
   );
 }
 
 /** Open, collapsed by default; a failure opens it once, when it happens. */
 function useRowOpen(failed: boolean): [boolean, () => void] {
-  const [open, setOpen] = React.useState(failed);
+  const [open, setOpen] = useRowOpenState(failed);
   const wasFailed = React.useRef(failed);
   React.useEffect(() => {
     if (failed && !wasFailed.current) setOpen(true);
@@ -365,9 +368,6 @@ function useRowOpen(failed: boolean): [boolean, () => void] {
   return [open, () => setOpen((prev) => !prev)];
 }
 
-function fileIcon(verb: FileVerb): React.ReactNode {
-  return verb === "create" ? <FilePlus size={16} /> : <Pencil size={16} />;
-}
 
 /** One file's row: "Edited <name> +N −M", opening to its diff, with Changes and Files actions on hover. */
 function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) {
@@ -403,7 +403,7 @@ function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) 
   const label = rowLabel(file.verb, rowStatus);
   return (
     <EditLine
-      icon={fileIcon(file.verb)}
+      icon={<RowEdit size={18} />}
       label={label}
       name={name}
       title={path}
@@ -443,7 +443,7 @@ function EditFilesGroup({ files, status }: { files: EditedFile[]; status: RowSta
   const count = `${files.length} files`;
   return (
     <EditLine
-      icon={fileIcon(verb)}
+      icon={<RowEdit size={18} />}
       label={label}
       name={count}
       isFileName={false}

@@ -42,13 +42,13 @@ The chat turn hands work off with `work_start({ title, brief })`.
 
 - `work_start` inserts a run-lane activation with the trigger `{ kind: 'work', input: brief, title, replyTo, from }` and returns at once. The bot then says something like "On it, I'll tell you when it's done."
 - **Its own thread.** Each piece of work is a run-lane activation on a thread of its own (`bot:<id>:act:<activationId>`), as scheduled runs already are. The run engine, receipts, unknown-call gate, supervisor, internet wait and usage-limit handling all apply unchanged.
-- **One at a time.** Work runs one at a time in the run lane, after what is already there (scheduled runs included). Later work queues, `work_start` says what it waits behind, and a full queue says so. The chat stays free either way, which is the point; running several at once touches every place that assumes one live run per bot (the failure streak, the live chip, crash recovery of replies, consults, spend), so it is a later step.
+- **All at once.** The run lane runs every piece side by side, with no count per bot or per profile, so a quick lookup never waits behind an hour-long job. When more waits than can start (only while a bot's journal cannot be written), the owner's work starts first, then a reminder's work, then scheduled runs, oldest first in each, across all the profile's bots. Every place that assumed one live run per bot now holds with several: each activation keeps its own spend ledger, deadline and supervisor; the failure streak counts each failed scheduled run, and a usage limit none; a schedule is skipped only by its own previous run; one ask per permission serves every piece, and an Allow reaches each piece that was refused it; the work lines, `work_list` and the status line show each piece; the startup pass carries each live piece on; delete ends them all, and Stop one. The bot's browser takes one call at a time, in turn (`BrowserTurns`): its session takes one action at a time and paints only its front tab.
 - **Tools.** Work gets the bot's full grant. It does not get the work tools, so work can't start work. A missing permission behaves as in any run: the call is refused, one ask card appears in the chat, and the work carries on and says what it skipped. Work saves run notes to memory and can't forget, as any run.
 - **Ending.** When work ends, its report is posted in the chat, replying to the owner's message that started it, and it notifies the owner as a run report does.
 - **The other work tools.**
   - `work_list` shows what is running: title, how long it has run, its live activity, and its last few reports.
   - `work_stop({ workId })` stops one piece of work.
-  - `work_note({ workId, note })` passes a note from the owner to running work. The note is kept on the activation. When the work's current turn ends, the engine posts what the work has so far and continues the same thread with the note (`continueWith`), instead of finishing. Then the report leads with what changed. Posting first means nothing found so far is lost if the continuation fails or is stopped. If the note changes the task completely, the bot stops the work and starts new work.
+  - `work_note({ workId, note })` passes a note from the owner to running work. The note is kept on the activation. It reaches the running turn at its next safe point (between tool calls or model steps), as the turn's own steer, framed as the owner's addition to the job, and it is marked read once the model read it; the report then leads with what changed. Delivery is at least once, usually once: a note the runtime took but never reported read goes again with the continuation, marked as a possible repeat. On a runtime that cannot take it while the turn runs, or when the runtime hands it back, the earlier way applies: when the work's current turn ends, the engine posts what the work has so far and continues the same thread with the note (`continueWith`). Posting first means nothing found so far is lost if the continuation fails or is stopped. The chat tells the owner which: the work has it now, gets it in a few minutes (its runtime is compacting its context), or gets it when this step ends. If the note changes the task completely, the bot stops the work and starts new work.
 - **Context.** The chat pack's situation lists the work in progress ("Working on: Vacuum comparison, 2 min, searching the web"), so a chat turn can answer "how's it going?" without a tool call. The chat window already holds the reports of finished work.
 
 ### 3. Replies say what they answer
@@ -78,7 +78,7 @@ The chat turn hands work off with `work_start({ title, brief })`.
 
 - A bot never asks before the owner wants something. The creation turn's prompt no longer asks for permissions. An `escalate` in an activation with no owner request (the creation turn) is answered "Ask when the owner wants something that needs it", and no card is made.
 - What a bot already holds never raises a card: the neutral web tools are found in `appTools`.
-- An ask for an MCP tool in the chat is refused at once, as in a run, because no bot can hold one.
+- An ask for an MCP tool names its server: one ask per server, raised from the chat as a wall or from a run as an ask. MCP tools are work's, like the web and the browser: a chat turn is not offered them and hands the job off. A server or tool that is not set up here is refused at once, with no card (`docs/bots.md`, "Use your MCP tools").
 - The bot's own files folder, memory, schedules, reminders and work need no permission, and the instructions say so.
 - Mousse's own data stays closed whatever the grant.
 
@@ -107,7 +107,6 @@ The base instructions are rewritten around the front desk:
 
 ## Not in this change
 
-- Several pieces of work at once (see "One at a time").
-- Live steering of a running work turn (the note waits for the current turn).
-- MCP servers for bots.
+- MCP servers for bots (they came later: `docs/bots.md`, "Use your MCP tools").
+- A compaction inside a Codex turn: Codex reports none that Mousse reads, so a bot on Codex keeps its system text through one but gets its memory pack again only with its next dispatch (Claude Code and Pi get it at once; see `docs/bots.md`, "What a compaction cannot remove").
 - Grant defaults (for example the bot's own browser without an ask). These are worth a separate look once this lands.

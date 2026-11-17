@@ -32,7 +32,7 @@ export function CopyIconButton({ text, label }: CopyIconButtonProps) {
       onClick={copy}
       aria-label={copied ? "Copied" : label}
       title={label}
-      className="size-6 shrink-0 inline-flex items-center justify-center rounded-md text-an-tool-color-muted hover:text-an-tool-color hover:bg-an-foreground/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color"
+      className="size-6 shrink-0 inline-flex items-center justify-center rounded-md text-an-tool-color-muted hover:text-an-tool-color hover:bg-an-foreground/10 focus-visible:outline-none focus-visible:bg-an-foreground/10"
     >
       {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
     </button>

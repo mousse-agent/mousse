@@ -230,9 +230,13 @@ export function inspectPendingChangesAsync(cwd: string): Promise<PendingChanges>
 /** The merge, revert, cherry-pick or rebase that waits for the user in a checkout, if any. */
 export function* operationInProgressSteps(cwd: string): Steps<PendingChanges['operation']> {
   if (activeHiddenStore(cwd)) return undefined
-  for (const marker of IN_PROGRESS_GIT_MARKERS) {
-    const resolved = yield* tryGitStep(cwd, ['rev-parse', '--git-path', marker])
-    if (resolved.ok && (yield* files.exists(resolve(cwd, resolved.stdout)))) return OPERATION_OF[marker]
+  // One Git command for every marker: Git prints each path on its own line, in the order asked.
+  const resolved = yield* tryGitStep(cwd, ['rev-parse', ...IN_PROGRESS_GIT_MARKERS.flatMap((marker) => ['--git-path', marker])])
+  if (!resolved.ok) return undefined
+  const paths = resolved.stdout.split(/\r?\n/)
+  for (const [index, marker] of IN_PROGRESS_GIT_MARKERS.entries()) {
+    const path = paths[index]
+    if (path && (yield* files.exists(resolve(cwd, path)))) return OPERATION_OF[marker]
   }
   return undefined
 }
@@ -440,15 +444,24 @@ export function commitParentsAsync(cwd: string, sha: string): Promise<string[]> 
   return runAsync(commitParentsSteps(cwd, sha))
 }
 
+/**
+ * Each path `start` and `end` hold differently, with its blob on each side (absent where that side has none). One
+ * `diff-tree` lists every path with both blobs: a turn that moved a branch by many commits changes hundreds of paths,
+ * and two Git commands per path took minutes on a busy daemon, under the repository's lease. Renames are listed as the
+ * path they left and the path they reached, and paths come whole (`-z`), not quoted.
+ */
 export function* changedPathsSteps(cwd: string, start: string, end: string): Steps<Array<{ path: string; beforeHash?: string; afterHash?: string }>> {
   if (start === end) return []
-  const paths = (yield* gitStep(cwd, ['diff', '--name-only', `${start}..${end}`], undefined, undefined, LISTING)).split(/\r?\n/).filter(Boolean)
-  const blob = function* (revision: string, path: string): Steps<string | undefined> {
-    const result = yield* tryGitStep(cwd, ['rev-parse', `${revision}:${path}`])
-    return result.ok ? result.stdout : undefined
-  }
+  const raw = (yield* gitStep(cwd, ['diff-tree', '-r', '-z', '--no-renames', '--raw', start, end], undefined, undefined, LISTING)).split('\0')
   const changed: Array<{ path: string; beforeHash?: string; afterHash?: string }> = []
-  for (const path of paths) changed.push({ path, beforeHash: yield* blob(start, path), afterHash: yield* blob(end, path) })
+  for (let index = 0; index + 1 < raw.length; index += 2) {
+    const [fromMode, toMode, fromBlob, toBlob] = raw[index]!.slice(1).split(' ') as [string, string, string, string]
+    changed.push({
+      path: raw[index + 1]!,
+      ...(fromMode === '000000' ? {} : { beforeHash: fromBlob }),
+      ...(toMode === '000000' ? {} : { afterHash: toBlob })
+    })
+  }
   return changed
 }
 

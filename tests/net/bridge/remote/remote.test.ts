@@ -189,6 +189,10 @@ describe('P3 real MMS remote Bridge', () => {
     expect(exposed.filter((method) => /permission/i.test(method))).toEqual([])
   })
 
+  it('never exposes Send now: a phone steers or stops only its own runs, which never hold a steer', () => {
+    expect(Object.keys(BRIDGE_REMOTE_METHODS)).not.toContain('orchestrator.steerNow')
+  })
+
   it('never exposes a thread\'s "Always for this thread" rules: a remote client can answer a request, not list or revoke the rules', () => {
     const exposed = Object.keys(BRIDGE_REMOTE_METHODS)
     expect(exposed).not.toContain('threads.approvalRules')
@@ -251,7 +255,8 @@ describe('P3 real MMS remote Bridge', () => {
     ).rejects.toMatchObject({ code: 'bad_request' })
     await expect(
       b.rpc('threads.get', { threadId: '../../outside' }, { id: newId('rpc'), deadlineMs: 2000 })
-    ).rejects.toMatchObject({ code: 'outcome_uncertain' })
+      // A read that fails changed nothing: the caller gets the real reason, not "may have partly happened".
+    ).rejects.toMatchObject({ code: 'stream_unknown' })
     expect(p.mms.threads.listAllThreads()).toHaveLength(1)
   })
   it('enforces current read-only capability and closes an actual active TLS session on revoke', async () => {
@@ -704,6 +709,8 @@ describe('P3 real MMS remote Bridge', () => {
     }
     p.mms.threads.mutateThreadData(thread.id, () => ({ messages: [message] }))
     p.mms.orchestrator.getOrCreateSession(thread.id).messages = [message]
+    // The change reaches the stream as the app sends it: an event too large for one record makes a fresh snapshot.
+    p.mms.orchestrator.emit('thread-messages', { threadId: thread.id, messages: [message] })
     const large = allRecords(adapter, descriptor.id)
     expect(
       large.filter(
@@ -773,8 +780,9 @@ describe('P3 real MMS remote Bridge', () => {
     }
     p.mms.threads.mutateThreadData(thread.id, () => ({ messages: [message] }))
     p.mms.orchestrator.getOrCreateSession(thread.id).messages = [message]
-    // Opening a snapshot refreshes the display, which truncates the stale history.
-    adapter.store.openSnapshot(descriptor.id).close()
+    // The change reaches the stream as the app sends it: the event is too large for one record, so the display gets
+    // a fresh snapshot, which truncates the stale history.
+    p.mms.orchestrator.emit('thread-messages', { threadId: thread.id, messages: [message] })
     p.bStore.createStream(descriptor, 1)
     const live = await p.connect(adapter.store)
     publish = (stream, record) => live.a.publishRecord(stream, record)

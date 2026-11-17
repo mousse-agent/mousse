@@ -19,6 +19,7 @@ import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptR
 import { AppError } from '../../../../shared/errors'
 import type { ClaudeLockedTurn } from '../../claude/locked'
 import { systemTempDirs } from '../../../bots/grants/compile'
+import { botShellWithheld } from '../../../bots/instructions'
 import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOverflow'
 
 /**
@@ -39,10 +40,14 @@ export interface ClaudeLockedProfile {
 export type ClaudeSubscriptionClient = Pick<
   ClaudeSubscriptionProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured'
-> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'commitFailed' | 'stopThread' | 'forkConversation' | 'hasLiveProcess'>>
+> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'commitFailed' | 'stopThread' | 'forkConversation' | 'hasLiveProcess' | 'releaseBotProcess'>>
 
 export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
+  // A tool call streams its `tool_use` block before it runs: a person's steer waits from there to its result.
+  steerBoundary: 'announce',
+  // Every call is known before it runs: no window after a result.
+  steerSettleMs: null,
   interrupt: true,
   // An undo or an edit cuts Claude's session at the next turn (issue #360), not as part of the undo.
   rollback: 'none',
@@ -81,7 +86,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
      * On the owner's own entry: whether Claude Code's sandbox can run here now (`claudeSandboxFact`).
      * Read as each bot turn starts. Absent: it cannot, and a `shell` grant runs outside it.
      */
-    private readonly ownerSandbox?: () => boolean
+    private readonly ownerSandbox?: () => boolean,
+    /** The user's choice to keep this entry's prompt cache for an hour; undefined: the automatic default. */
+    private readonly promptCacheChoice: () => boolean | undefined = () => undefined
   ) {}
 
   /**
@@ -122,7 +129,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       cwd: bot.workspace?.scratch ?? service.standaloneWorkspace(input.threadId),
       shellContained,
       temps: systemTempDirs(),
-      systemPrompt: host.bridge?.sessionInstructions ?? '',
+      // Bash is withheld without a proven sandbox (`claudeLockedTools`): the bot is told so, not "Run commands: yes".
+      systemPrompt: shellContained ? host.bridge?.sessionInstructions ?? '' : botShellWithheld(host.bridge?.sessionInstructions ?? ''),
       ...(onProcess ? { onProcess: (pid: number) => onProcess(pid, input.threadId) } : {}),
       ...(policyAppeared ? { policyAppeared } : {})
     }
@@ -172,6 +180,10 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     // Output, an accepted steer or a tool makes a replay after context overflow unsafe.
     let progressed = false
     let toolStarted = false
+    // The turn ended at Send now's cut (`onSendNowCut`): with no text, it has no reply to show.
+    let sendNowCut = false
+    // A steer cut the turn and the model wrote nothing after it (`onSteerUnanswered`).
+    let steerUnanswered = false
     const progress = (): void => {
       progressed = true
       sink.progress()
@@ -179,6 +191,12 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     }
     const chatInput = (): ClaudeSubscriptionChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
+      onSendNowCut: () => {
+        sendNowCut = true
+      },
+      onSteerUnanswered: () => {
+        steerUnanswered = true
+      },
       // A bot turn asks about every call, whatever the thread's or the entry's default.
       permissionMode: locked ? 'ask' : input.permissionMode,
       child: input.child,
@@ -186,6 +204,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       continuationId: input.continuationId,
       threadId: input.threadId,
       instanceId: input.instanceId,
+      ...(host.tools.secretMasker ? { secretMasker: host.tools.secretMasker } : {}),
       cwd,
       model: input.model,
       prompt: input.prompt,
@@ -204,6 +223,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       mcp: host.bridge?.mcp ?? null,
       mcpTurnToken: host.bridge?.mcp ? host.bridge.turnToken : undefined,
       autoCompactTokens: host.context.compactionTokens,
+      promptCacheHour: this.promptCacheChoice(),
       // Claude Code loads the project's instruction files itself, as in a terminal (CLAUDE.md, and
       // AGENTS.md as its own settings decide), so Mousse appends only its own session instructions.
       // A locked turn's instructions replace Claude Code's own system prompt instead (`locked`).
@@ -212,21 +232,47 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       integrations,
       drainSteer: () => ctl.drainSteer(),
-      drainSteerEntry: ctl.drainSteerEntry ? () => ctl.drainSteerEntry!() : undefined,
+      drainSteerEntry: ctl.drainSteerEntry ? (opts) => ctl.drainSteerEntry!(opts) : undefined,
+      // The hold: nothing is drained while a foreground tool is announced or running (docs/design/steer-and-interruptions.md §2.4).
+      ...(ctl.peekSteer ? { peekSteer: () => ctl.peekSteer!() } : {}),
+      ...(ctl.mayCut ? { mayCut: (token: string) => ctl.mayCut!(token) } : {}),
+      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
       returnSteer: (text, token) => ctl.returnSteer?.(text, token),
       steerTaken: (token) => ctl.steerTaken?.(token),
-      onSteer: (text) => {
+      onSteer: (text, token) => {
         progress()
-        sink.steerAccepted(text)
+        // The reply goes on below the steered message: what it wrote before keeps its row, above it.
+        streams.thinking.break()
+        streams.text.break()
+        sink.steerAccepted(text, token)
       },
       onText: (text) => {
         progress()
+        // The reply began: the thought before it is done, and one that resumes after it is a new row.
+        streams.thinking.break()
         streams.text.update(text)
       },
       onThinking: (text) => {
         progress()
+        // A thought after text keeps the text above it, as a tool call does.
+        streams.text.break()
         streams.thinking.update(text)
       },
+      onStatus: (status) => {
+        ctl.heartbeat()
+        sink.status?.(status)
+      },
+      onRetry: ({ attempt, ...detail }) => {
+        ctl.heartbeat()
+        sink.retry(attempt, detail)
+      },
+      // A bot's turn hears of a compaction inside it: its memory pack and job's brief go in again after it.
+      ...(host.bot ? {
+        onCompaction: (phase: 'start' | 'complete') => {
+          ctl.heartbeat()
+          sink.compaction(phase)
+        }
+      } : {}),
       onTool: (event) => {
         progress()
         // A thought or a note that came before this call keeps its own row, above it; the next one starts below.
@@ -246,7 +292,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
           tokensPerSecond: report.tokensPerSecond,
           usage: report.usage ?? undefined,
           context: report.context,
-          ...(report.promptCache ? { promptCache: report.promptCache } : {})
+          ...(report.promptCache ? { promptCache: report.promptCache } : {}),
+          ...(report.quota?.length ? { quota: report.quota } : {}),
+          ...(report.resumeLost ? { resumeLost: true } : {})
         })
         if (report.usage)
           sink.usage({
@@ -300,7 +348,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       contextSignature: contextKey,
       contextModelKey: contextKey,
       nativeMessages: [],
-      providerRef
+      providerRef,
+      ...(sendNowCut ? { noReply: true } : {}),
+      ...(steerUnanswered ? { steerUnanswered: true } : {})
     }
   }
 
@@ -319,6 +369,10 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
 
   hasLiveProcess(threadId: string): boolean {
     return this.service()?.hasLiveProcess?.(threadId) ?? false
+  }
+
+  releaseBotProcess(threadId: string): boolean {
+    return this.service()?.releaseBotProcess?.(threadId) ?? false
   }
 
   /**

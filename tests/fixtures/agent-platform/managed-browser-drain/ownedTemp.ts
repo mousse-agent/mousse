@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BrowserBroker } from '../../../../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../../../../src/mms/browser/defaultPorts'
@@ -51,12 +51,32 @@ export function removeOwnedTempRoot(root: string): void {
   rmSync(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 }
 
-export function hardlinkCertifiedChrome(browserRoot: string): void {
-  const sourceRoot = realpathSync.native(certifiedInstallDir(MANAGED_BROWSER_ROOT))
-  const targetRoot = certifiedInstallDir(browserRoot)
+/**
+ * Copies an installed Chrome tree with hard links (plain copies on Windows or
+ * across volumes). The macOS app bundle's framework uses relative links that
+ * stay inside the bundle (Versions/Current and friends); those are recreated
+ * as links. Each link is resolved by the filesystem, through any other links,
+ * as the extractor does: a link that is absolute, dangles, leaves the tree, or
+ * points at its own folder or a folder above it is refused.
+ */
+export function copyBrowserTreeAsHardlinks(sourceDirectory: string, targetDirectory: string): void {
+  const sourceRoot = realpathSync.native(sourceDirectory)
   const copyImmutable = (source: string, target: string): void => {
     const stat = lstatSync(source)
-    if (stat.isSymbolicLink()) throw new Error(`Certified browser contains an unexpected symlink: ${source}`)
+    if (stat.isSymbolicLink()) {
+      const linkTarget = readlinkSync(source)
+      let resolved: string
+      try { resolved = realpathSync.native(source) } catch { throw new Error(`Browser tree contains a dangling symlink: ${source}`) }
+      const rel = relative(sourceRoot, resolved)
+      const fromOwnFolder = relative(resolved, realpathSync.native(dirname(source)))
+      const ownFolderOrAbove = fromOwnFolder === '' || (fromOwnFolder !== '..' && !fromOwnFolder.startsWith(`..${sep}`) && !isAbsolute(fromOwnFolder))
+      if (isAbsolute(linkTarget) || rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel) || ownFolderOrAbove) {
+        throw new Error(`Browser tree contains a symlink that leaves it: ${source}`)
+      }
+      mkdirSync(dirname(target), { recursive: true })
+      symlinkSync(linkTarget, target)
+      return
+    }
     if (stat.isDirectory()) {
       mkdirSync(target, { recursive: true })
       for (const entry of readdirSync(source)) copyImmutable(join(source, entry), join(target, entry))
@@ -74,7 +94,12 @@ export function hardlinkCertifiedChrome(browserRoot: string): void {
       copyFileSync(source, target)
     }
   }
-  copyImmutable(sourceRoot, targetRoot)
+  copyImmutable(sourceRoot, targetDirectory)
+}
+
+export function hardlinkCertifiedChrome(browserRoot: string): void {
+  const targetRoot = certifiedInstallDir(browserRoot)
+  copyBrowserTreeAsHardlinks(certifiedInstallDir(MANAGED_BROWSER_ROOT), targetRoot)
   mkdirSync(targetRoot, { recursive: true })
   writeFileSync(certifiedMetadataPath(browserRoot), readFileSync(certifiedMetadataPath(MANAGED_BROWSER_ROOT)))
   const resolved = resolveCertifiedBrowser(browserRoot)

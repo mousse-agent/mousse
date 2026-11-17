@@ -29,7 +29,7 @@ const MOUSSE = { url: 'http://127.0.0.1:9/mcp', token: 'tok' }
 describe('policy table: permission decisions', () => {
   const READ_ONLY_BUILTINS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'ToolSearch']
   // A read-only subagent may start (read-only) subagents; `delegate_task` itself limits them to read-only ones.
-  const MOUSSE_READS = ['mcp__mousse__thread_read', 'mcp__mousse__queue_list', 'mcp__mousse__ask_user', 'mcp__mousse__present_plan', 'mcp__mousse__delegate_task', 'mcp__mousse__continue_subagent', 'mcp__mousse__answer_subagent', 'mcp__mousse__task_status', 'mcp__mousse__task_cancel', 'mcp__mousse__list_subagents']
+  const MOUSSE_READS = ['mcp__mousse__thread_read', 'mcp__mousse__queue_list', 'mcp__mousse__ask_user', 'mcp__mousse__delegate_task', 'mcp__mousse__continue_subagent', 'mcp__mousse__answer_subagent', 'mcp__mousse__task_status', 'mcp__mousse__task_cancel', 'mcp__mousse__list_subagents']
   const MOUSSE_WRITES = ['mcp__mousse__queue_enqueue', 'mcp__mousse__thread_fork', 'mcp__mousse__thread_merge_back', 'mcp__mousse__integrate_delegation', 'mcp__mousse__create_task']
   const WRITERS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'BashOutput']
   const EXTERNAL = ['mcp__userserver__lookup', 'mcp__oauthserver__post']
@@ -69,10 +69,13 @@ describe('policy table: permission decisions', () => {
       sandbox: 'workspace-write',
       sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/p/files/b1', '/home/me/site'], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
     })
-    // A bot's grant decides it: the folders it may write, its files folder and scratch, only with shell.
+    // A bot's grant decides it: the folders it may write, its files folder and scratch, only with shell. On Linux and
+    // macOS under Mousse's profile; on Windows in the `workspaceWrite` sandbox, as before.
     const workspace = { roots: ['/home/me/site', '/home/me/ref'], access: 'read' as const, writeRoots: ['/home/me/site', '/p/files/b1'], scratch: '/p/scratch/a', files: '/p/files/b1' }
-    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace })).toEqual({ shell: true, writableRoots: ['/home/me/site', '/p/files/b1', '/p/scratch/a'] })
-    expect(codexBotSandbox({ tools: new Set(['read']), workspace })).toEqual({ shell: false, writableRoots: [] })
+    const writableRoots = ['/home/me/site', '/p/files/b1', '/p/scratch/a']
+    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, { platform: 'linux' })).toEqual({ shell: true, writableRoots, profile: { base: ':minimal', readable: ['/home/me/ref'], closed: [] } })
+    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, { platform: 'win32' })).toEqual({ shell: true, writableRoots })
+    expect(codexBotSandbox({ tools: new Set(['read']), workspace }, { platform: 'win32' })).toEqual({ shell: false, writableRoots: [] })
     expect(codexBotSandbox({})).toEqual({ shell: false, writableRoots: [] })
   })
 
@@ -108,12 +111,21 @@ describe('Claude Subscription children', () => {
       seen.push({ hook, canUse })
       yield result
     })()
-    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+    return Object.assign(generator, {
+      close: vi.fn(),
+      interrupt: vi.fn(async () => {}),
+      // The servers Claude Code is given, over its input (#358).
+      setMcpServers: vi.fn(async (servers: Record<string, unknown>) => {
+        registered.set(options, servers)
+        return { added: Object.keys(servers), removed: [], errors: {} }
+      })
+    }) as unknown as Query
   }
+  /** The servers each query was given over its input, by its options. */
+  const registered = new Map<Options, Record<string, unknown>>()
   const integrations: ClaudeTurnIntegrations = {
     mcpServers: { userserver: { type: 'stdio', command: 'user-mcp' } },
     proxiedServers: { oauthserver: { tools: [{ name: 'lookup' }], call: async () => ({ content: [], isError: false }) } as never },
-    env: {},
     toolRules: {},
     warnings: []
   }
@@ -148,13 +160,17 @@ describe('Claude Subscription children', () => {
   }
 
   /**
-   * The user's setup is left alone: no tool lists, no strict MCP config, every server still passed,
-   * and no launch arguments beyond the ones every turn adds.
+   * The user's setup is left alone: no tool lists (beyond Claude Code's plan tools, off on every turn), no strict MCP
+   * config, every server still passed, and no launch arguments beyond the ones every turn adds.
    */
   const untouched = (turn: Options) => {
-    for (const key of ['tools', 'disallowedTools', 'strictMcpConfig', 'settingSources']) expect(turn).not.toHaveProperty(key)
-    expect(turn.extraArgs).toEqual(CLAUDE_TURN_EXTRA_ARGS)
-    expect(Object.keys(turn.mcpServers ?? {})).toEqual(expect.arrayContaining(['mousse', 'userserver', 'oauthserver']))
+    for (const key of ['tools', 'strictMcpConfig', 'settingSources']) expect(turn).not.toHaveProperty(key)
+    expect(turn.disallowedTools).toEqual(['EnterPlanMode', 'ExitPlanMode'])
+    // The user's own servers reach Claude Code through the pipe it reads at its start; the rest over its input (#358).
+    // macOS: the process's fourth stream; Linux: a named pipe in a folder of its own.
+    const startup = process.platform === 'darwin' ? '/dev/fd/3' : expect.stringMatching(/\/mousse-mcp-[^/]+\/servers$/)
+    expect(turn.extraArgs).toEqual({ ...CLAUDE_TURN_EXTRA_ARGS, ...(process.platform === 'win32' ? {} : { 'mcp-config': startup }) })
+    expect(Object.keys(registered.get(turn) ?? {})).toEqual(expect.arrayContaining(['mousse', 'oauthserver', ...(process.platform === 'win32' ? ['userserver'] : [])]))
   }
 
   it('a shared child keeps the default permission mode and is denied writes, shell, external MCP tools and thread-writing tools, first and resumed', async () => {
@@ -453,37 +469,37 @@ describe('Codex children', () => {
   })
 
   describe('preflight of the user setup (CodexAdapter.childPreflight)', () => {
-    const preflight = (s: ReturnType<typeof server>, workspace: 'shared' | 'isolated') =>
-      new CodexAdapter(() => create(s)).childPreflight({ workspace, cwd: home })
+    const preflight = (s: ReturnType<typeof server>, kind: 'read-only' | 'general-purpose') =>
+      new CodexAdapter(() => create(s)).childPreflight({ readOnly: kind === 'read-only', cwd: home })
     const SHARED_REFUSED = 'shared_unsupported_for_provider'
 
     it.each([
-      ['no MCP servers', {}, 'shared', null],
-      ['no MCP servers', {}, 'isolated', null],
-      ['a disabled server only', { mcpServers: { old: { enabled: false } } }, 'shared', null],
-      ['a user MCP server', { mcpServers: { ext: { enabled: true } } }, 'shared', SHARED_REFUSED],
-      ['a user MCP server whose enabled flag is unset', { mcpServers: { ext: {} } }, 'shared', SHARED_REFUSED],
-      ['a Mousse-managed server named mousse counts as external', { mcpServers: { mousse: { enabled: true } } }, 'shared', SHARED_REFUSED],
-      ['a user MCP server, isolated child', { mcpServers: { ext: { enabled: true } } }, 'isolated', null],
-      ['a server only in an applied config layer (project)', { layers: [{ disabledReason: null, config: { mcp_servers: { projsrv: {} } } }] }, 'shared', SHARED_REFUSED],
-      ['a server in a layer Codex switched off (untrusted project)', { layers: [{ disabledReason: 'trust this project', config: { mcp_servers: { projsrv: {} } } }] }, 'shared', null],
-      ['an unreadable config, shared child', { configFails: true }, 'shared', SHARED_REFUSED],
-      ['an unreadable config, isolated child', { configFails: true }, 'isolated', null]
-    ] as const)('%s (%s workspace)', async (_name, setup, workspace, code) => {
+      ['no MCP servers', {}, 'read-only', null],
+      ['no MCP servers', {}, 'general-purpose', null],
+      ['a disabled server only', { mcpServers: { old: { enabled: false } } }, 'read-only', null],
+      ['a user MCP server', { mcpServers: { ext: { enabled: true } } }, 'read-only', SHARED_REFUSED],
+      ['a user MCP server whose enabled flag is unset', { mcpServers: { ext: {} } }, 'read-only', SHARED_REFUSED],
+      ['a Mousse-managed server named mousse counts as external', { mcpServers: { mousse: { enabled: true } } }, 'read-only', SHARED_REFUSED],
+      ['a user MCP server, general-purpose child', { mcpServers: { ext: { enabled: true } } }, 'general-purpose', null],
+      ['a server only in an applied config layer (project)', { layers: [{ disabledReason: null, config: { mcp_servers: { projsrv: {} } } }] }, 'read-only', SHARED_REFUSED],
+      ['a server in a layer Codex switched off (untrusted project)', { layers: [{ disabledReason: 'trust this project', config: { mcp_servers: { projsrv: {} } } }] }, 'read-only', null],
+      ['an unreadable config, read-only child', { configFails: true }, 'read-only', SHARED_REFUSED],
+      ['an unreadable config, general-purpose child', { configFails: true }, 'general-purpose', null]
+    ] as const)('%s (%s child)', async (_name, setup, kind, code) => {
       const s = server(setup)
-      expect((await preflight(s, workspace))?.code ?? null).toBe(code)
+      expect((await preflight(s, kind))?.code ?? null).toBe(code)
       // It only reads the user's setup, and it never looks at Codex's own subagent flags.
       expect(s.messages.map((message) => message.method).filter((method) => /write|set|batch|experimentalFeature/i.test(method ?? ''))).toEqual([])
     })
 
     it("leaves Codex's native subagents alone: no refusal whatever the config", async () => {
-      for (const workspace of ['shared', 'isolated'] as const) expect((await preflight(server(), workspace))?.code ?? null).toBeNull()
+      for (const kind of ['read-only', 'general-purpose'] as const) expect((await preflight(server(), kind))?.code ?? null).toBeNull()
     })
 
-    it('names the servers and points to isolated', async () => {
-      const refusal = await preflight(server({ mcpServers: { ext: {}, other: {} } }), 'shared')
+    it('names the servers and says to leave readOnly out', async () => {
+      const refusal = await preflight(server({ mcpServers: { ext: {}, other: {} } }), 'read-only')
       expect(refusal?.message).toContain('ext, other')
-      expect(refusal?.message).toContain('"isolated"')
+      expect(refusal?.message).toContain('Leave readOnly out')
     })
   })
 
@@ -589,6 +605,52 @@ describe('Codex children', () => {
       await expect(running).rejects.toThrow('Stopped')
       // The parent's turn was already complete; only the helper is interrupted.
       await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
+    })
+
+    it("a helper's approval is asked in the hosting thread, about the helper's own item, and names the helper", async () => {
+      // The parent and the helper each have an item `patch-1`: item ids are unique per thread only.
+      const item = (threadId: string, path: string) => ({ method: 'item/started', params: { threadId, turnId: threadId === HELPER ? 'h-turn-1' : 'turn-1', item: { type: 'fileChange', id: 'patch-1', changes: [{ path, kind: { type: 'update' }, diff: '' }], status: 'inProgress' } } })
+      const s = server({
+        onTurnStart: (send) =>
+          setImmediate(() => {
+            send(item(PARENT, 'src/parent.ts'))
+            send(spawned('subAgentActivity'))
+            send(helperTurn)
+            send(item(HELPER, 'src/helper.ts'))
+            send({ id: 77, method: 'item/fileChange/requestApproval', params: { threadId: HELPER, turnId: 'h-turn-1', itemId: 'patch-1', reason: null } })
+            send(completed(PARENT, 'turn-1'))
+          })
+      })
+      const asked: Array<{ threadId: string; prompt: string; helper?: { agentId: string } }> = []
+      const onPending = (event: { requestId: string; threadId: string; questions: Array<{ prompt: string }>; helper?: { agentId: string } }): void => {
+        asked.push({ threadId: event.threadId, prompt: event.questions[0]!.prompt, ...(event.helper ? { helper: event.helper } : {}) })
+        questions.submitAnswers(event.requestId, { permission: 'allow' }, { kind: 'user' })
+      }
+      questions.on('pending', onPending)
+      try {
+        const running = chat(create(s), { child: ISOLATED, permissionMode: 'ask' })
+        await vi.waitFor(() => expect(s.messages.find((message) => message.id === 77)).toMatchObject({ result: { decision: 'accept' } }))
+        expect(asked).toEqual([{ threadId: 'child', prompt: expect.stringContaining('src/helper.ts'), helper: { agentId: HELPER } }])
+        expect(asked[0]!.prompt).not.toContain('src/parent.ts')
+        s.emit(completed(HELPER, 'h-turn-1'))
+        await expect(running).resolves.toMatchObject({ codexThreadId: PARENT })
+      } finally {
+        questions.off('pending', onPending)
+      }
+    })
+
+    it("Stop of one helper's mirror interrupts that helper alone, and the run goes on", async () => {
+      const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity'), onInterrupt: (send, params) => params.threadId === HELPER && interruptReply(send, params) })
+      const service = create(s)
+      const running = chat(service, { child: ISOLATED })
+      expect(await state(running)).toBe('pending')
+      expect(service.stopHelper('child', 'someone-else')).toBe('not_active')
+      expect(service.stopHelper('other-thread', HELPER)).toBe('not_active')
+      expect(service.stopHelper('child', HELPER)).toBe('stopped')
+      await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
+      // The helper's interrupted turn settles it, so the run completes as itself, not stopped.
+      await expect(running).resolves.toMatchObject({ codexThreadId: PARENT })
+      expect(service.stopHelper('child', HELPER)).toBe('not_active')
     })
 
     it("Stop during the parent's turn interrupts the parent and its helper", async () => {

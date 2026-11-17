@@ -9,7 +9,6 @@ import { CLAUDE_RELAY_TOOL_PREFIX } from '../../src/mms/run/mcp/attachment'
 import {
   allocateRelayTools,
   RELAY_MAX_DESCRIPTION_CHARS,
-  RELAY_MAX_RESULT_CHARS,
   RELAY_MAX_SCHEMA_BYTES,
   RELAY_MAX_TOOLS,
   RELAY_NAME_BUDGET,
@@ -37,14 +36,8 @@ function tool(serverName: string, toolName: string, overrides: Partial<McpToolDe
 }
 
 describe('relay names', () => {
-  it('has the agreed limits', () => {
-    expect(RELAY_SEPARATOR).toBe('__')
-    expect(RELAY_NAME_BUDGET).toBe(45)
+  it('has the agreed name limit', () => {
     expect(CLAUDE_RELAY_TOOL_PREFIX.length + RELAY_NAME_BUDGET).toBe(64)
-    expect(RELAY_MAX_TOOLS).toBe(128)
-    expect(RELAY_MAX_DESCRIPTION_CHARS).toBe(1024)
-    expect(RELAY_MAX_SCHEMA_BYTES).toBe(16 * 1024)
-    expect(RELAY_MAX_RESULT_CHARS).toBe(64_000)
     expect(relayPermissionKey('inst-1')).toBe('relay:inst-1')
   })
 

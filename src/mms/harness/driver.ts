@@ -1,4 +1,6 @@
-import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
+import { accessSync, constants, realpathSync } from 'node:fs'
+import { dirname } from 'node:path'
+import type { AuthState, CredentialKind, InstallOwner, PromptCacheHour } from '../../shared/harness/status'
 import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts, TelemetrySetting } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { PermissionLimits } from '../../shared/permissionMode'
@@ -12,6 +14,7 @@ import type { ProviderAdapter } from './adapter'
 import type { McpTurnBinding } from '../run/mcp/appTools/registry'
 import type { ProviderRef } from '../run/types'
 import type { InstanceEnv } from './env'
+import type { BotRuntimeHold } from '../../shared/bots/personal/subagentHold'
 import type { LatestVersionSource } from './latest'
 import type { SpendModelFacts } from './policy'
 import type { VendorMirror } from './vendorMirror'
@@ -39,6 +42,8 @@ export interface InstanceConfig {
   displayName?: string
   /** The entry's agent telemetry; absent = the default (`telemetryDefault`). */
   telemetry?: TelemetrySetting
+  /** Claude Code: the user kept (true) or did not keep (false) the prompt cache for an hour; absent = the automatic default. */
+  promptCacheHour?: boolean
   /** `private`: a Mousse-owned home under `<profileHome>/harness/<instanceId>/home`. */
   home: 'default' | 'private'
   loginMethod?: string
@@ -207,14 +212,54 @@ export interface OneShotSpec {
   onActivity(): void
 }
 
-/** What a one-shot writes on the title model: a chat title, a pull request draft or a commit message. */
-export type OneShotTask = 'title' | 'pull_request' | 'commit_message'
+/**
+ * What a one-shot writes: a chat title, a pull request draft or a commit message on the title model, or the digest of a
+ * bot's chat on the bot's own model.
+ */
+export type OneShotTask = 'title' | 'pull_request' | 'commit_message' | 'chat_digest'
 
 /** What each one-shot task does, for a refusal that names it ("… cannot name chats"). */
 export const ONE_SHOT_TASK_TEXT: Readonly<Record<OneShotTask, string>> = {
   title: 'name chats',
   pull_request: 'draft pull requests',
-  commit_message: 'write commit messages'
+  commit_message: 'write commit messages',
+  chat_digest: "summarise a bot's chat"
+}
+
+/**
+ * A model a runtime can make pictures with in Mousse's own process (#1088, a bot's Images row): its id and name, and
+ * USD per token from its catalogue (zeros when the catalogue gives no price).
+ */
+export interface ImageModelFacts {
+  id: string
+  label: string
+  price: { input: number; output: number }
+}
+
+/** One picture asked of an image model: the description, and a shape the model may honour. */
+export interface ImageRequestSpec {
+  model: string
+  prompt: string
+  shape?: 'square' | 'landscape' | 'portrait'
+}
+
+/** The picture an image model made: its type and base64 data, any words it sent with it, and what it cost. */
+export interface GeneratedImage {
+  mimeType: string
+  data: string
+  text?: string
+  usage?: { input: number; output: number; usd: number }
+}
+
+/** Why an image request made no picture, by kind (`ImageRequestError`); the provider's own words stay in the log. */
+export type ImageFailureKind = 'refused' | 'signed_out' | 'no_credit' | 'busy' | 'no_answer' | 'no_image' | 'failed'
+
+/** An image request that made no picture: its kind, and the provider's raw text for the log only. */
+export class ImageRequestError extends Error {
+  constructor(readonly kind: ImageFailureKind, readonly detail: string) {
+    super(`image request failed (${kind})`)
+    this.name = 'ImageRequestError'
+  }
 }
 
 /** What `/compact` asks a runtime: the thread, the history its native session must hold, and an optional focus. */
@@ -225,6 +270,11 @@ export interface NativeCompactRequest {
   instanceId: string
   /** What the summary should keep, in the user's words. */
   focus?: string
+  /**
+   * The thread's prompt cache has gone cold (`promptCacheGoneCold`): the compaction reads the whole history uncached
+   * anyway, so a runtime may skip writing it back to a cache the summary is about to replace.
+   */
+  cacheCold?: boolean
   signal: AbortSignal
 }
 
@@ -236,6 +286,13 @@ export interface DriverRuntime {
    * aborts it (the caller stopped, or the gateway's inactivity timeout).
    */
   oneShot?(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }>
+  /** The models this entry can make pictures with in Mousse's own process (#1088); absent or empty: none. */
+  imageModels?(): readonly ImageModelFacts[]
+  /**
+   * One picture on one of `imageModels` (#1088), in Mousse's own process: one request, no retry. Throws
+   * `ImageRequestError` when the provider made none; `signal` aborts it.
+   */
+  generateImage?(spec: ImageRequestSpec, signal: AbortSignal): Promise<GeneratedImage>
   /**
    * What token and spend limits need from `model` (`SpendModelFacts`), read at turn admission only
    * when the policy has such a limit and the caps reserve spend. Absent or undefined refuses them.
@@ -287,6 +344,11 @@ export interface DriverRuntime {
    * cached: the user may edit their settings at any time. Synchronous, no runtime start.
    */
   permissionLimits?(cwd?: string): PermissionLimits | undefined
+  /**
+   * Claude Code: whether its turns may keep the prompt cache for an hour (`InstanceSnapshot.promptCacheHour`).
+   * Read at every snapshot from what the runtime knows; it may start a background read that fires `changed`.
+   */
+  promptCacheHour?(): PromptCacheHour | undefined
   refreshModels?(cwd: string): Promise<void>
   /**
    * When the stored model list was last updated from the vendor (ISO time), kept with the list so
@@ -403,6 +465,11 @@ export interface HarnessDriver {
   readonly knownBroken?: readonly KnownBrokenVersions[]
   /** Where the newest published version is known from; none for an agent whose releases Mousse cannot see. */
   readonly latestVersion?: LatestVersionSource
+  /**
+   * The Homebrew formula or cask of this CLI. A copy Homebrew installed is compared with the version
+   * its tap offers (`brew info`), not the npm one, since `brew upgrade` can only reach that.
+   */
+  readonly brewName?: string
   /** The driver can run several instances (Add dialog); others have only their built-in one. */
   readonly multiInstance: boolean
   /** Supports a Mousse-owned home (`InstanceConfig.home = private`). */
@@ -460,6 +527,12 @@ export interface HarnessDriver {
    * on/off, not the Compact context size. Absent: a thread on it compacts at the Compact context size.
    */
   readonly compactsNearWindow?: boolean
+  /**
+   * Mousse masks a secret's value in the runtime's tool results before the runtime keeps them (Claude Code's
+   * `PostToolUse` hook), so its turns may read the thread's secret copies while they run. Absent: the runtime keeps
+   * its tools' results as they are, and a turn on it holds the copies off until it settles.
+   */
+  readonly masksToolResults?: boolean
   /**
    * What turns the agent's own telemetry off, as its vendor documents it: variables, and arguments
    * for the processes that take launch arguments. Set last, over the entry's own launch settings, on
@@ -538,6 +611,24 @@ export interface HarnessDriver {
    */
   botApprovals?(config: InstanceConfig): boolean
   /**
+   * The granted neutral tools a bot turn on the entry would not be offered now (a locked Claude entry withholds `shell`
+   * where its sandbox can't run), read with the installed version. Absent or empty: every granted tool is offered.
+   */
+  botWithheldTools?(config: InstanceConfig, installedVersion?: string, instanceId?: string): readonly NeutralTool[]
+  /**
+   * Why a bot's work won't run on the entry, as Runs on says it once (a Codex whose installed version hasn't been checked
+   * for bots), read with the installed version; the tooltip says more. Absent or undefined: nothing to say. The turn
+   * itself is refused where it starts, whatever this says.
+   */
+  botRunsOnNote?(config: InstanceConfig, installedVersion?: string): { text: string; title: string } | undefined
+  /**
+   * How the runtime holds a bot's turn on this computer now (its sandbox for commands, its hosted web search), for the
+   * hold rule of a bot's subagents (`subagentHold`): a subagent is never held less tightly than its work. `env`: the
+   * entry's environment, whose PATH decides whether Claude Code's sandbox can run. Absent: the runtime is taken to hold
+   * nothing (a subagent there runs without commands, and without the web is refused).
+   */
+  botHold?(config: InstanceConfig, env: InstanceEnv): BotRuntimeHold
+  /**
    * Reads again, now, what the entry's caps and `botAuthority` depend on beyond its config (a
    * locked Claude entry's organisation policy). The gateway calls it before every bot check point:
    * approval, dispatch and turn admission.
@@ -569,6 +660,7 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
   }
   if (raw.signedOutInMousse === true) config.signedOutInMousse = true
   if (raw.telemetry === 'off' || raw.telemetry === 'agent_setting') config.telemetry = raw.telemetry
+  if (typeof raw.promptCacheHour === 'boolean') config.promptCacheHour = raw.promptCacheHour
   // Only an entry with a home of its own can be locked: the user's own setup is never.
   if (raw.profile === 'locked' && config.home === 'private') config.profile = 'locked'
   return config
@@ -591,13 +683,72 @@ export function installOwner(path: string | undefined, source: 'path' | 'managed
   if (source === 'managed') return 'managed'
   if (!path) return 'unknown'
   const normalized = path.replace(/\\/g, '/').toLowerCase()
-  if (normalized.includes('/homebrew/') || normalized.includes('/cellar/') || normalized.includes('/linuxbrew/')) return 'brew'
+  if (normalized.includes('/homebrew/') || normalized.includes('/cellar/') || normalized.includes('/caskroom/') || normalized.includes('/linuxbrew/')) return 'brew'
   if (normalized.includes('/pnpm/')) return 'pnpm'
   if (normalized.includes('/.bun/')) return 'bun'
   if (normalized.includes('/node_modules/') || normalized.includes('/npm/') || normalized.endsWith('.cmd')) return 'npm'
   if (normalized.includes('/winget/')) return 'winget'
   if (normalized.includes('/.local/bin/') || normalized.includes('/.local/share/') || normalized.includes('/.grok/bin/')) return 'standalone'
   return 'unknown'
+}
+
+function realPathOf(path: string): string | undefined {
+  try {
+    return realpathSync(path)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The install owner of the executable a link on PATH leads to, else of the link itself.
+ * `/usr/local/bin/codex` is npm's when it links into `lib/node_modules`; `/opt/homebrew/bin/claude`
+ * is Homebrew's cask; `~/.local/bin/claude` is the native installer's.
+ */
+export function installOwnerOf(
+  path: string | undefined,
+  source: 'path' | 'managed' | 'override' | 'bundled',
+  realpath: (path: string) => string | undefined = realPathOf
+): InstallOwner {
+  if (source === 'managed' || !path) return installOwner(path, source)
+  const target = realpath(path)
+  const owner = target && target !== path ? installOwner(target, source) : 'unknown'
+  return owner !== 'unknown' ? owner : installOwner(path, source)
+}
+
+/** The folder a package manager writes when it updates the executable at `target`. */
+function installRoot(target: string): string {
+  const parts = target.split(/[\\/]/)
+  for (const marker of ['node_modules', 'Cellar', 'Caskroom']) {
+    const at = parts.indexOf(marker)
+    if (at > 0) return parts.slice(0, at + 1).join('/') || '/'
+  }
+  return dirname(target)
+}
+
+function writable(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Updating the executable needs rights this user lacks: the folder of the link on PATH or the
+ * package manager's folder is not writable (an npm prefix owned by root). Mousse never runs sudo;
+ * such an update is shown to run by hand. Windows folder rights cannot be read this way.
+ */
+export function updateNeedsElevation(
+  path: string | undefined,
+  owner: InstallOwner | undefined,
+  options: { platform?: NodeJS.Platform; realpath?: (path: string) => string | undefined; canWrite?: (path: string) => boolean } = {}
+): boolean {
+  if (!path || !owner || owner === 'managed' || owner === 'unknown' || (options.platform ?? process.platform) === 'win32') return false
+  const canWrite = options.canWrite ?? writable
+  const target = (options.realpath ?? realPathOf)(path) ?? path
+  return !canWrite(dirname(path)) || !canWrite(installRoot(target))
 }
 
 /** A driver's Add option (`HarnessDriver.addOptions`); the gateway adds whether it is added already. */

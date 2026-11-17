@@ -2,8 +2,8 @@
  * `approval_respond` end to end (docs/run-engine/SPEC.md §15.1, §17): a real `OrchestratorService`, Run Engine,
  * effect worker and Mousse MCP server, with scripted runtimes whose turns call the tool over HTTP. A request is a
  * saved approval of another thread whose provider callback waits in the same process, so an answer is seen
- * reaching it exactly once. Covers the gate (level, project, switch), the bound of the agent's own mode, "always",
- * the caller's own thread and lineage, the record on the target thread, races, replays, bot and capped callers,
+ * reaching it exactly once. Covers the gate (the profile's switch), the bound of the agent's own mode, "always",
+ * the caller's own thread and lineage, the record on the target thread, races, replays,
  * and the continuation after a restart.
  */
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
@@ -14,12 +14,12 @@ import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
-import type { AgentAccessLevel } from '../../src/shared/settings'
 import type { ChatMessage, PendingUserQuestions } from '../../src/shared/types'
+import { refusalOfResponse, type ReadRefusal } from './appToolsFixture'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
@@ -72,11 +72,15 @@ async function rpc(mcp: Mcp, method: string, params: Record<string, unknown>, id
 
 const call = (mcp: Mcp, name: string, args: Record<string, unknown> = {}) =>
   rpc(mcp, 'tools/call', { name, arguments: mcp.turnToken ? { ...args, [TURN_TOKEN_KEY]: mcp.turnToken } : args })
-const names = async (mcp: Mcp): Promise<string[]> => (await rpc(mcp, 'tools/list', {})).result!.tools!.map((tool) => tool.name)
 
-/** What a call came back with, whether it was an answer, an error result or a refusal before the handler. */
-function outcome(response: Rpc): { isError: boolean; body: Record<string, unknown>; text: string; rpcError?: NonNullable<Rpc['error']> } {
+/**
+ * What a call came back with, whether it was an answer, an error result or a refusal. A refusal's `body` is the
+ * fields kept beside it and its `text` its words.
+ */
+function outcome(response: Rpc): { isError: boolean; body: Record<string, unknown>; text: string; refusal?: ReadRefusal; rpcError?: NonNullable<Rpc['error']> } {
   if (response.error) return { isError: true, body: {}, text: response.error.message, rpcError: response.error }
+  const refusal = refusalOfResponse(response)
+  if (refusal) return { isError: true, body: refusal.details, text: refusal.message, refusal }
   const text = response.result?.content?.[0]?.text ?? ''
   let body: Record<string, unknown> = {}
   try {
@@ -119,12 +123,11 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
    * A daemon whose threads run on one scripted runtime that talks to the real MCP server. `agent` is the usual
    * caller (permission mode `full`) and `other` the thread whose approvals it answers; `thread` makes more.
    */
-  const world = (script: Script, options: { level?: AgentAccessLevel; answerApprovals?: boolean } = {}) => {
+  const world = (script: Script, options: { answerApprovals?: boolean } = {}) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-approval-respond-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     mkdirSync(join(home, 'project'))
-    mkdirSync(join(home, 'project2'))
     let created: Phase6Daemon | undefined
     const adapter = new VendorAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async (input, host) => {
       const bridge = host.bridge
@@ -141,21 +144,19 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       await d.stop()
     })
     const project = d.projects.openProject(join(home, 'project'))
-    const project2 = d.projects.openProject(join(home, 'project2'))
-    const thread = (name: string, mode: PermissionMode = 'full', projectId = project.id) => {
-      const made = d.store.createThread(name, projectId)
+    const thread = (name: string, mode: PermissionMode = 'full') => {
+      const made = d.store.createThread(name, project.id)
       d.orch.setThreadModelOverride(made.id, MODEL)
       d.orch.setThreadPermissionMode(made.id, mode)
       return made
     }
     const agent = thread('Orchestrator')
     const other = thread('Other work')
-    const setProfile = (level: AgentAccessLevel, extra: { projectIds?: string[]; answerApprovals?: boolean } = {}): void => {
-      ;(d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = {
-        level, projectIds: extra.projectIds ?? [], answerApprovals: extra.answerApprovals ?? false
-      }
+    /** The profile's switch "Agents may answer approvals on other threads". */
+    const setAnswerApprovals = (answerApprovals: boolean): void => {
+      ;(d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { answerApprovals }
     }
-    setProfile(options.level ?? 'manage', { answerApprovals: options.answerApprovals ?? true })
+    setAnswerApprovals(options.answerApprovals ?? true)
     /** A saved approval of `threadId` whose provider callback waits here; `settled()` says whether it has been answered. */
     const ask = (threadId: string, action: ApprovalTag['action'] = 'command', command = 'npm test', reason?: string) => {
       const outcomeOf: { value?: Record<string, string | string[]>; error?: Error; calls: number } = { calls: 0 }
@@ -168,7 +169,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
     const rows = (threadId: string, prefix: string) => messages(threadId).filter((message) => message.role === 'system' && message.content.startsWith(prefix)).map((message) => message.content)
     const row = (requestId: string) => d.engine.approvals.get(requestId)!
     return {
-      d, adapter, credentials, server, project, project2, agent, other, thread, setProfile, ask, events, messages, rows, row,
+      d, adapter, credentials, server, project, agent, other, thread, setAnswerApprovals, ask, events, messages, rows, row,
       attach: async () => { await server.start(); d.orch.setMcpAttachment(server) },
       go: (threadId: string, key = `go-${threadId}`) => d.orch.send('Go', false, { threadId, clientRequestId: key })
     }
@@ -230,18 +231,16 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
   })
 
   describe('the gate', () => {
-    it('needs the profile switch, which is read at every call: off refuses and leaves the request for the user, on answers, lowering the level takes it away at once', async () => {
+    it('needs the profile switch, which is read at every call: off refuses and leaves the request for the user, on answers, off again refuses at once', async () => {
       const seen: Record<string, Rpc> = {}
       const ids: { first?: string; second?: string } = {}
-      let listed: string[] = []
       const w = world(async (input, mcp) => {
         if (input.threadId !== w.agent.id) return 'noop'
         seen.off = await respond(mcp!, w.other.id, ids.first!, 'allow', 'k-off')
-        w.setProfile('manage', { answerApprovals: true })
+        w.setAnswerApprovals(true)
         seen.on = await respond(mcp!, w.other.id, ids.first!, 'allow', 'k-on')
-        w.setProfile('read', { answerApprovals: true })
-        seen.lowered = await respond(mcp!, w.other.id, ids.second!, 'allow', 'k-lowered')
-        listed = await names(mcp!)
+        w.setAnswerApprovals(false)
+        seen.offAgain = await respond(mcp!, w.other.id, ids.second!, 'allow', 'k-off-again')
         return 'done'
       }, { answerApprovals: false })
       await w.attach()
@@ -254,67 +253,15 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       const off = outcome(seen.off!)
       expect(off.isError).toBe(true)
       expect(off.body).toMatchObject({ ok: false, reason: 'approvals_disabled', requestId: first.requestId })
-      expect(off.body.message).toMatch(/not allowed agents to answer approvals on other threads/)
+      expect(off.refusal).toMatchObject({ refused: { code: 'not_granted', retry: 'after_change' } })
+      expect(off.text).toMatch(/not allowed agents to answer approvals on other threads/)
       expect(outcome(seen.on!).body).toMatchObject({ ok: true, decision: 'allow' })
-      // Lowered to read: refused before the handler, by the central check.
-      expect(outcome(seen.lowered!).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied, data: { reason: 'mousse_scope_denied' } })
+      // Turned off again: the running turn's next answer is refused.
+      expect(outcome(seen.offAgain!).body).toMatchObject({ ok: false, reason: 'approvals_disabled', requestId: second.requestId })
       expect(w.row(second.requestId).status).toBe('pending')
       expect(second.outcome.calls).toBe(0)
-      expect(listed).not.toContain('approval_respond')
       // The one the person has not seen is still theirs.
       expect(w.d.questions.settle(second.requestId, { permission: 'reject' }, USER)).toEqual({ ok: true, decision: 'reject' })
-    })
-
-    it('answers only in the projects the profile lists, read at every call', async () => {
-      const seen: Record<string, Rpc> = {}
-      const ids: { inList?: string; outside?: string } = {}
-      const w = world(async (input, mcp) => {
-        if (input.threadId !== w.agent.id) return 'noop'
-        seen.outside = await respond(mcp!, elsewhere.id, ids.outside!, 'allow', 'k-out')
-        seen.inList = await respond(mcp!, w.other.id, ids.inList!, 'allow', 'k-in')
-        return 'done'
-      })
-      const elsewhere = w.thread('Elsewhere', 'full', w.project2.id)
-      await w.attach()
-      w.setProfile('manage', { projectIds: [w.project.id], answerApprovals: true })
-      const outside = w.ask(elsewhere.id)
-      const inList = w.ask(w.other.id)
-      ids.outside = outside.requestId
-      ids.inList = inList.requestId
-      await w.go(w.agent.id)
-
-      expect(outcome(seen.outside!).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(w.row(outside.requestId).status).toBe('pending')
-      expect(outcome(seen.inList!).body).toMatchObject({ ok: true })
-      expect(w.row(inList.requestId).status).toBe('answered')
-      await w.d.questions.settle(outside.requestId, { permission: 'reject' }, USER)
-    })
-
-    it('a bot caller and a capped caller are refused: their turns are granted lineage whatever the profile says', async () => {
-      const seen: Record<string, { call: Rpc; tools: string[] }> = {}
-      const ids: { requestId?: string } = {}
-      const w = world(async (input, mcp) => {
-        if (input.threadId === w.other.id) return 'noop'
-        seen[input.threadId] = { call: await respond(mcp!, w.other.id, ids.requestId!, 'allow', `k-${input.threadId}`), tools: await names(mcp!) }
-        return 'done'
-      })
-      const bot = w.thread('Bot activation')
-      const channel = w.thread('Telegram chat')
-      w.d.orch.setBotThreads({ roleOf: (threadId) => (threadId === bot.id ? 'activation' : undefined) })
-      w.d.store.capAccessCeiling(channel.id, 'lineage')
-      await w.attach()
-      const asked = w.ask(w.other.id)
-      ids.requestId = asked.requestId
-      await w.go(bot.id)
-      await w.go(channel.id)
-
-      for (const caller of [bot, channel]) {
-        expect(outcome(seen[caller.id]!.call).rpcError, caller.name).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-        expect(seen[caller.id]!.tools, caller.name).not.toContain('approval_respond')
-      }
-      expect(w.row(asked.requestId).status).toBe('pending')
-      expect(asked.outcome.calls).toBe(0)
-      await w.d.questions.settle(asked.requestId, { permission: 'reject' }, USER)
     })
 
     it('a bot\'s thread is not answered from another thread, and neither is a plain question for the user', async () => {
@@ -337,8 +284,8 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       ids.plain = w.d.questions.listPendingForThread(w.other.id).at(-1)!.requestId
       await w.go(w.agent.id)
 
-      expect(outcome(seen.bot!).rpcError!.message).toMatch(/belongs to a bot/)
-      expect(outcome(seen.plain!).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
+      expect(outcome(seen.bot!).refusal!.message).toMatch(/belongs to a bot/)
+      expect(outcome(seen.plain!).refusal).toMatchObject({ code: 'mousse_scope_denied' })
       expect(outcome(seen.plain!).text).toMatch(/not an approval; only the user answers it/)
       expect(w.d.questions.getPending(ids.plain!)).not.toBeNull()
       expect(w.row(bot.requestId).status).toBe('pending')
@@ -390,8 +337,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
         // Past the tool's own check, the rule at the settlement refuses it as well.
         seen.byRule = d.orch.mcpToolHost().answerApproval!(w.other.id, ids.requestId!, { permission: 'allow_always' }, {
           clientRequestId: 'approval_respond:direct:1',
-          actor: { kind: 'agent', threadId: w.agent.id, runId: d.engine.getActiveRun(w.agent.id)!.runId, toolCallId: 'mcp:direct' },
-          accessLevel: 'manage'
+          actor: { kind: 'agent', threadId: w.agent.id, runId: d.engine.getActiveRun(w.agent.id)!.runId, toolCallId: 'mcp:direct' }
         })
         return 'done'
       })
@@ -400,7 +346,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       ids.requestId = asked.requestId
       await w.go(w.agent.id)
 
-      expect(outcome(seen.byTool as Rpc).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
+      expect(outcome(seen.byTool as Rpc).refusal).toMatchObject({ code: 'mousse_scope_denied' })
       expect(outcome(seen.byTool as Rpc).text).toMatch(/cannot approve "always for this thread"/)
       expect(seen.byRule).toEqual({ ok: false, reason: 'agent_no_standing_grant' })
       expect(w.row(asked.requestId)).toMatchObject({ status: 'pending', decision: null })
@@ -419,8 +365,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
         seen.byOtherId = await respond(mcp!, w.other.id, own.requestId, 'allow', 'k-own-2')
         seen.byRule = d.orch.mcpToolHost().answerApproval!(w.agent.id, own.requestId, { permission: 'allow' }, {
           clientRequestId: 'approval_respond:direct:2',
-          actor: { kind: 'agent', threadId: w.agent.id, runId: d.engine.getActiveRun(w.agent.id)!.runId, toolCallId: 'mcp:direct-2' },
-          accessLevel: 'manage'
+          actor: { kind: 'agent', threadId: w.agent.id, runId: d.engine.getActiveRun(w.agent.id)!.runId, toolCallId: 'mcp:direct-2' }
         })
         seen.status = w.row(own.requestId).status
         seen.calls = own.outcome.calls
@@ -432,7 +377,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       await w.go(w.agent.id)
 
       expect(outcome(seen.byOwnId as Rpc)).toMatchObject({ isError: true, text: expect.stringContaining('answers the approvals of other threads') })
-      expect(outcome(seen.byOtherId as Rpc).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'request_not_pending' } })
+      expect(outcome(seen.byOtherId as Rpc).refusal).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'request_not_pending' } })
       expect(seen.byRule).toEqual({ ok: false, reason: 'own_request' })
       expect(seen.status).toBe('pending')
       expect(seen.calls).toBe(0)
@@ -657,7 +602,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       expect(outcome(seen.rival!).body).toMatchObject({ ok: false, reason: 'already_answered', answeredBy: { kind: 'agent', threadId: w.agent.id } })
       expect(outcome(seen.rival!).body.replayed).toBeUndefined()
       // The key the agent used for one approval cannot answer another.
-      expect(outcome(seen.conflict!).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'client_request_id_conflict' } })
+      expect(outcome(seen.conflict!).refusal).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'client_request_id_conflict' } })
       expect(w.row(second.requestId).status).toBe('pending')
       expect(w.rows(w.other.id, 'Approved by an agent')).toHaveLength(1)
       expect(first.outcome.calls).toBe(1)
@@ -733,7 +678,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       const adapter = piAdapter(() => PI_ADAPTER_REPLY)
       const second = phase6Daemon(dir!, [adapter], { pid: 2 })
       daemons.push(second)
-      ;(second.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { level: 'manage', projectIds: [], answerApprovals: true }
+      ;(second.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { answerApprovals: true }
       const caller = second.store.createThread('Caller')
       second.orch.setThreadPermissionMode(caller.id, 'full')
       const sent = await second.engine.dispatch({ kind: 'send', threadId: caller.id, clientRequestId: 'caller-run', source: 'gui' })
@@ -743,8 +688,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       second.engine.recordExecutionBinding(run.runId, { instanceId: 'pi:openai', driver: 'pi', accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'gpt-replay', policy: { mode: 'default', origin: 'interactive', approvals: 'ask', permissionMode: 'full' } })
       const answer = (threadId: string, requestId: string, answer: string, key: string) => second.orch.mcpToolHost().answerApproval!(threadId, requestId, { permission: answer }, {
         clientRequestId: `approval_respond:${caller.id}:mcp:${key}`,
-        actor: { kind: 'agent', threadId: caller.id, runId: run.runId, toolCallId: `mcp:${key}` },
-        accessLevel: 'manage'
+        actor: { kind: 'agent', threadId: caller.id, runId: run.runId, toolCallId: `mcp:${key}` }
       })
       return { second, adapter, answer }
     }

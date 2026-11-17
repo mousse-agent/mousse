@@ -109,12 +109,22 @@ export interface ScheduledRunAgent {
  * and its chat know the schedule by (`bot_schedule_list`), kept across the move from `bots.db`.
  */
 export interface ScheduledJobBot {
+  canWakeMe?: boolean
+  /** A fixed reminder line, posted without a model run. */
+  say?: string
+  /** The owner's message or tapped answer started the turn that added this timer. */
+  ownerAsked?: boolean
   botId: string
   scheduleId: string
   /** Who added it: the owner (the Automations page, `bots.schedules.add`) or the bot itself (`bot_schedule_add`). */
   createdBy: 'owner' | 'bot'
-  /** A model the owner picked by hand for this automation's runs (#673); absent: the bot's own choice (by usage). */
+  /** A model the owner picked by hand for this automation's runs (#673), by name; absent: the bot's Work rows. */
   model?: string
+  /**
+   * That model on the entry it was picked on, with what the entry was signed in with (#673, a bot's `BotModelPick`): its
+   * runs run there or not at all. Absent on one saved by name only, which is matched by name as before.
+   */
+  pick?: { instanceId: string; model: string; effort?: string; credential?: 'subscription' | 'api_key' | 'ambient'; account?: string }
 }
 
 /** The saved agent a job's runs use (`ScheduledJob.agent`): its latest published revision at each run. */
@@ -307,10 +317,7 @@ export interface ScheduledJob {
    * creating call's key, so a retried call finds the job it already made.
    */
   createdBy?: { threadId: string; runId?: string; requestId?: string }
-  /**
-   * The most agent access (SPEC §15.1) a run of this job may be granted: the level of whoever created it. Absent
-   * (a creator whose level is not known) reads as `lineage`; a run is never granted more than the profile's setting either.
-   */
+  /** An agent access cap older versions stored on agent-made jobs (SPEC §15.1). Ignored and no longer written. */
   accessCap?: import('./settings').AgentAccessLevel
   /** When the job ends: set on jobs agents create (7 days); only a person extends it. Absent: no end. */
   expiresAt?: string
@@ -515,6 +522,13 @@ export interface ChatImageAttachment {
 
 export interface OrchestratorSendRequest {
   content: string
+  /**
+   * SPEC §16.4: the run a restart cut off that this message continues. The send's `clientRequestId` is
+   * `continue:<runId>`, so a second click replays the first.
+   */
+  continuationOfRunId?: string
+  /** Required with `continuationOfRunId` when that run is `uncertain`: the person saw the tools that may have run. */
+  acknowledgeUncertain?: boolean
   mode?: ChatMode
   images?: ChatImageAttachment[]
   /** Caller-owned logical send identity, retained after an uncertain response. */
@@ -531,6 +545,11 @@ export interface OrchestratorSendRequest {
    * daemon refuses the send (`thread_settings_changed`, with the current values) when the thread runs anything else.
    */
   expect?: SendExpectation
+  /**
+   * `ack`: the send answers once its run and turn.start are committed (SPEC §12.7), not when the turn ends; the turn's
+   * outcome comes through turn and run events. Absent: the send answers with the turn's result, as it always has.
+   */
+  await?: 'ack'
 }
 
 /** The model, permission mode and (when known) settings revision a send is bound to (`OrchestratorSendRequest.expect`). */
@@ -545,6 +564,8 @@ export type OrchestratorSendInput = string | OrchestratorSendRequest
 export interface OrchestratorContextUsageRequest {
   draftInput?: string
   mode?: ChatMode
+  /** The thread the window shows; without it, the window's active thread. */
+  threadId?: string
 }
 
 export type OrchestratorContextUsageInput = string | OrchestratorContextUsageRequest
@@ -620,15 +641,32 @@ export interface PendingUserQuestions {
   threadId?: string
   /** Present on a provider's, the Pi agent's or a Mousse tool's saved approval request. */
   approval?: PendingApprovalInfo
+  /**
+   * Set when the request is for a native helper's action (`Thread.native`): it is the hosting thread's own request and
+   * is shown on the mirror thread whose `native.agentId` this is, under that thread, as well.
+   */
+  helper?: { agentId: string }
+  /**
+   * `false`: the agent asked without waiting (`ask_user` with `wait: false`) and keeps working. The question stays
+   * open until it is answered, dismissed or withdrawn; a new message does not close it.
+   */
+  wait?: false
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
 
-/** One answered question as the transcript keeps it: the prompt, the labels of the options chosen, and any text typed instead. */
+/** Images sent with an answer, by the id of the question each one answers. */
+export type UserQuestionAttachments = Record<string, ChatImageAttachment[]>
+
+/**
+ * One answered question as the transcript keeps it: the prompt, the labels of the options chosen, any text typed
+ * instead, and the images sent with it (indexes into the answer message's `images`).
+ */
 export interface AnsweredQuestion {
   prompt: string
   chosen: string[]
   reply?: string
+  images?: number[]
 }
 
 /**
@@ -643,17 +681,17 @@ export interface QuestionAnswerOutcome {
   cancelReason?: string
 }
 
-export interface DocumentOpenPayload {
-  title: string
-  markdown: string
-}
-
 export interface DocumentTab {
   id: string
   title: string
   markdown: string
   /** Set when the tab shows an applet from a thread rather than Markdown. */
   applet?: { threadId: string; profileId: string | null; reference: AppletReference }
+  /**
+   * Set when the tab shows, read-only, the uncommitted change of a file a thread's agent wrote outside what the
+   * Changes tab lists: `path` is absolute, compared with the last commit of its own repository.
+   */
+  turnFile?: { threadId: string; profileId: string | null; path: string }
 }
 
 export type CliType = 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli'
@@ -812,11 +850,6 @@ export interface Task {
   createdAt: string
 }
 
-export interface PlanCardMetadata {
-  originalRequest: string
-  planMarkdown: string
-}
-
 /** Full transcript delivery; restoration snapshots replace retired presentation rows. */
 export interface ThreadMessagesSnapshot {
   threadId: string
@@ -832,6 +865,21 @@ export interface MessageModelSelection {
   name?: string
 }
 
+/**
+ * Why a turn was cut off before it finished. `user`: a person's Stop; `agent`: an agent in another thread stopped it;
+ * `daemon_restart`: Mousse shut down or restarted; `crash`: Mousse quit without shutting down. `tools`: what an
+ * `uncertain` run may have run without a recorded result.
+ */
+export interface TurnEnd {
+  cause: 'user' | 'agent' | 'daemon_restart' | 'crash'
+  tools?: string[]
+}
+
+/** The transcript line of a turn a person's or an agent's Stop cut off. Lines older than `turnEnd` are read by it. */
+export const TURN_STOPPED_TEXT = 'Turn stopped.'
+/** The transcript line of a turn a restart cut off: a clean shutdown writes it as the turn ends, boot after a crash. */
+export const RESTART_INTERRUPTED_TEXT = 'Turn interrupted by a Mousse restart.'
+
 export interface ChatMessage {
   /** Durable completed-response applets; generated code never executes in the shell. */
   presentationParts?: import('./applets').AppletPresentationPart[]
@@ -841,6 +889,16 @@ export interface ChatMessage {
   timestamp: string
   /** Durable turn/action lineage. */
   turnId?: string
+  /**
+   * On the line Mousse writes when a Stop, a restart or a crash cut a turn off: why it ended. The transcript marks
+   * that turn "Stopped" or "Interrupted". A steer's cut, a pause, a failure and a bot's wall write none.
+   */
+  turnEnd?: TurnEnd
+  /**
+   * A message whose turn a restart cut off before it started, added when the thread had moved on (SPEC §12.5). No
+   * model ever had it: a handoff leaves it out, and a fork keeps it marked.
+   */
+  notSent?: boolean
   actionId?: string
   conversationBranchId?: string
   /** Inline images for user messages (shown as previews; also sent to vision models). */
@@ -863,6 +921,12 @@ export interface ChatMessage {
    * (a continuation run): the tasks it reports, so the app shows them as a notice instead of a message the user wrote.
    */
   backgroundNotice?: import('./subagents').BackgroundTaskNoticeItem[]
+  /**
+   * Set on the message that opens a turn Mousse started to tell this thread's agent about work it asked to hear about
+   * (`notify` on `thread_send` or `thread_create`): what settled where. The app shows it as a notice, never as a message
+   * the user wrote or an agent's.
+   */
+  settleNotice?: import('./settleNotice').SettleNoticeItem[]
   /** Set on a user message a scheduled job sent, so the thread can show "Scheduled: <name>" instead of passing it off as typed. */
   scheduled?: { jobId: string; jobName?: string }
   /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */
@@ -879,10 +943,21 @@ export interface ChatMessage {
    */
   scheduledRun?: { jobId: string; threadId: string; runId?: string }
   /**
+   * Set on the note Mousse writes on a thread whose agent started another thread (`thread_create`): that thread, and
+   * what was chosen for it (model, mode, where it runs). The note is kept in the thread's record and read by agents
+   * (`thread_read`); the chat does not show it, as the agent's reply names the thread.
+   */
+  launchedThread?: { threadId: string; summary?: string }
+  /**
    * A user message added to a turn that was already running (a steer), so it does not start a turn.
    * Older transcripts do not carry it.
    */
   steered?: boolean
+  /**
+   * On a steered message that is the copy of a queued message sent now: that queue item's id. A turn that ends
+   * before it reads the steer hides exactly this copy, never another message with the same words.
+   */
+  steerItemId?: string
   /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
   hidden?: boolean
   /** Original presentation visibility while a conversation-undo is active. */
@@ -902,6 +977,7 @@ export interface ChatMessage {
   permissionMode?: PermissionMode
   kind?:
     | 'message'
+    /** Legacy: how older threads stored a Plan-mode reply. Its content is the reply's text and shows as a plain reply. */
     | 'plan_card'
     | 'thinking'
     | 'tool_call'
@@ -947,7 +1023,6 @@ export interface ChatMessage {
    * failed, or cut short by a daemon restart).
    */
   compaction?: { manual?: true; kept?: 'stopped' | 'failed' | 'interrupted' }
-  planCard?: PlanCardMetadata
   thinking?: {
     content: string
     status?: 'processing' | 'complete'
@@ -980,6 +1055,11 @@ export interface ChatMessage {
   /** A stopped stream retained as partial text; it has no response actions or metadata. */
   incomplete?: boolean
   streaming?: boolean
+  /**
+   * When an assistant reply stopped streaming (it finished, or a Stop cut it off). `timestamp` is when it started, so
+   * a turn's saved time runs to this instead. Replies saved before it existed have none and end at their `timestamp`.
+   */
+  completedAt?: string
 }
 
 export function isToolTimelineMessage(message: Pick<ChatMessage, 'kind'>): boolean {
@@ -1026,6 +1106,10 @@ export interface OrchestratorResponse {
   requestAcknowledged?: boolean
   error?: import('./errors').AppErrorShape
   message: string
+  /** With `error`, on a bot's turn whose work goes on (it reached its runtime's turn cap): the words it said last. */
+  partial?: string
+  /** On a bot's turn: a steer cut it and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
+  steerUnanswered?: boolean
   actions: OrchestratorAction[]
   /**
    * When true, the send was accepted onto the thread queue instead of starting a turn.
@@ -1094,6 +1178,11 @@ export interface QueuedMessage {
   claim?: QueuedMessageClaim
   /** Optional caller tag (gui | cli | remote | …). */
   source?: string
+  /**
+   * The id the sender gave the send that queued this message (`OrchestratorSendRequest.requestId`), so the window
+   * that sent it can tell it from the copy it shows while the send is on its way.
+   */
+  clientRequestId?: string
   /** Internal orchestration input: durable and executable, but hidden from queue/transcript UI. */
   internal?: boolean
   /** Run Engine run this item executes when drained. */
@@ -1104,12 +1193,36 @@ export interface QueuedMessage {
   inboxIds?: string[]
   /** The subagent results the item's message reports. */
   subagentNotice?: import('./subagents').SubagentNoticeItem[]
+  /** The settle notices the item delivers (`ChatMessage.settleNotice`); notices that arrive while it waits join it. */
+  settleNotice?: import('./settleNotice').SettleNoticeItem[]
+  /** With `settleNotice`: the count of agent messages in a row of the runs the notices are about; the turn carries it. */
+  settleHops?: number
+  /**
+   * A settle notice that must not start a turn by itself (its thread is a subagent, the person stopped it, it is kept in
+   * Plan, or the notice says Mousse stopped watching): it waits until a person sends it (Send now), a notice that may
+   * start a turn joins it, or a person's turn of the thread starts and it runs after that turn.
+   */
+  heldNotice?: true
   /**
    * The thread's stop generation when the item was queued, for work that starts on behalf of a parent
    * (a steer that missed its turn). Once a Stop raised the generation the item is refused when it would
    * run. Absent for what a person queued, which a Stop never fences.
    */
   stopGeneration?: number
+  /**
+   * A Stop left this item waiting: it runs when the person sends it (Send now) or the thread runs a turn again,
+   * never on its own. Saved so that a restart holds it too (startup recovery skips a held queue). Cleared from
+   * every item of the queue when the next turn of the thread starts.
+   */
+  heldAfterStop?: true
+  /**
+   * The item was queued only because the thread's execution lease was held (a git operation, a workspace restore,
+   * work in another process) and waits for it to be free. Saved so that a restart into a queue a Stop held runs it
+   * first, as the running app would have, and leaves what was only added after the Stop waiting for the person. Kept
+   * on a pending item only: claiming it, or a Stop holding it, clears it. Older builds drop it, which leaves the item
+   * waiting for Send now after such a restart.
+   */
+  waitsForLease?: true
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
   /** The other computer of the user this message was sent or last edited from (a routed call); absent for this computer's own. */
@@ -1120,6 +1233,18 @@ export interface QueuedMessage {
    * to a pending message, so a promotion never reaches a run it was not checked against.
    */
   steerRunId?: string
+  /**
+   * Set on a `steering` item this build promoted: every copy it writes of the steer into the turn names the item
+   * (`ChatMessage.steerItemId`), so a steered message with no item named is never this item's copy. Absent on an
+   * item an older build promoted, whose copy may carry no name; only those are matched to such copies by their words.
+   */
+  promotedWithCopyId?: true
+  /**
+   * Send now on a held steer (docs/design/steer-and-interruptions.md §2.9): the run and hold the click was shown for,
+   * and its request. The run that holds the item forces the hold once, only for that run and that hold; every path
+   * that moves the item out of `steering` drops the field.
+   */
+  steerNow?: { runId: string; holdGeneration: number; requestId: string }
   /**
    * Who the item is from when it is not a person. `schedule`: set on the occurrence of a scheduled job
    * that found its thread busy; the run drains with the job's model and origin, and the ids travel on to
@@ -1144,13 +1269,54 @@ export interface QueueEditResult {
  */
 export interface AgentOrigin {
   kind: 'agent'
-  threadId: string
-  runId: string
+  /** The sending thread and run on this computer; unset for a sender on another computer (`from`). */
+  threadId?: string
+  runId?: string
+  /**
+   * A sender on another of the user's computers: that computer (`node`), the thread and run there by their ids on it,
+   * and the sender's title then. The fields are not named `…Id`, so the routed id rewriting leaves them alone
+   * (`routedIds.ts`, `isRemoteAgentFrom`); on the computer named by `node` they are its own plain ids.
+   */
+  from?: AgentOriginFrom
   /**
    * How many agent messages in a row led to this one without a person in between (the sender's own count
    * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
    */
   hops?: number
+  /**
+   * Where the sending agent's own words sit in the stored text: after the header Mousse wrote and before its closing
+   * line (`agentMessageWords`). Lengths, not positions: text another computer reads is re-encoded inside the words,
+   * never in the header or the closing line. Absent on a message stored before it was kept: its whole text is shown.
+   */
+  body?: AgentMessageBody
+  /** The sending thread's title when it sent, shown for a sender that was deleted since. */
+  title?: string
+  /**
+   * The owner's bot that sent it ("use your threads"), whose chat thread is `threadId`: its id, and its name when it sent,
+   * shown for a bot this window does not list (deleted, or on another computer). Absent on an agent's message, and on a
+   * bot's stored before it was kept.
+   */
+  bot?: AgentOriginBot
+}
+
+/** The bot behind a message (`AgentOrigin.bot`). */
+export interface AgentOriginBot {
+  id: string
+  name: string
+}
+
+/** The length of the header before an agent's words (`head`) and of the closing line after them (`tail`). */
+export interface AgentMessageBody {
+  head: number
+  tail: number
+}
+
+/** Who sent an agent message from another computer (`AgentOrigin.from`). */
+export interface AgentOriginFrom {
+  node: string
+  thread: string
+  run: string
+  title: string
 }
 
 /** The category for the unsent draft: it is not yet in the context, so it never shows that usage is known. */
@@ -1172,6 +1338,11 @@ export interface ContextUsageSnapshot {
   source: 'measured' | 'estimated' | 'legacy-estimated'
   categories: ContextUsageCategory[]
   /**
+   * A measured snapshot's last request, split by the provider's prompt cache: `cached` read from it, `uncached`
+   * sent anew (written to the cache or not cached at all). Absent for an estimate.
+   */
+  request?: { cached: number; uncached: number }
+  /**
    * The agent runtime compacts this context itself, near its window (Pi), so the Compact context
    * size does not apply. Absent: Mousse compacts it at that size.
    */
@@ -1182,6 +1353,12 @@ export interface ContextUsageSnapshot {
    * new thread, or the history changed since, which starts a fresh session).
    */
   promptCache?: ContextPromptCache
+  /**
+   * A runtime that reports no context (an ACP agent, Cursor): Mousse's estimate of the history the next send
+   * carries, sent with `promptCache` so the composer can still suggest compacting once it goes cold. The gauge
+   * itself stays empty.
+   */
+  historyEstimate?: number
 }
 
 export interface ContextPromptCache {
@@ -1207,6 +1384,8 @@ export interface PtyCreateRequest {
   command?: string
   env?: Record<string, string>
   shellArgs?: string[]
+  /** The quick action that opened the terminal: agents are told it runs, by this name. */
+  label?: string
 }
 
 export interface PtyCreateResult {
@@ -1269,7 +1448,45 @@ export interface ThreadLineage {
   parentThreadId: string
   /** The thread at the top of the parent chain, the one a person started. */
   rootThreadId: string
-  relationship: 'subagent'
+  /**
+   * `subagent`: a Mousse subagent (`delegate_task`). `native`: a watch-only mirror of a helper the provider runtime
+   * started on its own (`Thread.native`); the parent is the thread whose run hosts it. Only the thread record says
+   * `native`: the run store's `thread_lineage` has no row for a mirror, so no delegation rule ever applies to one.
+   */
+  relationship: 'subagent' | 'native'
+}
+
+/** The runtimes whose own helpers Mousse mirrors as threads. */
+export type NativeHelperRuntime = 'codex' | 'claude'
+
+/**
+ * How a native helper's mirror stands. `running` until the runtime reports its end; `unknown` when its hosting run
+ * ended (or the process went away) without one: never shown as done or idle.
+ */
+export type NativeHelperState = 'running' | 'done' | 'failed' | 'stopped' | 'unknown'
+
+/**
+ * Set on a mirror thread (`ThreadLineage.relationship: 'native'`): a helper a provider runtime started inside a Mousse
+ * run (Codex's helper threads, Claude Code's Agent subagents). Mirroring creates no authority: the thread is
+ * watch-only, its runtime owns its turns, and nothing sent to it reaches the helper.
+ */
+export interface ThreadNativeHelper {
+  runtime: NativeHelperRuntime
+  /** The provider instance the hosting run ran on. */
+  instanceId: string
+  /** The runtime session the agent id belongs to (driver, home and account generation of the hosting run's binding). */
+  sessionEpoch: string
+  /** The runtime's own id of the helper: Codex's helper thread id, Claude Code's Agent call (`parent_tool_use_id`). */
+  agentId: string
+  /** The id Claude Code's SendMessage addresses the agent by, once the runtime has said it. */
+  sendTo?: string
+  /** The runtime can stop this helper without stopping the run that hosts it. */
+  stoppable?: true
+  /** The Mousse run that started the helper, then the latest that hosted it. */
+  hostRunId: string
+  state: NativeHelperState
+  /** Set when the log was rebuilt from what the runtime reported after the fact, not followed live from the start. */
+  partial?: true
 }
 
 /**
@@ -1279,8 +1496,13 @@ export interface ThreadLineage {
 export interface SubagentWorkspaceBinding {
   /** `primary`: a scheduled run on the project's own checkout, never a provisioned worktree. */
   policy: 'shared' | 'isolated' | 'primary'
-  /** The parent's workspace path a `shared` child observes read-only. */
+  /** The parent's workspace path a `shared` child works in. */
   sharedPath?: string
+  /**
+   * What a `shared` child may do there: `write`, every tool its parent has; `read-only` (and absent, on a child saved
+   * before this existed), the read-only tools only (`delegate_task` `readOnly`).
+   */
+  access?: 'read-only' | 'write'
   /**
    * An `isolated` child started with "Give each subagent its own worktree" on: the parent's HEAD when it was started. Its
    * worktree is made from this commit before its first turn, whatever that turn's mode.
@@ -1295,6 +1517,13 @@ export interface SubagentWorkspaceBinding {
 export interface ThreadStartedFrom {
   node: string
   projectId?: string
+  /**
+   * Set when an agent on that device started the thread (a routed `threads.create` marked as an agent's): the sender's
+   * thread there (its id on that device, never rewritten), its title then, and the mode the thread was held to when it
+   * was made. A marked `threads.setPermissionMode` never goes above that mode. `createdByThreadId` stays unset: a foreign
+   * id there would be rewritten to a thread of this computer that does not exist.
+   */
+  agent?: { thread: string; title: string; mode: PermissionMode }
 }
 
 /** The computer a thread's latest routed message came from. */
@@ -1354,13 +1583,27 @@ export interface Thread {
   projectId?: string
   createdAt: string
   updatedAt: string
-  /** Set on a subagent thread: the thread that started it. Absent on every other thread. */
+  /** Set on a subagent thread, and on a native helper's mirror: the thread that started it. Absent on every other thread. */
   lineage?: ThreadLineage
+  /** Set on a native helper's mirror thread (`ThreadLineage.relationship: 'native'`); watch-only. */
+  native?: ThreadNativeHelper
   /**
    * Set on a thread an agent launched with `thread_create`: the creating thread. Unlike `lineage` it
-   * is not a subagent relation; it only lets the creator read and stop the thread at any agent access level.
+   * is not a subagent relation; it marks the thread as the creator's (the `launched` scope of the thread tools).
    */
   createdByThreadId?: string
+  /**
+   * Set on a thread one of the owner's bots started ("use your threads"): the bot and its name then, so the thread still
+   * says who started it after the bot is renamed or deleted ("Started by Alpha (deleted)"). `createdByThreadId` is the
+   * bot's chat thread.
+   */
+  startedByBot?: { botId: string; name: string }
+  /**
+   * Set on a thread kept out of the owner's sidebar: a personal bot started it hidden, or hid it later (a short background
+   * job). It is not in the thread lists of this computer or the owner's other devices; the bot's chat lists it, it opens
+   * like any thread, and Show in sidebar (`threads.setHidden`) clears the mark. Search, links and Needs me still reach it.
+   */
+  hidden?: true
   /** Set on a thread another of the user's devices created through Bridge. */
   startedFrom?: ThreadStartedFrom
   /**
@@ -1402,10 +1645,8 @@ export interface Thread {
   /** At expiry a run in progress is stopped; without it the thread waits for the run to end. */
   expiryStopsRun?: true
   /**
-   * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
-   * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,
-   * and on a thread a remote send drives (a linked phone's); it only ever narrows. Absent: no limit of its own
-   * (the profile's setting and the thread's delegations still apply).
+   * An agent access ceiling older versions stored on forks, launched, scheduled and remote-driven threads (SPEC §15.1).
+   * Ignored: every agent reads and manages every thread. No longer written.
    */
   accessCeiling?: import('./settings').AgentAccessLevel
   /** Set on a subagent created after workspace bindings were recorded, and on a scheduled per-run thread. */
@@ -1448,6 +1689,19 @@ export interface Thread {
   worktreeBaseBranch?: string
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
   pullRequest?: ThreadPullRequestLink
+  /**
+   * Every pull request the thread has been linked to, oldest first, with its state as last read, for the sidebar's count.
+   * Written when a link is made and when the app reads, merges or closes one of them. Read through `threadPullRequestsOf`,
+   * which counts the `pullRequest` of a thread linked before this list was kept.
+   */
+  pullRequests?: import('./pullRequests').ThreadPullRequestSummary[]
+  /**
+   * The latest reply of the thread's agent as one clipped line of plain text (`replyPreviewText`), for its sidebar row.
+   * Written when a turn ends; absent until the first turn that ends with this field known.
+   */
+  lastReply?: string
+  /** The thread's goal (`/goal`): Mousse keeps starting turns while it is working. Set by the daemon. */
+  goal?: import('./threadGoal').ThreadGoal
   /** Explicit sidebar position within this thread's project (or standalone group). */
   order: number
   pinnedAt?: string
@@ -1496,6 +1750,8 @@ export interface TurnPause {
   autoResume: boolean
   /** The reset passed while Mousse was off for more than a day: the timer was dropped and only Resume now (or a message) continues the run. */
   stale?: true
+  /** The paused run was itself the continue turn of an earlier pause: resuming ran into the limit again. */
+  again?: true
 }
 
 export interface TurnState {
@@ -1509,8 +1765,61 @@ export interface TurnState {
   errorDescriptor?: import('./errors').AppErrorShape
   /** Set only while `phase` is `paused`. */
   pause?: TurnPause
+  /** What an active turn is doing that its phase does not say, for the live line under Working. Any phase change drops it. */
+  step?: TurnStep
+  /**
+   * Set only while `phase` is `stopped` after a restart cut off an `uncertain` run (SPEC §12.5, §16.4): the tools
+   * that may have run without a recorded result. Continue then asks first, and continues the run acknowledged.
+   */
+  uncertain?: { runId: string; tools: string[] }
+  /**
+   * A person's steer the turn holds until a foreground tool has its result (docs/design/steer-and-interruptions.md §2.9).
+   * In memory, like `step`; set only while the turn is active.
+   */
+  heldSteer?: HeldSteer
 }
+
+/** What a held steer waits for (`TurnState.heldSteer`). */
+export interface HeldSteer {
+  /** The oldest foreground tool's name (`Bash`), or `compaction`. Kept while the release window is open after the last result. */
+  waitsFor: string
+  /** That tool's first input line (its command, a path). */
+  detail?: string
+  /**
+   * No tool runs any more: strict release keeps the steer until the provider's turn ends (`waitsFor` is `turn`).
+   * The line says so instead of naming a tool that already finished.
+   */
+  untilTurnEnd?: true
+  /** How many foreground tools run. */
+  tools: number
+  /** Every foreground tool, for the tooltip. */
+  toolList?: Array<{ name: string; detail?: string }>
+  /** When the hold began. */
+  since: string
+  /** The hold a Send now click names; it rises when the held steers change. */
+  holdGeneration: number
+  /** The held queue items, a row another process promoted included. */
+  itemIds: string[]
+  /** The run the hold belongs to: Send now names it. */
+  runId?: string
+}
+
 export type TurnStateSnapshot = Record<string, TurnState>
+
+/** A step of an active turn that shows nothing in the transcript yet. */
+export type TurnStep =
+  /** The turn started; its provider has reported nothing yet (the runtime, its tools and Skills are being set up). */
+  | { kind: 'starting' }
+  /** The provider has the request and has sent nothing back yet. */
+  | { kind: 'waiting' }
+  /** The model reasons and has shown none of it yet. */
+  | { kind: 'reasoning' }
+  /**
+   * A failed provider request is tried again: attempt `attempt` (of `maxAttempts`), `delayMs` after the step was sent.
+   * A wait, not a time: a window on another computer counts it down on its own clock. `noResponse`: the provider sent
+   * nothing back in time (its own retry, outside the attempt count).
+   */
+  | { kind: 'retrying'; attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: true }
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'
@@ -1671,6 +1980,19 @@ export interface NativeLlmContext {
   lastTurnUsage?: NativeLastTurnUsage
   /** The provider's prompt cache after the last turn; it holds only while `revision` is unchanged. */
   promptCache?: NativePromptCache
+  /**
+   * What the last measured request carried beyond the thread's messages: the runtime's system prompt and tools,
+   * the instructions it and Mousse add, and the gap between the messages' estimate and their real size. Unlike
+   * `lastTurnUsage`, it outlives a change of the history, so the gauge still counts it while a turn runs, after
+   * Stop, or after an undo, until the next measurement replaces it.
+   */
+  contextBase?: NativeContextBase
+}
+
+export interface NativeContextBase {
+  /** `${llmProvider}:${model}` it was measured on; another model has its own system prompt and tools. */
+  modelKey: string
+  tokens: number
 }
 
 /**
@@ -2184,5 +2506,7 @@ export interface ProjectTerminalTab {
   cwd?: string
   title: string
   exited: boolean
+  /** The quick action that opened this terminal: its shell is started with it as its label (`PtyCreateRequest.label`). */
+  quickAction?: string
 }
 export type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from './platform'

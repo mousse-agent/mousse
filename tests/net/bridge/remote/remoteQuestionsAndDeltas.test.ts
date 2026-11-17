@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
@@ -240,6 +240,43 @@ describe('remote pending questions', () => {
       )
     ).toEqual({ ok: true })
     await expect(dismissed).resolves.toMatch(/dismissed/)
+  })
+
+  it('a phone answers with images it staged: each question gets its own, saved and named in its answer', async () => {
+    const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=='
+    const p = await setup(),
+      { b } = await p.connect(),
+      thread = p.mms.threads.createThread('Asks with a picture')
+    const answered = p.mms.questions.requestAnswers(
+      [
+        { id: 'q1', prompt: 'Which screen?', options: [{ id: 'a', label: 'Alpha' }] },
+        { id: 'q2', prompt: 'Anything else?', options: [{ id: 'n', label: 'No' }] }
+      ],
+      thread.id
+    )
+    const requestId = p.mms.questions.listPendingForThread(thread.id)[0].requestId
+    const stage = { upload: 'shot-0001', index: 0, total: 1, name: 'shot.png', mimeType: 'image/png', data: PNG }
+    expect(await b.rpc('attachments.stage', stage, rpc('stage'))).toMatchObject({ ok: true })
+    // Ids that were never staged, or the same id twice, are refused before anything is answered.
+    for (const attachments of [{ q1: ['missing-01'] }, { q1: ['shot-0001'], q2: ['shot-0001'] }, { q1: [] }, { q1: 'shot-0001' }]) {
+      const result = await b.rpc('orchestrator.answerQuestions', { threadId: thread.id, requestId, answers: { q1: 'a', q2: 'n' }, attachments }, rpc('bad-' + newId('rpc')))
+        .catch((error: { code?: string }) => ({ code: error.code }))
+      expect(result).toMatchObject(attachments.q1?.[0] === 'missing-01' ? { ok: false } : { code: 'bad_request' })
+    }
+    expect(p.mms.questions.getPending(requestId)).not.toBeNull()
+
+    expect(await b.rpc(
+      'orchestrator.answerQuestions',
+      { threadId: thread.id, requestId, answers: { q1: 'a', q2: 'n' }, attachments: { q1: ['shot-0001'] } },
+      rpc('answer-with-image')
+    )).toEqual({ ok: true })
+    const answers = await answered
+    expect(answers.q2).toBe('n')
+    const path = /\[Image attached: ([^\]]+)\]/.exec(String(answers.q1))?.[1]
+    expect(path && readFileSync(path).equals(Buffer.from(PNG, 'base64'))).toBe(true)
+    const message = p.mms.orchestrator.getMessages(thread.id).find((each) => each.questionAnswers?.length)!
+    expect(message.images?.map((image) => image.data)).toEqual([PNG])
+    expect(message.questionAnswers?.map((answer) => answer.images)).toEqual([[0], undefined])
   })
 
   it('lets a read-only phone see questions but not answer them', async () => {
@@ -892,4 +929,65 @@ describe('remote display deltas', () => {
     expect(live.a.state()).toBe('open')
     expect(live.b.state()).toBe('open')
   })
+})
+
+describe('a phone reading a long thread', () => {
+  it('gives a phone every older message of a long thread, page by page, from where its snapshot stops', async () => {
+    const p = await setup(),
+      { b } = await p.connect(),
+      thread = p.mms.threads.createThread('Long thread')
+    const at = (n: number) => new Date(Date.UTC(2026, 10, 1, 0, 0, n)).toISOString()
+    const image = { name: 'shot.png', mimeType: 'image/png', data: 'A'.repeat(100 * 1024) }
+    // Oldest first: many small messages, one larger than an RPC reply, one with an image, then 9 MiB of newest
+    // messages, so a phone's snapshot (8 MiB) leaves the rest on the computer.
+    const messages = [
+      ...Array.from({ length: 400 }, (_, n) => ({ id: `old${n}`, role: 'assistant' as const, content: `old ${n} `.repeat(200), timestamp: at(n) })),
+      { id: 'large', role: 'assistant' as const, content: 'L'.repeat(200 * 1024), timestamp: at(400) },
+      { id: 'pictured', role: 'user' as const, content: 'see this', images: [image], timestamp: at(401) },
+      ...Array.from({ length: 9 }, (_, n) => ({ id: `new${n}`, role: 'assistant' as const, content: 'N'.repeat(1024 * 1024), timestamp: at(402 + n) }))
+    ]
+    p.mms.threads.mutateThreadData(thread.id, () => ({ messages }))
+    const call = (method: string, params: unknown) => b.rpc(method, params, { id: newId('rpc'), deadlineMs: 10_000 })
+    // What the phone does: a reply too large for one RPC reply comes as `{ paged }`, fetched with `reply.page`.
+    const read = async (params: unknown) => {
+      const reply = (await call('thread.messages', params)) as Record<string, any>
+      if (!reply.paged) return reply
+      const parts: Buffer[] = []
+      for (let index = 0; index < reply.paged.pages; index++)
+        parts.push(Buffer.from(((await call('reply.page', { id: reply.paged.id, index })) as { data: string }).data, 'base64'))
+      return JSON.parse(Buffer.concat(parts).toString('utf8'))
+    }
+    const walk = async (loaded: boolean) => {
+      const snapshot = new MmsRemoteBackend(p.mms).snapshot(thread.id) as { messages: typeof messages; earlier?: { before: string; count: number } }
+      expect(snapshot.earlier?.count).toBeGreaterThan(400)
+      // Not loaded: the pages come from thread.db, and reading them does not load the thread.
+      if (!loaded) expect(p.mms.orchestrator.releaseIfIdle(thread.id)).toBe(true)
+      let shown = snapshot.messages
+      let earlier = snapshot.earlier
+      let pages = 0
+      while (earlier) {
+        const page = await read({ threadId: thread.id, before: earlier.before })
+        expect(page.messages.length).toBeGreaterThan(0)
+        shown = [...page.messages, ...shown]
+        earlier = page.earlier
+        pages++
+      }
+      expect(pages).toBeGreaterThan(1)
+      expect(shown.map((message) => message.id)).toEqual(messages.map((message) => message.id))
+      expect(shown.find((message) => message.id === 'large')?.content).toBe(messages[400].content)
+      expect(shown.find((message) => message.id === 'pictured')?.images).toEqual([image])
+      expect(p.mms.orchestrator.hasSession(thread.id)).toBe(loaded)
+    }
+    expect(p.mms.threads.usesThreadDb(thread.id)).toBe(true)
+    await walk(false)
+    // Loaded (a turn ran since): the same pages, from memory.
+    await walk(true)
+    // A transcript never goes to net.db: the pages run outside the request ledger.
+    const kept = p.aDb.database
+      .prepare("SELECT COUNT(*) AS n FROM net_executions WHERE target IN ('thread.messages','reply.page')")
+      .get() as { n: number }
+    expect(kept.n).toBe(0)
+    // A cursor the thread no longer has asks the phone to start again from a snapshot.
+    await expect(call('thread.messages', { threadId: thread.id, before: 'gone' })).rejects.toMatchObject({ code: 'snapshot_required' })
+  }, 60_000)
 })

@@ -316,6 +316,15 @@ describe('GitService commit', () => {
     expect(porcelain(cwd)).toEqual(['?? .mousse/state.json'])
   })
 
+  it('with all, commits in a project whose .gitignore lists .mousse/ while that folder exists', async () => {
+    const cwd = repo()
+    write(cwd, '.gitignore', '.mousse/\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-m', 'ignore .mousse')
+    write(cwd, 'a.txt'); write(cwd, '.mousse/state.json')
+    await new GitService().commit(cwd, USER, 'a', { all: true })
+    expect(git(cwd, 'show', '--name-only', '--format=', 'HEAD')).toBe('a.txt')
+    expect(porcelain(cwd)).toEqual([])
+  })
+
   it('leaves HEAD, index and tree as they were when a hook rejects an empty-index commit', async () => {
     const cwd = repo(); withHook(cwd, rejectingHook)
     write(cwd, 'a.txt'); write(cwd, 'base.txt', 'changed\n')
@@ -944,7 +953,8 @@ describe('GitService live output and cancel', () => {
     const service = new GitService()
     const { events, onEvent } = collect()
     const pushing = service.push(cwd, USER, { operationId: 'op-pre-push', onEvent }).then(() => null, (error: unknown) => error as { code?: string })
-    await until(() => events.some((event) => event.phase === 'hook' && event.hook?.name === 'pre-push'))
+    // The hook has started its grandchild (its pids are written), not only been reported: a cancel before that stops nothing to check.
+    await until(() => events.some((event) => event.phase === 'hook' && event.hook?.name === 'pre-push') && existsSync(pidFile))
     service.cancelOperation('op-pre-push')
     expect(await pushing).toMatchObject({ code: 'git_cancelled' })
     for (const pid of pidsOf(pidFile)) expect(await waitDead(pid)).toBe(true)
@@ -1080,7 +1090,8 @@ describe('GitService live output and cancel', () => {
     const service = new GitService()
     const { events, onEvent } = collect()
     const committing = service.commit(cwd, USER, 'never lands', { all: true, operationId: 'op-lock', onEvent }).then(() => null, (error: unknown) => error as { code?: string; details?: unknown })
-    await until(() => events.some((event) => event.phase === 'hook'))
+    // The hook has run far enough to take its lock (for `hook`) and start its grandchild.
+    await until(() => events.some((event) => event.phase === 'hook') && existsSync(pidFile))
     if (who === 'outside') writeFileSync(lock, 'from another program', { flag: 'wx' })
     service.cancelOperation('op-lock')
     const error = await committing

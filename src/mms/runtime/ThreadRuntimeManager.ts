@@ -12,6 +12,7 @@ import type { OrchestratorService } from '../orchestrator/OrchestratorService'
 import type { PtyManager } from '../terminals/PtyManager'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { ThreadRuntime } from './ThreadRuntime'
+import type { UnseenDoneStore } from './UnseenDoneStore'
 import type { Agent, AgentStatus, Task, ThreadActivityState } from '../../shared/types'
 
 const BUSY_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set([
@@ -45,6 +46,11 @@ interface RuntimeListenerBundle {
 
 export class ThreadRuntimeManager extends EventEmitter {
   private readonly runtimes = new Map<string, ThreadRuntime>()
+
+  /** How many thread runtimes are held (the memory monitor's count). */
+  runtimeCount(): number {
+    return this.runtimes.size
+  }
   private readonly registryListeners = new Map<string, RuntimeListenerBundle>()
   /** Turn lifecycle state before thread-owned background agent work is folded in. */
   private readonly turnActivity = new Map<string, ThreadActivityState>()
@@ -56,17 +62,25 @@ export class ThreadRuntimeManager extends EventEmitter {
   private orchestrator: OrchestratorService | null = null
   private ptyManager: PtyManager | null = null
   private questions: UserQuestionService | null = null
+  /** Threads showing Done: finished, and not seen in a window since. Kept across restarts. */
+  private unseenDone: UnseenDoneStore | null = null
+  /** When each runtime was last used (hydrated, read through `getOrHydrate`, given an activity or a terminal). */
+  private readonly lastUse = new Map<string, number>()
+  /** The idle sweep's clock (`ThreadResidency.now`), so the sweep and the uses above are timed alike. */
+  private now: () => number = Date.now
 
   attach(deps: {
     threadStore: ThreadDataStore
     orchestrator: OrchestratorService
     ptyManager: PtyManager
     questions: UserQuestionService
+    unseenDone?: UnseenDoneStore
   }): void {
     this.threadStore = deps.threadStore
     this.orchestrator = deps.orchestrator
     this.ptyManager = deps.ptyManager
     this.questions = deps.questions
+    this.unseenDone = deps.unseenDone ?? null
 
     // Wire per-session agent/task registries from orchestrator hydration.
     deps.orchestrator.setRuntimeManager(this)
@@ -76,6 +90,10 @@ export class ThreadRuntimeManager extends EventEmitter {
     return this.runtimes.get(threadId)
   }
 
+  setClock(now: () => number): void {
+    this.now = now
+  }
+
   /**
    * Hydrate or return existing runtime. Loads agents/tasks from disk once.
    * Does not call getOrCreateSession (avoids recursion). Does not kill PTYs.
@@ -83,6 +101,7 @@ export class ThreadRuntimeManager extends EventEmitter {
    */
   getOrHydrate(threadId: string): ThreadRuntime {
     let rt = this.runtimes.get(threadId)
+    this.lastUse.set(threadId, this.now())
     if (rt?.isHydrated) return rt
     if (!rt) {
       rt = new ThreadRuntime(threadId)
@@ -235,10 +254,54 @@ export class ThreadRuntimeManager extends EventEmitter {
     )
     if (!force && state === rt.activity) return
     if (state !== rt.activity) rt.setActivity(state)
+    this.noteDone(threadId, state)
     // Always fan out a full authoritative map so clients merge, never clobber.
     const activity = this.getActivitySnapshot()
     this.emit('activity', { threadId, state, activity })
     this.emit('activity.snapshot', { activity })
+  }
+
+  /**
+   * Done means the thread finished and nobody has looked since: the mark is set when its work cycle ends and
+   * dropped when the next one starts (or the thread is seen). A personal bot's chat is never listed, so never marked.
+   */
+  private noteDone(threadId: string, state: ThreadActivityState): void {
+    if (!this.unseenDone) return
+    if (state !== 'completed') {
+      this.unseenDone.delete(threadId)
+      return
+    }
+    if (this.unseenDone.has(threadId) || this.threadStore?.getThread(threadId)?.botOwned) return
+    this.unseenDone.add(threadId)
+  }
+
+  /**
+   * A window opened the thread, or showed it in focus: its Done, and the Done of its subagents (which its row
+   * shows rolled up), is cleared and every window is told. Seeing a thread is not activity on it: it moves no
+   * updated time and no list. True when something showed Done.
+   */
+  markSeen(threadId: string): boolean {
+    const ids = [threadId, ...(this.unseenDone?.list() ?? []).filter((id) => id !== threadId && this.descendsFrom(id, threadId))]
+    let cleared = false
+    for (const id of ids) {
+      if (this.unseenDone?.delete(id)) cleared = true
+      const rt = this.runtimes.get(id)
+      // Still waiting on its background work: Done is set again when that finishes.
+      if (!rt || rt.activity !== 'completed' || this.turnActivity.get(id) !== 'completed') continue
+      this.turnActivity.set(id, 'idle')
+      this.publishDerivedActivity(id, rt)
+      cleared = true
+    }
+    return cleared
+  }
+
+  private descendsFrom(threadId: string, ancestorId: string): boolean {
+    let current = this.threadStore?.getThread(threadId)?.lineage?.parentThreadId
+    for (let depth = 0; current && depth < 64; depth++) {
+      if (current === ancestorId) return true
+      current = this.threadStore?.getThread(current)?.lineage?.parentThreadId
+    }
+    return false
   }
 
   getActivity(threadId: string): ThreadActivityState {
@@ -265,10 +328,11 @@ export class ThreadRuntimeManager extends EventEmitter {
    * Refuse deletion when the thread owns active turn/agent/task/PTY/question work.
    */
   /** `ignoreTurn`: a bot's turn there, which the accepted trash stops in its drain. */
-  assertDeletable(threadId: string, options: { ignoreTurn?: boolean } = {}): void {
+  /** `ignoreQuestions`: the thread's questions belong to a turn a delete is about to stop, which ends them. */
+  assertDeletable(threadId: string, options: { ignoreTurn?: boolean; ignoreQuestions?: boolean } = {}): void {
     const rt = this.getOrHydrate(threadId)
     const turnRunning = !options.ignoreTurn && (this.orchestrator?.isActiveTurnRunning(threadId) ?? false)
-    const pendingQ = this.questions?.listPendingForThread(threadId) ?? []
+    const pendingQ = options.ignoreQuestions ? [] : this.questions?.listPendingForThread(threadId) ?? []
     const livePtys = [...rt.ptyIds].filter((id) => this.ptyManager?.isAlive(id))
     const runningAgents = rt.agents
       .list()
@@ -305,6 +369,70 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.turnActivity.delete(threadId)
     this.pendingDelegations.delete(threadId)
     this.pendingBackgroundWork.delete(threadId)
+    this.unseenDone?.delete(threadId)
+    this.lastUse.delete(threadId)
+  }
+
+  /**
+   * Why the thread's runtime must stay in memory, or undefined when dropping it loses nothing: its agents and tasks
+   * are saved on every change and read back by `getOrHydrate`, and its activity is what a restart shows (Idle, or a
+   * personal bot's chat that nothing lists). Cheap and synchronous; never hydrates.
+   */
+  runtimeHoldReason(threadId: string): string | undefined {
+    const rt = this.runtimes.get(threadId)
+    if (!rt) return undefined
+    // A loaded session shares the runtime's agent and task registries; the session's release comes first.
+    if (this.orchestrator?.hasSession(threadId)) return 'thread loaded'
+    if (this.orchestrator?.isTurnActive(threadId) || this.orchestrator?.isActiveTurnRunning(threadId)) return 'turn running'
+    if (!this.activityRebuiltByRestart(threadId, rt.activity) || !this.activityRebuiltByRestart(threadId, this.turnActivity.get(threadId) ?? rt.activity))
+      return 'activity shown'
+    if (this.pendingDelegations.has(threadId) || this.pendingBackgroundWork.has(threadId)) return 'waiting on work'
+    if (rt.agents.list().some((agent) => BUSY_AGENT_STATUSES.has(agent.status))) return 'agent running'
+    if (rt.tasks.list().some((task) => task.status === 'in_progress')) return 'task in progress'
+    if (rt.ptyIds.size) return 'terminal open'
+    if (rt.pendingQuestionIds.size || this.questions?.listPendingForThread(threadId).length) return 'question pending'
+    if (rt.connectionFailed) return 'connection failed'
+    return undefined
+  }
+
+  /** Idle is what every thread shows after a restart; Done only when it is marked unseen, which is kept. */
+  private activityRebuiltByRestart(threadId: string, state: ThreadActivityState): boolean {
+    if (state === 'idle') return true
+    if (state !== 'completed' || this.unseenDone?.has(threadId)) return false
+    // A personal bot's chat is never listed, so its Done is never shown or marked.
+    return Boolean(this.threadStore?.getThread(threadId)?.botOwned)
+  }
+
+  /**
+   * Drops the thread's runtime when nothing holds it (`runtimeHoldReason`, and `keep`). Kills nothing and dismisses
+   * nothing: a held runtime stays as it is. Emits nothing; the next use hydrates it again from disk. True when dropped.
+   */
+  releaseRuntime(threadId: string, keep?: (threadId: string) => string | undefined): boolean {
+    const rt = this.runtimes.get(threadId)
+    if (!rt) return false
+    if (this.runtimeHoldReason(threadId) !== undefined || keep?.(threadId) !== undefined) return false
+    this.detachRegistryListeners(threadId, rt)
+    this.runtimes.delete(threadId)
+    this.turnActivity.delete(threadId)
+    this.lastUse.delete(threadId)
+    return true
+  }
+
+  /**
+   * The idle sweep (`ThreadResidency.sweepNow`): drops runtimes unused for `idleMs` before `now`, and at once those
+   * of archived threads, unless something holds them. Returns the threads dropped.
+   */
+  releaseIdleRuntimes(idleMs: number, now: number, keep?: (threadId: string) => string | undefined): string[] {
+    const out: string[] = []
+    for (const threadId of [...this.runtimes.keys()]) {
+      let since = this.lastUse.get(threadId)
+      if (since === undefined) this.lastUse.set(threadId, (since = now))
+      const thread = this.threadStore?.getThread(threadId)
+      const archived = Boolean(thread?.settledAt)
+      if (!archived && now - since < idleMs) continue
+      if (this.releaseRuntime(threadId, keep)) out.push(threadId)
+    }
+    return out
   }
 
   /**
@@ -316,8 +444,9 @@ export class ThreadRuntimeManager extends EventEmitter {
     for (const thread of this.threadStore.listAllThreads()) {
       if (thread.settledAt) continue
       const data = this.threadStore.loadThreadWorkState(thread.id)
+      // Only threads with work to look at: a runtime for every started thread is what the idle sweep later drops.
       const hasWork = data.agents.length > 0 || data.tasks.length > 0 || data.queued > 0 || data.sessions > 0
-      if (!hasWork && !this.threadStore.isThreadStarted(thread.id)) continue
+      if (!hasWork) continue
       const rt = this.getOrHydrate(thread.id)
       for (const agent of rt.agents.list()) {
         // Headless children are owned by the daemon process and cannot outlive a restart.
@@ -334,6 +463,19 @@ export class ThreadRuntimeManager extends EventEmitter {
           rt.tasks.updateStatus(task.id, 'interrupted')
         }
       }
+    }
+    // Done outlives the service: threads that finished unseen before the restart show Done again. A thread that
+    // is gone or archived since is no longer listed, so its mark is dropped.
+    for (const threadId of this.unseenDone?.list() ?? []) {
+      const thread = this.threadStore.getThread(threadId)
+      if (!thread || thread.settledAt) {
+        this.unseenDone?.delete(threadId)
+        continue
+      }
+      // Hydrated first: a runtime made here starts its turn state from its own (idle) activity.
+      const rt = this.getOrHydrate(threadId)
+      this.turnActivity.set(threadId, 'completed')
+      this.publishDerivedActivity(threadId, rt)
     }
   }
 }

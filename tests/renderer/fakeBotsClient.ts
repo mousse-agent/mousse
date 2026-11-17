@@ -4,6 +4,8 @@
  */
 import { vi } from 'vitest'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
+import type { BotMemoryEntry } from '../../src/shared/bots/personal/memory'
+import type { BotDevicesView } from '../../src/shared/bots/personal/deviceAccess'
 import type { PersonalBotsClient, PersonalBotsEvents } from '../../src/renderer/services/personalBotsClient'
 
 export const AT = '2026-11-07T09:00:00.000Z'
@@ -25,22 +27,31 @@ export interface FakeBots {
   bots: BotSummary[]
   chats: Record<string, BotChatMessage[]>
   details: Record<string, BotDetail>
-  live: Record<string, { activationId: string; chip?: BotChip }>
+  live: Record<string, { activationId: string; chip?: BotChip; status?: string }>
+  /** Each bot's memory entries, as `bots.memory.list` returns them. */
+  memory: Record<string, BotMemoryEntry[]>
+  /** Each bot's Devices (`bots.devices.get`); a bot without one reaches every device and has none to pick. */
+  devices: Record<string, BotDevicesView>
   calls: Array<[string, ...unknown[]]>
   emit: {
     changed(botId: string): void
+    /** The window's service connection was opened again (`bots:changed` with `reread`). */
+    reread(): void
     message(botId: string, message: BotChatMessage): void
-    activity(botId: string, chip: BotChip | null, activationId?: string): void
+    /** `status`: what the activation said it is doing now; absent clears it. */
+    activity(botId: string, chip: BotChip | null, activationId?: string, status?: string): void
   }
 }
 
-export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, BotChatMessage[]>; details?: Record<string, BotDetail> } = {}): FakeBots {
-  const listeners = { changed: new Set<(e: { botId?: string }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null }) => void>() }
+export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, BotChatMessage[]>; details?: Record<string, BotDetail>; memory?: Record<string, BotMemoryEntry[]> } = {}): FakeBots {
+  const listeners = { changed: new Set<(e: { botId?: string; reread?: boolean }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null; status?: string }) => void>() }
   const fake: FakeBots = {
     bots: [...(initial.bots ?? [])],
     chats: { ...(initial.chats ?? {}) },
     details: { ...(initial.details ?? {}) },
     live: {},
+    memory: { ...(initial.memory ?? {}) },
+    devices: {},
     calls: [],
     client: undefined as unknown as PersonalBotsClient,
     events: {
@@ -52,8 +63,9 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     },
     emit: {
       changed: (botId) => { for (const cb of listeners.changed) cb({ botId }) },
+      reread: () => { for (const cb of listeners.changed) cb({ reread: true }) },
       message: (botId, row) => { for (const cb of listeners.message) cb({ botId, message: row }) },
-      activity: (botId, chip, activationId = 'act1') => { for (const cb of listeners.activity) cb({ botId, activationId, chip }) }
+      activity: (botId, chip, activationId = 'act1', status) => { for (const cb of listeners.activity) cb({ botId, activationId, chip, ...(status ? { status } : {}) }) }
     }
   }
   const find = (botId: string) => {
@@ -86,19 +98,44 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       // The service saves the files in the bot's files folder; the row names the copies.
       const saved = attachments?.map((file) => ({ name: file.name, path: `/home/me/.mousse/bots/files/${botId}/attachments/2026-11-08/${file.name}` }))
       const quoted = replyTo ? (fake.chats[botId] ?? []).find((entry) => entry.id === replyTo) : undefined
-      const row = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text, ...(saved?.length ? { attachments: saved } : {}), ...(quoted ? { replyTo: { id: quoted.id, author: quoted.author, text: quoted.text } } : {}) })
+      const row = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text, clientRequestId, ...(saved?.length ? { attachments: saved } : {}), ...(quoted ? { replyTo: { id: quoted.id, author: quoted.author, text: quoted.text } } : {}) })
       fake.chats[botId] = [...(fake.chats[botId] ?? []), row]
       return row
     })),
     stop: vi.fn((botId) => record('stop', [botId], () => undefined)),
     stopWork: vi.fn((botId, workId) => record('stopWork', [botId, workId], () => undefined)),
     markRead: vi.fn((botId, at) => record('markRead', [botId, at], () => undefined)),
+    react: vi.fn((botId, messageId, emoji) => record('react', [botId, messageId, emoji], () => {
+      const rows = fake.chats[botId] ?? []
+      const at = rows.findIndex((entry) => entry.id === messageId)
+      if (at < 0) throw new Error('No such message')
+      const { reaction: _old, ...rest } = rows[at]!
+      rows[at] = emoji === null ? rest : { ...rest, reaction: emoji }
+      return rows[at]!
+    })),
     answer: vi.fn((botId, askId, answer) => record('answer', [botId, askId, answer], () => {
       const rows = fake.chats[botId] ?? []
       const row = rows.find((entry) => entry.ask?.askId === askId)
       if (!row?.ask) throw new Error('No such ask')
       const next = { ...row, ask: { ...row.ask, status: answer === 'allow' ? 'allowed' as const : 'not_now' as const } }
       fake.chats[botId] = rows.map((entry) => (entry.id === row.id ? next : entry))
+      return next
+    })),
+    // A tap: the owner's reply (the label) to the question's bubble, and the bubble answered.
+    answerAction: vi.fn(async () => ({ status: 'done' })),
+    answerQuestion: vi.fn((botId, questionId, choice, clientRequestId) => record('answerQuestion', [botId, questionId, choice], () => {
+      const rows = fake.chats[botId] ?? []
+      const bubble = rows.find((entry) => entry.question?.questionId === questionId)
+      if (!bubble?.question) throw Object.assign(new Error('This bot has no such question.'), { code: 'question_not_found' })
+      if (bubble.question.status === 'answered') throw Object.assign(new Error('This was already answered.'), { code: 'question_answered' })
+      const next = { ...bubble, question: { ...bubble.question, status: 'answered' as const, answer: choice, answeredWith: 'choice' as const } }
+      const reply = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text: choice, clientRequestId, replyTo: { id: bubble.id, author: 'bot', text: bubble.text.slice(0, bubble.plainFrom).trim() }, answers: { questionId, tapped: true } })
+      fake.chats[botId] = [...rows.map((entry) => (entry.id === bubble.id ? next : entry)), reply]
+      return { message: reply, question: next }
+    })),
+    setPermission: vi.fn((botId, permissionId, enabled) => record('setPermission', [botId, permissionId, enabled], () => {
+      const next = { ...detail(botId), permissions: detail(botId).permissions.map((item) => item.id === permissionId ? { ...item, enabled } : item) }
+      fake.details[botId] = next
       return next
     })),
     revokePermission: vi.fn((botId, permissionId) => record('revokePermission', [botId, permissionId], () => {
@@ -109,12 +146,52 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     addSchedule: vi.fn((botId, when, prompt, model) => record('addSchedule', [botId, when, prompt, model], () => detail(botId))),
     model: vi.fn((botId) => record('model', [botId], () => ({ model: null, models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }))),
     setModel: vi.fn((botId, model) => record('setModel', [botId, model], () => detail(botId).summary)),
+    setSlots: vi.fn((botId, change) => record('setSlots', [botId, change], () => detail(botId).summary)),
+    setCustomSlot: vi.fn((botId, name, pick, description) => record('setCustomSlot', [botId, name, pick, description], () => detail(botId).summary)),
+    clearChat: vi.fn((botId) => record('clearChat', [botId], () => { fake.chats[botId] = [] })),
+    wipeMemory: vi.fn((botId, keep) => record('wipeMemory', [botId, keep], () => {
+      // History only: the chat goes and the listed entries (the owner's and the bot's notes) stay.
+      const before = fake.memory[botId] ?? []
+      if (keep) fake.chats[botId] = []
+      else fake.memory[botId] = []
+      return { forgotten: keep ? 0 : before.length }
+    })),
+    reset: vi.fn((botId) => record('reset', [botId], () => {
+      fake.chats[botId] = []
+      fake.memory[botId] = []
+      return detail(botId).summary
+    })),
+    modelChoices: vi.fn(() => record('modelChoices', [], () => ({ models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }))),
     removeSchedule: vi.fn((botId, scheduleId) => record('removeSchedule', [botId, scheduleId], () => {
       const next = { ...detail(botId), runs: detail(botId).runs.filter((item) => item.id !== scheduleId) }
       fake.details[botId] = next
       return next
     })),
-    exportMemory: vi.fn((botId, dir) => record('exportMemory', [botId, dir], () => ({ files: [`${dir}/memory.md`] })))
+    cancelReminder: vi.fn((botId, reminderId) => record('cancelReminder', [botId, reminderId], () => {
+      const next = { ...detail(botId), reminders: (detail(botId).reminders ?? []).filter((item) => item.id !== reminderId) }
+      fake.details[botId] = next
+      return next
+    })),
+    exportMemory: vi.fn((botId, dir) => record('exportMemory', [botId, dir], () => ({ files: [`${dir}/memory.md`] }))),
+    memory: vi.fn((botId) => record('memory', [botId], () => ({ entries: (fake.memory[botId] ?? []).map((entry) => ({ ...entry })), gauge: 'core 0/2,000' }))),
+    forgetMemory: vi.fn((botId, id) => record('forgetMemory', [botId, id], () => { fake.memory[botId] = (fake.memory[botId] ?? []).filter((entry) => entry.id !== id) })),
+    editMemory: vi.fn((botId, ref, text) => record('editMemory', [botId, ref, text], () => {
+      const at = (fake.memory[botId] ?? []).findIndex((entry) => entry.ref === ref)
+      if (at < 0) throw Object.assign(new Error('This memory changed since you opened it.'), { code: 'invalid_params' })
+      const old = fake.memory[botId]![at]!
+      const entry = { ...old, version: old.version + 1, ref: `${old.id}v${old.version + 1}`, text, by: 'you said' as const }
+      fake.memory[botId]![at] = entry
+      return { ...entry }
+    })),
+    devices: vi.fn((botId) => record('devices', [botId], () => fake.devices[botId] ?? { access: { mode: 'all' as const }, devices: [] })),
+    setDevices: vi.fn((botId, access) => record('setDevices', [botId, access], () => {
+      const next = { ...(fake.devices[botId] ?? { devices: [] }), access }
+      delete (next as { unreadable?: true }).unreadable
+      fake.devices[botId] = next
+      // The list says it too, as the service's own summaries do on the home computer.
+      fake.bots = fake.bots.map((bot) => (bot.id === botId && bot.reach !== undefined ? { ...bot, reach: access.mode } : bot))
+      return next
+    }))
   }
   return fake
 }

@@ -48,27 +48,27 @@ export function mcpAttachable(caps: ProviderCapabilities): boolean {
 /** A delegation the target cannot honour; `delegate_task` returns it instead of starting a child. */
 export interface SubagentRefusal {
   /**
-   * `shared_unsupported_for_provider`: the target cannot run a `shared` child (use `isolated`).
+   * `shared_unsupported_for_provider`: the target cannot run a read-only child (leave `readOnly` out).
    * `read_only_caller_requires_shared`: the caller is itself read-only, so its children must be too.
    */
   code: 'shared_unsupported_for_provider' | 'read_only_caller_requires_shared'
   message: string
 }
 
-/** What `ProviderAdapter.childPreflight` is asked about: the requested workspace and the parent's workspace path. */
+/** What `ProviderAdapter.childPreflight` is asked about: whether the child is read-only, and the parent's workspace path. */
 export interface ChildPreflightContext {
-  workspace: 'shared' | 'isolated'
+  readOnly: boolean
   cwd: string | null
 }
 
 /**
- * Issue #142: a `shared` child must be read-only, so a provider that cannot hold a child to that (it
- * rejects plan mode) is refused as the target of one. `label` names the provider for the message.
+ * Issue #142: a provider that cannot hold a child to read-only (it rejects plan mode) is refused as the target of a
+ * read-only child (`delegate_task` `readOnly`). `label` names the provider for the message.
  */
-export function subagentTargetRefusal(caps: ProviderCapabilities, label: string, workspace: 'shared' | 'isolated'): SubagentRefusal | null {
-  if (caps.childPolicy === 'enforced' || workspace !== 'shared') return null
+export function subagentTargetRefusal(caps: ProviderCapabilities, label: string, readOnly: boolean): SubagentRefusal | null {
+  if (caps.childPolicy === 'enforced' || !readOnly) return null
   return {
     code: 'shared_unsupported_for_provider',
-    message: `${label} cannot run a read-only (shared) subagent: Mousse cannot keep it read-only. Use workspace "isolated", or choose another provider or model for this task.`
+    message: `${label} cannot run a read-only subagent: Mousse cannot keep it read-only. Leave readOnly out, or choose another provider or model for this task.`
   }
 }

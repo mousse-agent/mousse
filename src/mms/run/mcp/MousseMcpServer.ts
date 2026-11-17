@@ -1,3 +1,4 @@
+import { runInWorkScope } from '../../execution/workScope'
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
@@ -5,10 +6,24 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { mousseVersion } from '../../appVersion'
-import { McpToolError, type McpCredentialAuthority, type McpToolErrorCode, type ToolOutcome, type ToolRegistry } from './appTools'
+import { McpToolError, refusalOutcome, type McpCredentialAuthority, type MousseTool, type ToolOutcome, type ToolRegistry } from './appTools'
 import { mousseOrchestrationInstructions } from './instructions'
 import type { BearerTurn, CredentialRecord, McpCredentials, TurnSettlement } from './McpCredentials'
-import { RELAY_INSTRUCTIONS, type RelayHandler } from './relay/handler'
+import type { CallAttribution } from '../nativeHelpers'
+import { RELAY_BOT_INSTRUCTIONS, RELAY_INSTRUCTIONS, type RelayHandler } from './relay/handler'
+
+/** The `tools/list` `_meta` key that keeps a tool out of Claude Code's tool search (`MousseTool.alwaysLoad`). */
+export const ALWAYS_LOAD_META = 'anthropic/alwaysLoad'
+
+/** One Mousse tool as `tools/list` gives it; an `alwaysLoad` tool says so in its `_meta`. */
+export function listedTool(tool: Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'alwaysLoad'>) {
+  return {
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object> },
+    ...(tool.alwaysLoad ? { _meta: { [ALWAYS_LOAD_META]: true } } : {})
+  }
+}
 
 /** The MCP relay (`mousse-relay`) a turn attaches: its URL on the same listener, and the catalogue revision. */
 export interface McpRelayAttachment {
@@ -23,6 +38,12 @@ export interface McpAttachment {
   token: string
   /** The MCP relay, under the same bearer; absent: the turn attaches only `mousse`. */
   relay?: McpRelayAttachment
+  /**
+   * What decides the tools the server lists under this bearer: the caller's policy (and a recorded access level), as the
+   * gateway keys the credential epoch on them. Equal for two bearers that differ only by a rotation, so a runtime that
+   * caches the tool list knows a new bearer alone from new tools; absent counts as one value.
+   */
+  tools?: string
 }
 
 /**
@@ -37,14 +58,25 @@ export interface McpAttachmentProvider {
   revokeThread(threadId: string): void
 }
 
-/** JSON-RPC error codes the server uses (implementation-defined range). */
-export const MCP_ERROR_CODES: Record<McpToolErrorCode | 'mousse_unauthorized', number> = {
+/**
+ * Notices a running turn gets with the result of one of its Mousse tool calls (docs/plans/tool-api.md §2.2): its
+ * pending subagent results and requests, on a runtime that has no native steer. `release` gives them back when the
+ * result never reached the model.
+ */
+export interface McpToolBoundary {
+  deliver(caller: { threadId: string; runId: string }): { text: string; release(): void } | null
+}
+
+/** The line that opens the notices a tool result carries, so they are never read as the tool's own output. */
+export const BOUNDARY_NOTICE_HEADER = 'Mousse notices that arrived while you were working (not part of the tool result above):'
+
+/**
+ * JSON-RPC error codes the server uses (implementation-defined range), for protocol and credential faults only: a
+ * tool's refusal is an error result in the refusal shape (`appTools/refusal.ts`).
+ */
+export const MCP_ERROR_CODES: Record<'mousse_unauthorized' | 'mousse_caller_not_live' | 'mousse_unknown_tool', number> = {
   mousse_unauthorized: -32001,
   mousse_caller_not_live: -32002,
-  mousse_scope_denied: -32003,
-  mousse_ceiling_exceeded: -32004,
-  mousse_read_only: -32005,
-  mousse_conflict: -32006,
   mousse_unknown_tool: -32601
 }
 
@@ -73,6 +105,14 @@ export class MousseMcpServer implements McpAttachmentProvider {
       registry: ToolRegistry
       /** The MCP relay served at `RELAY_PATH`; absent: that path is not found. */
       relay?: RelayHandler
+      /** Notices handed over with `mousse` tool results; relayed tools carry none. Absent: none are. */
+      boundary?: McpToolBoundary
+      /**
+       * Who made a call that arrived under a thread's credential, from the ids its runtime put in `_meta`: the run itself,
+       * one of its native helpers, or nobody it can tell while a helper may be running (docs/plans/tool-api.md §2.7). Absent:
+       * every call is the run's own.
+       */
+      attribute?: (threadId: string, meta: unknown) => Promise<CallAttribution>
       /** Defaults to `127.0.0.1`. */
       host?: string
       /** Defaults to 0 (a random free port). */
@@ -96,6 +136,13 @@ export class MousseMcpServer implements McpAttachmentProvider {
   }
 
   async start(): Promise<void> {
+    if (this.http) return
+    // Started as the profile's work: a server first started inside a turn would otherwise hand that turn's thread
+    // (`currentWorkScope`) to every request it ever serves.
+    return runInWorkScope(null, () => this.startOwned())
+  }
+
+  private async startOwned(): Promise<void> {
     if (this.http) return
     const http = createServer((req, res) => {
       void this.handle(req, res).catch((error) => {
@@ -189,9 +236,12 @@ export class MousseMcpServer implements McpAttachmentProvider {
     }
     const request = new AbortController()
     this.track(credential.threadId, request)
-    const server = relay ? this.relayServer(relay, credential, request.signal) : this.mcpServer(credential, request.signal)
+    // Notices handed over with a result that was never written out go back to pending.
+    const handedOver: Array<() => void> = []
+    const server = relay ? this.relayServer(relay, credential, request.signal) : this.mcpServer(credential, request.signal, handedOver)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
     res.once('close', () => {
+      if (!res.writableFinished) for (const release of handedOver) release()
       request.abort(new Error('The MCP request closed'))
       this.untrack(credential.threadId, request)
       void transport.close().catch(() => undefined)
@@ -202,32 +252,64 @@ export class MousseMcpServer implements McpAttachmentProvider {
   }
 
   /** One SDK server per request, bound to the credential the request's token resolved to. */
-  private mcpServer(resolved: CredentialRecord, requestSignal: AbortSignal): Server {
+  private mcpServer(resolved: CredentialRecord, requestSignal: AbortSignal, handedOver: Array<() => void> = []): Server {
+    const { registry, credentials } = this.options
+    // A bot's thread gets no orchestration guidance: it names delegation and thread tools no bot can hold.
     const server = new Server(
       { name: 'mousse', version: mousseVersion() },
-      { capabilities: { tools: {} }, instructions: mousseOrchestrationInstructions() }
+      { capabilities: { tools: {} }, ...(registry.isBotThread(resolved.threadId) ? {} : { instructions: mousseOrchestrationInstructions() }) }
     )
-    const { registry, credentials } = this.options
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      // For the thread's ceiling, not the turn's mode, and for the credential's agent access level as it
-      // is now. A runtime that caches the list gets a new bearer when the level changes (the level is part
-      // of the runtime generation), and the call-time check refuses a tool the list left out in any case.
-      tools: registry.listForThread(resolved.threadId, 'default', (credentials.current(resolved.tokenHash) ?? resolved).accessLevel).map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object> }
-      }))
+      // For the thread's ceiling, not the turn's mode; the call-time check refuses a tool the list left out in any case.
+      // A bot's thread tools follow the run the credential acts for now (`ToolListing.botTurnTools`).
+      tools: ((current) => registry.listForThread(resolved.threadId, 'default', current.runId))(credentials.current(resolved.tokenHash) ?? resolved).map(listedTool)
     }))
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { clientRequestId, ...args } = (request.params.arguments ?? {}) as Record<string, unknown>
       const toolCallId = typeof clientRequestId === 'string' && clientRequestId.trim()
         ? `mcp:${clientRequestId.trim()}`
         : `mcp:${randomUUID()}`
-      return this.tracked(resolved, (authority) =>
-        registry.call(request.params.name, args, { credential: authority, toolCallId, signal: AbortSignal.any([requestSignal, extra.signal]) })
-      )
+      const signal = AbortSignal.any([requestSignal, extra.signal])
+      return this.tracked(resolved, async (authority) => {
+        // A call that is not the run's own (a native helper's, or one nothing ties to the run while a helper may be
+        // running) holds the run's delegable authority only, and never takes the run's notices with its result.
+        const helper = await this.attributed(authority.threadId, request.params._meta)
+        const outcome = await registry.call(request.params.name, args, { credential: authority, toolCallId, signal, ...(helper ? { helper } : {}) })
+        return helper ? outcome : this.withBoundaryNotices(outcome, authority, signal, handedOver)
+      })
     })
     return server
+  }
+
+  /** The call's attribution when it is not the run's own; undefined for the run's own call. A failed check fails closed. */
+  private async attributed(threadId: string, meta: unknown): Promise<Exclude<CallAttribution, { kind: 'host' }> | undefined> {
+    const attribute = this.options.attribute
+    if (!attribute) return undefined
+    try {
+      const attribution = await attribute(threadId, meta)
+      return attribution.kind === 'host' ? undefined : attribution
+    } catch (error) {
+      console.warn('a Mousse tool call could not be attributed; it holds delegable authority only', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return { kind: 'unattributed' }
+    }
+  }
+  /**
+   * A `mousse` tool's outcome, followed by the caller's pending notices as a separate text block when its runtime has
+   * no native steer (`McpToolBoundary`). Never inside the tool's own text, and never for a call whose request is gone.
+   */
+  private withBoundaryNotices(outcome: ToolOutcome, authority: McpCredentialAuthority, signal: AbortSignal, handedOver: Array<() => void>): McpOutcome {
+    const boundary = this.options.boundary
+    if (!boundary || signal.aborted) return outcome
+    let delivered: ReturnType<McpToolBoundary['deliver']>
+    try {
+      delivered = boundary.deliver({ threadId: authority.threadId, runId: authority.runId })
+    } catch (error) {
+      console.warn('notices could not be handed over with a tool result', { threadId: authority.threadId, error: error instanceof Error ? error.message : String(error) })
+      return outcome
+    }
+    if (!delivered) return outcome
+    handedOver.push(delivered.release)
+    return { ...outcome, notices: `${BOUNDARY_NOTICE_HEADER}\n\n${delivered.text}` }
   }
 
   /**
@@ -239,7 +321,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
   private relayServer(relay: RelayHandler, resolved: CredentialRecord, requestSignal: AbortSignal): Server {
     const server = new Server(
       { name: 'mousse-relay', version: mousseVersion() },
-      { capabilities: { tools: {} }, instructions: RELAY_INSTRUCTIONS }
+      { capabilities: { tools: {} }, instructions: relay.forBot(resolved) ? RELAY_BOT_INSTRUCTIONS : RELAY_INSTRUCTIONS }
     )
     const { credentials } = this.options
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -264,9 +346,9 @@ export class MousseMcpServer implements McpAttachmentProvider {
   /**
    * Runs one tool call under the credential as it stands for it (the run it is bound to now, its
    * ceiling and relay grant), counted as received and running for the drained-turn check; a
-   * refusal becomes a JSON-RPC error.
+   * refusal becomes an error result in the refusal shape, and a fault a JSON-RPC error.
    */
-  private async tracked(resolved: CredentialRecord, run: (authority: McpCredentialAuthority) => Promise<ToolOutcome>) {
+  private async tracked(resolved: CredentialRecord, run: (authority: McpCredentialAuthority) => Promise<McpOutcome>) {
     const { credentials } = this.options
     const record = credentials.current(resolved.tokenHash) ?? resolved
     credentials.callReceived(record.tokenHash, record.runId)
@@ -284,8 +366,12 @@ export class MousseMcpServer implements McpAttachmentProvider {
     try {
       return toolContent(await run(authority))
     } catch (error) {
+      // A refusal is an error result in the refusal shape; only a fault (the credential's turn is over, no such tool)
+      // is a JSON-RPC error.
+      const refused = refusalOutcome(error)
+      if (refused) return toolContent(refused)
       if (error instanceof McpToolError)
-        throw Object.assign(new Error(error.message), { code: MCP_ERROR_CODES[error.code], data: { ...error.details, reason: error.code } })
+        throw Object.assign(new Error(error.message), { code: MCP_ERROR_CODES[error.code as keyof typeof MCP_ERROR_CODES], data: { ...error.details, reason: error.code } })
       throw error
     } finally {
       credentials.callRunning(record.tokenHash, record.runId, -1)
@@ -306,12 +392,16 @@ export class MousseMcpServer implements McpAttachmentProvider {
   }
 }
 
-/** A tool outcome as MCP content: its text, then its images. */
-function toolContent(outcome: ToolOutcome) {
+/** A tool's outcome and the notices handed over with it (`McpToolBoundary`). */
+type McpOutcome = ToolOutcome & { notices?: string }
+
+/** A tool outcome as MCP content: its text, then its images, then any notices handed over with it as a block of their own. */
+function toolContent(outcome: McpOutcome) {
   return {
     content: [
       { type: 'text' as const, text: outcome.text },
-      ...(outcome.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
+      ...(outcome.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType })),
+      ...(outcome.notices ? [{ type: 'text' as const, text: outcome.notices }] : [])
     ],
     ...(outcome.isError ? { isError: true } : {})
   }

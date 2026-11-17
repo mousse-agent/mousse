@@ -50,11 +50,10 @@ describe('activityFromToolCall', () => {
         { content: 'c', status: 'pending' }
       ]
     })
-    expect(from('present_plan', { title: 'Plan', markdown: '# Plan\n- a' })).toMatchObject({ kind: 'plan', text: '# Plan\n- a' })
-    expect(from('ExitPlanMode', { plan: 'Do it' })).toMatchObject({ kind: 'plan', text: 'Do it' })
-    expect(from('Agent', { subagent_type: 'Explore', description: 'Look around', run_in_background: true })).toMatchObject({
+    expect(from('Agent', { subagent_type: 'Explore', model: 'haiku', description: 'Look around', run_in_background: true })).toMatchObject({
       kind: 'subagent',
       agentType: 'Explore',
+      model: 'haiku',
       description: 'Look around',
       background: true
     })
@@ -283,9 +282,6 @@ describe('normalizeToolName', () => {
     ['todo', 'TodoWrite'],
     ['TodoWrite', 'TodoWrite'],
     ['plan', 'PlanWrite'],
-    ['present_plan', 'PlanWrite'],
-    ['ExitPlanMode', 'ExitPlanMode'],
-    ['exit_plan_mode', 'PlanWrite'],
     ['web_search', 'WebSearch'],
     ['WebFetch', 'WebFetch'],
     ['load_skill', 'Skill'],

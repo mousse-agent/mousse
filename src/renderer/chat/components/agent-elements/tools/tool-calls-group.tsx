@@ -1,73 +1,82 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ToolRowBase } from "./tool-row-base";
+import { useToolOpen, useToolOpenOf } from "./tool-open-state";
+import { countRender } from "../render-counts";
+import "./tool-calls-group.css";
 
 export type ToolCallsGroupProps = {
   count: number;
-  /** Thinking icon when the title is a thought; a tool icon otherwise. */
+  /** The icon of the calls' kind, or a wrench for a mix. */
   icon?: ReactNode;
-  /**
-   * One line from the latest thought in the run. When absent (the run has no
-   * thought text), the header falls back to "Tool calls" plus the count.
-   * Other tool calls do not change this title.
-   */
-  label?: string;
-  /**
-   * True while any tool inside the group is still running. Drives the group
-   * header shimmer only — completed groups stay static even if the turn is
-   * still streaming text. The group stays collapsed unless toggled.
-   */
-  autoOpen?: boolean;
-  /** Failed calls inside the group: named in the header, in the danger colour. */
+  /** The run's latest thought before its last call, or what the calls did ("Read 3 files and ran 2 commands"): `workGroupHeading`. */
+  title: string;
+  /** What the calls did, after a thought title: a short dim tag that is never cut. */
+  summary?: string;
+  /** Failed calls inside the group: named in the header. */
   failed?: number;
-  /**
-   * True while the turn is streaming. A failure that lands then opens the
-   * group once; a failure already there when an old turn loads does not.
-   */
+  /** True while the turn runs: an open group keeps its newest row in view as rows arrive. */
   live?: boolean;
+  /**
+   * The key its open state is kept under (tool-open-state.ts), so a group the list rebuilds stays as the person left
+   * it, and the ids of its calls: a new group that takes in a row the person opened opens with it.
+   */
+  openKey?: string;
+  rowKeys?: readonly string[];
   children: ReactNode;
 };
 
 /**
- * Collapsible wrapper for consecutive tool calls:
- * "Tool calls <num> >" (chevron), collapsed by default — even while
- * streaming. A manual toggle opens it, and so does the first failure that
- * lands while the turn runs.
+ * One still line for consecutive tool calls, titled with what they did, closed until clicked. A running turn's
+ * current run is its live row (turn-progress.tsx), which opens the same way under the same key; the run takes this
+ * line when it ends. Open, the rows sit in a box capped at about 18rem that scrolls on its own, with soft edges where
+ * more rows are (tool-calls-group.css).
  */
 export const ToolCallsGroup = memo(function ToolCallsGroup({
   count,
   icon,
-  label,
-  autoOpen = false,
+  title,
+  summary,
   failed = 0,
   live = false,
+  openKey,
+  rowKeys,
   children,
 }: ToolCallsGroupProps) {
-  const [expanded, setExpanded] = useState(false);
-  const title = label?.trim() ? label : "Tool calls";
-  // Failures already seen; a live group starts from none so its first failure counts.
-  const seenFailed = useRef(live ? 0 : failed);
-  const openedForFailure = useRef(false);
-  useEffect(() => {
-    if (failed > seenFailed.current && !openedForFailure.current) {
-      openedForFailure.current = true;
-      setExpanded(true);
-    }
-    seenFailed.current = failed;
-  }, [failed]);
+  countRender("ToolCallsGroup");
+  const openOf = useToolOpenOf();
+  const [startsOpen] = useState(() => rowKeys?.some((key) => openOf(key) === true) ?? false);
+  const [ownExpanded, setOwnExpanded] = useState(startsOpen);
+  const kept = useToolOpen(openKey, startsOpen);
+  const expanded = kept ? kept[0] : ownExpanded;
+  const setExpanded = (update: (prev: boolean) => boolean) => {
+    if (kept) kept[1](update(kept[0]));
+    else setOwnExpanded(update);
+  };
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Whether the open box shows its last row: rows that arrive then keep it in view.
+  const atEndRef = useRef(true);
+  useLayoutEffect(() => {
+    const box = scrollRef.current;
+    if (!box || !live || !atEndRef.current) return;
+    box.scrollTop = box.scrollHeight;
+  }, [count, live, expanded]);
 
   return (
     <ToolRowBase
       icon={icon}
       completeLabel={title}
-      shimmerLabel={title}
-      detail={title === "Tool calls" ? `${count}` : undefined}
+      labelTitle={summary ? title : undefined}
+      shimmer={false}
       badge={
-        failed > 0 ? (
-          <span className="text-[var(--danger)]">· {failed} failed</span>
+        summary || failed > 0 ? (
+          <>
+            {summary && <span className="text-an-foreground-muted/60">· {summary}</span>}
+            {failed > 0 && <span className="text-[var(--danger)]">{summary ? " " : ""}· {failed} failed</span>}
+          </>
         ) : undefined
       }
-      isAnimating={autoOpen}
+      isAnimating={false}
       expandable
       expanded={expanded}
       onToggleExpand={() => {
@@ -75,8 +84,18 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
       }}
       itemCount={count}
     >
-      <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 border-l border-an-border-color pl-3">
-        {children}
+      <div
+        ref={scrollRef}
+        className="an-tool-group-scroll"
+        data-tool-group-scroll
+        onScroll={(event) => {
+          const box = event.currentTarget;
+          atEndRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
+        }}
+      >
+        <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
+          {children}
+        </div>
       </div>
     </ToolRowBase>
   );

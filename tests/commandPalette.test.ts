@@ -40,7 +40,9 @@ const terminal = () => element('terminal', (selector) => (selector.includes('tex
 
 function stubWindow(activeElement: FakeElement | null) {
   const win = new EventTarget() as FakeWindow
-  win.mousse = { platform: 'win32', threads: { select: vi.fn(async () => undefined), create: vi.fn() } }
+  // Like the main process, a select sends the thread's view, which shows a thread the window had no transcript for.
+  const select = vi.fn(async (threadId: string) => useAppStore.getState().applyThreadView({ threadId, messages: [], agents: [], tasks: [] }))
+  win.mousse = { platform: 'win32', threads: { select, create: vi.fn() } }
   const doc = new EventTarget() as EventTarget & { activeElement: FakeElement | null }
   doc.activeElement = activeElement
   globals.window = win

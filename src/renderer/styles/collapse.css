@@ -5,7 +5,7 @@
    The group is the same one-cell grid whether it moves or not. A settled group then has a 1fr row for
    the close to start from, and its content's margins stay inside it in every state, so nothing shifts
    when the motion ends. `data-motion` is present only while it moves: a settled group clips nothing
-   (focus rings, hover actions), and rows added to an open list just appear.
+   (focus fills, hover actions), and rows added to an open list just appear.
    Selectors use child combinators so a nested group (a folder in a tree) keeps its own state.
    Durations match COLLAPSE_OPEN_MS / COLLAPSE_CLOSE_MS / COLLAPSE_STAGGER_MS. */
 

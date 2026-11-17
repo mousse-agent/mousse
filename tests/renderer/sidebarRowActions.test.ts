@@ -17,7 +17,11 @@ const actions = vi.hoisted(() => ({
   createAndSelectThread: vi.fn(async () => undefined),
   createAndSelectProjectThread: vi.fn(async () => undefined)
 }))
-vi.mock('../../src/renderer/lib/threadActions', () => actions)
+// Archive runs the real archiveThread, so the test still sees the settle call it makes.
+vi.mock('../../src/renderer/lib/threadActions', async (importOriginal) => ({
+  ...actions,
+  archiveThread: (await importOriginal<typeof import('../../src/renderer/lib/threadActions')>()).archiveThread
+}))
 // Neighbours that read the daemon and are not what these tests are about.
 vi.mock('../../src/renderer/components/profiles/ProfileSwitcher', () => ({ ProfileSwitcher: () => null }))
 vi.mock('../../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSidebar: () => null }))
@@ -223,17 +227,13 @@ describe('the row menu', () => {
 })
 
 describe('archive and delete', () => {
-  it('archives with an "Archived · Undo" toast; Undo unarchives', async () => {
+  it('archives without a toast', async () => {
     show([thread('a', 'Fix tests')])
     openProject()
     click(host.querySelector('[aria-label="More actions for Fix tests"]')!)
     click(menuItem('Archive'))
     await flush()
     expect(threadsApi.settle).toHaveBeenCalledWith('a', true)
-    expect(toast()?.textContent).toContain('Archived')
-    click(toastButton('undo'))
-    await flush()
-    expect(threadsApi.settle).toHaveBeenLastCalledWith('a', false)
     expect(toast()).toBeNull()
   })
 

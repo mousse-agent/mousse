@@ -5,10 +5,11 @@
  * chat row is journaled in its own transaction, capture runs after every dispatch, and a journal
  * that cannot be written makes the bot stuck rather than run unrecorded (bot-context.md §4).
  */
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import type { ChatMessage } from '../../src/shared/types'
 import { botFixture, chatOf, createBot, finish, flush, payloadOf, runDispatch, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -22,6 +23,9 @@ beforeEach(async () => {
 afterEach(() => f.close())
 
 const home = () => `thread:bot:${botId}`
+
+/** A call of a thread tool: the chat uses "use your threads" itself, so without it the call is a wall asking for it. */
+const threadCall = { kind: 'app' as const, tool: 'thread_create', args: {} }
 
 /** The chat lane's activation that runs (or waits) now. */
 const chatActivation = (statuses: Array<'running' | 'queued' | 'waiting_grant'> = ['running']) => f.store.laneActivations(botId, 'chat', statuses)[0]!
@@ -53,35 +57,30 @@ describe('bots.chat.send', () => {
   })
 
   it('a wall shows a card on the reply; after Allow the continuation keeps the thread history and the same pack', async () => {
-    const docs = join(f.base, 'docs')
-    mkdirSync(docs)
-    writeFileSync(join(docs, 'a.md'), 'notes')
-    await send('Read my notes', 'm1')
+    await send('Start a thread for my notes', 'm1')
     const activation = chatActivation()
     const { payload, prepared } = await start(f, activation.id)
-    // A folder outside its own asks for file access as a whole.
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'list', nativeName: 'ls', args: { path: docs } })).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
+    expect(prepared.authority.check(threadCall)).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
     expect(f.store.activation(activation.id)?.status).toBe('waiting_grant')
     await finish(f, payload, 'interrupted', { text: 'Let me look.', outcome: { interruptedBy: 'bot_wall' } })
     const reply = chatOf(f, botId).at(-1)!
-    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'Let me look.', ask: { title: 'use files on this computer', status: 'open', kind: 'permission' } })
+    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'Let me look.', ask: { title: 'use your threads', status: 'open', kind: 'permission' } })
     const { message } = await f.bots.service.answer(botId, reply.ask!.askId, 'allow')
     expect(message.ask?.status).toBe('allowed')
     await flush()
     const continuation = f.store.dispatch(activation.id, 2)!
-    expect(continuation).toMatchObject({ kind: 'continue', threadId: home(), prompt: { text: '[Mousse] The owner allowed: use files on this computer. Continue.' } })
+    expect(continuation).toMatchObject({ kind: 'continue', threadId: home(), prompt: { text: '[Mousse] The owner allowed: use your threads. Continue.' } })
     const next = await start(f, activation.id, 2)
     // Read again for the continuation: the provider keeps it frozen (a forget drops it).
     expect(next.prepared).toMatchObject({ history: 'thread', preamble: prepared.preamble })
-    expect(next.prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(docs, 'a.md') } })).toEqual({ ok: true })
+    expect(next.prepared.authority.check(threadCall)).toEqual({ ok: true })
   })
 
   it('a message sent while the chat waits at a wall counts as Not now and continues the walled dispatch with it', async () => {
-    const docs = join(f.base, 'docs')
-    await send('Read my notes', 'm1')
+    await send('Start a thread for my notes', 'm1')
     const activation = chatActivation()
     const { payload, prepared } = await start(f, activation.id)
-    prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(docs, 'a.md') } })
+    prepared.authority.check(threadCall)
     await finish(f, payload, 'interrupted', { text: '', outcome: { interruptedBy: 'bot_wall' } })
     const askId = chatOf(f, botId).at(-1)!.ask!.askId
     await send('Never mind, just say hi', 'm2')
@@ -89,7 +88,7 @@ describe('bots.chat.send', () => {
     expect(chatOf(f, botId).find((message) => message.ask?.askId === askId)?.ask?.status).toBe('not_now')
     // No new activation: the walled one goes on with the owner's message as its input.
     expect(f.store.laneActivations(botId, 'chat', ['queued', 'running', 'waiting_grant']).map((row) => row.id)).toEqual([activation.id])
-    expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: use files on this computer\. Carry on without it\.\n\nNever mind, just say hi$/)
+    expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: use your threads\. Carry on without it\.\n\nNever mind, just say hi$/)
   })
 
   it('a message saved just before Mousse stops is still answered: its activation is queued with it', async () => {
@@ -112,7 +111,7 @@ describe('bots.chat.send', () => {
       await send('Read my notes', `${recover}-1`)
       const activation = chatActivation()
       const { payload, prepared } = await start(f, activation.id)
-      prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'docs', 'a.md') } })
+      prepared.authority.check(threadCall)
       await finish(f, payload, 'interrupted', { text: '', outcome: { interruptedBy: 'bot_wall' } })
       const continueChatWith = f.bots.continueChatWith.bind(f.bots)
       f.bots.continueChatWith = async () => { throw new Error('Mousse stopped') }
@@ -156,6 +155,25 @@ describe('bots.chat.send', () => {
       .toEqual([['text', 'What came in today?'], ['text', 'Two invoices.'], ['run_report', 'Nothing new.']])
   })
 
+  it('the run reports of every piece that ran side by side are written at startup, however many; an older one is not', async () => {
+    const engine = f.bots as unknown as { postReply: (...args: unknown[]) => void }
+    const postReply = engine.postReply
+    engine.postReply = () => {}
+    // An older run whose report is gone (the chat was cleared, say) ended before the others were asked for.
+    const older = await f.bots.activate({ botId, input: 'Old job', clientRequestId: 'old' })
+    await runDispatch(f, older.id, 1, { text: 'Old report.' })
+    f.clock.now += 60_000
+    const runs = []
+    for (let i = 0; i < 5; i += 1) runs.push(await f.bots.activate({ botId, input: `Job ${i}`, clientRequestId: `r${i}` }))
+    for (const [i, run] of runs.entries()) await runDispatch(f, run.id, 1, { text: `Report ${i}.` })
+    engine.postReply = postReply
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    const reports = chatOf(f, botId).filter((message) => message.kind === 'run_report').map((message) => message.text)
+    expect(reports.sort()).toEqual(['Report 0.', 'Report 1.', 'Report 2.', 'Report 3.', 'Report 4.'])
+  })
+
   it('each chat row and its journal row share one transaction; the owner\'s row is journaled before any dispatch starts', async () => {
     const dispatchesAtAppend: Array<{ kind: string; started: number }> = []
     const append = f.host.journal!.appendInTx.bind(f.host.journal)
@@ -180,7 +198,7 @@ describe('bots.chat.send', () => {
     await send('two', 'm2')
     const walled = chatActivation()
     const wall = await start(f, walled.id)
-    wall.prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'x') } })
+    wall.prepared.authority.check(threadCall)
     await finish(f, wall.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     await f.bots.service.chatStop(botId)
     await send('three', 'm3')
@@ -218,6 +236,9 @@ describe('bots.chat.send', () => {
     const one = await send('Hello', 'same')
     const two = await send('Hello', 'same')
     expect(two.id).toBe(one.id)
+    // The owner's message carries its request id, which the app matches to the bubble it showed while sending.
+    expect([one.clientRequestId, two.clientRequestId]).toEqual(['same', 'same'])
+    expect(chatOf(f, botId).find((message) => message.author === 'owner')?.clientRequestId).toBe('same')
     expect(chatOf(f, botId).filter((message) => message.author === 'owner')).toHaveLength(1)
     expect(f.store.listActivations(botId).filter((row) => row.idempotencyKey === 'chat:same')).toHaveLength(1)
   })
@@ -267,6 +288,30 @@ describe('bots.chat.list, chips and read markers', () => {
     expect(before.map((message) => message.seq)).toEqual(all.slice(0, -2).map((message) => message.seq))
   })
 
+  it("a step's status is the bot's words just before it, sent with the live chip and in chat.list, never its reply; the dispatch's end clears it", async () => {
+    await send('one', 'm1')
+    const activation = chatActivation()
+    const { payload } = await start(f, activation.id)
+    const events: unknown[] = []
+    f.bots.events.on('activity', (event) => events.push(event))
+    const at = (id: string, role: ChatMessage['role'], content: string, kind?: ChatMessage['kind']): ChatMessage => ({ id, role, content, timestamp: '2026-11-14T10:00:00.000Z', turnId: 't1', ...(kind ? { kind } : {}) })
+    const said = [at('u1', 'user', 'one'), at('a1', 'assistant', 'Checking  your\ninbox now'), at('c1', 'assistant', '', 'tool_call')]
+    f.bots.stepStarted(home(), () => said)
+    expect(events).toEqual([{ botId, activationId: activation.id, chip: null, status: 'Checking your inbox now' }])
+    expect(f.bots.service.chatList(botId).live).toEqual({ activationId: activation.id, status: 'Checking your inbox now' })
+    // The same words before the next step send nothing again; a live chip keeps them.
+    f.bots.stepStarted(home(), () => [...said, at('c2', 'assistant', '', 'tool_call')])
+    expect(events).toHaveLength(1)
+    f.bots.publishActivity({ botId, activationId: activation.id, chip: { icon: 'search', text: 'searching the web', live: true } })
+    expect(events.at(-1)).toMatchObject({ chip: { text: 'searching the web' }, status: 'Checking your inbox now' })
+    // A thread that is not the bot's: nothing.
+    f.bots.stepStarted('thread:someone-else', () => said)
+    expect(events).toHaveLength(2)
+    await finish(f, payload, 'completed', { text: 'Two need a reply.' })
+    expect(events.at(-1)).toEqual({ botId, activationId: activation.id, chip: null })
+    expect(f.bots.service.chatList(botId).live).toBeUndefined()
+  })
+
   it('markRead lowers the unread count', async () => {
     await send('one', 'm1')
     await runDispatch(f, chatActivation().id, 1, { text: 'reply' })
@@ -306,7 +351,7 @@ describe('chat turns at their edges (review round 2)', () => {
     await send(text, id)
     const activation = chatActivation()
     const { payload, prepared } = await start(f, activation.id)
-    prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'docs', 'a.md') } })
+    prepared.authority.check(threadCall)
     let release!: () => void
     const held = new Promise<void>((resolve) => { release = resolve })
     const capture = f.host.context!.afterDispatch
@@ -338,12 +383,14 @@ describe('chat turns at their edges (review round 2)', () => {
     expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: .*\n\nNever mind, just say hi$/)
   })
 
-  it('a chat message dropped from a full queue says so in the chat', async () => {
+  it('a chat turn dropped from a full queue says so in the chat', async () => {
     await send('First', 'q0')
     const first = chatActivation()
+    // The owner's own messages join the turn that answers them; turns that can't join it (taps, another device's
+    // messages, the bot's own) wait in the queue, filled here directly.
     for (let n = 1; n <= 21; n += 1) {
       f.clock.now += 1
-      await f.bots.service.chatSend({ botId, text: `Message ${n}`, clientRequestId: `q${n}` })
+      await f.bots.enqueueChat(botId, `chat:q${n}`, `Message ${n}`)
     }
     const dropped = f.store.activationByKey('chat:q1')!
     expect(dropped).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })

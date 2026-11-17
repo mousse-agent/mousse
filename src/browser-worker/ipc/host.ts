@@ -145,11 +145,12 @@ export async function runBrowserWorkerHost(input: Readable, output: Writable): P
             : (error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'cancelled')
               ? 'cancelled'
               : 'invalid_action'
+        const problem = isBrowserWorkerError(error) ? error.problem : undefined
         await write({
           version: 1,
           id: request.id,
           ok: false,
-          error: { code, message: error instanceof Error ? error.message : String(error) }
+          error: { code, message: error instanceof Error ? error.message : String(error), ...(problem ? { details: { problem } } : {}) }
         })
       } finally {
         pending.delete(request.id)

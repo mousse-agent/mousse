@@ -26,7 +26,8 @@ export function ipcErrorLine(error: unknown): string {
 const SESSION_CLOSING_LINES = new Set([
   'Window MMS session is closing',
   'Window MMS session closed while opening',
-  'GuiMmsController is stopped'
+  'GuiMmsController is stopped',
+  'Mousse is installing an update'
 ])
 
 /**
@@ -49,6 +50,24 @@ export function isServiceBusy(error: unknown): boolean {
 export function readableError(error: unknown, fallback: string): string {
   if (isServiceBusy(error)) return 'Mousse is busy. Try again in a moment.'
   return ipcErrorLine(error) || fallback
+}
+
+/**
+ * Whether a call to the background service got no answer in time (`Request timeout: <method>`). The work it asked for
+ * may still be running there, so this says nothing about how it ended.
+ */
+export function isRequestTimeout(error: unknown): boolean {
+  return ipcErrorLine(error).startsWith('Request timeout: ')
+}
+
+/**
+ * What the composer says when Compact now failed, or null to say nothing. A compaction that started reports how it
+ * ended in its own row in the conversation, so a call that got no answer in time (the compaction may still be running)
+ * or a window that is closing says nothing here; a refusal says why in plain words.
+ */
+export function compactNowFailureLine(error: unknown): string | null {
+  if (isRequestTimeout(error) || isSessionClosing(error)) return null
+  return readableError(error, "This thread couldn't be compacted. Try again.")
 }
 
 /**

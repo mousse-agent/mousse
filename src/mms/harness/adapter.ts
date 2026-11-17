@@ -14,6 +14,7 @@ import type { TurnBudget } from './budget'
 import type { DefinitionAuthority } from '../agentDefinitions/definitionGate'
 import type { BotAuthority } from '../../shared/bots/personal/authority'
 import type { ProviderRef } from '../run/types'
+import type { SteerDelivery } from '../run/CommandPolicy'
 
 /**
  * Static capability manifest of a provider adapter (docs/run-engine/SPEC.md §13.2). Every key
@@ -31,6 +32,19 @@ export interface ProviderCapabilities {
    * - `queue_only`: the text waits for the turn to end.
    */
   steer: 'native' | 'interrupt_restart' | 'queue_only'
+  /**
+   * `CommandPolicy.steerDelivery`: when this adapter reports a tool call. `announce`: before it runs (a person's steer
+   * waits from the announcement); `start`: when it starts; `none`: the adapter has not adopted the hold, and a steer
+   * cuts in at once as before. Setting an adapter back to `none` is the per-provider rollback.
+   */
+  steerBoundary: 'announce' | 'start' | 'none'
+  /**
+   * `CommandPolicy.steerReleaseWindow`: on a `start` provider, how long a held steer still waits after the last tool's
+   * result when the model shows nothing (spike S4: twice the largest gap seen between a result and the next start of
+   * the same response, plus 100 ms). `null` on other providers, and on a `start` provider whose gap was never
+   * measured: a held steer there waits for the provider's own turn to end (strict release), whatever the setting.
+   */
+  steerSettleMs: number | null
   /** `CommandPolicy.stopStrategy`. */
   interrupt: boolean
   /** `featureGates.canUndoNatively` (Phase 6). */
@@ -46,17 +60,18 @@ export interface ProviderCapabilities {
   /** `featureGates.mcpAttachable` (Phase 5). */
   mcp: boolean
   /**
-   * `featureGates.subagentTargetRefusal`. `enforced`: the adapter holds a delegated child to its
-   * policy (read-only for a `shared` child, no provider-native subagents, no user MCP servers for a
-   * read-only child). `isolated_only`: it cannot hold a child to read-only, so it is refused as the target of a `shared` child and still runs `isolated` ones.
+   * `featureGates.subagentTargetRefusal`. `enforced`: the adapter holds a read-only child to its policy (the
+   * read-only tools only, no user MCP servers). `isolated_only`: it cannot hold a child to read-only, so it is refused
+   * as the target of a read-only child and still runs every other one.
    */
   childPolicy: 'enforced' | 'isolated_only'
 }
 
 /**
  * The policy of a delegated child's turn (issue #142), absent for a thread that is not a subagent.
- * Every turn of a child carries it, first or resumed. `readOnly` is a `shared` child, which
- * observes its parent's workspace and must not change it.
+ * Every turn of a child carries it, first or resumed. `readOnly` is a child asked read-only
+ * (`delegate_task` `readOnly`), which reads its parent's folder and must not change it; any other
+ * child has every tool its parent has.
  */
 export interface ChildTurnPolicy {
   readOnly: boolean
@@ -168,9 +183,35 @@ export interface TurnSink {
   /** The adapter's live native transcript after each append (crash-safe checkpointing). */
   nativeMessages(messages: Message[], checkpoint?: NativeMessageCheckpoint): void
   compaction(phase: 'start' | 'complete' | 'unchanged'): void
-  retry(attempt: number): void
+  /**
+   * A failed provider request is tried again; `detail` says how many attempts there are and how long until this one
+   * starts, when the runtime says. `noResponse`: the provider answered nothing in time.
+   */
+  retry(attempt: number, detail?: { maxAttempts?: number; delayMs?: number; noResponse?: boolean }): void
   /** The provider produced output; a context-overflow retry is no longer safe. */
   progress(): void
+  /**
+   * What the provider is doing while it shows nothing: `waiting`, it has the request; `reasoning`, the model reasons
+   * and has shown none of it yet. Output (`progress`) ends either.
+   */
+  status?(status: 'waiting' | 'reasoning'): void
+  /**
+   * A person is asked about the call `callId` (an approval or a question), and it waits for them; `false` once they
+   * answered or the ask ended. Such a call is not a foreground tool: a person's steer does not wait for it, it answers it.
+   */
+  toolAwaiting?(callId: string, waiting: boolean): void
+  /**
+   * The provider's own turn ended inside the Mousse turn (Pi's `turn_end`, Codex's `turn/completed`) and no tool
+   * runs: a held steer goes in natively, as the next provider turn, with no cut. Holds until the next model output,
+   * tool event or provider turn (`providerTurn`). `false`: the provider's next request started (Pi's `turn_start`, a
+   * retry or a compaction), so the boundary is over.
+   */
+  boundary?(at?: boolean): void
+  /**
+   * The provider began another turn of its own inside the Mousse turn (a Codex `turn/start` accepted, an ACP prompt
+   * or a Cursor run sent): the boundary `boundary()` reported is over, so a steer now cuts or waits again.
+   */
+  providerTurn?(): void
   /**
    * Token usage; the orchestrator adds it to the usage statistics, attributed to the latest
    * `providerMetrics` model.
@@ -182,8 +223,13 @@ export interface TurnSink {
    * A drained steer reached a runtime that keeps its own transcript. The orchestrator appends it
    * to the canonical transcript and acknowledges the drained queue items. (The pi loop reports
    * steers through `nativeMessages` instead.)
+   *
+   * `token` names the drain (`TurnControl.drainSteerEntry`): only that drain's queue items are
+   * acknowledged, after the text and their ids are saved, so another drain still outstanding stays
+   * unread. A token this turn does not know, or already accepted, changes nothing. Without a token,
+   * every drained item is acknowledged, which is right only while one drain is outstanding.
    */
-  steerAccepted(text: string): void
+  steerAccepted(text: string, token?: string): void
   /** Turn-level measurements from a runtime that reports them (may arrive on failure too). */
   providerMetrics(metrics: ProviderMetrics): void
   /** Lines the runtime edited in the workspace. */
@@ -212,6 +258,26 @@ export interface ProviderMetrics {
    * requests wrote (absent when they wrote none or the provider does not say).
    */
   promptCache?: { at?: number; ttlMs?: number }
+  /**
+   * The plan's usage windows as the runtime last reported them during the turn (Claude Code's rate-limit events,
+   * Codex's rate-limit snapshot): how much of each is used, 0-100, and when it resets (epoch seconds). Absent when the
+   * runtime reports none (Pi, an API key).
+   */
+  quota?: PlanWindowUse[]
+  /**
+   * The turn was to continue the runtime's saved conversation, and the runtime ran it in a new one instead (Claude Code
+   * answered a resume with another session, Codex's resume gave another thread or failed). What the conversation held
+   * is not in the new one, unless the turn's prompt carried the history.
+   */
+  resumeLost?: true
+}
+
+/** How much of one plan usage window is used (`ProviderMetrics.quota`). */
+export interface PlanWindowUse {
+  /** The window as the runtime names it (`five_hour`, `seven_day`, `primary`, `secondary`). */
+  kind: string
+  usedPercent: number
+  resetsAt?: number
 }
 
 export interface TurnControl {
@@ -225,9 +291,32 @@ export interface TurnControl {
   /**
    * `drainSteer` with a token naming this drain, for a provider that takes steers asynchronously and may
    * hand back several: `returnSteer(text, token)` then restores what that drain took and nothing else.
+   * `cut`: the drain holds a person's message, which the model must read now. A provider whose own steer
+   * waits for the current reply or command to end cuts the reply instead and continues with the text.
+   * `images`: the images the drained messages carry, in order, for a provider whose steer can take them; one that
+   * cannot sends the text alone. The orchestrator keeps them with the drain, so the transcript shows them either way.
    */
-  drainSteerEntry?(): { text: string; token: string } | undefined
-  /** The provider took the drain `token` names; it will not be returned. */
+  drainSteerEntry?(opts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut?: boolean; forced?: boolean; images?: ChatImageAttachment[] } | undefined
+  /**
+   * What a drain now would do, without taking anything; undefined when nothing is pending
+   * (docs/design/steer-and-interruptions.md §2.2). An adapter on the hold (`steerBoundary` not `none`)
+   * calls it on its poll and drains only with `drainSteerEntry({ expect })` for the delivery it can make:
+   * with `expect`, a drain takes nothing unless the decision at that moment is one of them. `forced` on a
+   * drain: Send now asked for it, and the adapter stops the running tool. `holdGeneration` names the hold
+   * a Send now click was shown for.
+   */
+  peekSteer?(): { delivery: SteerDelivery; holdGeneration?: number } | undefined
+  /**
+   * The check at dispatch: called right before the adapter sends the cut for the drain `token`, after any
+   * await. False: a foreground tool is known or the release window is open, so the adapter hands the drain
+   * back with `returnSteer(text, token)`, and the hold resumes in the same generation. A forced drain may always cut.
+   */
+  mayCut?(token: string): boolean
+  /**
+   * The provider took the drain `token` names. Nothing is saved or acknowledged until
+   * `TurnSink.steerAccepted(text, token)`. Until then the drain can still be handed back with
+   * `returnSteer`, and it is restored whole; once accepted, a hand-back is ignored.
+   */
   steerTaken?(token?: string): void
   /** Liveness touch; the orchestrator throttles the store write. */
   heartbeat(): void
@@ -266,6 +355,16 @@ export interface TurnResult {
    * reached a terminal update from the runtime itself.
    */
   drain?: { mousseCalls?: number; toolCalls?: number; toolsSettled?: boolean }
+  /**
+   * The turn ended where the person cut it (Send now's interrupt aborted the steer's own request), so a turn with no
+   * text has no reply to show: the thread gets no "Done." placeholder.
+   */
+  noReply?: boolean
+  /**
+   * A steer cut the turn and was read, and the model wrote nothing after it: the runtime closed the turn with a line of
+   * its own (Claude Code's "No response requested."), so what the steer said was never answered.
+   */
+  steerUnanswered?: boolean
 }
 
 /**
@@ -292,6 +391,11 @@ export interface ToolHost {
   browser?: BrowserExecutionBinding
   /** Whether the turn's run is still its thread's active run; an app tool call after that is refused. */
   runActive?: () => boolean
+  /**
+   * What hides the secrets the thread may use (and ones removed while it runs), read at each tool result: a runtime that
+   * runs its own tools masks their results with it before its model sees them or its session file keeps them.
+   */
+  secretMasker?: () => ((text: string) => string) | undefined
 }
 
 /** One compaction of the thread's transcript: the compacted context to (re)send. */
@@ -436,9 +540,18 @@ export interface ProviderAdapter {
    * outlives a turn have it. Resolves `stopped` when there was a process to end.
    */
   stopThread?(threadId: string): Promise<'stopped' | 'not_active'>
+  /**
+   * Stops one helper the runtime started on its own inside a run of `hostThreadId` (its mirror thread's Stop), by the
+   * runtime's agent id, and nothing else. Only adapters whose runtime can stop a single helper have it (Codex).
+   */
+  stopNativeHelper?(hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active'>
   /** Whether the adapter keeps a process for `threadId` between turns now (Claude's live query). */
   hasLiveProcess?(threadId: string): boolean
-  steer?(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'>
+  /**
+   * Closes the process a bot's chat keeps warm on `threadId` between its turns (its bot was paused or deleted, or its
+   * permissions or model changed); one running a turn closes when that turn ends. True when there was one.
+   */
+  releaseBotProcess?(threadId: string): boolean
   /**
    * SPEC §16.2 native fork: a new provider session branched from `ref` after `atTurnOrdinal`, or
    * null when the runtime cannot branch it (the fork then falls back to a portable handoff). Only

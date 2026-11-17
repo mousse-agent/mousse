@@ -1,11 +1,14 @@
-import { realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
+import { createHash } from 'node:crypto'
+import { closeSync, fstatSync, openSync, readSync, realpathSync, type Stats } from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
+import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotCheck, BotFileReadResult, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import { assertInsideRoots } from '../../agents/WorkspaceAccessPolicy'
 import { touchesGitMetadata } from '../../agents/gitMetadata'
+import { localPathOf } from '../../data/closedPlaces'
 import type { BotPermissions } from '../grants/compile'
 
 /**
@@ -13,19 +16,31 @@ import type { BotPermissions } from '../grants/compile'
  * Pi's `/pi/gate` for built-ins, the Mousse MCP registry for app and proxied MCP tools, Claude Code's
  * grant gate (its hooks and `canUseTool`), and Codex's approval requests. It asks nobody: a call outside the grant stops at a wall. The bot's
  * files folder (Bot Phase 1 §5.10) counts as a granted writable root, and every allowed call is
- * reported to `onAllowed`, the source of activity chips (§5.8).
+ * reported to `onAllowed`, the source of activity chips (§5.8). A permission the owner switched off for the bot
+ * (`disabled`, read on every call) is refused before anything else, never asked about.
  */
 
 /** The arguments that name a path, on every runtime (Pi's and Claude's built-ins). */
-const PATH_ARGUMENTS = ['path', 'file_path', 'filePath', 'notebook_path', 'directory', 'dir', 'cwd'] as const
+export const PATH_ARGUMENTS = ['path', 'file_path', 'filePath', 'notebook_path', 'directory', 'dir', 'cwd'] as const
 
 /** Built-ins that change files: they need write access, except inside the scratch folder. */
 const WRITE_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['edit', 'write'])
 /** Built-ins that never touch the file system. */
 const NETWORK_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['web_fetch', 'web_search'])
 
+/** Coverage is a contiguous prefix of one observed version, never pages from different versions. */
+export interface BotFileReadState {
+  version: string
+  through: number
+  whole: boolean
+  tooLong: boolean
+}
+interface FileObservation { version: string; lines?: number; bytes: number }
+
 export interface BotAuthorityInput {
   activationId: string
+  /** Read versions and contiguous page coverage, shared by dispatches. Memory only, fresh after a restart. */
+  fileReads?: Map<string, BotFileReadState>
   role: BotThreadRole
   permissions: BotPermissions
   /** Whether the activation waits for its owner's answer (`waiting_grant`), read at call time. */
@@ -40,10 +55,16 @@ export interface BotAuthorityInput {
   spend: SpendScope | null
   /** Told of every call the check allows, whatever the runtime (`BotActivitySink.observer`). Never fails a call. */
   onAllowed?: BotAllowedObserver
+  /**
+   * Why the owner's switch refuses `call` now (a permission switched off for this bot in About), read on every call, so a
+   * switch turned off refuses the next call of a turn already running. Undefined: not switched off. Must not throw.
+   */
+  disabled?(call: NormalisedCall): string | undefined
 }
 
 export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   const { permissions } = input
+  const fileReads = input.fileReads ?? new Map<string, BotFileReadState>()
   const tools: ReadonlySet<NeutralTool> = new Set(permissions.tools)
   const appTools: ReadonlySet<string> = new Set(permissions.appTools)
   const skills: ReadonlySet<string> = new Set(permissions.skills)
@@ -52,10 +73,6 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   // writable root, granted with the bot itself.
   const workspace = permissions.workspace ? workspaceWithFiles(permissions.workspace) : null
   const readOnlyRoots = workspace ? workspace.roots.filter((root) => !workspace.writeRoots.includes(root)) : []
-  // File access (§3.7): every folder, read and write, but Mousse's own data. Its files folder and
-  // scratch, inside that data, stay the bot's.
-  const computer = permissions.workspace?.computer
-  const ownInClosed = workspace ? [workspace.scratch, ...(permissions.workspace?.files !== undefined ? [permissions.workspace.files] : [])] : []
   const authority: BotAuthority = {
     activationId: input.activationId,
     role: input.role,
@@ -63,16 +80,54 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     appTools,
     skills,
     mcp,
+    ...(permissions.catalogue ? { catalogue: permissions.catalogue } : {}),
     workspace: workspace ? {
       roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch,
-      ...(permissions.workspace?.files !== undefined ? { files: permissions.workspace.files } : {}),
-      ...(computer ? { computer: { closed: computer.closed } } : {})
+      ...(permissions.workspace?.files !== undefined ? { files: permissions.workspace.files } : {})
     } : null,
     waiting: input.waiting,
     counters: input.counters,
     time: input.time,
     spend: input.spend,
-    check(call: NormalisedCall): { ok: true } | { ok: false; wall: WallReason } {
+    piFileCall(tool, args) {
+      const files = permissions.workspace?.files
+      const raw = args.path
+      if (!files || typeof raw !== 'string' || !['read', 'edit', 'write'].includes(tool)) return { completed() {} }
+      // Pi's gate has resolved this path and checked the grant already. Canonical names make
+      // relative paths and symlinks within the folder refer to the same remembered file.
+      if (!insideAny([files], raw, files)) return { completed() {} }
+      const absolute = resolve(files, raw)
+      let path = absolute
+      try { path = realpathSync.native(absolute) } catch {
+        // Creation under a symlinked folder must use the same key as its next edit.
+        try { path = join(realpathSync.native(dirname(absolute)), basename(absolute)) } catch { /* The tool reports a missing parent. */ }
+      }
+      const before = fileVersion(path)
+      const previous = fileReads.get(path)
+      if (tool !== 'read' && (before === null || (before !== undefined && previous?.version !== before.version))) {
+        return { refused: 'This file changed since you read it. Read it again, then make your change.' }
+      }
+      if (tool === 'write' && before !== undefined && previous && !previous.whole) {
+        return { refused: previous.tooLong
+          ? 'This file is too long to read in one call; change it with edit, which is checked against what you read, or read every page first.'
+          : 'Before replacing this file, read it again without offset or limit.' }
+      }
+      return {
+        completed(success, result = {}) {
+          if (!success) return
+          // A read remembers the version at admission, not a racing writer's newer version.
+          const observed = tool === 'read' ? before : fileVersion(path)
+          if (!observed) { fileReads.delete(path); return }
+          if (tool === 'read') {
+            fileReads.set(path, readCoverage(observed, args, result, previous))
+          } else {
+            fileReads.set(path, { version: observed.version, through: 0,
+              whole: tool === 'write' || previous?.whole === true, tooLong: previous?.tooLong ?? false })
+          }
+        }
+      }
+    },
+    check(call: NormalisedCall): BotCheck {
       const decided = decide(call)
       if (decided.ok && input.onAllowed) {
         try {
@@ -86,7 +141,9 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   }
   return authority
 
-  function decide(call: NormalisedCall): { ok: true } | { ok: false; wall: WallReason } {
+  function decide(call: NormalisedCall): BotCheck {
+    const disabled = input.disabled?.(call)
+    if (disabled) return { ok: false, refused: { text: disabled, askId: '' } }
     const ended = input.live?.() ?? (input.time.signal.aborted ? { kind: 'ended' as const } : undefined)
     if (ended) return { ok: false, wall: ended }
     if (input.waiting()) return { ok: false, wall: { kind: 'waiting' } }
@@ -95,7 +152,9 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
         return skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
       case 'mcp':
         // Granted parts never hold `:`, so a call whose parts do can never match another pair.
-        return !call.server.includes(':') && !call.tool.includes(':') && mcp.has(`${call.server}::${call.tool}`) ? { ok: true } : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool } }
+        return !call.server.includes(':') && !call.tool.includes(':') && mcp.has(`${call.server}::${call.tool}`)
+          ? { ok: true }
+          : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool, ...(call.serverName ? { serverName: call.serverName } : {}) } }
       case 'app':
         return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
       case 'builtin':
@@ -114,16 +173,22 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     if (own) return { ok: true }
     const writes = WRITE_TOOLS.has(tool)
     const access = writes ? 'write' : 'read'
-    // Without file access the bot has no folder at all, not even its scratch folder.
+    // A path the runtime itself expands is read only after this check, so it is never inside a
+    // root. It is refused with how to write it, never asked about, in every branch below: no
+    // permission would let the bot use it as written.
+    const expanded = PATH_ARGUMENTS.map((key) => args[key]).find((value): value is string => typeof value === 'string' && runtimeExpandedPath(value))
+    if (expanded !== undefined) return { ok: false, wall: pathFormWall(nativeName, expanded) }
+    // A network path to this computer is checked as the local path it means; one that can't be turned into it is refused.
+    const local = localArguments(args)
+    if ('refused' in local) return { ok: false, wall: { kind: 'network_path', tool: nativeName, path: local.refused } }
+    args = local.args
+    // Without a workspace the bot has no folder at all, not even its scratch folder.
     if (!workspace) return { ok: false, wall: { kind: 'path', tool: nativeName, path: String(firstPath(args) ?? '.'), access } }
     const scratch = workspace.scratch
     const paths = PATH_ARGUMENTS.map((key) => args[key]).filter((value): value is string => typeof value === 'string')
     // A file tool with no path argument works in its working directory: the scratch folder.
     if (!paths.length) return { ok: true }
-    if (computer) return checkEverywhere(nativeName, paths, scratch, computer.closed)
     for (const raw of paths) {
-      // A path the runtime itself expands is read only after this check: never inside a root.
-      if (runtimeExpandedPath(raw)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       // Git metadata is never a file tool's to change, in the scratch folder or a root (`agents/gitMetadata`).
       if (writes && touchesGitMetadata(raw, scratch)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       try {
@@ -151,44 +216,23 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     }
     return { ok: true }
   }
-
-  /**
-   * File access: any path, read or write, but one inside Mousse's own data that is not the bot's
-   * (its files folder or scratch), on the path as named and on the real path its links lead to.
-   * Neither refusal asks the owner anything: the bot already has all there is to ask for.
-   */
-  function checkEverywhere(nativeName: string, paths: readonly string[], scratch: string, closed: string): { ok: true } | { ok: false; wall: WallReason } {
-    for (const raw of paths) {
-      if (runtimeExpandedPath(raw)) return { ok: false, wall: { kind: 'path_form', tool: nativeName, path: raw } }
-      const named = resolve(scratch, raw)
-      for (const path of new Set([named, realPathOf(named)]))
-        if (insideFolder(closed, path) && !ownInClosed.some((folder) => insideFolder(folder, path)))
-          return { ok: false, wall: { kind: 'closed', tool: nativeName, path: raw } }
-    }
-    return { ok: true }
-  }
 }
 
-/** `path` with every link in the part that exists followed; the rest (not created yet) as named. */
-function realPathOf(path: string): string {
-  let current = path
-  const rest: string[] = []
-  while (true) {
-    try {
-      return join(realpathSync.native(current), ...rest.reverse())
-    } catch {
-      const parent = dirname(current)
-      if (parent === current) return path
-      rest.push(basename(current))
-      current = parent
-    }
+/**
+ * A call's path arguments with every network path to this computer turned into the local path it means (Windows,
+ * `localPathOf`), or the first that can't be turned into one with certainty. Elsewhere, as they are.
+ */
+function localArguments(args: Record<string, unknown>, platform: NodeJS.Platform = process.platform): { args: Record<string, unknown> } | { refused: string } {
+  if (platform !== 'win32') return { args }
+  let out = args
+  for (const key of PATH_ARGUMENTS) {
+    const value = args[key]
+    if (typeof value !== 'string') continue
+    const local = localPathOf(value)
+    if (local.kind === 'refused') return { refused: value }
+    if (local.kind === 'local') out = { ...out, [key]: local.path }
   }
-}
-
-/** Whether `path` is `folder` or inside it (both real, absolute paths). */
-function insideFolder(folder: string, path: string): boolean {
-  const child = relative(folder, path)
-  return child === '' || (!isAbsolute(child) && child !== '..' && !child.startsWith(`..${sep}`))
+  return { args: out }
 }
 
 /**
@@ -210,8 +254,26 @@ export function runtimeExpandedPath(raw: string, platform: NodeJS.Platform = pro
   if (raw.split(/[\\/]/).some((segment) => segment !== '.' && segment !== '..' && /[ .]$/.test(segment))) return true
   if (/^[~@]/.test(raw)) return true
   if (/\$(\{|[A-Za-z_])/.test(raw)) return true
+  if (platform === 'win32') {
+    const local = localPathOf(raw)
+    const path = local.kind === 'local' ? local.path : raw.replace(/^\\\\[^\\]+\\[^\\]+/, '')
+    if (/:/.test(path.replace(/^[A-Za-z]:/, ''))) return true
+  }
   if (platform === 'win32' && (/%[^%\\/]+%/.test(raw) || /^\/[A-Za-z](\/|$)/.test(raw))) return true
   return false
+}
+
+/**
+ * The refusal for a path a runtime would rewrite: it names the owner's home folder by its real
+ * path, and for `~/…` or `$HOME/…` the full path the bot meant. A hint only: the full path is
+ * checked like any other when the bot uses it.
+ */
+export function pathFormWall(tool: string, raw: string, home: string = homedir()): WallReason {
+  const trimmed = raw.trim()
+  if (!/^[~%]/.test(trimmed) && !trimmed.includes('$')) return { kind: 'path_form', tool, path: raw }
+  const rest = /^(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%)(?:[\\/]+(.*))?$/s.exec(trimmed)
+  const full = rest ? (rest[1] ? join(home, rest[1]) : home) : undefined
+  return { kind: 'path_form', tool, path: raw, home, ...(full !== undefined ? { full } : {}) }
 }
 
 /** The compiled workspace as the authority checks it: the files folder joins the roots, writable. */
@@ -238,4 +300,67 @@ function insideAny(roots: readonly string[], raw: string, scratch: string): bool
   } catch {
     return false
   }
+}
+
+/** Lists get exact content checks; attachments and logs never allocate unbounded buffers. */
+export const BOT_FILE_HASH_MAX_BYTES = 2 * 1024 * 1024
+
+function metadataVersion(stat: Stats): string {
+  return `stat:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+}
+
+function fileVersion(path: string): FileObservation | undefined | null {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const stat = fstatSync(fd)
+    if (stat.size > BOT_FILE_HASH_MAX_BYTES) return { version: metadataVersion(stat), bytes: stat.size }
+    // Read a bounded descriptor, not readFileSync(path): the file can grow after fstat.
+    const bytes = Buffer.allocUnsafe(stat.size)
+    let length = 0
+    while (length < bytes.length) {
+      const n = readSync(fd, bytes, length, bytes.length - length, length)
+      if (!n) break
+      length += n
+    }
+    const after = fstatSync(fd)
+    if (after.size > BOT_FILE_HASH_MAX_BYTES) return { version: metadataVersion(after), bytes: after.size }
+    // A changing small file has no stable observation. Ask for a fresh read.
+    if (length !== stat.size || metadataVersion(stat) !== metadataVersion(after)) return null
+    let lines = 1
+    for (let n = 0; n < length; n++) if (bytes[n] === 10) lines++
+    return { version: `sha256:${createHash('sha256').update(bytes.subarray(0, length)).digest('hex')}`, lines, bytes: length }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    return null
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+function readCoverage(file: FileObservation, args: Record<string, unknown>, result: BotFileReadResult, previous?: BotFileReadState): BotFileReadState {
+  const same = previous?.version === file.version ? previous : undefined
+  const start = args.offset === undefined ? 1 : Number.isInteger(args.offset) ? Math.max(1, args.offset as number) : NaN
+  const limit = args.limit === undefined ? Infinity : Number.isInteger(args.limit) && (args.limit as number) > 0 ? args.limit as number : NaN
+  const truncated = result.truncated === true || result.firstLineExceedsLimit === true
+  let end = 0
+  let eof = false
+  if (Number.isFinite(start) && !Number.isNaN(limit)) {
+    if (truncated) {
+      if (!result.firstLineExceedsLimit && Number.isInteger(result.outputLines) && result.outputLines! > 0) {
+        end = start - 1 + Math.min(result.outputLines!, limit)
+      }
+    } else if (file.lines !== undefined) {
+      end = Math.min(file.lines, start - 1 + limit)
+      eof = end === file.lines
+    } else if (limit === Infinity) {
+      // Pi returns the rest without a continuation notice only when it reached EOF.
+      end = Infinity
+      eof = true
+    }
+  }
+  const contiguous = start <= (same?.through ?? 0) + 1 && end >= start
+  const through = contiguous ? Math.max(same?.through ?? 0, end) : same?.through ?? 0
+  return { version: file.version, through, whole: same?.whole === true || (contiguous && eof),
+    tooLong: truncated || same?.tooLong === true || file.bytes > 50 * 1024 || (file.lines ?? 0) > 2000 }
 }

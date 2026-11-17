@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
@@ -18,11 +18,16 @@ import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
 import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL } from '../../src/mms/harness/vendors/codex/botApprovals'
+import { CODEX_BOT_FEATURES_OFF, CODEX_BOT_PROFILE } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { CODEX_MANAGED_VERSION } from '../../src/mms/harness/vendors/codex/release'
+import { CODEX_BOT_SETUP_UNREADABLE_TEXT, CODEX_BOT_VERSION_TEXT, codexBotSettingText } from '../../src/shared/harness/codexBotVersion'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
 import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
-import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
+import { parseTranscript, readTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
+import { CODEX_CAPS } from '../../src/mms/harness/drivers/codex'
+import { holdControl, type HoldControl } from '../support/steerHoldControl'
 import type { PendingUserQuestions, UserQuestionAnswers } from '../../src/shared/types'
 import { serializeAppError, type AppError } from '../../src/shared/errors'
 
@@ -42,10 +47,12 @@ const SUPERVISED = { type: 'readOnly', networkAccess: false }
  * helpers are tracked from the thread's items alone.
  */
 const NIL_THREAD = '00000000-0000-0000-0000-000000000000'
-function handshake(firstId = 1, probe = true): TranscriptFrame[] {
+/** What the replayed Codex says it is at `initialize`: the version Mousse runs, so a bot's turn may run on it. */
+const CHECKED_USER_AGENT = `codex_cli_rs/${CODEX_MANAGED_VERSION} (Mac OS 15.0.0; arm64) unknown (mousse; 0.1.1)`
+function handshake(firstId = 1, probe = true, userAgent = CHECKED_USER_AGENT): TranscriptFrame[] {
   return [
     out({ id: firstId, method: 'initialize', params: { clientInfo: { name: 'mousse', title: 'Mousse', version: '0.1.1' }, capabilities: { experimentalApi: true, requestAttestation: false } } }),
-    inn({ id: firstId, result: { userAgent: 'replay', codexHome: '/home/replay/.codex', platformFamily: 'unix', platformOs: 'macos' } }),
+    inn({ id: firstId, result: { userAgent, codexHome: '/home/replay/.codex', platformFamily: 'unix', platformOs: 'macos' } }),
     out({ method: 'initialized' }),
     ...(probe
       ? [
@@ -202,6 +209,9 @@ describe('CodexAdapter', () => {
     expect(adapter.driver).toBe('codex')
     expect(adapter.capabilities).toEqual({
       steer: 'native',
+      // On the steer hold: Codex reports a tool when it starts, and a held steer waits out S4's 232 ms window after it.
+      steerBoundary: 'start',
+      steerSettleMs: 232,
       interrupt: true,
       rollback: 'none',
       fork: 'portable',
@@ -1141,6 +1151,51 @@ describe('CodexAdapter', () => {
     expect(stopCommands).toHaveBeenCalledWith([process.pid], [command], { list: expect.any(Function) })
   })
 
+  it('says the turn waits for the model once Codex answered turn/start, not when only its thread is known', async () => {
+    const seen: string[][] = []
+    const sink = recordingSink()
+    sink.status = (status) => void sink.calls.push(['status', status])
+    const statuses = () => sink.calls.filter(([name]) => name === 'status').map(([, value]) => String(value))
+    const client = {
+      configured: () => true,
+      chat: async (chatInput: { onSession?: (session: { codexThreadId: string; turnId?: string }) => void }) => {
+        chatInput.onSession?.({ codexThreadId: 'codex-thread' })
+        seen.push(statuses())
+        chatInput.onSession?.({ codexThreadId: 'codex-thread', turnId: 'turn-1' })
+        seen.push(statuses())
+        throw new Error('done')
+      }
+    } as unknown as CodexProviderService
+    await expect(new CodexAdapter(() => client).startTurn(input(), sink, control(), host())).rejects.toThrow('done')
+    expect(seen).toEqual([[], ['waiting']])
+  })
+
+  it('closes a thought when the reply starts, so a thought that resumes after it is a new row', async () => {
+    const sink = recordingSink()
+    const client = {
+      configured: () => true,
+      chat: async (chatInput: { onThinking?: (text: string) => void; onText?: (text: string) => void }) => {
+        chatInput.onThinking?.('Reading the test')
+        chatInput.onText?.('It is flaky.')
+        chatInput.onThinking?.('Reading the test\n\nChecking the order')
+        throw new Error('done')
+      }
+    } as unknown as CodexProviderService
+    await expect(new CodexAdapter(() => client).startTurn(input(), sink, control(), host())).rejects.toThrow('done')
+    const streams = sink.calls
+      .filter(([name]) => name === 'thinking' || name === 'text')
+      .map(([name, value]) => `${name}:${(value as { phase: string }).phase}:${(value as { content: string }).content}`)
+    expect(streams).toEqual([
+      'thinking:start:', 'thinking:delta:Reading the test',
+      // The reply began: the thought is done.
+      'thinking:complete:Reading the test',
+      'text:start:', 'text:delta:It is flaky.',
+      // The thought resumes after the text: the text keeps its row, and the new thought is a row of its own.
+      'text:complete:It is flaky.',
+      'thinking:start:', 'thinking:delta:Checking the order'
+    ])
+  })
+
   it('fingerprints the thread a usage limit ended, and no other failure', async () => {
     const committed: Array<[string, string]> = []
     const client = (failure: Error) =>
@@ -1218,6 +1273,14 @@ describe('CodexAdapter', () => {
       expect(decide(managed)).toMatchObject({ action: 'pause', pause: { until: resetsAt, estimated: false } })
     })
 
+    it('a provider refusal shows its status and message on a plain Codex; a usage limit still pauses', async () => {
+      const refused = await turn(failing(new CodexTurnFailure('unexpected status 400 Bad Request: {"error":{"message":"Invalid value for \'tools\'"}}, url: http://127.0.0.1:9841/v1/responses', { message: 'x', codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 400 } } })), false)
+      expect(refused).toMatchObject({ code: 'provider_api_error', message: "400 · Invalid value for 'tools'" })
+      expect(decide(refused)).toBeUndefined()
+      const limited = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, new CodexTurnFailure('Too many requests', { message: 'Too many requests', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } }))), false)
+      expect(decide(limited)).toMatchObject({ action: 'pause' })
+    })
+
     it('a managed Codex failure that is not a usage limit does not pause', async () => {
       const overloaded = new CodexTurnFailure('Overloaded', { message: 'Overloaded', codexErrorInfo: 'serverOverloaded' })
       const managed = await turn(failing(overloaded), true)
@@ -1293,6 +1356,628 @@ describe('CodexAdapter', () => {
     replay.assertDone()
     expect(result).toMatchObject({ text: 'Working\n\nTests pass\n\nLint clean', providerRef: { nativeTurnId: 'turn-2' } })
     expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['Focus on tests', 'And lint'])
+  })
+
+  it("sends a steer's images with it: by turn/steer, and in the next turn when the steer arrives too late", async () => {
+    const png = (data: string) => ({ name: `${data}.png`, mimeType: 'image/png', data })
+    const image = (data: string) => ({ type: 'image', url: `data:image/png;base64,${data}` })
+    const steers: Array<{ text: string; images: ReturnType<typeof png>[] }> = []
+    const replay = transport(
+      [
+        ...handshake(),
+        ...threadStart(4),
+        ...turnStart(5, 'hello'),
+        cue({ steer: 'Match this', image: 'AAAA' }),
+        out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: [...text('Match this'), image('AAAA')] } }),
+        inn({ id: 6, result: { turnId: 'turn-1' } }),
+        cue({ steer: 'And this', image: 'BBBB' }),
+        out({ id: 7, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: [...text('And this'), image('BBBB')] } }),
+        completed('completed'),
+        inn({ id: 7, error: { code: -32600, message: 'no active turn to steer' } }),
+        out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: T, input: [...text('And this'), image('BBBB')], approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+        inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+        note('turn/started', { threadId: T, turn: { id: 'turn-2', status: 'inProgress', error: null } }),
+        completed('completed', 'turn-2')
+      ],
+      (frame) => {
+        const cued = frame as { steer: string; image: string }
+        steers.push({ text: cued.steer, images: [png(cued.image)] })
+      }
+    )
+    let drains = 0
+    const ctl: TurnControl = {
+      drainSteer: () => undefined,
+      drainSteerEntry: () => {
+        const entry = steers.shift()
+        return entry ? { ...entry, token: `drain-${++drains}`, cut: false } : undefined
+      },
+      heartbeat: () => {}
+    }
+    await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), ctl, host())
+    replay.assertDone()
+  })
+
+  describe('a native steer counts as read only once Codex has it', () => {
+    /** A control whose steers join the turn natively, with every take and hand-back recorded by token. */
+    function steerControl(queue: string[]) {
+      const taken: Array<string | undefined> = []
+      const returned: Array<[string, string | undefined]> = []
+      let drains = 0
+      const ctl: TurnControl = {
+        drainSteer: () => undefined,
+        drainSteerEntry: () => {
+          const text = queue.shift()
+          return text ? { text, token: `drain-${++drains}`, cut: false } : undefined
+        },
+        steerTaken: (token) => void taken.push(token),
+        returnSteer: (text, token) => void returned.push([text, token]),
+        heartbeat: () => {}
+      }
+      return { ctl, taken, returned }
+    }
+    const accepted = (sink: ReturnType<typeof recordingSink>) => sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)
+
+    it('is saved after Codex answers turn/steer, not before', async () => {
+      const steers: string[] = []
+      const sink = recordingSink()
+      const savedWhileSent: unknown[][] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus on tests' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus on tests') } }),
+          cue({ check: true }),
+          inn({ id: 6, result: { turnId: 'turn-1' } }),
+          ...message('msg-1', ['Tests pass']),
+          completed('completed')
+        ],
+        (frame) => {
+          const steer = (frame as { steer?: string }).steer
+          if (steer) steers.push(steer)
+          else savedWhileSent.push(accepted(sink))
+        }
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      await new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())
+      replay.assertDone()
+      expect(savedWhileSent).toEqual([[]])
+      expect(accepted(sink)).toEqual(['Focus on tests'])
+      expect(taken).toEqual(['drain-1'])
+      expect(returned).toEqual([])
+    })
+
+    it('is handed back, never read, when Stop lands before Codex has it', async () => {
+      const controller = new AbortController()
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+          // Codex refuses it (the turn ended), so it waits for the next turn; Stop comes first.
+          completed('completed'),
+          inn({ id: 6, error: { code: -32600, message: 'no active turn to steer' } }),
+          cue({ stop: true })
+        ],
+        (frame) => {
+          const steer = (frame as { steer?: string }).steer
+          if (steer) steers.push(steer)
+          else controller.abort(new Error('stopped by the user'))
+        }
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input({ signal: controller.signal }), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(accepted(sink)).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Focus', 'drain-1']])
+    })
+
+    it('is handed back, with the steer queued behind it, when Stop lands before Codex answers turn/steer', async () => {
+      const controller = new AbortController()
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+          // A second steer, drained while the first waits for Codex's answer, queues behind it.
+          cue({ steer: 'And lint' }),
+          cue({ stop: true })
+        ],
+        async (frame) => {
+          const steer = (frame as { steer?: string }).steer
+          if (steer) return void steers.push(steer)
+          // Stop once the second steer is drained, before Codex answers the first.
+          while (steers.length) await new Promise((resolve) => setTimeout(resolve, 10))
+          controller.abort(new Error('stopped by the user'))
+        }
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input({ signal: controller.signal }), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(accepted(sink)).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([
+        ['Focus', 'drain-1'],
+        ['And lint', 'drain-2']
+      ])
+    })
+
+    it('is handed back when the process dies before Codex answers turn/steer', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+          inn({ kind: 'exit', code: 1 })
+        ],
+        (frame) => void steers.push((frame as { steer: string }).steer)
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(accepted(sink)).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Focus', 'drain-1']])
+    })
+
+    it('is handed back by its token when its save fails', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+          inn({ id: 6, result: { turnId: 'turn-1' } })
+        ],
+        (frame) => void steers.push((frame as { steer: string }).steer)
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      const sink = recordingSink()
+      sink.steerAccepted = () => {
+        throw new Error('disk full')
+      }
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(taken).toEqual(['drain-1'])
+      expect(returned).toEqual([['Focus', 'drain-1']])
+    })
+  })
+
+  describe("a person's steer cuts the turn and is taken only by the turn that starts with it", () => {
+    /** A control whose steers are a person's (`cut`), with every take and hand-back recorded by token. */
+    function cutControl(queue: string[]) {
+      const taken: Array<string | undefined> = []
+      const returned: Array<[string, string | undefined]> = []
+      let drains = 0
+      const ctl: TurnControl = {
+        drainSteer: () => undefined,
+        drainSteerEntry: () => {
+          const text = queue.shift()
+          return text ? { text, token: `drain-${++drains}`, cut: true } : undefined
+        },
+        steerTaken: (token) => void taken.push(token),
+        returnSteer: (text, token) => void returned.push([text, token]),
+        heartbeat: () => {}
+      }
+      return { ctl, taken, returned }
+    }
+    const cutFrames = (): TranscriptFrame[] => [
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
+      ...message('msg-1', ['Working']),
+      cue({ steer: 'Use pnpm' }),
+      out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } })
+    ]
+    const steerCue = (steers: string[]) => (frame: unknown) => void steers.push((frame as { steer: string }).steer)
+
+    it('interrupts the turn and starts the next one with the message, which counts as read only then', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...turnStart(7, 'Use pnpm', 'turn-2'),
+          ...message('msg-2', ['Using pnpm'], 'turn-2'),
+          completed('completed', 'turn-2')
+        ],
+        steerCue(steers)
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      const result = await new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())
+      replay.assertDone()
+      expect(result).toMatchObject({ providerRef: { nativeTurnId: 'turn-2' } })
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['Use pnpm'])
+      expect(taken).toEqual(['drain-1'])
+      expect(returned).toEqual([])
+    })
+
+    it("starts the next turn with the message's images", async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          out({
+            id: 7,
+            method: 'turn/start',
+            params: { summary: 'auto', threadId: T, input: [...text('Use pnpm'), { type: 'image', url: 'data:image/png;base64,AAAA' }], approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' }
+          }),
+          inn({ id: 7, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+          note('turn/started', { threadId: T, turn: { id: 'turn-2', status: 'inProgress', error: null } }),
+          completed('completed', 'turn-2')
+        ],
+        steerCue(steers)
+      )
+      const ctl: TurnControl = {
+        drainSteer: () => undefined,
+        drainSteerEntry: () => {
+          const text = steers.shift()
+          return text ? { text, token: 'drain-1', cut: true, images: [{ name: 'shot.png', mimeType: 'image/png', data: 'AAAA' }] } : undefined
+        },
+        heartbeat: () => {}
+      }
+      await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), ctl, host())
+      replay.assertDone()
+    })
+
+    it('hands the message back when Stop lands before the next turn starts', async () => {
+      const controller = new AbortController()
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          cue({ action: 'stop' }),
+          out({ id: 7, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+          inn({ id: 6, result: {} }),
+          inn({ id: 7, result: {} }),
+          completed('interrupted')
+        ],
+        (frame) => {
+          const steer = (frame as { steer?: string }).steer
+          if (steer) steers.push(steer)
+          else controller.abort(new Error('stopped by the user'))
+        }
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input({ signal: controller.signal }), sink, ctl, host())).rejects.toThrow('stopped by the user')
+      await replay.idle()
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted')).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Use pnpm', 'drain-1']])
+    })
+
+    it('hands the message back when the interrupted turn ends failed', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          inn({ id: 6, result: {} }),
+          completed('failed', 'turn-1', { message: 'Upstream overloaded', codexErrorInfo: null })
+        ],
+        steerCue(steers)
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow('Upstream overloaded')
+      await replay.idle()
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted')).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Use pnpm', 'drain-1']])
+    })
+
+    it('hands the message back when the server refuses the turn that would carry it', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          out({ id: 7, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text('Use pnpm'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+          inn({ id: 7, error: { code: -32603, message: 'The app-server could not start the turn' } })
+        ],
+        steerCue(steers)
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted')).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Use pnpm', 'drain-1']])
+    })
+
+    it('accepts or hands back every message the next turn carries, even when one fails to save', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          // A second message drained while the cut turn ends, under its own drain.
+          cue({ steer: 'And keep the lockfile' }),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...turnStart(7, 'Use pnpm\nAnd keep the lockfile', 'turn-2')
+        ],
+        steerCue(steers)
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      const record = sink.steerAccepted
+      sink.steerAccepted = (text, token) => {
+        if (text === 'Use pnpm') throw new Error('disk full')
+        record(text, token)
+      }
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow('disk full')
+      await replay.idle()
+      expect(taken).toEqual(['drain-1', 'drain-2'])
+      // The one whose save failed is handed back; the other, which Codex has, is read.
+      expect(returned).toEqual([['Use pnpm', 'drain-1']])
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['And keep the lockfile'])
+    })
+
+    it('settles the approval the cut turn was asking, as the person, so no card is left waiting', async () => {
+      const steers: string[] = []
+      const asked: string[] = []
+      questions.on('pending', (request: { requestId: string }) => void asked.push(request.requestId))
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'rm -rf build', cwd: '/w', reason: null } }),
+          cue({ steer: 'Keep the build folder' }),
+          out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+          out({ id: 'srv-1', result: { decision: 'decline' } }),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...turnStart(7, 'Keep the build folder', 'turn-2'),
+          ...message('msg-2', ['Keeping it'], 'turn-2'),
+          completed('completed', 'turn-2')
+        ],
+        steerCue(steers)
+      )
+      const { ctl } = cutControl(steers)
+      await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), ctl, host())
+      replay.assertDone()
+      expect(asked).toHaveLength(1)
+      expect(questions.listPendingForThread('thread-1')).toEqual([])
+    })
+  })
+
+  describe("on the hold: a person's steer cuts in at once, even during a command (docs/design/steer-and-interruptions.md §2.5)", () => {
+    const STEER = 'Use pnpm, not npm'
+    const commandItem = (id: string, command: string, status: string, extra: Record<string, unknown> = {}) => ({
+      type: 'commandExecution', id, command, cwd: '/w', processId: '4242', status, commandActions: [], aggregatedOutput: null, exitCode: null, durationMs: null, ...extra
+    })
+    const started = (id: string, command = 'npm test', turn = 'turn-1') => note('item/started', { threadId: T, turnId: turn, item: commandItem(id, command, 'inProgress') })
+    const interrupt = (id: number, turn = 'turn-1') => out({ id, method: 'turn/interrupt', params: { threadId: T, turnId: turn } })
+    /** The run goes on with the steer as its next turn, which answers it. */
+    const answers = (id: number, steer = STEER): TranscriptFrame[] => [
+      ...turnStart(id, steer, 'turn-2'),
+      ...message('msg-2', ['Switching to pnpm'], 'turn-2'),
+      completed('completed', 'turn-2')
+    ]
+
+    /** Cue actions: `steer` (a person's message arrives), `drained` (wait until the adapter drained it), `ask`. */
+    /** Mousse's own questions asked in the thread (`ask` cue), as its MCP server's `ask_user` asks them. */
+    const asked: Array<Promise<unknown>> = []
+    const cues = (hold: HoldControl) => async (frame: unknown) => {
+      const action = frame as { action: string; text?: string }
+      if (action.action === 'ask') {
+        const answer = questions.requestAnswers([{ id: 'q', prompt: 'Which package manager?', options: [{ id: 'npm', label: 'npm' }, { id: 'skip', label: 'Skip' }] }], 'thread-1')
+        answer.catch(() => undefined)
+        asked.push(answer)
+        await vi.waitFor(() => expect(questions.listPendingForThread('thread-1')).toHaveLength(1))
+      } else if (action.action === 'steer') hold.steer(action.text ?? STEER)
+      else if (action.action === 'drained') await vi.waitFor(() => expect(hold.drained()).toContain(action.text ?? STEER))
+      else throw new Error(`unknown cue ${JSON.stringify(frame)}`)
+    }
+    const run = async (frames: TranscriptFrame[] | 'fixture', options: { strict?: boolean; settleMs?: number } = {}) => {
+      // As in the orchestrator: a question pending in the thread means the turn waits for a person.
+      const hold = holdControl(CODEX_CAPS, { ...options, questions: { pending: () => questions.listPendingForThread('thread-1').length > 0 } })
+      const transcript = frames === 'fixture'
+        ? readTranscript(join(__dirname, 'fixtures', 'steer-during-command', 'codex.ndjson'))
+        : parseTranscript([{ kind: 'transcript', adapter: 'codex', scenario: 'unit', boundary: CODEX_APP_SERVER_BOUNDARY, recordedAt: 'hand-authored', version: 1 }, ...frames].map((line) => JSON.stringify(line)).join('\n'))
+      const replay = new ReplayTransport(transcript, { onCue: cues(hold), stallMs: 3_000 })
+      // Every request the adapter sent, by method (the replay also fails on any frame the transcript does not have).
+      const sent: string[] = []
+      const send = replay.send.bind(replay)
+      replay.send = (frame: unknown) => {
+        sent.push((frame as { method?: string }).method ?? '')
+        send(frame)
+      }
+      const sink = hold.wrap(recordingSink())
+      const result = await new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'Run the tests' }), sink, hold.ctl, host())
+      replay.assertDone()
+      const events = hold.log.map(([event, detail]) => `${event}:${detail}`)
+      return { hold, sink, result, events, sent }
+    }
+    const before = (events: string[], a: string, b: string) => {
+      expect(events).toContain(a)
+      expect(events).toContain(b)
+      expect(events.indexOf(a)).toBeLessThan(events.indexOf(b))
+    }
+    const head = (prompt = 'Run the tests'): TranscriptFrame[] => [...handshake(), ...threadStart(4), ...turnStart(5, prompt)]
+
+    it('the fixture: a steer during a command interrupts the turn at once, before the command\'s result, and the next turn carries it once', async () => {
+      const { hold, result, events, sent } = await run('fixture')
+      expect(result.text).toBe('Switching to pnpm')
+      // Nothing waited for the command: the cut went out while it ran, and it never reported a result before the cut.
+      expect(hold.held()).toBe(false)
+      before(events, 'tool:start:cmd-1', `drain:${STEER}`)
+      if (events.includes('tool:complete:cmd-1')) before(events, `drain:${STEER}`, 'tool:complete:cmd-1')
+      expect(sent.filter((method) => method === 'turn/interrupt')).toHaveLength(1)
+      expect(sent).not.toContain('turn/steer')
+      // Checked at dispatch, then taken only once the turn that carries it is accepted.
+      before(events, `drain:${STEER}`, 'mayCut:true')
+      before(events, 'mayCut:true', 'taken:drain-1')
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+      expect(events.filter((event) => event.startsWith('returned:'))).toEqual([])
+    })
+
+    it('the boundary ends when the next server turn starts: a steer before that turn writes anything cuts it', async () => {
+      const LATER = 'And keep the lockfile'
+      const { events } = await run([
+        ...head(),
+        started('cmd-1'),
+        cue({ action: 'steer' }),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        // The cut turn's end is a boundary...
+        completed('interrupted'),
+        // ...which the turn that carries the steer ends.
+        ...turnStart(7, STEER, 'turn-2'),
+        // Turn 2 has shown nothing yet: a person's steer is not a native one for the turn that ended.
+        cue({ action: 'steer', text: LATER }),
+        interrupt(8, 'turn-2'),
+        inn({ id: 8, result: {} }),
+        completed('interrupted', 'turn-2'),
+        ...turnStart(9, LATER, 'turn-3'),
+        ...message('msg-3', ['Keeping it'], 'turn-3'),
+        completed('completed', 'turn-3')
+      ])
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`, `accepted:${LATER}@drain-2`])
+    })
+
+    it('a change waiting for a person\'s approval does not hold: the steer cuts and answers it', async () => {
+      const asked: string[] = []
+      questions.on('pending', (request: { requestId: string }) => void asked.push(request.requestId))
+      const { events } = await run([
+        ...head(),
+        note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'fileChange', id: 'patch-1', changes: [{ path: 'src/a.ts', kind: { type: 'update' }, diff: '' }], status: 'inProgress' } }),
+        inn({ id: 'srv-1', method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: 'patch-1', startedAtMs: 0, reason: null } }),
+        cue({ action: 'steer', text: 'Leave src/a.ts alone' }),
+        interrupt(6),
+        out({ id: 'srv-1', result: { decision: 'decline' } }),
+        inn({ id: 6, result: {} }),
+        completed('interrupted'),
+        ...answers(7, 'Leave src/a.ts alone')
+      ])
+      expect(asked).toHaveLength(1)
+      before(events, 'awaiting:patch-1:true', 'drain:Leave src/a.ts alone')
+      expect(events).toContain('awaiting:patch-1:false')
+    })
+
+    describe('a question for the person: the steer cuts and answers it', () => {
+      const mousseAsk = (status: string, extra: Record<string, unknown> = {}) => ({ type: 'mcpToolCall', id: 'mcp-ask', server: 'mousse', tool: 'ask_user', arguments: { questions: [] }, status, result: null, error: null, durationMs: null, ...extra })
+
+      it('a steer during Codex\'s own question (requestUserInput) cuts and answers it as the person', async () => {
+        const { events } = await run([
+          ...head(),
+          note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'dynamicToolCall', id: 'ask-1', tool: 'request_user_input', arguments: {}, status: 'inProgress', contentItems: null, success: null, durationMs: null } }),
+          inn({ id: 'srv-1', method: 'item/tool/requestUserInput', params: { threadId: T, turnId: 'turn-1', itemId: 'ask-1', isBlocking: true, autoResolutionMs: null, questions: [{ id: 'q1', header: 'Scope', question: 'Which module?', isOther: false, isSecret: false, options: [{ label: 'run', description: '' }, { label: 'Skip', description: '' }] }] } }),
+          cue({ action: 'steer' }),
+          interrupt(6),
+          // The steer answered the question as the person: the reject-like option.
+          out({ id: 'srv-1', result: { answers: { q1: { answers: ['Skip'] } } } }),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...answers(7)
+        ])
+        before(events, 'awaiting:ask-1:true', `drain:${STEER}`)
+        expect(events).toContain('awaiting:ask-1:false')
+        expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+        expect(questions.listPendingForThread('thread-1')).toEqual([])
+      })
+
+      it('a steer during Mousse\'s ask_user goes in at once, with no wait for the window', async () => {
+        asked.length = 0
+        const { hold, events } = await run([
+          ...head(),
+          note('item/started', { threadId: T, turnId: 'turn-1', item: mousseAsk('inProgress') }),
+          cue({ action: 'ask' }),
+          cue({ action: 'steer' }),
+          interrupt(6),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...answers(7)
+        ], { settleMs: 5_000 })
+        // A 5 s window: only the asking rule can have let it through.
+        expect(hold.at('drain')! - hold.at('tool', 'start:mcp-ask')!).toBeLessThan(1_000)
+        expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+        await expect(asked[0]).resolves.toEqual({ q: 'skip' })
+      })
+    })
+
+    it.each([['best effort', false], ['strict', true]] as const)('%s: a person\'s steer that arrives while the turn carrying a cut starts is never sent by turn/steer: it cuts that turn and starts the next', async (_name, strict) => {
+      const SECOND = 'and keep the lockfile'
+      const [startOut, startReply, started2] = turnStart(7, STEER, 'turn-2')
+      const { events } = await run([
+        ...head(),
+        ...message('msg-1', ['Looking around']),
+        cue({ action: 'steer' }),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        completed('interrupted'),
+        // The turn/start carrying the first steer is on its way when the second arrives (Codex has not answered yet).
+        startOut!,
+        cue({ action: 'steer', text: SECOND }),
+        cue({ action: 'drained', text: SECOND }),
+        startReply!,
+        started2!,
+        // No turn/steer: the new turn is cut, and the next one carries the second steer.
+        interrupt(8, 'turn-2'),
+        inn({ id: 8, result: {} }),
+        completed('interrupted', 'turn-2'),
+        ...turnStart(9, SECOND, 'turn-3'),
+        ...message('msg-3', ['Keeping it'], 'turn-3'),
+        completed('completed', 'turn-3')
+      ], { strict })
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`, `accepted:${SECOND}@drain-2`])
+    })
+
+    it('two steers around a cut reach the next turn in the order they were sent', async () => {
+      const SECOND = 'and keep the lockfile'
+      const { events } = await run([
+        ...head(),
+        ...message('msg-1', ['Looking around']),
+        cue({ action: 'steer' }),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        // The second arrives as the interrupted turn ends: it is taken at the boundary, after the cut one.
+        cue({ action: 'steer', text: SECOND }),
+        completed('interrupted'),
+        ...turnStart(7, `${STEER}\n${SECOND}`, 'turn-2'),
+        ...message('msg-2', ['Switching'], 'turn-2'),
+        completed('completed', 'turn-2')
+      ])
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`, `accepted:${SECOND}@drain-2`])
+    })
+
+    it('the turn\'s plan row is not a running tool: a steer while the model writes after it cuts at once', async () => {
+      const { events } = await run([
+        ...head(),
+        note('turn/plan/updated', { threadId: T, turnId: 'turn-1', explanation: null, plan: [{ step: 'Run the tests', status: 'inProgress' }] }),
+        ...message('msg-1', ['Running them now']),
+        cue({ action: 'steer' }),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        completed('interrupted'),
+        ...answers(7)
+      ])
+      expect(events).toContain('tool:start:plan:turn-1')
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+    })
   })
 
   it('stops at once while a steer is still unanswered after the turn completed', async () => {
@@ -1407,6 +2092,13 @@ describe('CodexAdapter', () => {
 })
 
 describe('a bot turn on Codex', () => {
+  /** A bot without "run commands" starts with every command tool of Codex off, so it has none at all. */
+  /**
+   * Every bot turn starts with Codex's tools that no bot may have off (`CODEX_BOT_FEATURES_OFF`), and, since none of these
+   * bots holds the web, with Codex's hosted web search off (`codexBotWebOff`).
+   */
+  const BOT_FEATURES = { ...Object.fromEntries(CODEX_BOT_FEATURES_OFF.map((feature) => [`features.${feature}`, false])), web_search: 'disabled' }
+  const NO_COMMANDS = { ...BOT_FEATURES, 'features.shell_tool': false, 'features.unified_exec': false }
   /** A bot whose authority allows changes in its files folder, refuses (with an ask) a command, and walls anything else. */
   function botIn(files: string) {
     const calls: Array<{ tool: string; args: Record<string, unknown> }> = []
@@ -1421,6 +2113,101 @@ describe('a bot turn on Codex', () => {
     return { bot, calls }
   }
 
+  it.each(['mousse', 'mousse-relay'])('switches off the owner server %s without an attachment', async (name) => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { mcp_servers: { [name]: { url: 'https://owner.invalid/mcp', enabled: true } } }, layers: [] } }),
+      ...threadStart(5, threadParams({ config: { [`mcp_servers.${name}.enabled`]: false, ...NO_COMMANDS, model_provider: 'openai' } })),
+      ...turnStart(6, 'go'),
+      completed('completed')
+    ])
+    await new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: bot as never })
+    replay.assertDone()
+  })
+
+  // Hand-authored wire replays: owner names × attachments × enabled/disabled entries.
+  // Refused cases must never send thread/start (nor let leftover owner keys reach Codex).
+  const reservedCases = [[], ['mousse'], ['mousse-relay'], ['mousse', 'mousse-relay'], ['mousse-relay', 'mousse']].flatMap((names) =>
+    ['none', 'mousse', 'both'].flatMap((attachment) => [true, false].flatMap((enabled) =>
+      ['effective', 'active layer', 'ignored layer', 'user and project', 'ancestor project'].map((source) => ({ names, attachment, enabled, source })))))
+  it.each(reservedCases)('contains reserved names $names with attachment $attachment, enabled=$enabled, $source', async ({ names, attachment, enabled, source }) => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const mcp = attachment === 'none' ? null : {
+      url: 'http://127.0.0.1:4000/mcp', token: 'run-token',
+      ...(attachment === 'both' ? { relay: { url: 'http://127.0.0.1:4000/relay', revision: 'rev-1' } } : {})
+    }
+    const servers = Object.fromEntries(names.map((name) => [name, {
+      enabled, url: 'https://owner.invalid/mcp', enabled_tools: ['owner_tool'],
+      http_headers: { Owner: 'leftover' }, bearer_token_env_var: 'OWNER_TOKEN'
+    }]))
+    const activeNames = source === 'ignored layer' ? [] : names
+    const collisions = ['mousse', 'mousse-relay'].filter((name) => activeNames.includes(name) && mcp && (name === 'mousse' || attachment === 'both'))
+    const config = {
+      ...Object.fromEntries(enabled ? activeNames.map((name) => [`mcp_servers.${name}.enabled`, false]) : []),
+      ...NO_COMMANDS, model_provider: 'openai',
+      ...(mcp ? {
+        'mcp_servers.mousse.url': mcp.url,
+        'mcp_servers.mousse.http_headers': { Authorization: 'Bearer run-token' },
+        'mcp_servers.mousse.tool_timeout_sec': 3600,
+        'mcp_servers.mousse.default_tools_approval_mode': 'approve',
+        ...(mcp.relay ? {
+          'mcp_servers.mousse-relay.url': mcp.relay.url,
+          'mcp_servers.mousse-relay.http_headers': { Authorization: 'Bearer run-token' },
+          'mcp_servers.mousse-relay.tool_timeout_sec': 3600,
+          'mcp_servers.mousse-relay.default_tools_approval_mode': 'approve'
+        } : {})
+      } : {})
+    }
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: {
+        config: { mcp_servers: source === 'effective' ? servers : {} },
+        layers: source === 'effective' ? [] : [
+          ...(source === 'user and project' ? [{ name: { type: 'user', file: '/owner/.codex/config.toml', profile: null }, disabledReason: null, config: { mcp_servers: servers } }] : []),
+          { name: { type: 'project', dotCodexFolder: join(source === 'ancestor project' ? home : files, '.codex') }, disabledReason: source === 'ignored layer' ? 'untrusted' : null, config: { mcp_servers: servers } }
+        ]
+      } }),
+      ...(!collisions.length ? [
+        ...threadStart(5, threadParams({ config, ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {}) })),
+        ...turnStart(6, 'go'), completed('completed')
+      ] : []),
+      // The same owner's next thread still runs, with exactly the usual attachment overrides.
+      ...threadStart(collisions.length ? 5 : 7, threadParams({
+        config: Object.fromEntries(Object.entries(config).filter(([key]) => key === 'model_provider' || (key.startsWith('mcp_servers.') && !key.endsWith('.enabled')))),
+        ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {})
+      })),
+      ...turnStart(collisions.length ? 6 : 8, 'owner'), completed('completed')
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    const run = adapter.startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(mcp), bot: bot as never })
+    if (collisions.length) {
+      const plural = collisions.length > 1
+      const namesText = collisions.map((name) => `"${name}"`).join(' and ')
+      const file = source === 'user and project' ? "Codex's config.toml and the project's .codex/config.toml"
+        : source === 'ancestor project' ? "the project's ../.codex/config.toml"
+        : source === 'active layer' ? "the project's .codex/config.toml" : "Codex's config.toml"
+      await expect(run).rejects.toMatchObject({ code: 'policy_unenforceable', message:
+        `Your Codex config has ${plural ? 'MCP servers' : 'an MCP server'} named ${namesText}, ${plural ? 'names' : 'a name'} Mousse needs for my work. Rename ${plural ? 'them' : 'it'} in ${file} to let me work on Codex.` })
+    }
+    else await run
+    await adapter.startTurn(input({ prompt: 'owner', threadId: 'owner-thread' }), recordingSink(), control(), host(mcp))
+    replay.assertDone()
+  })
+
+  it('keeps an owner thread outside the bot config checks', async () => {
+    const replay = transport([...handshake(), ...threadStart(4), ...turnStart(5, 'hello'), completed('completed')])
+    await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), control(), host())
+    replay.assertDone()
+  })
+
   it('runs in Ask with the user\'s MCP servers off, in its files folder; its authority answers every approval and nobody is asked', async () => {
     const files = join(home, 'files')
     mkdirSync(files)
@@ -1430,7 +2217,7 @@ describe('a bot turn on Codex', () => {
       // The user's own MCP servers, read on the turn's connection and switched off for the thread.
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
       inn({ id: 4, result: { config: { mcp_servers: { github: { enabled: true }, off: { enabled: false } } }, layers: [{ disabledReason: null, config: { mcp_servers: { linear: {} } } }] } }),
-      ...threadStart(5, threadParams({ config: { 'mcp_servers.github.enabled': false, 'mcp_servers.linear.enabled': false, model_provider: 'openai' } })),
+      ...threadStart(5, threadParams({ config: { 'mcp_servers.github.enabled': false, 'mcp_servers.linear.enabled': false, ...NO_COMMANDS, model_provider: 'openai' } })),
       // Full access asked for by the thread: the bot's turn still runs in Ask (untrusted, read-only).
       ...turnStart(6, 'go'),
       inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'rm -rf ~', cwd: files, reason: null } }),
@@ -1468,6 +2255,78 @@ describe('a bot turn on Codex', () => {
     expect(saved.threads['thread-1'].cwd).toBe(files)
   })
 
+  it('a Codex newer than the version its tools were checked on runs no bot turn, and the owner\'s own thread on it runs', async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot, calls } = botIn(files)
+    const replay = transport([
+      // A Codex that may offer tools Mousse has not accounted for: nothing of the bot's turn reaches it.
+      ...handshake(1, true, 'codex_cli_rs/0.999.0 (Mac OS 15.0.0; arm64) unknown (mousse; 0.1.1)'),
+      ...threadStart(4),
+      ...turnStart(5, 'mine'),
+      ...message('msg-1', ['Done']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    await expect(adapter.startTurn(input({ prompt: 'go', threadId: 'bot-thread' }), recordingSink(), control(), { ...host(), bot: bot as never })).rejects.toMatchObject({ message: CODEX_BOT_VERSION_TEXT })
+    expect(calls).toEqual([])
+    await adapter.startTurn(input({ prompt: 'mine' }), recordingSink(), control(), host())
+    replay.assertDone()
+  })
+
+  it('a bot turn doesn\'t run while the owner\'s Codex config has on a feature a thread can\'t switch off, and says which', async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot, calls } = botIn(files)
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { features: { multi_env_copy_file: true, view_image: true } }, layers: [] } })
+    ])
+    const codex = service(replay)
+    await expect(new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: bot as never }))
+      .rejects.toMatchObject({ message: codexBotSettingText(['multi_env_copy_file']) })
+    replay.assertDone()
+    expect(calls).toEqual([])
+  })
+
+  it('a bot turn that holds MCP tools gets Mousse\'s relay, and every MCP server of the owner\'s own Codex setup is off', async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const mcp = { url: 'http://127.0.0.1:4000/mcp', token: 'run-token', relay: { url: 'http://127.0.0.1:4000/relay', revision: 'rev-1' } }
+    const replay = transport([
+      ...handshake(),
+      // The owner's ordinary Codex server is switched off; only Mousse supplies the reserved names.
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { mcp_servers: { github: { enabled: true } } }, layers: [] } }),
+      ...threadStart(5, threadParams({
+        config: {
+          'mcp_servers.github.enabled': false,
+          ...NO_COMMANDS,
+          model_provider: 'openai',
+          'mcp_servers.mousse.url': mcp.url,
+          'mcp_servers.mousse.http_headers': { Authorization: 'Bearer run-token' },
+          'mcp_servers.mousse.tool_timeout_sec': 3600,
+          'mcp_servers.mousse.default_tools_approval_mode': 'approve',
+          // Every call of the bot's MCP tools goes to the relay, which checks the grant before the server sees it.
+          'mcp_servers.mousse-relay.url': mcp.relay.url,
+          'mcp_servers.mousse-relay.http_headers': { Authorization: 'Bearer run-token' },
+          'mcp_servers.mousse-relay.tool_timeout_sec': 3600,
+          'mcp_servers.mousse-relay.default_tools_approval_mode': 'approve'
+        },
+        developerInstructions: mousseOrchestrationInstructions()
+      })),
+      ...turnStart(6, 'go'),
+      ...message('msg-1', ['Done']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(mcp), bot: bot as never })
+    replay.assertDone()
+  })
+
   it('a chat activation\'s cleared context starts a new Codex thread', async () => {
     const files = join(home, 'files')
     mkdirSync(files)
@@ -1479,13 +2338,13 @@ describe('a bot turn on Codex', () => {
     const replay = transport([
       ...handshake(),
       ...setup(4),
-      ...threadStart(5),
+      ...threadStart(5, threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' } })),
       ...turnStart(6, 'one'),
       ...message('msg-1', ['one']),
       completed('completed'),
       // Cleared: the saved thread holds another history, so a new one starts.
       ...setup(7),
-      out({ id: 8, method: 'thread/start', params: threadParams() }),
+      out({ id: 8, method: 'thread/start', params: threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' } }) }),
       inn({ id: 8, result: threadResult('thr-2') }),
       out({ id: 9, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('two'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 9, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
@@ -1497,6 +2356,52 @@ describe('a bot turn on Codex', () => {
     await adapter.startTurn(input({ prompt: 'one', nativeHistory: '' }), recordingSink(), control(), { ...host(), bot: bot as never })
     await adapter.startTurn(input({ prompt: 'two', nativeHistory: '' }), recordingSink(), control(), { ...host(), bot: bot as never })
     replay.assertDone()
+  })
+
+  it("a bot's dispatch whose system text changed (an Allow) starts a new Codex thread under the new text, with the history in its prompt", async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const setup = (id: number) => [
+      out({ id, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id, result: { config: { mcp_servers: {} }, layers: [] } })
+    ]
+    const before = 'Your name is Pip.\n\nWhat your owner allows now: your files folder.'
+    const after = 'Your name is Pip.\n\nWhat your owner allows now: your files folder, and the web.'
+    const replay = transport([
+      ...handshake(),
+      ...setup(4),
+      ...threadStart(5, threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' }, developerInstructions: before })),
+      ...turnStart(6, 'one'),
+      ...message('msg-1', ['one']),
+      completed('completed'),
+      // The same system text: the loaded thread goes on.
+      ...setup(7),
+      ...turnStart(8, 'two', 'turn-2'),
+      ...message('msg-2', ['two'], 'turn-2'),
+      completed('completed', 'turn-2'),
+      // The owner allowed the web: the system text changed. The loaded thread, which keeps its old developer instructions,
+      // is let go, and a new one starts under the new text, never with the old permissions as its system text.
+      ...setup(9),
+      out({ id: 10, method: 'thread/unsubscribe', params: { threadId: T } }),
+      inn({ id: 10, result: { status: 'unsubscribed' } }),
+      out({ id: 11, method: 'thread/start', params: threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' }, developerInstructions: after }) }),
+      inn({ id: 11, result: threadResult('thr-2') }),
+      out({ id: 12, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+two\n\nCurrent request:\nthree'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      inn({ id: 12, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
+      note('item/completed', { threadId: 'thr-2', turnId: 'turn-3', item: { type: 'agentMessage', id: 'msg-3', text: 'three' } }),
+      note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-3', status: 'completed', error: null } })
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    const withText = (sessionInstructions: string): AdapterHost => ({ ...host(), bridge: { ...host().bridge!, sessionInstructions }, bot: bot as never })
+    await adapter.startTurn(input({ prompt: 'one', nativeHistory: '' }), recordingSink(), control(), withText(before))
+    await adapter.startTurn(input({ prompt: 'two', nativeHistory: 'history+one' }), recordingSink(), control(), withText(before))
+    const third = await adapter.startTurn(input({ prompt: 'three', nativeHistory: 'history+two' }), recordingSink(), control(), withText(after))
+    replay.assertDone()
+    expect(third).toMatchObject({ text: 'three', providerRef: { sessionId: 'thr-2' } })
+    const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, { codexThreadId: string; instructionsHash?: string }> }
+    expect(saved.threads['thread-1']).toMatchObject({ codexThreadId: 'thr-2', instructionsHash: expect.any(String) })
   })
 
   /** A real bot authority over its files folder, a folder it may change and one it may read. */
@@ -1521,23 +2426,39 @@ describe('a bot turn on Codex', () => {
   const command = (id: string, text: string, cwd: string, reason: string | null = null) =>
     inn({ id, method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: `cmd-${id}`, startedAtMs: 0, environmentId: null, command: text, cwd, reason } })
 
-  it('with "run commands": workspace-write over exactly its own folders, every command allowed by the grant with no question, never a retry outside the sandbox', async () => {
+  it('with "run commands": every command allowed by the grant with no question, never a retry outside the sandbox; its own profile (Linux, macOS) or workspace-write (Windows) over exactly its own folders', async () => {
     const { bot, files, docs, scratch } = realBot(['read', 'shell'])
     const writable = [docs, files, scratch]
+    // Linux and macOS: Mousse's permission profile, reading Codex's `:minimal`, the folder granted for reading and the
+    // Codex package (the replay's `codex` is in the test home, so its package is the folder above), writing the bot's folders; Windows keeps workspace-write.
+    const confined = process.platform !== 'win32'
+    const ref = join(home, 'ref')
+    const codexPackage = dirname(realpathSync.native(home))
+    const profile = { filesystem: { ':minimal': 'read', [ref]: 'read', [codexPackage]: 'read', ...Object.fromEntries(writable.map((root) => [root, 'write'])) }, network: { enabled: false } }
     const replay = transport([
       ...handshake(),
       ...setupRead(4),
-      ...threadStart(5, threadParams({
-        sandbox: 'workspace-write',
-        config: {
-          'sandbox_workspace_write.writable_roots': writable,
-          'sandbox_workspace_write.network_access': false,
-          'sandbox_workspace_write.exclude_tmpdir_env_var': true,
-          'sandbox_workspace_write.exclude_slash_tmp': true,
-          model_provider: 'openai'
-        }
-      })),
-      ...turnStart(6, 'go', 'turn-1', { sandboxPolicy: { type: 'workspaceWrite', writableRoots: writable, networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } }),
+      ...(confined
+        ? [
+            out({ id: 5, method: 'thread/start', params: { approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x', modelProvider: 'openai', config: { ...BOT_FEATURES, [`permissions.${CODEX_BOT_PROFILE}`]: profile, model_provider: 'openai' } } }),
+            inn({ id: 5, result: threadResult() }),
+            out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text('go'), approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x' } }),
+            inn({ id: 6, result: { turn: { id: 'turn-1', status: 'inProgress', error: null, items: [] } } })
+          ]
+        : [
+            ...threadStart(5, threadParams({
+              sandbox: 'workspace-write',
+              config: {
+                ...BOT_FEATURES,
+                'sandbox_workspace_write.writable_roots': writable,
+                'sandbox_workspace_write.network_access': false,
+                'sandbox_workspace_write.exclude_tmpdir_env_var': true,
+                'sandbox_workspace_write.exclude_slash_tmp': true,
+                model_provider: 'openai'
+              }
+            })),
+            ...turnStart(6, 'go', 'turn-1', { sandboxPolicy: { type: 'workspaceWrite', writableRoots: writable, networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } })
+          ]),
       command('srv-1', 'rm -rf build', files),
       out({ id: 'srv-1', result: { decision: 'accept' } }),
       command('srv-2', 'make test', '/somewhere/else'),
@@ -1554,12 +2475,12 @@ describe('a bot turn on Codex', () => {
     expect(asked).toEqual([])
   })
 
-  it('without "run commands": read-only, and a command is declined by the authority', async () => {
+  it('without "run commands": no command tool at all (read-only, every command feature off), and a command that still came is declined by the authority', async () => {
     const { bot, files, scratch } = realBot(['read'])
     const replay = transport([
       ...handshake(),
       ...setupRead(4),
-      ...threadStart(5),
+      ...threadStart(5, threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' } })),
       ...turnStart(6, 'go'),
       command('srv-1', 'ls', files),
       out({ id: 'srv-1', result: { decision: 'decline' } }),
@@ -1573,15 +2494,25 @@ describe('a bot turn on Codex', () => {
     expect(asked).toEqual([])
   })
 
-  it('does not run while the user\'s MCP servers cannot be read', async () => {
+  it('a bot\'s turn doesn\'t run while the owner\'s Codex config can\'t be read, and says so; the owner\'s own thread runs', async () => {
     const files = join(home, 'files')
     mkdirSync(files)
+    const { bot, calls } = botIn(files)
     const replay = transport([
       ...handshake(),
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
-      inn({ id: 4, error: { code: -32603, message: 'unreadable' } })
+      inn({ id: 4, error: { code: -32603, message: 'unreadable' } }),
+      ...threadStart(5),
+      ...turnStart(6, 'mine'),
+      ...message('msg-1', ['Done']),
+      completed('completed')
     ])
     const codex = service(replay)
-    await expect(new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: botIn(files).bot as never })).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    const adapter = new CodexAdapter(() => codex)
+    await expect(adapter.startTurn(input({ prompt: 'go', threadId: 'bot-thread' }), recordingSink(), control(), { ...host(), bot: bot as never }))
+      .rejects.toMatchObject({ code: 'policy_unenforceable', message: CODEX_BOT_SETUP_UNREADABLE_TEXT })
+    expect(calls).toEqual([])
+    await adapter.startTurn(input({ prompt: 'mine' }), recordingSink(), control(), host())
+    replay.assertDone()
   })
 })

@@ -343,6 +343,14 @@ export class RunStore {
     return rows.length ? toRun(rows[0]) : null
   }
 
+  /** Ids of every run that is working now (`starting|running|finalizing`), in every thread of the profile. */
+  activeRunIds(): string[] {
+    return this.db
+      .statement(`SELECT run_id FROM runs WHERE status IN ('starting','running','finalizing')`)
+      .all()
+      .map((row) => String(row.run_id))
+  }
+
   /**
    * The thread's `paused` run (SPEC §5), or null. A paused run is not active: the thread accepts a
    * person's message. At most one exists; more than one is an invariant violation and raises `conflict`.
@@ -437,6 +445,21 @@ export class RunStore {
       )
       .all(sinceIso)
       .map(toReceipt)
+  }
+
+  /**
+   * The threads where a receipt of `commandKind` whose request id starts with `prefix` admitted a run that has not
+   * started yet (queued, or starting), oldest first: where such a request's message may still wait in a queue.
+   */
+  receiptThreadsWithWaitingRuns(prefix: string, commandKind: string): string[] {
+    return this.db
+      .statement(
+        `SELECT r.thread_id AS thread_id FROM receipts r JOIN runs u ON u.run_id = json_extract(r.result, '$.runId')
+         WHERE r.client_request_id >= ? AND r.client_request_id < ? AND r.command_kind = ? AND u.status IN ('queued', 'starting')
+         GROUP BY r.thread_id ORDER BY MIN(r.created_at)`
+      )
+      .all(prefix, `${prefix}￿`, commandKind)
+      .map((row) => String((row as { thread_id: unknown }).thread_id))
   }
 
   /** The thread has an `agent.action` event of this action (the completion marker of a thread an agent created). */

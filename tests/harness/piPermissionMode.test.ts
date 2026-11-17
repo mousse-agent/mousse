@@ -26,7 +26,7 @@ function turnIn(permissionMode: PermissionMode, permission: PermissionPrompter |
       return permission.choose(request)
     }
   }
-  return { asked, turn: { input: { permissionMode, threadId: 't1', signal: new AbortController().signal }, host: { bridge: { permission: prompter } } } }
+  return { asked, turn: { input: { permissionMode, threadId: 't1', signal: new AbortController().signal }, host: { bridge: { permission: prompter } }, sink: {}, asking: new Set<string>(), gateRelease: new AbortController() } }
 }
 const answer = (optionId: string | undefined): PermissionPrompter => ({ choose: async () => optionId })
 

@@ -68,8 +68,19 @@
   padding-left: 1.4em;
 }
 
+/* The base reset takes list markers off; a document's lists keep theirs. */
+.chat-markdown ul { list-style: disc; }
+.chat-markdown ul ul { list-style: circle; }
+.chat-markdown ul ul ul { list-style: square; }
+.chat-markdown ol { list-style: decimal; }
+.chat-markdown ul.contains-task-list { list-style: none; padding-left: 0.3em; }
+
 .chat-markdown li {
   margin: 0.12em 0;
+}
+
+.chat-markdown li::marker {
+  color: var(--text-secondary);
 }
 
 .chat-markdown li > p {
@@ -160,7 +171,4 @@
   max-width: 100%;
   border-radius: 6px;
 }
-@keyframes context-compaction-spin { to { transform: rotate(360deg); } }
-.context-compaction-spinner { animation: context-compaction-spin 1s linear infinite; }
 .context-compaction-note { display: flex; align-items: center; gap: 8px; }
-@media (prefers-reduced-motion: reduce) { .context-compaction-spinner { animation: none; } }

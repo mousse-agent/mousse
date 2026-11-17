@@ -1,4 +1,4 @@
-import { realpath as realpathCallback } from 'node:fs'
+import { realpath as realpathCallback, realpathSync } from 'node:fs'
 import { access, lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
@@ -6,20 +6,37 @@ import { promisify } from 'node:util'
 /** `realpathSync` without blocking, spelled as `RepositoryIdentity` spells common directories, so keys made from it agree. */
 const realpathLike = promisify(realpathCallback)
 
+/** `path` made absolute, then each folder above it, nearest first, each with the names below it that were left off. */
+function* towardsRoot(path: string): Generator<{ folder: string; rest: string[] }> {
+  const rest: string[] = []
+  for (let current = resolve(path); ;) {
+    yield { folder: current, rest: [...rest] }
+    const parent = dirname(current)
+    if (parent === current) return
+    rest.unshift(basename(current)); current = parent
+  }
+}
+
 /**
  * The real path of `path`: links and aliases resolved (`/tmp` is `/private/tmp` on macOS), through the nearest folder
  * that exists, with the rest of the path kept as written. Reads without blocking.
  */
 export async function canonicalPathAsync(path: string): Promise<string> {
-  const rest: string[] = []
-  for (let current = resolve(path); ;) {
-    try { return join(await realpathLike(current), ...rest) }
-    catch {
-      const parent = dirname(current)
-      if (parent === current) return resolve(path)
-      rest.unshift(basename(current)); current = parent
-    }
+  for (const { folder, rest } of towardsRoot(path)) {
+    try { return join(await realpathLike(folder), ...rest) } catch { /* Not there: try the folder above. */ }
   }
+  return resolve(path)
+}
+
+/**
+ * {@link canonicalPathAsync}, blocking, for checks that cannot wait: the nearest folder that exists is resolved the
+ * way `realpathSync.native` does (short names and junctions too), and the rest of the path is kept as written.
+ */
+export function canonicalPathSync(path: string): string {
+  for (const { folder, rest } of towardsRoot(path)) {
+    try { return join(realpathSync.native(folder), ...rest) } catch { /* Not there: try the folder above. */ }
+  }
+  return resolve(path)
 }
 
 /**

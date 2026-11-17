@@ -2,7 +2,7 @@ import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
 import { applyFrostedComposer, createFrostedComposerSaver } from '../lib/frostedComposer'
-import { Activity, ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
+import { Activity, ArrowLeft, Bot, FlaskConical, Keyboard, Laptop, MessagesSquare, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import { DelayedLoader } from './ui/DelayedLoader'
@@ -21,12 +21,14 @@ import { ProvidersSettings } from './providers/ProvidersSettings'
 import { SpeechSettings } from '../speech/SpeechSettings'
 import { NetDevicesSection } from './NetDevicesSection'
 import { ActivitySection } from './ActivitySection'
-import { accountSection, takePendingSettingsSection } from '../lib/settingsNavigation'
+import { accountSection, takePendingSettingsAnchor, takePendingSettingsSection } from '../lib/settingsNavigation'
 import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
 import { StorageSettings } from './StorageSettings'
 import { AgentsSettings } from './settings/AgentsSettings'
 import { GeneralSettings } from './settings/GeneralSettings'
+import { LabsSettings } from './settings/LabsSettings'
 import { AppearanceSettings } from './settings/AppearanceSettings'
+import { ChatSettings } from './settings/ChatSettings'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { SkillsMcpSettings } from './settings/SkillsMcpSettings'
@@ -37,16 +39,18 @@ import { useStorageReviewPending } from '../lib/storageReview'
 import '../styles/settings.css'
 
 const SETTINGS_SECTIONS = [
-  { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'Settings', keywords: ['permission', 'runs', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
-  { id: 'appearance', label: 'Appearance', icon: Palette, hue: 1, group: 'Settings', keywords: ['theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'math', 'latex', 'project colors', 'tint'] },
-  { id: 'activity', label: 'Activity', icon: Activity, hue: 5, group: 'Settings', keywords: ['heatmap', 'lines', 'tokens', 'history'] },
-  { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Settings', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login'] },
-  { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Customize', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'access level', 'lineage', 'read other threads', 'manage threads', 'projects', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
-  { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Customize', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
-  { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
-  { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
+  { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'App', keywords: ['permission', 'runs', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
+  { id: 'appearance', label: 'Appearance', icon: Palette, hue: 1, group: 'App', keywords: ['theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'project colors', 'tint', 'font', 'window', 'motion', 'animation'] },
+  { id: 'chat', label: 'Chat', icon: MessagesSquare, hue: 5, group: 'App', keywords: ['chat', 'conversation', 'composer', 'width', 'replies', 'streaming', 'math', 'latex'] },
+  { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'App', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
+  { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'App', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
+  { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Agents', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login', 'sign in', 'account', 'cache', 'update', 'telemetry'] },
+  { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Agents', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'answer approvals', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
+  { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Agents', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote', 'invitation', 'ssh'] },
-  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['delete', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] }
+  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['delete', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] },
+  { id: 'activity', label: 'Activity', icon: Activity, hue: 5, group: 'This computer', keywords: ['heatmap', 'lines', 'tokens', 'history'] },
+  { id: 'labs', label: 'Labs', icon: FlaskConical, hue: 3, group: 'This computer', keywords: ['experimental', 'profiler', 'memory', 'ram', 'cpu', 'diagnostics', 'heap', 'leak'] }
 ] as const satisfies ReadonlyArray<{ id: SettingsSectionId; label: string; icon: unknown; hue: number; group: string; keywords: readonly string[] }>
 
 const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
@@ -106,8 +110,10 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [initialRequest] = useState(() => window.location.hash === CONTEXT_COMPACTION_HASH ? 'context' : takePendingSettingsSection())
   const [selectedSection, setActiveSection] = useState<SettingsSectionId>(() => settingsSectionId(initialRequest) ?? 'general')
   const anchorSeq = useRef(0)
-  const [pendingAnchor, setPendingAnchor] = useState<PendingAnchor | null>(() =>
-    initialRequest === 'context' ? { anchor: CONTEXT_COMPACTION_ANCHOR, seq: 0 } : null)
+  const [pendingAnchor, setPendingAnchor] = useState<PendingAnchor | null>(() => {
+    const anchor = initialRequest === 'context' ? CONTEXT_COMPACTION_ANCHOR : takePendingSettingsAnchor()
+    return anchor ? { anchor, seq: 0 } : null
+  })
   /** Why a search result's setting is not on its page; `focus` when nothing else took focus. */
   const [anchorNote, setAnchorNote] = useState<{ text: string; focus: boolean } | null>(null)
   const activeSection: SettingsSectionId = selectedSection
@@ -118,9 +124,12 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       const section = settingsSectionId(requested)
       if (section) {
         takePendingSettingsSection()
+        const anchor = takePendingSettingsAnchor()
         setAnchorNote(null)
         if (requested === 'context' || window.location.hash === CONTEXT_COMPACTION_HASH) {
           setPendingAnchor({ anchor: CONTEXT_COMPACTION_ANCHOR, seq: ++anchorSeq.current })
+        } else if (anchor) {
+          setPendingAnchor({ anchor, seq: ++anchorSeq.current })
         }
         setActiveSection(section)
       }
@@ -185,6 +194,25 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     })
     return unsub
   }, [settingsOpen, refreshProviderData])
+
+  // External theme and bot quiet-hours changes must reach the copy later saves start from.
+  // Keep the page's other notification choices while taking the saved quiet hours, including their removal.
+  useEffect(() => {
+    if (!settingsOpen) return
+    return window.mousse.settings.onChanged?.((next) => {
+      if (!next?.appearance) return
+      setSettings((current) => {
+        if (!current) return current
+        const { theme, userTheme, userThemes } = next.appearance!
+        const { quietHours: _quietHours, ...notifications } = current.notifications
+        return {
+          ...current,
+          appearance: { ...current.appearance, theme, userTheme, userThemes },
+          notifications: next.notifications ? { ...notifications, ...(next.notifications.quietHours ? { quietHours: next.notifications.quietHours } : {}) } : current.notifications
+        }
+      })
+    })
+  }, [settingsOpen])
 
   const updateSettings = useCallback(
     async (partial: MousseSettingsUpdate) => {
@@ -331,12 +359,16 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   )
 
   const [navQuery, setNavQuery] = useState('')
+  /** A page's own filter, filled in by a search result for one of its rows (a shortcut); `seq` starts it afresh. */
+  const [pageFilter, setPageFilter] = useState<{ text: string; seq: number }>({ text: '', seq: 0 })
   const searchRef = useRef<HTMLInputElement>(null)
   /** Opens a page, then brings `anchor` (a search result's setting) into view and focuses it. */
-  const goToSection = (id: SettingsSectionId, anchor?: string) => {
+  const goToSection = (id: SettingsSectionId, anchor?: string, filter?: string) => {
     const arrive = () => {
       setActiveSection(id)
       setAnchorNote(null)
+      // A result for a filtered row fills the page's filter; any other arrival opens the page unfiltered.
+      setPageFilter((current) => (filter !== undefined ? { text: filter, seq: current.seq + 1 } : current.text ? { text: '', seq: current.seq + 1 } : current))
       if (anchor) setPendingAnchor({ anchor, seq: ++anchorSeq.current })
     }
     // Only the integrations editors hold unsaved drafts; ask before leaving that section.
@@ -346,11 +378,13 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     }
     void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) arrive() })
   }
-  const openResult = (result: SettingsSearchResult) => goToSection(result.section, result.anchor)
+  const openResult = (result: SettingsSearchResult) => goToSection(result.section, result.anchor, result.filter)
   const reviewPending = useStorageReviewPending()
   const searching = navQuery.trim() !== ''
   const results = useMemo(() => searchSettings(navQuery, searchPages(mousseId), searchIndex(mousseId)), [navQuery, mousseId])
   const sectionOf = (id: SettingsSectionId) => SETTINGS_SECTIONS.find((section) => section.id === id)!
+  // Settings grants access (devices, agents, bots, phones): only Appearance, where themes are edited, shows a theme.
+  const themePaused = settingsOpen && activeSection !== 'appearance' ? '' : undefined
   const activeSectionInfo = sectionOf(activeSection)
   const activeSectionLabel = activeSectionInfo.label
   /** Up and Down move through the results; Up from the first goes back to the search field. */
@@ -438,7 +472,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
   if (!settings || !options) {
     return (
-      <div className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
+      <div data-mousse="settings" data-mousse-decision={themePaused} className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
         {settingsHeader}
         <div className="settings-body">
           {settingsNav}
@@ -460,7 +494,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }
 
   return (
-    <div className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
+    <div data-mousse="settings" data-mousse-decision={themePaused} className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
       {settingsHeader}
 
       <div className="settings-body">
@@ -486,6 +520,12 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               onRestart={handleRestart}
               onPreviewAcrylicIntensity={previewAcrylicIntensity}
               onCommitAcrylicIntensity={commitAcrylicIntensity}
+            />
+          )}
+          {activeSection === 'chat' && (
+            <ChatSettings
+              settings={settings}
+              onUpdate={updateSettings}
               onPreviewFrostedComposer={previewFrostedComposer}
               onCommitFrostedComposer={commitFrostedComposer}
             />
@@ -525,9 +565,11 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
         </section>
           )}
 
-          {activeSection === 'shortcuts' && <ShortcutsSettings settings={settings} onUpdate={updateSettings} />}
+          {activeSection === 'shortcuts' && <ShortcutsSettings key={pageFilter.seq} initialQuery={pageFilter.text} settings={settings} onUpdate={updateSettings} />}
 
-          {activeSection === 'agents' && <AgentsSettings settings={settings} options={options} projects={projects} updateSettings={updateSettings} />}
+          {activeSection === 'labs' && <LabsSettings settings={settings} onUpdate={updateSettings} />}
+
+          {activeSection === 'agents' && <AgentsSettings settings={settings} options={options} updateSettings={updateSettings} />}
 
           {activeSection === 'connections' && (
           <section id="connections" className="settings-section">

@@ -24,8 +24,11 @@ export interface ResourceLifecycleStoreOptions {
 
 const gateDepth = new Map<string, number>()
 const drainScope = new AsyncLocalStorage<{ root: string; taskId: string; operationId: string; settlement?: boolean; projection?: boolean; cleanup?: boolean }>()
+/** Whether `value` can name a lifecycle record. Another computer's qualified thread id, for one, cannot. */
+export const isLifecycleIdentity = (value: unknown): value is string =>
+  typeof value === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(value) && !/^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(value)
 const identity = (value: string): string => {
-  if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(value) || /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(value)) throw new ResourceLifecycleError('ambiguous', 'Invalid lifecycle identity')
+  if (!isLifecycleIdentity(value)) throw new ResourceLifecycleError('ambiguous', 'Invalid lifecycle identity')
   return value
 }
 // Lifecycle locations use resolved path identity; their components are separately

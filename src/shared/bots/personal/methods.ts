@@ -1,7 +1,11 @@
-import type { BotSchedule } from './definition'
+import type { BotTelling } from './telling'
+import type { BotCustomSlot, BotModelPick, BotModelSlotKey, BotModelSlots, BotPickCredential, BotSchedule } from './definition'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from './chat'
 import type { BotLook } from './look'
-import type { BotMemoryForgetResult, BotMemoryListing } from './memory'
+import type { BotPickReason } from './modelSlots'
+import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from './memory'
+import type { LlmProviderOption } from '../../settings'
+import type { NewBotAccess } from './deviceAccess'
 
 /** A computer on a bot's About and create row: this one (`this_computer`), or another of the person's computers by node. */
 export interface BotComputerChoice {
@@ -11,6 +15,75 @@ export interface BotComputerChoice {
   /** Why it cannot be picked; absent for the computer that holds the bot. */
   unavailable?: string
 }
+
+/**
+ * One model a bot's row can be given by hand (#673), in the daemon: an entry's model, with the reasoning levels it
+ * offers and what the entry is signed in with now (stamped on a pick when it is saved). The same model on two entries
+ * is two options, told apart by `entry`. Clients get `BotRunsOnChoices.providers` instead.
+ */
+export interface BotModelOption {
+  instanceId: string
+  /** The entry's name, as Settings → Providers shows it. */
+  entry: string
+  model: string
+  /** The model's own name. */
+  label: string
+  /** The reasoning levels it offers, lowest first; empty when it has none to pick. */
+  efforts: string[]
+  credential?: BotPickCredential
+  account?: string
+  /** Other words that name it (catalog id and names, family word), lower case: `use_model` checks the owner said one. */
+  names?: string[]
+}
+
+/**
+ * What one piece of work may be asked to run on (`work_models`): the Runs on choices (`options`), and each of the
+ * owner's other entries with why a bot's work can't run there (turned off, signed out, not ready, or a runtime that
+ * can't hold a bot to its permissions).
+ */
+export interface BotWorkChoices {
+  options: BotModelOption[]
+  unavailable: Array<{ instanceId: string; entry: string; reason: BotPickReason }>
+}
+
+/** What a bot can run on (#673): the ready models that can hold a bot here, and the computers, this one first. */
+export interface BotRunsOnChoices {
+  /** One per model name, for an app from before rows (a single Model picker). */
+  models: Array<{ model: string; label: string }>
+  /**
+   * The rows' choices, as the app's model picker takes them: each ready entry with the models on it that can hold a
+   * bot, and their reasoning levels. Absent from an older service, whose app shows one Model picker.
+   */
+  providers?: LlmProviderOption[]
+  /** The computer that holds (or will hold) the bot: always `this_computer` for now. */
+  computer: string
+  computers: BotComputerChoice[]
+  /** By entry, the line Runs on shows once when a row is picked there, and its tooltip: a Codex not checked for bots. */
+  notes?: Record<string, { text: string; title: string }>
+  /**
+   * The Images row's choices (#1088): each ready entry with the models Mousse can make pictures with on it. Absent from an
+   * older service, whose app shows no Images row; empty when none of the owner's entries can, and `imagesMissing` says
+   * what to add.
+   */
+  imageProviders?: LlmProviderOption[]
+  /** What the owner can add for the Images row to offer a model, while it offers none (its tooltip). */
+  imagesMissing?: string
+  /**
+   * New bot's Devices row: the service takes `access` on `bots.create`, saved before the bot is listed anywhere. Absent
+   * from an older service, which refuses the key, so the app shows no such row there.
+   */
+  reachOnCreate?: true
+}
+
+/** The pictures a bot made today against its caps (#1088), for the Images row's tooltip. */
+export interface BotImageUsage {
+  today: number
+  perDay: number
+  perTurn: number
+}
+
+/** A bot's rows as Runs on shows them: each a pick on an entry, or null (Same as another picked row, else Pick a model). */
+export type BotShownRows = Record<BotModelSlotKey, BotModelPick | null>
 
 /**
  * The personal-bot methods (PR 6 §4): profile-bound, apart from the Space-bot `bots.*` set and
@@ -44,7 +117,7 @@ export const BOTS_PERSONAL_EVENTS = ['bots.changed', 'bots.escalation'] as const
 
 /**
  * The Bot UI methods (Bot Phase 1 §5.11). No payload carries a model or an instance id, apart from
- * `BotError.action.instanceId` (a Sign in button). `bots.activate` stays internal, and
+ * `BotError.action.instanceId` (a Sign in button) and the Runs on methods (`bots.model.*`, #673). `bots.activate` stays internal, and
  * `bots.memory.reindex` is an engine function (`BotMemoryAdmin.reindex`) until Phase 2. The list,
  * pause and resume methods are `bots.personal.*`: `bots.list` and `bots.resume` already name the
  * Space-bot methods (`BOTS_LOCAL_METHODS`), and a method has one handler.
@@ -62,6 +135,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
   'bots.chat.stop',
   'bots.chat.markRead',
   'bots.asks.answer',
+  'bots.permissions.set',
   'bots.permissions.revoke',
   'bots.schedules.add',
   'bots.schedules.remove',
@@ -72,10 +146,11 @@ export const BOTS_PERSONAL_V2_METHODS = [
   'bots.memory.export'
 ] as const
 /**
- * Methods added after the required Bot UI set (docs/plans/bot-always-free.md): the app calls them when they are there,
- * and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
+ * Methods added after the required Bot UI set (docs/plans/bot-always-free.md, #673): the app calls them when they are
+ * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
-export const BOTS_WORK_METHODS = ['bots.work.stop'] as const
+export const BOTS_WORK_METHODS = ['bots.reminders.snooze', 'bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit',
+  'bots.actions.answer', 'bots.chat.clear', 'bots.memory.wipe', 'bots.reset', 'bots.model.setCustom'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -91,6 +166,8 @@ export interface BotChatAttachment {
   path: string
 }
 
+/** The most characters one chat message's text carries. */
+export const MAX_BOT_CHAT_TEXT = 64 * 1024
 /** Most files one chat message carries. */
 export const MAX_BOT_CHAT_ATTACHMENTS = 10
 /** The largest file a chat message carries. */
@@ -99,41 +176,123 @@ export const MAX_BOT_CHAT_ATTACHMENT_BYTES = 50 * 1024 * 1024
 /** Each v2 method's params (`profileId` aside) and result. */
 export interface BotsPersonalV2Api {
   'bots.personal.list': { params: Record<string, never>; result: { bots: BotSummary[] } }
-  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string }; result: { bot: BotSummary } }
+  /**
+   * `slots`: the rows picked on New bot (#673), all four, each a model on an entry among `bots.model.choices`'
+   * `providers`. A pick that is not offered now is refused (`model_unavailable`) rather than replaced. `model` (an app
+   * from before rows): one model by name on every row; neither, by usage (an app from before picks). Older services
+   * refuse these keys, so the app sends `model` only to a service that has `bots.model.choices`, and `slots` only to one
+   * whose choices carry `providers`. `image`: the Images row (#1088), one of `imageProviders`' models; sent only to a
+   * service whose choices carry `imageProviders`. `access`: which devices reach the new bot (New bot's Devices row),
+   * saved before the bot is listed anywhere; sent only to a service whose choices carry `reachOnCreate`. Absent, every
+   * device, as before.
+   */
+  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
-  'bots.update': { params: { botId: string; name?: string; look?: BotLook }; result: { bot: BotSummary } }
+  /**
+   * Renames the bot, changes its look, or (`description`) edits its prompt in About: the description it works under from
+   * its next turn. `description: null` resets the prompt to what it was before the first edit. An older service refuses it.
+   */
+  'bots.update': { params: { botId: string; name?: string; look?: BotLook; description?: string | null }; result: { bot: BotSummary } }
   'bots.personal.pause': { params: { botId: string }; result: { bot: BotSummary } }
   'bots.personal.resume': { params: { botId: string }; result: { bot: BotSummary } }
   /** Archives now; everything is purged at `purgeAt` (30 days). */
   'bots.delete': { params: { botId: string }; result: { purgeAt: string } }
   'bots.chat.list': {
     params: { botId: string; beforeSeq?: number; limit?: number }
-    result: { messages: BotChatMessage[]; live?: { activationId: string; chip?: BotChip } }
+    /** `live`: the working activation, its live chip and its status (the bot's latest line before a step). */
+    result: { messages: BotChatMessage[]; live?: { activationId: string; chip?: BotChip; status?: string } }
   }
   'bots.chat.send': { params: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string }; result: { message: BotChatMessage } }
   'bots.chat.stop': { params: { botId: string }; result: Record<string, never> }
   /** Stops one piece of work (or a scheduled run) of the bot; the chat goes on. `stopped` is false when it had ended. */
   'bots.work.stop': { params: { botId: string; workId: string }; result: { stopped: boolean } }
+  'bots.reminders.snooze': { params: { botId: string; messageId: string; choice: import('./chat').BotSnoozeChoice }; result: BotChatMessage }
+  /** Cancels one waiting reminder; it is never said or started. One already said leaves the detail as it is. */
+  'bots.reminders.cancel': { params: { botId: string; reminderId: string }; result: BotDetail }
   'bots.chat.markRead': { params: { botId: string; seq: number }; result: Record<string, never> }
+  /** The owner's reaction on one of the bot's messages: an emoji, which replaces any other, or `null` to remove it. */
+  'bots.chat.react': { params: { botId: string; messageId: string; emoji: string | null }; result: { message: BotChatMessage } }
   'bots.asks.answer': { params: { botId: string; askId: string; answer: 'allow' | 'not_now' }; result: { message: BotChatMessage } }
+  /**
+   * The owner taps one of a question's answers (`choice`, its label): their reply to its bubble, which starts or continues
+   * a chat turn, as writing it would. `message` is the owner's answer, `question` the bubble as it is now. One already
+   * answered (`question_answered`) or no longer open (`question_closed`) is refused before anything is written. An older
+   * service lacks it: the owner answers with Reply.
+   */
+  'bots.actions.answer': { params: { actionId: string; digest: string; answer: 'send' | 'not_now' }; result: { status: string } }
+  'bots.questions.answer': { params: { botId: string; questionId: string; choice: string; clientRequestId: string }; result: { message: BotChatMessage; question?: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */
+  'bots.permissions.set': { params: { botId: string; permissionId: string; enabled: boolean }; result: BotDetail }
   'bots.permissions.revoke': { params: { botId: string; permissionId: string }; result: BotDetail }
   /**
    * The owner adds a schedule (the Automations page's create row, with the bot as Who). `model`: one picked by hand for
-   * its runs (#673); absent, the bot's own choice (by usage).
+   * its runs (#673), by name, saved on the entry that offers it now (refused when none does); absent, the bot's Work.
    */
   'bots.schedules.add': { params: { botId: string; when: BotSchedule['when']; prompt: string; model?: string }; result: BotDetail }
   /**
-   * The bot's model and computer, by hand (#673): `model` null is by usage (the default). Model names appear here and on
-   * the pickers that use them only. `computers` are this one and the person's other computers; a bot runs on the computer
-   * that holds it, so the others carry `unavailable` (why they cannot be picked) and `offline`.
+   * The bot's models and computer, by hand (#673). `slots`: its rows, each a pick on an entry, or null for "Pick a model"
+   * (a bot from before picks, on which Mousse chooses until the owner picks; a model by name from it is `named`).
+   * `model`: the Talk row's model by name, or null, for an app from before rows. Model names appear here and on the
+   * pickers that use them only. `computers` are this one and the person's other computers; a bot runs on the computer
+   * that holds it, so the others carry `unavailable` (why they cannot be picked) and `offline`. An older service sends
+   * no `slots` or `providers`, and the app shows its single Model picker. `image` is the Images row (#1088), a pick or
+   * null, and `images` today's pictures against the caps; an older service sends neither.
    */
-  'bots.model.get': { params: { botId: string }; result: { model: string | null; models: Array<{ model: string; label: string }>; computer: string; computers: BotComputerChoice[] } }
+  'bots.model.get': { params: { botId: string }; result: { model: string | null; slots?: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>>; image?: BotModelPick | null; images?: BotImageUsage; custom?: BotCustomSlot[] } & BotRunsOnChoices }
+  /**
+   * What New bot's Runs on offers before the bot exists (#673): the same choices as `bots.model.get`, and `last`, the
+   * rows of the owner's newest bot with picks, which a new bot starts from (null where it had none).
+   */
+  'bots.model.choices': { params: Record<string, never>; result: BotRunsOnChoices & { last?: BotShownRows } }
+  /**
+   * The single picker before rows: one model by name on every row, on the entry that offers it now, or null, which
+   * leaves a bot from before picks by usage. A picked bot is never set back to by usage.
+   */
   'bots.model.set': { params: { botId: string; model: string | null }; result: { bot: BotSummary } }
+  /**
+   * Changes the bot's rows (#673) over the rows as they are now, as a revision with the same grant. `slots`: some rows,
+   * each a pick on an entry offered now (`model_unavailable` otherwise); only those change. `oneWork` (Advanced closing):
+   * Medium work's pick, as it is, on all work. One of the two.
+   */
+  'bots.model.setSlots': { params: { botId: string; slots?: Partial<BotModelSlots>; oneWork?: true }; result: { bot: BotSummary } }
+  /**
+   * The Images row (#1088): a model among `imageProviders`, saved with the entry's sign-in now (`model_unavailable` when
+   * it is not offered), or null, which takes the bot's image tool away from its next turn. A revision with the same grant.
+   */
+  'bots.model.setImage': { params: { botId: string; pick: BotModelPick | null }; result: { bot: BotSummary } }
+  /**
+   * A custom slot (`BotCustomSlot`, the bot chat's `/model <name> <model> [description]`): `pick`, a model among
+   * `providers` saved with the entry's sign-in now (`model_unavailable` when it is not offered), adds the slot or
+   * replaces its pick and description (left out, the slot keeps its description); null removes it. A base slot's name
+   * or a malformed one is refused (`invalid_params`), as is a 13th slot and removing a slot the bot doesn't have. The
+   * name is taken in lower case. A revision with the same grant.
+   */
+  'bots.model.setCustom': { params: { botId: string; name: string; pick: BotModelPick | null; description?: string }; result: { bot: BotSummary } }
+  /**
+   * Wipes the bot's chat (`/clear`): its turn stops, open asks and questions are withdrawn, and every chat message is
+   * deleted. Its memory and journal stay, so it still remembers what was said.
+   */
+  'bots.chat.clear': { params: { botId: string }; result: Record<string, never> }
+  /**
+   * Wipes the bot's memory (`/forget`): every entry is forgotten, as Forget does one. With `keep: 'saved'`
+   * (`/forget history`): the chat, its history (journal, summary, search) and run notes go, and the owner's entries and
+   * the bot's notes stay. `forgotten`: the entries removed.
+   */
+  'bots.memory.wipe': { params: { botId: string; keep?: 'saved' }; result: { forgotten: number } }
+  /**
+   * A fresh start (`/reset`): everything running stops, and the chat, memory, schedules and reminders are deleted. The
+   * bot's name, look, permissions and models stay.
+   */
+  'bots.reset': { params: { botId: string }; result: { bot: BotSummary } }
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }
-  /** Writes `memory.md`, `memory.jsonl`, `journal.jsonl` and the definition into `dir`. */
+  /**
+   * The owner changes an entry's words: a new version of it (`id` names the version the owner saw, `m12` or `m12v2`;
+   * an older one is refused), with the guard and caps a save has. A run note the owner edits becomes a note.
+   */
+  'bots.memory.edit': { params: { botId: string; id: string; text: string }; result: { entry: BotMemoryEntry } }
+  /** Writes `memory.md`, `memory.jsonl`, `journal.jsonl`, `questions.jsonl` (when it asked any), `actions.jsonl` (when it has any calls) and the definition into `dir`. */
   'bots.memory.export': { params: { botId: string; dir: string }; result: { files: string[] } }
 }
 
@@ -144,14 +303,19 @@ export type BotsPersonalV2Result<M extends BotsPersonalV2Method> = BotsPersonalV
  * Events of the v2 methods. `bots.message` with an `ask` replaces `bots.escalation`, which is no
  * longer bridged to clients.
  */
-export const BOTS_PERSONAL_V2_EVENTS = ['bots.changed', 'bots.message', 'bots.activity'] as const
+export const BOTS_PERSONAL_V2_EVENTS = ['bots.changed', 'bots.message', 'bots.activity', 'bots.tell'] as const
 export type BotsPersonalV2Event = (typeof BOTS_PERSONAL_V2_EVENTS)[number]
 
 export interface BotsPersonalV2EventData {
+  /** A service-decided banner or withdrawal, only for windows that negotiated telling. */
+  'bots.tell': BotTelling
   /** The list and the bot's state need refreshing. */
   'bots.changed': { botId: string }
   /** A new or changed chat row: chat push and notifications (titled with `botName`, absent on older daemons). */
   'bots.message': { botId: string; message: BotChatMessage; botName?: string }
-  /** The live chip of a working activation; null clears it. */
-  'bots.activity': { botId: string; activationId: string; chip: BotChip | null }
+  /**
+   * The live chip of a working activation; null clears it. `status`: what the bot said it is doing now, its latest line
+   * before a step ("Checking prices at Indian stores now"); absent when it said none. Absent from older services.
+   */
+  'bots.activity': { botId: string; activationId: string; chip: BotChip | null; status?: string }
 }

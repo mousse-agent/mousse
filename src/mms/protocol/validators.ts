@@ -9,7 +9,8 @@ import { isKeyName, MAX_KEYS_PER_AUTOMATION } from '../../shared/automationKeys'
 import { parseTellMe, isThreadEventKind, THREAD_EVENT_KINDS, type ChatImageAttachment, type ChatMode, type ScheduledJobAgent, type ScheduledJobWorkspace, type TellMe, type ThreadEventKind } from '../../shared/types'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { upgradeSelection } from '../../shared/modelSelection'
-import { isAgentAccessLevel, MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
+import { MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
+import { MAX_GOAL_TURN_LIMIT } from '../../shared/threadGoal'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import {
   RESERVED_AGENT_IDS,
@@ -35,7 +36,8 @@ import {
   MMS_PROTOCOL_CHUNK_BYTES,
   MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
   MMS_PROTOCOL_MAX_ID_LENGTH,
-  MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES,
+  maxConnectionEventBytes,
+  PROTOCOL_CONNECTION_EVENT_TYPES,
   MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS,
   MMS_PROTOCOL_MAX_IMAGES,
   MMS_PROTOCOL_MAX_METHOD_LENGTH,
@@ -96,7 +98,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
         Object.keys(raw).some(
           key => !['kind', 'type', 'profileId', 'profileEpoch', 'data'].includes(key)
         ) ||
-        (raw.type !== 'bridge.hub.thread' && raw.type !== 'mcp.auth-url' && raw.type !== 'git.operation') ||
+        !PROTOCOL_CONNECTION_EVENT_TYPES.includes(raw.type as never) ||
         !isBoundedString(raw.profileId, 128, { nonEmpty: true }) ||
         !Number.isSafeInteger(raw.profileEpoch) ||
         (raw.profileEpoch as number) < 1
@@ -104,7 +106,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
         return null
       }
       try {
-        if (Buffer.byteLength(JSON.stringify(raw), 'utf8') > MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES) {
+        if (Buffer.byteLength(JSON.stringify(raw), 'utf8') > maxConnectionEventBytes(raw.type as import('./types').ProtocolConnectionEventType)) {
           return null
         }
       } catch {
@@ -112,7 +114,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
       }
       return {
         kind: 'connection_event',
-        type: raw.type,
+        type: raw.type as import('./types').ProtocolConnectionEventType,
         profileId: raw.profileId,
         profileEpoch: raw.profileEpoch as number,
         data: raw.data
@@ -511,7 +513,7 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
   // `engine` (the removed Pi engine setting) is still accepted from an older client, and ignored.
-  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings', 'provider', 'telemetry'])
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings', 'provider', 'telemetry', 'promptCacheHour'])
   if (o.useOlderSettings !== undefined) {
     if (o.useOlderSettings !== true) throw invalidParams(`${name}.useOlderSettings must be true`)
     return { useOlderSettings: true }
@@ -532,6 +534,10 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
   if (o.telemetry !== undefined) {
     if (o.telemetry !== 'off' && o.telemetry !== 'agent_setting') throw invalidParams(`${name}.telemetry must be off|agent_setting`)
     patch.telemetry = o.telemetry
+  }
+  if (o.promptCacheHour !== undefined) {
+    if (o.promptCacheHour !== null && typeof o.promptCacheHour !== 'boolean') throw invalidParams(`${name}.promptCacheHour must be a boolean or null`)
+    patch.promptCacheHour = o.promptCacheHour
   }
   if (o.provider !== undefined) {
     const provider = asString(o.provider, `${name}.provider`, 64)
@@ -976,6 +982,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'provider',
     'title',
     'botModel',
+    'bots',
     'experimental',
     'agents',
     'integrations'
@@ -1027,31 +1034,37 @@ function assertPermissionsPatch(value: unknown): void {
 function assertRunsPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.runs')
   for (const key of Object.keys(patch)) {
-    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry') throw new Error(`partial.runs.${key} is not allowed`)
+    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry' && key !== 'goalTurnLimit' && key !== 'keepAwake' && key !== 'steerRelease') throw new Error(`partial.runs.${key} is not allowed`)
+  }
+  // How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2).
+  if (patch.steerRelease !== undefined) {
+    const release = asPlainObject(patch.steerRelease, 'partial.runs.steerRelease')
+    for (const [instanceId, mode] of Object.entries(release))
+      if (mode !== 'best_effort' && mode !== 'strict') throw new Error(`partial.runs.steerRelease.${instanceId} must be best_effort or strict`)
   }
   if (patch.newThreadWorktree !== undefined && typeof patch.newThreadWorktree !== 'boolean')
     throw new Error('partial.runs.newThreadWorktree must be a boolean')
   if (patch.privateThreadExpiry !== undefined && patch.privateThreadExpiry !== 'never' && !isExpiryPreset(patch.privateThreadExpiry))
     throw new Error('partial.runs.privateThreadExpiry must be never, 1h, 24h, 7d or 30d')
+  if (patch.keepAwake !== undefined && typeof patch.keepAwake !== 'boolean')
+    throw new Error('partial.runs.keepAwake must be a boolean')
   if (patch.resumeAfterUsageLimit !== undefined && typeof patch.resumeAfterUsageLimit !== 'boolean')
     throw new Error('partial.runs.resumeAfterUsageLimit must be a boolean')
   if (patch.usageLimitPauseCap !== undefined && (!Number.isInteger(patch.usageLimitPauseCap) || (patch.usageLimitPauseCap as number) < 1 || (patch.usageLimitPauseCap as number) > MAX_USAGE_LIMIT_PAUSE_CAP))
     throw new Error(`partial.runs.usageLimitPauseCap must be a whole number from 1 to ${MAX_USAGE_LIMIT_PAUSE_CAP}`)
+  if (patch.goalTurnLimit !== undefined && (!Number.isInteger(patch.goalTurnLimit) || (patch.goalTurnLimit as number) < 1 || (patch.goalTurnLimit as number) > MAX_GOAL_TURN_LIMIT))
+    throw new Error(`partial.runs.goalTurnLimit must be a whole number from 1 to ${MAX_GOAL_TURN_LIMIT}`)
 }
 
-/** `agentAccess` narrows what agents may reach, so a malformed patch is refused rather than guessed at. */
+/** `agentAccess` widens what agents may do, so a malformed patch is refused rather than guessed at. */
 function assertAgentAccessPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.agentAccess')
   for (const key of Object.keys(patch)) {
-    if (key !== 'level' && key !== 'projectIds' && key !== 'answerApprovals' && key !== 'remoteSubagents' && key !== 'computers') throw new Error(`partial.agentAccess.${key} is not allowed`)
+    // `level`, `projectIds` and `projectsUnreadable` are the removed access level's: an older client may still send them, and they are dropped.
+    if (key !== 'level' && key !== 'projectIds' && key !== 'projectsUnreadable' && key !== 'answerApprovals' && key !== 'remoteSubagents' && key !== 'computers') throw new Error(`partial.agentAccess.${key} is not allowed`)
   }
-  if (patch.level !== undefined && !isAgentAccessLevel(patch.level)) throw new Error('partial.agentAccess.level must be lineage, read or manage')
   if (patch.answerApprovals !== undefined && typeof patch.answerApprovals !== 'boolean') throw new Error('partial.agentAccess.answerApprovals must be a boolean')
   if (patch.remoteSubagents !== undefined && typeof patch.remoteSubagents !== 'boolean') throw new Error('partial.agentAccess.remoteSubagents must be a boolean')
-  if (patch.projectIds !== undefined) {
-    if (!Array.isArray(patch.projectIds) || patch.projectIds.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256))
-      throw new Error('partial.agentAccess.projectIds must be an array of project ids')
-  }
   if (patch.computers !== undefined) {
     if (!Array.isArray(patch.computers) || patch.computers.some((node) => typeof node !== 'string' || node.length === 0 || node.length > 256))
       throw new Error('partial.agentAccess.computers must be an array of computer ids')
@@ -1101,6 +1114,25 @@ export function asAnswersMap(v: unknown): Record<string, string | string[]> {
     }
   }
   return out
+}
+
+/** Images sent with an answer, by question id (`orchestrator.answerQuestions`): at most as many images as one message takes. */
+export function asOptionalAnswerAttachments(v: unknown): Record<string, ChatImageAttachment[]> | undefined {
+  if (v === undefined || v === null) return undefined
+  const o = asPlainObject(v, 'attachments')
+  const keys = Object.keys(o)
+  if (keys.length > 64) throw invalidParams('attachments has too many keys')
+  // No prototype: a question id such as `constructor` is an ordinary key here.
+  const out = Object.create(null) as Record<string, ChatImageAttachment[]>
+  let total = 0
+  for (const key of keys) {
+    if (!key || key.length > 256) throw invalidParams('attachments key must be a question id')
+    const images = asChatImages(o[key], `attachments.${key}`)
+    total += images.length
+    if (total > MMS_PROTOCOL_MAX_IMAGES) throw invalidParams(`attachments exceed max ${MMS_PROTOCOL_MAX_IMAGES} images`)
+    if (images.length) out[key] = images
+  }
+  return Object.keys(out).length ? out : undefined
 }
 
 export function asCursorMcpConfigPatch(v: unknown): Record<string, unknown> {

@@ -11,8 +11,15 @@ import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import type { BotChatMessage, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
-import { BOTS_PERSONAL_V2_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES } from '../../src/shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES, type BotModelOption } from '../../src/shared/bots/personal/methods'
+import { slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
 import { botFixture, flush, runDispatch, start, finish, type BotFixture } from './botFixture'
+
+/** Opus on a Claude subscription, and the same model through a paid API key. */
+const OPUS_SUB: BotModelOption = { instanceId: 'claude', entry: 'Claude Code', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'] }
+const OPUS_KEY: BotModelOption = { instanceId: 'pi:key', entry: 'Anthropic API', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'] }
+const OPUS_PICK = { instanceId: 'claude', model: 'opus' }
+const ALL_OPUS = slotsAllOn(OPUS_PICK)
 
 const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
 const LOOK = { colour: 'teal', accessory: 'cap' }
@@ -52,9 +59,99 @@ async function created(): Promise<string> {
   return bot.id
 }
 
+it('only the local app window can flip a permission through the local protocol', async () => {
+  const botId = await created()
+  const activation = await f.bots.activate({ botId, input: 'Run', clientRequestId: 'grant-command' })
+  const turn = await start(f, activation.id)
+  turn.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run' })
+  await finish(f, turn.payload, 'completed', { text: 'Asked.' })
+  for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+  const permissionId = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+  const params = { botId, permissionId, enabled: false }
+  for (const clientType of ['cli', 'agent', 'mcp', undefined]) {
+    const caller = { connection: { ...context.connection, clientType } } as unknown as HandlerContext
+    await expect(domains.dispatch(caller, 'bots.permissions.set', params)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(f.store.activeGrant(botId)!.manifest.tools).toContain('shell')
+  }
+  const gui = { connection: { ...context.connection, clientType: 'gui' } } as unknown as HandlerContext
+  await domains.dispatch(gui, 'bots.permissions.set', params)
+  expect(f.store.activeGrant(botId)!.manifest.tools).not.toContain('shell')
+  await domains.dispatch(gui, 'bots.permissions.set', { ...params, enabled: true })
+  expect(f.store.activeGrant(botId)!.manifest.tools).toContain('shell')
+  const routed = { connection: { ...gui.connection, bridgeCaller: { node: 'phone' } } } as unknown as HandlerContext
+  await expect(domains.dispatch(routed, 'bots.permissions.set', params)).rejects.toMatchObject({ code: 'forbidden' })
+})
+
 describe('validation', () => {
   it('registers exactly the v2 methods', () => {
     for (const method of BOTS_PERSONAL_V2_METHODS) expect(domains.has(method)).toBe(true)
+    // Added later: the app asks for them, and an older service without them is still compatible.
+    for (const method of BOTS_WORK_METHODS) expect(domains.has(method)).toBe(true)
+  })
+
+  it('New bot\'s choices come without a bot, and Create bot carries a pick on every row (#673)', async () => {
+    ;(f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]
+    // The picker's listing for the rows (none in this fixture), and one per name for an app from before rows.
+    expect(await call('bots.model.choices')).toMatchObject({ models: [{ model: 'opus' }], providers: [], computer: 'this_computer' })
+    // The rows: Talk on the subscription, Work on the API key at high.
+    const slots = { talk: { instanceId: 'claude', model: 'opus' }, light: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, medium: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, hard: { instanceId: 'pi:key', model: 'opus', effort: 'high' } }
+    const { bot: rows } = await call<{ bot: BotSummary }>('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c11', slots })
+    // Shown as picked, without what the entry signs in with.
+    const got = await call<{ slots: unknown }>('bots.model.get', { botId: rows.id })
+    expect(got).toMatchObject({ model: 'opus', slots })
+    expect(JSON.stringify(got)).not.toMatch(/credential|account/)
+    // The next bot starts from these.
+    expect(await call('bots.model.choices')).toMatchObject({ last: slots })
+    // An app from before rows sends one model: on every row, on an entry that offers it.
+    const { bot } = await call<{ bot: BotSummary }>('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c9', model: ' opus ' })
+    expect(await call('bots.model.get', { botId: bot.id })).toMatchObject({ slots: slotsAllOn({ instanceId: 'claude', model: 'opus' }) })
+    await expect(call('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c10', model: 'sonnet' })).rejects.toMatchObject({ code: 'model_unavailable' })
+  })
+
+  it('the chat\'s slash commands: setCustom, chat.clear, memory.wipe and reset go through with exact keys', async () => {
+    ;(f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options.modelOptions = async () => [OPUS_SUB]
+    const botId = await created()
+    const refused: Array<[string, Record<string, unknown>, string]> = [
+      ['bots.model.setCustom', { botId, name: 'docs' }, 'invalid_params'],
+      ['bots.model.setCustom', { botId, name: 'docs', pick: { instanceId: 'claude', model: 'opus', credential: 'api_key' } }, 'invalid_params'],
+      ['bots.model.setCustom', { botId, name: 'work', pick: OPUS_PICK }, 'invalid_params'],
+      ['bots.model.setCustom', { botId, name: 'docs', pick: OPUS_PICK, extra: 1 }, 'unknown_field'],
+      ['bots.memory.wipe', { botId, keep: 'everything' }, 'invalid_params'],
+      ['bots.chat.clear', { botId: 'Not A Bot' }, 'invalid_params']
+    ]
+    for (const [method, params, code] of refused) await expect(call(method, params), `${method} ${JSON.stringify(params)}`).rejects.toMatchObject({ code })
+    await call('bots.model.setCustom', { botId, name: 'Docs', pick: OPUS_PICK, description: 'Writing docs' })
+    expect(await call('bots.model.get', { botId })).toMatchObject({ custom: [{ name: 'docs', pick: OPUS_PICK, description: 'Writing docs' }] })
+    expect(await call('bots.chat.clear', { botId })).toEqual({})
+    expect(f.bots.service.chatList(botId).messages).toEqual([])
+    expect(await call('bots.memory.wipe', { botId })).toEqual({ forgotten: 0 })
+    expect(await call('bots.memory.wipe', { botId, keep: 'saved' })).toEqual({ forgotten: 0 })
+    expect(await call<{ bot: BotSummary }>('bots.reset', { botId })).toMatchObject({ bot: { id: botId } })
+    // The slot is the owner's model choice: a reset keeps it.
+    expect(f.bots.customSlots(botId).map((slot) => slot.name)).toEqual(['docs'])
+  })
+
+  it('setSlots saves only the rows given, each offered now; oneWork copies Medium work; a by-usage bot shows Pick a model (#673)', async () => {
+    const options = (f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options
+    options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]
+    const botId = await created()
+    // A bot from before picks: every row Pick a model.
+    expect(await call('bots.model.get', { botId })).toMatchObject({ model: null, slots: { talk: null, light: null, medium: null, hard: null } })
+    const hard = { instanceId: 'pi:key', model: 'opus', effort: 'high' }
+    await call('bots.model.setSlots', { botId, slots: { hard } })
+    expect(f.bots.ownerSlots(botId)).toEqual({ talk: null, light: null, medium: null, hard })
+    // The key is gone: a new pick on it is refused; one offered saves.
+    options.modelOptions = async () => [OPUS_SUB]
+    await expect(call('bots.model.setSlots', { botId, slots: { light: hard } })).rejects.toMatchObject({ code: 'model_unavailable' })
+    await call('bots.model.setSlots', { botId, slots: { talk: { instanceId: 'claude', model: 'opus' }, medium: { instanceId: 'claude', model: 'opus' } } })
+    expect(f.bots.ownerSlots(botId)).toEqual({ talk: { instanceId: 'claude', model: 'opus' }, light: null, medium: { instanceId: 'claude', model: 'opus' }, hard })
+    // Closing Advanced: Medium work's pick on all work.
+    await call('bots.model.setSlots', { botId, oneWork: true })
+    expect(f.bots.ownerSlots(botId)).toEqual(slotsAllOn({ instanceId: 'claude', model: 'opus' }))
+    // `bots.model.set` (an older app's single picker): one model on every row; never back to by usage.
+    await call('bots.model.set', { botId, model: 'opus' })
+    expect(f.bots.ownerSlots(botId)).toEqual(slotsAllOn({ instanceId: 'claude', model: 'opus' }))
+    await expect(call('bots.model.set', { botId, model: null })).rejects.toMatchObject({ code: 'invalid_params' })
   })
 
   it('refuses unknown keys and bad values', async () => {
@@ -67,12 +164,34 @@ describe('validation', () => {
       ['bots.create', { look: LOOK, description: 'x'.repeat(501), clientRequestId: 'c2' }],
       ['bots.create', { look: LOOK, name: 'n'.repeat(61), description: 'x', clientRequestId: 'c2' }],
       ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'has spaces' }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: '  ' }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: null }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: 'm'.repeat(201) }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', slots: { talk: OPUS_PICK } }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', slots: { ...ALL_OPUS, light: null } }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', slots: { ...ALL_OPUS, talk: { model: 'opus' } } }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: 'opus', slots: ALL_OPUS }],
+      ['bots.model.setSlots', { botId, slots: { images: OPUS_PICK } }],
+      ['bots.model.setSlots', { botId, slots: { talk: null } }],
+      ['bots.model.setSlots', { botId, slots: { talk: { ...OPUS_PICK, speed: 'fast' } } }],
+      ['bots.model.setSlots', { botId, slots: { talk: { ...OPUS_PICK, credential: 'subscription' } } }],
+      ['bots.model.setSlots', { botId, slots: { talk: { instanceId: 'claude', model: '' } } }],
+      ['bots.model.setSlots', { botId, slots: {} }],
+      ['bots.model.setSlots', { botId }],
+      ['bots.model.setSlots', { botId, oneWork: false }],
+      ['bots.model.setSlots', { botId, oneWork: true, slots: { talk: OPUS_PICK } }],
+      ['bots.model.set', { botId, model: 'm'.repeat(201) }],
+      ['bots.schedules.add', { botId, when: { kind: 'interval', minutes: 30 }, prompt: 'x', model: 'm'.repeat(201) }],
+      ['bots.model.choices', { botId }],
       ['bots.get', { botId: 'Not An Id' }],
       ['bots.get', {}],
       ['bots.update', { botId }],
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', glow: true } }],
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', kind: 7 } }],
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', eyes: 'x'.repeat(41) } }],
+      ['bots.update', { botId, description: '   ' }],
+      ['bots.update', { botId, description: 'x'.repeat(501) }],
+      ['bots.update', { botId, description: 7 }],
       ['bots.chat.list', { botId, limit: 101 }],
       ['bots.chat.list', { botId, beforeSeq: 0 }],
       ['bots.chat.send', { botId, text: '  ', clientRequestId: 'm1' }],
@@ -87,6 +206,8 @@ describe('validation', () => {
       ['bots.schedules.remove', { botId, scheduleId: 'Bad Id' }],
       ['bots.memory.list', { botId, history: 'yes' }],
       ['bots.memory.forget', { botId }],
+      ['bots.memory.edit', { botId, id: 'm1' }],
+      ['bots.memory.edit', { botId, id: 'm1', text: '  ' }],
       ['bots.memory.export', { botId, dir: 'relative/dir' }]
     ]
     for (const [method, params] of bad) await expect(domains.dispatch(context, method, params), `${method} ${JSON.stringify(params)}`).rejects.toMatchObject({ code: expect.stringMatching(/^(invalid_params|unknown_field)$/) })
@@ -147,9 +268,7 @@ describe('a bot through the v2 methods', () => {
     expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' })
     expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mouse', eyes: 'pill' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown' })
 
-    // The owner asks; the chat turn asks for a folder with `escalate`, and the card lands on its reply.
-    const invoices = join(f.base, 'Invoices')
-    mkdirSync(invoices)
+    // The owner asks; the chat turn asks to run commands with `escalate`, and the card lands on its reply.
     writeFileSync(join(f.base, 'list.txt'), 'March, April')
     const sent = await call<{ message: BotChatMessage }>('bots.chat.send', { botId, text: 'Sum up my invoices', clientRequestId: 'm1', attachments: [{ name: 'list.txt', path: join(f.base, 'list.txt') }] })
     expect(sent.message).toMatchObject({ author: 'owner', kind: 'text', text: 'Sum up my invoices', attachments: [{ name: 'list.txt' }] })
@@ -157,27 +276,27 @@ describe('a bot through the v2 methods', () => {
     expect((await call<{ message: BotChatMessage }>('bots.chat.send', { botId, text: 'Sum up my invoices', clientRequestId: 'm1' })).message.seq).toBe(sent.message.seq)
     const [chat] = f.store.laneActivations(botId, 'chat', ['running'])
     const { payload, prepared } = await start(f, chat!.id)
-    expect(prepared.authority.escalate!({ permission: { path: invoices, access: 'read' }, reason: 'To read them.' })).toContain('Asked')
-    await finish(f, payload, 'completed', { text: 'I need to read that folder.' })
+    expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To add them up.' })).toContain('Asked')
+    await finish(f, payload, 'completed', { text: 'I need to run a command.' })
     const listed = await call<{ messages: BotChatMessage[] }>('bots.chat.list', { botId, limit: 2 })
     expect(listed.messages).toHaveLength(2)
     const reply = listed.messages.at(-1)!
-    expect(reply).toMatchObject({ author: 'bot', text: 'I need to read that folder.', ask: { status: 'open', kind: 'permission', title: 'use files on this computer' } })
-    expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots[0]).toMatchObject({ state: 'needs_you', stateText: 'Wants to use files on this computer' })
+    expect(reply).toMatchObject({ author: 'bot', text: 'I need to run a command.', ask: { status: 'open', kind: 'permission', title: 'run commands' } })
+    expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots[0]).toMatchObject({ state: 'needs_you', stateText: 'Wants to run commands' })
     const older = await call<{ messages: BotChatMessage[] }>('bots.chat.list', { botId, beforeSeq: listed.messages[0]!.seq })
     expect(older.messages.map((message) => message.text)).toEqual(['Hello, I sum up invoices.'])
 
     const answered = await call<{ message: BotChatMessage }>('bots.asks.answer', { botId, askId: reply.ask!.askId, answer: 'allow' })
     expect(answered.message.ask).toMatchObject({ status: 'allowed' })
     // The wall continues: the next dispatch says what the owner allowed.
-    expect(f.store.dispatch(chat!.id, 2)?.prompt.text).toContain('The owner allowed: use files on this computer')
+    expect(f.store.dispatch(chat!.id, 2)?.prompt.text).toContain('The owner allowed: run commands')
     await runDispatch(f, chat!.id, 2, { text: 'Total: 120 EUR.' })
     expect(await call('bots.chat.markRead', { botId, seq: 1_000 })).toEqual({})
     expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots[0]).toMatchObject({ state: 'idle', unread: 0 })
 
-    // About: file access is listed once and can be removed; so can a schedule.
+    // About: what was allowed is listed and can be removed; so can a schedule.
     let detail = await call<BotDetail>('bots.get', { botId })
-    expect(detail.permissions).toMatchObject([{ title: 'use files on this computer', note: expect.any(String) }])
+    expect(detail.permissions).toMatchObject([{ title: 'run commands', note: expect.any(String) }])
     f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'Sum up new invoices.' }, 'bot')
     await f.tickSchedules(new Date(f.clock.now))
     detail = await call<BotDetail>('bots.get', { botId })
@@ -192,6 +311,7 @@ describe('a bot through the v2 methods', () => {
     // Memory goes to the memory admin.
     expect(await call('bots.memory.list', { botId, history: true })).toEqual({ entries: [], gauge: 'core 0/2,000' })
     expect(await call('bots.memory.forget', { botId, id: 'm1' })).toEqual({ redacted: [] })
+    await expect(call('bots.memory.edit', { botId, id: 'm1', text: 'Call me Sam.' })).rejects.toMatchObject({ code: 'not_found' })
     expect(await call('bots.memory.export', { botId, dir: join(f.base, 'export') })).toEqual({ files: [] })
 
     const deleted = await call<{ purgeAt: string }>('bots.delete', { botId })
@@ -244,4 +364,33 @@ describe('Bot UI wiring', () => {
     expect(calls).toEqual([['bots:changed', { botId: 'bot-1' }], ['bots:message', message], ['bots:activity', activity]])
     expect(bridgeProtocolEvent({ type: 'bots.escalation', data: {} } as never, broadcast as never, presentation)).toBe(false)
   })
+})
+
+
+it('snoozes through the optional reminder method without writing an owner message', async () => {
+  const botId = await created()
+  await f.bots.reconcileOnStartup()
+  const first = f.store.listActivations(botId)[0]!
+  const { reminderId } = f.bots.addReminder(botId, first.id, { dueAt: new Date(f.clock.now).toISOString(), text: 'Tea' })
+  await f.bots.deliverDueReminders()
+  const before = f.store.listActivations(botId).length
+  const messageId = `bm_${reminderId}`
+  const message = await call<BotChatMessage>('bots.reminders.snooze', { botId, messageId, choice: '10m' })
+  expect(message.reminder?.snoozedUntil).toBe(new Date(f.clock.now + 600_000).toISOString())
+  expect(f.store.listActivations(botId)).toHaveLength(before)
+  await expect(call('bots.reminders.snooze', { botId, messageId, choice: '10m' })).rejects.toMatchObject({ code: 'reminder_snoozed' })
+  await expect(call('bots.reminders.snooze', { botId, messageId, choice: 'bad' })).rejects.toMatchObject({ code: 'invalid_params' })
+})
+
+it('refuses a stale snooze after Clear chat without making a reminder', async () => {
+  const botId = await created()
+  await f.bots.reconcileOnStartup()
+  const turn = f.store.listActivations(botId)[0]!
+  const { reminderId } = f.bots.addReminder(botId, turn.id, { dueAt: new Date(f.clock.now).toISOString(), text: 'Tea' })
+  await f.bots.deliverDueReminders()
+  await call('bots.chat.clear', { botId })
+  await expect(call('bots.reminders.snooze', { botId, messageId: `bm_${reminderId}`, choice: '10m' })).rejects.toMatchObject({
+    code: 'reminder_not_found', message: 'This message has no reminder to snooze.'
+  })
+  expect(f.store.waitingReminders(botId)).toEqual([])
 })

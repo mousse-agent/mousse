@@ -8,11 +8,14 @@ import { randomBytes } from 'crypto'
 import { EnvelopeAssembler } from './envelopeChunks'
 import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from './framing'
 import { parseEnvelope } from './validators'
+import { BOTS_BROWSER_STREAM_CAPABILITY } from '../../shared/bots/personal/browser'
+import { BROWSER_VIEW_CAPABILITY } from '../../shared/browser/threadView'
 import {
   GIT_OPERATIONS_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
   MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS,
+  MMS_PROTOCOL_COMPACT_TIMEOUT_MS,
   MMS_PROTOCOL_LOGIN_TIMEOUT_MS,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
@@ -68,12 +71,18 @@ export function requestTimeoutFor(method: string): number {
   if (method === 'mcp.beginAuth' || method === 'mcp.authenticate') return MMS_PROTOCOL_LOGIN_TIMEOUT_MS
   // Fetches the pull request's head from the network and builds a worktree.
   if (GIT_MUTATION_METHODS.has(method) || method === 'pullRequests.startThread') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
+  // A heap snapshot of a large service takes a while to write.
+  if (method === 'diagnostics.memory.heapSnapshot') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
+  // Answers when the compaction ended: up to the service's own time limit for it.
+  if (method === 'threads.compact') return MMS_PROTOCOL_COMPACT_TIMEOUT_MS
   return MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
 }
 
 /** The capability a daemon must have advertised for a connection event type to be believed. */
 function connectionEventCapability(type: ProtocolConnectionEvent['type']): string {
   if (type === 'mcp.auth-url') return 'integrations.lifecycle.v1'
+  if (type === 'bots.browser.frame') return BOTS_BROWSER_STREAM_CAPABILITY
+  if (type === 'browser.view.frame') return BROWSER_VIEW_CAPABILITY
   return type === 'git.operation' ? GIT_OPERATIONS_CAPABILITY : 'net.v1'
 }
 
@@ -628,6 +637,12 @@ export class LocalMmsClient implements MmsClient {
 
       if (result.gap) this.needsResnapshot = true
 
+      // A subscription from 0 starts on its audience's own numbering: a new window connection, or one just bound to
+      // another profile. The cursor the hello or the previous profile left belongs to another counter; kept, a higher
+      // one made this audience's next live events look stale, and they were dropped without a gap (#1042).
+      const fresh = afterSequence === 0
+      if (fresh) this.lastSequence = 0
+
       // Deliver replay before any newer live events from the same receive batch.
       const replay = Array.isArray(result.replay) ? result.replay : []
       for (const ev of replay) {
@@ -638,7 +653,7 @@ export class LocalMmsClient implements MmsClient {
       }
 
       // Never lower lastSequence after a live event; floor at response boundary.
-      this.lastSequence = Math.max(this.lastSequence, result.sequence)
+      this.lastSequence = fresh ? result.sequence : Math.max(this.lastSequence, result.sequence)
 
       // Flush live events buffered while subscribe was in flight (seq > boundary only).
       const buffered = this.subscribeEventBuffer
@@ -757,7 +772,9 @@ export class LocalMmsClient implements MmsClient {
   ): void {
     if (!Number.isFinite(event.sequence) || event.sequence < 0) return
 
-    if (this.lastSequence > 0 && event.sequence > this.lastSequence + 1) {
+    // A replay skips numbers the ring replaced with a newer copy of the same state; whether it lost any is the
+    // subscribe answer's `gap`.
+    if (!opts?.fromReplay && this.lastSequence > 0 && event.sequence > this.lastSequence + 1) {
       this.needsResnapshot = true
     }
 
@@ -825,12 +842,16 @@ export class LocalMmsClient implements MmsClient {
     }
   }
 
+  /**
+   * `err` goes to the requests already written, whose outcome is now unknown. Requests still waiting for a slot were
+   * never written, so they fail as not sent (`Not connected`), and a caller may give their input back.
+   */
   private rejectAllPending(err: Error): void {
     const waiters = this.slotWaiters
     this.slotWaiters = []
     for (const waiter of waiters) {
       clearTimeout(waiter.timer)
-      waiter.fail(err)
+      waiter.fail(new Error('Not connected'))
     }
     for (const [, p] of this.pending) {
       clearTimeout(p.timer)

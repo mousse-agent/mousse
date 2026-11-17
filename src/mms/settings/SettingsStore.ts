@@ -1,4 +1,6 @@
+import { isQuietHours } from '../../shared/settings'
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
+import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from '../../shared/themes/cssSafety'
 import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
@@ -64,6 +66,7 @@ function namesProviderOnly(selection: { llmProvider?: unknown; instanceId?: unkn
 
 function normalizeSettings(settings: MousseSettings): MousseSettings {
   const defaults = getDefaultSettings()
+  if (settings.notifications && !isQuietHours(settings.notifications.quietHours)) delete settings.notifications.quietHours
   const integrations = settings.integrations as MousseSettings['integrations'] & {
     tools?: { enabled?: unknown; enabledTools?: unknown; knownTools?: unknown }
   }
@@ -116,6 +119,14 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
   }
 }
 
+const savedListeners = new Set<() => void>()
+
+/** Calls `listener` after any profile's settings are saved through a SettingsStore. Returns a function that stops it. */
+export function onSettingsSaved(listener: () => void): () => void {
+  savedListeners.add(listener)
+  return () => { savedListeners.delete(listener) }
+}
+
 export class SettingsStore {
   private shouldPersistUsername = false
 
@@ -138,7 +149,7 @@ export class SettingsStore {
       typeof settings.appearance?.acrylic !== 'boolean' ||
       typeof settings.appearance?.acrylicIntensity !== 'number' ||
       typeof settings.appearance?.renderMath !== 'boolean' ||
-      typeof settings.appearance?.threadProjectColors !== 'boolean'
+      settings.appearance?.threadProjectColors !== normalized.appearance.threadProjectColors
     if (needsAppearanceMigrate) {
       this.config.applySettingsPatch({ appearance: normalized.appearance })
       this.shouldPersistUsername = true
@@ -164,12 +175,25 @@ export class SettingsStore {
     return normalizeSettings(structuredClone(this.config.assembleSettings()))
   }
 
-  set(partial: MousseSettingsUpdate): MousseSettings {
+  set(update: MousseSettingsUpdate): MousseSettings {
+    // `bots` (the removed "What bots may do here" switches) is ignored when an older window or script still sends it.
+    const { bots: _retired, ...partial } = update as MousseSettingsUpdate & { bots?: unknown }
+    // A theme's CSS over the limit is refused, never cut, and nothing in the update is saved.
+    const themes = (partial.appearance as { userThemes?: unknown } | undefined)?.userThemes
+    if (Array.isArray(themes)) {
+      const long = themes.find((theme) => theme && typeof theme === 'object' && typeof (theme as { css?: unknown }).css === 'string' && ((theme as { css: string }).css.length > THEME_CSS_MAX_LENGTH))
+      if (long) throw new Error(`${themeCssTooLong((long as { css: string }).css.length)} Nothing was saved.`)
+    }
+    const quietHours = partial.notifications?.quietHours
+    if (quietHours != null && !isQuietHours(quietHours)) throw new Error('Quiet hours need different from and to times in HH:MM (00:00 to 23:59). Nothing was saved.')
     const current = this.get()
     const merged = deepMerge(
       current as unknown as Record<string, unknown>,
       partial as Partial<Record<string, unknown>>
     ) as unknown as MousseSettings
+    // Choosing a built-in theme without naming a user theme turns the user theme off (the CLI's `appearance.theme`).
+    if (partial.appearance && Object.hasOwn(partial.appearance, 'theme') && !Object.hasOwn(partial.appearance, 'userTheme'))
+      merged.appearance = { ...merged.appearance, userTheme: '' }
     // A default chosen by provider name alone must not keep the instance of an earlier choice.
     if (partial.provider?.llmProvider !== undefined && partial.provider.instanceId === undefined)
       merged.provider = { ...merged.provider, instanceId: undefined }
@@ -196,7 +220,12 @@ export class SettingsStore {
       for (const [skillId, update] of skillModels) if (model[skillId] && update) model[skillId] = cleared(model[skillId]!, update)
       normalized.integrations = { ...normalized.integrations, skills: { ...normalized.integrations.skills, model } }
     }
+    // null is the update-only clear operation; the config removes the key before saving.
+    if (partial.notifications?.quietHours === null) normalized.notifications = { ...normalized.notifications, quietHours: null as never }
     this.config.applySettingsPatch(normalized)
+    for (const listener of savedListeners) {
+      try { listener() } catch (error) { console.warn('[SettingsStore] a settings listener failed', error) }
+    }
     return this.get()
   }
 }

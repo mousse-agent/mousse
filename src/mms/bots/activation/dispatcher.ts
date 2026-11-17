@@ -4,6 +4,7 @@ import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { BindPolicy, ProviderSelection } from '../../../shared/harness/types'
 import type { BrowserExecutionBinding } from '../../orchestrator/browser/binding'
 import type { BotTurnPayload } from '../../run/types'
+import type { ProviderMetrics } from '../../harness/adapter'
 
 /**
  * What the `turn.start` executor asks of the bot engine (PR 6 §4 "Execution"). The payload names
@@ -21,7 +22,8 @@ export interface BotTurnDispatcher {
    */
   refresh?(payload: BotTurnPayload): Promise<void>
   /** The dispatch's run ended (the executor saw it terminal); `text` is the final message, if any. */
-  settle(payload: BotTurnPayload, outcome: { text?: string }): void
+  /** `unanswered`: a steer cut the turn and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
+  settle(payload: BotTurnPayload, outcome: { text?: string; unanswered?: boolean }): void
   /** The bot's name when `threadId` is one of its threads: ordinary sends there are refused. */
   ownerOf(threadId: string): string | undefined
 }
@@ -31,7 +33,10 @@ export interface PreparedBotTurn {
   dispatchN: number
   /** The trigger's text, sent as the turn's user message. */
   prompt: string
-  /** The bot's instructions, appended to the runtime's own. */
+  /**
+   * The bot's system text (who it is, its lane's rules, what its owner allows now): the turn's system prompt, which a
+   * compaction keeps. Claude Code's is replaced by it; Codex takes it as developer instructions; Pi adds it to its own.
+   */
   instructions?: string
   selection: ProviderSelection
   /** The binding's policy (`bind(…, {policy})`). */
@@ -39,6 +44,15 @@ export interface PreparedBotTurn {
   authority: BotAuthority
   /** The activation's private scratch folder: the turn's working directory. */
   scratch: string
+  /** The runtime produced model text, thinking or a tool call: its prompt reached the model. */
+  modelOutput?(): void
+  /**
+   * The turn's runtime reported token usage (`TurnSink.usage`): one request, or the whole turn where the runtime sums
+   * them. Kept as a measurement in `bots.db` (`bot_turn_usage`); it never changes the turn.
+   */
+  usage?(usage: { input: number; output: number; cacheRead: number; cacheWrite: number }): void
+  /** The turn's runtime reported its measurements (`TurnSink.providerMetrics`): context size, window, cache and plan use. */
+  metrics?(metrics: ProviderMetrics): void
   /** Skill ids the turn may list and load. */
   skills: readonly string[]
   /**
@@ -54,6 +68,41 @@ export interface PreparedBotTurn {
   preamble?: string
   /** The bot's own browser, when its grant holds "use the browser": the turn's browser tools run on it. */
   browser?: BotTurnBrowser
+  /**
+   * What reaches the turn while it runs (a main dispatch only): the owner's notes to running work, and, after the
+   * runtime compacted the turn's context, the memory pack and the job's brief again. The orchestrator offers it to the
+   * runtime as a steer, at the next safe point; a runtime that cannot take one leaves it for the dispatch's end.
+   */
+  steer?: BotTurnSteer
+}
+
+/**
+ * How long a note waits for a compaction the runtime started inside the turn and never reported ended: past it, the
+ * steer goes in anyway (a compaction takes a minute or two).
+ */
+export const BOT_COMPACTION_HOLD_MS = 3 * 60_000
+
+/**
+ * The engine's side of a bot turn's steer (`PreparedBotTurn.steer`). Nothing in it widens the turn's grant: it adds
+ * text to the conversation and nothing else. Taken text is delivered at least once, usually once: `accepted` marks it
+ * read, `handedBack` puts it back to wait, and whatever the turn never reported read waits for the dispatch's end and
+ * goes with the continuation, marked as a possible repeat (the model may have read it before the turn ended).
+ */
+export interface BotTurnSteer {
+  /** The runtime takes steers into this turn (the orchestrator wired it): a note reaches it while it runs. */
+  attached(): void
+  /** What waits to go in now, without taking it. */
+  peek(): string | undefined
+  /** Takes what waits: its text, and the token it is accepted or handed back by. */
+  take(): { text: string; token: string } | undefined
+  /** The model read what `token` names: delivered, once. */
+  accepted(token: string): void
+  /** The runtime could not give it to the turn: it waits again. */
+  handedBack(token: string): void
+  /** The runtime compacted the turn's context: the memory pack and the job's brief go in again at the next safe point. */
+  compacted(): void
+  /** The runtime starts (`true`) or ends compacting the turn's context: a note waits for it (`work_note` says so). */
+  compacting?(active: boolean): void
 }
 
 /** A bot turn's browser: its trusted binding, and the runtime that holds it to the bot's own browser. */
@@ -93,6 +142,23 @@ export class BotReloadAbort extends BotWallAbort {
   }
 }
 
+/**
+ * The abort reason of work that ran out of room (`BotEngine.budgetEnd`): a wall whose turn hands back what it had, the
+ * reply it finished last when it was cut right after a tool call (`stoppedReplyText`).
+ */
+export class BotRoomAbort extends BotWallAbort {
+  readonly botRoom = true
+  constructor() {
+    super('bot_out_of_room')
+    this.name = 'BotRoomAbort'
+  }
+}
+
 export function isBotWallAbort(reason: unknown): boolean {
   return reason instanceof BotWallAbort || (Boolean(reason) && typeof reason === 'object' && (reason as { botWall?: unknown }).botWall === true)
+}
+
+/** Whether a bot turn was cut because its work ran out of room (`BotRoomAbort`). */
+export function isBotRoomAbort(reason: unknown): boolean {
+  return reason instanceof BotRoomAbort || (Boolean(reason) && typeof reason === 'object' && (reason as { botRoom?: unknown }).botRoom === true)
 }

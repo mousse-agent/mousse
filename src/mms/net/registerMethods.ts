@@ -1,5 +1,6 @@
 import { isIP } from 'node:net'
 import {
+  isAgentReach,
   NET_LOCAL_CAPABILITY,
   NET_LOCAL_METHODS,
   type NetLocalMethod
@@ -71,13 +72,20 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.recovery.import': ['file', 'passphrase', 'becomeAuthority'],
   'bridge.invite': ['ttlMs', 'name', 'caps'],
   'bridge.join': ['invite', 'name', 'passphrase', 'via'],
+  'net.join.retry': ['passphrase'],
+  'net.join.abandon': [],
+  'net.startOver.check': [],
+  'net.startOver': [],
   'bridge.nodes': [],
   'bridge.revoke': ['node'],
   'bridge.rename': ['node', 'name'],
   'bridge.setCaps': ['node', 'caps'],
   'bridge.setKind': ['node', 'kind'],
-  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor'],
+  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots', 'agentReach', 'work'],
+  'bridge.connect': ['node'],
+  'bridge.disconnect': ['node'],
   'bridge.workOnThreads': ['enabled'],
+  'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']
 }
 const SSH_ID = /^[A-Za-z0-9_-]{1,64}$/u
@@ -246,6 +254,8 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       'bridge.setCaps',
       'bridge.setKind',
       'bridge.policy',
+      'bridge.connect',
+      'bridge.disconnect',
       'net.editor.probe',
       'net.authority.transfer'
     ].includes(method) &&
@@ -257,7 +267,7 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
   if (method === 'bridge.setCaps' && params.caps === undefined)
     throw new DomainRpcError('invalid_params', 'A capability list is required')
   if (
-    method === 'bridge.workOnThreads' &&
+    (method === 'bridge.workOnThreads' || method === 'bridge.shareBots') &&
     params.enabled !== undefined &&
     typeof params.enabled !== 'boolean'
   )
@@ -273,17 +283,26 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       params.blocked === undefined &&
       params.maxPermissionMode === undefined &&
       params.terminal === undefined &&
-      params.editor === undefined
+      params.editor === undefined &&
+      params.bots === undefined &&
+      params.agentReach === undefined &&
+      params.work === undefined
     )
       throw new DomainRpcError('invalid_params', 'Choose a limit to change')
+    if (params.work !== undefined && typeof params.work !== 'boolean')
+      throw new DomainRpcError('invalid_params', 'work must be boolean')
     if (params.blocked !== undefined && typeof params.blocked !== 'boolean')
       throw new DomainRpcError('invalid_params', 'blocked must be boolean')
     if (params.terminal !== undefined && typeof params.terminal !== 'boolean')
       throw new DomainRpcError('invalid_params', 'terminal must be boolean')
     if (params.editor !== undefined && typeof params.editor !== 'boolean')
       throw new DomainRpcError('invalid_params', 'editor must be boolean')
+    if (params.bots !== undefined && typeof params.bots !== 'boolean')
+      throw new DomainRpcError('invalid_params', 'bots must be boolean')
     if (params.maxPermissionMode !== undefined && !isPermissionMode(params.maxPermissionMode))
       throw new DomainRpcError('invalid_params', 'Unknown permission mode')
+    if (params.agentReach !== undefined && !isAgentReach(params.agentReach))
+      throw new DomainRpcError('invalid_params', 'agentReach must be none, launched or all')
   }
   if (
     method === 'net.recovery.import' &&
@@ -423,12 +442,15 @@ export function registerEditorTunnelMethods(
     })
 }
 
-function publicError(code: keyof typeof NET_ERRORS, cause?: unknown): AppError {
+/** Methods whose errors carry a reason (and for a join, the other computer's name) for the screen to word. */
+const DETAILED_METHODS: ReadonlySet<NetLocalMethod> = new Set(['bridge.join', 'net.join.retry', 'net.startOver'])
+function publicError(code: keyof typeof NET_ERRORS, cause?: unknown, details?: unknown): AppError {
   const entry = NET_ERRORS[code]
   return new AppError(
     {
       code,
       message: entry.message,
+      ...(details === undefined ? {} : { details }),
       errorInfo: { category: entry.category, retryable: entry.retryable }
     },
     cause
@@ -466,7 +488,8 @@ export function registerNetMethods(
         try {
           return await (await forProfile(binding!.profileId)).request(method, params)
         } catch (error) {
-          if (error instanceof NetError) throw publicError(error.code, error)
+          if (error instanceof NetError)
+            throw publicError(error.code, error, DETAILED_METHODS.has(method) ? error.details : undefined)
           throw error
         }
       }

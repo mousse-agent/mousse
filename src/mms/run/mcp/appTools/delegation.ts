@@ -1,6 +1,7 @@
 import { Type, type JsonObject, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
 import { recordSubagentCall } from '../../../../shared/subagentTools'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
+import { hostingTurn } from '../../nativeHelpers'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
   McpToolError,
@@ -31,8 +32,18 @@ export interface DelegateTaskInput {
   /** @deprecated Older `llmProvider` name; mapped to an instance id. `instanceId` wins when both are set. */
   provider?: string
   model?: string
+  /** The model's reasoning level (one of its `efforts` from `list_models`); needs `model`. Absent: its default. */
+  effort?: string
+  /** A label for the subagent's job; it narrows nothing (`readOnly` does). */
   role?: string
+  /** `isolated`: a worktree of its own. `shared`: the caller's own folder. Either way, every tool the caller has. */
   workspace: 'isolated' | 'shared'
+  /**
+   * A read-only subagent: the narrow kind (an explorer, a read-only reviewer or researcher). It works in the caller's
+   * folder whatever `workspace` says, and reads files and the web, with Mousse's read-only tools: no shell, no edits,
+   * no other MCP servers. Absent: a general-purpose subagent with everything the caller has.
+   */
+  readOnly?: boolean
   wake?: 'always' | 'settled_only'
   /**
    * The subagent's title: its address among the caller's subagents. The `delegate_task` tool
@@ -49,7 +60,7 @@ export interface DelegateTaskInput {
    * `list_computers`. Absent: this computer.
    */
   computer?: string
-  /** A remote subagent is stopped after this many minutes (1-1440; default 360). */
+  /** A remote subagent is stopped after this many minutes (a whole number, at least 1); absent: it runs until it ends or is stopped. */
   maxMinutes?: number
 }
 
@@ -73,14 +84,18 @@ export interface SubagentRef {
  */
 export interface DelegationToolHost {
   delegateTask(input: DelegateTaskInput, call: DelegationToolCall): Promise<unknown>
-  continueSubagent(input: { subagent: string; prompt: string }, call: DelegationToolCall): Promise<unknown>
+  /** `mode: 'plan'` (from `thread_send`) runs the follow-up as a plan turn whatever the subagent's ceiling. */
+  continueSubagent(input: { subagent: string; prompt: string; mode?: 'plan' }, call: DelegationToolCall): Promise<unknown>
   answerSubagent(input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }, call: DelegationToolCall): Promise<unknown> | unknown
-  taskStatus(input: SubagentRef): Promise<unknown> | unknown
+  /** `acknowledge: false`: the read is not the thread's own turn (a native helper's call), so the result stays unacknowledged. */
+  taskStatus(input: SubagentRef, options?: { acknowledge?: false }): Promise<unknown> | unknown
   taskCancel(input: SubagentRef): Promise<unknown>
   listDelegations(): unknown
   listSubagents(): unknown
   /** The user's other computers a subagent may run on, and whether each can take this caller's work. */
   listComputers(): Promise<unknown> | unknown
+  /** The agents and models a subagent or thread may run on, here or on `computer` (`list_models`). */
+  listModels?(input: { computer?: string }): Promise<unknown> | unknown
   /**
    * The retired merge tools (`integrate_delegation`, `integrate_subagent`): a finished task's frozen result, with a
    * note that Mousse merged nothing. They stay callable for older transcripts and agents.
@@ -93,16 +108,13 @@ export interface DelegationToolHost {
   }
 }
 
-/** The longest `maxMinutes` of a remote subagent: a day. */
-export const MAX_REMOTE_MINUTES = 1440
-
 /** Delegation tool schemas (SPEC §14.2) plus the named-agent compatibility wrappers. */
 const DELEGATION_TOOLS: Tool[] = [
-  { name: 'delegate_task', description: 'Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). Mousse never merges a subagent\'s files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId. computer runs the subagent on another of the user\'s computers (a name from list_computers), in its copy of this repository and under its own agents; there instanceId and model default to that computer\'s, and maxMinutes (default 360) stops it if it runs longer. Its result names the branch its work is on there.',
-    parameters: Type.Object({ prompt: Type.String(), title: Type.String(), instanceId: Type.Optional(Type.String()), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
-      workspace: Type.Union([Type.Literal('isolated'), Type.Literal('shared')]),
+  { name: 'delegate_task', description: 'Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. A subagent has everything you have: your shell, your tools, your MCP servers, your skills and your permission mode, never more. workspace isolated gives it a worktree of its own; shared runs it in your own folder, where its edits land in your files as it makes them. readOnly true starts the narrow kind instead (an explorer, a read-only reviewer or researcher): it works in your folder and can only read files and the web and use Mousse\'s read-only tools, with no shell, no edits and no other MCP servers. role is a label and changes nothing. Mousse never merges a subagent\'s files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai"), model and effort (its reasoning level) default to yours; take them from list_models, and pass effort only with model. A model or agent that is not offered, or is signed out, is refused with the reason and nothing starts: tell the user, never pick another yourself. provider is the older name form of instanceId. computer runs the subagent on another of the user\'s computers (a name from list_computers), in its copy of this repository and under its own agents; there instanceId and model default to that computer\'s. It runs there until it ends or is stopped; maxMinutes, when you give it, stops it after that many minutes of running time (time it waits for a person\'s answer does not count). It expires with your thread. Its result names the branch its work is on there.',
+    parameters: Type.Object({ prompt: Type.String(), title: Type.String(), instanceId: Type.Optional(Type.String()), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()), effort: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
+      workspace: Type.Union([Type.Literal('isolated'), Type.Literal('shared')]), readOnly: Type.Optional(Type.Boolean()),
       wake: Type.Optional(Type.Union([Type.Literal('always'), Type.Literal('settled_only')])),
-      computer: Type.Optional(Type.String()), maxMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_REMOTE_MINUTES })) }) },
+      computer: Type.Optional(Type.String()), maxMinutes: Type.Optional(Type.Integer({ minimum: 1 })) }) },
   { name: 'continue_subagent', description: 'Send a follow-up to a subagent you already started, by title (or childThreadId, or delegationId). It continues on the same thread with the context it has, so use it when the next step builds on what it read or did. Starts a new task, returns at once with its delegationId, and Mousse sends you a notice with the result. A subagent that is busy runs the follow-up after its current task (status queued). A subagent waiting for an answer returns needs_answer with its question; answer it with answer_subagent. It cannot change workspace, provider or model; start a new subagent for that.',
     parameters: Type.Object({ subagent: Type.String(), prompt: Type.String() }) },
   { name: 'answer_subagent', description: 'Answer a question one of your subagents asked (ask_user), using the requestId from continue_subagent (needs_answer) or from the question notice. answers maps each question id to the chosen option id (an array when several are allowed) or free text.',
@@ -111,11 +123,11 @@ const DELEGATION_TOOLS: Tool[] = [
   { name: 'task_cancel', description: 'Cancel a subagent task and everything that subagent delegated, deepest first. Pass the delegationId, or the subagent title to cancel all of its open tasks.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
   { name: 'list_delegations', description: 'List the tasks this thread delegated, with their status.', parameters: Type.Object({}) },
   { name: 'integrate_delegation', description: 'Retired: Mousse no longer merges subagent results. Returns the finished task\'s result (base and result snapshots, where it worked, the Git state it left) so you can bring it in with git. Pass the delegationId, or the subagent title for its latest finished task.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
-  { name: 'create_subagent', description: 'Named wrapper over delegate_task: starts a child thread titled with the name and returns at once. Defaults to shared read-only research; access write runs in an isolated worktree.',
+  { name: 'create_subagent', description: 'Named wrapper over delegate_task: starts a child thread titled with the name and returns at once. Defaults to a read-only subagent in your folder; access write gives it everything you have, in a worktree of its own.',
     parameters: Type.Object({ name: Type.String(), task: Type.String(),
       workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
       access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }) },
-  { name: 'create_subagents', description: 'Start up to eight named delegated tasks at once (see create_subagent).', parameters: Type.Object({ agents: Type.Array(Type.Object({ name: Type.String(), task: Type.String(), workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])), access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }), { minItems: 1, maxItems: 8 }) }) },
+  { name: 'create_subagents', description: 'Start several named delegated tasks at once (see create_subagent).', parameters: Type.Object({ agents: Type.Array(Type.Object({ name: Type.String(), task: Type.String(), workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])), access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }), { minItems: 1 }) }) },
   { name: 'integrate_subagent', description: 'Retired named wrapper over integrate_delegation: returns the latest finished task\'s result for the named child; merges nothing.', parameters: Type.Object({ agent: Type.String(), episodeId: Type.Optional(Type.String()), expectedResultSha: Type.Optional(Type.String()), expectedDestinationSha: Type.Optional(Type.String()) }) },
   { name: 'recall_subagent', description: 'Send a follow-up task to an existing named child thread; returns at once and wakes you when it finishes.',
     parameters: Type.Object({ agent: Type.String(), task: Type.String(), expectedAgentGeneration: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -123,7 +135,9 @@ const DELEGATION_TOOLS: Tool[] = [
       access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])),
       contextMode: Type.Optional(Type.Union([Type.Literal('continue'), Type.Literal('fresh')])), resumeResult: Type.Optional(Type.Boolean()) }) },
   { name: 'list_subagents', description: 'List your subagents, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model, and the computer a remote one runs on.', parameters: Type.Object({}) },
-  { name: 'list_computers', description: 'List the user\'s other computers you may start subagents on (delegate_task computer): name, whether it is online, whether the user allowed it, and whether it has this repository. Starts nothing.', parameters: Type.Object({}) }
+  { name: 'list_computers', description: 'List the user\'s other computers you may start subagents (delegate_task computer) or threads (thread_create computer) on: name, whether it is online, whether the user allowed it, and whether it has this repository. The threads of a computer the user allowed can also be listed and searched (thread_list and thread_search with computer) and read by their ids. Starts nothing.', parameters: Type.Object({}) },
+  { name: 'list_models', description: 'List the agents and models you can start a subagent (delegate_task) or a thread (thread_create) on, as the model picker offers them: each entry\'s instanceId and name, whether it is ready (else why not), whether it can run subagents, and its models with their reasoning levels (effort). current is what you run on. Match the model the user names to a model id here; never guess ids. computer (a name from list_computers) lists that computer\'s instead, for delegate_task computer. Starts nothing.',
+    parameters: Type.Object({ computer: Type.Optional(Type.String()) }) }
 ]
 
 /** Every name `dispatchDelegationTool` runs, the hidden compatibility aliases included. */
@@ -134,7 +148,7 @@ export const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOO
  * (`create_subagent(s)`, `recall_subagent`, `integrate_delegation`, `integrate_subagent`, `list_delegations`)
  * stay dispatchable for replayed transcripts and older agents but are not listed.
  */
-export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_computers'] as const
+export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_computers', 'list_models'] as const
 
 /** Definitions shared by the pi loop and the Mousse MCP server, so both offer identical schemas. */
 export function delegationToolDefinitions(names: readonly string[] = LISTED_DELEGATION_TOOL_NAMES): Tool[] {
@@ -164,16 +178,20 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
       const prompt = requireString(args, 'prompt', 'delegate_task requires a prompt')
       if (args.workspace !== 'isolated' && args.workspace !== 'shared') throw new Error('delegate_task requires workspace isolated or shared')
       if (args.wake !== undefined && args.wake !== 'always' && args.wake !== 'settled_only') throw new Error('wake must be always or settled_only')
-      for (const key of ['instanceId', 'provider', 'model', 'role'] as const)
+      if (args.readOnly !== undefined && typeof args.readOnly !== 'boolean') throw new Error('readOnly must be true or false')
+      for (const key of ['instanceId', 'provider', 'model', 'effort', 'role'] as const)
         if (args[key] !== undefined && (typeof args[key] !== 'string' || !String(args[key]).trim())) throw new Error(`${key} must be a non-empty string`)
       if (args.modeCeiling !== undefined && args.modeCeiling !== 'plan' && args.modeCeiling !== 'default') throw new Error('modeCeiling must be plan or default')
       if (args.computer !== undefined && (typeof args.computer !== 'string' || !args.computer.trim())) throw new Error('computer must be a non-empty string: a name from list_computers')
-      if (args.maxMinutes !== undefined && !(Number.isInteger(args.maxMinutes) && (args.maxMinutes as number) >= 1 && (args.maxMinutes as number) <= MAX_REMOTE_MINUTES))
-        throw new Error(`maxMinutes must be a whole number from 1 to ${MAX_REMOTE_MINUTES}`)
+      if (args.maxMinutes !== undefined && !(Number.isInteger(args.maxMinutes) && (args.maxMinutes as number) >= 1))
+        throw new Error('maxMinutes must be a whole number, at least 1')
       if (args.maxMinutes !== undefined && args.computer === undefined) throw new Error('maxMinutes applies only with computer')
+      if (args.effort !== undefined && args.model === undefined) throw new Error('effort needs model: name the model (list_models shows yours as current) with its reasoning level')
       const title = requireString(args, 'title', 'delegate_task requires a title: a short role-like name for the subagent, such as "API reviewer"').trim()
       return host.delegateTask({ prompt, title, workspace: args.workspace, wake: args.wake as DelegateTaskInput['wake'],
         instanceId: args.instanceId as string | undefined, provider: args.provider as string | undefined, model: args.model as string | undefined, role: args.role as string | undefined,
+        ...(args.effort !== undefined ? { effort: (args.effort as string).trim() } : {}),
+        ...(args.readOnly === true ? { readOnly: true } : {}),
         ...(args.modeCeiling !== undefined ? { modeCeiling: args.modeCeiling as DelegateTaskInput['modeCeiling'] } : {}),
         ...(args.computer !== undefined ? { computer: (args.computer as string).trim() } : {}),
         ...(args.maxMinutes !== undefined ? { maxMinutes: args.maxMinutes as number } : {}) }, call)
@@ -221,6 +239,11 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
       return host.listSubagents()
     case 'list_computers':
       return host.listComputers()
+    case 'list_models': {
+      if (args.computer !== undefined && (typeof args.computer !== 'string' || !args.computer.trim())) throw new Error('computer must be a non-empty string: a name from list_computers')
+      if (!host.listModels) throw new Error('list_models is not available here')
+      return host.listModels(args.computer !== undefined ? { computer: (args.computer as string).trim() } : {})
+    }
     default:
       throw new Error(`Unknown delegation tool ${toolCall.name}`)
   }
@@ -305,7 +328,8 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
     // No delegation tool writes the caller's workspace: the retired merge tools only report a result.
     access: 'actsAsCaller',
     class: 'delegation',
-    hidden: !listed.has(definition.name),
+    // The older names are neither listed nor callable over MCP; they still run in process.
+    ...(listed.has(definition.name) ? {} : { listed: () => false, callable: 'in_process' as const }),
     // A read-only subagent may start (read-only) subagents and follow them; `delegateTask` checks the
     // workspace of each one.
     readOnlySafe: true,
@@ -315,8 +339,10 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
       if (ctx.transport === 'mcp') before?.(args, ctx.caller)
       // In process, only a turn the host gave delegation tools runs them (a trusted definition never
       // has them); over MCP the thread owner builds them for the caller.
-      const delegation = ctx.turn.delegation ?? (ctx.transport === 'mcp' ? host.delegation(ctx.caller) : undefined)
-      if (!delegation) throw new Error(`Unknown tool: ${definition.name}`)
+      const own = ctx.turn.delegation ?? (ctx.transport === 'mcp' ? host.delegation(ctx.caller) : undefined)
+      if (!own) throw new Error(`Unknown tool: ${definition.name}`)
+      // A native helper's call is not the thread's own turn: what it reads never acknowledges the thread's notices (§2.7).
+      const delegation = hostingTurn(ctx.turn) === ctx.turn ? own : Object.assign(Object.create(own) as DelegationToolHost, { taskStatus: (ref: SubagentRef) => own.taskStatus(ref, { acknowledge: false }) })
       // Tool arguments arrive as parsed JSON (MCP or Pi), so they are JSON values.
       const call: ToolCall = { type: 'toolCall', id: ctx.toolCallId, name: definition.name, arguments: args as JsonObject }
       return { text: await dispatchWithTimeline(delegation, call, ctx) }

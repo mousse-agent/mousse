@@ -44,7 +44,7 @@
 .chat-prompt-tick[aria-current] span { opacity: 0.75; }
 .chat-prompt-rail:is(:hover, :focus-within, .is-active) .chat-prompt-tick span { transform: scaleX(1); }
 .chat-prompt-tick:is(:hover, :focus-visible) span { opacity: 1; }
-.chat-prompt-tick:focus-visible { outline: 1px solid currentColor; outline-offset: -1px; }
+.chat-prompt-tick:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .chat-prompt-preview {
   position: absolute;
   left: calc(100% + 12px);
@@ -73,7 +73,8 @@
   inset: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* clip, not hidden: nothing, not even scrollIntoView or focus, can scroll the app's frame. */
+  overflow: clip;
   background: var(--app-window-bg);
 }
 
@@ -81,7 +82,7 @@
   display: flex;
   flex: 1 1 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .titlebar {
@@ -91,8 +92,6 @@
   height: var(--theme-titlebar-height, var(--titlebar-height));
   flex-shrink: 0;
   background: var(--vscode-titleBar-activeBackground, linear-gradient(90deg, rgba(var(--surface-strong-rgb), 0.72) 0%, rgba(var(--surface-soft-rgb), 0.65) 55%, rgba(var(--surface-elevated-rgb), 0.6) 100%));
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   user-select: none;
 }
 
@@ -347,21 +346,6 @@ html.platform-darwin .titlebar-left {
   color: white;
 }
 
-/* Functional progress indicators must keep spinning even when Windows
-   reports prefers-reduced-motion (global baseline short-circuits animation). */
-.icon-spin {
-  animation: spin 1s linear infinite !important;
-}
-
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 /* The conversation takes what the panel area leaves, at least 280px; the panel area's minimum keeps it
    within 60% of the workspace (lib/panelSplit.ts). */
 .sidebar {
@@ -370,8 +354,6 @@ html.platform-darwin .titlebar-left {
   flex-direction: column;
   min-width: 280px;
   background: var(--vscode-sideBar-background, var(--gradient-surface));
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .sidebar.sidebar-full {
@@ -412,7 +394,6 @@ html.platform-darwin .titlebar-left {
 .app .resizer:focus-visible {
   outline: none;
   background: var(--accent);
-  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.5);
 }
 
 /* Its width comes from App (mainAreaStyle): the saved width; it shrinks when the window is narrower. */
@@ -422,7 +403,7 @@ html.platform-darwin .titlebar-left {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: clip;
   background: transparent;
   container-type: inline-size;
   container-name: main-area;
@@ -456,8 +437,6 @@ html.platform-darwin .titlebar-left {
   min-width: 0;
   flex-shrink: 0;
   background: rgba(var(--surface-strong-rgb), 0.55);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .main-area > :not(.header) {
@@ -640,12 +619,12 @@ html.platform-darwin .titlebar-left {
 }
 
 .main-view-tab:hover {
-  background: rgba(var(--accent-rgb), 0.1);
+  background: var(--ui-hover, rgba(127, 127, 127, 0.1));
   color: var(--text-primary);
 }
 
 .main-view-tab.active {
-  background: rgba(var(--accent-rgb), 0.18);
+  background: var(--main-tab-selected, rgba(127, 127, 127, 0.16));
   color: var(--text-primary);
 }
 
@@ -656,7 +635,6 @@ html.platform-darwin .titlebar-left {
 
 .main-view-tab.active .main-view-tab-icon {
   opacity: 1;
-  color: var(--accent);
 }
 
 /* The empty app panel: one muted line and the list, in a compact column centred in the pane, a little
@@ -720,7 +698,6 @@ html.platform-darwin .titlebar-left {
 .surface-menu-row:focus-visible {
   outline: none;
   background: rgba(var(--accent-rgb), 0.1);
-  box-shadow: var(--ui-focus-ring);
 }
 
 .surface-menu-state {
@@ -887,7 +864,7 @@ html.platform-darwin .titlebar-left {
 .turn-edits-review:focus-visible,
 .turn-edits-toggle:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .turn-edits-file-icon {
@@ -920,8 +897,6 @@ html.platform-darwin .titlebar-left {
   justify-content: center;
   min-height: 0;
   background: rgba(var(--surface-base-rgb), 0.7);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .placeholder-view-content {
@@ -967,16 +942,25 @@ html.platform-darwin .titlebar-left {
 }
 
 .chat {
-  /* Component CSS also supplies a narrow standalone default at :root.
-     Keep the full app conversation width stable regardless of production
-     stylesheet chunk order. */
-  --an-max-width: 680px;
+  /* The transcript's text column (Settings → Appearance → Chat width) plus the list's 24px
+     gutters; the composer shares the column. Component CSS also supplies a narrow standalone
+     default at :root, so the width is set here regardless of stylesheet chunk order. */
+  --chat-text-width: 736px;
+  --an-max-width: calc(var(--chat-text-width) + 48px);
   flex: 1;
   min-height: 0;
   position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+html[data-chat-width='wide'] .chat {
+  --chat-text-width: 1152px;
+}
+
+html[data-chat-width='full'] .chat {
+  --an-max-width: 100%;
 }
 
 .chat-messages,
@@ -1269,7 +1253,7 @@ html.platform-darwin .titlebar-left {
 .composer-notice-btn:focus-visible,
 .composer-notice-icon-btn:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-notice-btn:disabled,
@@ -1289,8 +1273,6 @@ html.platform-darwin .titlebar-left {
   border: 1px solid var(--border);
   border-radius: 15px;
   background: var(--bg-secondary);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.16);
 }
 
@@ -1481,6 +1463,59 @@ html.platform-darwin .titlebar-left {
   gap: 10px;
   flex: 1;
   min-width: 0;
+}
+
+/* While dictating, the footer is the recorder: a still red dot, the time and the live wave across the
+   width, then Cancel and Done. The dot does not pulse; the wave already shows the microphone is live. */
+.composer-recorder-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  min-height: 30px;
+  padding-left: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.composer-recorder-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+.composer-recorder-time {
+  flex-shrink: 0;
+  min-width: 30px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.composer-recorder-wave {
+  flex: 1;
+  margin-right: 8px;
+}
+
+.composer-recorder-cancel {
+  color: var(--text-secondary);
+}
+
+.app .composer .composer-recorder-done {
+  background: var(--text-primary);
+  color: var(--ui-raised);
+}
+
+.app .composer .composer-recorder-done:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-primary) 86%, transparent);
+}
+
+.app .composer .composer-recorder-done:disabled {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  color: var(--text-secondary);
 }
 
 .composer-pill-btn,
@@ -2204,18 +2239,6 @@ html.platform-darwin .titlebar-left {
   color: var(--text-secondary);
 }
 
-.composer-implement-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 6px 12px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  flex-shrink: 0;
-  transition: background 0.15s, opacity 0.15s;
-}
-
 .composer-action-btn {
   display: inline-flex;
   align-items: center;
@@ -2291,16 +2314,6 @@ html.platform-darwin .titlebar-left {
 
 .composer-context-anchor {
   position: relative;
-}
-
-.composer-action-btn-recording {
-  background: rgba(239, 68, 68, 0.25);
-  color: #f87171;
-}
-
-.composer-action-btn-recording:hover {
-  background: rgba(239, 68, 68, 0.35);
-  color: #fca5a5;
 }
 
 .composer-action-btn-stop {
@@ -2447,10 +2460,10 @@ html.platform-darwin .titlebar-left {
   /* Match the wrap cap directly — % max-height is unreliable while height is auto. */
   max-height: var(--theme-composer-input-max-height, min(60vh, 640px));
   overflow: hidden;
-  padding: 11px 14px 6px;
+  padding: var(--theme-composer-input-padding, 11px 14px 6px);
   font-size: 14px;
   line-height: 1.5;
-  color: transparent;
+  color: var(--text-primary);
   white-space: pre-wrap;
   overflow-wrap: break-word;
   pointer-events: none;
@@ -2458,11 +2471,161 @@ html.platform-darwin .titlebar-left {
   -webkit-user-select: none;
 }
 
+/* Light Markdown in the draft. The textarea's own glyphs are hidden (caret, selection, spellcheck
+ * and IME stay native) and the backdrop paints the text with these styles. None of them may change
+ * a character's width, or the caret would drift: bold is a stroke, not a heavier face, italic is a
+ * tint, and code keeps the prose font. */
+.composer-input.composer-input-mirrored {
+  -webkit-text-fill-color: transparent;
+}
+
+.composer-input.composer-input-mirrored::placeholder {
+  -webkit-text-fill-color: currentColor;
+}
+
+.composer-input.composer-input-mirrored::selection {
+  background: rgba(var(--accent-rgb), 0.28);
+}
+
+.composer-input-wrap:has(.composer-input:disabled) .composer-input-backdrop {
+  opacity: 0.5;
+}
+
+.composer-md-marker {
+  color: color-mix(in srgb, var(--text-secondary) 80%, transparent);
+}
+
+.composer-md-bold:not(.composer-md-marker),
+.composer-md-heading:not(.composer-md-marker) {
+  -webkit-text-stroke: 0.04em currentColor;
+}
+
+/* Geist's italic face has slightly different widths, so italic is a tint, not a slant. */
+.composer-md-italic:not(.composer-md-marker) {
+  color: color-mix(in srgb, var(--text-primary) 75%, var(--accent));
+}
+
+.composer-md-strike:not(.composer-md-marker) {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+.composer-md-code:not(.composer-md-marker) {
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.12);
+  border-radius: 4px;
+  padding: 1px 2px;
+  margin: 0 -2px;
+}
+
+.composer-md-codeblock {
+  color: var(--text-secondary);
+}
+
+.composer-md-quote:not(.composer-md-marker) {
+  color: var(--text-secondary);
+}
+
+.composer-md-list,
+.composer-md-link:not(.composer-md-marker) {
+  color: var(--accent);
+}
+
 .composer-token-chip {
   background: rgba(var(--accent-rgb), 0.16);
   border-radius: 6px;
   padding: 1px 5px;
   margin: 0 -5px;
+}
+
+/* A Reply pill: text quoted from the conversation (lib/composerQuotes.ts). */
+.composer-quote-chip {
+  padding: 1px 2px;
+  margin: 0 -2px;
+  background: rgba(var(--accent-rgb), 0.12);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.35);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* The pill's first slot is blank in the text box: its reply icon is drawn there. */
+.composer-quote-tag {
+  position: relative;
+}
+
+.composer-quote-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--accent);
+}
+
+/* A quote in a sent message: the reply icon and the quoted words, on a line of their own. */
+.sent-quote-pill {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 2px 0 8px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.12);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.3);
+  font-size: 0.92em;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.sent-quote-pill:first-child {
+  margin-top: 0;
+}
+
+.sent-quote-pill:last-child {
+  margin-bottom: 0;
+}
+
+.sent-quote-icon {
+  flex-shrink: 0;
+  margin-top: 0.2em;
+  color: var(--accent);
+}
+
+.sent-quote-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  opacity: 0.9;
+}
+
+/* The Reply button beside text selected in a conversation. */
+.selection-reply-button {
+  position: fixed;
+  z-index: 1000;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--ui-raised, var(--surface-raised, #1c1c1c));
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
+
+.selection-reply-button:hover {
+  background: rgba(var(--accent-rgb), 0.12);
+  border-color: rgba(var(--accent-rgb), 0.45);
+}
+
+.selection-reply-button:focus-visible {
+  background-image: var(--ui-focus-layer);
 }
 
 .browser-element-pill-tag {
@@ -2481,24 +2644,6 @@ html.platform-darwin .titlebar-left {
   min-width: 0;
 }
 
-.composer-attachment-pill-recording {
-  color: #f87171;
-  border-color: rgba(239, 68, 68, 0.3);
-  animation: composer-recording-pulse 1.5s ease-in-out infinite;
-}
-
-.composer-attachment-pill-transcribing {
-  color: var(--text-secondary);
-}
-
-.composer-transcribing-spin {
-  animation: composer-transcribing-spin 0.9s linear infinite;
-}
-
-@keyframes composer-transcribing-spin {
-  to { transform: rotate(360deg); }
-}
-
 .composer-attachment-remove {
   display: inline-flex;
   align-items: center;
@@ -2514,11 +2659,6 @@ html.platform-darwin .titlebar-left {
 .composer-attachment-remove:hover {
   background: rgba(var(--accent-rgb), 0.2);
   color: var(--text-primary);
-}
-
-@keyframes composer-recording-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.65; }
 }
 
 /* The ring takes the level's colour: accent, then warning from 75%, danger from 90%. */
@@ -2698,7 +2838,7 @@ html.platform-darwin .titlebar-left {
 
 .context-usage-compaction-change:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .context-usage-notes {
@@ -2747,8 +2887,6 @@ html.platform-darwin .titlebar-left {
   border: none;
   border-radius: 14px;
   background: var(--bg-secondary);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: 0 8px 24px rgba(var(--surface-base-rgb), 0.18);
 }
 
@@ -2804,8 +2942,8 @@ html.platform-darwin .titlebar-left {
 }
 
 .message-user .message-user-sticky-toggle:focus-visible {
-  outline: 2px solid rgba(var(--accent-rgb), 0.55);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .message-user-sticky-collapsed {
@@ -3131,7 +3269,7 @@ html.platform-darwin .titlebar-left {
   /* The global desktop performance baseline disables cosmetic animation with
      !important. Loading and active tool labels are functional progress
      indicators, so explicitly retain their shared gradient sweep. */
-  animation: shimmer-sweep 1.8s ease-in-out infinite !important;
+  animation: shimmer-sweep 1.8s steps(27, jump-none) infinite !important;
 }
 
 @keyframes shimmer-sweep {
@@ -3196,8 +3334,6 @@ html.platform-darwin .titlebar-left {
 
 .terminal-container-empty {
   background: rgba(var(--surface-base-rgb), 0.7);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .terminal-empty {
@@ -3311,7 +3447,7 @@ html[data-theme='high-contrast'] {
 /* Self-contained so it works outside Settings, where the settings tokens are unset. */
 :is(.modal, .integration-modal) .modal-close { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; margin-left: auto; border-radius: var(--ui-control-radius); color: var(--text-secondary); transition: background-color 0.15s, color 0.15s; }
 :is(.modal, .integration-modal) .modal-close:hover:not(:disabled) { background: var(--ui-hover); color: var(--text-primary); }
-:is(.modal, .integration-modal) .modal-close:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
+:is(.modal, .integration-modal) .modal-close:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .modal-body > p { margin: 0 0 12px; line-height: 1.6; }
 .modal-body > p:last-child { margin-bottom: 0; }
 /* The footer is its own row under the scrolling body: the dialog inset on the
@@ -3360,7 +3496,7 @@ html[data-theme='high-contrast'] {
   animation-range: 0px var(--modal-fade, 18px), calc(100% - var(--modal-fade, 18px)) 100%;
 }
 
-/* Above a footer the body keeps only room for a focus ring: the footer's own
+/* Above a footer the body keeps only a little room: the footer's own
    gap is the space. */
 .modal-body:has(+ .modal-footer) {
   padding-bottom: 4px;
@@ -3452,8 +3588,6 @@ html[data-theme='high-contrast'] {
   gap: 8px;
   padding: 8px 12px;
   background: rgba(var(--surface-strong-rgb), 0.5);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
   min-height: 36px;
 }
@@ -3480,16 +3614,6 @@ html[data-theme='high-contrast'] {
   font-size: 12px;
   color: var(--danger);
   background: rgba(248, 81, 73, 0.1);
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.spin {
-  animation: spin 0.8s linear infinite;
 }
 
 .project-terminal-panel .terminal-container {
@@ -3607,8 +3731,6 @@ html[data-theme='high-contrast'] {
   position: relative;
   z-index: 3;
   background: rgba(var(--surface-strong-rgb), 0.5);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   user-select: none;
 }
 
@@ -3633,8 +3755,8 @@ html[data-theme='high-contrast'] {
 }
 
 .browser-toolbar-btn:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .browser-toolbar-btn:disabled {
@@ -4252,7 +4374,6 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 .git-section-divider:focus-visible {
   outline: none;
   background: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .git-section-header {
@@ -4348,8 +4469,8 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .git-row-action:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* The question before a discard: what goes, then which files and how long a copy is kept. */
@@ -5106,7 +5227,7 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 
 .composer-question-dot:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-question-modal-body {
@@ -5171,7 +5292,6 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 .composer-question-option:focus-visible {
   outline: none;
   background: var(--ui-hover);
-  box-shadow: inset 0 0 0 1.5px rgba(var(--accent-rgb), 0.55);
 }
 
 .composer-question-option.selected {
@@ -5180,7 +5300,9 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .composer-question-option.selected:focus-visible {
-  box-shadow: var(--ui-specular), inset 0 0 0 1.5px rgba(var(--accent-rgb), 0.55);
+  outline: none;
+  box-shadow: var(--ui-specular);
+  background-image: var(--ui-focus-layer);
 }
 
 html[data-theme='high-contrast'] .composer-question-option.selected {
@@ -5258,6 +5380,23 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   padding: 4px 16px 16px;
 }
 
+.composer-question-footer-start {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* Images sent from the composer as the shown question's answer. */
+.composer-question-attached {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 .composer-question-footer-end {
   display: flex;
   align-items: center;
@@ -5293,7 +5432,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 
 .composer-question-btn:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-question-btn:disabled {
@@ -5467,7 +5606,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.1);
-  animation: response-work-pulse 1.8s ease-in-out infinite;
+  animation: response-work-pulse 1.8s steps(13, jump-none) infinite;
 }
 
 .response-work-content {
@@ -5572,16 +5711,16 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 
 .assistant-message-action:focus-visible,
 .assistant-response-metadata button:focus-visible {
-  outline: 2px solid var(--accent-hover);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
-/* Copy, Details, Undo and Read aloud under a message: a keyboard ring, full strength while focused. */
+/* Copy, Details, Undo and Read aloud under a message: the focus fill, full strength while focused. */
 .chat-message-toolbar button:focus-visible,
 .chat-user-image:focus-visible {
+  outline: none;
   opacity: 1;
-  outline: 2px solid var(--accent-hover);
-  outline-offset: 1px;
+  background-image: var(--ui-focus-layer);
 }
 
 /* An attached image is a button; the global button reset would drop its tile fill. */
@@ -5665,7 +5804,8 @@ button.chat-user-image { background: color-mix(in oklab, var(--color-an-foregrou
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: var(--bg-secondary);
+  /* Solid like every dialog: a glass fill lets the page behind show through with acrylic on. */
+  background: var(--ui-raised);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
 }
 
@@ -5778,7 +5918,7 @@ button.chat-user-image { background: color-mix(in oklab, var(--color-an-foregrou
 
 .shimmer-text {
   background-size: 220% 100%;
-  animation: shimmer-sweep 1.6s ease-in-out infinite !important;
+  animation: shimmer-sweep 1.6s steps(24, jump-none) infinite !important;
 }
 
 @keyframes shimmer-sweep {
@@ -5832,7 +5972,7 @@ button.chat-user-image { background: color-mix(in oklab, var(--color-an-foregrou
   border-radius: 1.5px;
   background: var(--accent);
   opacity: 0.18;
-  animation: pixel-pulse 1.2s ease-in-out infinite;
+  animation: pixel-pulse 1.2s steps(9, jump-none) infinite;
 }
 
 .pixel-grid span:nth-child(1) { animation-delay: 0ms; }
@@ -5900,7 +6040,7 @@ button.chat-user-image { background: color-mix(in oklab, var(--color-an-foregrou
   width: 8px;
   height: 8px;
   box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.12);
-  animation: response-work-pulse 1.6s ease-in-out infinite;
+  animation: response-work-pulse 1.6s steps(12, jump-none) infinite;
 }
 
 .response-work-content {
@@ -6105,7 +6245,7 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 .quick-actions-field input:focus,
 .quick-actions-field textarea:focus {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .quick-actions-field textarea {
@@ -6170,6 +6310,157 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 
 .an-compaction-stop:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
   opacity: 1;
+  background-image: var(--ui-focus-layer);
+}
+
+/* A long paste opened from its chip: the text as it will reach the agent, monospace and scrollable. */
+.pasted-text-preview .modal { width: 760px; }
+.pasted-text-preview-body {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+}
+.pasted-text-preview-body:focus-visible { outline: none; }
+.modal-body > .pasted-text-preview-cut { margin: 12px 0 0; color: var(--text-tertiary, var(--text-secondary)); font-size: 12px; }
+
+/* The private card an agent's secret request puts above the composer (#595); it shares the question card's surface. */
+.secret-request-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: -4px 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.secret-request-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent, var(--text-primary));
+  text-decoration: none;
+}
+
+.secret-request-link:hover {
+  text-decoration: underline;
+}
+
+.secret-request-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+}
+
+.secret-request-field:focus-within {
+  border-color: var(--accent, var(--ui-line-strong));
+}
+
+.secret-request-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.secret-request-input::placeholder {
+  font-family: inherit;
+  color: var(--text-secondary);
+}
+
+.secret-request-reveal {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.secret-request-reveal:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.secret-request-keep {
+  display: inline-flex;
+  gap: 2px;
+  margin: 10px 0 6px;
+  padding: 2px;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+}
+
+.secret-request-keep-option {
+  height: 24px;
+  padding: 0 10px;
+  border: none;
+  border-radius: calc(var(--ui-control-radius) - 2px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.secret-request-keep-option.is-selected {
+  background: var(--ui-raised);
+  color: var(--text-primary);
+  box-shadow: var(--ui-dialog-edge);
+}
+
+.secret-request-keep-line {
+  margin-bottom: 0;
+}
+
+.secret-request-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--danger, #d14343);
+}
+
+.secret-request-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 6px 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.secret-request-row-label {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* The secret form in the transcript: the question card's surface, in the flow of the turn instead of over the composer. */
+.composer-question-modal.secret-request-card.is-inline {
+  position: relative;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  max-width: 640px;
+  box-shadow: var(--ui-dialog-edge);
 }

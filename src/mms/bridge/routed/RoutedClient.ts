@@ -1,6 +1,7 @@
 import { NetError, newId, type NodeId, type RpcId } from '../../../shared/net'
 import {
   ROUTED_LARGE_READS,
+  ROUTED_RUN_WAIT_DEADLINE_MS,
   ROUTED_LARGE_READS_PER_CALLER,
   ROUTED_METHODS,
   ROUTED_DROPPABLE_KEYS,
@@ -92,6 +93,8 @@ const SEQUENCED_DEADLINE_MS = 15_000
 const deadlineOf = (method: string): number =>
   ROUTED_METHODS[method]?.sequenced
     ? SEQUENCED_DEADLINE_MS
+    : method === 'runs.wait'
+      ? ROUTED_RUN_WAIT_DEADLINE_MS
     : LONG_METHODS.has(method)
       ? LONG_DEADLINE_MS
       : DEFAULT_DEADLINE_MS
@@ -164,6 +167,21 @@ export class RoutedClient {
     for (const [key, value] of Object.entries(params))
       if (value !== undefined && !known.has(key) && !droppable.includes(key)) return { outdated: true, key }
     return { outdated: false, version }
+  }
+
+  /**
+   * The versions `node` advertises, read like a call: a computer that cannot be asked fails with what a person would
+   * see (offline, outdated), never with a bare transport error.
+   */
+  async versionsOrRefusal(node: NodeId): Promise<Record<string, number> | undefined> {
+    const computer = this.deps.computer(node)
+    const session = this.sessionOrOffline(node, computer)
+    return this.guard(node, session, computer, () => this.versions(node, session))
+  }
+
+  /** The name a person knows `node` by. */
+  nameOf(node: NodeId): string {
+    return this.deps.computer(node).name
   }
 
   /** Runs one routed row on `node` and returns its result, or throws what the person should see. */

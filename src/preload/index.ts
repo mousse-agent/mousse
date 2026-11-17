@@ -1,13 +1,19 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
+import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
+import type { WindowCacheSize } from '../shared/diagnostics/profiler'
+import { RENDERER_ERROR_CHANNEL, type RendererErrorReport } from '../shared/diagnostics/rendererError'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
+import { MAX_STAGED_FILE_BYTES, stagedFileTooLargeText } from '../shared/attachedFilesMarker'
+import { MAX_DRAG_BYTES, type FileDragAnswer, type FileDragRequest } from '../shared/fileDrag'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
 import type { NetStatus } from '../shared/net/local'
 import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
 import type { ProjectIconChoice, ProjectIconImage } from '../shared/projectIcon'
+import type { StoredWallpaperInfo, WallpaperPieceResult } from '../shared/themes/wallpaperImage'
 import type { LocalTtsModelId, LocalTtsModelStatus, NativeSpeechResult, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
@@ -22,7 +28,6 @@ import type {
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
   ContextUsageSnapshot,
-  DocumentOpenPayload,
   FileAsset,
   EditorInfo,
   FileEntry,
@@ -87,7 +92,7 @@ import type {
   TurnStateSnapshot,
   QuestionAnswerOutcome,
   ThreadApprovalRequest,
-  UserQuestionAnswers
+  UserQuestionAnswers, UserQuestionAttachments
 } from '../shared/types'
 import type {
   CreatePullRequestResult,
@@ -134,10 +139,13 @@ import type {
   SignInResponse
 } from '../shared/harness/types'
 import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
+import type { BotBrowserFrameEvent, BotBrowserView } from '../shared/bots/personal/browser'
+import type { ThreadBrowserFrameEvent } from '../shared/browser/threadView'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState } from '../shared/browser/inApp'
 import type { ReviewFileParams, ReviewFileResult, ReviewFilesParams, ReviewFilesResult } from '../shared/review'
+import type { TurnFileParams, TurnFileResult } from '../shared/turnFiles'
 import type {
   GitHubApi,
   GitHubAvailability,
@@ -183,6 +191,17 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
   if (response?.ok) return response.value
   if (response?.error) throw { ...response.error, name: 'StorageRequestError' }
   throw { code: 'storage_invalid_response', message: 'Storage bridge returned an invalid response', errorInfo: { category: 'internal', retryable: false } }
+}
+
+/** The window's own counters for the profiler (`diagnostics.provideCounters`), read only when main asks. */
+let windowCountersProvider: (() => { mountedTurns?: number; mountedRows?: number; caches?: Record<string, WindowCacheSize> }) | null = null
+
+/**
+ * A composer file's path on this computer: where it is, or, for a pasted file (it has none), a temporary copy the
+ * app writes for the bot or thread it is attached in.
+ */
+async function attachmentPath(file: File, target: { kind: 'bot' } | { kind: 'thread'; threadId: string | null }): Promise<string> {
+  return webUtils.getPathForFile(file) || ipcRenderer.invoke('attachments:stage', target, file.name, new Uint8Array(await file.arrayBuffer()))
 }
 
 const api = {
@@ -280,6 +299,18 @@ const api = {
       ipcRenderer.on('orchestrator:questionsPending', handler)
       return () => ipcRenderer.removeListener('orchestrator:questionsPending', handler)
     },
+    /** A thread's open secret cards changed (#595); read them with `secrets.requests.list`. Carries no value. */
+    onSecretRequestsChanged: (cb: (payload: { threadId: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, payload: { threadId: string }) => cb(payload)
+      ipcRenderer.on('secrets:requestsChanged', handler)
+      return () => ipcRenderer.removeListener('secrets:requestsChanged', handler)
+    },
+    /** A secret was added, used, removed or expired (Settings → Secrets). */
+    onSecretsChanged: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('secrets:changed', handler)
+      return () => ipcRenderer.removeListener('secrets:changed', handler)
+    },
     onQuestionsCleared: (
       cb: (payload: { requestId: string; threadId?: string }) => void
     ): (() => void) => {
@@ -300,12 +331,32 @@ const api = {
       ipcRenderer.on('orchestrator:turn-steered', handler)
       return () => ipcRenderer.removeListener('orchestrator:turn-steered', handler)
     },
+    /** A Send now request's outcome (`steerNow`): the held steer went in, or the click matched nothing. */
+    onSteerNow: (
+      cb: (payload: { threadId?: string; requestId: string; outcome: 'applied' | 'stale' }) => void
+    ): (() => void) => {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        payload: { threadId?: string; requestId: string; outcome: 'applied' | 'stale' }
+      ) => cb(payload)
+      ipcRenderer.on('orchestrator:steer-now', handler)
+      return () => ipcRenderer.removeListener('orchestrator:steer-now', handler)
+    },
+    /**
+     * Send now on a held steer (`TurnState.heldSteer`): stops the tool it waits for and sends it at once. `ok` false:
+     * the run is no longer the thread's active one.
+     */
+    steerNow: (request: { threadId: string; runId: string; holdGeneration: number; itemIds: string[]; clientRequestId: string }): Promise<{ ok: boolean; reason?: string }> =>
+      ipcRenderer.invoke('orchestrator:steerNow', request),
     /** `threadId` names the thread that asked; a thread on another computer needs it. */
     answerQuestions: (requestId: string, answers: UserQuestionAnswers, threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers, threadId),
-    /** `answerQuestions` with its outcome: who answered a saved approval request first, or why it was closed. */
-    answerQuestionsDetailed: (requestId: string, answers: UserQuestionAnswers, threadId?: string): Promise<QuestionAnswerOutcome> =>
-      ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers, threadId),
+    /**
+     * `answerQuestions` with its outcome: who answered a saved approval request first, or why it was closed.
+     * `attachments`: images sent with the answers, by the id of the question each answers.
+     */
+    answerQuestionsDetailed: (requestId: string, answers: UserQuestionAnswers, threadId?: string, attachments?: UserQuestionAttachments): Promise<QuestionAnswerOutcome> =>
+      ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers, threadId, attachments),
     dismissQuestions: (requestId: string, threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:dismissQuestions', requestId, threadId),
     /** The thread's saved approval requests, oldest first, with the answers they got. */
@@ -316,7 +367,8 @@ const api = {
       ipcRenderer.invoke('orchestrator:pendingQuestions'),
     abort: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:abort', threadId),
-    steer: (text: string, threadId?: string): Promise<boolean> =>
+    /** `true`: the running turn takes it. `'queued'`: it could not, and is queued at the end instead. */
+    steer: (text: string, threadId?: string): Promise<boolean | 'queued'> =>
       ipcRenderer.invoke('orchestrator:steer', text, threadId),
     isTurnActive: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:isTurnActive', threadId),
@@ -379,13 +431,6 @@ const api = {
       ) => cb(payload)
       ipcRenderer.on('queue:updated', handler)
       return () => ipcRenderer.removeListener('queue:updated', handler)
-    }
-  },
-  documents: {
-    onOpened: (cb: (payload: DocumentOpenPayload) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, payload: DocumentOpenPayload) => cb(payload)
-      ipcRenderer.on('document:opened', handler)
-      return () => ipcRenderer.removeListener('document:opened', handler)
     }
   },
   quickActions: {
@@ -656,6 +701,37 @@ const api = {
     /** Asks the computer that runs a thread to allow editor connections from this one. A person there answers. */
     askAccess: (threadId: string): Promise<RemoteAskResult> => ipcRenderer.invoke('editors:askAccess', threadId)
   },
+  /** A file or folder of this computer by its absolute path (a bot's file chip or picture); each refuses one that is not there. */
+  localFiles: {
+    /** What the path names. A folder is opened in the computer's file manager; a file is for the window to show. */
+    open: (path: string): Promise<'file' | 'folder'> => ipcRenderer.invoke('localFiles:open', path),
+    /** Shows the file or folder selected in the computer's file manager. */
+    showInFolder: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:showInFolder', path),
+    /** Saves a copy where the person picks; the path it was saved to, or null when they closed the dialog. */
+    saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path)
+  },
+  /**
+   * Dragging a file out of the window into Finder, File Explorer or another app. Call from a `dragstart` handler that
+   * cancelled the window's own drag; the app starts the system's drag while the mouse button is still down.
+   */
+  fileDrag: {
+    /** A file of the thread's folder, an attached file by its path, or bytes with a name. */
+    start: (request: FileDragRequest): Promise<FileDragAnswer> => ipcRenderer.invoke('files:startDrag', request),
+    /**
+     * A file the composer holds: its bytes under its name, or, for a file too large to hand over, its own path on
+     * this computer (which the app drags only when it belongs to the thread).
+     */
+    startComposerFile: async (file: File, scope: { threadId?: string; projectId?: string }): Promise<FileDragAnswer> => {
+      const path = webUtils.getPathForFile(file)
+      if (file.size > MAX_DRAG_BYTES) {
+        if (!path) return { refused: `${file.name} is too large to drag.` }
+        return ipcRenderer.invoke('files:startDrag', { ...scope, item: { kind: 'attachment', path, name: file.name } })
+      }
+      return ipcRenderer.invoke('files:startDrag', { ...scope, item: { kind: 'bytes', name: file.name, data: new Uint8Array(await file.arrayBuffer()) } })
+    },
+    /** Where a dropped file is on this computer; empty when it has no path (a pasted one). */
+    pathOf: (file: File): string => webUtils.getPathForFile(file)
+  },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
     selectTab: (input) => ipcRenderer.invoke('browser:select-tab', input),
@@ -688,7 +764,20 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, state: BrowserState) => cb(state)
       ipcRenderer.on('browser:state', handler)
       return () => ipcRenderer.removeListener('browser:state', handler)
-    }
+    },
+    /** A picture of a thread's browser without a window this window watches (`browser.view.watch`), pushed as the page paints. */
+    onViewFrame: (cb: (event: ThreadBrowserFrameEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: ThreadBrowserFrameEvent) => cb(event)
+      ipcRenderer.on('browser:viewFrame', handler)
+      return () => ipcRenderer.removeListener('browser:viewFrame', handler)
+    },
+    /**
+     * A page in a thread's browser without a window asks for files: the app opens this computer's own
+     * file dialog, naming the site, and answers a one-time token for what the person chose (never the
+     * paths), or that they cancelled, or why it was refused.
+     */
+    chooseViewFiles: (request: { threadId: string; viewId: string; holdId: string; multiple: boolean; site?: string }): Promise<{ token?: string; count?: number; cancelled?: true; refused?: string }> =>
+      ipcRenderer.invoke('browser:chooseViewFiles', request)
   },
   settings: {
     get: (): Promise<MousseSettings> => ipcRenderer.invoke('settings:get'),
@@ -699,6 +788,25 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, settings: MousseSettings) => cb(settings)
       ipcRenderer.on('settings:changed', handler)
       return () => ipcRenderer.removeListener('settings:changed', handler)
+    }
+  },
+  /** Theme wallpapers, kept by the daemon (`WallpaperStore`). Every call names the profile it is for. */
+  wallpapers: {
+    /** Opens the file dialog and stores the chosen image; null when cancelled. Rejects when the file cannot be used. */
+    choose: (profileId: string): Promise<StoredWallpaperInfo | null> => ipcRenderer.invoke('appearance:chooseWallpaper', profileId),
+    /** Stores an image carried as base64 (a theme file's wallpaper). */
+    importBytes: (profileId: string, dataBase64: string): Promise<StoredWallpaperInfo> =>
+      ipcRenderer.invoke('appearance:importWallpaperBytes', profileId, dataBase64),
+    /** A piece of the original (no bucket) or of a display copy; `missing` when it is not stored. */
+    read: (profileId: string, id: string, bucket: number | null, offset: number): Promise<WallpaperPieceResult> =>
+      ipcRenderer.invoke('appearance:readWallpaper', profileId, id, bucket, offset),
+    saveCopy: (profileId: string, id: string, bucket: number, dataBase64: string, replace: boolean): Promise<boolean> =>
+      ipcRenderer.invoke('appearance:saveWallpaperCopy', profileId, id, bucket, dataBase64, replace),
+    displayLongEdge: (): Promise<number> => ipcRenderer.invoke('appearance:displayLongEdge'),
+    onDisplaysChanged: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('appearance:displaysChanged', handler)
+      return () => ipcRenderer.removeListener('appearance:displaysChanged', handler)
     }
   },
   lineEdits: {
@@ -740,8 +848,8 @@ const api = {
   },
   /** Personal bots (the Bots section): change, chat-row and live-chip events; requests go through `platformRequest`. */
   personalBots: {
-    onChanged: (cb: (event: { botId?: string; activationId?: string }) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, event: { botId?: string; activationId?: string }) => cb(event ?? {})
+    onChanged: (cb: (event: { botId?: string; activationId?: string; reread?: boolean }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: { botId?: string; activationId?: string; reread?: boolean }) => cb(event ?? {})
       ipcRenderer.on('bots:changed', handler)
       return () => ipcRenderer.removeListener('bots:changed', handler)
     },
@@ -757,9 +865,27 @@ const api = {
       ipcRenderer.on('bots:activity', handler)
       return () => ipcRenderer.removeListener('bots:activity', handler)
     },
+    /** A picture of a bot's browser this window watches (`bots.browser.watch`), pushed as the page paints. */
+    onBrowserFrame: (cb: (event: BotBrowserFrameEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: BotBrowserFrameEvent) => cb(event)
+      ipcRenderer.on('bots:browserFrame', handler)
+      return () => ipcRenderer.removeListener('bots:browserFrame', handler)
+    },
     /** A composer file's path on this computer: where it is, or, for a pasted one, a temporary copy. */
-    attachmentPath: async (file: File): Promise<string> =>
-      webUtils.getPathForFile(file) || ipcRenderer.invoke('bots:stageAttachment', file.name, new Uint8Array(await file.arrayBuffer()))
+    attachmentPath: (file: File): Promise<string> => attachmentPath(file, { kind: 'bot' }),
+    /**
+     * A page in a bot's browser asks for files: the app opens this computer's own file dialog, naming
+     * the site, and answers a one-time token for what the person chose (never the paths), or that they
+     * cancelled, or why it was refused.
+     */
+    chooseBrowserFiles: (request: { botId: string; viewId: string; holdId: string; multiple: boolean; site?: string }): Promise<{ token?: string; count?: number; cancelled?: true; refused?: string }> =>
+      ipcRenderer.invoke('bots:chooseBrowserFiles', request),
+    /**
+     * Open in a window (`open`) or Close window (`close`) for the bot's browser this window holds: the app opens it
+     * on its own screen and answers the browser's view, or why it was refused.
+     */
+    browserWindow: (request: { botId: string; viewId: string; holdId: string; op: 'open' | 'close' }): Promise<{ browser?: BotBrowserView; refused?: string }> =>
+      ipcRenderer.invoke('bots:browserWindow', request)
   },
   skills: {
     list: (projectId?: string): Promise<SkillsRegistrySnapshot> =>
@@ -815,7 +941,9 @@ const api = {
   },
   review: {
     files: (params: ReviewFilesParams): Promise<ReviewFilesResult> => ipcRenderer.invoke('review:files', params),
-    file: (params: ReviewFileParams): Promise<ReviewFileResult> => ipcRenderer.invoke('review:file', params)
+    file: (params: ReviewFileParams): Promise<ReviewFileResult> => ipcRenderer.invoke('review:file', params),
+    /** A file the thread's agent wrote, anywhere on this computer: a diff against its own repository, or the file itself. */
+    turnFile: (params: TurnFileParams): Promise<TurnFileResult> => ipcRenderer.invoke('review:turnFile', params)
   },
   publish: {
     start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)
@@ -854,6 +982,14 @@ const api = {
     }
   },
   threads: {
+    /**
+     * A file attached in a thread's composer as a path on this computer: where it is, or, for a pasted one, a
+     * temporary copy under the thread's folder (`new` before the thread is made).
+     */
+    attachmentPath: async (file: File, threadId?: string | null): Promise<string> => {
+      if (!webUtils.getPathForFile(file) && file.size > MAX_STAGED_FILE_BYTES) throw new Error(stagedFileTooLargeText(file.name))
+      return attachmentPath(file, { kind: 'thread', threadId: threadId ?? null })
+    },
     initialize: (): Promise<void> => ipcRenderer.invoke('threads:initialize'),
     list: (): Promise<Thread[]> => ipcRenderer.invoke('threads:list'),
     listAll: (): Promise<Thread[]> => ipcRenderer.invoke('threads:listAll'),
@@ -904,6 +1040,8 @@ const api = {
       ipcRenderer.invoke('threads:pin', threadId, pinned),
     /** One thread as the computer that runs it has it now, its settings revision included; null when it is not there. */
     get: (threadId: string): Promise<Thread | null> => ipcRenderer.invoke('threads:get', threadId),
+    /** The new chat a window goes to after its thread was deleted; windows asking at once share one. */
+    newChatAfterDelete: (): Promise<Thread> => ipcRenderer.invoke('threads:newChatAfterDelete'),
     /** `picked`: the person chose this checkout, so it is remembered for the project's next new threads. */
     setWorktreeEnabled: (threadId: string, enabled: boolean, picked?: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled, picked),
@@ -1210,6 +1348,32 @@ const api = {
       return () => ipcRenderer.removeListener('dictation:localModelStatus', handler)
     }
   },
+  /** The profiler's memory monitor (Settings → Labs, and its notice). */
+  diagnostics: {
+    /** An error in this window's page, for main's `logs/renderer-errors.log`. Nothing is answered. */
+    reportError: (report: RendererErrorReport): void => {
+      try { ipcRenderer.send(RENDERER_ERROR_CHANNEL, report) } catch { /* the window is closing */ }
+    },
+    memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('diagnostics:memoryStatus'),
+    memoryNoticeShown: (kind: BreachKind): Promise<void> => ipcRenderer.invoke('diagnostics:memoryNoticeShown', kind),
+    /** Opens the prefilled GitHub issue in the browser; nothing is sent until the person submits it there. */
+    memoryReport: (): Promise<{ ok: boolean; url: string; copied: boolean; complete: boolean }> => ipcRenderer.invoke('diagnostics:memoryReport'),
+    onMemoryNotice: (cb: (notice: MemoryNotice) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, notice: MemoryNotice) => cb(notice)
+      ipcRenderer.on('diagnostics:memoryNotice', handler)
+      return () => ipcRenderer.removeListener('diagnostics:memoryNotice', handler)
+    },
+    /** Writes a service heap snapshot to `diagnostics/heap-snapshots/`, after the person confirmed the warning. */
+    heapSnapshot: (): Promise<{ file: string; mb: number }> => ipcRenderer.invoke('diagnostics:heapSnapshot'),
+    /**
+     * The window's own counters (mounted turns and rows, its caches), read only when the profiler asks for this
+     * window's detail. Returns a function that removes the provider.
+     */
+    provideCounters: (provider: () => { mountedTurns?: number; mountedRows?: number; caches?: Record<string, WindowCacheSize> }): (() => void) => {
+      windowCountersProvider = provider
+      return () => { if (windowCountersProvider === provider) windowCountersProvider = null }
+    }
+  },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
@@ -1321,7 +1485,9 @@ const api = {
   },
   clipboard: {
     showCopyMenu: (x: number, y: number, text: string): Promise<void> =>
-      ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text)
+      ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text),
+    /** Puts a picture, as PNG bytes, on the clipboard as an image that other apps paste. */
+    writeImage: (png: Uint8Array): Promise<void> => ipcRenderer.invoke('clipboard:writeImage', png)
   },
   dialog: {
     /** Native open-file dialog; resolves to the chosen absolute path, or null when cancelled. */
@@ -1360,5 +1526,72 @@ const api = {
 }
 
 contextBridge.exposeInMainWorld('mousse', api)
+
+// This window's renderer memory, for the profiler, read only when main asks (the profiler is on, or a profiler tool
+// asked): JS heap, Blink memory, private memory, the resource cache, decoded images and canvases, and with `detail`
+// the window's DOM and counters. No
+// timer runs here, nothing is read per frame, and no GPU work is done.
+{
+  const mb = (bytes: number): number => Math.round((bytes / 1048576) * 10) / 10
+  const detailCounters = (heap: { usedHeapSize: number; totalHeapSize: number }, imagesKb: number | undefined, webgl: number) => {
+    let decoded = 0
+    const images = document.images
+    for (const image of Array.from(images)) if (image.complete) decoded += image.naturalWidth * image.naturalHeight * 4
+    const canvases = Array.from(document.querySelectorAll('canvas'))
+    let canvasBytes = 0
+    for (const canvas of canvases) canvasBytes += canvas.width * canvas.height * 4
+    let own: ReturnType<NonNullable<typeof windowCountersProvider>> = {}
+    try { own = windowCountersProvider?.() ?? {} } catch { /* the window's code failed: its counters are left out */ }
+    return {
+      domNodes: document.getElementsByTagName('*').length,
+      mountedTurns: own.mountedTurns ?? 0,
+      mountedRows: own.mountedRows ?? 0,
+      images: images.length,
+      imagesDecodedMbEstimated: mb(decoded),
+      ...(imagesKb !== undefined ? { imageCacheMb: Math.round((imagesKb / 1024) * 10) / 10 } : {}),
+      canvases: canvases.length,
+      canvasMbEstimated: mb(canvasBytes),
+      webglContexts: webgl,
+      jsHeapUsedMb: Math.round((heap.usedHeapSize / 1024) * 10) / 10,
+      jsHeapTotalMb: Math.round((heap.totalHeapSize / 1024) * 10) / 10,
+      caches: own.caches ?? {}
+    }
+  }
+  ipcRenderer.on('diagnostics:collectMemory', (_event, request: { requestId?: unknown; detail?: unknown } | null) => {
+    void (async () => {
+      try {
+        const heap = process.getHeapStatistics()
+        let privateKb: number | undefined
+        try { privateKb = (await process.getProcessMemoryInfo()).private } catch { /* not offered */ }
+        let imagesKb: number | undefined
+        let resourcesKb: number | undefined
+        try {
+          const usage = webFrame.getResourceUsage()
+          imagesKb = Math.round(usage.images.size / 1024)
+          resourcesKb = Math.round((usage.images.size + usage.scripts.size + usage.cssStyleSheets.size + usage.xslStyleSheets.size + usage.fonts.size + usage.other.size) / 1024)
+        } catch { /* not offered */ }
+        // Blink's own memory (DOM, layout, styles): what it allocated, and what it holds from the OS.
+        let blink: { allocated: number; total: number } | undefined
+        try { blink = process.getBlinkMemoryInfo() } catch { /* not offered */ }
+        const webglRaw = Number(document.documentElement?.dataset.mousseWebglContexts ?? 0)
+        const webgl = Number.isFinite(webglRaw) ? webglRaw : 0
+        ipcRenderer.send('diagnostics:windowMemory', {
+          requestId: typeof request?.requestId === 'string' ? request.requestId : undefined,
+          usedHeapKb: heap.usedHeapSize,
+          totalHeapKb: heap.totalHeapSize,
+          privateKb,
+          imagesKb,
+          resourcesKb,
+          ...(blink ? { blinkUsedKb: blink.allocated, blinkTotalKb: blink.total } : {}),
+          canvases: document.querySelectorAll('canvas').length,
+          webglContexts: webgl,
+          ...(request?.detail === true ? { counters: detailCounters(heap, imagesKb, webgl) } : {})
+        })
+      } catch {
+        // Not offered in this renderer.
+      }
+    })()
+  })
+}
 
 export type MousseAPI = typeof api

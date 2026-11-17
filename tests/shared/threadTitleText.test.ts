@@ -17,6 +17,7 @@ import {
   titleContextOf,
   titleLength
 } from '../../src/shared/threadTitleText'
+import { agentMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
 
 const stackTrace = [
   'TypeError: Cannot read properties of undefined (reading \'id\')',
@@ -65,6 +66,12 @@ describe('cleaning what the title model sees', () => {
     expect(hints.files).toEqual(['ThreadsSidebar.tsx', 'notes.pdf', 'shot.png'])
     expect(hints.browserElement).toBe(true)
     expect(text).not.toContain('data=')
+  })
+
+  it('takes file names, not their folders, from a marker that gives paths', () => {
+    const { text, hints } = cleanTitleText('trim the intro\n\n[Attached files: clip, final.mp4 (C:\\My Videos, 2026\\clip, final.mp4), b.pdf (/tmp/b.pdf)]')
+    expect(text).toBe('trim the intro')
+    expect(hints.files).toEqual(['clip, final.mp4', 'b.pdf'])
   })
 
   it('turns paths into file names and links into hosts, and leaves "and/or" alone', () => {
@@ -127,9 +134,9 @@ describe('the model answer as a sidebar name', () => {
   })
 
   it('fits the cap at a word, without a dangling stopword', () => {
-    const title = normalizeTitle('Investigating why project groups disappear after restart on the other computer')!
+    const title = normalizeTitle('Investigating why the project groups in the sidebar vanish after restart')!
     expect(titleLength(title)).toBeLessThanOrEqual(TITLE_MAX_CHARS)
-    expect(title).toBe('Investigating why')
+    expect(title).toBe('Investigating why the project groups')
   })
 
   it('names nothing for UNTITLED or an empty answer', () => {
@@ -143,13 +150,13 @@ describe('the model answer as a sidebar name', () => {
   })
 
   it('cuts one word longer than the cap at a character rather than showing nothing', () => {
-    expect(fitTitle('x'.repeat(40))).toBe('x'.repeat(TITLE_MAX_CHARS))
+    expect(fitTitle('x'.repeat(TITLE_MAX_CHARS + 10))).toBe('x'.repeat(TITLE_MAX_CHARS))
   })
 })
 
 describe('the title from the message alone', () => {
   it('drops "please"/"can you" and uses the first sentence that names something', () => {
-    expect(heuristicTitle('Hi! Can you fix the OAuth callback loop? It started yesterday.')).toBe('Fix the OAuth callback')
+    expect(heuristicTitle('Hi! Can you fix the OAuth callback loop? It started yesterday.')).toBe('Fix the OAuth callback loop')
   })
 
   it('names nothing for "continue" or a paste alone, and falls back to the command or a file', () => {
@@ -183,5 +190,15 @@ describe('what a title is made from', () => {
 
   it('is null before the person has written anything', () => {
     expect(titleContextOf([{ role: 'assistant', content: 'hi' }])).toBeNull()
+  })
+
+  it('reads an agent\'s message for its words, never for the label Mousse wrote around them', () => {
+    const first = agentMessage('sender', 'Planner', 'fix the login redirect')
+    const later = agentMessage('sender', 'Planner', 'also keep the return path')
+    const origin = (envelope: typeof first) => ({ kind: 'agent' as const, threadId: 'sender', runId: 'r', body: { head: envelope.head, tail: envelope.tail } })
+    expect(titleContextOf([
+      { role: 'user', content: first.text, origin: origin(first) },
+      { role: 'user', content: later.text, origin: origin(later) }
+    ])).toMatchObject({ request: 'fix the login redirect', later: ['also keep the return path'] })
   })
 })

@@ -101,6 +101,22 @@ describe('network CLI validation', () => {
       params: { node: nodeId, name: 'Desk' }
     })
   })
+  it('maps connect and disconnect to the daemon methods and refuses a missing or bad node', () => {
+    expect(prepareNetCommand(args('bridge', 'connect', [nodeId]))).toEqual({
+      method: 'bridge.connect',
+      params: { node: nodeId }
+    })
+    expect(prepareNetCommand(args('bridge', 'disconnect', [nodeId]))).toEqual({
+      method: 'bridge.disconnect',
+      params: { node: nodeId }
+    })
+    for (const bad of [
+      args('bridge', 'connect', []),
+      args('bridge', 'disconnect', ['not-a-node']),
+      args('bridge', 'connect', [nodeId], [['terminal', 'on']])
+    ])
+      expect(() => prepareNetCommand(bad)).toThrow()
+  })
   it('maps block, unblock, limits, caps and kind to the daemon methods and refuses bad input', () => {
     expect(prepareNetCommand(args('bridge', 'block', [nodeId]))).toEqual({
       method: 'bridge.policy',
@@ -148,6 +164,18 @@ describe('network CLI validation', () => {
         )
       )
     ).toEqual({ method: 'bridge.policy', params: { node: nodeId, terminal: true, editor: true } })
+    // What the device's agents may change here.
+    for (const reach of ['none', 'launched', 'all'])
+      expect(prepareNetCommand(args('bridge', 'limits', [nodeId], [['agent-reach', reach]]))).toEqual({
+        method: 'bridge.policy',
+        params: { node: nodeId, agentReach: reach }
+      })
+    // Work on threads from this device: off leaves it to view threads and chat with bots.
+    for (const [flag, work] of [['off', false], ['on', true]] as const)
+      expect(prepareNetCommand(args('bridge', 'limits', [nodeId], [['work', flag]]))).toEqual({
+        method: 'bridge.policy',
+        params: { node: nodeId, work }
+      })
     expect(
       prepareNetCommand(args('bridge', 'caps', [nodeId], [['caps', 'read,chat,write,settings']]))
     ).toEqual({
@@ -165,6 +193,10 @@ describe('network CLI validation', () => {
       args('bridge', 'limits', [nodeId], [['max-mode', 'root']]),
       args('bridge', 'limits', [nodeId], [['terminal', 'maybe']]),
       args('bridge', 'limits', [nodeId], [['editor', 'maybe']]),
+      args('bridge', 'limits', [nodeId], [['agent-reach', 'everything']]),
+      args('bridge', 'limits', [nodeId], [['work', 'maybe']]),
+      args('bridge', 'block', [nodeId], [['work', 'off']]),
+      args('bridge', 'block', [nodeId], [['agent-reach', 'all']]),
       args('bridge', 'block', [nodeId], [['editor', 'on']]),
       args('bridge', 'caps', [nodeId]),
       args('bridge', 'caps', [nodeId], [['caps', 'read,read']]),
@@ -191,6 +223,13 @@ describe('network CLI validation', () => {
       args('bridge', 'editor-server', ['sshd']),
       args('bridge', 'editor-server', ['system', 'mousse'])
     ])
+      expect(() => prepareNetCommand(bad)).toThrow()
+  })
+  it('turns "Share bots with other devices" on and off, or shows it', () => {
+    expect(prepareNetCommand(args('bridge', 'bots', []))).toEqual({ method: 'bridge.shareBots', params: {} })
+    expect(prepareNetCommand(args('bridge', 'bots', ['on']))).toEqual({ method: 'bridge.shareBots', params: { enabled: true } })
+    expect(prepareNetCommand(args('bridge', 'bots', ['off']))).toEqual({ method: 'bridge.shareBots', params: { enabled: false } })
+    for (const bad of [args('bridge', 'bots', ['maybe']), args('bridge', 'bots', ['on', 'off'])])
       expect(() => prepareNetCommand(bad)).toThrow()
   })
   it('turns the setting for other computers working on this one on and off, or shows it', () => {

@@ -1,7 +1,7 @@
 import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { FileArtifactStore } from '../execution/ArtifactStore'
-import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
+import { OwnedWorkBarrier, type OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
 import { assertOwnedPath, assertProfileId } from '../profiles/pathSafety'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import type { ArtifactReference } from '../../shared/execution/types'
@@ -49,6 +49,8 @@ export class BrowserArtifactService {
 
   beginShutdown(): void { this.work.beginShutdown() }
   getActiveCount(): number { return this.work.count }
+  /** The work `getActiveCount` counts, each with the threads it belongs to. */
+  getActiveWork(): OwnedWorkEntry[] { return this.work.entries() }
   async dispose(): Promise<void> { this.beginShutdown(); await this.work.waitForIdle() }
 
   /** SessionManager calls this only after checking the observation's session owner. */

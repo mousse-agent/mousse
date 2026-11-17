@@ -7,7 +7,7 @@ import { DelayedLoader, LOADER_DELAY_MS } from '../../src/renderer/components/ui
 import { ALL_COMPUTERS, THIS_COMPUTER, usageRows, usageSelection, type ComputerUsage } from '../../src/renderer/lib/subscriptionUsage'
 import { formatCountdown, nextResetGain, resetsLabel, resetsTooltip, resetTooltip, resetTypeLabel, summarizeAccounts, totalResets } from '../../src/renderer/lib/subscriptionUsage'
 import { activeAccountsLabel } from '../../src/renderer/components/UsageAccountsView'
-import { formatResetLine, orderUsageWindows, remainingNow, remainingPercent, shortUsageNote, usageReadAtLabel, usageReadingTime, usageRedMix } from '../../src/renderer/lib/subscriptionUsage'
+import { formatResetLine, orderUsageWindows, remainingNow, remainingPercent, shortUsageNote, usageLevel, usageReadAtLabel, usageReadingTime, usageRunningLow } from '../../src/renderer/lib/subscriptionUsage'
 
 const NOW = Date.parse('2026-11-05T12:00:00Z')
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&#39;/g, "'").replace(/\s+/g, ' ').trim()
@@ -40,8 +40,9 @@ describe('a usage window', () => {
     expect(remainingPercent({ remainingPercent: 140 })).toBe(100)
   })
 
-  it('takes on red smoothly as it nears empty: none at 80% left, a trace at 30%, clearly red-tinted at 5%', () => {
-    expect([usageRedMix(100), usageRedMix(80), usageRedMix(35), usageRedMix(30), usageRedMix(5), usageRedMix(0)]).toEqual([0, 0, 0, 8, 47, 55])
+  it('sorts a share left into levels: plenty above half, getting low to a quarter, low under it, critical under a tenth', () => {
+    expect([100, 51, 50, 25, 24, 10, 9, 0].map(usageLevel)).toEqual(['plenty', 'plenty', 'getting-low', 'getting-low', 'low', 'low', 'critical', 'critical'])
+    expect([25, 24, 0].map(usageRunningLow)).toEqual([false, true, true])
   })
 
   it('counts down, not by weekday: 45m, 1h 12m; from a day on always with hours (1d 0h, 3d 0h, 6d 23h)', () => {
@@ -88,9 +89,9 @@ describe('the Usage page', () => {
     expect(page).toContain('Sonnet Unknown')
     expect(page).toContain('Resets in 2h 5m')
     expect([...html.matchAll(/role="meter"[^>]*aria-valuenow="(\d+)"/g)].map((match) => match[1])).toEqual(['62', '12'])
-    // The fill is what is left, and only the nearly empty one is tinted red.
-    expect([...html.matchAll(/data-red="(\d+)" style="width:(\d+)%/g)].map((match) => [match[2], match[1]])).toEqual([['62', '0'], ['12', '36']])
-    expect(html).toContain('--usage-red:36%')
+    // The fill is what is left, each bar and share at its level.
+    expect([...html.matchAll(/aria-valuenow="(\d+)" data-usage-level="([a-z-]+)"><span class="usage-bar-fill" style="width:(\d+)%/g)].map((match) => [match[3], match[2]])).toEqual([['62', 'plenty'], ['12', 'low']])
+    expect([...html.matchAll(/usage-window-used usage-level-text" data-usage-level="([a-z-]+)"/g)].map((match) => match[1])).toEqual(['plenty', 'low'])
     expect(html).not.toContain('usage-ring')
   })
 
@@ -98,7 +99,7 @@ describe('the Usage page', () => {
     const html = view({ usage: response([{ ...claude, windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 5, resetsAt: '2026-11-08T12:00:00Z' }] }]) })
     expect(windows(html)).toEqual(['5'])
     expect(text(html)).not.toContain('5-hour')
-    expect(html).toContain('data-red="47" style="width:5%')
+    expect(html).toContain('data-usage-level="critical"><span class="usage-bar-fill" style="width:5%')
   })
 
   it('shows each provider as one group, with its own usage page behind an icon', () => {
@@ -162,6 +163,55 @@ describe('limits across several accounts', () => {
   it('a reset that has passed counts as 100% left and is not the next reset', () => {
     const passed = [{ id: 'a', label: 'a', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 10, resetsAt: at(-1) }] }, { id: 'b', label: 'b', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 30, resetsAt: at(4) }] }]
     expect(summarizeAccounts(passed, now)[0]).toMatchObject({ remaining: 65, resetsAt: at(4), label: '5-hour · all accounts' })
+  })
+
+  it('the 5-hour limit leaves out accounts whose weekly limit is used up', () => {
+    const fiveHour = (left: number, hours: number) => ({ id: 'five_hour', label: '5-hour limit', remainingPercent: left, resetsAt: at(hours) })
+    const weekly = (left: number | undefined, hours: number) => ({ id: 'seven_day', label: 'Weekly limit', remainingPercent: left as number, resetsAt: at(hours) })
+    const team = [
+      { id: 'a', label: 'a', windows: [fiveHour(0, 1), weekly(33, 100)] },
+      { id: 'b', label: 'b', windows: [fiveHour(100, 2), weekly(0, 8)] },
+      { id: 'c', label: 'c', windows: [fiveHour(25, 3), weekly(79, 70)] },
+      // A weekly reset that has passed is 100% left again, so it counts.
+      { id: 'd', label: 'd', windows: [fiveHour(50, 4), weekly(0, -1)] },
+      // No weekly number: nothing says it is used up.
+      { id: 'e', label: 'e', windows: [fiveHour(75, 5), weekly(undefined, 9)] },
+      { id: 'f', label: 'f', windows: [fiveHour(100, 2)] }
+    ]
+    const [five, week] = summarizeAccounts(team, now)
+    expect(five).toMatchObject({ label: '5-hour · 5 accounts', accounts: 5, remaining: 50, resetsAt: at(1) })
+    expect(five!.gain).toMatchObject({ percent: 20, accounts: [{ label: 'a' }] })
+    // The weekly limit itself still counts every account, used up or not.
+    expect(week).toMatchObject({ accounts: 5, remaining: 53 })
+  })
+
+  it('a per-model weekly limit (Weekly · Fable) leaves out accounts whose weekly limit is used up', () => {
+    const windows = (weekly: number, fable: number, fableHours: number) => [
+      { id: 'seven_day', label: 'Weekly limit', remainingPercent: weekly, resetsAt: at(20) },
+      { id: 'model_fable', label: 'Weekly · Fable', remainingPercent: fable, resetsAt: at(fableHours) }
+    ]
+    // The screenshot's accounts: three are at 0% weekly with Fable left that they cannot use.
+    const team = [
+      { id: 'a', label: 'a', windows: windows(33, 56, 116) },
+      { id: 'b', label: 'b', windows: windows(0, 44, 8) },
+      { id: 'c', label: 'c', windows: windows(0, 56, 28) },
+      { id: 'd', label: 'd', windows: windows(79, 93, 73) },
+      { id: 'e', label: 'e', windows: windows(0, 50, 1) }
+    ]
+    const fable = summarizeAccounts(team, now).find((summary) => summary.id === 'model_fable')
+    expect(fable).toMatchObject({ label: 'Weekly · Fable · 2 accounts', accounts: 2, remaining: 75, resetsAt: at(73) })
+    expect(fable!.gain).toMatchObject({ accounts: [{ label: 'd' }] })
+    // Other scoped weekly ids follow the same rule.
+    const opus = summarizeAccounts([{ id: 'x', label: 'x', windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 0 }, { id: 'seven_day_opus', label: 'Weekly · Opus', remainingPercent: 90 }] }], now)
+    expect(opus.find((summary) => summary.id === 'seven_day_opus')).toMatchObject({ accounts: 0, remaining: 0 })
+  })
+
+  it('with every weekly limit used up nothing of the 5-hour or per-model limits is left', () => {
+    const out = [{ id: 'a', label: 'a', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 100, resetsAt: at(2) }, { id: 'seven_day', label: 'Weekly limit', remainingPercent: 0, resetsAt: at(8) }, { id: 'model_fable', label: 'Weekly · Fable', remainingPercent: 60, resetsAt: at(8) }] }]
+    const [five, , fable] = summarizeAccounts(out, now)
+    expect(five).toMatchObject({ label: '5-hour · weekly limits used up', accounts: 0, remaining: 0 })
+    expect(five!.gain).toBeUndefined()
+    expect(fable).toMatchObject({ label: 'Weekly · Fable · weekly limits used up', accounts: 0, remaining: 0 })
   })
 
   it('with every account failing there is nothing to sum', () => {

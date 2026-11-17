@@ -12,14 +12,18 @@ import type { SpacesLocalMethod } from './spaces/local'
 import type { BotsLocalMethod } from './bots/space/local'
 import type { BotsPersonalV2Method } from './bots/personal/methods'
 import type { BotsBrowserMethod } from './bots/personal/browser'
+import type { BotDeviceMethod } from './bots/personal/deviceAccess'
+import type { BrowserViewMethod } from './browser/threadView'
 import type { AutomationsMethod } from './automations'
 import type { SpaceArchiveMethod } from './spaces/archive'
 import type { SpeechHostMethod } from './speechRelay'
+import type { SecretMethod } from './secretRequests'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
   | ChatNetworkMethod | NetLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
-  | BotsPersonalV2Method | BotsBrowserMethod
+  | BotsPersonalV2Method | BotDeviceMethod | BotsBrowserMethod | BrowserViewMethod
   | AutomationsMethod
+  | SecretMethod
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
   | 'workflows.saveDraft' | 'workflows.publish' | 'workflows.archive'
   | 'workflows.duplicate' | 'workflows.importBundle' | 'workflows.exportBundle'
@@ -34,7 +38,7 @@ export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRu
   | 'skills.importPackage' | 'skills.exportPackage'
   | 'mcp.create' | 'mcp.update' | 'mcp.read' | 'mcp.enable' | 'mcp.delete'
   | 'mcp.testConnection' | 'mcp.beginAuth' | 'mcp.cancelAuth' | 'mcp.revokeAuth'
-  | 'runs.resumeNow' | 'runs.cancelPause'
+  | 'runs.resumeNow' | 'runs.cancelPause' | 'threads.goal' | 'threads.setHidden'
 
 export type PlatformRequestErrorShape = import('./errors').AppErrorShape
 

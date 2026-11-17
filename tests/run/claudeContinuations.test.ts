@@ -51,7 +51,9 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     const binary = join(home, 'claude')
-    writeFileSync(binary, 'fixture')
+    // `delegate_task` starts only an entry the picker lists as ready, and the picker's check runs
+    // `claude --version`; turns themselves run on `FakeClaudeCli`.
+    writeFileSync(binary, "#!/bin/sh\necho '2.1.291 (Claude Code)'\n")
     chmodSync(binary, 0o755)
     mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
     writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
@@ -116,7 +118,8 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     const task = () => d.engine.delegations.get(builder.delegationId)!
     const callMousse = async (name: string, args: Record<string, unknown> = {}) => {
       const options = cli.last.options
-      const server = (options.mcpServers as Record<string, { url: string; headers: { Authorization: string } }>).mousse
+      // The server as Claude Code was given it, over its input (#358).
+      const server = (cli.last.mcpServers as Record<string, { url: string; headers: { Authorization: string } }>).mousse
       // Claude runs Mousse's PreToolUse hook before each call; the input the hook returns (stamped
       // with the turn's token) is what reaches the server.
       const hooked = await options.hooks!.PreToolUse![0].hooks[0](
@@ -216,13 +219,13 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(s.d.engine.listRuns(s.childThread).map((run) => run.source)).not.toContain('provider-continuation')
   })
 
-  it('a model change is refused while background work exists, with a message that says what to do', async () => {
+  it('a model change while background work exists runs on the same process, and the work keeps running', async () => {
     const s = await scene()
     s.d.orch.setThreadModelOverride(s.childThread, { llmProvider: 'claude-subscription', model: 'opus' })
-    await s.d.orch.send('switch', false, { threadId: s.childThread, clientRequestId: 'switch' }).catch(() => undefined)
-    const refused = s.d.engine.listRuns(s.childThread).find((run) => run.status === 'failed')
-    expect(refused?.outcome?.error).toMatch(/claude_background_work_blocks_change.*Stop/)
+    await s.d.orch.send('switch', false, { threadId: s.childThread, clientRequestId: 'switch' })
+    expect(s.d.engine.listRuns(s.childThread).some((run) => run.status === 'failed')).toBe(false)
     expect(s.cli.processes).toHaveLength(1)
+    expect(s.cli.last.flagSettings).toEqual([{ model: 'opus', effortLevel: null }])
     expect(s.service.hasBackgroundWork(s.childThread)).toBe(true)
   })
 

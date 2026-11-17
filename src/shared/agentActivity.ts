@@ -25,6 +25,11 @@ interface ActivityBase {
   endedAt?: string
   runId?: string
   interruptedBy?: ActivityInterruptedBy
+  /**
+   * A subagent call the provider could not move to the background: a person's steer waits for it like any foreground
+   * tool, instead of trying the move again and again.
+   */
+  notMovable?: boolean
 }
 
 export interface ActivityFileChange {
@@ -70,6 +75,8 @@ export type AgentActivityItem = ActivityBase &
     | {
         kind: 'subagent'
         agentType?: string
+        /** The model the call asked the subagent to run on ("sonnet"), when it named one. */
+        model?: string
         description?: string
         nativeId?: string
         background?: boolean
@@ -118,6 +125,24 @@ export const ACTIVITY_CHECKPOINT_MS = 5000
 /** Longest subagent `description` an item keeps. */
 export const ACTIVITY_DESCRIPTION_CHARS = 200
 const ACTIVITY_ERROR_CHARS = 2000
+/** Longest report a runtime's own subagent (Claude Code's `Agent`) leaves on its row. */
+export const ACTIVITY_TASK_RESULT_CHARS = 4000
+
+/**
+ * What a provider's task reported when it ended, as its row keeps it, or undefined when it said nothing. A subagent's
+ * report is Markdown, so its line breaks stay (only trailing spaces and long blank runs go) and it is clipped to
+ * `ACTIVITY_TASK_RESULT_CHARS`; any other task's summary is one line of `ACTIVITY_DESCRIPTION_CHARS`.
+ */
+export function taskEndSummary(summary: unknown, kind: string | undefined): string | undefined {
+  if (typeof summary !== 'string' || !summary.trim()) return undefined
+  if (kind !== 'subagent') return clip(summary.replace(/\s+/g, ' ').trim(), ACTIVITY_DESCRIPTION_CHARS)
+  const kept = summary
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\n+|\s+$/g, '')
+  return clip(kept, ACTIVITY_TASK_RESULT_CHARS)
+}
 
 export const INTERRUPTED_SUMMARY: Readonly<Record<ActivityInterruptedBy, string>> = {
   stop: 'Stopped',
@@ -390,6 +415,19 @@ export function commandLabel(command: string): string {
 
 /** Normalize any provider casing ("read", "read_file", "TodoWrite") to 21st PascalCase. */
 export function normalizeToolName(rawName: string | undefined, kind?: string): string {
+  const known = knownToolName(rawName)
+  if (known) return known
+  if (!rawName) {
+    if (kind === 'mcp_tool_call' || kind === 'mcp_tool_result') return 'Mcp'
+    return 'Generic'
+  }
+  // Preserve already-PascalCase names (Bash, Grep, ...), capitalize first letter otherwise.
+  if (/^[A-Z][A-Za-z]*$/.test(rawName)) return rawName
+  return rawName.charAt(0).toUpperCase() + rawName.slice(1)
+}
+
+/** The card name a tool name maps to ("ls" is `Glob`, "read_file" is `Read`), or undefined for a name it does not know. */
+export function knownToolName(rawName: string | undefined): string | undefined {
   const lower = (rawName ?? '').toLowerCase().replace(/[^a-z]/g, '')
   switch (lower) {
     case 'read':
@@ -416,9 +454,7 @@ export function normalizeToolName(rawName: string | undefined, kind?: string): s
       return 'TodoWrite'
     case 'plan':
     case 'planwrite':
-    case 'presentplan':
-    case 'exitplanmode':
-      return rawName === 'ExitPlanMode' ? 'ExitPlanMode' : 'PlanWrite'
+      return 'PlanWrite'
     case 'websearch':
       return 'WebSearch'
     case 'webfetch':
@@ -442,13 +478,7 @@ export function normalizeToolName(rawName: string | undefined, kind?: string): s
     case 'cloning':
       return 'cloning'
     default:
-      if (!rawName) {
-        if (kind === 'mcp_tool_call' || kind === 'mcp_tool_result') return 'Mcp'
-        return 'Generic'
-      }
-      // Preserve already-PascalCase names (Bash, Grep, ...), capitalize first letter otherwise.
-      if (/^[A-Z][A-Za-z]*$/.test(rawName)) return rawName
-      return rawName.charAt(0).toUpperCase() + rawName.slice(1)
+      return undefined
   }
 }
 
@@ -605,8 +635,7 @@ function typedDraft(
       const items = todosOf(input.todos)
       return items ? { ...base, kind: 'todo', items } : undefined
     }
-    case 'PlanWrite':
-    case 'ExitPlanMode': {
+    case 'PlanWrite': {
       const text = str(input.markdown) ?? str(input.plan) ?? str(input.text)
       return text ? { ...base, kind: 'plan', text: capHead(text, ACTIVITY_GENERIC_CAP_BYTES).text } : undefined
     }
@@ -614,10 +643,12 @@ function typedDraft(
     case 'Task': {
       const agentType = str(input.subagent_type)
       const description = str(input.description)
+      const model = str(input.model)
       return {
         ...base,
         kind: 'subagent',
         ...(agentType ? { agentType } : {}),
+        ...(model ? { model } : {}),
         ...(description ? { description: clip(description.replace(/\s+/g, ' ').trim(), ACTIVITY_DESCRIPTION_CHARS) } : {}),
         ...(input.run_in_background === true ? { background: true } : {})
       }

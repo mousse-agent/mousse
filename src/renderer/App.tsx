@@ -3,6 +3,7 @@ import { Suspense, useEffect, useRef, useCallback, useState, startTransition, ty
 import { useChatsStore } from './stores/chatsStore'
 import { followPushedList } from './lib/followPushedList'
 import { OrchestratorChat } from './components/OrchestratorChat'
+import { scheduleHighlighterWarmup } from './chat/components/agent-elements/code-highlighter'
 
 import { MainViewTabs } from './components/MainViewTabs'
 
@@ -22,9 +23,11 @@ import { WorkspaceLoading } from './components/WorkspaceLoading'
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
 import { CommandPalette } from './components/CommandPalette'
+import { SelectionReplyButton } from './components/SelectionReplyButton'
 import { ToastHost } from './components/ui/Toast'
 import { ThreadRenameDialog } from './components/ThreadRenameDialog'
 import { showThreadToast, watchOpenedThreadToasts } from './lib/threadToasts'
+import { watchDeletedShownThread } from './lib/leaveDeletedThread'
 
 import { openSurface } from './lib/surfaces'
 import { DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKeys'
@@ -33,7 +36,10 @@ import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore, withNewerTimes } from './stores/appStore'
 import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
+import { applyStreamedUpdates, landMessage } from './stores/liveTextStore'
 import { useViewSwap } from './lib/motion'
+import { useMemoryNotices } from './hooks/useMemoryNotices'
+import { useWindowCounters } from './lib/windowCounters'
 import { normalizeRunSettings } from '../shared/settings'
 import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
 import { useAppCommands } from './commands/useAppCommands'
@@ -80,6 +86,8 @@ export default function App() {
 
   useCommandShortcuts()
   useAppCommands()
+  useMemoryNotices()
+  useWindowCounters()
   const setShortcuts = useAppStore((s) => s.setShortcuts)
   const usageOpen = useAppStore((s) => s.usageOpen)
   const setUsageOpen = useAppStore((s) => s.setUsageOpen)
@@ -107,10 +115,15 @@ export default function App() {
   useEffect(() => {
     if (workspaceReady) preloadSplitSurfaces()
   }, [workspaceReady])
+  // The code highlighter loads once the window is idle after startup, so the first code block of a session is
+  // coloured as it streams. It does not wait for a thread to load: a window that opens on a new thread has none.
+  useEffect(() => {
+    if (profileReady) scheduleHighlighterWarmup()
+  }, [profileReady])
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
-  // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the old one
-  // fades out, inert, then the new one fades in, in step with the sidebar lists (sidebar-view-motion.css).
+  // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the new one shows
+  // at once and settles in, in step with the sidebar lists (sidebar-view-motion.css).
   const { shown: workspaceMode, phase: workspaceSwap } = useViewSwap(sidebarMode)
   // A run's thread from the Automations page always shows as a conversation, whatever Chats was showing.
   const layoutMode = inboxThread ? 'projects' : workspaceMode
@@ -140,10 +153,7 @@ export default function App() {
 
   const setAppInfo = useAppStore((s) => s.setAppInfo)
 
-  const addMessage = useAppStore((s) => s.addMessage)
-
   const setMainView = useAppStore((s) => s.setMainView)
-  const openDocument = useAppStore((s) => s.openDocument)
 
   const mainView = useAppStore((s) => s.mainView)
 
@@ -297,7 +307,11 @@ export default function App() {
     // Anything else that changes the transcript applies the held updates first, so order is kept.
     // The Usage page covers the workspace: the transcript catches up in one write when it closes.
     const messageUpdates = createMessageUpdateBatcher({
-      apply: (_threadId, messages) => useAppStore.getState().updateMessages(messages),
+      // Text added to a reply on screen, or to the thought being written, goes to its live text (see liveTextStore); the rest to the store.
+      apply: (_threadId, messages) => {
+        const state = useAppStore.getState()
+        applyStreamedUpdates(messages, state.messages, state.updateMessages)
+      },
       isCurrent: isSelectedThread,
       held: () => useAppStore.getState().usageOpen
     })
@@ -307,21 +321,19 @@ export default function App() {
 
     const unsubs = [
       window.mousse.orchestrator.onThreadMessage(({ threadId, message }) => {
-        if (!isSelectedThread(threadId)) return
-        messageUpdates.flush()
-        if (message.role === 'user') {
-          const cur = useAppStore.getState().messages
-          const idx = cur.findIndex((m) => m.id.startsWith('optimistic:') && m.content === message.content)
-          if (idx !== -1) {
-            const next = cur.filter((m) => !(m.id.startsWith('optimistic:') && m.content === message.content))
-            useAppStore.getState().setMessages([...next, message])
-            return
-          }
+        if (!isSelectedThread(threadId)) {
+          // A thread being opened keeps what arrives before its view; the view may be older (see openingThreadId).
+          if (isCurrentProfile()) useAppStore.getState().holdOpeningMessage(threadId, message)
+          return
         }
-        addMessage(message)
+        // Held updates first, then a thought it follows hands its live text to the transcript, then the message (see liveTextStore).
+        landMessage(message, messageUpdates.flush)
       }),
       window.mousse.orchestrator.onThreadMessageUpdated(({ threadId, message }) => {
-        if (!isSelectedThread(threadId)) return
+        if (!isSelectedThread(threadId)) {
+          if (isCurrentProfile()) useAppStore.getState().holdOpeningMessage(threadId, message)
+          return
+        }
         messageUpdates.push(threadId, message)
       }),
       // Non-selected or legacy full-sync path (select/resnapshot use thread:view instead).
@@ -338,9 +350,14 @@ export default function App() {
       }),
       // Combined select/resnapshot payload: one store update for messages + agents + tasks.
       window.mousse.threads.onView((view) => {
-        if (!isSelectedThread(view.threadId)) return
+        const state = useAppStore.getState()
+        const opening = isCurrentProfile() && state.openingThreadId === view.threadId
+        if (!opening && !isSelectedThread(view.threadId)) return
         messageUpdates.flush()
-        startTransition(() => applyThreadView(view))
+        // The first transcript a thread shows paints in the next frame; later views (a catch-up, a reconnect) can wait
+        // behind input.
+        if (opening || state.transcriptPending) applyThreadView(view)
+        else startTransition(() => applyThreadView(view))
         hydrationReceived = true
         finishHydration()
       }),
@@ -353,7 +370,9 @@ export default function App() {
       window.mousse.threads.onTouched?.(applyIfCurrent(useAppStore.getState().applyThreadTouches)) ?? (() => undefined),
       // Sidebar already calls switchToThread optimistically; this covers createAndSelect
       // and other main-driven selection without showing the previous transcript.
-      window.mousse.threads.onSelected(applyIfCurrent(({ id }) => switchToThread(id))),
+      // It is an echo (or, at launch, the thread restored): the workspace stays where the person left it, so a
+      // window that opens on the Chats tab keeps showing Chats.
+      window.mousse.threads.onSelected(applyIfCurrent(({ id }) => switchToThread(id, { keepWorkspace: true }))),
       window.mousse.threads.onActivity(applyIfCurrent(setThreadActivity)),
       // Keep the default provider current; subagent rows of threads on the default draw its logo.
       window.mousse.settings.onChanged(applyIfCurrent((settings) => {
@@ -374,14 +393,13 @@ export default function App() {
         setMainView(view)
         setMainAreaOpen(true)
       }),
-      window.mousse.documents.onOpened(({ title, markdown }) => {
-        openDocument(title, markdown)
-      }),
       // A thread's notification was clicked: open that thread.
       window.mousse.app.onOpenThread(applyIfCurrent((threadId: string) => void selectThread(threadId))),
       // A thread the person is not looking at finished, needs them, or stopped.
       window.mousse.app.onThreadToast(applyIfCurrent(showThreadToast)),
-      watchOpenedThreadToasts()
+      watchOpenedThreadToasts(),
+      // The shown thread deleted anywhere (here, another window, the CLI, its expiry, its parent's delete): leave it.
+      watchDeletedShownThread()
     ]
 
     // Subscribe before requesting the first selected-thread snapshot. Initial
@@ -415,7 +433,6 @@ export default function App() {
     applyThreadView,
     setAppInfo,
     setShortcuts,
-    addMessage,
     setProjects,
     setThreads,
     switchToThread,
@@ -423,7 +440,6 @@ export default function App() {
     setTurnState,
     setTurnSnapshot,
     setMainView,
-    openDocument,
     setMainAreaOpen,
     profileId,
     profileReady,
@@ -601,7 +617,6 @@ export default function App() {
           ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
           style={layoutMode === 'chats' ? { display: 'none' } : undefined}
-          inert={workspaceSwap === 'out' || undefined}
         >
           {inboxThread && <RunStrip />}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
@@ -615,7 +630,7 @@ export default function App() {
 
 
         {/* The conversation pane is hidden here, so a failed workspace load shows in this pane's place. */}
-        {layoutMode === 'chats' && <KeepMounted active={!usageOpen} leaving={workspaceSwap === 'out'} className="keep-mounted-pane">
+        {layoutMode === 'chats' && <KeepMounted active={!usageOpen} className="keep-mounted-pane">
           {bootstrapError
             ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
             : <Suspense fallback={null}><ChatWorkspace key={profileId} /></Suspense>}
@@ -624,7 +639,6 @@ export default function App() {
         {mainAreaOpen && layoutMode === 'projects' && (
           <div
             className={`resizer ${resizing === 'main' ? 'active' : ''}`}
-            inert={workspaceSwap === 'out' || undefined}
             onPointerDown={(event) => startResize('main', event)}
             onKeyDown={onMainResizerKey}
             onDoubleClick={() => setMainAreaWidth(null)}
@@ -638,7 +652,7 @@ export default function App() {
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={mainAreaOpen && layoutMode === 'projects'} leaving={workspaceSwap === 'out'} preserveLayout className="main-area"
+        <KeepMounted as="main" active={mainAreaOpen && layoutMode === 'projects'} preserveLayout className="main-area"
           // Beside it: the threads sidebar and its divider when open (the Runs list sits outside the workspace), and the 1px divider before it.
           style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen && !inboxThread ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />
@@ -650,6 +664,7 @@ export default function App() {
       </div>
 
       <CommandPalette />
+      <SelectionReplyButton />
       <ThreadRenameDialog />
       {/* New bot opens from the Chats sidebar, which can show while the pane is on Projects (after a restart). */}
       {profileReady && newBotOpen && <Suspense fallback={null}><NewBotDialogHost /></Suspense>}

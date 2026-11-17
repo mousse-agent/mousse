@@ -64,19 +64,34 @@ export class WriterEpisode {
     return count
   }
 
-  /** The gate's decision for an allowed call of `kind`; an allowed call enters the barrier. */
-  async authorize(toolCallId: string, kind: PiToolClass): Promise<EpisodeDecision> {
-    if (this.closedBy || this.closed) return { allow: false, reason: GATE_REFUSALS.denied }
+  /**
+   * The gate's decision for an allowed call of `kind`; an allowed call enters the barrier. `signal` ends the wait for
+   * the writer (a steer's cut or a Stop is aborting the prompt): the call is refused, and the writer, once it comes,
+   * stays with the episode until it closes.
+   */
+  async authorize(toolCallId: string, kind: PiToolClass, signal?: AbortSignal): Promise<EpisodeDecision> {
+    if (this.closedBy || this.closed || signal?.aborted) return { allow: false, reason: GATE_REFUSALS.denied }
     if (kind === 'mutation') {
       if (this.pending('delegation') > 0) return { allow: false, reason: GATE_REFUSALS.writerYielded }
       // Entered before the writer is awaited, so a delegation preflighted meanwhile waits for it.
       this.authorized.set(toolCallId, kind)
+      let onAbort: (() => void) | undefined
       try {
-        await this.takeWriter()
+        const writer = this.takeWriter()
+        // The writer's own wait goes on (a rejection is the episode's to see when it closes); this call stops waiting.
+        writer.catch(() => {})
+        await (signal
+          ? Promise.race([writer, new Promise<never>((_, reject) => {
+              onAbort = () => reject(new Error(GATE_REFUSALS.denied))
+              signal.addEventListener('abort', onAbort, { once: true })
+            })])
+          : writer)
       } catch (error) {
         this.authorized.delete(toolCallId)
         this.settle()
         return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
+      } finally {
+        if (onAbort) signal?.removeEventListener('abort', onAbort)
       }
       if (this.closedBy) {
         this.authorized.delete(toolCallId)

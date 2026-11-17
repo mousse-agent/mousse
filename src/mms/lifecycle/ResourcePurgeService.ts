@@ -31,6 +31,29 @@ const within = (root: string, path: string): boolean => { const rel = relative(r
 const active = new Set<string>()
 /** Whether `path` is there, as `existsSync` answers; a checkout is read without blocking the daemon. */
 const present = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
+
+/** Mousse's refs outside `refs/heads/` are named by ids, so the same name is the same ref whatever repository a record gives. */
+const idNamed = (identity: string): boolean => identity.startsWith('refs/') && !identity.startsWith('refs/heads/')
+
+/**
+ * Whether another task or profile also claims this resource, so a purge leaves it: the same identity (in the same
+ * repository, or named by ids), or a path that overlaps a peer's claim. Shared by the preview and `deletePrecheck`.
+ */
+function sharedWithPeer(peers: ReadonlyArray<Parameters<typeof claimOverlapsPath>[0] & { identity: string; repositoryId?: string }>, identity: string, repositoryId: string | undefined, real: string | undefined): boolean {
+  return peers.some((peer) => peer.identity === identity && (!repositoryId || !peer.repositoryId || peer.repositoryId === repositoryId || idNamed(identity)) || real !== undefined && claimOverlapsPath(peer, real))
+}
+
+/** True once `root` holds anything but folders; stops at the first such entry (a symbolic link counts, as in a walk). */
+async function holdsAnyFile(root: string): Promise<boolean> {
+  const pending = [root]
+  for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) return true
+      pending.push(join(dir, entry.name))
+    }
+  }
+  return false
+}
 const rootIdentity = (stat: { dev: number; ino: number; birthtimeMs: number }) => digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs })
 /**
  * Whether `stat` is the folder `recorded` identifies: the same device and inode, and the same creation time where the
@@ -164,7 +187,7 @@ export class ResourcePurgeService {
   private timer?: ReturnType<typeof setInterval>
   private sweepPromise?: Promise<TrashSweepOutcome[]>
   private stopping = false
-  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; /** Every pass, the first and each resumed one, before any item is removed; a failure stops the pass. */ beforeRemoval?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void; /** Stops background disk measurement until the returned function is called, so no handle of it is open in what is about to be removed. */ quiesceDisk?(): Promise<() => void>; /** The trashed thread's own expiry has passed (`Thread.expiresAt`): the authority an expiry purge needs. */ expired?(record: TaskLifecycleRecord): boolean }) { this.retirement = new WorktreeRetirementService(store) }
+  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { /** `keepWork`: the purge keeps the worktrees and Git refs (`ResourceLifecycleHooks.assertCanTrash`). */ assertIdle(taskId: string, options?: { keepWork?: boolean }): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; /** Every pass, the first and each resumed one, before any item is removed; a failure stops the pass. */ beforeRemoval?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void; /** Stops background disk measurement until the returned function is called, so no handle of it is open in what is about to be removed. */ quiesceDisk?(): Promise<() => void>; /** The trashed thread's own expiry has passed (`Thread.expiresAt`): the authority an expiry purge needs. */ expired?(record: TaskLifecycleRecord): boolean }) { this.retirement = new WorktreeRetirementService(store) }
 
   policy(): TrashRetentionPolicy {
     const path = join(this.store.root, 'trash-policy.json')
@@ -345,6 +368,56 @@ export class ResourcePurgeService {
     }
     return { kept, skip, failed }
   }
+  /**
+   * Why the files at `resource` may be the only copy (scratch folders, browser runtime files), or undefined. A purge
+   * removes such files only with a person's Discard; `deletePrecheck` asks the same before a delete stops anything.
+   */
+  private soleCopyReason(inventory: Awaited<ReturnType<typeof buildResourceInventory>>, resource: Awaited<ReturnType<typeof buildResourceInventory>>['resources'][number]): string | undefined {
+    const scratch = inventory.sources.filter((source) => resource.sourceIds.includes(source.id)).some((source) => {
+      const workflow = dirname(source.path) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces')
+      const agent = basename(source.path) === 'run.json' && dirname(dirname(source.path)) === join(this.store.profileHome, 'agent-runs')
+      const terminal = basename(source.path) === 'terminal-workspace.json'
+      if (!workflow && !agent && !terminal) return false
+      const value = JSON.parse(readFileSync(source.path, 'utf8'))
+      return workflow && value.kind === 'scratch' && value.worktreePath === resource.identity || agent && resource.identity === join(dirname(source.path), 'workspace') || terminal && value.kind === 'task-terminal-scratch' && resource.identity === join(dirname(source.path), 'terminal-workspace')
+    })
+    if (scratch) return 'Scratch files have no durable reconstruction proof'
+    return within(join(this.store.profileHome, 'browser', 'worker-artifacts'), resource.identity) ? 'Browser runtime files include content outside the durable artifact index' : undefined
+  }
+
+  /**
+   * What would refuse a delete that keeps the work, read from an active thread before anything stops or moves: the
+   * inventory's blockers, and files that may be the only copy (which need a person's Discard). Read-only; the trash and
+   * the preview still check everything again.
+   */
+  async deletePrecheck(taskId: string, options: { soleCopies: boolean } = { soleCopies: true }): Promise<{ blockers: string[]; soleCopies: string[] }> {
+    const record = this.store.require(taskId)
+    const ownedIds = new Set(this.owned(taskId).map((task) => task.taskId))
+    let peers: Awaited<ReturnType<ResourcePurgeService['peers']>>
+    try { peers = await this.peers(ownedIds) } catch (error) { return { blockers: [(error as Error).message], soleCopies: [] } }
+    const inventory = await buildResourceInventory(this.store, record, { keepWork: true })
+    const blockers = [...inventory.blockers]
+    // As the preview: unverified sources decide nothing here, and a delete that may discard needs no files listed.
+    if (blockers.length || inventory.sources.some((source) => source.status !== 'verified') || !options.soleCopies) return { blockers, soleCopies: [] }
+    for (const resource of inventory.resources) {
+      // The preview's exceptions, in its order: not this thread's, kept with the work, another's too, or held back by
+      // an owner that cannot be verified; the record's own tombstone and configuration rows are no files.
+      if (!ownedIds.has(resource.ownerTaskId) || ['worktree', 'agent-session', 'artifact', 'git-ref'].includes(resource.kind)) continue
+      if (resource.identity.includes('#') || resource.identity === this.store.recordPath(resource.ownerTaskId)) continue
+      if (!isAbsolute(resource.identity) || !within(this.store.profileHome, resource.identity)) continue
+      try {
+        const real = await canonicalPathAsync(resource.identity)
+        if (sharedWithPeer(peers, resource.identity, resource.repositoryId, real) || unverifiedOwnerOver(peers, { path: real })) continue
+        if (!this.soleCopyReason(inventory, resource) || !await present(resource.identity)) continue
+        // One file is enough to need a person's Discard.
+        if (await holdsAnyFile(resource.identity)) return { blockers, soleCopies: [resource.identity] }
+      } catch {
+        // Unreadable now: the preview after the trash judges it.
+      }
+    }
+    return { blockers, soleCopies: [] }
+  }
+
   /** `taskId` and the threads it owns; one trashed on its own keeps its own choice, and one deleted for good is gone. */
   private owned(taskId: string): TaskLifecycleRecord[] {
     const records = this.store.list(), ids = new Set([taskId])
@@ -407,7 +480,7 @@ export class ResourcePurgeService {
     }
     if (record.state !== 'trashed') throw new Error('Only a trashed task can be permanently deleted')
     // A dry run does not hydrate runtimes; the caller asks the cheap idle lookup instead.
-    if (!readOnly) this.hooks.assertIdle(taskId)
+    if (!readOnly) this.hooks.assertIdle(taskId, { keepWork })
     const tasks = this.owned(taskId), ownedIds = new Set(tasks.map((task) => task.taskId))
     // The mode is signed with the rest: a preview that keeps the work authorizes only a purge that keeps it.
     const preview: LifecyclePurgePreview = { schemaVersion: 1, taskId, generation: record.generation, digest: '', items: [], ownedTaskIds: [...ownedIds].sort(), blockers: [], retained: [], exclusiveBytes: 0, ...(keepWork ? { keepWork: true as const } : {}) }
@@ -439,10 +512,9 @@ export class ResourcePurgeService {
       held.add(identity)
       return true
     }
-    // Mousse's refs outside `refs/heads/` are named by ids, so the same name is the same ref whatever repository a record
-    // gives: one written before the repository moved names it by its old id. A branch name is shared within a repository.
-    const idNamed = (identity: string): boolean => identity.startsWith('refs/') && !identity.startsWith('refs/heads/')
-    const shared = (identity: string, repositoryId: string | undefined, real: string | undefined): boolean => peers.some((peer) => peer.identity === identity && (!repositoryId || !peer.repositoryId || peer.repositoryId === repositoryId || idNamed(identity)) || real !== undefined && claimOverlapsPath(peer, real))
+    // A ref named by ids is the same ref in any repository a record gives (one written before the repository moved names
+    // it by its old id); a branch name is shared within a repository (`sharedWithPeer`).
+    const shared = (identity: string, repositoryId: string | undefined, real: string | undefined): boolean => sharedWithPeer(peers, identity, repositoryId, real)
     // A delete that keeps the work never reads, pins or removes a worktree, nor any Git ref below: they stay as they are.
     for (const resource of keepWork ? [] : inventory.resources.filter((item) => item.kind === 'worktree' && ownedIds.has(item.ownerTaskId))) {
       // On a drive that is not connected: there, out of reach, and kept; never taken for already deleted.
@@ -598,16 +670,9 @@ export class ResourcePurgeService {
       try {
         assertLifecyclePath(this.store.profileHome, resource.identity)
         const stat = await lstat(resource.identity), content = await walkOwnedContentAsync(resource.identity)
-        const scratch = inventory.sources.filter((source) => resource.sourceIds.includes(source.id)).some((source) => {
-          const workflow = dirname(source.path) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces')
-          const agent = basename(source.path) === 'run.json' && dirname(dirname(source.path)) === join(this.store.profileHome, 'agent-runs')
-          const terminal = basename(source.path) === 'terminal-workspace.json'
-          if (!workflow && !agent && !terminal) return false
-          const value = JSON.parse(readFileSync(source.path, 'utf8'))
-          return workflow && value.kind === 'scratch' && value.worktreePath === resource.identity || agent && resource.identity === join(dirname(source.path), 'workspace') || terminal && value.kind === 'task-terminal-scratch' && resource.identity === join(dirname(source.path), 'terminal-workspace')
-        })
-        const discardRequired = (scratch || within(join(this.store.profileHome, 'browser', 'worker-artifacts'), resource.identity)) && content.some((entry) => entry.kind !== 'directory')
-        preview.items.push({ id: resource.id, kind: 'path', identity: resource.identity, ownerTaskId: resource.ownerTaskId, content, rootIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }, discardRequired, ...(discardRequired ? { reason: scratch ? 'Scratch files have no durable reconstruction proof' : 'Browser runtime files include content outside the durable artifact index' } : {}), status: 'pending' })
+        const soleCopy = this.soleCopyReason(inventory, resource)
+        const discardRequired = soleCopy !== undefined && content.some((entry) => entry.kind !== 'directory')
+        preview.items.push({ id: resource.id, kind: 'path', identity: resource.identity, ownerTaskId: resource.ownerTaskId, content, rootIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }, discardRequired, ...(discardRequired ? { reason: soleCopy } : {}), status: 'pending' })
       } catch (error) { preview.blockers.push((error as Error).message) }
     }
     // Delete maximal owned containers once, with task data last. Contained source entries are accounted by their parent snapshot.
@@ -656,10 +721,10 @@ export class ResourcePurgeService {
       if (record.purge && record.purge.operationId !== input.operationId) throw new Error('Purge operation identity differs from its irreversible ledger')
       if (record.state === 'purged') return record
       if (record.state !== 'purge-started') {
-        this.hooks.assertIdle(input.taskId)
         const expiry = input.authorization === 'expiry'
         // An expiry takes the worktree; every other delete keeps it when asked.
         const keepWork = input.keepWork === true && !expiry
+        this.hooks.assertIdle(input.taskId, { keepWork })
         const preview = await this.previewOwned(input.taskId, false, keepWork)
         if (preview.blockers.length) throw new Error(preview.blockers.join('; '))
         // A preview made in the other mode (keeping the work, or not) has another digest, and is refused here too.

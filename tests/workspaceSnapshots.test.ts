@@ -117,6 +117,22 @@ describe('turns are recorded as private snapshots', () => {
     expect(git(cwd, 'ls-tree', '--name-only', (await takeSnapshotAsync(cwd, { reason: 'untracked' })).sha)).not.toMatch(/settings\.local/)
     expect(f.read(cwd, 'settings.local')).toBe('two\n')
   })
+
+  it('records a turn in a project whose .gitignore lists .mousse/ while that folder exists, and Undo takes the turn back', async () => {
+    // Git refuses the snapshot's own exclusion of `.mousse` when the project ignores it too, as the Mousse repository does.
+    write('.gitignore', '.mousse/\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'ignore .mousse')
+    mkdirSync(join(cwd, '.mousse'), { recursive: true }); write('.mousse/state.json', '{}\n')
+    const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
+    expect(action.state).toBe('completed')
+    expect(action.git?.coverageGaps ?? []).toEqual([])
+    expect(action.changedPaths.map((item) => item.path)).toEqual(['agent.txt'])
+    expect(git(cwd, 'show', `${action.endSha}:agent.txt`)).toBe('agent')
+    expect(git(cwd, 'ls-tree', '-r', '--name-only', action.endSha!)).not.toMatch(/\.mousse/)
+    noPending()
+    await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
+    expect(existsSync(join(cwd, 'agent.txt'))).toBe(false)
+    expect(f.read(cwd, '.mousse/state.json')).toBe('{}\n')
+  })
 })
 
 describe('an agent that does its own Git work', () => {

@@ -81,6 +81,19 @@ export function modelLabel(choice: ModelChoice, options: ModelLabelOptions = {})
   return modelLabelParts(choice, options).join(' · ')
 }
 
+/**
+ * The reasoning levels of a transcript marker whose two sides are one model at different levels ("Medium", "High"),
+ * as a model's label names them; a side with no level is the model's default. Undefined when the model differs
+ * (a model change, which names each side's level in its label) or the level is the same.
+ */
+export function reasoningChange(from: StoredModelSelection, to: StoredModelSelection): { from: string; to: string } | undefined {
+  const before = upgradeSelection({ ...from })
+  const after = upgradeSelection({ ...to })
+  if (before.provider !== after.provider || before.model !== after.model || before.effort === after.effort) return undefined
+  const label = (effort: string | undefined): string => (effort ? formatEffortLabel(effort) : 'Default')
+  return { from: label(before.effort), to: label(after.effort) }
+}
+
 /** The model of a listing a stored model string names: the exact id, else the id without its level or other suffixes. */
 export function findListedModel<T extends { id: string }>(models: readonly T[], model: string): T | undefined {
   return (

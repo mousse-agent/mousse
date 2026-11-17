@@ -4,16 +4,17 @@
  * point applies on every call. Nothing asks a person; a call outside the grant stops at a wall.
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createBotAuthority, runtimeExpandedPath } from '../../src/mms/bots/authority/botAuthority'
-import { botManifestDigest, compileBotThread, computerRoots, mousseDataFolder, type CompileInput } from '../../src/mms/bots/grants/compile'
+import { createBotAuthority, pathFormWall, runtimeExpandedPath } from '../../src/mms/bots/authority/botAuthority'
+import { botManifestDigest, compileBotThread, type CompileInput, type CompileResult } from '../../src/mms/bots/grants/compile'
 import { BOT_ASKING_MODE_REQUIRED, BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy } from '../../src/mms/harness/policy'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
-import { botAppToolRefusal, checkBuiltinCall } from '../../src/shared/bots/personal/walls'
+import { botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../src/shared/bots/personal/walls'
 import type { HarnessCaps, RunPolicy } from '../../src/shared/harness/types'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 
@@ -25,9 +26,10 @@ let profile: string
 
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-authority-')))
-  root = join(base, 'site')
   other = join(base, 'docs')
   profile = join(base, 'profile')
+  // The bot's files folder: the one folder a bot has beside its scratch.
+  root = join(profile, 'bots', 'files', 'b1')
   scratch = join(profile, 'bots', 'scratch', 'act-1')
   for (const dir of [root, other, join(scratch, 'tmp')]) mkdirSync(dir, { recursive: true })
   writeFileSync(join(root, 'index.html'), 'hi')
@@ -43,7 +45,7 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   appTools: ['web_search'],
   mcp: [],
   skills: ['release-notes'],
-  workspace: { roots: [root], access: 'write' },
+  workspace: null,
   budget: { maxActiveMs: 15 * 60_000, maxTurns: 40 },
   audience: 'owner',
   ...patch
@@ -58,6 +60,7 @@ const compile = (patch: Partial<CompileInput> = {}) => {
     digest: botManifestDigest(grant),
     thread: {},
     scratch,
+    filesFolder: root,
     profileHome: profile,
     nativeNames: piNames,
     remaining: { maxTurns: 40, deadlineMs: 600_000 },
@@ -65,8 +68,10 @@ const compile = (patch: Partial<CompileInput> = {}) => {
   })
 }
 
-const authorityFor = (grant: BotManifest = manifest(), waiting = false, narrow?: CompileInput['thread']['narrow'], mcp: Array<`${string}::${string}`> = []): BotAuthority => {
-  const compiled = compile({ grant, thread: { narrow } })
+const authorityFor = (grant: BotManifest = manifest(), waiting = false, narrow?: CompileInput['thread']['narrow'], mcp: Array<`${string}::${string}`> = []): BotAuthority =>
+  authorityOf(compile({ grant, thread: { narrow } }), waiting, mcp)
+
+const authorityOf = (compiled: CompileResult, waiting = false, mcp: Array<`${string}::${string}`> = []): BotAuthority => {
   if (!compiled.ok) throw new Error(compiled.error.message)
   return createBotAuthority({
     activationId: 'act-1',
@@ -85,14 +90,14 @@ describe('compileBotThread', () => {
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.policy).toEqual({
       // Granted skills bring the skill tools.
-      tools: { allow: ['edit', 'find', 'grep', 'list_skills', 'load_skill', 'ls', 'read', 'web_search', 'write'] },
+      tools: { allow: ['edit', 'find', 'grep', 'list_skills', 'load_skill', 'ls', 'read', 'running_list', 'web_search', 'write'] },
       approvals: 'grants',
       approve: 'host',
       budget: { maxWallMs: 600_000, maxTurns: 40 },
       authority: { kind: 'bot', digest: botManifestDigest(manifest()) }
     })
-    // File access is one permission (§3.7): every folder, read and write, with Mousse's data closed.
-    expect(compiled.permissions.workspace).toEqual({ roots: computerRoots(), access: 'write', writeRoots: computerRoots(), scratch: realpathSync(scratch), computer: { closed: profile } })
+    // Only the bot's own folders: its files folder and scratch, no root beyond them.
+    expect(compiled.permissions.workspace).toEqual({ roots: [], access: 'read', writeRoots: [], scratch: realpathSync(scratch), files: root })
   })
 
   it('compiles "run commands" (shell) like any tool: the runtime\'s shell is on the allowlist', () => {
@@ -102,42 +107,42 @@ describe('compileBotThread', () => {
     expect(compiled.permissions.tools).toEqual(['read', 'shell'])
   })
 
-  it('compiles any workspace as file access: the folders an older grant names are neither checked nor kept', () => {
-    const temp = join(base, 'tmp-root', 'work')
-    mkdirSync(temp, { recursive: true })
-    const whole = compile()
-    if (!whole.ok) throw new Error(whole.error.message)
-    // A write folder in a temporary folder, one holding scratch, one inside Mousse data: each was
-    // refused when it was a folder of its own; now each grants the same file access.
-    for (const roots of [[temp], [base], [join(profile, 'bots')]]) {
-      const compiled = compile({ grant: manifest({ workspace: { roots, access: 'read' } }) })
+  it('a stored workspace opens no folder: it compiles as the grant without one', () => {
+    const none = compile()
+    if (!none.ok) throw new Error(none.error.message)
+    for (const roots of [[other], [base], [join(profile, 'bots')], [process.platform === 'win32' ? 'C:\\' : '/']]) {
+      const compiled = compile({ grant: manifest({ workspace: { roots, access: 'write' } }) })
       if (!compiled.ok) throw new Error(compiled.error.message)
-      expect(compiled.permissions.workspace, roots[0]).toEqual(whole.permissions.workspace)
+      expect(compiled.permissions.workspace, roots[0]).toEqual(none.permissions.workspace)
     }
-    expect(compile({ grant: manifest({ workspace: null }) })).toMatchObject({ ok: true, permissions: { workspace: null } })
+    // Without a files folder (a bot made before them), a stored workspace still gives no folder at all.
+    expect(compile({ grant: manifest({ workspace: { roots: [other], access: 'write' } }), filesFolder: undefined })).toMatchObject({ ok: true, permissions: { workspace: null } })
   })
 
-  it('closes Mousse\'s own data: the Mousse home holding the profile, or the profile alone', () => {
-    expect(mousseDataFolder(join('/x', '.mousse', 'profiles', 'p1'))).toBe(join('/x', '.mousse'))
-    expect(mousseDataFolder(join('/x', 'profile'))).toBe(join('/x', 'profile'))
-    expect(computerRoots('linux')).toEqual(['/'])
-  })
-
-  it('refuses delegation and thread tools, and user MCP tools, even in a stored grant', () => {
+  it('refuses delegation and thread tools, even in a stored grant', () => {
     for (const tool of ['delegate_task', 'thread_fork', 'queue_enqueue', 'create_subagent', 'ask_user'])
       expect(compile({ grant: manifest({ appTools: [tool] }) }), tool).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', reason: expect.stringContaining(tool) } })
-    expect(compile({ grant: manifest({ mcp: [{ serverId: 'github', tool: 'create_issue' }] }) })).toMatchObject({ ok: false, error: { missing: ['mcp'], reason: 'Your MCP tools are not available to bots yet.' } })
+  })
+
+  it('compiles the owner\'s MCP tools for work, and none for a chat turn', () => {
+    const grant = manifest({ mcp: [{ serverId: 'srv-1', tool: 'create_issue' }, { serverId: 'srv-1', tool: 'list_issues' }] })
+    const work = compile({ grant })
+    if (!work.ok) throw new Error(work.error.message)
+    expect(work.permissions.mcp).toEqual(['srv-1::create_issue', 'srv-1::list_issues'])
+    const chat = compile({ grant, botTools: { escalate: true, consult: false, memory: true, frontDesk: true } })
+    if (!chat.ok) throw new Error(chat.error.message)
+    expect(chat.permissions.mcp).toEqual([])
+    // The listing of the owner's servers is always on, in both lanes, and never in the grant.
+    expect(chat.permissions.appTools).toContain('mcp_servers')
   })
 
   it('compiles the published revision held inside the grant: a narrower revision really narrows', () => {
-    const grant = manifest({ workspace: { roots: [root, other], access: 'write' }, budget: { maxActiveMs: 60 * 60_000, maxTurns: 100 } })
-    const revision = manifest({ tools: ['read'], appTools: [], workspace: { roots: [root], access: 'read' }, budget: { maxActiveMs: 5 * 60_000, maxTurns: 10 } })
+    const grant = manifest({ budget: { maxActiveMs: 60 * 60_000, maxTurns: 100 } })
+    const revision = manifest({ tools: ['read'], appTools: [], budget: { maxActiveMs: 5 * 60_000, maxTurns: 10 } })
     const compiled = compile({ grant, revision })
     if (!compiled.ok) throw new Error(compiled.error.message)
-    expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read'] })
-    // File access is one permission: a revision with any workspace keeps it whole, one without drops it.
-    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill'], workspace: { access: 'write', computer: { closed: profile } } })
-    expect(compile({ grant, revision: manifest({ workspace: null }) })).toMatchObject({ ok: true, permissions: { workspace: null } })
+    expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read', 'running_list'] })
+    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill', 'running_list'] })
     // A revision can never name more than the grant: what the grant lacks is dropped.
     const wider = compile({ grant: manifest({ tools: ['read'], appTools: [] }), revision: manifest({ tools: ['read', 'edit'] }) })
     if (!wider.ok) throw new Error(wider.error.message)
@@ -216,6 +221,26 @@ describe('host approvals in checkPolicy', () => {
   })
 })
 
+describe('the files folder under the starter grant', () => {
+  it('the chat and its work both read, list, search, edit and write there, and nothing outside', () => {
+    const files = join(profile, 'bots', 'files', 'b1')
+    mkdirSync(files, { recursive: true })
+    const list = join(files, 'lists', 'shopping.md')
+    for (const frontDesk of [true, false]) {
+      const grant = botStarterManifest()
+      const compiled = compile({ grant, filesFolder: files, botTools: { escalate: true, consult: false, memory: true, frontDesk } })
+      if (!compiled.ok) throw new Error(compiled.error.message)
+      const bot = createBotAuthority({
+        activationId: 'act-1', role: 'activation', permissions: compiled.permissions, waiting: () => false,
+        counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null
+      })
+      for (const tool of ['read', 'list', 'search', 'edit', 'write'] as const)
+        expect(bot.check({ kind: 'builtin', tool, nativeName: tool, args: { path: list } }), `${tool} frontDesk=${frontDesk}`).toEqual({ ok: true })
+      expect(bot.check({ kind: 'builtin', tool: 'write', nativeName: 'write', args: { path: join(base, 'elsewhere.md') } })).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    }
+  })
+})
+
 describe('BotAuthority.check', () => {
   const read = (path: string) => ({ kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path } })
   const edit = (path: string) => ({ kind: 'builtin' as const, tool: 'edit' as const, nativeName: 'edit', args: { path } })
@@ -226,13 +251,13 @@ describe('BotAuthority.check', () => {
     for (const args of [{ command: 'ls -la' }, { command: 'rm -rf build', cwd: join(base, 'elsewhere') }, { command: 'cat ~/.profile', cwd: '~' }])
       expect(granted.check(command(args)), JSON.stringify(args)).toEqual({ ok: true })
     // A bot with no folder at all still runs commands once it holds them.
-    expect(authorityFor(manifest({ tools: ['shell'], workspace: null })).check(command({ command: 'date' }))).toEqual({ ok: true })
+    expect(authorityOf(compile({ grant: manifest({ tools: ['shell'] }), filesFolder: undefined })).check(command({ command: 'date' }))).toEqual({ ok: true })
     expect(authorityFor().check(command({ command: 'ls' }))).toEqual({ ok: false, wall: { kind: 'tool', tool: 'bash' } })
     // Waiting for the owner still stops it.
     expect(authorityFor(manifest({ tools: ['shell'] }), true).check(command({ command: 'ls' }))).toEqual({ ok: false, wall: { kind: 'waiting' } })
   })
 
-  it('allows granted tools inside a root and inside scratch', () => {
+  it('allows granted tools inside its files folder and inside scratch', () => {
     const bot = authorityFor()
     expect(bot.check(read(join(root, 'index.html')))).toEqual({ ok: true })
     expect(bot.check(edit(join(root, 'new.html')))).toEqual({ ok: true })
@@ -241,23 +266,17 @@ describe('BotAuthority.check', () => {
     expect(bot.check(edit('notes.md'))).toEqual({ ok: true })
   })
 
-  it('with file access every folder is open, read and write, but Mousse\'s own data, where only scratch is the bot\'s', () => {
-    const bot = authorityFor(manifest({ workspace: { roots: [root, other], access: 'read' } }))
-    expect(bot.check(read(join(other, 'a.md')))).toEqual({ ok: true })
-    expect(bot.check(read(join(base, 'secret.txt')))).toEqual({ ok: true })
-    expect(bot.check(edit(join(base, 'secret.txt')))).toEqual({ ok: true })
-    expect(bot.check(edit(join(root, '..', 'new', 'file.md')))).toEqual({ ok: true })
-    // Git metadata is a file like any other once the bot may change files anywhere.
-    expect(bot.check(edit(join(root, '.git', 'config')))).toEqual({ ok: true })
-    expect(bot.check(edit(join(scratch, 'draft.md')))).toEqual({ ok: true })
-    // Mousse's data: never, and never an ask (the bot has all there is to ask for).
-    expect(bot.check(read(join(profile, 'profile.json')))).toEqual({ ok: false, wall: { kind: 'closed', tool: 'read', path: join(profile, 'profile.json') } })
-    expect(bot.check(edit(join(profile, 'bots', 'bots.db')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
-    expect(bot.check(read(join(scratch, '..', 'act-2', 'x')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
-    expect(bot.check(read(profile))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+  it('outside its files folder and scratch every file call is a path wall, even with a stored workspace', () => {
+    const bot = authorityFor(manifest({ workspace: { roots: [other, base], access: 'write' } }))
+    expect(bot.check(read(join(root, 'index.html')))).toEqual({ ok: true })
+    for (const path of [join(other, 'a.md'), join(base, 'secret.txt'), join(profile, 'profile.json'), join(profile, 'bots', 'bots.db'), join(scratch, '..', 'act-2', 'x'), profile])
+      for (const call of [read(path), edit(path)])
+        expect(bot.check(call), `${call.tool} ${path}`).toMatchObject({ ok: false, wall: { kind: 'path', path } })
+    // Git metadata in its own folder is never a file tool's to change.
+    expect(bot.check(edit(join(root, '.git', 'config')))).toMatchObject({ ok: false, wall: { kind: 'path' } })
   })
 
-  it('follows links: a link that leads into Mousse\'s data is refused', () => {
+  it('follows links: a link in its files folder that leads out is refused', () => {
     const link = join(root, 'escape')
     try {
       symlinkSync(profile, link, process.platform === 'win32' ? 'junction' : 'dir')
@@ -265,25 +284,18 @@ describe('BotAuthority.check', () => {
       return // The platform does not let this process make links.
     }
     const bot = authorityFor()
-    expect(bot.check(read(join(link, 'profile.json')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
-    expect(bot.check(edit(join(link, 'new.md')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    expect(bot.check(read(join(link, 'profile.json')))).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    expect(bot.check(edit(join(link, 'new.md')))).toMatchObject({ ok: false, wall: { kind: 'path' } })
   })
 
-  it('an older read-only grant is file access too: writes anywhere but Mousse\'s data', () => {
-    const bot = authorityFor(manifest({ workspace: { roots: [root], access: 'read' } }))
-    expect(bot.check(read(join(root, 'index.html')))).toEqual({ ok: true })
-    expect(bot.check(edit(join(root, 'index.html')))).toEqual({ ok: true })
-    expect(bot.check(edit(join(other, 'notes.md')))).toEqual({ ok: true })
-  })
-
-  it('Claude Code\'s own storage, recognised by its gate, needs no file access', () => {
-    const bot = authorityFor(manifest({ workspace: null }))
+  it('Claude Code\'s own storage, recognised by its gate, is allowed outside the bot\'s folders', () => {
+    const bot = authorityFor()
     const saved = '/home/me/.claude/projects/-x/session/tool-results/out.txt'
     expect(bot.check(read(saved))).toMatchObject({ ok: false, wall: { kind: 'path' } })
     expect(bot.check({ ...read(saved), own: true })).toEqual({ ok: true })
     // The tool must still be granted, and nothing runs while the activation waits.
-    expect(authorityFor(manifest({ tools: ['web_search'], workspace: null })).check({ ...read(saved), own: true })).toMatchObject({ ok: false, wall: { kind: 'tool' } })
-    expect(authorityFor(manifest({ workspace: null }), true).check({ ...read(saved), own: true })).toEqual({ ok: false, wall: { kind: 'waiting' } })
+    expect(authorityFor(manifest({ tools: ['web_search'] })).check({ ...read(saved), own: true })).toMatchObject({ ok: false, wall: { kind: 'tool' } })
+    expect(authorityFor(manifest(), true).check({ ...read(saved), own: true })).toEqual({ ok: false, wall: { kind: 'waiting' } })
   })
 
   it('refuses an ungranted tool, skill, app tool and a same-named MCP tool on another server', () => {
@@ -302,8 +314,8 @@ describe('BotAuthority.check', () => {
     expect(authorityFor(manifest(), true).check(read(join(root, 'index.html')))).toEqual({ ok: false, wall: { kind: 'waiting' } })
   })
 
-  it('without file access, file tools have no folder at all', () => {
-    const bot = authorityFor(manifest({ workspace: null }))
+  it('without a files folder (a bot made before them), file tools have no folder at all', () => {
+    const bot = authorityOf(compile({ filesFolder: undefined }))
     expect(bot.check(read('notes.md'))).toMatchObject({ ok: false, wall: { kind: 'path' } })
   })
 
@@ -319,9 +331,7 @@ describe('the check points', () => {
   it('a runtime built-in is held to its neutral tool; one with no neutral name is never granted', () => {
     const bot = authorityFor(manifest({ tools: ['search'] }))
     expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'grep', { path: root })).toEqual({ ok: true })
-    expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'find', { path: join(base, 'secret.txt') })).toEqual({ ok: true })
-    expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'find', { path: join(profile, 'bots') })).toMatchObject({ ok: false, wall: { kind: 'closed' } })
-    expect(checkBuiltinCall(authorityFor(manifest({ tools: ['search'], workspace: null })), PI_NATIVE_TOOLS, 'find', { path: join(base, 'secret.txt') })).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'find', { path: join(base, 'secret.txt') })).toMatchObject({ ok: false, wall: { kind: 'path' } })
     expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'powershell', {})).toEqual({ ok: false, wall: { kind: 'tool', tool: 'powershell' } })
     expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'read', { path: join(root, 'index.html') })).toEqual({ ok: false, wall: { kind: 'tool', tool: 'read' } })
   })
@@ -356,15 +366,31 @@ describe('paths a runtime rewrites before it opens them (PR 6 review M1)', () =>
       [PI_NATIVE_TOOLS, 'grep', { pattern: 'x', path: '~' }],
       [PI_NATIVE_TOOLS, 'write', { path: '@notes.md', content: 'x' }]
     ]
-    // With file access it is a path to give in full, never an ask; without it, the ask for file access.
-    const without = authorityFor(manifest({ workspace: null }))
+    // A path to give in full, with or without a files folder: no permission would let the bot use it as written.
+    const without = authorityOf(compile({ filesFolder: undefined }))
     for (const [table, name, args] of cases) {
       expect(checkBuiltinCall(bot, table, name, args), `${name} ${JSON.stringify(args)}`).toMatchObject({ ok: false, wall: { kind: 'path_form' } })
-      expect(checkBuiltinCall(without, table, name, args), `${name} ${JSON.stringify(args)}`).toMatchObject({ ok: false, wall: { kind: 'path' } })
+      expect(checkBuiltinCall(without, table, name, args), `${name} ${JSON.stringify(args)}`).toMatchObject({ ok: false, wall: { kind: 'path_form' } })
     }
+    // A real path outside the bot's folders is a path wall.
+    expect(checkBuiltinCall(without, claude, 'Read', { file_path: join(base, 'elsewhere', 'x.txt') })).toMatchObject({ ok: false, wall: { kind: 'path' } })
     // A real path in scratch or the root still passes.
     expect(checkBuiltinCall(bot, claude, 'Grep', { pattern: 'x', path: root })).toEqual({ ok: true })
     expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'write', { path: join(scratch, 'notes.md'), content: 'x' })).toEqual({ ok: true })
+  })
+
+  it('the refusal gives the owner’s home folder, and the full path for ~ and $HOME', () => {
+    const home = join(base, 'home', 'ada')
+    const text = (path: string) => wallMessage(pathFormWall('Read', path, home))
+    expect(text('~/Notes/todo.md')).toBe(`Give ~/Notes/todo.md as a full path, without ~ or variables: ${join(home, 'Notes', 'todo.md')}`)
+    expect(text('~')).toBe(`Give ~ as a full path, without ~ or variables: ${home}`)
+    expect(text('$HOME/x')).toBe(`Give $HOME/x as a full path, without ~ or variables: ${join(home, 'x')}`)
+    expect(text('${HOME}/x')).toBe(`Give \${HOME}/x as a full path, without ~ or variables: ${join(home, 'x')}`)
+    expect(text('~other/x')).toBe(`Give ~other/x as a full path, without ~ or variables. Your owner's home folder is ${home}.`)
+    expect(text('$TMPDIR/x')).toBe(`Give $TMPDIR/x as a full path, without ~ or variables. Your owner's home folder is ${home}.`)
+    expect(text('@notes.md')).toBe('Give @notes.md as a full path, without ~ or variables.')
+    // The live check names the real home folder of this computer.
+    expect(checkBuiltinCall(authorityFor(), PI_NATIVE_TOOLS, 'read', { path: '~/x' })).toMatchObject({ ok: false, wall: { kind: 'path_form', home: homedir(), full: join(homedir(), 'x') } })
   })
 
   it('names what each runtime rewrites, by platform', () => {

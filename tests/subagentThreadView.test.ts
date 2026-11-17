@@ -17,7 +17,7 @@ const subagentOf = (parentThreadId: string, rootThreadId = parentThreadId): Thre
 
 type Patch = Partial<ReturnType<typeof useAppStore.getState>>
 const initial = useAppStore.getInitialState()
-const keys = ['threads', 'activeThreadId', 'threadActivity', 'subagentsByParent'] as const
+const keys = ['threads', 'activeThreadId', 'threadActivity', 'subagentsByParent', 'threadsSidebarView'] as const
 const original = Object.fromEntries(keys.map((key) => [key, initial[key]])) as Patch
 
 /** Server rendering reads the store's initial state, so patch both it and the live state. */
@@ -71,8 +71,11 @@ describe('SubagentParentBar', () => {
 })
 
 describe('ThreadsSidebar with subagents', () => {
-  const render = () => renderToStaticMarkup(createElement(ThreadsSidebar))
-  // The Threads view lists every shown thread as a card; the same threads also sit in the recent list.
+  // The Threads view lists every shown thread as a card (its cards render only while it shows).
+  const render = () => {
+    setStore({ threadsSidebarView: 'threads' })
+    return renderToStaticMarkup(createElement(ThreadsSidebar))
+  }
   const cardTitles = (html: string) => [...html.matchAll(/threads-sidebar-card-title">([^<]*)</g)].map((match) => match[1])
 
   it('lists threads people started and leaves subagents under their parent, keeping an orphan', () => {
@@ -92,11 +95,11 @@ describe('ThreadsSidebar with subagents', () => {
     expect(running.match(/card-status-working/g)).toHaveLength(1)
     setStore({ threads, activeThreadId: 'lone', threadActivity: { child: 'awaiting_input' } })
     const asking = render()
-    // The waiting parent also heads the "Needs me" group, once; in the list it shows once more.
+    // The waiting parent moves to the "Needs me" group, once, and leaves the list below until it is answered.
     const needsMe = asking.match(/<section class="threads-sidebar-needs-me"[\s\S]*?<\/section>/)?.[0] ?? ''
     expect(needsMe).toContain('Fix the build')
     expect(needsMe.match(/card-status-input/g)).toHaveLength(1)
-    expect(asking.replace(needsMe, '').match(/card-status-input/g)).toHaveLength(1)
+    expect(asking.replace(needsMe, '')).not.toContain('card-status-input')
   })
 
   it('highlights the parent row while a subagent is open, with a background class and no selection dot', () => {

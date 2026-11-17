@@ -1,8 +1,9 @@
-import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { certifiedInstallDir, certifiedMetadataPath, resolveCertifiedBrowser } from '../../../../src/browser-worker/binary/resolver'
+import { copyBrowserTreeAsHardlinks } from '../../agent-platform/managed-browser-drain/ownedTemp'
 import { REPO_ROOT } from './pin'
 
 export const SIBLING_CORE_BROWSER_ROOT = resolve(REPO_ROOT, '..', 'core', '.mousse-dev', 'browser-binaries')
@@ -60,26 +61,6 @@ function resolveSourceRoot(): ChromeSource {
   }
 }
 
-function copyCertifiedTree(source: string, target: string): void {
-  const stat = lstatSync(source)
-  if (stat.isSymbolicLink()) throw new Error(`Certified browser contains an unexpected symlink: ${source}`)
-  if (stat.isDirectory()) {
-    mkdirSync(target, { recursive: true })
-    for (const entry of readdirSync(source)) copyCertifiedTree(join(source, entry), join(target, entry))
-    return
-  }
-  mkdirSync(dirname(target), { recursive: true })
-  if (process.platform === 'win32') {
-    copyFileSync(source, target)
-    return
-  }
-  try {
-    linkSync(source, target)
-  } catch {
-    copyFileSync(source, target)
-  }
-}
-
 export function inspectChromeSource(): ChromeSource {
   return resolveSourceRoot()
 }
@@ -101,7 +82,8 @@ export async function isolateCertifiedBrowser(source = inspectChromeSource()): P
   mkdirSync(profileRoot, { recursive: true })
   mkdirSync(artifactRoot, { recursive: true })
   mkdirSync(stageRoot, { recursive: true })
-  copyCertifiedTree(realpathSync.native(certifiedInstallDir(source.browserRoot)), certifiedInstallDir(browserRoot))
+  // The macOS app bundle's framework links are recreated; a link that leaves the tree is refused.
+  copyBrowserTreeAsHardlinks(certifiedInstallDir(source.browserRoot), certifiedInstallDir(browserRoot))
   writeFileSync(certifiedMetadataPath(browserRoot), readFileSync(certifiedMetadataPath(source.browserRoot)))
   const resolved = resolveCertifiedBrowser(browserRoot)
   if (resolved.status !== 'ready') throw new Error(`Isolated certified browser did not resolve: ${resolved.message}`)

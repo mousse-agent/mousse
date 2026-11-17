@@ -89,8 +89,9 @@ export async function linkedTaskFixture(){
   const invite=await caller.services.net.request('bridge.invite',{}) as {invite:string}
   await target.services.net.request('bridge.join',{invite:invite.invite})
   await target.services.net.request('net.protect',{passphrase:'chats-candidate-fixture-protection'})
-  const node=target.services.net.runtime().identity.self()!.node
-  await vi.waitFor(()=>expect(caller.services.net.session(node).state()).toBe('open'),{timeout:10000})
+  const node=target.services.net.runtime().identity.self()!.node,callerNode=caller.services.net.runtime().identity.self()!.node
+  // Each end marks the link open on its own; tests reach for either end.
+  await vi.waitFor(()=>{expect(caller.services.net.session(node).state()).toBe('open');expect(target.services.net.session(callerNode).state()).toBe('open')},{timeout:10000})
   const group=await caller.createGroup()
   caller.services.chatNetwork.publish({chatId:group.id,publicationId:'task-group'})
   const targetGroup=await target.createGroup(),agent=targetGroup.participants.find(value=>value.kind==='agent')!

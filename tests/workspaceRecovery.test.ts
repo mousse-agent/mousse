@@ -132,10 +132,12 @@ describe('what a thread is waiting on', () => {
     expect(await status()).toEqual({ kind: 'paused', reason: 'The code-revert operation did not finish.', operationId: 'revert-1', operationType: 'code-revert' })
   })
 
-  it('pauses the thread when Git cannot read the worktree', async () => {
+  it('pauses nothing when Git cannot read a worktree that no operation of Mousse\'s own left so: its turns run in the project folder', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+    rmSync(join(workspace.worktreePath, '.git'))
     writeFileSync(join(workspace.worktreePath, '.git'), 'gitdir: /nowhere\n')
-    expect(await status()).toEqual({ kind: 'paused', reason: 'Git cannot read the worktree.' })
+    expect((await new ThreadWorkspaceManager(f.thread).verify()).lifecycle).toBe('recovery_required')
+    expect(await status()).toBeUndefined()
   })
 
   it('reports a merge an earlier version left in the worktree, without pausing the thread, until it is aborted', async () => {

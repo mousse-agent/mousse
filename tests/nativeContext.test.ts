@@ -355,8 +355,11 @@ describe('the prompt cache record', () => {
     const cached = { ...first, promptCache: nextPromptCache(first, { at: 1_000, ttlMs: hour, modelKey: 'm', instanceId: 'claude' }) }
     const next = appendNativeMessage(appendNativeMessage(cached, userMessage('again')), assistant('stop'))
     expect(nextPromptCache(next, { at: 2_000, modelKey: 'm', instanceId: 'claude' })).toEqual({ lastRequestAt: 2_000, ttlMs: hour, revision: next.revision, modelKey: 'm', instanceId: 'claude' })
-    // A write says its own lifetime; another model, or another instance of the same provider, has its own cache.
-    expect(nextPromptCache(next, { at: 2_000, ttlMs: 5 * 60_000, modelKey: 'm', instanceId: 'claude' }).ttlMs).toBe(5 * 60_000)
+    // A shorter write does not shorten an hour still live: the history before it stays cached that long. Once the
+    // hour has run out, a write says its own lifetime. Another model, or another instance, has its own cache.
+    expect(nextPromptCache(next, { at: 2_000, ttlMs: 5 * 60_000, modelKey: 'm', instanceId: 'claude' }).ttlMs).toBe(hour)
+    expect(nextPromptCache(next, { at: 1_000 + hour, ttlMs: 5 * 60_000, modelKey: 'm', instanceId: 'claude' }).ttlMs).toBe(5 * 60_000)
+    expect(nextPromptCache(next, { at: 2_000, ttlMs: 2 * hour, modelKey: 'm', instanceId: 'claude' }).ttlMs).toBe(2 * hour)
     expect(nextPromptCache(next, { at: 2_000, modelKey: 'other', instanceId: 'claude' }).ttlMs).toBeUndefined()
     expect(nextPromptCache(next, { at: 2_000, modelKey: 'm', instanceId: 'claude:work' }).ttlMs).toBeUndefined()
   })

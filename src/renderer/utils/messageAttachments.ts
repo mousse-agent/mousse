@@ -25,10 +25,12 @@ export interface ParsedBrowserElement {
 
 import type { ChatReference } from '../../shared/chatReferences'
 import { extractChatReferences } from '../../shared/chatReferences'
+import { formatAttachedFilesMarker, replaceAttachedFilesMarkers, type AttachedFileEntry } from '../../shared/attachedFilesMarker'
 
 export interface ParsedUserMessageContent {
   text: string
-  attachedFiles: string[]
+  /** The files of `[Attached files: …]`, with their paths when the message names them. */
+  attachedFiles: AttachedFileEntry[]
   browserElements: ParsedBrowserElement[]
   references: ChatReference[]
 }
@@ -38,16 +40,17 @@ export interface ParsedUserMessageContent {
  * show a preview. Older messages also contain the image name in the generic
  * attached-files marker, which would otherwise render a second pill.
  */
-export function filterImageAttachmentNames(
-  attachedFiles: string[],
+export function filterImageAttachmentNames<T extends string | { name: string }>(
+  attachedFiles: T[],
   imageNames: string[]
-): string[] {
+): T[] {
   const imageNameCounts = new Map<string, number>()
   for (const name of imageNames) {
     imageNameCounts.set(name, (imageNameCounts.get(name) ?? 0) + 1)
   }
 
-  return attachedFiles.filter((name) => {
+  return attachedFiles.filter((file) => {
+    const name = typeof file === 'string' ? file : file.name
     const count = imageNameCounts.get(name) ?? 0
     if (count === 0) return true
     if (count === 1) imageNameCounts.delete(name)
@@ -181,31 +184,35 @@ export function browserElementLabel(element: Pick<ParsedBrowserElement, 'text' |
 }
 
 /**
- * A message's composer markers as the composer holds them again: its browser elements and references as
- * attachments, and the markers the composer cannot rebuild (attached file names, voice messages) as text.
+ * A message's composer markers as the composer holds them again: its browser elements, references and files with
+ * paths as attachments, and the markers the composer cannot rebuild (file names without paths, voice messages) as
+ * text.
  */
-export function composerPartsFromMarkers(markers: string): { text: string; browserElements: ParsedBrowserElement[]; references: ChatReference[] } {
+export function composerPartsFromMarkers(markers: string): { text: string; browserElements: ParsedBrowserElement[]; references: ChatReference[]; files: Array<Required<AttachedFileEntry>> } {
   const extracted = extractChatReferences(markers)
   const browserElements: ParsedBrowserElement[] = []
-  const text = extracted.text.replace(BROWSER_ELEMENT_BLOCK_RE, (block, body: string) => {
+  const files: Array<Required<AttachedFileEntry>> = []
+  const withoutFiles = replaceAttachedFilesMarkers(extracted.text, (entries) => {
+    if (entries.some((entry) => !entry.path)) return formatAttachedFilesMarker(entries)
+    files.push(...(entries as Array<Required<AttachedFileEntry>>))
+    return ''
+  })
+  const text = withoutFiles.replace(BROWSER_ELEMENT_BLOCK_RE, (block, body: string) => {
     const parsed = parseBrowserElementBody(body)
     if (!parsed) return block
     browserElements.push(parsed)
     return ''
   }).replace(/\n{3,}/g, '\n\n').trim()
-  return { text, browserElements, references: extracted.references }
+  return { text, browserElements, references: extracted.references, files }
 }
 
 export function parseUserMessageContent(content: string): ParsedUserMessageContent {
-  const attachedFiles: string[] = []
+  const attachedFiles: AttachedFileEntry[] = []
   const browserElements: ParsedBrowserElement[] = []
   const extracted = extractChatReferences(content)
 
-  let text = extracted.text.replace(/\[Attached files: ([^\]]+)\]/g, (_match, list: string) => {
-    for (const name of list.split(', ')) {
-      const trimmed = name.trim()
-      if (trimmed) attachedFiles.push(trimmed)
-    }
+  let text = replaceAttachedFilesMarkers(extracted.text, (entries) => {
+    attachedFiles.push(...entries)
     return ''
   })
 

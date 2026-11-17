@@ -15,7 +15,24 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
-import { createNativeContext, isNativeLastTurnUsage, isNativePromptCache, normalizeNativeContext } from './nativeContext'
+import type { MessageEstimate } from './contextEstimate'
+import { createNativeContext, isNativeContextBase, isNativeLastTurnUsage, isNativePromptCache, normalizeNativeContext } from './nativeContext'
+
+/**
+ * Where a delegated `shared` child works: its parent's folder. `access: 'write'` is a general-purpose child with every
+ * tool its parent has; absent or `'read-only'` is a read-only child (`delegate_task` `readOnly`, and every `shared`
+ * child started before the two were separate).
+ */
+export interface SharedWorkspace {
+  path: string
+  parentThreadId: string
+  access?: 'read-only' | 'write'
+}
+
+/** Whether a child working in `shared` is a read-only one. */
+export function isReadOnlyShared(shared: SharedWorkspace | null | undefined): boolean {
+  return Boolean(shared) && shared!.access !== 'write'
+}
 
 /**
  * One steer waiting for a live turn to read it. A person's typed steer has only its text. A promoted queue
@@ -36,6 +53,21 @@ export interface SteerEntry {
   images?: ChatImageAttachment[]
   /** An agent promoted the item: nothing here may settle a question or approval the user has been asked. */
   byAgent?: true
+  /**
+   * The transcript message that shows this steer inside the running turn. A turn that never reads the text hides
+   * it again: the text then runs as a turn of its own, whose prompt shows it once.
+   */
+  echoId?: string
+  /**
+   * A bot turn's own steer (`BotTurnSteer`): the token the bot engine took it under. Read, it is accepted there; handed
+   * back, it goes back to the engine, never to the thread's queue (nothing else is ever steered into a bot's turn).
+   */
+  botSteer?: string
+}
+
+/** The images a drain's steers carry, in the order they were steered: they go to the model with the joined text. */
+export function steerImages(entries: readonly SteerEntry[]): ChatImageAttachment[] {
+  return entries.flatMap((entry) => entry.images ?? [])
 }
 
 export interface ActiveTurnControl {
@@ -52,6 +84,11 @@ export class ThreadSession {
   readonly threadId: string
   messages: ChatMessage[] = []
   nativeContext: NativeLlmContext = createNativeContext()
+  /**
+   * Only on a copy read for the context gauge (`measuredSession`): the estimate of each active message, made in the
+   * read worker. Its `nativeContext` then holds no messages, and the gauge sums these instead.
+   */
+  gaugeEstimates?: MessageEstimate[]
   /** Per-thread model selection; absent means use global settings. */
   modelOverride: Thread['modelOverride'] | undefined
   activeTurn: ActiveTurnControl | null = null
@@ -75,6 +112,17 @@ export class ThreadSession {
   stopping = false
   /** The messages a person sent while the stopped turn still ended, in the order sent (`stopping`). */
   sentAfterStop: string[] = []
+  /**
+   * Who stopped the thread's last turn: a person (their Stop, or the Stop of the thread that launched this one) or an
+   * agent. Kept while the thread shows stopped, so its end is not announced to the person who stopped it.
+   */
+  stoppedBy?: 'person' | 'agent'
+  /**
+   * Queued messages sent now (Steer) while the turn was still being set up, in the order sent. They wait at the
+   * front of the queue and join the turn as soon as it runs; a turn that ends before it runs leaves them to go
+   * first. Cleared with the admission.
+   */
+  steerOnStart: string[] = []
   /**
    * Ends the waits of a turn that is still being set up (its worktree, the snapshot it starts from) when a Stop comes
    * then, so a repository another operation holds cannot keep a stopped thread busy. Cleared once the turn runs.
@@ -103,11 +151,14 @@ export class ThreadSession {
   /** Project cwd for this thread (resolved path; never process.chdir). */
   projectCwd: string | null = null
   workspace: WorkspaceExecutionContext | null = null
+  /** The `workspace.workspaceNote` the agent was last told, so the next turns in the project folder do not repeat it. */
+  workspaceNoteGiven: string | null = null
   /**
-   * A delegated child with `workspace: 'shared'` (read-only roles) runs in its parent's workspace
-   * path under read-only tool access instead of provisioning its own (SPEC §14.2).
+   * A delegated child with `workspace: 'shared'` runs in its parent's workspace path instead of provisioning its own
+   * (SPEC §14.2). `access: 'write'` has every tool its parent has; any other value (a child saved before `access`
+   * existed included) is a read-only child, held to read-only tool access.
    */
-  sharedWorkspace: { path: string; parentThreadId: string } | null = null
+  sharedWorkspace: SharedWorkspace | null = null
   /**
    * A scheduled run's thread works on the project's own checkout (`workspaceBinding.policy ===
    * 'primary'`): its turns never provision a worktree.
@@ -165,6 +216,9 @@ export class ThreadSession {
     }
     if (this.nativeContext.promptCache !== undefined && !isNativePromptCache(this.nativeContext.promptCache)) {
       delete this.nativeContext.promptCache
+    }
+    if (this.nativeContext.contextBase !== undefined && !isNativeContextBase(this.nativeContext.contextBase)) {
+      delete this.nativeContext.contextBase
     }
     this.activeToolCallMessageIds.clear()
     this.callToMessage.clear()

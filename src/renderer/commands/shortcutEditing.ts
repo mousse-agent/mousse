@@ -1,5 +1,6 @@
 import {
   COMMANDS,
+  COMMANDS_IN_DISPLAY_ORDER,
   beats,
   bindingFor,
   bindingFromKey,
@@ -194,15 +195,39 @@ export interface ShortcutGroup {
   rows: ShortcutRow[]
 }
 
-/** Every command in table order, grouped by category, narrowed to the ones that match every word of `query`. */
+/** Shorter names for Shortcuts rows whose group already says where they work. Command titles (the palette) stay as they are. */
+const ROW_TITLES: Partial<Record<CommandId, string>> = {
+  'editor.save': 'Save file',
+  'workflow.undo': 'Undo',
+  'workflow.redo': 'Redo',
+  'composer.steer': 'Steer the running reply',
+  'composer.switchSendMode': 'Switch send mode'
+}
+
+/** A command's name on the Shortcuts page. */
+export function shortcutRowTitle(id: CommandId): string {
+  return ROW_TITLES[id] ?? getCommand(id).title
+}
+
+/** The short row name, when there is one. */
+export function shortRowTitle(id: CommandId): string | undefined {
+  return ROW_TITLES[id]
+}
+
+/** Where a settings search result for a shortcut lands: its row on the Shortcuts page. */
+export function shortcutAnchor(id: CommandId): string {
+  return `shortcuts-${id.replace(/\./g, '-').replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`
+}
+
+/** Every command in display order, grouped by category, narrowed to the ones that match every word of `query`. */
 export function shortcutGroups(query: string, overrides: ShortcutOverrides, platform: string): ShortcutGroup[] {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean)
   const shadows = shadowedBy(overrides, platform)
   const groups = new Map<CommandCategory, ShortcutRow[]>()
-  for (const command of COMMANDS) {
+  for (const command of COMMANDS_IN_DISPLAY_ORDER) {
     const binding = bindingFor(command.id, overrides, platform)
     const label = binding === null ? '' : formatBinding(binding, platform)
-    const haystack = [command.title, command.category, ...(command.searchTerms ?? []), label].join(' ').toLowerCase()
+    const haystack = [shortcutRowTitle(command.id), command.title, command.category, ...(command.searchTerms ?? []), label].join(' ').toLowerCase()
     if (!words.every((word) => haystack.includes(word))) continue
     const custom =
       !command.fixed &&

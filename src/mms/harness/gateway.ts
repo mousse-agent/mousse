@@ -40,10 +40,10 @@ import { mcpAttachable, type ChildPreflightContext, type SubagentRefusal } from 
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { TurnSettlement } from '../run/mcp/McpCredentials'
 import type { ModeCeiling, ProviderRef } from '../run/types'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
-import type { InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
+import { dirname, join } from 'node:path'
+import type { InstanceBinary, InstanceConfigView, NextStep, PromptCacheHour, UpdateAffordance } from '../../shared/harness/status'
 import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
@@ -57,13 +57,13 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
 import type { SetVendorSettingInput, VendorSettingsView } from '../../shared/harness/vendorSettings'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
-import { LatestVersionCache } from './latest'
+import { LatestVersionCache, type LatestVersionSource } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
 import { checkPermissionMode, checkPolicy, type CheckPolicyOptions, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
@@ -78,6 +78,7 @@ import {
   type PermissionMode
 } from '../../shared/permissionMode'
 import type { BotAuthority } from '../../shared/bots/personal/authority'
+import type { BotRuntimeHold } from '../../shared/bots/personal/subagentHold'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { runOwnerUpdate } from './ownerUpdate'
@@ -149,6 +150,19 @@ export interface HarnessGateway {
    * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
    */
   oneShot(request: OneShotRequest): Promise<{ text: string }>
+  /** The driver's runtime masks secret values in its tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean
+  /**
+   * The models an entry can make pictures with in Mousse's own process (#1088, a bot's Images row); none for an entry
+   * that is unknown, turned off, or whose runtime makes none.
+   */
+  imageModels?(instanceId: string): readonly ImageModelFacts[]
+  /**
+   * One picture on one of an entry's `imageModels` (#1088), after the checks every dispatch passes (turned on, not
+   * stopped, not retired, signed in in Mousse). Throws the harness errors, or `ImageRequestError` when the provider made
+   * no picture. Never retried.
+   */
+  generateImage?(request: ImageRequestSpec & { instanceId: string; signal?: AbortSignal }): Promise<GeneratedImage>
 
   // -- Run engine -------------------------------------------------------------------------------
 
@@ -181,6 +195,18 @@ export interface HarnessGateway {
    * with `policy_unenforceable` when the runtime has no tool for one of them.
    */
   nativeToolNames(instanceId: string, tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
+  /**
+   * The granted neutral tools a bot turn on the instance would not be offered now (`HarnessDriver.botWithheldTools`);
+   * empty for an unknown instance.
+   */
+  botWithheldTools(instanceId: string): readonly NeutralTool[]
+  /** Runs on's line for a bot on the instance (`HarnessDriver.botRunsOnNote`); undefined for an unknown instance. */
+  botRunsOnNote(instanceId: string): { text: string; title: string } | undefined
+  /**
+   * How the instance's runtime holds a bot's turn here now (`HarnessDriver.botHold`), for the hold rule of a bot's
+   * subagents; undefined for an unknown instance or a driver that says nothing (held as tightly as nothing).
+   */
+  botHold(instanceId: string): BotRuntimeHold | undefined
   /**
    * The permission mode `bind` would record for a thread asking for `requested` (the mode itself, a
    * stricter fallback with the reason, or a refusal). Reads, binds nothing; used to tell the agent
@@ -222,6 +248,13 @@ export interface HarnessGateway {
   /** The model's name as Mousse shows it: the instance's listing (an instance id, or a provider name), else a name it listed before, else one made from the id. */
   modelName(instanceId: string, model: string): string
   /**
+   * The reasoning level a turn on a model runs at (an instance id, or a provider name): the chosen one when the
+   * model offers it or lists no levels, else the default its agent reports. Undefined when neither is known.
+   */
+  reasoningLevel(instanceId: string, model: string, effort?: string): string | undefined
+  /** The name of the agent a model runs on, as Mousse shows it (an instance id, or a provider name): Claude Code, Codex, a Pi provider's name. */
+  providerName(instanceId: string): string
+  /**
    * Issue #142: the instance's look at the user's own setup before a delegated child runs on it
    * (`ProviderAdapter.childPreflight`); null when nothing stands in the way. Reads, never changes.
    */
@@ -240,8 +273,15 @@ export interface HarnessGateway {
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
    */
   stopThread(threadId: string): Promise<'stopped' | 'not_active'>
+  /**
+   * Stops one native helper of `hostThreadId`'s run on the instance that runs it (`ProviderAdapter.stopNativeHelper`).
+   * `unsupported`: that instance's runtime cannot stop a single helper.
+   */
+  stopNativeHelper?(instanceId: string, hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active' | 'unsupported'>
   /** Whether any instance keeps a process for the thread between turns now (`ProviderAdapter.hasLiveProcess`). */
   hasLiveProcess?(threadId: string): boolean
+  /** Closes the process a bot's chat keeps warm on the thread, on whichever instance holds it (`ProviderAdapter.releaseBotProcess`). */
+  releaseBotProcess?(threadId: string): boolean
   /**
    * `/compact` on the instance a thread runs on: its own compaction of the thread's native session.
    * False when it has none or compacted nothing (`DriverRuntime.compactConversation`).
@@ -526,6 +566,11 @@ export interface TurnAppContext {
   modeCeiling: ModeCeiling
   /** The agent access level granted to the run (SPEC §15.1); absent is `lineage`. */
   accessLevel?: AgentAccessLevel
+  /**
+   * The thread's capability revision (`ToolRegistry.capabilityRevision`): when it differs from the last turn's, the
+   * turn gets a new credential epoch, so the runtime takes the list the thread holds now.
+   */
+  capabilityRevision?: string
   /** The turn may attach the Mousse MCP server (a run engine run). */
   mcpEligible: boolean
   /**
@@ -555,8 +600,6 @@ export interface TurnAppContext {
 
 export interface TurnHandle {
   readonly result: Promise<TurnResult>
-  /** Never "unsupported": delivered live, by restart, or queued; `not_active` once the turn ended. */
-  steer(text: string): Promise<{ delivery: 'live' | 'restarted' | 'queued' } | 'not_active'>
   interrupt(): Promise<'interrupted' | 'not_active'>
   /** The provider session reference once known (`TurnSink.providerRef`). */
   providerRef(): ProviderRef | undefined
@@ -572,6 +615,21 @@ export const PROBE_TTL_MS = 10 * 60_000
 const RETIRED_BOT_RUNNER = { id: 'claude:bots', name: 'Claude for bots' } as const
 /** How long a probe waits for the login-shell PATH before searching the inherited PATH only. */
 const SHELL_PATH_WAIT_MS = 3_000
+/** How often the newest published versions are asked for; `LATEST_TTL_MS` limits real lookups. */
+const LATEST_CHECK_INTERVAL_MS = 60 * 60_000
+
+/**
+ * Where the newest version of an instance's CLI is read: Homebrew's own tap for a copy Homebrew
+ * installed (the version `brew upgrade` reaches), else the driver's source.
+ */
+export function latestSourceFor(driver: Pick<HarnessDriver, 'latestVersion' | 'brewName'>, binary: InstanceBinary | undefined): LatestVersionSource | undefined {
+  if (binary?.owner === 'brew' && driver.brewName) {
+    const brew = binary.path ? join(dirname(binary.path), 'brew') : undefined
+    return { kind: 'brew', name: driver.brewName, ...(brew && existsSync(brew) ? { brew } : {}) }
+  }
+  return driver.latestVersion
+}
+
 /** Every enabled, signed-in instance's model list is refreshed this often (`startModelRefreshSchedule`). */
 export const MODEL_REFRESH_INTERVAL_MS = 3 * 60 * 60_000
 /** The first scheduled pass runs this long after start-up, once the app is up and quiet. */
@@ -716,6 +774,11 @@ interface Operation {
   prompts: number
   progress?: InstallProgress
   cancel(): boolean
+}
+
+/** A bot turn's relay revision: the names of the MCP tools it was offered, so a changed set opens a new listing. */
+function botRelayRevision(bot: BotAuthority): string {
+  return createHash('sha256').update(JSON.stringify((bot.mcpTools ?? []).map((tool) => tool.name).sort())).digest('hex').slice(0, 12)
 }
 
 function errorText(error: unknown): string {
@@ -881,7 +944,7 @@ export class Harness implements HarnessGateway {
   private readonly modelRefreshes = new Map<string, Promise<void>>()
   private modelSlots = 0
   private readonly modelWaiting: Array<() => void> = []
-  private modelSchedule?: { interval: ReturnType<typeof setInterval>; startup: ReturnType<typeof setTimeout>; intervalMs: number }
+  private modelSchedule?: { interval: ReturnType<typeof setInterval>; startup: ReturnType<typeof setTimeout>; latest: ReturnType<typeof setInterval>; intervalMs: number }
 
   constructor(private readonly options: HarnessGatewayOptions) {
     this.instanceMap = options.instanceMap
@@ -1229,6 +1292,29 @@ export class Harness implements HarnessGateway {
     return { ok: false, error: { code: 'policy_unenforceable', message: `This provider cannot enforce the requested restrictions (toolControl). ${reason}`, missing: ['toolControl'], reason, instanceId } }
   }
 
+  botWithheldTools(instanceId: string): readonly NeutralTool[] {
+    const record = this.recordOrUndefined(instanceId)
+    if (!record?.driver.botWithheldTools) return []
+    return record.driver.botWithheldTools(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, record.instanceId)
+  }
+
+  botRunsOnNote(instanceId: string): { text: string; title: string } | undefined {
+    const record = this.recordOrUndefined(instanceId)
+    if (!record?.driver.botRunsOnNote) return undefined
+    return record.driver.botRunsOnNote(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version)
+  }
+
+  botHold(instanceId: string): BotRuntimeHold | undefined {
+    const record = this.recordOrUndefined(instanceId)
+    if (!record?.driver.botHold) return undefined
+    try {
+      return record.driver.botHold(record.config, record.env)
+    } catch (error) {
+      console.warn('[harness] could not read how the instance holds a bot', { instanceId, error: errorText(error) })
+      return undefined
+    }
+  }
+
   async refreshPolicyFacts(instanceId: string): Promise<void> {
     const record = this.recordOrUndefined(instanceId)
     if (!record?.driver.readPolicyFacts) return
@@ -1506,13 +1592,13 @@ export class Harness implements HarnessGateway {
     return {
       result,
       providerRef: () => ref,
-      interrupt: async () => (ended || !ref ? 'not_active' : this.interruptOn(record, ref, spec.input.threadId)),
-      steer: async (text) => {
-        if (ended) return 'not_active'
-        if (ref && record.runtime.adapter.steer && (await record.runtime.adapter.steer(ref, text)) === 'delivered') return { delivery: 'live' }
-        return { delivery: 'queued' }
-      }
+      interrupt: async () => (ended || !ref ? 'not_active' : this.interruptOn(record, ref, spec.input.threadId))
     }
+  }
+
+  /** Whether a driver's runtime masks secrets in tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean {
+    return Boolean(driver && this.drivers.get(driver)?.masksToolResults)
   }
 
   /** Whether the instance's driver runs one-shots (`HarnessDriver.oneShot`); read for picker listings. */
@@ -1561,6 +1647,31 @@ export class Harness implements HarnessGateway {
     } finally {
       if (timer) clearTimeout(timer)
     }
+  }
+
+  imageModels(instanceId: string): readonly ImageModelFacts[] {
+    try {
+      return this.record(instanceId).runtime.imageModels?.() ?? []
+    } catch {
+      // An unknown or turned-off entry makes no pictures.
+      return []
+    }
+  }
+
+  async generateImage(request: ImageRequestSpec & { instanceId: string; signal?: AbortSignal }): Promise<GeneratedImage> {
+    let record: InstanceRecord
+    try {
+      record = this.record(request.instanceId)
+    } catch (error) {
+      throw asHarnessError(error, request.instanceId)
+    }
+    const runtime = record.runtime
+    if (!runtime.generateImage || !(runtime.imageModels?.() ?? []).some((model) => model.id === request.model))
+      harnessFail('model_unavailable', `${this.displayName(record)} does not offer ${request.model} for pictures.`, record.instanceId)
+    if (record.stopped) throw this.stopError(record, record.stopped.reason)
+    this.refuseRetired(record)
+    this.admissionGate(record)
+    return runtime.generateImage({ model: request.model, prompt: request.prompt, ...(request.shape ? { shape: request.shape } : {}) }, request.signal ?? new AbortController().signal)
   }
 
   /**
@@ -1729,6 +1840,16 @@ export class Harness implements HarnessGateway {
     }
   }
 
+  /** Whether the instance's turns may keep the prompt cache for an hour; absent for a runtime that has no such choice. */
+  private promptCacheHourOf(record: InstanceRecord): PromptCacheHour | undefined {
+    try {
+      return record.runtime.promptCacheHour?.()
+    } catch (error) {
+      console.warn('[harness] could not read the prompt cache lifetime', { instanceId: record.instanceId, error: errorText(error) })
+      return undefined
+    }
+  }
+
   /** Capabilities of a record's instance at its last known version and current runtime facts. */
   private recordCaps(record: InstanceRecord): HarnessCaps {
     return record.driver.caps(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, this.currentFacts(record.instanceId), record.instanceId)
@@ -1860,12 +1981,30 @@ export class Harness implements HarnessGateway {
     return false
   }
 
+  releaseBotProcess(threadId: string): boolean {
+    let released = false
+    for (const record of this.records.values()) {
+      try {
+        if (record.runtime.adapter.releaseBotProcess?.(threadId)) released = true
+      } catch (error) {
+        console.warn("a bot's warm process could not be closed", { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return released
+  }
+
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
     const results = await Promise.allSettled([...this.records.values()].map((record) => record.runtime.adapter.stopThread?.(threadId)))
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (results.some((result) => result.status === 'fulfilled' && result.value === 'stopped')) return 'stopped'
     if (failed) throw failed.reason
     return 'not_active'
+  }
+
+  async stopNativeHelper(instanceId: string, hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active' | 'unsupported'> {
+    const adapter = this.recordOrUndefined(instanceId)?.runtime.adapter
+    if (!adapter?.stopNativeHelper) return 'unsupported'
+    return adapter.stopNativeHelper(hostThreadId, agentId)
   }
 
   async compactConversation(request: NativeCompactRequest): Promise<boolean> {
@@ -1898,11 +2037,21 @@ export class Harness implements HarnessGateway {
     if (!app) return undefined
     const { binding, input } = spec
     const caps = this.recordCaps(record)
-    // The MCP relay, when the driver can attach it and the user left it on for this runtime. A bot or
-    // definition turn never attaches it, whatever its context says.
-    const relayGrant = app.relay && record.driver.relay && app.relay.runtimes[record.driver.kind as McpRelayRuntime] === true && !app.bot && !app.definition && binding.policy.authority?.kind !== 'bot'
+    // The MCP relay, when the driver can attach it and the user left it on for this runtime. A definition turn never
+    // attaches it. A bot's turn attaches it only when its work was offered the owner's MCP tools (its grant holds
+    // them): the relay then lists just those and holds every call to the bot's grant, whatever the relay settings of
+    // the owner's own threads; nobody is asked.
+    const botRelay = Boolean(app.bot?.mcpTools?.length) && binding.policy.authority?.kind === 'bot' && !app.definition
+    const relayGrant = record.driver.relay && (botRelay || (app.relay && app.relay.runtimes[record.driver.kind as McpRelayRuntime] === true && !app.bot && !app.definition && binding.policy.authority?.kind !== 'bot'))
       ? { approvals: record.driver.relay.approvals }
       : undefined
+    // What the server's tool list depends on, apart from the bearer: the caller's policy, a level other than the default,
+    // and the thread's capability revision.
+    const listParts = [
+      ...(binding.policyDigest ? [binding.policyDigest] : []),
+      ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : []),
+      ...(app.capabilityRevision ? [`caps:${app.capabilityRevision}`] : [])
+    ]
     let attachment: { url: string; token: string; tokenHash: string; relayUrl: string } | null = null
     if (app.mcpEligible && this.mcp && mcpAttachable(caps)) {
       try {
@@ -1917,8 +2066,9 @@ export class Harness implements HarnessGateway {
           // A new runtime, a new epoch: driver, home, signed-in account and settings, and a caller's
           // policy (a narrower grant must not keep the tool list of the last one). So is a different agent
           // access level (SPEC §15.1): a runtime caches its tool list, so it takes the new level with a new
-          // bearer. The default level adds nothing, so a profile that never sets one is unchanged.
-          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
+          // bearer. The default level adds nothing, so a profile that never sets one is unchanged. So is a new
+          // capability revision: the list the thread holds changed, and no runtime is told so mid-epoch.
+          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...listParts].join('|')
         })
       } catch (error) {
         console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
@@ -1928,11 +2078,17 @@ export class Harness implements HarnessGateway {
       }
     }
     const mcp = this.mcp
-    const relay = attachment && relayGrant && app.relay ? { url: attachment.relayUrl, revision: app.relay.revision } : undefined
+    // A bot's relay lists the tools its turn was offered: their names are its revision.
+    const relay = attachment && relayGrant && (app.relay || botRelay)
+      ? { url: attachment.relayUrl, revision: botRelay ? botRelayRevision(app.bot!) : app.relay!.revision }
+      : undefined
     const texts = app.instructions(attachment !== null, relay !== undefined)
+    // A runtime that keeps its process for a bearer renewed in place starts a new one when this changes, since it would
+    // keep offering a tool the list dropped.
+    const tools = listParts.join('|')
     return {
       bridge: {
-        mcp: attachment ? { url: attachment.url, token: attachment.token, ...(relay ? { relay } : {}) } : null,
+        mcp: attachment ? { url: attachment.url, token: attachment.token, ...(tools ? { tools } : {}), ...(relay ? { relay } : {}) } : null,
         turnToken: app.turnToken,
         sessionInstructions: texts.sessionInstructions,
         turnPreamble: texts.turnPreamble,
@@ -2021,17 +2177,38 @@ export class Harness implements HarnessGateway {
    * a name made from its id. Never the stored string with its level.
    */
   modelName(named: string, model: string): string {
-    // Callers holding only a provider name (older selections, a default set by provider) get its instance.
-    let instanceId = named
-    try {
-      if (!this.instanceMap.get(named)) instanceId = this.instanceMap.instanceIdOf({ llmProvider: named }) || named
-    } catch {
-      // Unknown either way: the name is made from the id.
-    }
+    const instanceId = this.namedInstance(named)
     const listed = findListedModel(this.recordOrUndefined(instanceId)?.runtime.models() ?? [], model)
     const { modelId } = modelChoiceOf({ provider: instanceId, model })
     const label = listed?.label?.trim() || findListedModel(this.prefs.get(instanceId).custom, model)?.label || this.names.get(instanceId)[modelId]
     return modelChoiceOf({ provider: instanceId, model }, label).name
+  }
+
+  reasoningLevel(named: string, model: string, effort?: string): string | undefined {
+    const listed = findListedModel(this.recordOrUndefined(this.namedInstance(named))?.runtime.models() ?? [], model)
+    const levels = listed?.efforts ?? []
+    if (effort && (effort === 'off' || !levels.length || levels.includes(effort))) return effort
+    return listed?.defaultEffort && levels.includes(listed.defaultEffort) ? listed.defaultEffort : undefined
+  }
+
+  providerName(named: string): string {
+    const record = this.recordOrUndefined(this.namedInstance(named))
+    if (!record) return named
+    if (record.entry.driver === 'pi') {
+      const providerId = piProviderIdOf(record.instanceId) ?? record.instanceId
+      return this.options.piDisplayName?.(providerId) ?? providerId
+    }
+    return record.driver.label
+  }
+
+  /** The instance an instance id or a provider name means: callers holding only a provider name (older selections, a default set by provider) get its instance. */
+  private namedInstance(named: string): string {
+    try {
+      if (!this.instanceMap.get(named)) return this.instanceMap.instanceIdOf({ llmProvider: named }) || named
+    } catch {
+      // Unknown either way: the name is used as it is.
+    }
+    return named
   }
 
   /** The names listings gave models the instance does not list now, for a selection that still names one. */
@@ -2404,6 +2581,7 @@ export class Harness implements HarnessGateway {
     const refreshedAt = runtime.modelsRefreshedAt ? runtime.modelsRefreshedAt() : models?.refreshedAt
     // Recomputed on every snapshot: the user may edit their Claude settings at any time.
     const limits = this.permissionLimitsOf(record)
+    const cacheHour = this.promptCacheHourOf(record)
     const signInStep: NextStep | undefined = auth.state === 'signed_out' || auth.state === 'expired'
       ? { action: 'sign_in', label: auth.state === 'expired' ? 'Sign in again' : 'Sign in', ...(auth.signInCommand ? { command: auth.signInCommand } : {}) }
       : undefined
@@ -2452,6 +2630,7 @@ export class Harness implements HarnessGateway {
       ...(shown?.binary ? { binary: shown.binary } : {}),
       caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId), instanceId),
       ...(limits ? { permissionLimits: limits } : {}),
+      ...(cacheHour ? { promptCacheHour: cacheHour } : {}),
       config: this.configView(record),
       models: {
         entries,
@@ -2518,7 +2697,7 @@ export class Harness implements HarnessGateway {
   private updateFor(record: InstanceRecord): UpdateAffordance | undefined {
     const good = this.probes.get(record.instanceId)?.lastGood
     if (!good) return undefined
-    const latest = record.runtime.pinned ? record.runtime.pinned().version : this.latest.get(record.driver.latestVersion)
+    const latest = record.runtime.pinned ? record.runtime.pinned().version : this.latest.get(latestSourceFor(record.driver, good.binary))
     return updateAffordance(record.driver, good.binary, good.compatibility, latest)
   }
 
@@ -2533,9 +2712,11 @@ export class Harness implements HarnessGateway {
     const packages = new Set<string>()
     for (const instanceId of instanceIds) {
       const entry = entries[instanceId]
-      const source = entry?.enabled ? this.drivers.get(entry.driver)?.latestVersion : undefined
-      if (source?.kind !== 'npm' || packages.has(source.package)) continue
-      packages.add(source.package)
+      const driver = entry?.enabled ? this.drivers.get(entry.driver) : undefined
+      const source = driver ? latestSourceFor(driver, this.probes.get(instanceId)?.lastGood?.binary) : undefined
+      const key = source?.kind === 'npm' ? source.package : source?.kind === 'brew' ? `brew:${source.name}` : undefined
+      if (!source || !key || packages.has(key)) continue
+      packages.add(key)
       void this.latest.refresh(source).then((changed) => {
         if (changed && !this.stopped) this.changed(instanceId)
       })
@@ -2929,6 +3110,8 @@ export class Harness implements HarnessGateway {
       harnessFail('unsupported', `${this.displayName(record)} keeps the provider it was added with. Add another entry for another one.`, instanceId)
     if (patch.telemetry !== undefined && !telemetrySwitch(record.driver, record.config))
       harnessFail('unsupported', `${record.driver.label} has no telemetry switch Mousse could set.`, instanceId)
+    if (patch.promptCacheHour !== undefined && !record.runtime.promptCacheHour)
+      harnessFail('unsupported', `${record.driver.label} has no prompt cache setting Mousse could set.`, instanceId)
     const launch: CliProviderConfigPatch = {
       ...(patch.binaryPath !== undefined ? { binaryPath: patch.binaryPath } : {}),
       ...(patch.args !== undefined ? { args: patch.args } : {}),
@@ -3338,6 +3521,7 @@ export class Harness implements HarnessGateway {
     if (patch.env !== undefined) config.env = Object.keys(patch.env).length ? { ...patch.env } : null
     if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
     if (patch.telemetry !== undefined) config.telemetry = patch.telemetry
+    if (patch.promptCacheHour !== undefined) setOrDelete(config, 'promptCacheHour', patch.promptCacheHour ?? undefined)
     // The removed engine setting (Advanced → Engine) is dropped on the first write after it.
     delete config.engine
     if (patch.source !== undefined) {
@@ -3667,9 +3851,12 @@ export class Harness implements HarnessGateway {
     }
     const interval = setInterval(() => pass(intervalMs / 2), intervalMs)
     const startup = setTimeout(() => pass(intervalMs), Math.min(MODEL_REFRESH_STARTUP_DELAY_MS, intervalMs))
+    // Newest published versions, for the update button: the cache decides when a lookup is due.
+    const latest = setInterval(() => this.refreshLatest(Object.keys(this.instanceMap.list())), LATEST_CHECK_INTERVAL_MS)
     interval.unref?.()
     startup.unref?.()
-    this.modelSchedule = { interval, startup, intervalMs }
+    latest.unref?.()
+    this.modelSchedule = { interval, startup, latest, intervalMs }
   }
 
   /** A probe found another program than before: list its models now, when the instance qualifies. */
@@ -3762,6 +3949,8 @@ export class Harness implements HarnessGateway {
     if (update?.kind === 'one_click') return this.install(instanceId, 'update')
     if (update?.kind === 'notice')
       return harnessFail('unsupported', `Mousse cannot tell how this CLI was installed, so it cannot update it. Version ${update.latestVersion} is available.`, instanceId)
+    if (update?.kind === 'advisory' && update.manual)
+      return harnessFail('unsupported', `Updating needs administrator rights. Run this in a terminal: ${update.command}`, instanceId)
     // Not Mousse's install: its owner's own update command, the one the editor shows to copy.
     if (update?.kind === 'advisory') return this.install(instanceId, 'update', update.command)
     return harnessFail('unsupported', 'No update is available.', instanceId)
@@ -3959,6 +4148,7 @@ export class Harness implements HarnessGateway {
     this.stopped = true
     if (this.modelSchedule) {
       clearInterval(this.modelSchedule.interval)
+      clearInterval(this.modelSchedule.latest)
       clearTimeout(this.modelSchedule.startup)
       this.modelSchedule = undefined
     }

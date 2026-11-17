@@ -128,13 +128,11 @@ describe('ScheduledJobStore', () => {
       prompt: 'Report',
       schedule: { kind: 'manual' },
       createdBy: { threadId: 'agent-thread', runId: 'run-1', requestId: 'schedule_create:agent-thread:req-1' },
-      accessCap: 'read',
       permissionCeiling: 'ask'
     })
     const reloaded = new ScheduledJobStore(MousseConfigStore.load(tempHome)).getJob(job.id)
     expect(reloaded).toMatchObject({
       createdBy: { threadId: 'agent-thread', runId: 'run-1', requestId: 'schedule_create:agent-thread:req-1' },
-      accessCap: 'read',
       permissionCeiling: 'ask'
     })
   })
@@ -1331,12 +1329,12 @@ describe('ScheduledJobService concurrency and occurrences', () => {
 
   describe('Keep on a job an agent created', () => {
     it('removes only its end, starts an ended one again on its schedule, and is refused on a person\'s job', () => {
-      const ended = due('Ended', { createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() - 1000).toISOString(), accessCap: 'lineage', permissionCeiling: 'ask' })
+      const ended = due('Ended', { createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() - 1000).toISOString(), permissionCeiling: 'ask' })
       store.claimDueJobs()
       expect(store.getJob(ended.id)).toMatchObject({ state: 'completed' })
       const kept = store.keepJob(ended.id)!
       expect(kept.expiresAt).toBeUndefined()
-      expect(kept).toMatchObject({ state: 'scheduled', accessCap: 'lineage', permissionCeiling: 'ask', schedule: ended.schedule, createdBy: { threadId: 'agent-thread' } })
+      expect(kept).toMatchObject({ state: 'scheduled', permissionCeiling: 'ask', schedule: ended.schedule, createdBy: { threadId: 'agent-thread' } })
       const person = due('Person made')
       expect(() => store.keepJob(person.id)).toThrow(/Only an automation an agent added/)
     })
@@ -1431,12 +1429,12 @@ describe('ScheduledJobService concurrency and occurrences', () => {
     })
   })
 
-  it('hands a job\'s permission ceiling, access cap and name to the run, so the run is bound by them', async () => {
+  it('hands a job\'s permission ceiling and name to the run, so the run is bound by them', async () => {
     const ingresses: Array<Record<string, unknown>> = []
-    const job = due('Capped', { createdBy: { threadId: 'agent-thread' }, accessCap: 'read', permissionCeiling: 'accept_edits' })
+    const job = due('Capped', { createdBy: { threadId: 'agent-thread' }, permissionCeiling: 'accept_edits' })
     serviceOf({ runIsolated: async (_prompt, ingress) => { ingresses.push({ ...ingress }); return { text: 'ok', silent: false, transcriptWritten: true } } }).start()
     await vi.waitFor(() => expect(store.getJob(job.id)?.lastStatus).toBe('ok'))
-    expect(ingresses[0]).toMatchObject({ accessCap: 'read', permissionCeiling: 'accept_edits', jobName: 'Capped' })
+    expect(ingresses[0]).toMatchObject({ permissionCeiling: 'accept_edits', jobName: 'Capped' })
   })
 
   it('does not apply the slash rule to a job a person created', async () => {

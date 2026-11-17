@@ -3,8 +3,9 @@
  * well-known hosts, any one is enough; a local provider is never checked; results are reused for
  * a few seconds; and which run errors are connection failures.
  */
+import { createServer, type AddressInfo, type LookupFunction } from 'node:net'
 import { describe, expect, it } from 'vitest'
-import { GENERIC_PROBE_HOSTS, botApiHost, createBotConnectivity, isConnectionFailure } from '../../src/mms/bots/activation/connectivity'
+import { GENERIC_PROBE_HOSTS, botApiHost, createBotConnectivity, isConnectionFailure, probeHost } from '../../src/mms/bots/activation/connectivity'
 
 describe('the internet check', () => {
   const setup = (answers: Record<string, boolean>) => {
@@ -51,6 +52,35 @@ describe('the internet check', () => {
     expect(botApiHost('pi', 'openrouter')).toBe('openrouter.ai')
     expect(botApiHost('pi', 'ollama')).toBe('local')
     expect(botApiHost('pi', 'someone-else')).toBeUndefined()
+  })
+})
+
+describe('one host\'s probe', () => {
+  /** A name that resolves to an IPv6 address with no route first (100::/64 discards), then to this computer. */
+  const ipv6First: LookupFunction = (_hostname, _options, callback) => {
+    (callback as (error: null, addresses: Array<{ address: string; family: number }>) => void)(null, [
+      { address: '100::1', family: 6 },
+      { address: '127.0.0.1', family: 4 }
+    ])
+  }
+
+  it('is online over IPv4 when the first address the name resolves to is IPv6 that does not route', async () => {
+    const server = createServer((socket) => socket.destroy())
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = server.address() as AddressInfo
+      expect(await probeHost('api.example.test', 4_000, { port, lookup: ipv6First })).toBe(true)
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('is offline when nothing answers', async () => {
+    const server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as AddressInfo
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    expect(await probeHost('api.example.test', 4_000, { port, lookup: ipv6First })).toBe(false)
   })
 })
 

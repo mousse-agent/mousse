@@ -1,16 +1,25 @@
+import { tellMeOf } from '../shared/types'
+import { OwnerQuietHours } from './notifications/OwnerQuietHours'
+import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
+import { SecretVault, secretThreadBusy } from './secrets/SecretVault'
+import { SecretRequests } from './secrets/SecretRequests'
+import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
+import { EventEmitter } from 'node:events'
 import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
+import type { MousseSettingsUpdate } from '../shared/settings'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { ClaudeIntegrationResolver } from './harness/vendors/claude/integrations'
+import { removeClaudeBotTemp } from './harness/claude/locked'
 import { AntigravityProviderService } from './harness/acp/presets/antigravity/AntigravityProviderService'
 import { configInstanceStore, ProviderInstanceService } from './harness/instanceMap'
 import { createProviderAccess, type ProviderAccess } from './providers/providerAccess'
@@ -42,21 +51,33 @@ import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
-import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
+import { personTurnRequest } from './run/mcp/appTools/agentMessage'
+import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
+import { jobThreadIn, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
+import { readRunResultText } from './run/delegation/hold'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
+import { pullRequestStateOf, wakeThreadState } from './bots/wakeSources'
+import { wakeEventLabel } from '../shared/bots/personal/wakes'
+import { botThreadReach } from './run/mcp/appTools/thread'
 import { openPersonalBots } from './bots/activation/open'
 import { botApiHost, createBotConnectivity } from './bots/activation/connectivity'
 import { createBotActivitySink } from './bots/activity/BotActivitySink'
+import { isStepMessage } from './bots/activity/statusLine'
 import { BotBrowsers } from './bots/browser/BotBrowsers'
+import { publishedApplets } from './bots/chat/replyApplets'
 import { botFilesFolder } from './bots/grants/compile'
+import { BotImageMaker } from './bots/images/BotImageMaker'
 import { botInstructions } from './bots/instructions'
 import { createBotMemoryAdmin } from './bots/memory/admin'
-import { BotMemoryStore } from './bots/memory/BotMemoryStore'
-import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
-import { createBotContextProvider, type BotSituation } from './bots/memory/contextPack'
+import type { BotMemoryStore } from './bots/memory/BotMemoryStore'
+import { botAsksFirst } from './bots/actions/BotActions'
+import { createProfileBotMemory } from './bots/memory/profileMemory'
+import { botThreadsForCatchUp } from './bots/memory/capture'
+import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
+import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -74,6 +95,7 @@ import { AgentRegistry } from './agents/AgentRegistry'
 import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
 import { PtyManager } from './terminals/PtyManager'
+import { RunningRegistry } from './running/RunningRegistry'
 import { McpRegistry } from './integrations/mcp/McpRegistry'
 import { McpManager } from './integrations/mcp/McpManager'
 import { SkillsRegistry } from './integrations/skills/SkillsRegistry'
@@ -83,6 +105,7 @@ import { LineEditStatsStore } from './stats/LineEditStatsStore'
 import type { TerminalSendSink } from './terminals/PtyManager'
 import { type MmsOwnerHandle, type MmsOwnerRecord } from './ownership/MmsOwnerLease'
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
+import { UnseenDoneStore } from './runtime/UnseenDoneStore'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
 import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
@@ -91,6 +114,7 @@ import { AutomationDrafts } from './automations/AutomationDrafts'
 import { AutomationRuns } from './automations/AutomationRuns'
 import type { AutomationInbox, InboxCounts } from '../shared/automationInbox'
 import { AUTOMATION_MANAGER_NAME, AUTOMATION_MANAGER_THREAD_KEY, automationManagerWorkspace } from './automations/automationManager'
+import { computerNameIfKnown } from './computerName'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -110,10 +134,16 @@ import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
 import type { EditorAsksPort } from './protocol/editorAsksPort'
+import type { BotsSharingPort } from './protocol/botsSharingPort'
+import type { BotReachPort } from './protocol/botReachPort'
+import { BotDeviceAccessStore } from './bots/definitions/BotDeviceAccessStore'
 import type { RemoteListsPort } from './protocol/remoteListsPort'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
-import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
+import { OwnedWorkBarrier, type OwnedWorkEntry } from './execution/OwnedWorkBarrier'
+import { threadScope, type WorkScope } from './execution/workScope'
+import { canonicalPathSync, pathsOverlap } from './lifecycle/canonicalPath'
+import { readThreadWorkspaceRecord } from './workspace/ThreadWorkspaceManager'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
 import { returnTrashedThreadsToArchive } from './lifecycle/trashToArchive'
@@ -124,7 +154,7 @@ import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from './lifecycle/sweepClock'
 import { threadHasPendingWork } from './lifecycle/threadIdle'
 import { listPendingQueue } from './queue/ThreadMessageQueue'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
@@ -134,9 +164,11 @@ import { ThreadEventTriggers } from './automations/threadEventTriggers'
 import { buildAutomationIndex, mergeRemoteAutomations } from './automations/AutomationIndex'
 import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAutomations'
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
+import { usedWallpapers, WallpaperStore } from './appearance/WallpaperStore'
+import { ThemeRestoreStore } from './appearance/ThemeRestoreStore'
 import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
 import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
-import type { AutomationIndex } from '../shared/automations'
+import type { AutomationIndex, ManagerTurn } from '../shared/automations'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
@@ -177,9 +209,70 @@ function containsProfileBusy(error: unknown): boolean {
   return error instanceof AggregateError && error.errors.some(containsProfileBusy)
 }
 
+/** Why a piece of work keeps a delete from going ahead (`MmsProfileServices.deleteGuard`). */
+type DeleteBlock = 'thread' | 'launched' | 'worktree' | 'repository' | 'profile'
+
+const DELETE_BLOCK_REASONS: Record<DeleteBlock, string> = {
+  thread: 'work in this thread or its subagent threads is still active',
+  launched: 'a thread it launched is still running',
+  worktree: 'another thread is working in its worktree',
+  repository: "another thread is working in the same repository, and this delete removes the thread's worktree and Git refs",
+  profile: 'profile execution is still active'
+}
+
+/** The refusal for the first piece of work that keeps a trash or purge from going ahead. */
+function deleteBusy(blocked: Array<{ label: string; why: DeleteBlock }>): ResourceLifecycleError {
+  const order: DeleteBlock[] = ['thread', 'launched', 'worktree', 'repository', 'profile']
+  const why = order.find((reason) => blocked.some((entry) => entry.why === reason))!
+  // The profile's own refusal reads as it always did.
+  if (why === 'profile') return new ResourceLifecycleError('busy', 'Cannot trash thread: profile execution is still active')
+  const labels = [...new Set(blocked.filter((entry) => entry.why === why).map((entry) => entry.label))]
+  return new ResourceLifecycleError('busy', `Cannot trash thread: ${DELETE_BLOCK_REASONS[why]} (${labels.join(', ')})`)
+}
+
+/**
+ * The refusal while requests a delete touches are in flight. It names why they count when that is not the profile's
+ * own work, and always says "requests are still active", so the delete tries again once they settle (`isPassingBusy`).
+ */
+function requestsBusy(prefix: string, active: Array<{ label: string; why: DeleteBlock }>): string {
+  const counts = new Map<string, number>()
+  for (const { label } of active) counts.set(label, (counts.get(label) ?? 0) + 1)
+  const list = [...counts].map(([key, count]) => `${key}=${count}`).join(', ')
+  const order: DeleteBlock[] = ['thread', 'launched', 'worktree', 'repository', 'profile']
+  const why = order.find((reason) => active.some((entry) => entry.why === reason))
+  if (!why || why === 'profile') return `${prefix}: profile requests are still active (${list})`
+  return `${prefix}: ${DELETE_BLOCK_REASONS[why]}; its requests are still active (${list})`
+}
+
+/** A thread's facts a delete compares (`MmsProfileServices.threadWorkspaceFacts`). */
+interface ThreadWorkspaceFacts {
+  location?: string
+  worktree?: string
+  /** The worktree is the thread's own (its workspace record), not its parent's folder it shares. */
+  ownWorktree: boolean
+  projectFolder: boolean
+  repositoryId?: string
+  projectId?: string
+}
+/** What a thread's `meta.json` says of where it works. */
+type ThreadFacts = Pick<Thread, 'projectId' | 'lineage' | 'workspaceBinding'>
+
+/** The facts of a thread from its `meta.json` in `location` (a thread in the trash is not listed); undefined when unreadable. */
+function readThreadFacts(location: string, threadId: string): ThreadFacts | undefined {
+  try {
+    const path = join(location, 'meta.json')
+    if (statSync(path).size > 1024 * 1024) return undefined
+    const meta = JSON.parse(readFileSync(path, 'utf8')) as Partial<Thread>
+    return meta && meta.id === threadId ? meta : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export class MmsProfileServices {
   readonly domains: DomainHandlerRegistry
   readonly config: MousseConfigStore
+  readonly ownerQuietHours: OwnerQuietHours
   readonly settings: SettingsStore
   readonly providerAuth: ProviderAuthService
   readonly antigravity: AntigravityProviderService
@@ -231,6 +324,10 @@ export class MmsProfileServices {
   routedTerminals?: RoutedTerminalsPort
   /** The asks other computers made for editor connections, set while Bridge is on. */
   editorAsks?: EditorAsksPort
+  /** "Share bots with other devices" on this computer, set while Bridge is on. */
+  botsSharing?: BotsSharingPort
+  /** Which of the owner's devices reach which bot here (each device's switch, each bot's Devices), set while Bridge is on. */
+  botReach?: BotReachPort
   /**
    * The threads, projects and statuses of the user's other computers, merged into this computer's lists
    * for windows. Set and cleared with `threadRouter`; empty while routing is off.
@@ -292,6 +389,8 @@ export class MmsProfileServices {
   readonly botModels: BotModelChooser
   /** Each bot's own browser (`bots.browser.*`, the browser tools of a bot with "use the browser"). */
   readonly botBrowsers: BotBrowsers
+  /** Which devices reach each bot (About → Devices), in `<profile>/bots/device-access.json`. */
+  readonly botDeviceAccess: BotDeviceAccessStore
   /** Bots' schedules: automations whose Who is the bot, in the shared scheduled-job store. */
   readonly botSchedules: BotScheduleBook
   private readonly botStore: BotStore | null
@@ -326,7 +425,6 @@ export class MmsProfileServices {
   private readonly ownerHandle: MmsOwnerHandle | null
   private readonly homeDir: string
   private readonly installationHome: string
-  private readonly effectFibres: Partial<EffectWorkerFibres> | undefined
 
   constructor(
     config: MousseConfigStore,
@@ -347,15 +445,9 @@ export class MmsProfileServices {
       listProfiles?: () => Array<{ id: string; displayName?: string }>
       /** Whether another profile still has an unmoved provider entry `instanceId` (the profile host's answer for a profile it builds). */
       otherProfilesUse?: (instanceId: string) => boolean
-      /**
-       * Effect worker fibres per lane class (SPEC §12.3). `turn` caps this profile's concurrent
-       * turns (default 8); control fibres keep Stop and steer responsive while turns run.
-       */
-      effectFibres?: Partial<EffectWorkerFibres>
     }
   ) {
     this.config = config
-    this.effectFibres = shared.effectFibres
     this.ownerHandle = ownerHandle
     this.homeDir = homeDir
     this.installationHome = shared.installationHome
@@ -368,6 +460,7 @@ export class MmsProfileServices {
     })
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
+    this.ownerQuietHours = new OwnerQuietHours(() => this.settings.get().notifications.quietHours)
     // Before anything reads or moves a worktree: the folders this profile chose for them are Mousse's (`worktreeLayout`).
     setWorktreeFolders(homeDir, this.settings.get().storage)
     this.providerAuth = shared.providerAuth
@@ -505,7 +598,9 @@ export class MmsProfileServices {
     this.mcpServer = new MousseMcpServer({
       credentials: this.mcpCredentials,
       registry: this.orchestrator.mcpToolRegistry(),
-      relay: this.orchestrator.relayHandler()
+      relay: this.orchestrator.relayHandler(),
+      boundary: this.orchestrator.mcpToolBoundary(),
+      attribute: (threadId, meta) => this.orchestrator.attributeMcpCall(threadId, meta)
     })
     this.orchestrator.setAppletStore(this.applets)
     // Registry agents install once per installation; each profile records which versions it uses.
@@ -613,6 +708,16 @@ export class MmsProfileServices {
       chipContext: (ctx) => ({ filesFolder: botFilesFolder(homeDir, ctx.botId), home: homedir() })
     })
     let botMemory: BotMemoryStore | undefined
+    // A bot's pictures (#1088): on the Images row's model, through Mousse's own provider code, saved in its files folder.
+    const botImages = new BotImageMaker({
+      dir: join(homeDir, 'bots'),
+      filesFolder: (botId) => botFilesFolder(homeDir, botId),
+      pick: (botId) => this.personalBots?.imagePick(botId) ?? null,
+      snapshots: () => harness.instances.snapshots({ kind: 'device' }),
+      imageModels: (instanceId) => harness.imageModels(instanceId),
+      generate: (request) => harness.generateImage(request),
+      log: (message, details) => console.warn(message, details)
+    })
     // Each bot's own browser: a managed Chromium session on a profile of its own, apart from the owner's tabs.
     const botBrowsers = new BotBrowsers({
       profileId: this.profileId,
@@ -625,7 +730,10 @@ export class MmsProfileServices {
       }
     })
     this.botBrowsers = botBrowsers
+    this.botDeviceAccess = new BotDeviceAccessStore(join(homeDir, 'bots'))
     this.platform.onDispose(() => botBrowsers.dispose())
+    // Looked up now, so a bot's Runs on has this computer's name when it is first opened.
+    computerNameIfKnown()
     const opened = openPersonalBots({
       profileHome: homeDir,
       threads: {
@@ -640,9 +748,9 @@ export class MmsProfileServices {
       // A deleted bot's home thread: like the lifecycle RPCs, wait briefly for other requests to
       // finish, and retry a busy refusal a few times before reporting it.
       trashThread: async (threadId) => {
-        const include = (active: string) => !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))
         for (let attempt = 0; ; attempt += 1) {
-          await this.requests.waitForIdle(2_000, include).catch(() => {})
+          // Only requests the delete touches are waited for (`deleteGuard`).
+          await this.waitForDeleteRequests(threadId, 2_000, { keepWork: true }).catch(() => {})
           try {
             // Through the one delete: it is archived, then deleted for good; with unpublished work it stays in Archived.
             return await this.deleteThreadForGood(threadId, { human: false, discard: false, internal: true })
@@ -654,13 +762,53 @@ export class MmsProfileServices {
         }
       },
       runs: () => this.runEngine,
+      // What a bot's wakes wait on: one of the owner's threads it may see, and a pull request of one of their projects.
+      wakeThread: (from, threadId) => wakeThreadState({
+        thread: (id) => this.threads.getThread(id),
+        trashed: (id) => {
+          const record = this.threads.lifecycleStore.get(id)
+          return Boolean(record && record.state !== 'active')
+        },
+        reachable: (caller, id) => !('refused' in botThreadReach(this.orchestrator.mcpToolHost(), this.runEngine, caller, id)),
+        working: (id) => this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null || this.runEngine.store.getPausedRun(id) !== null,
+        lastRun: (id) => {
+          const run = this.runEngine.listRuns(id, { limit: 1 })[0]
+          return run ? { status: run.status, endedAt: run.completedAt } : undefined
+        }
+      }, from, threadId),
+      pullRequestState: (repo, number) => pullRequestStateOf({
+        folders: () => this.projects.listProjects().map((project) => project.path),
+        repository: async (folder) => (await this.gitService.codeHost.repositoryIdentity(folder)).nameWithOwner,
+        pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
+      }, repo, number),
+      // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works.
+      launchedThreads: (creators) => launchedThreadsIn({
+        threads: this.threads,
+        engine: this.runEngine,
+        asks: (id) => this.questions.listPendingForThread(id).length > 0,
+        projectName: (id) => this.projects.getProject(id)?.name
+      }, creators),
+      // A thread a bot handed a job to, for its ledger: how it stands and its last answer.
+      jobThread: (threadId) => jobThreadIn({
+        threads: this.threads,
+        engine: this.runEngine,
+        asks: (id) => this.questions.listPendingForThread(id).length > 0,
+        trashed: (id) => {
+          const record = this.threads.lifecycleStore.get(id)
+          return Boolean(record && record.state !== 'active')
+        },
+        result: (id, runId) => readRunResultText(this.runEngine.store, id, runId)
+      }, threadId),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
       // A resumed bot's due schedules are claimed at once; before the scheduler started this does nothing.
+      settings: this.settings,
+      settingsChanged: (settings) => this.events.emit({ channel: 'protocol:event', data: { type: 'settings.changed', data: { settings } } }),
       schedulesChanged: () => { this.scheduled?.wake() },
       // The shared store, through the book made once the scheduler exists below (nothing reads it before that).
       schedules: {
+        setTelling: (botId, change) => this.botSchedules.setTelling(botId, change),
         list: (botId) => this.botSchedules?.list(botId) ?? [],
         get: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId),
         add: (botId, input, createdBy, options) => this.botSchedules.add(botId, input, createdBy, options),
@@ -668,9 +816,26 @@ export class MmsProfileServices {
         removeAll: (botId) => this.botSchedules?.removeAll(botId) ?? 0,
         labelOf: (when) => botScheduleLabel(when)
       },
+      // A scheduled run's reported level: a quiet one posts nothing in the bot chat (made below, like the book).
+      runLevel: (activationId) => this.automationRuns?.levelOfActivation(activationId),
       models: botModels,
       activity: botActivity,
       clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
+      // A turn's Mousse tools as its runtime lists them (`bot_turn_usage`): how many, and their characters.
+      toolList: (threadId, runId) => {
+        const tools = this.orchestrator.mcpToolRegistry().listForTurn(threadId, runId)
+        return { count: tools.length, chars: tools.reduce((sum, tool) => sum + tool.name.length + tool.description.length + JSON.stringify(tool.inputSchema ?? {}).length, 0) }
+      },
+      // Bot chat epochs (docs/plans/bot-context.md §14) run where the runtime resumes the thread's own session: Claude
+      // Code and Codex. Pi's bot process is made for each turn and seeds a new session from the transcript, which holds
+      // none of the packs, so its chat starts every turn from a cleared context, as before.
+      // A bot's tool catalogue (docs/plans/bot-context.md §15): Claude Code loads listed tools on demand with its own tool
+      // search; every other runtime (Codex, Pi, an ACP agent) is listed the core set and calls the rest through `use_tool`.
+      toolCatalogue: (instanceId) => (this.providerInstances.get(instanceId)?.driver === 'claude' ? 'search' : 'use_tool'),
+      chatResumes: (instanceId) => {
+        const driver = this.providerInstances.get(instanceId)?.driver
+        return driver === 'claude' || driver === 'codex'
+      },
       archiveThread: (threadId) => { this.threads.setThreadSettled(threadId, true) },
       // Naming a new bot: one short call on the model its activations would use.
       oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
@@ -681,7 +846,8 @@ export class MmsProfileServices {
         prompt,
         maxChars: 60
       })).text,
-      instructions: (bot) => botInstructions(bot),
+      // The owner's home folder by its real path: `~` and variables are refused in a bot's paths.
+      instructions: (bot) => botInstructions({ ...bot, homeFolder: homedir() }),
       scheduleLabel: (when) => botScheduleLabel(when),
       providerLabel: (instanceId) => this.botProviderLabel(instanceId),
       // No internet: a bot waits instead of failing (a DNS lookup and a connection, never a model call).
@@ -691,36 +857,61 @@ export class MmsProfileServices {
           return botApiHost(driver, driver === 'pi' ? instanceId.split(':')[1] : undefined)
         }
       }),
-      // By hand (#673): the ready models that can hold a bot here, named by their provider.
-      modelChoices: async () => {
-        const seen = new Set<string>()
-        return (await botModels.holdable()).flatMap(({ instanceId, model }) => {
-          if (seen.has(model)) return []
-          seen.add(model)
-          const family = this.botProviderLabel(instanceId)
-          return [{ model, label: family ? `${family} · ${model}` : model }]
-        })
-      },
-      computerName: () => hostname(),
+      // By hand (#673): each ready entry's models that can hold a bot here, named by the entry, with their reasoning levels,
+      // shown in the app's model picker from its own listing.
+      modelOptions: () => botModels.pickable(),
+      modelListing: () => harness.llmProviders({ kind: 'device' }),
+      runsOnNote: (instanceId) => harness.botRunsOnNote(instanceId),
+      images: { options: () => botImages.options(), usage: (botId) => botImages.usage(botId) },
+      // The name the side card and Devices show (macOS's Computer Name, Linux's pretty hostname), else the hostname.
+      // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
+      computerName: () => computerNameIfKnown() || hostname(),
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
-      // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
+      // Which devices reach each bot: a new bot's choice is saved before the bot is published.
+      deviceAccess: this.botDeviceAccess,
+      // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
-      browser: botBrowsers
+      browser: botBrowsers,
+      // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
+      threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
+      // A deleted bot's private temporary folder outside Mousse's data (Claude Code's commands on Linux) goes with it.
+      quietHoursFor: (botId, at) => this.ownerQuietHours.quietHoursFor(botId, at),
+      ownerActive: () => this.ownerQuietHours.active(),
+      ownerActivity: () => this.ownerQuietHours.report(),
+      removeRuntimeTemp: (cwd) => removeClaudeBotTemp(cwd),
+      // The owner's MCP servers set up for the whole profile, through Mousse (`BotMcp`).
+      ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
     }, ({ store }) => {
       // Memory (WP6) on `bots.db`, right after its migration: the journal, the packs and the owner's memory operations.
-      const memory = new BotMemoryStore({ db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') })
+      const { memory, journal, pack } = createProfileBotMemory({
+        memory: { db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') },
+        journal: {
+          asksFirstEnabled: () => botAsksFirst(this.settings.get()),
+          readThread: (threadId) => this.threads.loadThreadData(threadId),
+          listThreads: () => botThreadsForCatchUp(store.captureThreads()),
+          // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
+          isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
+        },
+        context: {
+          filesFolder: (botId) => botFilesFolder(homeDir, botId),
+          situation: (botId) => this.botSituation(botId),
+          scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
+          jobs: (botId, limit, since) => store.recentJobs(botId, limit, since),
+          reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
+            .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') })),
+          // The digest of a fold (docs/plans/bot-context.md §14): one call with no tools on the bot's chat model.
+          digest: async ({ selection, system, prompt, signal }) => (await harness.oneShot({
+            selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model },
+            signal,
+            purpose: 'title',
+            task: 'chat_digest',
+            system,
+            prompt,
+            maxChars: BOT_CHAT_DIGEST.digest * 8
+          })).text
+        }
+      })
       botMemory = memory
-      const journal = createBotJournal({
-        store: memory,
-        readThread: (threadId) => this.threads.loadThreadData(threadId),
-        listThreads: () => botThreadsForCatchUp(store.captureThreads())
-      })
-      const pack = createBotContextProvider({
-        store: memory,
-        journal,
-        situation: (botId) => this.botSituation(botId),
-        scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt
-      })
       // A scheduled run of a bot's automation learns the report levels, its context and Tuning, as any automation run does.
       const context: typeof pack = {
         ...pack,
@@ -738,15 +929,25 @@ export class MmsProfileServices {
       }
       const admin = createBotMemoryAdmin({
         store: memory,
+        name: (botId) => this.personalBots?.definitionOf(botId)?.name,
         definition: (botId) => {
           try { return this.personalBots?.definitionOf(botId) } catch { return undefined }
         }
       })
       // Process control (WP1) over this `bots.db`: the engine arms each dispatch, the runtimes attach to it.
       botProcesses = createBotProcessRegistry({ store })
-      return { journal, context, memory: admin, supervision: botProcesses }
+      return { journal, context, progress: memory, memory: admin, supervision: botProcesses }
     })
     this.botStore = opened?.store ?? null
+    // A new bot's choice of devices is saved before the bot: one left by a crash between the two names a bot that was
+    // never made, and goes now, before any call can make a bot.
+    if (opened) {
+      try {
+        this.botDeviceAccess.dropBots((botId) => opened.store.registry(botId) !== undefined)
+      } catch (error) {
+        console.warn('bot device choices could not be tidied', error instanceof Error ? error.message : String(error))
+      }
+    }
     // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
     if (opened) {
       try {
@@ -756,6 +957,18 @@ export class MmsProfileServices {
       }
     }
     this.personalBots = opened?.engine ?? null
+    this.platform.onDispose(onSettingsSaved(() => this.personalBots?.quietHoursChanged()))
+    // A bot's browser that comes back to it on its own (the window that held it went away) says so in its chat.
+    const chat = opened?.engine.chat
+    // A bot's reply shows the applets its turn published in its thread, as a thread's reply does.
+    chat?.setReplyParts({ published: (threadId) => publishedApplets(this.threads.loadThreadData(threadId).messages) })
+    if (chat) botBrowsers.setNotice((botId, text) => {
+      try {
+        chat.post({ botId, author: 'bot', kind: 'notice', text })
+      } catch (error) {
+        console.warn('a bot browser notice could not be posted', { botId, error: error instanceof Error ? error.message : String(error) })
+      }
+    })
     if (this.personalBots) {
       void this.skillsRegistry.discover()
         .then((snapshot) => { this.botKnownSkills = new Set(snapshot.skills.map((skill) => skill.id)) })
@@ -763,11 +976,22 @@ export class MmsProfileServices {
     }
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
+    // What runs for each turn's folder: its terminals, agents' background commands and bots' (`RunningRegistry`).
+    const orchestrator = this.orchestrator
+    const ptys = this.ptyManager
+    this.orchestrator.setBotNames(personalBots ? (botId) => personalBots.botName(botId) : null)
+    this.orchestrator.setRunning(new RunningRegistry({
+      terminals: () => ptys.runningTerminals(),
+      terminalOutput: (ptyId) => ptys.getScrollback(ptyId).slice(-8_000),
+      watchers: () => personalBots?.runningWatchers() ?? [],
+      thread: (threadId) => orchestrator.runningSources().thread(threadId),
+      botName: (botId) => personalBots?.botName(botId)
+    }))
     // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
     if (personalBots && botMemory) {
       const memory = botMemory
       this.orchestrator.setBotAppTools({
-        bots: { host: personalBots.tools, activity: botActivity, models: botModels },
+        bots: { host: personalBots.tools, activity: botActivity, models: botModels, images: botImages },
         memory: {
           activationOf: (threadId) => personalBots.tools.activationOf(threadId),
           memory,
@@ -778,12 +1002,31 @@ export class MmsProfileServices {
     }
     // Every bot run that ends is settled, whatever path its turn took (no activation stays running).
     if (personalBots) this.runEngine.on('event', (event: ThreadEvent) => {
+      // A call of a bot's live dispatch finished: it was working until now (what a restart charges it up to).
+      if (event.type === 'tool.status') {
+        const call = event.payload as { runId?: unknown; status?: unknown }
+        if (typeof call.runId === 'string' && call.status !== 'started') {
+          try { personalBots.toolCallEnded(call.runId) } catch { /* a record never fails the call */ }
+        }
+        return
+      }
       if (event.type !== 'run.status') return
       const run = event.payload as RunRecord
       if (run.source !== 'bot' || !TERMINAL_RUN_STATUSES.has(run.status)) return
       setImmediate(() => {
         try { personalBots.settleRun(run.runId) } catch (error) { console.warn('bot dispatch could not be settled', { runId: run.runId, error: error instanceof Error ? error.message : String(error) }) }
       })
+    })
+    // A thread a bot started began, was held, asks the owner or ended: that bot's header reads busy or free again.
+    if (personalBots) {
+      const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, threads: this.threads, thread: (id) => this.threads.getThread(id), changed: (creator, threadId) => personalBots.launchedThreadChanged(creator, threadId) })
+      this.platform.onDispose(stop)
+    }
+    // A step of a bot's turn began: its words just before it are what it is doing now, beside its typing dots.
+    if (personalBots) this.orchestrator.on('thread-message', (payload: { threadId?: unknown; message?: ChatMessage }) => {
+      if (typeof payload?.threadId !== 'string' || !payload.message || !isStepMessage(payload.message)) return
+      const threadId = payload.threadId
+      try { personalBots.stepStarted(threadId, () => this.orchestrator.liveMessagesForSave(threadId)) } catch { /* a status never fails the call */ }
     })
     this.orchestrator.setBotDispatcher(personalBots)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
@@ -793,7 +1036,8 @@ export class MmsProfileServices {
       threadStore: this.threads,
       orchestrator: this.orchestrator,
       ptyManager: this.ptyManager,
-      questions: this.questions
+      questions: this.questions,
+      unseenDone: new UnseenDoneStore(homeDir)
     })
     // Minimum MMS-owned persistence so headless turns survive without the GUI.
     // Load-merges agents/tasks/mousse sessions; never writes messageQueue (queue API only).
@@ -869,8 +1113,12 @@ export class MmsProfileServices {
         try { runs.forgetAutomation(jobId) } catch { /* the notes stay; nothing reads them */ }
       })
     }
+    this.scheduled.on('jobRemoved', (jobId: string) => botMemory?.removeProgressForJob(jobId))
     if (personalBots) {
-      this.scheduled.setBotRunner({ runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
+      this.scheduled.on('jobRemoved', (_jobId: string, job: ScheduledJob) => {
+        if (job.bot) personalBots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job), canWakeMe: job.bot.canWakeMe })
+      })
+      this.scheduled.setBotRunner({ editSchedule: (botId, save) => personalBots.editSchedule(botId, save), findOccurrence: (input) => personalBots.findScheduledOccurrence(input), runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
       // Each tick also brings the inbox's bot runs up to date, so their items appear without the page open.
       this.scheduled.setTickHook(async (now) => {
         await personalBots.maintain(now)
@@ -916,6 +1164,20 @@ export class MmsProfileServices {
       threads: this.threads
     })
     this.agentJobAsks = new AgentJobAskStore(homeDir)
+    this.themeRestore = new ThemeRestoreStore(homeDir)
+    this.wallpapers = new WallpaperStore(homeDir, { used: () => this.usedWallpaperIds() })
+    // The agents' theme tools: a change is saved like one made in Settings and reaches every window of the profile.
+    this.orchestrator.setAppearanceTools({
+      get: () => this.settings.get().appearance,
+      set: (patch) => {
+        const settings = this.settings.set({ appearance: patch } as MousseSettingsUpdate)
+        this.events.emit({ channel: 'protocol:event', data: { type: 'settings.changed', data: { settings } } })
+        return settings.appearance
+      },
+      // An agent's path: never a network share (signing in to a host the agent named would hand it the person's credentials).
+      importWallpaper: (path) => this.wallpapers.importFile(path, { network: false }),
+      restorePoint: this.themeRestore
+    })
     this.orchestrator.setScheduledJobs({
       // A thread whose first ask the person allowed; a profile that turned the old switch on lets every thread add them.
       threadAllowed: (threadId) => config.agentJobsEnabled() || this.agentJobAsks.threadAllowed(threadId),
@@ -935,6 +1197,7 @@ export class MmsProfileServices {
       create: (input) => this.scheduled.createJob(input),
       update: (id, patch) => this.scheduled.updateJob(id, patch),
       pause: (id, reason) => this.scheduled.pauseJob(id, reason),
+      remove: (id) => this.deleteScheduledJob(id),
       trigger: (id) => this.scheduled.triggerJob(id),
       wake: () => this.scheduled.wake()
     })
@@ -963,10 +1226,12 @@ export class MmsProfileServices {
     this.orchestrator.setAutomationTools({
       drafts: this.automationDrafts,
       isManagerThread: (threadId) => this.threads.getThread(threadId)?.automationManager === true,
-      personRequest: (threadId) => [...this.orchestrator.getMessages(threadId)].reverse().find((message) => message.role === 'user')?.content,
+      // The person's own message that started the manager's current turn: none when an agent's or a bot's message did.
+      personRequest: (threadId, runId) => this.automationManagerRequest(threadId, runId),
       managerWorkspace: () => automationManagerWorkspace(this.homeDir, this.automationManagerProjectId ? this.projects.getProject(this.automationManagerProjectId)?.path : undefined),
       botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId,
       activationOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.activationId,
+      saveLeftOff: (activationId, text) => this.personalBots?.saveLeftOff(activationId, text),
       // "Check this daily" in an ordinary chat: a person's thread, not a run's, a bot's or the manager's.
       ordinaryThread: (threadId) => {
         const thread = this.threads.getThread(threadId)
@@ -985,11 +1250,50 @@ export class MmsProfileServices {
     })
     this.webhookSecretCache = new WebhookSecretCache(this.scheduledStore, webhookSecrets)
     // Saved keys live in the same secret file, by name; a run that names one that is not there ends Incomplete.
+    // Secrets agents ask for in threads (#595) live in the same store: a thread's card stores one, the agent gets its name.
+    this.secretVault = new SecretVault({
+      profileRoot: homeDir,
+      threadAlive: (threadId) => Boolean(this.threads.getThread(threadId)),
+      threadTitle: (threadId) => this.threads.getThread(threadId)?.name,
+      // A subagent's thread is masked with its parents' secrets: their agents may hand it the value.
+      ancestorsOf: (threadId) => {
+        const lineage = this.threads.getThread(threadId)?.lineage
+        if (!lineage) return []
+        const ancestors = [lineage.rootThreadId]
+        for (let id: string | undefined = lineage.parentThreadId; id && !ancestors.includes(id) && ancestors.length < 32; id = this.threads.getThread(id)?.lineage?.parentThreadId) ancestors.push(id)
+        return ancestors
+      },
+      threadBusy: (threadId) => secretThreadBusy(threadId, this.orchestrator, this.runEngine),
+      changed: () => this.secretsChanged.emit('changed')
+    })
+    this.secretRequests = new SecretRequests(this.secretVault)
+    const vault = this.secretVault
+    this.orchestrator.setSecrets({
+      masker: (threadId) => vault.maskerFor(threadId),
+      storeMasker: (threadId) => vault.maskerForStore(threadId),
+      copies: { allow: (threadId) => vault.allowCopies(threadId, true), hold: (threadIds) => vault.holdCopies(threadIds) },
+      tools: createSecretToolHost({ vault, requests: this.secretRequests, scratchRoot: join(homeDir, 'secrets', 'run') })
+    })
+    try {
+      this.secretVault.sweep()
+    } catch (error) {
+      console.warn('Expired secrets could not be removed', { error: error instanceof Error ? error.name : 'unknown' })
+    }
+    this.secretSweepTimer = setInterval(() => {
+      try {
+        this.secretVault.sweep()
+      } catch {
+        // The next sweep tries again.
+      }
+    }, 10 * 60 * 1000)
+    this.secretSweepTimer.unref?.()
     this.automationKeys = {
-      list: () => listProfileKeyNames(homeDir),
+      // Secrets given in a thread for a while are not saved keys; a saved one is.
+      list: () => vault.savedKeyNames(),
       set: (name, value) => {
         if (!isKeyName(name)) throw new Error('A key name is a word like GITHUB_TOKEN')
         writeProfileSecret(homeDir, name, value)
+        vault.refresh()
         this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
       },
       has: (name) => listProfileKeyNames(homeDir).includes(name)
@@ -1003,12 +1307,17 @@ export class MmsProfileServices {
       accepted: () => this.scheduled.wake()
     })
 
+    let netDomainClosed = false
     this.net = new NetService({
       profileDir: this.homeDir,
       editorSsh: { home: homedir(), mousseHome: this.installationHome, profile: this.profileId },
       hosted: mousseIdNetModule,
       onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: (runtime) => {
+        // Net closed its earlier runtime without stopping (a removed computer's identity was set
+        // aside): chats over the network work again with the new one.
+        if (netDomainClosed) this.chatNetwork?.resume()
+        netDomainClosed = false
         this.bridgeService = new BridgeProfileService({
           services: this,
           runtime,
@@ -1027,8 +1336,10 @@ export class MmsProfileServices {
             this.chatNetwork?.beginShutdown()
             composition.beginDisable?.()
           },
-          close: () =>
-            Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined),
+          close: () => {
+            netDomainClosed = true
+            return Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined)
+          },
           activeCount: () =>
             (composition.activeCount?.() ?? 0) + (this.chatNetwork?.activeCount() ?? 0)
         }
@@ -1053,10 +1364,22 @@ export class MmsProfileServices {
       listThreads: () => this.threads.listAllThreads(),
       trash: (threadId, operationId, expectedGeneration, keepWork) => this.trashThread(threadId, operationId, expectedGeneration, keepWork),
       restore: (threadId) => this.restoreThread(threadId),
-      archive: (threadId) => this.archiveIfStartedByPerson(threadId)
+      archive: (threadId) => this.archiveIfStartedByPerson(threadId),
+      stopRuns: (threadIds) => this.stopRunsForDelete(threadIds),
+      isRunning: (threadIds) => this.runningForDelete(threadIds).length > 0,
+      assertCanStop: (threadIds, options) => this.assertCanStopForDelete(threadIds, options),
+      assertRequestsSettled: (threadIds, options) => this.assertRequestsSettledBeforeStop(threadIds, options),
+      precheck: (threadId, options) => {
+        // A thread never moved has no lifecycle record yet; the trash would make the same one.
+        if (!this.threads.lifecycleStore.get(threadId)) this.threads.getThreadDir(threadId)
+        return this.lifecycle.cleanup.deletePrecheck(threadId, options)
+      },
+      // The delete's own request, and the other lifecycle calls, are not waited for (as at its admission); nor are
+      // requests of threads the delete does not touch (`deleteGuard`).
+      settle: (threadId, budgetMs, options) => this.waitForDeleteRequests(threadId, budgetMs, options).catch(() => undefined)
     })
     this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
-      assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
+      assertCanTrash: (record, options) => this.assertLifecycleIdle(record.taskId, options),
       drain: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
         const botThreads = new Set(this.personalBots?.botThreadsAmong(owned.map((task) => task.taskId)) ?? [])
@@ -1142,7 +1465,7 @@ export class MmsProfileServices {
         clearCleanupMarker(this.threads.lifecycleStore, record.taskId)
         this.threads.projectPurgedIndex(record)
         this.threadRuntimes.disposeRuntime(record.taskId)
-        this.orchestrator.markThreadDeleted(record.taskId)
+        this.orchestrator.markThreadDeleted(record.taskId, { purged: true })
       },
       configurationChanged: () => {
         this.config.reloadFromDisk()
@@ -1160,6 +1483,8 @@ export class MmsProfileServices {
       runInProgress: (threadId) => this.lifecycleOwnedTasks(threadId).some((task) => this.orchestrator.isTurnActive(task.taskId) || this.runEngine.getActiveRun(task.taskId) !== null),
       stop: async (threadId) => { await this.orchestrator.stopThread(threadId, 'expired', { clearQueue: true }) },
       quiesce: (threadId) => {
+        // What the expired threads launched on other computers is stopped there; nothing there is deleted.
+        this.orchestrator.stopRemoteLaunches(this.lifecycleOwnedTasks(threadId).map((task) => task.taskId), 'expired')
         // A question waiting for an answer and an open terminal are not a run: they end at expiry.
         for (const task of this.lifecycleOwnedTasks(threadId)) {
           this.questions.dismissAllForThread(task.taskId, 'thread_deleted')
@@ -1187,6 +1512,7 @@ export class MmsProfileServices {
       },
       runStore: () => this.runEngine.store,
       notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
+      noteStates: (details) => { this.threads.notePullRequestStates(details) },
       onRunEnd: (listener) => {
         const handler = (event: ThreadEvent): void => {
           if (event.type !== 'run.status') return
@@ -1196,8 +1522,15 @@ export class MmsProfileServices {
         return () => { this.orchestrator.off('run-event', handler) }
       }
     })
+    // A bot's wakes on a thread look when its run ends or it is archived, not only at the next tick.
+    this.orchestrator.on('run-event', (event: ThreadEvent) => {
+      if (event.type === 'run.status' && TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) this.personalBots?.threadRunEnded(event.threadId)
+    })
+    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => this.personalBots?.threadRunEnded(payload.threadId))
     // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
     this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
+    // An archived thread's watch ends as archived, not as stopped (`OrchestratorService.settleThread`).
+    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => this.pullRequestWatch.onEnded(payload.threadId, 'settled'))
     // Thread-event automations wake on their pull request's activity, never on what their own run caused.
     const threadEvents = new ThreadEventTriggers({
       jobs: () => this.scheduled.listJobs(),
@@ -1234,39 +1567,26 @@ export class MmsProfileServices {
     void opts?.headless
   }
 
-  private assertLifecycleIdle(taskId: string): void {
+  /**
+   * The trash's admission and the purge's idle check (`ResourceLifecycleHooks.assertCanTrash`): nothing of these threads
+   * runs, and no other work the delete touches (`deleteGuard`) is in flight. Work of unrelated threads goes on.
+   */
+  private assertLifecycleIdle(taskId: string, options: { keepWork?: boolean } = {}): void {
     const owned = this.lifecycleOwnedTasks(taskId)
     // A bot's turns on these threads are not other work: the accepted trash stops them in its drain.
     const botThreads = new Set(this.personalBots?.botThreadsAmong(owned.map((task) => task.taskId)) ?? [])
     for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId, { ignoreTurn: botThreads.has(task.taskId) })
     this.platform.chats.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
     this.platform.workflowRuns.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
-    const turns = Object.fromEntries(Object.entries(this.orchestrator.getOwnedActivity()).filter(([label]) => !(label.startsWith('bot-turn:') && botThreads.has(label.slice('bot-turn:'.length)))))
-    const activity = {
-      ...turns,
-      platform: this.platform.getActiveCount(),
-      scheduled: this.scheduled.getActiveCount(),
-      // Headless CLI agents are retired; the key stays for protocol stability.
-      headless: 0,
-      mcp: this.mcpManager.getActiveCount()
-    }
-    const activeExecution = Object.entries(activity).filter(([, count]) => count > 0)
-    if (activeExecution.length)
-      throw new ResourceLifecycleError(
-        'busy',
-        'Cannot trash thread: profile execution is still active'
-      )
-    const requests = this.requests.snapshot()
-    const activeRequests = Object.entries(requests).filter(
-      ([key, count]) =>
-        count > 0 && !LIFECYCLE_EXEMPT_METHODS.has(key.replace(/^rpc:/, ''))
-    )
-    if (activeRequests.length) {
-      throw new ResourceLifecycleError(
-        'busy',
-        'Cannot trash thread: profile requests are still active'
-      )
-    }
+    const blocks = this.deleteGuard([taskId, ...owned.map((task) => task.taskId)], { removesWork: options.keepWork !== true })
+    const execution = this.lifecycleExecution().filter(({ label }) => !(label.startsWith('bot-turn:') && botThreads.has(label.slice('bot-turn:'.length))))
+    const blocked = execution.flatMap((entry) => { const why = blocks(entry.scope); return why ? [{ label: entry.label, why }] : [] })
+    if (blocked.length) throw deleteBusy(blocked)
+    const activeRequests = this.requests.entries().flatMap((entry) => {
+      const why = LIFECYCLE_EXEMPT_METHODS.has(entry.label.replace(/^rpc:/, '')) ? undefined : blocks(entry.scope)
+      return why ? [{ label: entry.label, why }] : []
+    })
+    if (activeRequests.length) throw new ResourceLifecycleError('busy', requestsBusy('Cannot trash thread', activeRequests))
     const root = this.threads.lifecycleStore.require(taskId)
     const settle = () => {
       for (const task of owned) {
@@ -1300,6 +1620,109 @@ export class MmsProfileServices {
       },
       threadId
     )
+  }
+
+  /** The profile's execution a delete looks at: turns and sends, agent and chat runs, automations, MCP work. */
+  private lifecycleExecution(): OwnedWorkEntry[] {
+    return [
+      ...this.orchestrator.getOwnedWork(),
+      ...this.platform.getActiveWork(),
+      ...this.scheduled.getActiveWork(),
+      ...this.mcpManager.getActiveWork()
+    ]
+  }
+
+  /**
+   * Which work keeps a delete of `threadIds` from going ahead, and why (`DeleteBlock`); undefined for work it does not
+   * touch. Counted: work of the profile or of unknown reach (`scope: null`); work of these threads and their subagent
+   * threads; work of a thread they launched (or its subagents); and work of a thread whose folder is inside one of their
+   * own worktrees or thread folders. A delete that removes the work (`removesWork`: an expiry takes the worktree and
+   * Git refs) also counts work of a thread in the same repository or project. A person's delete keeps the worktree,
+   * branch and refs (#812/#817), so another thread's work in the same repository is not touched by it and goes on.
+   */
+  private deleteGuard(threadIds: readonly string[], options: { removesWork: boolean }): (scope: WorkScope | null) => DeleteBlock | undefined {
+    const family = new Set<string>()
+    for (const id of threadIds) {
+      family.add(id)
+      for (const subagent of this.threadDeletes.subagentsOf(id)) family.add(subagent)
+      // A thread waiting for recovery is refused by the trash on its own; its owned children are then left out here.
+      if (this.threads.lifecycleStore.get(id)) { try { for (const task of this.lifecycleOwnedTasks(id)) family.add(task.taskId) } catch { /* see above */ } }
+    }
+    // Threads they launched (`createdByThreadId`), and those threads' own subagents and launches.
+    const related = new Set(family)
+    const listed = this.threads.listAllThreads()
+    for (let grew = true; grew;) {
+      grew = false
+      for (const thread of listed) {
+        if (related.has(thread.id)) continue
+        const parent = thread.lineage?.parentThreadId
+        if ((thread.createdByThreadId && related.has(thread.createdByThreadId)) || (parent && related.has(parent))) { related.add(thread.id); grew = true }
+      }
+    }
+    const facts = new Map<string, ReturnType<MmsProfileServices['threadWorkspaceFacts']>>()
+    const factsOf = (id: string) => {
+      if (!facts.has(id)) facts.set(id, this.threadWorkspaceFacts(id))
+      return facts.get(id)
+    }
+    // Folders of the family no other thread may work in: their own worktrees (never a project's own folder, which is the
+    // person's and which no delete touches) and their thread folders. A shared subagent's folder is its parent's: its
+    // delete removes nothing there (its inventory has no worktree), so its parent's work there does not count.
+    const owned: string[] = [], repositories = new Set<string>(), projects = new Set<string>()
+    for (const id of family) {
+      const own = factsOf(id)
+      if (!own) continue
+      if (own.location) owned.push(own.location)
+      if (own.worktree && own.ownWorktree && !own.projectFolder) owned.push(own.worktree)
+      if (own.repositoryId) repositories.add(own.repositoryId)
+      if (own.projectId) projects.add(own.projectId)
+    }
+    return (scope) => {
+      if (!scope || !scope.threadIds.length) return 'profile'
+      for (const id of scope.threadIds) {
+        if (family.has(id)) return 'thread'
+        if (related.has(id)) return 'launched'
+        const other = factsOf(id)
+        // A thread not known here (another computer's, one already gone) is work of unknown reach.
+        if (!other) return 'profile'
+        if (other.worktree && owned.some((folder) => pathsOverlap(canonicalPathSync(other.worktree!), canonicalPathSync(folder)))) return 'worktree'
+        if (options.removesWork && ((other.repositoryId && repositories.has(other.repositoryId)) || (other.projectId && projects.has(other.projectId)))) return 'repository'
+      }
+      return undefined
+    }
+  }
+
+  /**
+   * Where a thread keeps its data and works: its folder, its worktree (or project folder) and repository, its project.
+   * Read only: from the list caches (`ThreadDataStore.peekThread`), else from the thread's lifecycle record and the
+   * `meta.json` and `workspace.json` in its folder. No project is scanned, and no thread folder is resolved, registered
+   * or migrated. A thread in the trash is read the same way. A subagent with no workspace record of its own works in its
+   * parent's (a `shared` one in the parent's folder, `workspaceBinding.sharedPath`), so it has its parent's facts.
+   */
+  private threadWorkspaceFacts(threadId: string, seen = new Set<string>()): ThreadWorkspaceFacts | undefined {
+    const record = this.threads.lifecycleStore.get(threadId)
+    // The list caches, then the lifecycle record's `meta.json`: never `getThread`, which may scan every project and
+    // migrate and register what it finds. A thread found in neither is of unknown reach (undefined).
+    const meta: ThreadFacts | undefined = this.threads.peekThread(threadId) ?? (record ? readThreadFacts(record.location, threadId) : undefined)
+    if (!meta && !record) return undefined
+    const location = record?.location
+    const workspace = location ? readThreadWorkspaceRecord(location) : undefined
+    const facts: ThreadWorkspaceFacts = { location, worktree: workspace?.worktreePath, ownWorktree: Boolean(workspace?.worktreePath), projectFolder: workspace?.kind === 'project-folder', repositoryId: workspace?.repositoryId, projectId: meta?.projectId }
+    const parent = meta?.lineage?.parentThreadId
+    if (workspace || !parent || parent === threadId || seen.has(parent)) return facts
+    seen.add(threadId)
+    const up = this.threadWorkspaceFacts(parent, seen)
+    if (!up) return facts
+    // The shared path is the parent's own folder: a project's own folder stays one. It is not this thread's own.
+    return { ...facts, worktree: meta?.workspaceBinding?.sharedPath ?? up.worktree, ownWorktree: false, projectFolder: up.projectFolder, repositoryId: up.repositoryId, projectId: facts.projectId ?? up.projectId }
+  }
+
+  /**
+   * Waits up to `budgetMs` for the requests a delete of `threadId` would be refused for (`deleteGuard`): requests of the
+   * profile or of unknown reach, and requests of the threads it touches. Lifecycle calls are not waited for.
+   */
+  private waitForDeleteRequests(threadId: string, budgetMs: number, options: { keepWork?: boolean } = {}): Promise<void> {
+    const blocks = this.deleteGuard([threadId], { removesWork: options.keepWork === false })
+    return this.requests.waitForIdle(Math.max(1, Math.round(budgetMs)), (label, scope) => !LIFECYCLE_EXEMPT_METHODS.has(label.replace(/^rpc:/, '')) && blocks(scope) !== undefined)
   }
 
   private lifecycleOwnedTasks(taskId: string): TaskLifecycleRecord[] {
@@ -1408,6 +1831,102 @@ export class MmsProfileServices {
     return this.threadDeletes.delete(taskId, options)
   }
 
+  /** `threads.delete` before its admission: see `ThreadDeleter.stopBeforeDelete`. */
+  async stopThreadBeforeDelete(threadId: string, options: { human: boolean; discard: boolean }): Promise<void> {
+    this.threads.assertLifecycleMutationAvailable()
+    try {
+      await this.threadDeletes.stopBeforeDelete(threadId, options)
+    } catch (error) {
+      // A profile shutting down refuses the delete as its request would.
+      if (error instanceof Error && 'code' in error && error.code === 'profile_draining') throw new DomainRpcError('profile_draining', error.message)
+      throw error
+    }
+  }
+
+  /**
+   * How long a delete waits for the turns it stopped to end. A stopped turn may wait up to 20 s for its checkpoint;
+   * with the admission wait (2 s) and the retries (5 s), a delete answers well inside a request's 60 s.
+   */
+  private deleteStopWaitMs = 20_000
+
+  /** `ThreadDeleteDeps.assertRequestsSettled`: the requests that would refuse the delete after its Stop, checked before it. */
+  private async assertRequestsSettledBeforeStop(threadIds: readonly string[], options: { keepWork?: boolean } = {}): Promise<void> {
+    const family = new Set(threadIds)
+    const blocks = this.deleteGuard(threadIds, { removesWork: options.keepWork === false })
+    // The threads' own requests (the send waiting for a turn, a window's read) end with the Stop or are waited for after it.
+    const why = (label: string, scope: WorkScope | null): DeleteBlock | undefined =>
+      LIFECYCLE_EXEMPT_METHODS.has(label.replace(/^rpc:/, '')) || (scope?.threadIds.length && scope.threadIds.every((id) => family.has(id))) ? undefined : blocks(scope)
+    try {
+      await this.requests.waitForIdle(2_000, (label, scope) => why(label, scope) !== undefined)
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'profile_busy') throw error
+      const active = this.requests.entries().flatMap((entry) => { const reason = why(entry.label, entry.scope); return reason ? [{ label: entry.label, why: reason }] : [] })
+      throw new ResourceLifecycleError('busy', requestsBusy('Cannot trash thread', active))
+    }
+  }
+
+  /**
+   * What refuses a delete's trash, checked before its Stop (`ThreadDeleteDeps.assertCanStop`): shutdown, the threads'
+   * own terminals, questions, agents, chats and workflows, and other execution the delete touches (`deleteGuard`): a
+   * thread they launched, another thread in their worktree, the profile's own work. Their own turns, the questions
+   * those turns asked and the sends waiting for them end with the Stop; requests are checked by `assertRequestsSettledBeforeStop`.
+   */
+  private assertCanStopForDelete(threadIds: readonly string[], options: { keepWork?: boolean } = {}): void {
+    this.requests.assertAccepting()
+    const owned = [...new Set(threadIds.flatMap((id) => this.threads.lifecycleStore.get(id) ? this.lifecycleOwnedTasks(id).map((task) => task.taskId) : [id]))]
+    const family = new Set([...owned, ...threadIds])
+    const stopping = new Set(this.runningForDelete([...family]))
+    for (const id of family) this.threadRuntimes.assertDeletable(id, { ignoreTurn: true, ignoreQuestions: stopping.has(id) })
+    this.platform.chats.assertLifecycleIdle(family)
+    this.platform.workflowRuns.assertLifecycleIdle(family)
+    const blocks = this.deleteGuard([...family], { removesWork: options.keepWork === false })
+    const ownWork = (scope: WorkScope | null): boolean => Boolean(scope?.threadIds.length && scope.threadIds.every((id) => family.has(id)))
+    // What the Stop ends is left out: the threads' turns and the sends waiting for them, the MCP calls those turns make,
+    // and a bot's turns there (the trash's drain ends those). Everything else the delete touches refuses it here.
+    const blocked = this.lifecycleExecution().flatMap((entry) => {
+      if (ownWork(entry.scope) && (entry.label === 'turn' || entry.label === 'send' || entry.label.startsWith('bot-turn:') || entry.label.startsWith('mcp-'))) return []
+      const why = blocks(entry.scope)
+      return why ? [{ label: entry.label, why }] : []
+    })
+    // A turn or send counted nowhere else (a send that named no thread is the profile's).
+    for (const id of [...this.orchestrator.activeTurnThreadIds(), ...this.orchestrator.sendingThreadIds()]) {
+      if (family.has(id)) continue
+      const why = blocks(threadScope(id))
+      if (why) blocked.push({ label: 'turn', why })
+    }
+    if (blocked.length) throw deleteBusy(blocked)
+  }
+
+  /**
+   * A delete's Stop: the turns of these threads end, with their queued messages, and the delete waits for them to
+   * unwind (their provider gone, their lease let go). A turn still running after the wait is left to the trash, which
+   * refuses it as busy.
+   */
+  /**
+   * The threads among these whose turn or run a delete's Stop ends. A bot's turns end in the trash's drain instead
+   * (`personalBots.quiesceForTrash`), which ends its activation first.
+   */
+  private runningForDelete(threadIds: readonly string[]): string[] {
+    const bots = new Set(this.personalBots?.botThreadsAmong([...threadIds]) ?? [])
+    return threadIds.filter((id) => !bots.has(id) && (this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null))
+  }
+
+  private async stopRunsForDelete(threadIds: readonly string[]): Promise<void> {
+    // What the deleted threads launched on other computers is stopped there, whether or not they run now; nothing there
+    // is deleted.
+    this.orchestrator.stopRemoteLaunches(threadIds, 'deleted')
+    const running = (): string[] => this.runningForDelete(threadIds)
+    const stopping = running()
+    if (!stopping.length) return
+    for (const threadId of stopping) {
+      await this.orchestrator.stopThread(threadId, 'deleted', { clearQueue: true }).catch((error: unknown) => {
+        console.warn('a delete could not stop the thread\'s turn', { threadId, error: error instanceof Error ? error.message : String(error) })
+      })
+    }
+    const until = Date.now() + this.deleteStopWaitMs
+    while (running().length && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+
   async restoreThread(
     taskId: string,
     operationId?: string,
@@ -1426,6 +1945,18 @@ export class MmsProfileServices {
 
   /** First-creation asks of agents that add automations (`AgentJobAskStore`). */
   agentJobAsks!: AgentJobAskStore
+
+  /** The profile's wallpaper images (`<profileHome>/wallpapers`); settings name them by id only. */
+  wallpapers!: WallpaperStore
+
+  /** The theme from before agents changed it, which `theme_set { restore: true }` puts back. */
+  themeRestore!: ThemeRestoreStore
+
+  /** The wallpaper images to keep: the user themes', and those of the themes a restore would put back. */
+  private usedWallpaperIds(): Set<string> {
+    const kept = Object.values(this.themeRestore?.get()?.themes ?? {}).filter((theme) => theme !== null)
+    return usedWallpapers([...this.settings.get().appearance.userThemes, ...kept])
+  }
 
   /**
    * Answers an agent's first-creation ask. Allow makes the automation as the agent asked, ending after the lifetime
@@ -1448,6 +1979,19 @@ export class MmsProfileServices {
    * while one of them needs it, and an `event` watch off once none does. A failure to turn it on is shown on the row
    * (the watch is off), never thrown at the edit that caused it.
    */
+  /**
+   * Deletes a scheduled job: Automations' Delete (`scheduled.delete`) and an agent's `schedule_delete` both come here.
+   * The job and the run history on it go, and the scheduler starts no further runs; a run already started, or already
+   * waiting in its thread's queue, still runs there. The inbox keeps its runs and their threads. False when there was no such job.
+   */
+  deleteScheduledJob(id: string): boolean {
+    const watched = this.scheduled.getJob(id)?.trigger?.threadEvent?.threadId
+    const ok = this.scheduled.deleteJob(id)
+    // The pull request's watch stops with the last automation that needed it, unless it is a Notify watch.
+    if (ok && watched) this.syncThreadEventWatch(watched)
+    return ok
+  }
+
   syncThreadEventWatch(threadId: string): void {
     try {
       // A draft never runs, so it needs no watch until it is turned on.
@@ -1461,6 +2005,12 @@ export class MmsProfileServices {
 
   /** Saved keys (#595, the automation part): names in the profile's secret store; values are written, never read back out. */
   automationKeys!: { list(): string[]; set(name: string, value: string): void; has(name: string): boolean }
+  /** Secrets agents asked for in threads, over the profile's secret store (#595). */
+  secretVault!: SecretVault
+  secretRequests!: SecretRequests
+  /** Emits `changed` when a secret is added, used, removed or expires (Settings → Secrets refreshes). */
+  readonly secretsChanged = new EventEmitter()
+  private secretSweepTimer: ReturnType<typeof setInterval> | null = null
   automationDrafts!: AutomationDrafts
 
   /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
@@ -1472,21 +2022,51 @@ export class MmsProfileServices {
     return this.threads.ensureExecutionThread(AUTOMATION_MANAGER_THREAD_KEY, AUTOMATION_MANAGER_NAME, undefined, undefined, { automationManager: true })
   }
 
+  /**
+   * How a turn of the manager's thread stands, from its run: the composer's send answers once the run is committed, and
+   * the page reads the outcome here when no turn event told it (a turn that failed before it started, or a reload).
+   */
+  automationManagerTurn(runId: string): ManagerTurn {
+    const run = this.runEngine.getRun(runId)
+    if (!run || this.threads.getThread(run.threadId)?.automationManager !== true) return { status: 'unknown' }
+    const error = run.outcome?.error
+    switch (run.status) {
+      case 'completed': return { status: 'completed' }
+      case 'failed':
+      case 'uncertain': return { status: 'failed', ...(error ? { error } : {}) }
+      case 'interrupted':
+      case 'cancelled': return { status: 'stopped' }
+      case 'paused': return { status: 'paused' }
+      case 'queued': return { status: 'queued' }
+      default: return { status: 'working' }
+    }
+  }
+
+  /**
+   * The person's request in the manager's turn `runId`: the person's own message that started that turn, else none. An
+   * agent's or a bot's message that started it has none, so an older message of the person's never stands in for one.
+   */
+  automationManagerRequest(threadId: string, runId: string): string | undefined {
+    return personTurnRequest(this.orchestrator.getMessagesForPersistence(threadId), runId)
+  }
+
   /** The Automations inbox (`automations/automations.db`); absent when it could not be opened. */
   automationRuns: AutomationRuns | undefined
 
   /** Brings the inbox's bot runs up to date with their activations. */
   syncBotRuns(): void {
     const runs = this.automationRuns
-    const bots = this.personalBots
-    if (!runs || !bots) return
-    for (const job of this.scheduled.listJobs()) {
-      if (!job.bot) continue
+    const store = this.botStore
+    if (!runs || !store) return
+    for (const open of runs.openBotRuns()) {
       try {
-        const facts = bots.service.automationFacts(job.bot.botId, job.bot.scheduleId)
-        if (facts) runs.syncBotRuns(job.id, facts.runs)
+        const row = store.activation(open.activationId)
+        if (!row || row.botId !== open.botId || row.trigger.kind !== 'schedule') continue
+        runs.syncBotRuns(open.jobId, [{ id: row.id, status: row.status, at: row.createdAt,
+          ...(row.endedAt ? { endedAt: row.endedAt } : {}), ...(row.endReason ? { endReason: row.endReason } : {}),
+          ...(row.threadId ? { threadId: row.threadId } : {}) }])
       } catch {
-        // That bot's runs follow at the next read.
+        // That run follows at the next read, including when its job no longer exists.
       }
     }
   }
@@ -1617,7 +2197,11 @@ export class MmsProfileServices {
     return this.requests.signal
   }
 
-  async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
+  /**
+   * `scope`: the threads the request names, when it names nothing beyond them (`requestWorkScope`); `null` or left out,
+   * it may reach anything of the profile. A delete waits only for requests it touches (`deleteGuard`).
+   */
+  async runOwnedRequest<T>(method: string, work: () => T | Promise<T>, scope: WorkScope | null = null): Promise<T> {
     const label = `rpc:${method}`
     // An idle window's wait holds no profile state and ends when the relay closes, so it must not
     // make storage changes or shutdown wait for it. It is still refused once the profile drains.
@@ -1633,22 +2217,27 @@ export class MmsProfileServices {
         // unchanged synchronous idle check and durable task fence below authorize
         // the move; this wait alone never does. Exclude lifecycle calls consistently
         // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
-        const include = (active: string) =>
-          !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))
+        // Requests of threads the delete does not touch (another thread's send, open
+        // for its whole turn) are not waited for (`deleteGuard`), as at that idle check.
+        // Every thread the request names is the delete's; one that names none waits for every request.
+        const targets = scope?.threadIds ?? []
+        const blocks = targets.length ? this.deleteGuard(targets, { removesWork: false }) : () => 'profile' as const
+        const include = (active: string, activeScope: WorkScope | null) =>
+          !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, '')) && blocks(activeScope) !== undefined
         try {
           await this.requests.waitForIdle(2_000, include)
         } catch (error) {
           if (!(error instanceof Error) || !('code' in error) || error.code !== 'profile_busy')
             throw error
-          const remaining = Object.entries(this.requests.snapshot()).filter(([key]) => include(key))
-          throw new DomainRpcError(
-            'profile_busy',
-            `Cannot change task storage: profile requests are still active (${remaining.map(([key, count]) => `${key}=${count}`).join(', ')})`
-          )
+          const remaining = this.requests.entries().flatMap((entry) => {
+            const why = include(entry.label, entry.scope) ? blocks(entry.scope) : undefined
+            return why ? [{ label: entry.label, why }] : []
+          })
+          throw new DomainRpcError('profile_busy', requestsBusy('Cannot change task storage', remaining))
         }
         this.requests.assertAccepting()
         return await work()
-      })
+      }, scope)
     } catch (error) {
       if (
         error instanceof Error &&
@@ -1699,6 +2288,9 @@ export class MmsProfileServices {
     this.scheduled.beginShutdown()
     if (this.botSweepTimer) clearInterval(this.botSweepTimer)
     this.botSweepTimer = null
+    if (this.secretSweepTimer) clearInterval(this.secretSweepTimer)
+    this.secretSweepTimer = null
+    this.secretRequests?.dispose()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -1735,10 +2327,19 @@ export class MmsProfileServices {
     const schedules = engine.listSchedules(botId).map((schedule) => ({ label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
     // What its work is doing and what it will say later, so a chat turn answers "how's it going?" without a tool.
     const work = engine.listWork(botId).now
-    const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.text }))
+    // A wake reads as the bot's own follow-up, with what it waits for: its time is then when it gives up.
+    const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.wake ? `your wake-up${reminder.event ? ` ${wakeEventLabel(reminder.event)}` : ''}: ${reminder.text}` : reminder.text }))
+    // Work rows whose model can't run (#673): the chat can tell the owner why such work does not start.
+    const blocked = engine.situationLines(botId)
+    // Questions its work waits on (#1123): the chat can talk about them and pass on an answer the owner gives there.
+    const questions = engine.questionLines(botId)
+    // The owner's custom slots: the chat routes work whose job matches one to it (`work_start`'s `slot`).
+    const slots = engine.customSlots(botId).map((slot) => ({ name: slot.name, ...(slot.description ? { description: slot.description } : {}) }))
     return {
       ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
-      work, ...(reminders.length ? { reminders } : {})
+      telling: engine.tellingLine(botId),
+      work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {}), ...(questions.length ? { questions } : {}),
+      ...(slots.length ? { slots } : {})
     }
   }
 
@@ -1997,6 +2598,8 @@ export class MmsProfileServices {
     this.orchestrator.residency?.start()
     // Threads still on JSON files move to thread.db in the background, one at a time.
     this.threads.startBackgroundImport()
+    // Wallpaper images no theme has used for a week go, in the background.
+    void this.wallpapers.collect(this.usedWallpaperIds()).catch(() => 0)
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
@@ -2116,14 +2719,14 @@ export class MmsProfileServices {
     const worker = new EffectWorker({
       outbox: engine.outbox,
       executors: this.orchestrator.effectExecutors(),
-      owner: engine.leaseOwner,
-      fibres: this.effectFibres
+      owner: engine.leaseOwner
     })
     const reconciler = new Reconciler({
       store: engine.store,
       outbox: engine.outbox,
       tools: engine.tools,
       capabilitiesFor: (threadId) => this.orchestrator.capabilitiesForThread(threadId),
+      awaitsAnswer: (threadId) => this.orchestrator.awaitsAnswer(threadId),
       credentials: this.mcpCredentials
     })
     this.runEffectWorker = worker

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import '../../styles/loader.css'
+import { Turning } from '../../lib/turning'
 
 /** How long data may take before a loader appears, so quick loads never flash one. */
 export const LOADER_DELAY_MS = 160
@@ -30,7 +31,7 @@ export function DelayedLoader({ label, size = 'large', delayMs = LOADER_DELAY_MS
   const shown = useShownAfter(delayMs)
   return <span className={`ui-loader-slot${className ? ` ${className}` : ''}`} data-testid={testId}>
     {shown && <span className={`ui-loader ${size}`} role="status" aria-label={label}>
-      <span className="ui-loader-ring icon-spin" />
+      <Turning className="ui-loader-ring icon-spin" />
       <span className="ui-loader-core" />
     </span>}
   </span>

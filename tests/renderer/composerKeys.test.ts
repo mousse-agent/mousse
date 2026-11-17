@@ -76,6 +76,22 @@ describe('composer keys', () => {
     expect(onSend).toHaveBeenLastCalledWith(undefined)
   })
 
+  it('steers with Ctrl+Enter during a run; Ctrl+Shift+Enter and Ctrl+Alt+Enter are not the steer key', () => {
+    const { onSend } = render({ input: 'use pnpm', loading: true })
+    press('Enter', { ctrlKey: true })
+    expect(onSend).toHaveBeenLastCalledWith(undefined, { steer: true })
+    press('Enter', { ctrlKey: true, altKey: true })
+    expect(onSend).toHaveBeenLastCalledWith(undefined)
+    press('Enter', { ctrlKey: true, shiftKey: true })
+    expect(onSend).toHaveBeenCalledTimes(2)
+  })
+
+  it('sends normally with Ctrl+Enter when no run is going', () => {
+    const { onSend } = render({ input: 'hello' })
+    press('Enter', { ctrlKey: true })
+    expect(onSend).toHaveBeenCalledWith(undefined)
+  })
+
   it('sends normally with Alt+Enter when no run is going', () => {
     const { onSend } = render({ input: 'hello' })
     press('Enter', { altKey: true })
@@ -121,7 +137,7 @@ describe('composer keys', () => {
     act(() => root.unmount())
     root = createRoot(host)
     render({ loading: true })
-    expect(box().placeholder).toBe('Queue a follow-up · Alt+Enter steers')
+    expect(box().placeholder).toBe('Queue a follow-up · Ctrl+Enter steers')
     act(() => root.unmount())
     root = createRoot(host)
     render({ disabled: true, placeholder: '' })

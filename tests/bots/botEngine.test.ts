@@ -8,9 +8,9 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_JOURNAL_ERROR, BOT_OFFLINE_WATCH_MS, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
-import { botManifestDigest } from '../../src/mms/bots/grants/compile'
+import { botFilesFolder, botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
@@ -23,6 +23,7 @@ import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/
 import type { Enforceability, RunPolicy } from '../../src/shared/harness/types'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
+import { BOT_SUBAGENT_TOOLS, BOT_TASK_TOOLS } from '../../src/shared/bots/personal/manifest'
 
 let base: string
 let profile: string
@@ -46,7 +47,7 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   appTools: [],
   mcp: [],
   skills: [],
-  workspace: { roots: [root], access: 'read' },
+  workspace: null,
   budget: { maxActiveMs: 10 * 60_000, maxTurns: 30 },
   audience: 'owner',
   ...patch
@@ -77,7 +78,8 @@ const approve = () => bots.approve('site-editor', botManifestDigest(bots.get('si
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-engine-')))
   profile = join(base, 'profile')
-  root = join(base, 'site')
+  // The bot's files folder: the one folder its file tools reach, beside its scratch.
+  root = botFilesFolder(profile, 'site-editor')
   mkdirSync(profile, { recursive: true })
   mkdirSync(root, { recursive: true })
   clock = T0
@@ -144,9 +146,8 @@ describe('approval', () => {
     await expect(bots.activate({ botId: 'site-editor', input: 'Fix the footer', clientRequestId: 'c1' })).rejects.toMatchObject({ code: 'bot_approval_required' })
     expect(() => bots.approve('site-editor', '0'.repeat(64))).toThrow(expect.objectContaining({ code: 'bot_grant_changed' }))
     expect(bots.approval('site-editor').added.map((line) => line.text)).toEqual([
-      'Use files on this computer',
-      'Read files',
-      'Search files',
+      'Read files in its files folder',
+      'Search files in its files folder',
       'Up to 10 minutes of work per run',
       'Up to 30 model requests (retries included) per run'
     ])
@@ -174,7 +175,7 @@ describe('approval', () => {
     publish({ tools: ['read', 'search', 'edit'] })
     await expect(bots.activate({ botId: 'site-editor', input: 'b', clientRequestId: 'wide' })).rejects.toMatchObject({
       code: 'bot_approval_required',
-      details: { added: [{ kind: 'tool', text: 'Edit files' }] }
+      details: { added: [{ kind: 'tool', text: 'Edit files in its files folder' }] }
     })
   })
 
@@ -239,7 +240,7 @@ describe('activation and dispatch', () => {
     // A run's request ends with what its last message is for (bot-context.md §5.2).
     expect(prepared.prompt).toBe(` /deploy now\n\n${BOT_RUN_REPORT_LINE}`)
     expect(prepared.instructions).toBe('You keep the site tidy.\n\nAnswer briefly.')
-    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', ...BOT_MEMORY_TOOLS, 'read'].sort() }, budget: { maxTurns: 30, maxWallMs: 10 * 60_000 }, authority: { kind: 'bot' } })
+    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', ...BOT_MEMORY_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'work_models'].sort() }, budget: { maxTurns: 30, maxWallMs: 10 * 60_000 }, authority: { kind: 'bot' } })
     expect(prepared.authority.spend).toBeNull()
     expect(existsSync(join(prepared.scratch, 'tmp'))).toBe(true)
     expect(store.counters(activation.id).activeMs).toBe(10 * 60_000)
@@ -284,9 +285,10 @@ describe('activation and dispatch', () => {
     expect(store.registry('site-editor')).toMatchObject({ failureStreak: 1 })
   })
 
-  it('revoking the grant stops a running dispatch, and its authority refuses the next call', async () => {
+  it('revoking the grant stops every running dispatch, and its authority refuses the next call', async () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
-    const queued = await bots.activate({ botId: 'site-editor', input: 'later', clientRequestId: 'c2' })
+    // A second run of the bot runs beside it.
+    const beside = await bots.activate({ botId: 'site-editor', input: 'later', clientRequestId: 'c2' })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
     const call = { kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path: join(root, 'a.md') } }
@@ -295,9 +297,9 @@ describe('activation and dispatch', () => {
     expect(prepared.authority.check(call)).toEqual({ ok: false, wall: { kind: 'revoked' } })
     expect(prepared.authority.time.signal.aborted).toBe(true)
     await new Promise((resolve) => setImmediate(resolve))
-    expect(stopped).toEqual([activation.threadId])
+    expect([...stopped].sort()).toEqual([activation.threadId, beside.threadId].sort())
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_revoked' })
-    expect(bots.getActivation(queued.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_revoked' })
+    expect(bots.getActivation(beside.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_revoked' })
   })
 
   it('approving a replacement grant ends the dispatch running under the old one', async () => {
@@ -310,25 +312,20 @@ describe('activation and dispatch', () => {
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
   })
 
-  it('a narrower published revision is what runs: tools, file access, limits and work time', async () => {
-    const wide = manifest({ tools: ['read', 'search'], workspace: { roots: [root, join(base, 'docs')], access: 'read' }, budget: { maxActiveMs: 10 * 60_000, maxTurns: 30 } })
-    mkdirSync(join(base, 'docs'))
-    bots.save({ ...definition(), permissions: wide }, bots.get('site-editor').draftHash)
-    bots.publish('site-editor', bots.get('site-editor').draftHash)
-    approve()
-    publish({ tools: ['read'], workspace: null, budget: { maxActiveMs: 2 * 60_000, maxTurns: 5 } })
+  it('a narrower published revision is what runs: tools, limits and work time', async () => {
+    publish({ tools: ['read'], budget: { maxActiveMs: 2 * 60_000, maxTurns: 5 } })
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'narrow' })
     expect(store.counters(activation.id).limits).toEqual({ maxTurns: 5 })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
-    // The memory tools are every bot's, beside its grant (Bot Phase 1 §5.10).
-    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', ...BOT_MEMORY_TOOLS, 'read'].sort() }, budget: { maxTurns: 5, maxWallMs: 2 * 60_000 } })
+    // The memory tools and the listing of the owner's MCP servers are every bot's, beside its grant (Bot Phase 1 §5.10);
+    // a run also splits its job among subagents, on models from work_models, and reads the rest of its tools from its catalogue.
+    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', ...BOT_MEMORY_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'work_models'].sort() }, budget: { maxTurns: 5, maxWallMs: 2 * 60_000 } })
     expect(store.counters(activation.id).activeMs).toBe(2 * 60_000)
     // An ungranted tool in a run is refused and asked for once (Bot Phase 1 §5.4); the run goes on.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'docs', 'a.md') } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
-    // The revision has no file access although the grant has: only its own files folder is open.
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(bots.filesFolder('site-editor'), 'a.md') } })).toEqual({ ok: true })
+    // The tool the revision keeps still works in its files folder.
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: true })
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
 
@@ -336,7 +333,8 @@ describe('activation and dispatch', () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
-    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000])
+    // Its deadline, and the look every live dispatch gets (`BOT_OFFLINE_WATCH_MS`).
+    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000, BOT_OFFLINE_WATCH_MS])
     timers[0].fn()
     await new Promise((resolve) => setImmediate(resolve))
     expect(prepared.authority.time.signal.aborted).toBe(true)
@@ -386,17 +384,17 @@ describe('activation and dispatch', () => {
     expect(store.openAsks('site-editor')).toMatchObject([{ mode: 'ask', kind: 'budget', permission: { budget: { key: 'maxActiveMs' } } }])
   })
 
-  it('one activation runs at a time; the next starts when it ends', async () => {
+  it('runs of a bot run at once, with no count; one ending leaves the others running', async () => {
     const first = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
-    const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
-    expect(second).toMatchObject({ status: 'queued', threadId: null })
+    const others = []
+    for (const id of ['c2', 'c3', 'c4', 'c5']) others.push(await bots.activate({ botId: 'site-editor', input: id, clientRequestId: id }))
+    for (const other of others) expect(other).toMatchObject({ status: 'running', threadId: expect.any(String) })
     const payload = turnStart(store.dispatch(first.id, 1)!.runId!)
     bots.prepare(payload)
     finish(payload.runId, 'failed')
     bots.settle(payload, {})
     expect(bots.getActivation(first.id)).toMatchObject({ status: 'failed', endReason: 'failed' })
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(bots.getActivation(second.id).status).toBe('running')
+    for (const other of others) expect(bots.getActivation(other.id).status).toBe('running')
   })
 
   it('a tool call cut off without an outcome pauses the activation until the owner checks it', async () => {
@@ -420,7 +418,10 @@ describe('activation and dispatch', () => {
 
   it('stopping a queued activation ends it; stopping a running one stops its thread', async () => {
     const first = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
-    const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
+    // Nothing starts while the bot's journal cannot be written, so the second waits.
+    store.setError('site-editor', { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
+    const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c4' })
+    expect(second.status).toBe('queued')
     await expect(bots.stop(second.id)).resolves.toMatchObject({ status: 'cancelled', endReason: 'stopped' })
     await expect(bots.stop(first.id)).resolves.toMatchObject({ status: 'cancelled', endReason: 'stopped' })
     expect(stopped).toEqual([first.threadId])
@@ -441,13 +442,17 @@ describe('activation and dispatch', () => {
     store = new BotStore({ profileHome: profile, clock: () => clock })
   })
 
-  it('keeps at most 20 waiting activations; the oldest is dropped', async () => {
-    await bots.activate({ botId: 'site-editor', input: 'running', clientRequestId: 'run' })
+  it('keeps at most 20 waiting runs, running ones not counted; the oldest waiting one is dropped', async () => {
+    const running = await bots.activate({ botId: 'site-editor', input: 'running', clientRequestId: 'run' })
+    // Nothing starts while the bot's journal cannot be written, so the rest wait.
+    store.setError('site-editor', { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     const waiting = []
     for (let index = 0; index < 21; index += 1) {
       clock += 1
       waiting.push(await bots.activate({ botId: 'site-editor', input: `q${index}`, clientRequestId: `q${index}` }))
     }
+    // Of the 21 that waited, the oldest is dropped; the running one is kept and not counted.
+    expect(bots.getActivation(running.id).status).toBe('running')
     expect(bots.getActivation(waiting[0].id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
     expect(bots.listActivations('site-editor').filter((row) => row.status === 'queued')).toHaveLength(20)
   })

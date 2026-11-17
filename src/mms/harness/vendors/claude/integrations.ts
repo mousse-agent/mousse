@@ -15,7 +15,11 @@ import type { IntegrationSecretAdapter } from '../../../integrations/secrets'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
 import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../run/mcp/attachment'
 
-/** A user MCP server in the Claude Agent SDK `mcpServers` shape. Values hold `${VAR}` references only. */
+/**
+ * A user MCP server in the Claude Agent SDK's server shape, its header and environment values resolved. It reaches
+ * Claude Code only through a channel it reads at its start, or over its input (`mcpRegistration`): never its command line
+ * or its environment.
+ */
 export type ClaudeUserMcpServer =
   | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
   | { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }
@@ -37,8 +41,6 @@ export interface ClaudeTurnIntegrations {
   mcpServers: Record<string, ClaudeUserMcpServer>
   /** Servers Mousse stays connected to on Claude's behalf, by the name Claude sees. */
   proxiedServers: Record<string, ClaudeProxiedMcpServer>
-  /** Resolved secret values the `${VAR}` references in `mcpServers` point at. */
-  env: Record<string, string>
   toolRules: ClaudeMcpToolRules
   /** Local Claude plugin directory holding the enabled skills; absent when there are none. */
   pluginPath?: string
@@ -132,7 +134,7 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     const settings = this.deps.settings.get().integrations
     // A Claude Subscription thread is the main agent, as on every other chat provider.
     const actor: IntegrationActor = { kind: 'main' }
-    const result: ClaudeTurnIntegrations = { mcpServers: {}, proxiedServers: {}, env: {}, toolRules: {}, warnings: [] }
+    const result: ClaudeTurnIntegrations = { mcpServers: {}, proxiedServers: {}, toolRules: {}, warnings: [] }
 
     try {
       const snapshot = await this.deps.mcpRegistry.discover({ projectPath, redactSecrets: false })
@@ -159,15 +161,13 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
   ): Promise<void> {
     // The names Mousse's own servers take: a user server never shadows one, nor is shadowed by one.
     const used = new Set<string>([MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME])
-    let variable = 0
-    // Secrets travel in the environment: the SDK puts the server list on Claude's command line.
-    const indirect = (record: Record<string, string> | undefined): Record<string, string> | undefined => {
+    // Resolved here, and sent so that Claude Code expands nothing in them again (`claudeLiteralServers`): the servers reach
+    // Claude Code through a channel it reads at its start or over its input, so a secret is neither on its command line nor
+    // in its environment, where the commands Claude runs could read it (#358).
+    const resolveValues = (record: Record<string, string> | undefined): Record<string, string> | undefined => {
       const entries = Object.entries(record ?? {}).flatMap(([key, value]) => {
-        const resolved = this.deps.secrets.resolveEnv(value)
-        if (!resolved) return []
-        const name = `MOUSSE_MCP_VALUE_${variable++}`
-        result.env[name] = resolved
-        return [[key, `\${${name}}`] as const]
+        const text = this.deps.secrets.resolveEnv(value)
+        return text ? [[key, text] as const] : []
       })
       return entries.length > 0 ? Object.fromEntries(entries) : undefined
     }
@@ -194,14 +194,14 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
           result.warnings.push(`MCP server ${server.name} has no command.`)
           continue
         }
-        const env = indirect(server.env)
+        const env = resolveValues(server.env)
         entry = { type: 'stdio', command: server.command, ...(server.args?.length ? { args: server.args } : {}), ...(env ? { env } : {}) }
       } else {
         if (!server.url) {
           result.warnings.push(`MCP server ${server.name} has no URL.`)
           continue
         }
-        const headers = indirect(server.headers)
+        const headers = resolveValues(server.headers)
         entry = { type: server.transport, url: server.url, ...(headers ? { headers } : {}) }
       }
       const name = claim(server)

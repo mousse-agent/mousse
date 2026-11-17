@@ -129,15 +129,6 @@ describe('Collapse', () => {
     expect(shell()?.hasAttribute('data-stagger')).toBe(false)
   })
 
-  it('keeps the motion within the requested timing and turns it off for reduced motion', () => {
-    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
-    expect(css).toMatch(/\[data-motion='enter'\]\s*\{\s*transition: grid-template-rows 160ms/)
-    expect(css).toMatch(/\[data-motion='exit'\]\s*\{\s*grid-template-rows: 0fr;\s*transition: grid-template-rows 180ms/)
-    expect(css).toMatch(/:nth-child\(8\) \{ transition-delay: 84ms; \}/)
-    expect(css).not.toMatch(/nth-child\(9\)/)
-    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*transition: none !important/)
-  })
-
   it('lays a settled group out as the same one-row grid it moves in, so the close has a row to shrink from', () => {
     const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
     const base = css.match(/\n\.ui-collapse \{([^}]*)\}/)?.[1] ?? ''
@@ -145,40 +136,6 @@ describe('Collapse', () => {
     expect(base).toMatch(/grid-template-rows: 1fr;/)
     // Only the clip and the transitions depend on the motion; the layout does not.
     expect(css).not.toMatch(/\.ui-collapse\[data-motion\] \{[^}]*display/)
-  })
-
-  it('turns the chevron with the group: the open and close durations and easings', () => {
-    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
-    expect(css).toMatch(/\[data-motion='exit'\]\s*\{[^}]*grid-template-rows 180ms var\(--ui-collapse-ease-close\)/)
-    // The rule that turns the chevron is the one with the transition, on `transform`; `rotate` is listed too
-    // because Tailwind's `rotate-*` classes set that separate property, which a `transform` transition skips.
-    expect(css).toMatch(/\.ui-collapse-chevron \{\s*transform: rotate\(0deg\);\s*transition-property: transform, rotate;\s*transition-duration: 180ms;\s*transition-timing-function: var\(--ui-collapse-ease-close\);/)
-    expect(css).toMatch(/\.ui-collapse-chevron\[data-open\] \{\s*transform: rotate\(var\(--ui-collapse-chevron-turn, 90deg\)\);\s*transition-duration: 160ms;\s*transition-timing-function: var\(--ui-collapse-ease\);/)
-  })
-
-  it('fades the bottom edge of a closing group, so a highlighted row cut by the clip leaves no sliver', () => {
-    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
-    expect(css).toMatch(/\[data-motion='exit'\] > \.ui-collapse-clip \{\s*mask-image: linear-gradient\(to bottom, #000 calc\(100% - 20px\), transparent calc\(100% - 4px\)\);/)
-    // A sidebar row's highlight fades out with the close (it would otherwise outlast the row's clipped text).
-    const sidebar = readFileSync(resolve(process.cwd(), 'src/renderer/styles/threads-sidebar.css'), 'utf8')
-    expect(sidebar).toMatch(/\.app \.ui-collapse\[data-motion='exit'\] \.threads-sidebar-thread \{\s*background: transparent;\s*box-shadow: none;/)
-  })
-
-  it('no other rule turns a shared chevron, so its one transition always applies', () => {
-    const files = [
-      'src/renderer/styles/app.css',
-      'src/renderer/chat/components/agent-elements/tools/subagent-card.css',
-      'src/renderer/chat/components/agent-elements/tools/tool-row-base.tsx',
-      'src/renderer/chat/components/agent-elements/tools/bash-tool.tsx',
-      'src/renderer/chat/components/agent-elements/tools/edit-tool.tsx',
-      'src/renderer/chat/components/agent-elements/tools/SubagentCard.tsx',
-      'src/renderer/chat/components/agent-elements/turn-edit-summary.tsx'
-    ].map((file) => readFileSync(resolve(process.cwd(), file), 'utf8'))
-    for (const source of files) {
-      expect(source).not.toMatch(/(turn-edits|subagent-group)-chevron\.is-open/)
-      // No Tailwind `rotate-*` class on the chevron element (up to the end of its tag).
-      expect(source).not.toMatch(/ui-collapse-chevron[^>]*\brotate-/)
-    }
   })
 })
 

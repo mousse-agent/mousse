@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LlmProviderOption } from '../src/shared/settings'
-import { groupModelsByFamily } from '../src/shared/modelVariants'
+import { getModelSpeedOptions, groupModelsByFamily, resolveReasoning } from '../src/shared/modelVariants'
 import {
   familyFavoritesPatch,
   importLegacyModelFavorites,
@@ -58,6 +58,34 @@ describe('composer picker from snapshots', () => {
       status: { headline: 'Signed in · Max plan', tone: 'ready' }
     })
     expect(providers[0].caps?.planMode).toBe(true)
+  })
+
+  it('gives the same entries for the same snapshots, so switching threads does not group the models again', () => {
+    const snapshots = [snapshot({ models: { entries: claudeModels, source: 'live' } })]
+    const first = pickerProviders(snapshots, catalog)
+    expect(pickerProviders(snapshots, catalog)).toBe(first)
+    // The composer groups the entry's models on every render: the same list keeps its families.
+    expect(groupModelsByFamily('claude-subscription', pickerProviders(snapshots, catalog)[0].models)).toBe(groupModelsByFamily('claude-subscription', first[0].models))
+    // New snapshots or a new catalog are read again; the catalog still fills in what the snapshot lacks.
+    const next = pickerProviders([...snapshots], catalog)
+    expect(next).not.toBe(first)
+    expect(next).toEqual(first)
+    expect(pickerProviders(snapshots, [{ ...catalog[0], models: [{ id: 'claude-opus-4', label: 'Claude Opus 4' }] }])[0].models[0].speed).toBeUndefined()
+    expect(first[0].models[0].speed).toBe('fast')
+  })
+
+  it('offers the speeds a model runs at in the picker\'s speed control, with the model listed once in its family', () => {
+    const opus = model('opus', { label: 'Opus 5.5', capabilities: { efforts: ['low', 'high', 'ultracode'], speeds: ['fast'], images: false } })
+    const [entry] = pickerProviders([snapshot({ models: { entries: [opus, model('haiku', { label: 'Haiku 5.5' })], source: 'live' } })], [])
+    expect(groupModelsByFamily('claude-subscription', entry.models)).toHaveLength(2)
+    expect(getModelSpeedOptions('claude-subscription', 'opus:high', entry.models)).toEqual({
+      current: 'standard',
+      options: [{ speed: 'standard', modelId: 'opus:high' }, { speed: 'fast', modelId: 'opus:fast:high' }]
+    })
+    // Fast keeps the model's levels, Ultracode included, and goes back to the standard speed at the same level.
+    expect(resolveReasoning('claude-subscription', 'opus:fast:ultracode', entry.models).levels).toContain('ultracode')
+    expect(getModelSpeedOptions('claude-subscription', 'opus:fast:high', entry.models)?.options).toContainEqual({ speed: 'standard', modelId: 'opus:high' })
+    expect(getModelSpeedOptions('claude-subscription', 'haiku', entry.models)).toBeUndefined()
   })
 
   it('carries an older model\'s flag to the picker', () => {

@@ -1,0 +1,54 @@
+/* Messages steered into a running reply (SteerGroup): one block where they entered it, a quiet "Steer"
+   label over bubbles stacked tight. */
+.steer-group {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  margin: 4px 0;
+}
+
+.steer-group-label {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-end;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: color-mix(in oklab, var(--color-an-foreground-muted) 80%, transparent);
+}
+
+.steer-group-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* A held steer: what it waits for, muted like the label, and Send now as a quiet text button (background on hover
+   and focus only, no border, no fill). */
+.steer-group-sep {
+  opacity: 0.7;
+}
+
+.steer-hold-wait {
+  cursor: default;
+}
+
+.steer-hold-send {
+  height: 20px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.steer-hold-send:hover:not([aria-disabled="true"]) { background: var(--ui-hover); }
+.steer-hold-send:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
+.steer-hold-send[aria-disabled="true"] { cursor: default; color: inherit; }
+
+.steer-group-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}

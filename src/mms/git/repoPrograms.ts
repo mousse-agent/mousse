@@ -384,16 +384,19 @@ const CHANGING = "This repository's Git config kept changing while Mousse read i
  */
 type Step =
   | { kind: 'git'; cwd: string; args: string[]; ceiling?: string }
-  | { kind: 'signature'; path: string }
+  | { kind: 'signatures'; paths: readonly string[] }
   | { kind: 'trustPath'; commonDir: string }
   | { kind: 'trustRecord'; path: string }
 
 type Reading<T> = Generator<Step, T, unknown>
 
+/**
+ * What each of `paths` is now, looked at together: the async reading stats them all at once, so a check costs one
+ * round trip through the daemon's event loop however many files it watches, not one per file.
+ */
 function* signaturesOf(paths: readonly string[]): Reading<string[]> {
-  const signatures: string[] = []
-  for (const path of paths) signatures.push((yield { kind: 'signature', path }) as string)
-  return signatures
+  if (!paths.length) return []
+  return (yield { kind: 'signatures', paths }) as string[]
 }
 
 function sameSignatures(before: readonly string[], after: readonly string[]): boolean {
@@ -414,12 +417,8 @@ function* readPrograms(key: string, ceiling?: string): Reading<RepoPrograms> {
   const cached = ceiling ? `${key}\0${ceiling}` : key
   const hit = cache.get(cached)
   if (hit) {
-    let same = true
-    // One at a time, stopping at the first change.
-    for (const [path, sig] of hit.watched) {
-      if ((yield { kind: 'signature', path }) !== sig) { same = false; break }
-    }
-    if (same) return hit.programs
+    const now = yield* signaturesOf(hit.watched.map(([path]) => path))
+    if (sameSignatures(hit.watched.map(([, sig]) => sig), now)) return hit.programs
   }
   cache.delete(cached)
   for (let attempt = 0; attempt < READ_ATTEMPTS; attempt++) {
@@ -470,9 +469,10 @@ function* readProgramsOnce(key: string, cached = key, ceiling?: string): Reading
     for (const entry of entries) if (entry.origin.startsWith('file:')) paths.add(resolve(key, entry.origin.slice(5)))
     for (const path of dotGitsUpFrom(key, top)) paths.add(path)
     const watched = [...paths]
-    const signatures: string[] = []
-    for (const path of watched) signatures.push(known.get(path) ?? (yield { kind: 'signature', path }) as string)
-    remember(cached, watched, signatures, programs)
+    const unknown = watched.filter((path) => !known.has(path))
+    const looked = yield* signaturesOf(unknown)
+    unknown.forEach((path, index) => known.set(path, looked[index]!))
+    remember(cached, watched, watched.map((path) => known.get(path)!), programs)
   }
   return programs
 }
@@ -484,7 +484,7 @@ function programsFor(cwd: string): RepoPrograms {
     const need = step.value
     step = reading.next(
       need.kind === 'git' ? bareGit(need.cwd, need.args)
-        : need.kind === 'signature' ? signature(need.path)
+        : need.kind === 'signatures' ? need.paths.map(signature)
           : need.kind === 'trustPath' ? repoTrustPath(need.commonDir)
             : readRepoTrustAt(need.path)
     )
@@ -505,7 +505,7 @@ async function programsForAsync(cwd: string, signal?: AbortSignal, ceiling?: str
     const need = step.value
     // A file read that does not answer (a held `stat`) does not hold a cancelled caller: it finishes in the background.
     const answer = need.kind === 'git' ? await bareGitAsync(need.cwd, need.args, signal, need.ceiling)
-      : need.kind === 'signature' ? await untilAborted(signatureAsync(need.path), signal)
+      : need.kind === 'signatures' ? await untilAborted(Promise.all(need.paths.map(signatureAsync)), signal)
         : need.kind === 'trustPath' ? await untilAborted(repoTrustPathAsync(need.commonDir), signal)
           : await untilAborted(readRepoTrustAtAsync(need.path), signal)
     signal?.throwIfAborted()
@@ -641,13 +641,24 @@ export async function withoutRepoProgramsAsync(cwd: string, args: readonly strin
   await waitForFolderAccess([resolve(cwd)], { signal: options?.signal })
   const own = !options?.userAction
   const run = own ? withoutDeref(args) : [...args]
-  await assertGitAllowedAsync({ cwd, args: run, userRequested: options?.userRequested, stdin: options?.stdin, env: options?.env, lockFree: own && run[0] !== 'config' }, options?.signal)
-  const dir = (await untilAborted(gitDirectoryEnvAsync(cwd), options?.signal)).GIT_DIR
-  const named = dir ? [`--git-dir=${dir}`] : []
-  if (run[0] === 'config') return [...named, ...run]
   // A command kept from looking above a folder has the repository's programs read under the same limit.
   const ceiling = options?.ceiling ?? options?.env?.GIT_CEILING_DIRECTORIES
-  return [...named, ...(own ? ['--no-optional-locks'] : []), ...await noRepoProgramArgsAsync(cwd, run, { ...options, ...(ceiling ? { ceiling } : {}) }), ...run]
+  // The check, the Git directory and the repository's programs are read side by side: each waits on file reads, and on a
+  // busy daemon every wait is a turn of its event loop. Reading the programs runs only Git reads, each checked on its own,
+  // and nothing is returned until all three agree, so the command still runs only once the check has allowed it.
+  const [checked, directory, programs] = await Promise.allSettled([
+    assertGitAllowedAsync({ cwd, args: run, userRequested: options?.userRequested, stdin: options?.stdin, env: options?.env, lockFree: own && run[0] !== 'config' }, options?.signal),
+    untilAborted(gitDirectoryEnvAsync(cwd), options?.signal),
+    run[0] === 'config' ? Promise.resolve([]) : noRepoProgramArgsAsync(cwd, run, { ...options, ...(ceiling ? { ceiling } : {}) })
+  ])
+  // In the order they ran in before: a refusal by the check wins over a repository whose programs cannot be read.
+  if (checked.status === 'rejected') throw checked.reason
+  if (directory.status === 'rejected') throw directory.reason
+  if (programs.status === 'rejected') throw programs.reason
+  const dir = directory.value.GIT_DIR
+  const named = dir ? [`--git-dir=${dir}`] : []
+  if (run[0] === 'config') return [...named, ...run]
+  return [...named, ...(own ? ['--no-optional-locks'] : []), ...programs.value, ...run]
 }
 
 /**

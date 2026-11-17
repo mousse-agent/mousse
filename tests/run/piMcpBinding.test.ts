@@ -65,14 +65,14 @@ describe('Pi extension → Mousse MCP registry', () => {
     let turn: PiTurnResponse = {
       attemptToken: first.turn.turnToken, sessionInstructions: '', activeBuiltins: [], catalogRevision: 1,
       mcp: { url: attachment.url, token: attachment.token },
-      tools: [{ name: 'present_plan', description: 'plan', parameters: { type: 'object' }, class: 'read' }]
+      tools: [{ name: 'create_task', description: 'task', parameters: { type: 'object' }, class: 'read' }]
     }
     const loaded = await extension(() => turn)
     await loaded.startTurn()
-    const plan = { title: 'P', markdown: '1.' }
-    const result = await loaded.tools.get('present_plan')!.execute('call-1', plan)
+    const task = { description: 'P' }
+    const result = await loaded.tools.get('create_task')!.execute('call-1', task)
     expect(result.content[0]?.text).not.toMatch(/earlier turn/)
-    expect(fake.host.presentPlan).toHaveBeenCalledWith('thread-a', plan)
+    expect(fake.tasks.list()).toHaveLength(1)
 
     // Turn N+1 on the same warm process (`per_call` keeps the bearer).
     fx.engine.markTerminal(run.runId, 'completed')
@@ -83,14 +83,14 @@ describe('Pi extension → Mousse MCP registry', () => {
     const held = await fetch(attachment.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${attachment.token}` },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'present_plan', arguments: { ...plan, [TURN_TOKEN_KEY]: first.turn.turnToken } } })
+      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'create_task', arguments: { ...task, [TURN_TOKEN_KEY]: first.turn.turnToken } } })
     }).then((response) => response.json() as Promise<{ error?: { code: number } }>)
     expect(held.error?.code).toBe(MCP_ERROR_CODES.mousse_caller_not_live)
-    expect(fake.host.presentPlan).toHaveBeenCalledTimes(1)
+    expect(fake.tasks.list()).toHaveLength(1)
     // The extension's next turn stamps the new token, and its call runs.
     turn = { ...turn, attemptToken: second.turn.turnToken }
     await loaded.startTurn()
-    await loaded.tools.get('present_plan')!.execute('call-2', plan)
-    expect(fake.host.presentPlan).toHaveBeenCalledTimes(2)
+    await loaded.tools.get('create_task')!.execute('call-2', task)
+    expect(fake.tasks.list()).toHaveLength(2)
   })
 })

@@ -66,3 +66,13 @@ export function sanitizeUrl(value: string): string {
 export function nowIso(clock: () => Date = () => new Date()): string {
   return clock().toISOString()
 }
+
+/** Lines the browser broker passes on from a worker's stderr to the daemon's log (`BrowserBroker`). */
+export const WORKER_WARNING_PREFIX = '[browser-worker] '
+
+/** Something the worker did on its own that someone may need to know about, such as a page it closed. */
+export function workerWarning(message: string, details: Record<string, unknown> = {}): void {
+  try {
+    process.stderr.write(`${WORKER_WARNING_PREFIX}${message} ${JSON.stringify(details)}\n`)
+  } catch { /* a closed stderr loses the line, never the work */ }
+}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UIMessage } from "ai";
 import { invokeCommand, isCommandRegistered } from "../../../../commands/commandRegistry";
 import { useRenderMath } from "../../../../markdown/math/renderMathSetting";
+import { useLiveTextVersion } from "../../../../stores/liveTextStore";
 import type { TurnWindowApi } from "../virtual/use-turn-window";
 import { createFindPainter, type FindPainter } from "./dom-highlight";
 import {
@@ -40,6 +41,10 @@ type Options = {
   /** Called when a match is about to be shown: the reader no longer follows the end. */
   onNavigate: () => void;
   onProgrammaticScroll: () => void;
+  /** More messages are still on their way (older history loading): the count says so, and "No matches" waits. */
+  pending?: boolean;
+  /** The field's name and placeholder; "Find in thread" by default. */
+  label?: string;
 };
 
 const NO_MATCHES: FindMatch[] = [];
@@ -162,7 +167,15 @@ export function useThreadFind(options: Options): ThreadFind {
   const index = useMemo(() => new FindIndex(math), [math]);
   // Follows index.revision, so the results catch up as the build reads more of the thread.
   const [indexRevision, setIndexRevision] = useState(0);
-  const searchedTurns = useThrottled(turns, searching && isStreaming ? STREAMING_REINDEX_MS : 0);
+  // Text streamed into a reply goes to its live text, not `turns`: while the bar is open over a
+  // stream, its version is followed too (and only then, so a delta renders nothing here otherwise),
+  // at most once per reindex interval rather than once per delta.
+  const liveVersion = useLiveTextVersion(searching && isStreaming, STREAMING_REINDEX_MS);
+  const searchedInput = useMemo(() => ({ turns, liveVersion }), [turns, liveVersion]);
+  const { turns: searchedTurns, liveVersion: searchedLiveVersion } = useThrottled(
+    searchedInput,
+    searching && isStreaming ? STREAMING_REINDEX_MS : 0,
+  );
 
   const result = useMemo(
     () =>
@@ -173,11 +186,13 @@ export function useThreadFind(options: Options): ThreadFind {
             readMissing: index.missing(searchedTurns, READ_ON_THE_SPOT + 1) <= READ_ON_THE_SPOT,
           })
         : { matches: NO_MATCHES, complete: true },
-    // indexRevision: the same turns, with more of them read.
+    // indexRevision: the same turns, with more of them read. searchedLiveVersion: a reply's live text grew.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [searching, query, searchedTurns, index, indexRevision],
+    [searching, query, searchedTurns, searchedLiveVersion, index, indexRevision],
   );
   const matches = result.matches;
+  // Searched as far as it goes: every message read, and none still on its way.
+  const complete = result.complete && !options.pending;
   const activeIndex = useMemo(() => reselect(matches, active), [matches, active]);
 
   // What callbacks that outlive a render read.
@@ -287,7 +302,7 @@ export function useThreadFind(options: Options): ThreadFind {
     if (startedFor.current === query) return;
     const { options: current } = latest.current;
     const found = result.matches;
-    if (query === "" || (found.length === 0 && result.complete)) {
+    if (query === "" || (found.length === 0 && complete)) {
       startedFor.current = query;
       current.virtualization.cancelNavigation();
       setActive(null);
@@ -306,13 +321,13 @@ export function useThreadFind(options: Options): ThreadFind {
       },
     });
     if (start === null) return;
-    if (!result.complete) {
+    if (!complete) {
       const anchor = anchorTurnKey === null ? 0 : current.turns.findIndex((turn) => turn.key === anchorTurnKey);
       if (!startIsSettled(index, current.turns, anchor, found[start]!)) return;
     }
     startedFor.current = query;
     goTo(found[start]!);
-  }, [searching, query, result, index, goTo]);
+  }, [searching, query, result, complete, index, goTo]);
 
   const step = useCallback(
     (delta: 1 | -1) => {
@@ -345,11 +360,12 @@ export function useThreadFind(options: Options): ThreadFind {
       inputRef,
       query,
       onQueryChange: setQuery,
-      countLabel: formatFindCount(activeIndex, matches.length, query, !result.complete),
+      countLabel: formatFindCount(activeIndex, matches.length, query, !complete),
       hasMatches: matches.length > 0,
       onNext: () => step(1),
       onPrevious: () => step(-1),
       onClose: close,
+      ...(options.label ? { label: options.label } : {}),
     },
   };
 }

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { KokoroTtsModel } from '../../shared/readAloud'
+import { assertNotInstallingUpdate } from '../updates/installGate'
 import type { VoiceEngineProcess } from './NativeTtsSlots'
 
 /**
@@ -23,6 +24,7 @@ export const kokoroOnnxFile = (model: KokoroTtsModel): string => KOKORO_ONNX_FIL
 
 /** Starts the engine at `path`; throws when it is not there. Its log lines go to main's console. */
 export function spawnVoiceEngine(path: string): VoiceEngineProcess {
+  assertNotInstallingUpdate('The voice engine')
   if (!existsSync(path)) throw new Error('The native voice engine is not part of this build')
   const child = spawn(path, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
   // Writing to an engine that just ended fails; its exit is reported instead.

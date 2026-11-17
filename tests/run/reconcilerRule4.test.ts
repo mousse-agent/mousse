@@ -5,7 +5,7 @@ import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import { NOTICE_TASK_CHARS } from '../../src/mms/run/delegation/notice'
 import { planWakeNotice } from '../../src/mms/run/delegation/notice'
 import { redeliveryDelayMs } from '../../src/mms/run/delegation/wake'
-import type { WakeTurnPayload } from '../../src/mms/run/types'
+import type { AgentNotePayload, WakeTurnPayload } from '../../src/mms/run/types'
 import { delegationFixture, QUEUE_ONLY_CAPABILITIES, type DelegationFixture } from './delegationFixture'
 
 describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () => {
@@ -83,9 +83,9 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     expect(report.steers).toHaveLength(1)
     const steer = f.outbox.get(report.steers[0])!
     expect(steer).toMatchObject({ kind: 'turn.steer', runId: parent.runId, status: 'pending' })
-    expect((steer.payload as { text: string; inboxIds: string[] }).text).toBe(
-      `Subagent thread ${accepted.childThreadId} finished task ${accepted.delegationId}.\nAll tests pass\nFull result above.`
-    )
+    const text = (steer.payload as { text: string; inboxIds: string[] }).text
+    expect(text.startsWith(`<mousse_notice kind="subagent_result" ref="${accepted.delegationId}">\nSubagent thread ${accepted.childThreadId} finished its task.`)).toBe(true)
+    expect(text).toContain('<quoted from="subagent result">\nAll tests pass\n</quoted>')
     // The steer carries the identity of the rows it delivers, so the executor can rebuild or skip it.
     expect((steer.payload as { inboxIds: string[] }).inboxIds).toHaveLength(1)
     expect(f.engine.inbox.listPending('parent')).toEqual([])
@@ -108,6 +108,25 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     expect(report.wakes).toEqual([])
     expect(report.steers).toHaveLength(1)
     expect(f.outbox.get(report.steers[0])).toMatchObject({ kind: 'turn.steer', runId: parent.runId })
+    expect(f.engine.inbox.listPending('parent')).toEqual([])
+  })
+
+  it('an agent note waits while the thread waits on a person: a native steer would settle the request', async () => {
+    const { f, parent } = await childFinished({ parentStaysActive: true })
+    const note: AgentNotePayload = { kind: 'agent_note', senderThreadId: 'child-1', senderRunId: 'run-x', senderTitle: null, senderAccess: 'agent', from: 'subagent', text: 'fyi', attention: 'needed' }
+    const noteRow = f.engine.inbox.append({ threadId: 'parent', kind: 'reconcile_notice', payload: note })
+    f.awaiting.add('parent')
+    const held = f.reconciler.runOnce().wakes
+    expect(held.steers).toHaveLength(1)
+    // The child result joins the run; the note does not.
+    expect((f.outbox.get(held.steers[0])!.payload as { inboxIds: string[] }).inboxIds).not.toContain(noteRow.inboxId)
+    expect(f.engine.inbox.listPending('parent').map((row) => row.inboxId)).toEqual([noteRow.inboxId])
+    expect(f.reconciler.runOnce().wakes.steers).toEqual([])
+
+    f.awaiting.delete('parent')
+    const answered = f.reconciler.runOnce().wakes
+    expect(answered.steers).toHaveLength(1)
+    expect(f.outbox.get(answered.steers[0])).toMatchObject({ kind: 'turn.steer', runId: parent.runId })
     expect(f.engine.inbox.listPending('parent')).toEqual([])
   })
 

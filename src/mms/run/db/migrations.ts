@@ -11,7 +11,10 @@ import type { Migration } from './ProfileDatabase'
  * generations); version 9 stores each attempt's execution binding (harness gateway); version 10
  * rebuilds `runs` so a run can be `paused` until a usage limit resets; version 11 records the agent
  * access level on credentials, delegations and runs; version 17 binds a remote subagent's task to the
- * run on another computer that does it (issue #469).
+ * run on another computer that does it (issue #469); version 18 lets that task's mode be Full access; version 19
+ * records whether a remote subagent's calls carry the agent mark; version 20 keeps the watches of the settle notice (an
+ * agent that sent a message with `notify` is told when the work it started settles, SPEC §15.1); version 23 keeps the
+ * questions an agent asked without waiting (`open_questions`, issue #1372).
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -542,6 +545,219 @@ CREATE TABLE remote_subagents(
 ) STRICT;
 CREATE INDEX remote_subagents_state ON remote_subagents(state);
 CREATE INDEX remote_subagents_child ON remote_subagents(child_thread_id);
+`
+  },
+  {
+    version: 18,
+    // SQLite cannot change a CHECK in place: the table is rebuilt (SQLite's "other kinds of ALTER TABLE"
+    // procedure). It has no foreign key, and nothing refers to it.
+    sql: `
+-- A remote subagent may run in Full access when the computer that runs it allows this one Full access
+-- (issue #1160): the mode CHECK takes 'full'. Rows written before keep the mode they were started with, and
+-- their rowids, which order a subagent's tasks.
+CREATE TABLE remote_subagents_new(
+  delegation_id    TEXT PRIMARY KEY,
+  child_thread_id  TEXT NOT NULL,
+  child_run_id     TEXT NOT NULL,
+  node             TEXT NOT NULL,
+  prompt           TEXT NOT NULL,
+  permission_mode  TEXT NOT NULL CHECK(permission_mode IN ('ask','accept_edits','auto','full')),
+  chat_mode        TEXT NOT NULL CHECK(chat_mode IN ('agent','plan')),
+  worktree         INTEGER NOT NULL CHECK(worktree IN (0,1)),
+  project_id       TEXT,
+  instance_id      TEXT,
+  model            TEXT,
+  remote_thread_id TEXT,
+  remote_run_id    TEXT,
+  deadline_at      TEXT,
+  state            TEXT NOT NULL CHECK(state IN ('starting','running','stopping','done')),
+  waiting_input    INTEGER NOT NULL DEFAULT 0 CHECK(waiting_input IN (0,1)),
+  last_error       TEXT,
+  last_seen_at     TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+) STRICT;
+INSERT INTO remote_subagents_new(rowid, delegation_id, child_thread_id, child_run_id, node, prompt, permission_mode, chat_mode,
+    worktree, project_id, instance_id, model, remote_thread_id, remote_run_id, deadline_at, state, waiting_input,
+    last_error, last_seen_at, created_at, updated_at)
+  SELECT rowid, delegation_id, child_thread_id, child_run_id, node, prompt, permission_mode, chat_mode,
+    worktree, project_id, instance_id, model, remote_thread_id, remote_run_id, deadline_at, state, waiting_input,
+    last_error, last_seen_at, created_at, updated_at
+  FROM remote_subagents;
+DROP TABLE remote_subagents;
+ALTER TABLE remote_subagents_new RENAME TO remote_subagents;
+CREATE INDEX remote_subagents_state ON remote_subagents(state);
+CREATE INDEX remote_subagents_child ON remote_subagents(child_thread_id);
+`
+  },
+  {
+    version: 19,
+    sql: `
+-- The form a remote subagent's calls take on its computer (issue #1160): 1 when they carry the agent mark (that
+-- computer knows it), 0 when they go unmarked (an older computer), null until the first call decides. A task never
+-- changes form mid-flight: the other computer's replay ledger is keyed by method, so a switch would send it twice.
+ALTER TABLE remote_subagents ADD COLUMN marked INTEGER CHECK(marked IS NULL OR marked IN (0,1));
+`
+  },
+  {
+    version: 20,
+    sql: `
+-- The settle notice (SPEC §15.1): one row per message an agent sent with notify (thread_send, thread_create's first
+-- message). It follows the message, not a run: run_id is the run that carries it now (a re-queue, a steer handed
+-- back or a pause continuation moves it) and queue_item_id the queue item that carried it, when it was queued.
+-- target_node is null for a thread on this computer; how a watch learns about its run is not stored here, so a
+-- follower for another computer adds no column.
+--   active:  still followed;
+--   ended:   the work ended (end_status says how) and the end notice is written;
+--   expired: 24 h passed first (expires_at) and the sender was told once that the work is still going.
+-- needs_input and end_notice: 'due' once Mousse decided to tell the sender, 'sent' once the notice is in the sender's
+-- queue, so a restart in between delivers it.
+CREATE TABLE thread_watches(
+  watch_id                TEXT PRIMARY KEY,
+  message_key             TEXT NOT NULL UNIQUE,
+  watcher_thread_id       TEXT NOT NULL,
+  watcher_run_id          TEXT NOT NULL,
+  watcher_stop_generation INTEGER NOT NULL,
+  target_node             TEXT,
+  target_thread_id        TEXT NOT NULL,
+  run_id                  TEXT,
+  queue_item_id           TEXT,
+  state                   TEXT NOT NULL CHECK(state IN ('active','ended','expired')),
+  needs_input             TEXT CHECK(needs_input IN ('due','sent')),
+  end_notice              TEXT CHECK(end_notice IN ('due','sent')),
+  end_status              TEXT,
+  created_at              TEXT NOT NULL,
+  expires_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL
+) STRICT;
+CREATE INDEX thread_watches_state ON thread_watches(state, target_thread_id);
+CREATE INDEX thread_watches_watcher ON thread_watches(watcher_thread_id);
+`
+  },
+  {
+    version: 21,
+    sql: `
+-- A thread an agent here launched on another of the user's computers (thread_create with computer, issue #1160):
+-- this computer's record of the launch. The thread there is that computer's own. One row per launch, keyed by
+-- the thread_create receipt's key, and written with it before any call, so a launch cut off by a lost link or a
+-- restart is finished from this row.
+--   starting:  nothing is confirmed there yet; the next attempt creates the thread (the same key finds the first);
+--   created:   the thread exists there (remote_thread_id); its model, mode and first message are not all set;
+--   launched:  the thread is set up there; first_message_state says what became of the first message;
+--   abandoned: refused for good before a thread existed, or the thread there was archived (last_error says why).
+-- first_message_state: none (the launch has none), pending, sent, failed (refused for good, the thread is kept),
+-- uncertain (that computer did not confirm it; the next attempt asks again under the same key).
+CREATE TABLE remote_launches(
+  creation_key        TEXT PRIMARY KEY,
+  launcher_thread_id  TEXT NOT NULL,
+  launcher_run_id     TEXT NOT NULL,
+  node                TEXT NOT NULL,
+  computer_name       TEXT NOT NULL,
+  title               TEXT NOT NULL,
+  remote_project_id   TEXT NOT NULL,
+  worktree            INTEGER NOT NULL CHECK(worktree IN (0,1)),
+  instance_id         TEXT,
+  model               TEXT,
+  permission_mode     TEXT NOT NULL CHECK(permission_mode IN ('ask','accept_edits','auto','full')),
+  remote_mode         TEXT CHECK(remote_mode IS NULL OR remote_mode IN ('ask','accept_edits','auto','full')),
+  first_message       TEXT,
+  first_message_mode  TEXT CHECK(first_message_mode IS NULL OR first_message_mode IN ('agent','plan')),
+  mark                TEXT NOT NULL,
+  remote_thread_id    TEXT,
+  remote_run_id       TEXT,
+  state               TEXT NOT NULL CHECK(state IN ('starting','created','launched','abandoned')),
+  first_message_state TEXT NOT NULL CHECK(first_message_state IN ('none','pending','sent','failed','uncertain')),
+  last_error          TEXT,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL
+) STRICT;
+CREATE INDEX remote_launches_launcher ON remote_launches(launcher_thread_id);
+CREATE INDEX remote_launches_remote ON remote_launches(node, remote_thread_id);
+CREATE INDEX remote_launches_open ON remote_launches(state, first_message_state);
+`
+  },
+  {
+    version: 22,
+    sql: `
+-- A person's Stop of a launcher, its deletion or its expiry reaches the threads it launched on other computers
+-- (issue #1160): a marked orchestrator.abort there, which stops only runs this computer's agents started. A Stop that
+-- could not be delivered is kept here, survives a restart and is sent when that computer answers, until stop_deadline.
+--   pending: not delivered yet (stop_key is the idempotency key every attempt uses, so it acts once there);
+--   sent:    that computer answered (stop_result says what it stopped, or why it left the run);
+--   expired: stop_deadline passed first.
+-- stop_reason: stopped (a person's Stop), deleted or expired (the launcher's).
+ALTER TABLE remote_launches ADD COLUMN stop_state TEXT CHECK(stop_state IS NULL OR stop_state IN ('pending','sent','expired'));
+ALTER TABLE remote_launches ADD COLUMN stop_key TEXT;
+ALTER TABLE remote_launches ADD COLUMN stop_reason TEXT CHECK(stop_reason IS NULL OR stop_reason IN ('stopped','deleted','expired'));
+ALTER TABLE remote_launches ADD COLUMN stop_deadline TEXT;
+ALTER TABLE remote_launches ADD COLUMN stop_result TEXT;
+CREATE INDEX remote_launches_stops ON remote_launches(stop_state);
+`
+  },
+  {
+    version: 23,
+    sql: `
+-- A question an agent asked without waiting (ask_user with wait false, issue #1372). The agent keeps working; the
+-- answer reaches it through the inbox (inbox_id), written in the same transaction as the answer.
+--   open:      waiting for the person;
+--   answered:  answered (answers, answered_by);
+--   dismissed: closed by the person without an answer (the agent is told, as for an answer);
+--   withdrawn: the agent no longer needs it;
+--   closed:    the thread was stopped, archived or deleted (close_reason).
+CREATE TABLE open_questions(
+  request_id   TEXT PRIMARY KEY,
+  thread_id    TEXT NOT NULL,
+  run_id       TEXT,
+  questions    TEXT NOT NULL,
+  status       TEXT NOT NULL CHECK(status IN ('open','answered','dismissed','withdrawn','closed')),
+  answers      TEXT,
+  answered_by  TEXT,
+  close_reason TEXT,
+  inbox_id     TEXT,
+  created_at   TEXT NOT NULL,
+  settled_at   TEXT
+) STRICT;
+CREATE INDEX open_questions_thread ON open_questions(thread_id, status);
+`
+  },
+  {
+    version: 24,
+    sql: `
+-- A remote subagent's limit (issue #685, maxMinutes): the minutes of running time its task may use. The computer that
+-- runs it counts them when it takes the limit; deadline_at stays the stop this computer makes for an older one.
+ALTER TABLE remote_subagents ADD COLUMN limit_minutes INTEGER CHECK(limit_minutes IS NULL OR limit_minutes >= 1);
+
+-- The expiry a remote subagent's thread there must have (issue #685): its root thread's here, kept until that
+-- computer took it, so a change made while it is offline reaches it when it answers. One row per subagent.
+--   pending: expires_at (null: no expiry) is not yet set there; generation rises with each change;
+--   sent:    that computer took it, or its thread there is gone.
+CREATE TABLE remote_expiry(
+  child_thread_id  TEXT PRIMARY KEY,
+  root_thread_id   TEXT NOT NULL,
+  node             TEXT NOT NULL,
+  remote_thread_id TEXT,
+  expires_at       TEXT,
+  stops_run        INTEGER NOT NULL DEFAULT 0 CHECK(stops_run IN (0,1)),
+  generation       INTEGER NOT NULL DEFAULT 1,
+  state            TEXT NOT NULL CHECK(state IN ('pending','sent')),
+  last_error       TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+) STRICT;
+CREATE INDEX remote_expiry_root ON remote_expiry(root_thread_id);
+CREATE INDEX remote_expiry_state ON remote_expiry(state);
+
+-- A run's running-time limit on the computer that runs it (an agent on another computer gave one, issue #685).
+-- used_ms counts the time the run was starting, running or finalizing and nothing in its thread waited on a person;
+-- the run is stopped once it reaches limit_ms. The row goes when the run ends.
+CREATE TABLE run_time_limits(
+  run_id     TEXT PRIMARY KEY,
+  thread_id  TEXT NOT NULL,
+  limit_ms   INTEGER NOT NULL CHECK(limit_ms > 0),
+  used_ms    INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
 `
   }
 ]

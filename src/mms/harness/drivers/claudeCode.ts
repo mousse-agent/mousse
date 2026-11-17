@@ -214,8 +214,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
   const owned = new Map<string, OwnedService>()
   const platform = options.platform ?? process.platform
   const evidence = options.evidence ?? CONTAINMENT_EVIDENCE
-  /** The locked entries whose runtime is bound: where their policy is read. */
-  const lockedEntries = new Map<string, { home?: string; cwd: () => string }>()
+  /** The locked entries whose runtime is bound: where their policy is read, and whether a program is on their PATH. */
+  const lockedEntries = new Map<string, { home?: string; cwd: () => string; onPath?: (name: string) => boolean }>()
   /**
    * The last policy reading of each locked entry, for the synchronous caps and `botAuthority`. A
    * reading is the entry's own (another entry's home may hold a server-managed policy), and a "no
@@ -266,6 +266,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     binaryNames: cliNames('claude'),
     ...compatibilityFields('claude'),
     latestVersion: { kind: 'npm', package: '@anthropic-ai/claude-code' },
+    brewName: 'claude-code',
     multiInstance: true,
     privateHome: true,
     canInstall: false,
@@ -281,6 +282,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     // Claude Code passes MCP image content to the model, and every Claude model reads images.
     mcpImageResults: true,
     mirrorsVendorFile: true,
+    // Mousse's PostToolUse hook masks secret values in tool results before Claude Code keeps them.
+    masksToolResults: true,
     // Claude Code's documented switches (names checked in the 2.1.291 binary's text): usage
     // telemetry, and error reports.
     telemetryOff: () => ({ env: { DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' } }),
@@ -303,12 +306,24 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     botAuthority: (config, instanceId) => !claudeLocked(config) || claudeLockedHoldsBots(platform, managedFor(instanceId), evidence),
     // A locked entry holds it only exactly: on a version with no record it holds none.
     botApprovals: (config) => !claudeLocked(config),
+    // A locked entry runs Bash only in a proven sandbox (`admit`, `claudeLockedTools`); the owner's entry runs it either way.
+    botWithheldTools: (config, installedVersion, instanceId) => {
+      if (!claudeLocked(config)) return []
+      const entry = instanceId === undefined ? undefined : lockedEntries.get(instanceId)
+      const contained = entry?.onPath !== undefined && claudeSandboxFact(platform, entry.onPath) === 'available' &&
+        installedVersion !== undefined && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: installedVersion }, evidence)
+      return contained ? [] : ['shell']
+    },
+    // A bot's Bash runs in Claude Code's sandbox where it can run here, read with the entry's own PATH, as each turn does.
+    botHold: (_config, env) => ({ runtime: 'claude', sandbox: claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], env))) }),
     readPolicyFacts: async (config, instanceId) => {
       if (claudeLocked(config)) await readManaged(instanceId)
     },
     nativeToolNames: (neutral) => CLAUDE_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @anthropic-ai/claude-code@latest'
+      if (owner === 'pnpm') return 'pnpm add -g @anthropic-ai/claude-code@latest'
+      if (owner === 'bun') return 'bun add -g @anthropic-ai/claude-code@latest'
       if (owner === 'brew') return 'brew upgrade claude-code'
       if (owner === 'standalone') return 'claude update'
       return undefined
@@ -370,6 +385,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             saveLaunch: (patch: CliProviderConfigPatch) => live().saveLaunch(patch),
             // The entry's telemetry switch, from its newest revision.
             telemetryEnv: () => live().env.enforced,
+            // An API-key entry pays per token: its prompt cache stays at 5 minutes unless the user keeps it for an hour.
+            ...(onKey ? { paysPerToken: true } : {}),
             signInCommand,
             ...(credential ? credential.serviceOptions : {})
           }
@@ -536,7 +553,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
       const lockedEntry = !shared && claudeLocked(context.config)
       if (lockedEntry) {
         // Its policy is read as soon as the runtime is bound, so the entry's caps can say what it holds.
-        lockedEntries.set(context.instanceId, { ...(context.env.home ? { home: context.env.home } : {}), cwd: () => service.standaloneWorkspace('locked-policy') })
+        lockedEntries.set(context.instanceId, { ...(context.env.home ? { home: context.env.home } : {}), cwd: () => service.standaloneWorkspace('locked-policy'), onPath: (name) => Boolean(findOnPath([name], context.env)) })
         void readManaged(context.instanceId).then(() => context.changed(), () => undefined)
       }
       const adapter = new ClaudeSubscriptionAdapter(() => service, () => integrations, lockedEntry
@@ -563,7 +580,9 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         : undefined,
       // The owner's entry: a bot's Bash runs in Claude Code's sandbox when bubblewrap and socat (Linux)
       // or Seatbelt (macOS) are here, read as each bot turn starts.
-      lockedEntry ? undefined : () => claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) === 'available')
+      lockedEntry ? undefined : () => claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) === 'available',
+      // The user's choice for this entry (Settings → Providers), read as each turn starts.
+      () => context.config.promptCacheHour)
       const runtime: DriverRuntime = {
         adapter,
         configured: () => service.configured(),
@@ -581,6 +600,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         identity: async () => service.accountSubject(),
         // Claude Code refuses `bypassPermissions` when the user's settings say so.
         permissionLimits: (cwd) => service.permissionLimits(cwd),
+        promptCacheHour: () => {
+          void service.refreshProxySeats()
+          return service.promptCacheHour(undefined, undefined, context.config.promptCacheHour)
+        },
         refreshModels: async (cwd) => {
           await service.status()
           await service.refreshModels(cwd)
@@ -588,7 +611,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         signIn: privateHome ? signInInTerminal : (session, cwd) => service.login(session, cwd),
         signOut: privateHome ? signOutOfHome : () => service.logout(),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
-        compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.focus, request.signal),
+        compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.focus, request.signal, { cacheCold: request.cacheCold === true }),
         oneShot: (spec, signal) => service.oneShot(spec, signal),
         setLiveHost: (host) => service.setLiveHost(host),
         inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),

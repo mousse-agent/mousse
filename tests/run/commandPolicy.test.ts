@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { heartbeatToleranceMs, steerStrategy, stopStrategy } from '../../src/mms/run/CommandPolicy'
+import { heartbeatToleranceMs, MAX_STEER_SETTLE_MS, steerDelivery, steerReleaseWindow, steerStrategy, stopStrategy, type SteerTurnFacts } from '../../src/mms/run/CommandPolicy'
 import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
+import { GENERIC_ACP_CAPS } from '../../src/mms/harness/acp/presets/generic'
+import { GROK_CAPS } from '../../src/mms/harness/acp/presets/grok'
+import { CODEX_CAPS } from '../../src/mms/harness/drivers/codex'
+import { CURSOR_CAPS } from '../../src/mms/harness/drivers/cursor'
+import { PI_RPC_CAPS } from '../../src/mms/harness/drivers/pi'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { ProviderCapabilities } from '../../src/mms/harness/adapter'
@@ -63,6 +68,101 @@ describe('steerStrategy', () => {
     expect(steerStrategy(caps({ steer: 'interrupt_restart', interrupt: false }), run('running'))).toBe(
       'queue'
     )
+  })
+})
+
+describe('steerDelivery (docs/design/steer-and-interruptions.md §2.2)', () => {
+  const turn = (patch: Partial<SteerTurnFacts> = {}): SteerTurnFacts => ({ foreground: 0, releaseOpen: false, strict: false, held: false, atBoundary: false, forced: false, ...patch })
+  const person = { person: true }
+  const agent = { person: false }
+  const hold = (steerBoundary: 'announce' | 'start', steer: ProviderCapabilities['steer'] = 'interrupt_restart') => caps({ steer, steerBoundary })
+
+  // A person's steer goes in now, whatever the turn does; it waits only for a compaction, unless sent now.
+  const PERSON: Array<[string, Partial<SteerTurnFacts>, 'cut' | 'native' | 'hold']> = [
+    ['the model writes or thinks', {}, 'cut'],
+    ['a foreground tool runs', { foreground: 1 }, 'cut'],
+    ['two foreground tools run', { foreground: 2 }, 'cut'],
+    ['the release window after a tool is open', { releaseOpen: true }, 'cut'],
+    ['strict release holds a steer already', { strict: true, held: true }, 'cut'],
+    ['the provider\'s own turn ended', { atBoundary: true }, 'native'],
+    ['the provider compacts', { compacting: true }, 'hold'],
+    ['the provider compacts, and Send now', { compacting: true, forced: true }, 'cut'],
+    ['Send now during a tool', { forced: true, foreground: 2 }, 'cut']
+  ]
+  it.each((['announce', 'start'] as const).flatMap((boundary) => PERSON.map(([what, facts, want]) => [boundary, what, facts, want] as const)))(
+    'a person\'s steer on a %s provider when %s: %s',
+    (boundary, _what, facts, want) => {
+      for (const steer of ['interrupt_restart', 'native'] as const) expect(steerDelivery(hold(boundary, steer), turn(facts), person)).toBe(want)
+    }
+  )
+
+  it('an agent\'s steer or a notice on a native provider is always native, during a tool too, and never forced', () => {
+    const c = hold('start', 'native')
+    for (const facts of [turn(), turn({ foreground: 1 }), turn({ releaseOpen: true }), turn({ atBoundary: true }), turn({ forced: true })])
+      expect(steerDelivery(c, facts, agent)).toBe('native')
+  })
+
+  it('an agent\'s steer or a notice on an interrupt_restart provider holds for a tool, is native at a boundary, and cuts while writing', () => {
+    const c = hold('announce')
+    expect(steerDelivery(c, turn({ foreground: 1 }), agent)).toBe('hold')
+    expect(steerDelivery(c, turn({ releaseOpen: true }), agent)).toBe('hold')
+    expect(steerDelivery(c, turn({ atBoundary: true }), agent)).toBe('native')
+    expect(steerDelivery(c, turn(), agent)).toBe('cut')
+  })
+
+  it('steerBoundary none keeps the behaviour from before the hold: a person cuts, anything else follows the capability', () => {
+    for (const facts of [turn(), turn({ foreground: 3 }), turn({ releaseOpen: true, strict: true, held: true }), turn({ atBoundary: true })]) {
+      expect(steerDelivery(caps({ steer: 'interrupt_restart', steerBoundary: 'none' }), facts, person)).toBe('cut')
+      expect(steerDelivery(caps({ steer: 'native', steerBoundary: 'none' }), facts, person)).toBe('cut')
+      expect(steerDelivery(caps({ steer: 'native', steerBoundary: 'none' }), facts, agent)).toBe('native')
+      expect(steerDelivery(caps({ steer: 'interrupt_restart', steerBoundary: 'none' }), facts, agent)).toBe('cut')
+    }
+    // Caps saved before the key existed read as none.
+    const { steerBoundary: _gone, ...old } = hold('announce')
+    expect(steerDelivery(old as ProviderCapabilities, turn({ foreground: 1 }), person)).toBe('cut')
+  })
+
+  it('strict keeps an agent\'s steer that is already held held until the provider\'s turn ends, on a start provider only', () => {
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: true }), agent)).toBe('hold')
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: true, atBoundary: true }), agent)).toBe('native')
+    // An announce provider knows every tool before it runs: strict changes nothing there.
+    expect(steerDelivery(hold('announce'), turn({ strict: true, held: true }), agent)).toBe('cut')
+    // Best effort releases the same steer.
+    expect(steerDelivery(hold('start'), turn({ strict: false, held: true }), agent)).toBe('cut')
+    // Nothing held yet and the window closed: it cuts.
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: false }), agent)).toBe('cut')
+  })
+
+  it('an agent\'s steer or a notice waits for a compaction on an interrupt_restart provider; a native provider takes it at its next step', () => {
+    expect(steerDelivery(hold('announce'), turn({ compacting: true }), agent)).toBe('hold')
+    expect(steerDelivery(hold('start', 'native'), turn({ compacting: true }), agent)).toBe('native')
+  })
+})
+
+describe('steerReleaseWindow (§2.3.2, §6 pass rule)', () => {
+  it('each start provider uses its own measured window: Codex 232 ms, Grok 100 ms, best effort unless the instance asks for strict', () => {
+    expect(steerReleaseWindow(CODEX_CAPS, undefined)).toEqual({ strict: false, settleMs: 232 })
+    expect(steerReleaseWindow(CODEX_CAPS, 'best_effort')).toEqual({ strict: false, settleMs: 232 })
+    expect(steerReleaseWindow(CODEX_CAPS, 'strict')).toEqual({ strict: true, settleMs: 232 })
+    expect(steerReleaseWindow(GROK_CAPS, undefined)).toEqual({ strict: false, settleMs: 100 })
+    expect(steerReleaseWindow(GROK_CAPS, 'strict')).toEqual({ strict: true, settleMs: 100 })
+  })
+
+  it('a start provider whose gap was never measured is strict whatever the setting, with the window at the 1 s cap', () => {
+    for (const unmeasured of [CURSOR_CAPS, GENERIC_ACP_CAPS, ANTIGRAVITY_CAPABILITIES]) {
+      expect(unmeasured.steerBoundary).toBe('start')
+      for (const setting of [undefined, 'best_effort', 'strict'] as const)
+        expect(steerReleaseWindow(unmeasured, setting)).toEqual({ strict: true, settleMs: MAX_STEER_SETTLE_MS })
+    }
+    // A window over the cap cannot keep its margin, and caps saved before the key existed have none: strict.
+    expect(steerReleaseWindow(caps({ steerBoundary: 'start', steerSettleMs: 1_500 }), 'best_effort')).toEqual({ strict: true, settleMs: MAX_STEER_SETTLE_MS })
+    const { steerSettleMs: _gone, ...old } = CODEX_CAPS
+    expect(steerReleaseWindow(old as ProviderCapabilities, undefined)).toEqual({ strict: true, settleMs: MAX_STEER_SETTLE_MS })
+  })
+
+  it('an announce or none provider has no window', () => {
+    expect(steerReleaseWindow(CLAUDE_SUBSCRIPTION_CAPABILITIES, undefined)).toEqual({ strict: false, settleMs: 0 })
+    expect(steerReleaseWindow(PI_RPC_CAPS, undefined)).toEqual({ strict: false, settleMs: 0 })
   })
 })
 

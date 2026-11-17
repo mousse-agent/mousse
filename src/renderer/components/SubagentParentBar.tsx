@@ -1,6 +1,7 @@
 import { ChevronLeft } from '../lib/icons'
 import { isSubagentThread } from '../../shared/threadLineage'
 import { openThread } from '../lib/openThread'
+import { useThreadPathInTitleBar } from '../lib/threadPathSetting'
 import { useAppStore } from '../stores/appStore'
 import './subagentParentBar.css'
 
@@ -8,6 +9,8 @@ interface SubagentParentBarViewProps {
   parentName: string
   childName: string
   onOpenParent: () => void
+  /** The title bar shows the path, so the breadcrumb line is left out; the divider stays. */
+  hideBreadcrumb?: boolean
 }
 
 /**
@@ -15,17 +18,19 @@ interface SubagentParentBarViewProps {
  * subagent this is. Messages typed here continue the subagent, so the divider is the cue that
  * this is not the main thread.
  */
-export function SubagentParentBarView({ parentName, childName, onOpenParent }: SubagentParentBarViewProps) {
+export function SubagentParentBarView({ parentName, childName, onOpenParent, hideBreadcrumb = false }: SubagentParentBarViewProps) {
   return (
     <div className="subagent-parent-bar">
-      <nav className="subagent-breadcrumb" aria-label="Subagent location">
-        <button type="button" className="subagent-breadcrumb-parent" title={`Open ${parentName}`} onClick={onOpenParent}>
-          <ChevronLeft size={13} strokeWidth={2} aria-hidden="true" />
-          <span className="subagent-breadcrumb-name">{parentName}</span>
-        </button>
-        <span className="subagent-breadcrumb-separator" aria-hidden="true">/</span>
-        <span className="subagent-breadcrumb-current" aria-current="page" title={childName}>{childName}</span>
-      </nav>
+      {!hideBreadcrumb && (
+        <nav className="subagent-breadcrumb" aria-label="Subagent location">
+          <button type="button" className="subagent-breadcrumb-parent" title={`Open ${parentName}`} onClick={onOpenParent}>
+            <ChevronLeft size={13} strokeWidth={2} aria-hidden="true" />
+            <span className="subagent-breadcrumb-name">{parentName}</span>
+          </button>
+          <span className="subagent-breadcrumb-separator" aria-hidden="true">/</span>
+          <span className="subagent-breadcrumb-current" aria-current="page" title={childName}>{childName}</span>
+        </nav>
+      )}
       <div className="subagent-divider" role="separator">
         <span className="subagent-divider-label">Subagent of {parentName}</span>
       </div>
@@ -40,6 +45,7 @@ export function SubagentParentBar() {
     return active && isSubagentThread(active) ? active : undefined
   })
   const parent = useAppStore((s) => (child ? s.threads.find((thread) => thread.id === child.lineage?.parentThreadId) : undefined))
+  const pathInTitleBar = useThreadPathInTitleBar()
   // A subagent whose parent is gone is listed as a normal thread, so it gets no link to one.
   if (!child || !parent) return null
   return (
@@ -47,6 +53,7 @@ export function SubagentParentBar() {
       parentName={parent.name.trim() || 'Untitled thread'}
       childName={child.name.trim() || 'Subagent'}
       onOpenParent={() => void openThread(parent.id)}
+      hideBreadcrumb={pathInTitleBar}
     />
   )
 }

@@ -1,0 +1,25 @@
+/* The span that turns a spinner (Turning in lib/turning.tsx, which says why it turns there and not in CSS). The span
+   takes the icon's classes and places itself as the <svg> did: block, its own size, middle-aligned, like the
+   preflight's svg rule. The <svg> fills it, so a size set by a class on the span (w-3.5 h-3.5) still sizes the icon.
+   These are defaults in the base layer: any class on the span or rule for the <svg>, including Tailwind's utilities,
+   wins over them. No will-change: a running transform animation has its own layer while it runs, and a still span
+   keeps none. */
+
+@layer base {
+  .turning {
+    display: block;
+    width: fit-content;
+    height: fit-content;
+    vertical-align: middle;
+  }
+
+  .turning > svg {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+/* Turning runs the turn; Tailwind's CSS animation for the same class would turn it a second time. */
+.turning.animate-spin {
+  animation: none;
+}

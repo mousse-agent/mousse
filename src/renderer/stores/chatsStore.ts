@@ -8,6 +8,8 @@ import { useBotsStore } from './botsStore'
 import { keepEqual } from '../lib/keepEqual'
 
 const EMPTY: ChatsSnapshot = { agents: [], chats: [], devices: [] }
+/** How long a bot being opened waits for its messages before it opens without them (see `openingBotId`). */
+export const OPEN_BOT_HOLD_MS = 1000
 interface ChatsState {
   profileId: string | null
   snapshot: ChatsSnapshot
@@ -15,6 +17,11 @@ interface ChatsState {
   activeChatId: string | null
   /** The bot whose chat is open. A chat and a bot are never open together. */
   activeBotId: string | null
+  /**
+   * A bot being opened whose messages are not here yet (`openBot`). Its face shows as chosen at once while the pane
+   * goes on showing what it showed, so the bot never opens on an empty "Loading messages…" chat.
+   */
+  openingBotId: string | null
   error: string | null
   /** What set `error`: a background refresh clears only its own, never an action's. */
   errorSource: 'refresh' | 'action' | null
@@ -59,7 +66,7 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 /** The error of something the person did, which a later background refresh leaves on screen. */
 export const actionError = (error: unknown, prefix = '') => ({ error: `${prefix}${errorText(error)}`, errorSource: 'action' as const })
 export const useChatsStore = create<ChatsState>((set, get) => ({
-  profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, error: null, errorSource: null,
+  profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, openingBotId: null, error: null, errorSource: null,
   loading: false, newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {},
   activate(profileId) {
     if (get().profileId === profileId) return
@@ -68,7 +75,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     pendingPublications.clear()
     refreshOperation = undefined
     refreshAgain = false
-    set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, error: null, errorSource: null, loading: false,
+    set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, openingBotId: null, error: null, errorSource: null, loading: false,
       newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {} })
     useBotsStore.getState().activate(profileId)
     // A bot's notification was clicked: open its chat.
@@ -114,8 +121,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     if (chatId !== get().activeChatId && !await confirmNavigation()) return
     const owner = epoch
     useAppStore.getState().setThreadsSidebarView('chats')
-    useAppStore.getState().setSidebarMode('chats')
-    set({ activeChatId: chatId, activeBotId: null, conversation: null, error: null, errorSource: null, loading: true })
+    set({ activeChatId: chatId, activeBotId: null, openingBotId: null, conversation: null, error: null, errorSource: null, loading: true })
     try {
       const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.get', { chatId })
       if (owner === epoch && get().activeChatId === chatId) set({ conversation, loading: false })
@@ -124,10 +130,23 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
   async openBot(botId) {
     if (botId !== get().activeBotId && !await confirmNavigation()) return
     useAppStore.getState().setThreadsSidebarView('chats')
-    useAppStore.getState().setSidebarMode('chats')
-    if (botId !== get().activeBotId) useBotsStore.setState({ aboutOpen: false, error: null })
-    set({ activeBotId: botId, activeChatId: null, conversation: null, error: null, errorSource: null, loading: false })
-    await useBotsStore.getState().loadChat(botId)
+    const show = () => {
+      if (botId !== get().activeBotId) useBotsStore.setState({ aboutOpen: false, error: null })
+      set({ activeBotId: botId, openingBotId: null, activeChatId: null, conversation: null, error: null, errorSource: null, loading: false })
+    }
+    if (botId === get().activeBotId || useBotsStore.getState().chats[botId]) {
+      show()
+      await useBotsStore.getState().loadChat(botId)
+      return
+    }
+    // Its messages are not here yet: held until they are, for at most OPEN_BOT_HOLD_MS (then it opens saying they
+    // are loading). A click on another bot, or a chat, meanwhile replaces it.
+    set({ openingBotId: botId })
+    const load = useBotsStore.getState().loadChat(botId)
+    await Promise.race([load, new Promise((resolve) => setTimeout(resolve, OPEN_BOT_HOLD_MS))])
+    if (get().openingBotId !== botId) return
+    show()
+    await load
   },
   async create(input) {
     if (!await confirmNavigation()) return
@@ -136,9 +155,8 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     try {
       const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.create', input)
       if (owner !== epoch) return
-      set({ conversation, activeChatId: conversation.id, activeBotId: null, newChatOpen: false, loading: false })
+      set({ conversation, activeChatId: conversation.id, activeBotId: null, openingBotId: null, newChatOpen: false, loading: false })
       useAppStore.getState().setThreadsSidebarView('chats')
-      useAppStore.getState().setSidebarMode('chats')
       await get().refresh()
     } catch (error) { if (owner === epoch && get().activeChatId === from) set({ loading: false, ...actionError(error) }) }
   },

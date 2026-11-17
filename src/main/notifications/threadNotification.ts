@@ -5,7 +5,6 @@ import {
   type NotificationChannels,
   type ThreadNotificationEvent
 } from '../../shared/settings'
-import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import type { RunEndState } from '../../shared/automations'
 
 export type ThreadNotificationKind = ThreadNotificationEvent
@@ -97,39 +96,7 @@ export function planThreadNotification(channels: NotificationChannels, context: 
 
 export type { ThreadToastPayload } from '../../shared/threadToast'
 
-/**
- * What a bot's chat row announces (Bot Phase 1 §5.7), as the thread event whose channels it uses:
- * a run report, a reply, a notice or an error is `completed`; an open ask is `question`. The
- * owner's own messages, answered asks and rows older than `maxAgeMs` (a changed old row, such as
- * a forgotten memory's blanked text) announce nothing. Chips never notify: they are not rows.
- */
-export function botNotificationKind(
-  message: Pick<BotChatMessage, 'author' | 'at' | 'ask'>,
-  now = Date.now(),
-  maxAgeMs = 10 * 60_000
-): ThreadNotificationKind | null {
-  if (message.author !== 'bot') return null
-  const at = Date.parse(message.at)
-  if (Number.isFinite(at) && now - at > maxAgeMs) return null
-  if (message.ask) return message.ask.status === 'open' ? 'question' : null
-  return 'completed'
-}
-
-/** The words of a bot notification: the bot's name as the title, then what it wants or said. */
-export function botNotificationContent(
-  botName: string | undefined,
-  message: Pick<BotChatMessage, 'text' | 'ask' | 'error'>
-): { title: string; body: string } {
-  const title = botName?.trim() || 'Your bot'
-  if (message.ask) return { title, body: `Wants to ${message.ask.title}` }
-  if (message.error) return { title, body: message.error.text }
-  const line = message.text
-    .split('\n')
-    .map((part) => part.replace(/[*_`#>[\]]/g, '').replace(/^\s*(?:[-+]|\d+\.)\s+/, '').trim())
-    .find(Boolean)
-  if (!line) return { title, body: 'New message' }
-  return { title, body: line.length > 140 ? `${line.slice(0, 139)}…` : line }
-}
+export { botNotificationContent, botNotificationKind } from '../../shared/bots/personal/notification'
 
 /** The bots' names the main process has seen in replies, and the rows it already announced, per profile. */
 export class BotNotificationIndex {

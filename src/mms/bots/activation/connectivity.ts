@@ -1,5 +1,4 @@
-import { lookup } from 'node:dns/promises'
-import { connect } from 'node:net'
+import { connect, type LookupFunction, type Socket } from 'node:net'
 
 /**
  * Whether a bot's provider can be reached (docs/bots.md, "No internet"): a cheap check the engine
@@ -46,30 +45,33 @@ export function botApiHost(driver: string | undefined, provider?: string): BotAp
   return known[id]
 }
 
-/** One host: its name resolves and a TCP connection to port 443 opens, within the timeout. */
-export async function probeHost(host: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  let timer: NodeJS.Timeout | undefined
-  const timeout = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs) })
-  try {
-    const address = await Promise.race([lookup(host).then((found) => found.address, () => undefined), timeout])
-    if (!address) return false
-    return await new Promise<boolean>((resolve) => {
-      const socket = connect({ host: address, port: 443, timeout: Math.max(1, deadline - Date.now()) })
-      const done = (ok: boolean): void => {
-        socket.removeAllListeners()
-        socket.destroy()
-        resolve(ok)
-      }
+/**
+ * One host: its name resolves and a TCP connection to port 443 opens, within the timeout. Every
+ * address the name resolves to is tried, IPv6 and IPv4 interleaved (Happy Eyeballs), so a
+ * computer whose IPv6 has no route still counts as online over IPv4.
+ */
+export function probeHost(host: string, timeoutMs = PROBE_TIMEOUT_MS, options: { port?: number; lookup?: LookupFunction } = {}): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let socket: Socket | undefined
+    let settled = false
+    const done = (ok: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket?.removeAllListeners()
+      socket?.on('error', () => {})
+      socket?.destroy()
+      resolve(ok)
+    }
+    const timer = setTimeout(() => done(false), timeoutMs)
+    try {
+      socket = connect({ host, port: options.port ?? 443, autoSelectFamily: true, ...(options.lookup ? { lookup: options.lookup } : {}) })
       socket.once('connect', () => done(true))
-      socket.once('timeout', () => done(false))
       socket.once('error', () => done(false))
-    })
-  } catch {
-    return false
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+    } catch {
+      done(false)
+    }
+  })
 }
 
 /** True as soon as one probe answers true; false when every probe answered false. */

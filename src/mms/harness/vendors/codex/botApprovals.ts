@@ -2,18 +2,20 @@ import { isAbsolute, resolve } from 'node:path'
 import type { BotAuthority, BotCheck, NormalisedCall } from '../../../../shared/bots/personal/authority'
 import { checkMessage } from '../../../../shared/bots/personal/walls'
 import type { NativeToolTable } from '../../../../shared/harness/tools'
-import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../run/mcp/attachment'
 
 /**
  * A bot's turn on Codex (Bot Phase 1): Codex runs in its asking mode (`untrusted` approvals, no
  * network), and every approval it raises is answered by the bot's authority, the same check (and
  * the same walls and asks) as Pi's gate. Nobody is asked. Its sandbox is read-only, or, for a bot
- * with "run commands", `workspaceWrite` over the bot's own folders (`codexTurnPolicy`).
+ * with "run commands", Mousse's permission profile on Linux and macOS (`codexTurnPolicy`, `codexBotSandbox`);
+ * Windows keeps the `workspaceWrite` command sandbox.
  *
- * What Codex runs without asking is not checked here: the read-only commands it trusts (it reads
- * files with them) and its web search. Its sandbox keeps those inside it. Shell commands it asks
- * about are `shell` calls, allowed whenever the bot holds "run commands"; file changes are `write`
- * (a new file) or `edit` calls, each on its own path. A retry outside the sandbox is never allowed.
+ * What Codex runs without asking is not checked here: its web search, and the read-only commands
+ * it trusts in a read-only sandbox (a bot without "run commands" has no command tool at all;
+ * under the bot's profile every command asks). Its sandbox keeps those inside it. Shell commands
+ * it asks about are `shell` calls, allowed whenever the bot holds "run commands"; file changes are
+ * `write` (a new file) or `edit` calls, each on its own path. A retry outside the sandbox is never
+ * allowed.
  */
 
 /**
@@ -37,7 +39,9 @@ export type CodexBotDecision = { decision: 'accept' } | { decision: 'decline'; r
 
 const decided = (check: BotCheck): CodexBotDecision => (check.ok ? { decision: 'accept' } : { decision: 'decline', reason: checkMessage(check) })
 
-/** Why a bot's command never runs outside Codex's sandbox. */
+/**
+ * Why a bot's command never runs outside Codex's sandbox.
+ */
 export const CODEX_BOT_UNSANDBOXED_REFUSAL = 'This bot\'s commands run only in its sandbox. Try another way.'
 
 /**
@@ -86,15 +90,15 @@ export const CODEX_BOT_USER_MCP_UNREADABLE = 'Mousse could not read your Codex M
 
 /**
  * The thread config of a bot turn that switches off every MCP server of the user's own Codex setup
- * (`readCodexUserSetup`): their tools would run under Codex's rules, never the bot's. Mousse's own
- * server stays. Undefined when the setup could not be read or names a server that cannot be
- * addressed in a config key: the turn is then refused.
+ * (`readCodexUserSetup`): their tools would run under Codex's rules, never the bot's. Reserved names
+ * are disabled too; an attached-name collision is refused before building this config. Undefined
+ * when the setup could not be read or names a server that cannot be addressed in a config key:
+ * the turn is then refused.
  */
 export function codexBotMcpOverrides(servers: readonly string[] | null): Record<string, boolean> | undefined {
   if (servers === null) return undefined
   const overrides: Record<string, boolean> = {}
   for (const name of servers) {
-    if (name === MOUSSE_MCP_SERVER_NAME || name === MOUSSE_RELAY_SERVER_NAME) continue
     if (!/^[A-Za-z0-9_-]+$/.test(name)) return undefined
     overrides[`mcp_servers.${name}.enabled`] = false
   }

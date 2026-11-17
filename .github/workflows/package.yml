@@ -164,6 +164,27 @@ jobs:
           foreach ($file in 'mousse-voice.exe', 'msvcp140.dll', 'vcruntime140.dll') {
             if (-not (Test-Path "release\win-unpacked\resources\voice-engine\$file")) { throw "The package has no resources\voice-engine\$file" }
           }
+      # Setup carries Mousse.exe once; its installer makes mousse-cli.exe, the console copy the
+      # mousse-cli command runs. Install it silently and run that copy.
+      - name: Check the installer makes the console mousse-cli.exe
+        if: matrix.part == 'app'
+        run: |
+          $installer = "release\Mousse.Setup.$env:VERSION.exe"
+          '{0:N0} MB {1}' -f ((Get-Item $installer).Length / 1MB), $installer
+          $dir = Join-Path $env:RUNNER_TEMP 'mousse-install'
+          $p = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "The installer exited with $($p.ExitCode)" }
+          $cli = Join-Path $dir 'mousse-cli.exe'
+          if (-not (Test-Path $cli)) { throw 'The installer did not make mousse-cli.exe' }
+          $bytes = [IO.File]::ReadAllBytes($cli)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 92)
+          if ($subsystem -ne 3) { throw "mousse-cli.exe has subsystem $subsystem, not 3 (console)" }
+          $gui = [IO.File]::ReadAllBytes((Join-Path $dir 'Mousse.exe'))
+          if ([BitConverter]::ToUInt16($gui, $pe + 92) -ne 2) { throw 'Mousse.exe is no longer a GUI program' }
+          $out = (& $cli --version | Out-String).Trim()
+          $out
+          if ($out -ne "mousse-cli $env:VERSION") { throw "Unexpected version output: $out" }
       - name: Check the packaged CLI reports the version
         if: matrix.part == 'cli'
         run: |

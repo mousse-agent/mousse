@@ -78,15 +78,43 @@
   color: var(--text-primary);
   opacity: 0;
   transform: translateX(10px);
-  transition: opacity calc(180ms * var(--ui-motion-scale)) ease, transform calc(180ms * var(--ui-motion-scale)) ease,
+  /* Closing fades out over 180ms, the exit wait in sideCardPresence.ts. */
+  transition:
+    opacity calc(180ms * var(--ui-motion-scale)) ease,
+    transform calc(180ms * var(--ui-motion-scale)) ease,
+    background-color calc(180ms * var(--ui-motion-scale)) ease,
+    border-color calc(180ms * var(--ui-motion-scale)) ease,
+    box-shadow calc(180ms * var(--ui-motion-scale)) ease,
     translate var(--ui-dur-slow) var(--ui-collapse-ease);
   pointer-events: none;
 }
 
+/* Opening and hovering in or out fade over 450ms; the slide keeps its 180ms. */
 .thread-side-card[data-shown='true'] {
   opacity: 1;
   transform: none;
   pointer-events: auto;
+  transition:
+    opacity calc(450ms * var(--ui-motion-scale)) ease,
+    transform calc(180ms * var(--ui-motion-scale)) ease,
+    background-color calc(450ms * var(--ui-motion-scale)) ease,
+    border-color calc(450ms * var(--ui-motion-scale)) ease,
+    box-shadow calc(450ms * var(--ui-motion-scale)) ease,
+    translate var(--ui-dur-slow) var(--ui-collapse-ease);
+}
+
+/* At rest the docked card recedes: 60% opacity, no fill, shadow or specular, and a
+   transparent border so nothing shifts when it comes back. Hover or keyboard focus
+   inside it restores the full card. The overlay card covers the transcript, so it
+   stays solid. The selector outweighs the acrylic theme's fill. */
+.thread-side-card-layer:not(.thread-side-card-layer--overlay) > .thread-side-card:not(:hover):not(:has(:focus-visible)) {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.thread-side-card-layer:not(.thread-side-card-layer--overlay) > .thread-side-card[data-shown='true']:not(:hover):not(:has(:focus-visible)) {
+  opacity: 0.6;
 }
 
 /* Find in thread (agent-ui.css, find-bar-host.ts): an open find bar takes the top of the card's column at the
@@ -141,19 +169,9 @@
   pointer-events: auto;
 }
 
-/* Reduced motion fades without the slide, over the same 180ms, and keeps the exit
-   wait. The app-wide reduced-motion rule in global.css forces every transition
-   duration to 0.01ms with !important and six :not() classes of specificity, so
-   this needs !important and more specificity than that (the repeated class is
-   deliberate). The column follows the fade, but a reflow is motion, so it is
-   instant. */
+/* Reduced motion: the app-wide rule in global.css makes the card's fades and slide
+   instant, and the column's reflow is instant too. */
 @media (prefers-reduced-motion: reduce) {
-  .app .sidebar .thread-side-card-layer .thread-side-card.thread-side-card.thread-side-card[data-shown] {
-    transform: none;
-    transition-property: opacity;
-    transition-duration: 180ms !important;
-  }
-
   .sidebar.sidebar-full .an-message-list > div,
   .sidebar.sidebar-full .chat-input-area {
     transition: none;
@@ -222,8 +240,8 @@
 }
 
 .side-card-section-toggle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .side-card-section-name {

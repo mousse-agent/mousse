@@ -1,6 +1,7 @@
 import { homedir } from 'os'
 import { join, resolve } from 'path'
 import { parseArgs } from './parseArgs'
+import { addToSwitchList, type SwitchCommandLine } from '../shared/chromiumSwitches'
 
 /** Resolve before app.ready: safeStorage and Chromium share this vault context. */
 export function resolveElectronUserData(
@@ -39,14 +40,11 @@ const NETWORK_SERVICE_IN_PROCESS = 'NetworkServiceInProcess2'
  */
 export function configureWindowlessElectron(app: {
   disableHardwareAcceleration(): void
-  commandLine: { getSwitchValue(name: string): string; appendSwitch(name: string, value?: string): void }
+  commandLine: SwitchCommandLine
 }): void {
   app.disableHardwareAcceleration()
   app.commandLine.appendSwitch('in-process-gpu')
-  const features = app.commandLine.getSwitchValue('enable-features').split(',').filter(Boolean)
-  if (!features.includes(NETWORK_SERVICE_IN_PROCESS)) {
-    app.commandLine.appendSwitch('enable-features', [...features, NETWORK_SERVICE_IN_PROCESS].join(','))
-  }
+  addToSwitchList(app.commandLine, 'enable-features', NETWORK_SERVICE_IN_PROCESS)
 }
 
 /** Graceful success flushes Local State; Electron quit otherwise discards exitCode. */

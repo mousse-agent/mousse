@@ -130,8 +130,8 @@
 .side-card-git-option-action:focus-visible,
 .side-card-git-new-branch:focus-visible,
 .side-card-git-submit:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* The thread's pull requests: icon, bold title over at most two lines, then the number and checks. */
@@ -273,8 +273,8 @@
 
 .side-card-git-pr-close:focus-visible,
 .side-card-git-pr-merge:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .side-card-git-pr-more {
@@ -297,8 +297,8 @@
 }
 
 .side-card-git-pr-more:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* The branch of a thread with its own worktree: its full name and why it stays fixed. */
@@ -339,8 +339,8 @@
 }
 
 .side-card-git-pr-external:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .side-card-git-pr-check {
@@ -362,7 +362,7 @@
   margin: 0 3px;
   border-radius: 50%;
   background: var(--ui-faint);
-  animation: side-card-git-pr-pulse 1.6s ease-in-out infinite;
+  animation: side-card-git-pr-pulse 1.6s steps(12, jump-none) infinite;
 }
 
 .side-card-git-pr-number {
@@ -521,7 +521,7 @@
   outline: none;
 }
 
-/* The popover already shows where focus is; the global input:focus ring would double it. */
+/* The popover already shows where focus is; the global input:focus fill would double it. */
 .side-card-git-search input:focus {
   border: 0;
   background: transparent;
@@ -1051,19 +1051,12 @@
 .side-card-git-next-split:focus-visible,
 .side-card-git-next-side:focus-visible,
 .side-card-git-commit-open:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .side-card-git-next-spin {
   flex: none;
-  animation: side-card-git-next-spin 0.9s linear infinite;
-}
-
-@keyframes side-card-git-next-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 
@@ -1101,10 +1094,4 @@
 .side-card-git-commit-open:hover {
   background: var(--ui-hover);
   color: var(--text-primary);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .side-card-git-next-spin {
-    animation: none;
-  }
 }

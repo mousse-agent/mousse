@@ -57,6 +57,11 @@ export function bridgeProtocolEvent(
       broadcast('lineEdits:updated', (event.data as { snapshot: unknown }).snapshot)
       return true
     }
+    // The service's memory monitor has a notice for the windows (`diagnostics.memory.notice`).
+    case 'diagnostics.memory.notice': {
+      broadcast('diagnostics:memoryNotice', event.data)
+      return true
+    }
     case 'projects.updated': {
       const projects =
         (event.data as { projects?: unknown } | null)?.projects ?? event.data
@@ -122,7 +127,9 @@ export function bridgeProtocolEvent(
           questions: (event.data as { questions?: unknown })?.questions,
           threadId,
           // A saved approval request says so: the chat shows it inline instead of in the question dialog.
-          ...(approval ? { approval } : {})
+          ...(approval ? { approval } : {}),
+          // A question the agent asked without waiting: the card says the agent keeps working.
+          ...((event.data as { wait?: unknown })?.wait === false ? { wait: false } : {})
         })
       }
       return true
@@ -166,10 +173,6 @@ export function bridgeProtocolEvent(
       // optional — UI may refresh list
       return true
     }
-    case 'ui.document-open': {
-      broadcast('document:opened', event.data)
-      return true
-    }
     case 'ui.quick-action-created': {
       broadcast('quickActions:created', event.data)
       return true
@@ -193,6 +196,15 @@ export function bridgeProtocolEvent(
         'scheduled:updated',
         (event.data as { jobs?: unknown })?.jobs ?? event.data
       )
+      return true
+    }
+    case 'secrets.requests.changed': {
+      // Only the thread id: a window reads the thread's open secret cards itself.
+      if (threadId != null) broadcast('secrets:requestsChanged', { threadId })
+      return true
+    }
+    case 'secrets.changed': {
+      broadcast('secrets:changed', {})
       return true
     }
     case 'pullRequests.updated': {
@@ -304,6 +316,12 @@ export function bridgeProtocolEvent(
       const err = (event.data as { error?: string })?.error ?? 'Title generation failed'
       broadcast('threads:title-generation-failed', { threadId, error: err })
       console.error(`[title] generation failed for ${threadId}: ${err}`)
+      return true
+    }
+    case 'steer.now': {
+      const data = event.data as { requestId?: unknown; outcome?: unknown } | undefined
+      if (typeof data?.requestId === 'string' && (data.outcome === 'applied' || data.outcome === 'stale'))
+        broadcast('orchestrator:steer-now', { threadId, requestId: data.requestId, outcome: data.outcome })
       return true
     }
     case 'turn.steered': {

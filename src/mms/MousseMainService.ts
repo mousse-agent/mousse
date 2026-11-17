@@ -28,13 +28,17 @@ import { registerBotMethods } from './bots/space/registerMethods'
 import { BotLocalService } from './bots/space/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerPersonalBotMethods } from './bots/registerMethods'
+import { registerBotDeviceMethods } from './bots/deviceMethods'
+import { BotDefinitionError } from './bots/definitions/BotDefinitionStore'
 import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
 import { registerAutomationMethods } from './automations/registerMethods'
+import { registerSecretMethods } from './secrets/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
 import { ConnectionCommandRouter } from './protocol/connectionCommands'
 import { registerBrowserMethods, type BrowserDomainRegistration } from './browser/registerBrowserMethods'
+import { registerBrowserViewMethods } from './browser/viewer/registerBrowserViewMethods'
 import type { BrowserRuntimePort } from '../shared/browser/runtime'
 import { BrowserAutomationError } from './browser/automation/BrowserSessionManager'
 import { mainBrowserBinding } from './platform/mainBrowserBinding'
@@ -135,6 +139,8 @@ export class MousseMainService extends MmsProfileServices {
       const host = new ProfileHost({
         providerAuth: providers,
         domains,
+        // One installation store for every profile: the default profile already reads through it.
+        installationConfig,
         options: { ...options, homeDir: home },
         configureServices: (profile) => service!.configureProfileBrowser(profile)
       })
@@ -239,6 +245,20 @@ export class MousseMainService extends MmsProfileServices {
     this.domainCleanupSubscriptions.push(() => chatResourceDomains.dispose())
     // The Bot UI's methods (`bots.personal.v2`): the profile's bot engine answers them.
     registerPersonalBotMethods(this.domains, async (profileId) => (await profile(profileId)).personalBots?.service)
+    // About → Devices: which of the owner's devices reach each bot, kept and set on this computer only.
+    registerBotDeviceMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      const engine = services.personalBots
+      if (!engine) return null
+      return {
+        assertBot: (botId) => {
+          if (!engine.botIds().includes(botId)) throw new BotDefinitionError('bot_not_found', 'This bot is gone.')
+        },
+        store: services.botDeviceAccess,
+        devices: async () => services.botReach?.devices(),
+        changed: (botId) => engine.reachChanged(botId)
+      }
+    })
     // Each bot's own browser, as its owner sees it (`bots.browser.*`).
     registerBotBrowserMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
@@ -261,6 +281,7 @@ export class MousseMainService extends MmsProfileServices {
           nextWho: (botId, who) => services.automationDrafts.nextWho(botId ? { botId } : {}, who)
         },
         managerThread: (projectId) => services.automationManagerThread(projectId),
+        managerTurn: (runId) => services.automationManagerTurn(runId),
         inbox: {
           list: () => services.automationInbox(),
           counts: () => services.automationInboxCounts(),
@@ -274,6 +295,19 @@ export class MousseMainService extends MmsProfileServices {
         }
       }
     })
+    registerSecretMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      return {
+        requests: {
+          list: (threadId) => services.secretRequests.list(threadId),
+          answer: (threadId, requestId, value, keep) => services.secretRequests.answer(threadId, requestId, value, keep),
+          useSaved: (threadId, requestId) => services.secretRequests.useSaved(threadId, requestId),
+          decline: (threadId, requestId) => services.secretRequests.decline(threadId, requestId)
+        },
+        list: () => services.secretVault.list(),
+        delete: (name) => services.secretVault.delete(name)
+      }
+    })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>
@@ -282,6 +316,8 @@ export class MousseMainService extends MmsProfileServices {
       (await profile(profileId)).platform.workflowRuns)
     this.browserDomains = registerBrowserMethods(this.domains, async (profileId) =>
       (await profile(profileId)).platform.browser)
+    // A thread agent's browser without a window, as the person sees it from the thread (`browser.view.*`).
+    registerBrowserViewMethods(this.domains, async (profileId) => (await profile(profileId)).platform.browser)
     this.integrationDomains = registerIntegrationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {
@@ -324,7 +360,7 @@ export class MousseMainService extends MmsProfileServices {
     const runtime: BrowserRuntimePort = {
       capabilities: (context) => {
         if (context.profileId !== services.profileId) return undefined
-        const target = context.source === 'gui' ? services.platform.browser.selectedTarget(context.threadId) : { backend: 'managed-chromium' as const }
+        const target = context.source === 'gui' ? services.platform.browser.targetFor(context) : { backend: 'managed-chromium' as const }
         return services.platform.browser.sessions.listThreadSessions({ profileId: context.profileId, threadId: context.threadId })
           .find((session) => session.backend === target?.backend && session.runId === context.runId && session.lifecycle !== 'closed' && session.lifecycle !== 'disconnected')?.capabilities
       },
@@ -340,7 +376,7 @@ export class MousseMainService extends MmsProfileServices {
       resolveTarget: (context) => {
         if (context.profileId !== services.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
         if (context.source !== 'gui') return { backend: 'managed-chromium' }
-        const selected = services.platform.browser.selectedTarget(context.threadId)
+        const selected = services.platform.browser.targetFor(context)
         if (!selected) throw new BrowserAutomationError({ code: 'setup_required', message: 'No available in-app browser tab is connected. Open a browser tab and retry.' })
         return selected
       },

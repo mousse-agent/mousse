@@ -280,6 +280,13 @@ describe('the words for what a device did', () => {
       if (row.durable) expect(AUDITED_CHANGE_METHODS, method).toContain(method)
   })
 
+  it('says a Send now stopped a command, not only that a turn was steered', () => {
+    expect(describeActivityEntry({ method: 'orchestrator.steerNow', kind: 'change', outcome: 'ok' })).toBe('Sent a steer now, stopping a command')
+    expect(describeDeviceActivity([{ method: 'orchestrator.steerNow', count: 2 }, { method: 'orchestrator.steer', count: 1 }])).toBe(
+      'Sent 2 steers now, stopping commands, steered a turn'
+    )
+  })
+
   it('says why a call was refused or lost, and how a terminal ended', () => {
     expect(describeActivityEntry({ method: 'files.write', kind: 'refused', outcome: 'thread_not_found' })).toBe(
       'Saved a file (refused: the thread was gone)'

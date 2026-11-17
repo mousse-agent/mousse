@@ -5,6 +5,8 @@ import {
   botNotificationKind,
   planThreadNotification
 } from '../src/main/notifications/threadNotification'
+import { BotChatProjection } from '../src/mms/bots/chat/projection'
+import type { BotMessageRow } from '../src/mms/bots/store/BotStore'
 import type { BotChatMessage } from '../src/shared/bots/personal/chat'
 
 /**
@@ -21,10 +23,39 @@ describe('what a bot row announces', () => {
     for (const kind of ['run_report', 'text', 'notice', 'error'] as const) expect(botNotificationKind(row({ kind }), NOW)).toBe('completed')
   })
 
+  it.each(['bm_wake_w1', 'bm_permission_switch_1'])('keeps projected service line %s silent and announces the reply', (id) => {
+    // These notice ids become systemLine in the chat projection used by bots.message.
+    const projection = new BotChatProjection({ store: {} as never, emit: () => {} })
+    const service = projection.toMessage({ ...row({ id, kind: 'notice', text: 'Following up' }), botId: 'b1' } as BotMessageRow)
+    expect(service.systemLine).toBe(true)
+    expect(botNotificationKind(service, NOW)).toBeNull()
+    expect(botNotificationKind(row({ kind: 'text', text: 'The deploy is done.' }), NOW)).toBe('completed')
+  })
+
   it('announces an open ask as a question, and an answered one not at all', () => {
     const ask = { askId: 'k1', title: 'read files in ~/Invoices', note: '', status: 'open' as const }
     expect(botNotificationKind(row({ kind: 'notice', ask }), NOW)).toBe('question')
     expect(botNotificationKind(row({ kind: 'notice', ask: { ...ask, status: 'allowed' } }), NOW)).toBeNull()
+  })
+
+  it('announces a question with answers to tap as a question, with its answers; an answered one not at all', () => {
+    const question = { questionId: 'q_1', choices: [{ label: 'Flat A' }, { label: 'Flat B' }], other: true, status: 'open' as const }
+    const asked = row({ kind: 'text', text: 'Which flat should I book a viewing for?\n\nFlat A · Flat B · Something else', plainFrom: 39, question })
+    expect(botNotificationKind(asked, NOW)).toBe('question')
+    expect(botNotificationContent('Flat Finder', asked)).toEqual({ title: 'Flat Finder', body: 'Which flat should I book a viewing for? — Flat A / Flat B' })
+    expect(botNotificationKind(row({ kind: 'text', question: { ...question, status: 'answered', answer: 'Flat B' } }), NOW)).toBeNull()
+  })
+
+  it('announces a nudge with the question it reminds of, cut to fit, so it reads on its own', () => {
+    const question = { questionId: 'q_1', choices: [{ label: 'Flat A' }, { label: 'Flat B' }], other: true, status: 'open' as const, nudge: true as const }
+    const long = 'I found two flats that fit what you asked for, both close to the station and under budget, and both free on Saturday. Which one should I book a viewing for?'
+    const nudge = row({ kind: 'text', text: 'Still need your answer on this one.\n\nFlat A · Flat B · Something else', plainFrom: 35, question, replyTo: { id: 'qb', author: 'bot', text: long } })
+    const { body } = botNotificationContent('Flat Finder', nudge)
+    expect(body.startsWith(`Still need your answer: ${long.slice(0, 80)}`)).toBe(true)
+    expect(body).toMatch(/… — Flat A \/ Flat B$/)
+    expect(body.length).toBeLessThanOrEqual(140)
+    // The bubble it replies to is gone: the nudge's own line.
+    expect(botNotificationContent('Flat Finder', { ...nudge, replyTo: { id: 'qb', author: 'bot', text: '', gone: true } }).body).toBe('Still need your answer on this one. — Flat A / Flat B')
   })
 
   it('never announces the owner’s own messages or an old row that changed', () => {
@@ -75,4 +106,69 @@ describe('how a bot row reaches the person', () => {
   it('shows the system notification for a bot that is not on screen, even with Mousse in front', () => {
     expect(planThreadNotification(channels, { windowFocused: true, viewingThread: false, systemSupported: true })).toEqual({ toast: false, system: true, playSound: false })
   })
+})
+
+it('keeps an owner MCP review readable in its sidebar summary, card and notification after the master merges', async () => {
+  // Owner MCP tools are offered and called directly; use_tool deliberately refuses their names.
+  const { botFixture, createBot, start, finish } = await import('./bots/botFixture')
+  const { BotMcp, callForBot } = await import('../src/mms/bots/mcp/BotMcp')
+  const { getDefaultSettings } = await import('../src/shared/settings')
+  const { botManifestDigest } = await import('../src/mms/bots/grants/compile')
+  const f = botFixture()
+  try {
+    const settings = getDefaultSettings()
+    settings.experimental.botAsksFirst = true
+    f.host.settings = { get: () => settings } as never
+    const descriptor = { configRevision: 'r1', toolName: 'send_email', providerName: 'mail_send_email', inputSchema: { type: 'object' }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
+    const mcp = new BotMcp({ enabled: () => true, catalog: {
+      ensure: async () => undefined, listing: () => [{ ...descriptor, name: 'Mail__send_email' }],
+      servers: () => [{ installationId: 'mail', serverName: 'Mail', configDigest: 'c1', tools: [descriptor] }]
+    }, manager: { callTool: async () => { throw new Error('An open review must not send') } } as never })
+    f.host.mcp = mcp
+    await f.bots.reconcileOnStartup()
+    const { botId } = await createBot(f, { reply: 'Ready' })
+    const permission = await f.bots.activate({ botId, input: 'Allow Mail', clientRequestId: 'mail-permission' })
+    const asking = await start(f, permission.id)
+    asking.prepared.authority.escalate!({ permission: { mcp: { server: 'Mail' } } as never, reason: 'To send mail' })
+    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+    await finish(f, asking.payload)
+    const grant = f.store.activeGrant(botId)!
+    f.store.approve(botId, botManifestDigest({ ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send_email', level: 'asks_first' }] }), { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send_email', level: 'asks_first' }] })
+    await f.bots.service.chatSend({ botId, text: 'Send an email', clientRequestId: 'owner-mail' })
+    const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const talk = await start(f, chat.id)
+    const { workId } = await f.bots.tools.work.start(botId, chat.id, { title: 'Mail', brief: 'Send the email', key: 'send-mail' })
+    await finish(f, talk.payload)
+    const work = await start(f, workId)
+    await callForBot({ bot: work.prepared.authority, mcp, name: 'Mail__send_email', args: { to: 'private@example.test', body: 'Private content' }, toolCallId: 'send-one', signal: new AbortController().signal })
+    const message = f.bots.service.chatList(botId).messages.find(message => message.action)!
+    expect(message.action).toMatchObject({ title: 'Send email', serverName: 'Mail', status: 'open' })
+    const summary = f.bots.service.list().bots.find(bot => bot.id === botId)!
+    expect(summary).toMatchObject({ state: 'needs_you', needsOwner: true })
+    expect(summary.stateText).toBe('Waiting for you: Send email · Mail')
+    const banner = botNotificationContent(summary.name, message)
+    expect(botNotificationKind(message, f.clock.now)).toBe('question')
+    expect(banner).toEqual({ title: summary.name, body: 'Wants to send email' })
+    for (const internal of ['send_email', 'mail_send_email', 'Mail__', 'private@example.test', 'Private content']) expect(`${summary.stateText}\n${banner.body}`).not.toContain(internal)
+  } finally { f.close() }
+})
+
+it('notifies an older bot own-tool permission in its plain card words, without the tool id or call details', async () => {
+  const { botFixture, createBot, start, finish } = await import('./bots/botFixture')
+  const f = botFixture()
+  try {
+    const { botId } = await createBot(f, { reply: 'Ready' })
+    f.bots.narrowGrant(botId, manifest => ({ ...manifest, appTools: manifest.appTools.filter(tool => tool !== 'telling_set') }))
+    await f.bots.service.chatSend({ botId, text: 'Notify me when all done.', clientRequestId: 'notify-preference' })
+    const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { prepared, payload } = await start(f, chat.id)
+    expect(prepared.authority.check({ kind: 'app', tool: 'telling_set', args: { tellMe: 'look', quietHours: { from: '22:00', to: '07:00' } } })).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
+    await finish(f, payload, 'interrupted', { text: 'I need your OK first.', outcome: { interruptedBy: 'bot_wall' } })
+    const message = f.bots.service.chatList(botId).messages.find(message => message.ask?.status === 'open')!
+    expect(message.ask?.title).toBe('change when it tells you')
+    const banner = botNotificationContent('Helper', message)
+    expect(botNotificationKind(message, f.clock.now)).toBe('question')
+    expect(banner).toEqual({ title: 'Helper', body: 'Wants to change when it tells you' })
+    for (const internal of ['telling_set', 'tellMe', 'quietHours', '22:00']) expect(banner.body).not.toContain(internal)
+  } finally { f.close() }
 })

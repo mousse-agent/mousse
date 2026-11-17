@@ -9,9 +9,11 @@ export const scenario: Scenario = {
     expect(run).toMatchObject({ status: 'failed' })
     expect(turnState.phase).toBe('failed')
     // A provider failure without a typed error surfaces as a sanitised turn failure. The Pi RPC
-    // engine types every failed request from Pi's error text (`normalizeProviderError`).
-    const code = adapterId === 'pi-rpc' ? 'provider_unknown' : 'orchestrator_turn_failed'
+    // engine types every failed request from Pi's error text (`normalizeProviderError`); Cursor's
+    // run end carries the SDK's own message, which the transcript shows.
+    const code = adapterId === 'pi-rpc' ? 'provider_unknown' : adapterId === 'cursor' ? 'provider_api_error' : 'orchestrator_turn_failed'
     expect(response.error).toMatchObject({ code })
+    if (adapterId === 'cursor') expect(response.error).toMatchObject({ message: 'Upstream overloaded' })
     expect(response.message.startsWith(`[${code}] `)).toBe(true)
     const replies = messages.filter((message) => message.role === 'assistant' && !message.kind)
     expect(replies).toEqual([expect.objectContaining({ content: 'Partial', streaming: false, incomplete: true })])

@@ -8,10 +8,18 @@ import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearV
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
 import { setTurnChangedFiles } from '../lib/turnChangedFilesSetting'
+import { applyChatWidth } from '../lib/chatWidth'
+import { setReplyPacing } from '../lib/replyPacingSetting'
 import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
+import { setThreadPathInTitleBar } from '../lib/threadPathSetting'
+import { setReplyPreviews } from '../lib/replyPreviewSetting'
+import { setContextRingInComposer } from '../lib/contextRingSetting'
 import { setAnimationSpeed } from '../lib/motion'
 import { applyFrostedComposer } from '../lib/frostedComposer'
+import { applyThemeCss, setUserThemeActive } from '../lib/themeCss'
+import { showWallpaper } from '../lib/wallpaper'
+import { activeUserTheme, type UserTheme } from '../../shared/themes/userThemes'
 
 const FIXED_SURFACE_VARS = [
   ...new Set(Object.values(FIXED_SURFACE_THEMES).flatMap((vars) => Object.keys(vars ?? {})))
@@ -43,7 +51,6 @@ const GLASS_OWNED_VARS = [
   '--bg-tertiary',
   '--app-window-bg',
   '--gradient-surface',
-  '--glass-blur',
   '--glass-alpha-base',
   '--glass-alpha-strong',
   '--glass-alpha-soft',
@@ -128,7 +135,6 @@ function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void
     // glass surface duplicates off-screen render targets and significantly
     // increases GPU-process memory. Keep translucency, but let the single
     // native material provide the blur.
-    root.style.setProperty('--glass-blur', 'none')
     root.style.setProperty(
       '--glass-bg',
       'rgba(var(--acrylic-base-rgb), var(--glass-alpha-base))'
@@ -154,7 +160,6 @@ function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void
     for (const name of GLASS_OWNED_VARS) {
       root.style.removeProperty(name)
     }
-    root.style.setProperty('--glass-blur', 'none')
     root.setAttribute('data-acrylic', 'false')
   }
 }
@@ -188,11 +193,26 @@ function applyLayoutTokens(theme: ThemeId): void {
   }
 }
 
+/**
+ * A user theme over its base: its color tokens and CSS as one adopted sheet after the app's (`applyThemeCss`), its
+ * wallpaper behind the chat (`showWallpaper`), and `data-user-theme` on the root. While a decision is on screen all of
+ * it pauses (`setUserThemeActive`). No theme takes it off.
+ */
+function applyUserTheme(theme: UserTheme | undefined): void {
+  const root = document.documentElement
+  if (theme) root.setAttribute('data-user-theme', theme.id)
+  else root.removeAttribute('data-user-theme')
+  setUserThemeActive(Boolean(theme))
+  applyThemeCss(theme?.css ?? '', { tokens: theme?.colors ?? {} })
+  showWallpaper(useAppStore.getState().profileId, theme?.wallpaper)
+}
+
 function applyAppearance(appearance: AppearanceSettings): void {
   const normalized = normalizeAppearance(appearance)
+  const userTheme = activeUserTheme(normalized)
   applyTheme(normalized.theme)
   clearFixedSurfaces()
-  applyAccent(normalized.accentColor)
+  applyAccent(userTheme?.accent || normalized.accentColor)
   applyFixedSurfaces(normalized.theme)
   applyLightSurfaces(normalized.theme)
   applyVsCodeTheme(normalized.theme)
@@ -201,13 +221,19 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyFontSettings(normalized)
   setAnimationSpeed(normalized.animationSpeed)
   applyFrostedComposer(normalized)
+  applyChatWidth(normalized.chatWidth)
+  applyUserTheme(userTheme)
 }
 
-/** Chat display settings that live under appearance: math and the changed-files summary. */
+/** Display settings that live under appearance: math, reply pacing, the changed-files summary, the title-bar path, reply previews and the context ring. */
 function applyChatDisplay(appearance: AppearanceSettings): void {
   const normalized = normalizeAppearance(appearance)
   setRenderMath(normalized.renderMath)
+  setReplyPacing(normalized.replyPacing)
   setTurnChangedFiles(normalized.turnChangedFiles)
+  setThreadPathInTitleBar(normalized.threadPathInTitleBar)
+  setReplyPreviews(normalized.replyPreviews)
+  setContextRingInComposer(normalized.contextRingInComposer)
 }
 
 async function syncWindowBackground(): Promise<void> {

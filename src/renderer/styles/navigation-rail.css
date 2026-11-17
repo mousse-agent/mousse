@@ -36,12 +36,11 @@
 .navigation-rail-button.active {
   color: var(--accent);
   background: rgba(var(--accent-rgb), 0.08);
-  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.16);
 }
 
 .navigation-rail-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .navigation-rail-button:disabled { opacity: 0.35; cursor: not-allowed; }

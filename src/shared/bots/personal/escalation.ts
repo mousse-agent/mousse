@@ -1,7 +1,7 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
-import { foldersOf, workspaceOf, type BotManifest } from './definition'
-import { BOT_BROWSER_PERMISSION, botGrantTool, isAbsolutePath } from './manifest'
+import type { BotManifest } from './definition'
+import { BOT_BROWSER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -14,17 +14,42 @@ export const BOT_BUDGET_WALL_KEYS = ['maxActiveMs', 'maxTurns', 'maxToolCalls', 
 export type BotBudgetWallKey = (typeof BOT_BUDGET_WALL_KEYS)[number]
 
 /**
- * What a wall asks the owner to allow. A `path` request is file access as a whole, "use files on
- * this computer" (`filesAsk`): whichever folder it names, allowing it lets the bot read and change
- * files anywhere. Asks are written in the one form `filesAsk` returns; rows of older builds name
- * the folder that was asked about.
+ * What a wall asks the owner to allow. A `path` request ("use files on this computer") is only ever read from rows an
+ * older build wrote: bots can no longer be given files outside their files folder, so no new one is made (`askProblem`
+ * refuses it) and allowing an old one grants nothing (`withPermission`).
  */
 export type BotPermissionRequest =
   | { tool: string }
   | { path: string; access: 'read' | 'write' }
   | { skill: string }
-  | { mcp: { serverId: string; tool: string } }
+  | { mcp: BotMcpAsk }
   | { budget: { key: BotBudgetWallKey; amount?: number } }
+
+/**
+ * An ask for the owner's MCP tools: one ask per server (`serverId`: its installation and identity,
+ * `<installation>.<identity>`, or the bare installation of a grant made before identities), never per tool. Mousse
+ * writes it with the server's `name` and every tool a bot can be offered that the bot does not hold yet (`tools`);
+ * Allow grants exactly those, each as its own pair in the grant, so a tool the server adds later is asked for again
+ * (`added`: the bot already holds some of the server's tools). `changes` says what the tools' own annotations tell:
+ * whether any of them can change things. A request naming one `tool` (the bot's, or an older build's row) is asked as
+ * its server.
+ */
+export interface BotMcpAsk {
+  serverId: string
+  tool?: string
+  name?: string
+  tools?: string[]
+  added?: true
+  /** From the tools' read-only hints: `none` (every tool says it only reads), `some` (at least one says it can change things), `unknown`. */
+  changes?: 'none' | 'some' | 'unknown'
+  /** The server has not answered yet: its tools are filled in when it does; until then Allow grants nothing and is off. */
+  loading?: true
+  /** The server changed since the bot was allowed it (`replaces`, the id the grant holds): Allow replaces those pairs. */
+  changed?: true
+  replaces?: string
+  /** How many of the server's tools a bot can't use (a name a grant can't hold, or a tool the relay leaves out). */
+  unusable?: number
+}
 
 /**
  * An ask that grants nothing (Bot Phase 1 §5.11): `export_memory` ("Save my memory to a folder").
@@ -43,10 +68,17 @@ export function isSpecialAsk(request: BotAskRequest): request is BotSpecialAsk {
 
 /**
  * The fingerprint of an ask: the canonical JSON of what it asks for. There is at most one open ask
- * per bot and fingerprint, and a permission's fingerprint is its id in About → Can use.
+ * per bot and fingerprint, and a permission's fingerprint is its id in About → Can use. The owner's MCP tools are one
+ * permission per server: whichever tools an ask lists, its fingerprint is its server's.
  */
 export function askFingerprint(request: BotAskRequest): string {
+  if ('mcp' in request) return stableStringify({ mcp: { serverId: request.mcp.serverId } })
   return stableStringify(request)
+}
+
+/** The tools an MCP ask grants: the ones it lists, or the one an older row names. */
+export function mcpAskTools(ask: BotMcpAsk): string[] {
+  return ask.tools ?? (ask.tool ? [ask.tool] : [])
 }
 
 /**
@@ -127,45 +159,31 @@ export function grantRequestOf<T extends BotAskRequest>(request: T): T {
   return (tool === request.tool ? request : { tool }) as T
 }
 
-/** The top of the file system `path` is on: `/`, a drive (`C:\\`) or a network share (`\\\\server\\share\\`). */
-export function pathRoot(path: string): string {
-  const drive = /^([A-Za-z]:)[\\/]/.exec(path)
-  if (drive) return `${drive[1]!.toUpperCase()}\\`
-  const share = /^\\\\([^\\/]+)[\\/]([^\\/]+)/.exec(path)
-  if (share) return `\\\\${share[1]}\\${share[2]}\\`
-  return '/'
-}
-
-/**
- * The one file ask (bot-architecture.md §3.7): "use files on this computer", for every folder,
- * read and write. Its folder is the top of the file system the computer starts from (`/`, or the
- * system drive on Windows), so every file ask has the same fingerprint, and an older build reading
- * the row sees a folder it can show.
- */
-export function filesAsk(): { path: string; access: 'write' } {
-  const scope = globalThis as { process?: { platform?: string; env?: Record<string, string | undefined> } }
-  const windows = scope.process?.platform === 'win32'
-  return { path: windows ? pathRoot(`${scope.process?.env?.SystemDrive ?? 'C:'}\\`) : '/', access: 'write' }
-}
-
-/** `request` as it is asked: any folder becomes the one file ask (`filesAsk`). */
-export function filesAskOf<T extends BotAskRequest>(request: T): T {
-  return ('path' in request ? filesAsk() : request) as T
-}
-
 /** A permission request in plain words. */
 export function permissionText(permission: BotPermissionRequest): string {
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_BROWSER_PERMISSION) return 'Use the browser'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_THREADS_PERMISSION) return 'Use your threads'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_PROFILER_PERMISSION) return 'Use the profiler'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_THEMES_PERMISSION) return 'Change how Mousse looks'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_SCHEDULES_PERMISSION) return 'Schedule work in your threads'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_SECRETS_PERMISSION) return 'Use secrets you give it'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_QUICK_ACTIONS_PERMISSION) return 'Add quick actions'
   if ('tool' in permission) return `Use the tool \`${permission.tool}\``
   if ('path' in permission) return 'Use files on this computer'
   if ('skill' in permission) return `Use the skill *${permission.skill}*`
-  if ('mcp' in permission) return `Use the ${permission.mcp.serverId} tool \`${permission.mcp.tool}\``
+  if ('mcp' in permission) {
+    if (permission.mcp.name) return permission.mcp.added ? `Use ${permission.mcp.name}'s new tools` : permission.mcp.changed ? `Use your ${permission.mcp.name} tools again` : `Use your ${permission.mcp.name} tools`
+    return permission.mcp.tool ? `Use the MCP tool \`${permission.mcp.tool}\`` : 'Use the tools of an MCP server'
+  }
   const { key, amount } = permission.budget
   if (amount === undefined) return `More ${BUDGET_WORDS[key]}`
   if (key === 'maxActiveMs') return `${Math.max(1, Math.round(amount / 60_000))} more minutes of work`
   if (key === 'maxUsd') return `$${amount} more spend`
   return `${amount} more ${BUDGET_WORDS[key]}`
 }
+
+/** What a bot is told when it asks for a folder: it has only its files folder, and asking gives no more. */
+export const BOT_NO_FOLDER_ASK_TEXT = "A bot can't be given files outside its files folder, so there is nothing to ask for. Work in your files folder; if the owner needs a file from elsewhere, ask them to attach it or copy it there."
 
 /** Why a value is not a permission request, or undefined when it is one. */
 export function permissionProblem(value: unknown): string | undefined {
@@ -175,14 +193,22 @@ export function permissionProblem(value: unknown): string | undefined {
   const text = (item: unknown) => typeof item === 'string' && item.length > 0 && item.length <= 1024
   if (keys.length === 1 && keys[0] === 'tool') return text(entry.tool) ? undefined : 'The tool name is invalid.'
   if (keys.length === 1 && keys[0] === 'skill') return text(entry.skill) ? undefined : 'The skill is invalid.'
-  if (keys.length === 2 && 'path' in entry && 'access' in entry) {
-    if (!text(entry.path) || (entry.access !== 'read' && entry.access !== 'write')) return 'The folder permission is invalid.'
-    // Never resolved against the daemon's working directory: the owner is shown the exact folder.
-    return isAbsolutePath(entry.path as string) ? undefined : 'The folder must be a full path, without . or .. parts.'
-  }
+  // Files outside the bot's files folder are no longer something a bot can be given (an older build's ask).
+  if ('path' in entry) return BOT_NO_FOLDER_ASK_TEXT
   if (keys.length === 1 && keys[0] === 'mcp') {
     const mcp = entry.mcp as Record<string, unknown> | null
-    return mcp && typeof mcp === 'object' && text(mcp.serverId) && text(mcp.tool) ? undefined : 'The MCP tool is invalid.'
+    if (!mcp || typeof mcp !== 'object' || Array.isArray(mcp)) return 'The MCP server is invalid.'
+    // The bot names the server as `mcp_servers` lists it (`server`: its name or id); Mousse writes `serverId`.
+    if (!text(mcp.serverId) && !text(mcp.server)) return 'Name the MCP server, as mcp_servers lists it.'
+    if (mcp.tool !== undefined && !text(mcp.tool)) return 'The MCP tool is invalid.'
+    if (mcp.tools !== undefined && !(Array.isArray(mcp.tools) && mcp.tools.length <= 512 && mcp.tools.every(text))) return 'The MCP tools are invalid.'
+    if (mcp.name !== undefined && !text(mcp.name)) return 'The MCP server name is invalid.'
+    // Mousse's own fields: a bot's request never sets them (Mousse writes the ask from the servers as they are).
+    if (mcp.loading !== undefined && mcp.loading !== true) return 'The MCP ask is invalid.'
+    if (mcp.changed !== undefined && mcp.changed !== true) return 'The MCP ask is invalid.'
+    if (mcp.replaces !== undefined && !text(mcp.replaces)) return 'The MCP ask is invalid.'
+    if (mcp.unusable !== undefined && !(typeof mcp.unusable === 'number' && Number.isSafeInteger(mcp.unusable) && mcp.unusable >= 0)) return 'The MCP ask is invalid.'
+    return undefined
   }
   if (keys.length === 1 && keys[0] === 'budget') {
     const budget = entry.budget as Record<string, unknown> | null
@@ -193,6 +219,9 @@ export function permissionProblem(value: unknown): string | undefined {
   return 'The permission is not one a bot can ask for.'
 }
 
+/** What a bot is told it may ask for, after an ask it wrote wrongly. */
+export const WHAT_TO_ASK_TEXT = "Ask for a tool, a skill, the tools of one of your owner's MCP servers, a limit, or to export your memory."
+
 /** Why a value is not something `escalate` may ask for, or undefined when it is one. */
 export function askProblem(value: unknown): string | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && 'ask' in value)
@@ -201,10 +230,9 @@ export function askProblem(value: unknown): string | undefined {
 }
 
 /**
- * `manifest` with `permission` added ("Allow for this bot" and "Allow this time"). A path gives
- * file access as a whole (the workspace becomes the top of the file system, read and write), a
- * tool adds a built-in or an app tool, a budget raises the limit by `amount`. The result is
- * checked like any manifest before it is published.
+ * `manifest` with `permission` added ("Allow for this bot" and "Allow this time"). A tool adds a
+ * built-in or an app tool, a budget raises the limit by `amount`, and an older build's folder ask
+ * adds nothing. The result is checked like any manifest before it is published.
  */
 export function withPermission(manifest: BotManifest, permission: BotPermissionRequest, amount?: number): BotManifest {
   const next: BotManifest = {
@@ -223,12 +251,17 @@ export function withPermission(manifest: BotManifest, permission: BotPermissionR
       if (!next.tools.includes(tool)) next.tools.push(tool)
     } else if (!next.appTools.includes(tool)) next.appTools.push(tool)
   } else if ('path' in permission) {
-    // File access is one permission: whatever folder was asked about, every folder is allowed.
-    next.workspace = { roots: [pathRoot(permission.path)], access: 'write' }
+    // An older build's folder ask: files outside the files folder can no longer be given, so it adds nothing.
   } else if ('skill' in permission) {
     if (!next.skills.includes(permission.skill)) next.skills.push(permission.skill)
   } else if ('mcp' in permission) {
-    if (!next.mcp.some((pair) => pair.serverId === permission.mcp.serverId && pair.tool === permission.mcp.tool)) next.mcp.push({ ...permission.mcp })
+    // One ask per server, stored per tool: each tool the ask lists is its own pair, so a later tool is asked for again.
+    // A server that changed since it was allowed: its old pairs go, so the grant holds only what the owner saw now.
+    const serverId = permission.mcp.serverId
+    const replaced = permission.mcp.replaces
+    if (replaced && replaced !== serverId) next.mcp = next.mcp.filter((pair) => pair.serverId !== replaced)
+    for (const tool of mcpAskTools(permission.mcp))
+      if (!next.mcp.some((pair) => pair.serverId === serverId && pair.tool === tool)) next.mcp.push({ serverId, tool })
   } else {
     const { key } = permission.budget
     const by = amount ?? permission.budget.amount

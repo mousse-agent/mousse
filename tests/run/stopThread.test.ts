@@ -167,7 +167,9 @@ describe('RunEngine.stopSubtree (issue #142)', () => {
       f!.engine.stopSubtree({ threadId: 'child-1', reason: 'user' })
       const [notice] = f!.engine.inbox.listPending('parent')
       expect(notice).toMatchObject({ kind: 'reconcile_notice', payload: { kind: 'delegation_stopped', delegationId: c.delegationId, childThreadId: 'child-1' } })
-      expect(planWakeNotice([notice], { titleOf: () => 'Reviewer' }).text).toBe(`Subagent "Reviewer" (thread child-1) was stopped before it finished task ${c.delegationId}.`)
+      const planned = planWakeNotice([notice], { titleOf: () => 'Reviewer' })
+      expect(planned.text).toBe(`<mousse_notice kind="subagent_stopped" ref="${c.delegationId}">\nSubagent "Reviewer" (thread child-1) was stopped before it finished its task.\n</mousse_notice>`)
+      expect(planned.items).toMatchObject([{ event: 'stopped', childThreadId: 'child-1', title: 'Reviewer' }])
       // The subagent's own task into child-2 is inside the subtree: no notice for it.
       expect(f!.engine.inbox.listForThread('child-1')).toEqual([])
 
@@ -598,6 +600,58 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     })
   })
 
+  describe('the line a Stop writes says why the turn was cut off (the transcript marks it Stopped)', () => {
+    const stopLine = (s: Scene) => s.d.orch.getMessages(s.parentId).filter((message) => message.role === 'system').at(-1)
+
+    it('a person\'s Stop writes cause user with the run\'s id', async () => {
+      const s = await scene()
+      await s.d.orch.stopThread(s.parentId, 'user')
+      await waitFor(() => s.terminal(s.parentRunId), 'the parent to stop')
+      expect(stopLine(s)).toMatchObject({ content: 'Turn stopped.', turnId: s.parentRunId, turnEnd: { cause: 'user' } })
+      // The run's user message carries the same id, so the mark finds its turn.
+      expect(s.d.orch.getMessages(s.parentId).find((message) => message.role === 'user')?.turnId).toBe(s.parentRunId)
+    })
+
+    it('an agent\'s thread_interrupt from another thread writes cause agent', async () => {
+      const s = await scene()
+      await s.d.orch.stopThread(s.parentId, 'user', { actor: { kind: 'agent', threadId: 'other-thread', runId: 'other-run', toolCallId: 'mcp:stop-1' } })
+      await waitFor(() => s.terminal(s.parentRunId), 'the parent to stop')
+      expect(s.run(s.parentRunId).outcome).toMatchObject({ interruptedBy: 'agent' })
+      expect(stopLine(s)).toMatchObject({ content: 'Turn stopped.', turnId: s.parentRunId, turnEnd: { cause: 'agent' } })
+    })
+
+    it('a subagent its parent cancels (task_cancel) writes cause agent, and no agent.action row', async () => {
+      const s = await scene()
+      await (s.d.orch as any).taskCancel(s.parentId, { subagent: 'Worker' })
+      await waitFor(() => s.terminal(s.delegation.childRunId), 'the subagent to stop')
+      expect(s.run(s.delegation.childRunId).outcome).toMatchObject({ interruptedBy: 'agent' })
+      const childLine = s.d.orch.getMessages(s.childThreadId).filter((message) => message.role === 'system').at(-1)
+      expect(childLine).toMatchObject({ content: 'Turn stopped.', turnId: s.delegation.childRunId, turnEnd: { cause: 'agent' } })
+      expect(s.d.engine.store.hasAgentAction(s.childThreadId, 'stopped_run')).toBe(false)
+    })
+
+    it('the launched threads a task_cancel reaches are stopped as the agent\'s too (launcher_stopped keeps the cause)', async () => {
+      const s = await scene()
+      const launched = s.d.store.createThread('Launched', undefined, undefined, { started: true, createdByThreadId: s.childThreadId })
+      const agentRun = s.d.engine.store.createRun({ threadId: launched.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 1 } })
+      s.d.engine.markStarting(agentRun.runId)
+      s.d.engine.markRunning(agentRun.runId)
+      await (s.d.orch as any).taskCancel(s.parentId, { subagent: 'Worker' })
+      expect(s.run(agentRun.runId).outcome).toMatchObject({ stopRequested: true, stopRequestedBy: 'agent' })
+    })
+
+    it('the launched threads a person\'s Stop reaches stay the person\'s', async () => {
+      const s = await scene()
+      const launched = s.d.store.createThread('Launched', undefined, undefined, { started: true, createdByThreadId: s.parentId })
+      const agentRun = s.d.engine.store.createRun({ threadId: launched.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 1 } })
+      s.d.engine.markStarting(agentRun.runId)
+      s.d.engine.markRunning(agentRun.runId)
+      await s.d.orch.stopThread(s.parentId, 'user')
+      expect(s.run(agentRun.runId).outcome).toMatchObject({ stopRequested: true })
+      expect(s.run(agentRun.runId).outcome?.stopRequestedBy).toBeUndefined()
+    })
+  })
+
   it('the Stop fence: a run that is being stopped can start no subagent and continue none', async () => {
     const s = await scene()
     const threadsBefore = s.d.store.listAllThreads().length
@@ -748,6 +802,9 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       expect(prompt).toContain('Which database should I use?')
       expect(prompt).toContain(`answer_subagent`)
       expect(prompt).toContain(requestId)
+      // The transcript keeps it as a notice about the subagent, so the app does not show that text as the person's message.
+      const stored = s.d.orch.getMessages(s.parentId).find((message) => message.role === 'user' && message.content === prompt)
+      expect(stored?.subagentNotice).toMatchObject([{ event: 'question', childThreadId: s.childThreadId, title: 'Worker', requestId }])
       // The wake read it; the parent answers with answer_subagent.
       expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
       expect(await (s.d.orch as any).answerSubagent(s.parentId, wake, { subagent: 'Worker', requestId, answers: { db: 'sqlite' } })).toMatchObject({ answered: true })
@@ -928,12 +985,15 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       await s.d.orch.stopThread(s.parentId, 'user')
       expect(ids()).toEqual([typed.queueItem!.id, internal.id, nameless.id, external.id].sort())
       expect(s.run(typed.runId!).status).toBe('queued')
-      // It runs once the stopped task is over.
+      // The Stop ended the subagent's turn, so the message waits for the person, through startup recovery too (#917),
+      // and runs when they send it.
       await waitFor(() => s.terminal(s.delegation.childRunId), 'the subagent to stop')
-      await waitFor(() => {
-        s.d.orch.recoverAndDrainPendingQueues()
-        return s.run(typed.runId!).status === 'completed'
-      }, 'the person\'s message to run', 15_000)
+      await waitFor(() => !s.d.orch.isActiveTurnRunning(s.childThreadId), 'the stopped turn to end')
+      s.d.orch.recoverAndDrainPendingQueues()
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(s.run(typed.runId!).status).toBe('queued')
+      expect(s.d.orch.promoteQueueItem(s.childThreadId, typed.queueItem!.id)).toEqual({ ok: true })
+      await waitFor(() => s.run(typed.runId!).status === 'completed', 'the person\'s message to run', 15_000)
       expect(s.childTurns().some((prompt) => prompt.includes('typed to the worker'))).toBe(true)
     })
   })
@@ -976,6 +1036,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     it('the follow-up is a queued run from the start: it holds the task by itself, with no session in memory, and survives a restart', async () => {
       const { s, followUp } = await heldBySteer()
       expect(followUp.status).toBe('queued')
+      expect(followUp.outcome?.sentByAgent).toBeUndefined()
       expect(s.d.store.loadMessageQueue(s.childThreadId).map((item) => item.runId)).toEqual([followUp.runId])
       expect(s.task(s.delegation.delegationId).status).toBe('running')
       ;(s.d.orch as any).sessions.delete(s.childThreadId)

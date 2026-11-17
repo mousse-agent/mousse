@@ -12,6 +12,7 @@ import { runBrowserWorkerHost } from '../../browser-worker/ipc/host'
 import type { CapabilityReport } from '../../browser-worker/session/SessionManager'
 import { fail } from '../../browser-worker/errors'
 import { stopOwnedPid } from '../../browser-worker/lifecycle/process'
+import { WORKER_WARNING_PREFIX } from '../../browser-worker/util'
 import {
   rootOnlyTree,
   stopOwnedProcessTree,
@@ -281,7 +282,13 @@ export class BrowserBroker {
     if (child.pid) {
       this.workerTree = rootOnlyTree(child.pid, { parentHandleAlive: child.exitCode === null, executablePath: process.execPath })
     }
-    child.stderr?.on('data', () => undefined)
+    // The worker's own warnings (a page it closed because it could not be marked) reach the log; nothing else does.
+    let stderrTail = ''
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const lines = (stderrTail + chunk.toString('utf8')).split('\n')
+      stderrTail = (lines.pop() ?? '').slice(-4096)
+      for (const line of lines) if (line.startsWith(WORKER_WARNING_PREFIX)) console.warn(line.slice(0, 4096))
+    })
     child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk))
     child.once('exit', () => this.onDisconnect(child))
     child.once('error', () => this.onDisconnect(child))
@@ -531,9 +538,19 @@ async function cleanupOwnedBrowserProcesses(browserRoot: string, ownerPid: numbe
   }
 }
 
-/** The page a person's input goes to (`human.input` navigate): the policy checks it like an agent's. */
+/**
+ * The page a person's input goes to (`human.input` navigate, alone or in `inputs`): the policy checks
+ * it like an agent's. Several navigations in one request are refused: each is checked on its own.
+ */
 function humanNavigation(request: BrowserWorkerRequest): string | undefined {
   if (request.method !== 'human.input') return undefined
-  const input = request.params.input as { kind?: unknown; url?: unknown } | undefined
-  return input?.kind === 'navigate' && typeof input.url === 'string' ? input.url : undefined
+  const navigate = (value: unknown): string | undefined => {
+    const input = value as { kind?: unknown; url?: unknown } | undefined
+    return input?.kind === 'navigate' ? (typeof input.url === 'string' ? input.url : '') : undefined
+  }
+  const listed = Array.isArray(request.params.inputs)
+    ? (request.params.inputs as unknown[]).map((entry) => navigate((entry as { input?: unknown } | null)?.input)).filter((url): url is string => url !== undefined)
+    : []
+  if (listed.length > 1) throw new Error('invalid_action: one navigation per request')
+  return navigate(request.params.input) ?? listed[0]
 }

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Opens a tab</title>
+  <style>body { margin: 0; font: 24px sans-serif; } a { display: block; margin: 40px; }</style>
+</head>
+<body>
+  <!-- A link the site opens in a new tab, and whether this tab is the one Chromium paints. -->
+  <p id="state">tab:<span id="vis"></span></p>
+  <a id="open" href="/moving.html?tab=site" target="_blank">Open the site's own tab</a>
+  <script>
+    const show = () => { document.getElementById('vis').textContent = document.visibilityState }
+    show()
+    document.addEventListener('visibilitychange', show)
+  </script>
+</body>
+</html>

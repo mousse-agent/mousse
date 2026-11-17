@@ -100,10 +100,6 @@
   opacity: 0.6;
 }
 
-.pr-panel-action[aria-busy='true'] svg {
-  animation: pr-panel-spin 1s linear infinite;
-}
-
 .pr-panel-action:focus-visible,
 .pr-panel-link:focus-visible,
 .pr-panel-more:focus-visible,
@@ -111,8 +107,8 @@
 .pr-panel-line:focus-visible,
 .pr-panel-file-head:focus-visible,
 .pr-panel-check-state:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .pr-panel-link {
@@ -449,8 +445,8 @@ button.pr-panel-line:hover {
 }
 
 .pr-panel-details summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .pr-panel-details pre {
@@ -540,18 +536,6 @@ button.pr-panel-line:hover {
 
 .pr-panel-image-omitted {
   color: var(--text-secondary);
-}
-
-@keyframes pr-panel-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .pr-panel-action[aria-busy='true'] svg {
-    animation: none;
-  }
 }
 
 /* Holds the panel and its header actions without a box of its own. */

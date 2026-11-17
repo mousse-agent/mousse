@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { guiChatRequestError } from '../src/main/mms/requestErrors'
+import { guiChatRequestError, guiSendFailureAnswer } from '../src/main/mms/requestErrors'
 import { MmsProtocolError } from '../src/mms/protocol/client'
 
 describe('GUI chat connection errors', () => {
@@ -14,6 +14,16 @@ describe('GUI chat connection errors', () => {
   })
   it('classifies a plain socket close', () => {
     expect(guiChatRequestError(new Error('Connection closed')).code).toBe('workspace_connection_lost')
+  })
+  it('classifies the app closing its own connection (a quit during a turn) as a lost connection, not a refusal', () => {
+    expect(guiChatRequestError(new Error('Client closed')).code).toBe('workspace_connection_lost')
+    // The composer gives a prompt back only for a send answered as not taken.
+    expect(guiSendFailureAnswer(new Error('Client closed')).answer).not.toHaveProperty('requestAcknowledged')
+    expect(guiSendFailureAnswer(new MmsProtocolError('thread_busy', 'Busy')).answer.requestAcknowledged).toBe(false)
+  })
+  it('answers a request the client never wrote (`Not connected`) as not taken, so the composer gives its text back', () => {
+    expect(guiChatRequestError(new Error('Not connected')).code).not.toBe('workspace_connection_lost')
+    expect(guiSendFailureAnswer(new Error('Not connected')).answer.requestAcknowledged).toBe(false)
   })
   it('retains explicit protocol admission errors', () => {
     const error = guiChatRequestError(new MmsProtocolError('thread_not_found', 'Thread not found'))

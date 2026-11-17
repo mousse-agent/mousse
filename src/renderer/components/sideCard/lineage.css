@@ -52,7 +52,7 @@ button.lineage-row:hover {
 
 button.lineage-row:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .lineage-row.is-working {
@@ -148,12 +148,12 @@ button.lineage-row:focus-visible {
 
 .lineage-stop-all:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .lineage-stop:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .lineage-more {

@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, Mic, Paperclip, Square, Zap } from '../lib/icons'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { ArrowTurnForward, ArrowUp, Check, Layers, Loader2, Mic, Paperclip, Square, X, Zap } from '../lib/icons'
+import type { AudioLevels } from '../speech/audioLevels'
+import { SpeechHistoryWave } from '../speech/SpeechHistoryWave'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
@@ -11,14 +13,22 @@ import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown, type ContextCacheLine } from './ContextUsagePopover'
 import { IdleCompactionChip } from './IdleCompactionChip'
-import { cacheGoneCold, contextTokens, idleCompactionChip, promptCacheState, promptCacheText, suggestsCompaction, uncachedCostText, useMinuteClock } from '../lib/promptCache'
+import { useContextRingInComposer } from '../lib/contextRingSetting'
+import { cacheGoneCold, historyTokens, idleCompactionChip, promptCacheState, promptCacheText, suggestsCompaction, uncachedCostText, useMinuteClock } from '../lib/promptCache'
 import type { ContextSettings } from '../../shared/settings'
 import { formatBinding } from '../../shared/commands'
-import { useCommandBindings } from '../commands/commandRegistry'
+import { shortcutTitle, useCommandBindings } from '../commands/commandRegistry'
 import { useAppStore } from '../stores/appStore'
 
-/** Alt+Enter in the composer while a run is going sends the text as a steer. */
-export const STEER_BINDING = 'Alt+Enter'
+import { STEER_BINDING, type SendMode } from '../lib/steerKey'
+
+export { STEER_BINDING, isSteerKey } from '../lib/steerKey'
+
+/** The thread's send mode while a reply runs, shown as one icon left of the send button; clicking it switches. */
+export interface ComposerSendModeProps {
+  mode: SendMode
+  onSwitch: () => void
+}
 
 /** The model picker's fade-out, before the speed scale; matches its close animation in composer-run-controls.css. */
 const MODEL_PICKER_EXIT_MS = 90
@@ -74,6 +84,10 @@ export interface ComposerRunProps {
   onCompactNow?: () => void
   /** A compaction the person started is running: the chip reads "Compacting…". */
   compacting?: boolean
+  /** Work is going on that Compact now must not run beside; absent: whatever Stop stops. Subagents paused on a usage limit keep Stop but are not work. */
+  workInProgress?: boolean
+  /** A bot's own thread: the bot keeps its context, so there is no ring, popover or Compact chip whatever the settings. */
+  contextHidden?: boolean
 }
 
 /** The thread's permission mode and how to change it; it shows beside the model button. */
@@ -104,14 +118,27 @@ export interface ComposerFooterProps {
   sendLabel?: string
   onStop?: () => void
   onStartRecording?: () => void
+  /** Done: ends the recording and turns it into text. */
   onStopRecording?: () => void
-  primaryAction?: 'send' | 'implement-plan'
-  onImplementPlan?: () => void
-  implementPlanDisabled?: boolean
+  /** Cancel: ends the recording and throws it away. */
+  onCancelRecording?: () => void
+  /** Seconds recorded so far. */
+  recordingDuration?: number
+  /** Loudness of the recording, for its wave. */
+  recordingLevels?: AudioLevels | null
   /** When true, file attach stays enabled during an active turn (queued sends). */
   allowAttachWhileLoading?: boolean
   /** The thread's permission mode and how to change it; without it (or `run`) the footer has no such control. */
   permission?: ComposerPermissionProps
+  /**
+   * The thread's send mode, while a reply runs and Enter can either queue or steer. Without it there is no mode
+   * button and the send button queues (a bot's chat, an idle thread, a card that takes the message).
+   */
+  sendMode?: ComposerSendModeProps
+  /** Dictation stays offered while a run can be stopped: a bot's chat, which takes messages while it works. */
+  dictateWhileStoppable?: boolean
+  /** Buttons of the caller's own, left of Attach (a bot's chat: emoji). */
+  extraActions?: ReactNode
 }
 
 /** The permission chip and the model button with its picker. */
@@ -287,10 +314,13 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
 }
 
 /**
- * The context ring and its popover, while the context's fill is known, and left of it the Full/Compact chip
- * once the prompt cache has gone cold.
+ * The context ring and its popover, while the context's fill is known and the ring is turned on (Settings ›
+ * Appearance › Composer), and left of it the Full/Compact chip once the prompt cache has gone cold. The chip
+ * shows with the ring off too, and on a runtime that reports no context (an ACP agent, Cursor), sized by
+ * Mousse's estimate of the history.
  */
 function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runActive: boolean }) {
+  const ringOn = useContextRingInComposer()
   const { providers, selectedProviderId, contextUsage, contextCompactionSetting, contextOpen, onContextOpenChange, onCompactNow, compacting = false } = run
   const cache = contextUsage.promptCache
   const now = useMinuteClock(Boolean(cache), cache?.lastRequestAt)
@@ -302,13 +332,15 @@ function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runAct
   const compaction = contextCompactionSetting ? contextCompaction(contextCompactionSetting, contextUsage) : undefined
   // The popover goes with the ring, so it does not reopen by itself when the ring comes back.
   useEffect(() => {
-    if (!contextShown && contextOpen) onContextOpenChange(false)
-  }, [contextShown, contextOpen, onContextOpenChange])
-  if (!contextShown) return null
+    if (!(contextShown && ringOn) && contextOpen) onContextOpenChange(false)
+  }, [contextShown, ringOn, contextOpen, onContextOpenChange])
+  // A runtime with no gauge still has a prompt cache that goes cold: the chip alone, when Mousse estimated the history.
+  const estimatedOnly = !showsContextGauge(selectedProvider) && contextUsage.historyEstimate !== undefined
+  if (!contextShown && !estimatedOnly) return null
   const cacheState = cache ? promptCacheState(cache, now) : undefined
   const canCompact = Boolean(onCompactNow)
   const chip = idleCompactionChip({ usage: contextUsage, now, setting: idleSetting, canCompact, runActive, compacting })
-  const historyTokens = contextTokens(contextUsage)
+  const history = historyTokens(contextUsage)
   const cacheLine: ContextCacheLine | undefined = cacheState && {
     text: promptCacheText(cacheState),
     tone: cacheState.kind === 'warm' ? 'warm' : cacheGoneCold(cacheState) ? 'cold' : 'unknown',
@@ -318,29 +350,32 @@ function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runAct
     {chip && cache && cacheLine ? (
       <IdleCompactionChip
         state={chip}
-        historyTokens={historyTokens}
+        historyTokens={history}
+        estimated={estimatedOnly}
         cacheText={cacheLine.text}
-        costText={uncachedCostText(cache, historyTokens)}
+        costText={uncachedCostText(cache, history)}
         onCompact={() => onCompactNow?.()}
       />
     ) : null}
-    <div className="composer-context-anchor">
-      <ContextUsageRing
-        usage={contextUsage}
-        onClick={() => onContextOpenChange(!contextOpen)}
-        active={contextOpen}
-        ref={contextBtnRef}
-      />
-      <ContextUsagePopover
-        open={contextOpen}
-        onClose={() => onContextOpenChange(false)}
-        usage={contextUsage}
-        compaction={compaction}
-        providerId={selectedProviderId}
-        anchorRef={contextBtnRef}
-        cache={cacheLine}
-      />
-    </div>
+    {ringOn && contextShown ? (
+      <div className="composer-context-anchor">
+        <ContextUsageRing
+          usage={contextUsage}
+          onClick={() => onContextOpenChange(!contextOpen)}
+          active={contextOpen}
+          ref={contextBtnRef}
+        />
+        <ContextUsagePopover
+          open={contextOpen}
+          onClose={() => onContextOpenChange(false)}
+          usage={contextUsage}
+          compaction={compaction}
+          providerId={selectedProviderId}
+          anchorRef={contextBtnRef}
+          cache={cacheLine}
+        />
+      </div>
+    ) : null}
   </>)
 }
 
@@ -358,24 +393,34 @@ export function ComposerFooter({
   onStop,
   onStartRecording,
   onStopRecording,
-  primaryAction = 'send',
-  onImplementPlan,
-  implementPlanDisabled = false,
+  onCancelRecording,
+  recordingDuration = 0,
+  recordingLevels = null,
   allowAttachWhileLoading = false,
   permission,
-  sendLabel
+  sendLabel,
+  dictateWhileStoppable = false,
+  extraActions,
+  sendMode
 }: ComposerFooterProps) {
   const bindings = useCommandBindings()
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
   const stopBinding = bindings['run.stop']
   const stopTitle = stopBinding ? `Stop · ${formatBinding(stopBinding, platform)}` : 'Stop'
-  const queueTitle = `Queue · ${formatBinding('Enter', platform)} — Steer · ${formatBinding(STEER_BINDING, platform)}`
+  const enterKey = formatBinding('Enter', platform)
+  const steerKey = formatBinding(STEER_BINDING, platform)
+  // In Steer mode the send button steers, as Enter does.
+  const steers = sendMode?.mode === 'steer'
+  const runningTitle = steers ? `Steer · ${enterKey} — Queue · ${steerKey}` : `Queue · ${enterKey} — Steer · ${steerKey}`
+  const switchBinding = bindings['composer.switchSendMode']
+  const dictateBinding = bindings['composer.dictate']
+  const modeTitle = [
+    steers ? 'Steer' : 'Queue',
+    `${steerKey} ${steers ? 'queues' : 'steers'}`,
+    ...(switchBinding ? [`${formatBinding(switchBinding, platform)} switches`] : [])
+  ].join(' · ')
 
   const handleActionClick = () => {
-    if (primaryAction === 'implement-plan') {
-      onImplementPlan?.()
-      return
-    }
     if (canSend) onSend?.()
   }
   // The send slot is Send, Queue, Stop or Stop recording. While a run goes and the box has text, Stop
@@ -387,6 +432,52 @@ export function ComposerFooter({
     </button>
   )
 
+  // While recording, the footer is the recorder: the time and the wave, then Cancel and Done. While the
+  // recording turns into text it says so in the same place, so the box above never moves.
+  if (isRecording || transcribing) {
+    return (
+      <div className="composer-footer composer-recorder">
+        {isRecording ? (
+          <div className="composer-recorder-status" role="group" aria-label="Recording">
+            <span className="composer-recorder-dot" aria-hidden="true" />
+            <span className="composer-recorder-time">{formatRecordingTime(recordingDuration)}</span>
+            <SpeechHistoryWave levels={recordingLevels} className="composer-recorder-wave" />
+          </div>
+        ) : (
+          <div className="composer-recorder-status" role="status">
+            <Loader2 size={14} strokeWidth={2} className="composer-transcribing-spin" />
+            <span className="composer-recorder-label">Transcribing…</span>
+          </div>
+        )}
+        <div className="composer-footer-right">
+          <button
+            type="button"
+            className="composer-icon-btn composer-recorder-cancel"
+            title="Cancel · discard the recording"
+            aria-label="Cancel recording"
+            // The box keeps focus and its selection, where Done puts the text.
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onCancelRecording}
+            disabled={!isRecording || !onCancelRecording}
+          >
+            <X size={16} strokeWidth={2} />
+          </button>
+          <button
+            type="button"
+            className="composer-action-btn composer-recorder-done"
+            title={shortcutTitle('Done · insert the text', dictateBinding, platform)}
+            aria-label="Finish recording"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onStopRecording}
+            disabled={!isRecording}
+          >
+            <Check size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="composer-footer">
       <div className="composer-footer-left">
@@ -394,7 +485,9 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        {run ? <ComposerContextRing run={run} runActive={stoppable} /> : null}
+        {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={run.workInProgress ?? stoppable} /> : null}
+
+        {extraActions}
 
         <button
           type="button"
@@ -407,49 +500,47 @@ export function ComposerFooter({
           <Paperclip size={16} strokeWidth={2} />
         </button>
 
-        {primaryAction !== 'implement-plan' && !stoppable && !isRecording && onStartRecording ? (
+        {(!stoppable || dictateWhileStoppable) && onStartRecording ? (
           <button
             type="button"
             className="composer-icon-btn composer-dictate-btn"
-            title="Dictate"
+            title={shortcutTitle('Dictate', dictateBinding, platform)}
             aria-label="Dictate"
-            aria-busy={recordingPending || transcribing}
+            aria-busy={recordingPending}
+            // The box keeps focus, so its selection stays highlighted while recording.
+            onMouseDown={(event) => event.preventDefault()}
             onClick={onStartRecording}
-            disabled={disabled || recordingPending || transcribing}
+            disabled={disabled || recordingPending}
           >
             <Mic size={16} strokeWidth={2} />
           </button>
         ) : null}
 
-        {primaryAction !== 'implement-plan' && !isRecording && stoppable && canSend ? stopButton('composer-icon-btn composer-stop-btn') : null}
+        {stoppable && canSend ? stopButton('composer-icon-btn composer-stop-btn') : null}
 
-        {primaryAction === 'implement-plan' ? (
+        {sendMode ? (
           <button
             type="button"
-            className="composer-implement-btn"
-            onClick={handleActionClick}
-            disabled={implementPlanDisabled || loading}
+            className={`composer-icon-btn composer-send-mode-btn${steers ? ' is-steer' : ''}`}
+            title={modeTitle}
+            aria-label={steers ? 'Send mode: Steer' : 'Send mode: Queue'}
+            // Switching keeps the caret in the box, so the next Enter sends from there. It never sends.
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={sendMode.onSwitch}
+            disabled={disabled}
           >
-            Implement plan
+            {steers ? <ArrowTurnForward size={16} strokeWidth={2} /> : <Layers size={16} strokeWidth={2} />}
           </button>
-        ) : isRecording ? (
-          <button
-            type="button"
-            className="composer-action-btn composer-action-btn-recording"
-            title="Stop recording"
-            aria-label="Stop recording"
-            onClick={onStopRecording}
-          >
-            <Square size={14} strokeWidth={2} fill="currentColor" />
-          </button>
-        ) : stopInSlot ? (
+        ) : null}
+
+        {stopInSlot ? (
           stopButton('composer-action-btn composer-action-btn-stop')
         ) : (
           <button
             type="button"
             className={`composer-action-btn${canSend ? ' composer-action-btn-active' : ''}`}
-            title={sendLabel ?? (loading ? queueTitle : 'Send')}
-            aria-label={sendLabel ?? (loading ? 'Queue message' : 'Send message')}
+            title={sendLabel ?? (loading ? runningTitle : 'Send')}
+            aria-label={sendLabel ?? (loading ? (steers ? 'Steer message' : 'Queue message') : 'Send message')}
             onClick={handleActionClick}
             disabled={disabled || !canSend}
           >
@@ -459,4 +550,10 @@ export function ComposerFooter({
       </div>
     </div>
   )
+}
+
+/** 0:07, 1:23, 12:05: minutes and seconds of a recording. */
+export function formatRecordingTime(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
 }

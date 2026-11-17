@@ -11,7 +11,7 @@ describe('composer rendering performance', () => {
       const source = readRendererComponent(name)
       // The agent-elements pipeline (mousseToUIMessages -> MousseAgentChatShell)
       // isolates transcript derivation from input renders.
-      expect(source).toMatch(/const uiMessages = useMemo\(\(\) => mousseToUIMessages\(messages, turnSenders\), \[messages, turnSenders\]\)/)
+      expect(source).toMatch(/const uiMessages = useMemo\(\(\) => mousseToUIMessages\(transcript, turnSenders\), \[transcript, turnSenders\]\)/)
       expect(source).toMatch(/MousseAgentChatShell/)
     }
   )

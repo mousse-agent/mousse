@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { chmodSync, copyFileSync, renameSync, unlinkSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
+import { dropForeignAppImageMounts } from '../../cli/appImageMounts'
 
 // Waits up to 60 s for the old Mousse to exit, then starts the new AppImage with the same arguments.
 const RESTART_SCRIPT = 'pid=$1; shift; i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 600 ]; do sleep 0.1; i=$((i+1)); done; exec "$@"'
@@ -62,8 +63,10 @@ export function installAppImage(options: AppImageInstallOptions): string {
  * single-instance lock, and the new copy quits at once.
  */
 export function startAfterExit(pid: number, appImage: string, args: string[], env: NodeJS.ProcessEnv): void {
-  // The AppImage runtime sets these for the copy it starts.
+  // The AppImage runtime sets these for the copy it starts. The old copy's mount goes away once it exits, so the new
+  // copy must not inherit it in PATH and the other search paths (without APPDIR, every mount is dropped).
   const { APPIMAGE: _appImage, APPDIR: _appDir, ARGV0: _argv0, OWD: _owd, ...rest } = env
+  dropForeignAppImageMounts(rest, 'linux')
   const child = spawn('/bin/sh', ['-c', RESTART_SCRIPT, 'mousse-restart', String(pid), appImage, ...args], {
     detached: true,
     stdio: 'ignore',

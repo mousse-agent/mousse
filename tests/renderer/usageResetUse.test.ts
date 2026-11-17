@@ -171,9 +171,10 @@ describe('the question names what is reset', () => {
 })
 
 describe('a window with nothing left', () => {
-  it('reads as empty: "0% left" in red over a faint red track', () => {
+  it('reads as critical: "0% left" and its bar at the critical level, not missing', () => {
     render(chatgpt(), vi.fn())
-    expect(document.querySelector('.usage-window-used')?.className).toContain('is-empty')
+    expect(document.querySelector<HTMLElement>('.usage-window-used')?.dataset.usageLevel).toBe('critical')
     expect(document.querySelector('.usage-window-used')?.textContent).toBe('0% left')
+    expect(document.querySelector<HTMLElement>('.usage-bar')?.dataset.usageLevel).toBe('critical')
   })
 })

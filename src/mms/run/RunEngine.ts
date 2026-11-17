@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { onRetiredBareRoute, type ExecutionBinding } from '../../shared/harness/types'
+import { onRetiredBareRoute, type ExecutionBinding, type TurnOrigin } from '../../shared/harness/types'
 import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
@@ -8,12 +8,16 @@ import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreErro
 import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
-import { RemoteSubagentRecords, type RemoteSubagentMode } from './delegation/remoteSubagents'
+import { RemoteLaunchRecords } from './delegation/remoteLaunches'
+import { RemoteSubagentRecords } from './delegation/remoteSubagents'
+import { RemoteExpiryRecords } from './delegation/remoteExpiry'
+import { RunTimeLimitRecords } from './runTimeLimits'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
 import { ContextTransfers } from './handoff/Transfers'
 import { Inbox } from './Inbox'
+import { QueueCommands } from './QueueCommands'
 import type { Answerer } from './approvalRights'
 import { DEFAULT_HEARTBEAT_MS } from './Reconciler'
 import type { RestartNote } from './restartNote'
@@ -21,12 +25,14 @@ import type { RunStore } from './RunStore'
 import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale } from './stopGeneration'
 import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
+import { OpenQuestions } from './OpenQuestions'
 import { ThreadApprovals, type BootRecovery } from './ThreadApprovals'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
 import {
   TERMINAL_EFFECT_STATUSES,
   TERMINAL_RUN_STATUSES,
+  isSendTurnPayload,
   leaseOwner,
   type AgentActor,
   type AttemptRecord,
@@ -92,6 +98,11 @@ export type RunCommand =
        */
       agentOrigin?: { hops: number }
       /**
+       * The run delivers settle notices (SPEC §15.1): it carries the count of agent messages in a row of the runs the
+       * notices are about and adds none of its own. It is not an agent's message.
+       */
+      noticeHops?: number
+      /**
        * A person's message that waits behind a usage-limit pause instead of ending it: on a paused thread the run
        * is created `queued`, the pause and its timer stay, and the result says so (`heldByPause`). The sender
        * queues it; the queue holds it until the continue turn has run or the pause is cancelled.
@@ -121,6 +132,24 @@ export type RunCommand =
        */
       ceiling?: PermissionMode
     }
+  | {
+      /**
+       * Send now on a held steer (docs/design/steer-and-interruptions.md §2.9): the hold `holdGeneration` of run `runId`
+       * goes in at once, stopping the tool it waits for. Only a person sends it. Committed with its receipt, its queue
+       * journal entry (`steer_now`) and the `steer.now_requested` event; the journal then marks the held items
+       * (`QueuedMessage.steerNow`), and the run that holds them forces the hold. A run that is not the active one is
+       * `ignored` (`run_not_active`) with no entry.
+       */
+      kind: 'steer_now'
+      threadId: string
+      clientRequestId: string
+      runId: string
+      holdGeneration: number
+      itemIds: string[]
+    }
+
+/** The queue journal key of a Send now request. */
+export const steerNowCommandKey = (threadId: string, clientRequestId: string): string => `steer-now:${threadId}:${clientRequestId}`
 
 /** The delegation row a follow-up `send` writes with its run (the child thread is the command's). */
 export interface SendDelegation {
@@ -180,6 +209,11 @@ export interface StopRequest {
    * agent's (`interruptedBy: 'agent'`) and one `agent.action` event is written in the same transaction.
    */
   actor?: AgentActor
+  /**
+   * An agent's own Stop with no other thread's change to audit (`task_cancel` of its subagent, and the
+   * launched threads such a Stop reaches): everything it ends is the agent's, and no `agent.action` event is written.
+   */
+  byAgent?: boolean
 }
 
 export interface StopResult {
@@ -241,6 +275,11 @@ export interface DelegationRequest {
   model?: string
   role?: string
   workspace: 'isolated' | 'shared'
+  /**
+   * A read-only child (`delegate_task` `readOnly`): it works in the parent's folder (`workspace: 'shared'`) with the
+   * read-only tools only. Absent: the child has every tool its parent has, in either workspace.
+   */
+  readOnly?: boolean
   wake: DelegationWake
   title?: string
   /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */
@@ -259,13 +298,15 @@ export interface RemoteDelegationTarget {
   node: string
   /** The task as that computer's thread receives it (the subagent's guidance and the prompt). */
   prompt: string
-  permissionMode: RemoteSubagentMode
+  permissionMode: PermissionMode
   chatMode: 'agent' | 'plan'
   worktree: boolean
   projectId: string | null
   instanceId: string | null
   model: string | null
   deadlineAt: string | null
+  /** The minutes of running time the task may use (`maxMinutes`); null for no limit. */
+  limitMinutes?: number | null
   /** The far thread, for a follow-up on a subagent that already has one. */
   remoteThreadId?: string | null
 }
@@ -291,11 +332,6 @@ export interface ForkThreadRequest {
    * fork starts from the source's current HEAD. Recorded in the transfer payload as `seedFrom`.
    */
   seedFrom?: 'checkpoint' | 'current_head'
-  /**
-   * The agent access level of the agent that forks, when an agent does (a tool call); absent for a
-   * person's fork. The host narrows the fork's own ceiling by it (SPEC §15.1).
-   */
-  accessLevel?: AgentAccessLevel
 }
 
 /**
@@ -346,7 +382,7 @@ export function narrowestAccess(tasks: ReadonlyArray<Pick<DelegationRecord, 'acc
 /** A thread the engine asks its host to create: a delegated child or a fork. */
 export type ThreadCreation =
   | { kind: 'delegation'; request: DelegationRequest }
-  | { kind: 'fork'; sourceThreadId: string; sourceRunId: string; title?: string; accessLevel?: AgentAccessLevel }
+  | { kind: 'fork'; sourceThreadId: string; sourceRunId: string; title?: string }
 
 /** Source runs a fork may start after (SPEC §16.2): never `running` or `uncertain`. */
 export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -398,6 +434,19 @@ export class TitleTakenRejection extends CommandRejection {
   }
 }
 
+/**
+ * The thread id the transcript markers are recorded under, as the reconciler's own events are
+ * (`RECONCILER_THREAD_ID`): the boot reads them through the events' thread index. The payload names the
+ * run's thread.
+ */
+export const RESTART_TRANSCRIPTS_THREAD_ID = '__restart_transcripts__'
+/** A run boot cut off; its thread's transcript still has to say so (`pendingRestartTranscripts`). */
+const RESTART_TRANSCRIPT_PENDING = 'restart.transcript_pending'
+/** The thread's transcript says the restart cut the run off. */
+const RESTART_TRANSCRIPT_WRITTEN = 'restart.transcript_written'
+/** Turn origins whose runs a thread turn does not continue after a restart: their own runner owns them. */
+const NOT_CONTINUABLE_ORIGINS: ReadonlySet<TurnOrigin> = new Set(['bot', 'workflow', 'definition'])
+
 /** The outcome of a run whose binding names the retired bare pi route (PR 4). */
 const RETIRED_ROUTE_OUTCOME = Object.freeze({
   errorCode: 'binding_stale',
@@ -434,8 +483,16 @@ export class RunEngine extends EventEmitter {
   readonly delegations: Delegations
   /** Remote subagents' tasks and the runs on other computers that do them (issue #469). */
   readonly remoteSubagents: RemoteSubagentRecords
+  /** The expiry each remote subagent's thread there must have (emote_expiry). */
+  readonly remoteExpiry: RemoteExpiryRecords
+  /** Running-time limits of runs on this computer (un_time_limits). */
+  readonly runTimeLimits: RunTimeLimitRecords
+  /** Threads agents here launched on other computers (`thread_create` with `computer`, issue #1160). */
+  readonly remoteLaunches: RemoteLaunchRecords
   /** Saved approval requests (SPEC §17). */
   readonly approvals: ThreadApprovals
+  /** Questions agents asked without waiting (`ask_user` with `wait: false`). */
+  readonly openQuestions: OpenQuestions
   /** Context handoffs (SPEC §16.1). */
   readonly handoffs: HandoffService
   /** Fork and merge-back transfers (SPEC §16.2). */
@@ -469,7 +526,11 @@ export class RunEngine extends EventEmitter {
     this.inbox = new Inbox(opts.store)
     this.delegations = new Delegations(opts.store, this.inbox)
     this.remoteSubagents = new RemoteSubagentRecords(opts.store)
+    this.remoteExpiry = new RemoteExpiryRecords(opts.store)
+    this.runTimeLimits = new RunTimeLimitRecords(opts.store)
+    this.remoteLaunches = new RemoteLaunchRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
+    this.openQuestions = new OpenQuestions(opts.store)
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
     this.pid = opts.pid ?? process.pid
@@ -791,6 +852,11 @@ export class RunEngine extends EventEmitter {
     return undefined
   }
 
+  /** Whether the run's binding was made on the retired bare pi route. */
+  private onRetiredRoute(runId: string): boolean {
+    return onRetiredBareRoute(this.bindingForRun(runId)?.instanceId)
+  }
+
   /**
    * Boot recovery (SPEC §12.5 steps 1-5), one transaction:
    * 1. open a daemon epoch and learn whether the previous daemon crashed;
@@ -798,7 +864,13 @@ export class RunEngine extends EventEmitter {
    * 3. re-queue running replay-safe effects; revoke every live Mousse MCP credential row (the
    *    tokens existed only in the previous daemon's memory, SPEC §15.1);
    * 4. every active run becomes `uncertain` when the previous daemon crashed while one of the
-   *    run's non-idempotent tools was `started`, otherwise `interrupted` by `daemon_restart`;
+   *    run's non-idempotent tools was `started`, otherwise `interrupted` by `daemon_restart`. So does
+   *    a send the previous daemon had begun: its `turn.start` was claimed (`running`), but the run
+   *    was still `queued` (the turn was being set up and never reached its provider). It is not
+   *    started again (`cutOffStart`), unless the message queue holds it (`options.queued`: a send that
+   *    could not start went back to the queue with its run, which runs it in its turn). Every run cut
+   *    off here gets a `restart.transcript_pending` event, kept until the orchestrator has written the
+   *    thread's transcript line (`pendingRestartTranscripts`), so a write that fails is tried again;
    * 5. one `restart.note` event per affected thread. Nothing auto-resumes. A note also covers runs
    *    the previous daemon's clean shutdown interrupted (`interruptedBy: 'daemon_restart'`, completed
    *    since that epoch started, not noted yet, no later run started on the thread) and lists
@@ -809,12 +881,7 @@ export class RunEngine extends EventEmitter {
    *    uncertain child runs publish through the terminal write's publication gate.
    * Step 6 (heartbeat and reconciler) belongs to the profile that owns the worker (Phase 2b).
    */
-  /** Whether the run's binding was made on the retired bare pi route. */
-  private onRetiredRoute(runId: string): boolean {
-    return onRetiredBareRoute(this.bindingForRun(runId)?.instanceId)
-  }
-
-  reconcileOnBoot(): BootReport {
+  reconcileOnBoot(options: { queued?: (run: RunRecord) => boolean } = {}): BootReport {
     this.epochs.clear()
     const report = this.store.db.transaction((): BootReport => {
       const now = this.now()
@@ -822,6 +889,8 @@ export class RunEngine extends EventEmitter {
       const active = this.store
         .listNonTerminalRuns()
         .filter((run) => ACTIVE_STATUSES.has(run.status))
+      // The turns the previous daemon had begun: read before step 2 cancels their effects.
+      const claimedStarts = this.outbox.listRunning().filter((effect) => effect.kind === 'turn.start')
       this.outbox.cancelProcessBound('daemon_restart', now)
       this.outbox.requeueRunningReplaySafe(now)
       // SPEC §15.1: MCP tokens live only in the previous daemon's memory; their rows are dead.
@@ -830,6 +899,8 @@ export class RunEngine extends EventEmitter {
       const uncertain: string[] = []
       /** The tools a crash may have cut off mid-call, per run: a saved approval request records them. */
       const uncertainTools = new Map<string, string[]>()
+      /** Runs this boot cut off: their threads' transcripts still have to say so. */
+      const cutOff: RunRecord[] = []
       const notes = new Map<string, Omit<RestartNote, 'epoch'>>()
       const noteFor = (threadId: string): Omit<RestartNote, 'epoch'> => {
         const note = notes.get(threadId) ?? { runIds: [], uncertainRunIds: [], cutOffTools: [] }
@@ -857,6 +928,7 @@ export class RunEngine extends EventEmitter {
           this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart', ...(retired ? RETIRED_ROUTE_OUTCOME : {}) })
           interrupted.push(run.runId)
         }
+        cutOff.push(run)
         const note = noteFor(run.threadId)
         note.runIds.push(run.runId)
         if (unsafe.length) note.uncertainRunIds.push(run.runId)
@@ -880,6 +952,21 @@ export class RunEngine extends EventEmitter {
       }
       const orphanedChildren = this.settleOrphanedChildren()
       const recoveredWakes = recoverWakesOnBoot(this.store, this.outbox, now)
+      // After children and wakes are settled their own way: what is still queued with a claimed send was cut off.
+      for (const effect of claimedStarts) {
+        const run = effect.runId ? this.store.getRun(effect.runId) : null
+        if (!run || !cutOffStart(run, effect.payload)) continue
+        // A queued message owns it: the queue runs it in its turn (an unreadable queue counts as owning it).
+        if (options.queued?.(run)) continue
+        this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart' })
+        interrupted.push(run.runId)
+        cutOff.push(run)
+        noteFor(run.threadId).runIds.push(run.runId)
+      }
+      // `crashed` says why the transcript line reads Interrupted (a crash, or a restart); a write retried at a later boot
+      // still has this boot's answer.
+      for (const run of cutOff)
+        this.store.appendEvent({ threadId: RESTART_TRANSCRIPTS_THREAD_ID, runId: run.runId, type: RESTART_TRANSCRIPT_PENDING, payload: { threadId: run.threadId, epoch, crashed: previousCrashed } })
       const strandedQueued: string[] = []
       for (const { run } of strandedQueuedRuns(this.store, this.outbox)) {
         const note = noteFor(run.threadId)
@@ -887,7 +974,9 @@ export class RunEngine extends EventEmitter {
         strandedQueued.push(run.runId)
       }
       // SPEC §17.6: what waited for a provider in the dead process can only continue the thread now.
-      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => (this.bindingForRun(runId)?.policy.origin ?? 'interactive') !== 'interactive')
+      // A bot's, a workflow's and an agent definition's runs belong to their own runner, which a thread turn does not
+      // continue; every other run's request parks for the person.
+      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => NOT_CONTINUABLE_ORIGINS.has(this.bindingForRun(runId)?.policy.origin ?? 'interactive'))
       for (const requestId of approvals.continued) {
         const record = this.approvals.get(requestId)
         if (!record) continue
@@ -903,6 +992,48 @@ export class RunEngine extends EventEmitter {
     })
     this.daemonEpoch = report.epoch
     return report
+  }
+
+  /**
+   * Runs a boot cut off whose thread's transcript does not say so yet: a `restart.transcript_pending`
+   * event with no `restart.transcript_written` after it, oldest first. Kept across boots, so a write that
+   * a peer's lease or a failure held up is tried again at the next one. The markers live under their own
+   * thread id (`RESTART_TRANSCRIPTS_THREAD_ID`), so this reads them through the events' thread index and
+   * never scans the event log.
+   */
+  pendingRestartTranscripts(): RunRecord[] {
+    const rows = this.store.db
+      .statement(
+        `SELECT p.run_id FROM thread_events p WHERE p.thread_id = ? AND p.type = ? AND p.run_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM thread_events w WHERE w.thread_id = p.thread_id AND w.type = ? AND w.run_id = p.run_id)
+         ORDER BY p.seq`
+      )
+      .all(RESTART_TRANSCRIPTS_THREAD_ID, RESTART_TRANSCRIPT_PENDING, RESTART_TRANSCRIPT_WRITTEN)
+    return rows.flatMap((row) => {
+      const run = this.store.getRun(String(row.run_id))
+      return run ? [run] : []
+    })
+  }
+
+  /**
+   * Whether the boot that cut `runId` off found that the previous daemon had crashed, from the latest
+   * `restart.transcript_pending` event of the run. A marker an older build wrote has no answer: false (a restart).
+   */
+  restartTranscriptCrashed(runId: string): boolean {
+    const row = this.store.db
+      .statement(`SELECT payload FROM thread_events WHERE thread_id = ? AND type = ? AND run_id = ? ORDER BY seq DESC LIMIT 1`)
+      .get(RESTART_TRANSCRIPTS_THREAD_ID, RESTART_TRANSCRIPT_PENDING, runId) as { payload?: unknown } | undefined
+    if (!row || typeof row.payload !== 'string') return false
+    try {
+      return (JSON.parse(row.payload) as { crashed?: unknown }).crashed === true
+    } catch {
+      return false
+    }
+  }
+
+  /** The thread's transcript now says the restart cut `runId` off (or never will): `pendingRestartTranscripts` drops it. */
+  markRestartTranscriptWritten(run: RunRecord): void {
+    this.store.appendEvent({ threadId: RESTART_TRANSCRIPTS_THREAD_ID, runId: run.runId, type: RESTART_TRANSCRIPT_WRITTEN, payload: { threadId: run.threadId } })
   }
 
   /**
@@ -1098,7 +1229,7 @@ export class RunEngine extends EventEmitter {
       const activeRuns: StopResult['activeRuns'] = []
       const cancelledRuns: StopResult['cancelledRuns'] = []
       // A Stop an agent asked for ends everything in the subtree as the agent's (`interruptedBy: 'agent'`).
-      const asAgent = request.actor !== undefined
+      const asAgent = request.actor !== undefined || request.byAgent === true
       for (const run of this.store.listNonTerminalRuns().filter((entry) => depths.has(entry.threadId))) {
         // A paused run has no turn to abort: the Stop ends the pause, and with it the timer.
         if (run.status === 'paused') {
@@ -1164,7 +1295,8 @@ export class RunEngine extends EventEmitter {
       threadId,
       runId,
       type: 'agent.action',
-      payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
+      // A sender on another computer: its ids are that computer's, so the event names the computer and its title too.
+      payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId, ...(actor.remote ? { actorNode: actor.remote.node, actorTitle: actor.remote.title } : {}) }
     })
   }
 
@@ -1555,8 +1687,7 @@ export class RunEngine extends EventEmitter {
         kind: 'fork',
         sourceThreadId: input.sourceThreadId,
         sourceRunId: source.runId,
-        title: input.title,
-        ...(input.accessLevel ? { accessLevel: input.accessLevel } : {})
+        title: input.title
       })
       return this.withCreatedThread(host, threadId, () => this.store.db.transaction((): ForkAccepted => {
         this.delegations.createLineage({
@@ -1817,7 +1948,11 @@ export class RunEngine extends EventEmitter {
     opts.admit?.()
     let result: CommandResult
     try {
-      result = command.kind === 'send' ? this.commitSend(command, this.trackedFollowUp(command)) : this.commitControl(command)
+      result = command.kind === 'send'
+        ? this.commitSend(command, this.trackedFollowUp(command))
+        : command.kind === 'steer_now'
+          ? this.commitSteerNow(command)
+          : this.commitControl(command)
     } catch (error) {
       if (command.kind === 'stop' && error instanceof RunStoreError && error.code === 'stale_write')
         return { status: 'rejected', reason: 'stale_write', sequence: store.maxSeq(threadId) }
@@ -1886,7 +2021,11 @@ export class RunEngine extends EventEmitter {
       const continuationOf = command.continuationOfRunId
       // A run that carries on agent work (a provider's continuation, the resume after a pause) keeps the count of agent
       // messages in a row; it is not itself an agent's message.
-      const carriedHops = command.actor || command.agentOrigin ? undefined : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
+      const carriedHops = command.actor || command.agentOrigin
+        ? undefined
+        : command.noticeHops !== undefined
+          ? (command.noticeHops > 0 ? command.noticeHops : undefined)
+          : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
       const outcome: RunOutcome = {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.
@@ -2035,6 +2174,48 @@ export class RunEngine extends EventEmitter {
     })
   }
 
+  /**
+   * Send now's intent, in one transaction: the receipt, the `steer_now` queue journal entry and the
+   * `steer.now_requested` event. The caller then applies the entry to the queue file under the queue lock
+   * (`recoverQueueJournal`); a crash before that is finished by the next queue change, boot repair or the owner's poll.
+   */
+  private commitSteerNow(command: Extract<RunCommand, { kind: 'steer_now' }>): CommandResult {
+    const { store } = this
+    const { threadId, runId } = command
+    return store.db.transaction((): CommandResult => {
+      const run = store.getRun(runId)
+      const activeRunId = store.getActiveRun(threadId)?.runId ?? null
+      if (!run || run.threadId !== threadId || activeRunId !== runId) {
+        const reason = 'run_not_active'
+        store.appendEvent({
+          threadId,
+          runId: run?.threadId === threadId ? runId : null,
+          type: 'command.ignored',
+          payload: { kind: command.kind, runId, activeRunId, reason }
+        })
+        const sequence = store.maxSeq(threadId)
+        this.putReceipt(command, 'ignored', { runId, activeRunId, reason, sequence })
+        return { status: 'ignored', reason, runId, activeRunId, sequence }
+      }
+      const request = { runId, holdGeneration: command.holdGeneration, itemIds: [...command.itemIds], requestId: command.clientRequestId }
+      new QueueCommands(store.db).insertPending(steerNowCommandKey(threadId, command.clientRequestId), {
+        op: 'steer_now',
+        threadId,
+        itemId: command.itemIds[0] ?? '',
+        cancelRunIds: [],
+        releaseInboxIds: [],
+        steerNow: request
+      })
+      store.appendEvent({ threadId, runId, type: 'steer.now_requested', payload: { ...request, itemIds: request.itemIds.join(','), now: true } })
+      // The audit record of a person's action on the run (agents cannot Send now): it ended the command the run waited for.
+      store.appendEvent({ threadId, runId, type: 'person.action', payload: { action: 'steered_run', runId, now: true, requestId: command.clientRequestId } })
+      const sequence = store.maxSeq(threadId)
+      this.putReceipt(command, 'accepted', { runId, sequence })
+      store.db.checkpoint('steerNow.beforeCommit')
+      return { status: 'accepted', runId, sequence, replayed: false }
+    })
+  }
+
   private putReceipt(
     command: RunCommand,
     status: ReceiptRecord['status'],
@@ -2133,6 +2314,17 @@ export class RunEngine extends EventEmitter {
     }
     return settled
   }
+}
+
+/**
+ * Boot: a send the previous daemon had begun and never started. Its `turn.start` was claimed, but the run is still
+ * `queued`: the turn was being set up (workspace, start snapshot) and never marked its run starting, so its provider
+ * never had it. Payloads with a `kind` (wakes, bots, integrations, provider continuations) are settled by their own
+ * recovery, and a queue item's send by the message queue's: its claim is handed back and the item runs in its turn.
+ */
+function cutOffStart(run: RunRecord, payload: unknown): boolean {
+  if (run.status !== 'queued' || !isSendTurnPayload(payload) || payload.queueItemId !== undefined) return false
+  return typeof (payload as { kind?: unknown }).kind !== 'string'
 }
 
 function requireStatus(run: RunRecord, allowed: RunStatus[]): void {

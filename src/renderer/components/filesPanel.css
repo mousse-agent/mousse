@@ -1,8 +1,17 @@
-/* One row above the file: its tab strip, then its controls (view switch, save state, close) at the end. */
-.files-editor-toolbar { display: flex; flex: 0 0 auto; align-items: center; min-width: 0; border-bottom: 1px solid var(--border-subtle); }
-.files-editor-toolbar > .ui-tabs { flex: 1 1 auto; border-bottom: 0; }
-.files-editor-toolbar > .files-toolbar-actions { flex: none; margin-left: auto; padding: 0 6px 0 4px; }
-.files-save-status { white-space: nowrap; font-size: 11px; color: var(--text-secondary); }
+/* One header row per column, at one height, so the tree's row and the file's row line up when both show. */
+.files-panel .panel-toolbar.files-header,
+.files-panel .panel-toolbar.files-editor-toolbar { flex: 0 0 auto; min-height: 36px; padding: 4px 6px 4px 8px; }
+
+/* The open file's row: where it is, then its controls. */
+.files-editor-toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.files-editor-toolbar > .files-toolbar-actions { flex: none; margin-left: auto; gap: 2px; }
+.files-crumbs { display: flex; flex: 1 1 auto; align-items: center; gap: 2px; min-width: 0; overflow: hidden; font-size: 12px; white-space: nowrap; }
+.files-crumb { flex: 0 1 auto; min-width: 1.5em; overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary); }
+.files-crumb:first-child { padding-left: 2px; }
+.files-crumb.current { flex: 0 0 auto; max-width: 100%; color: var(--text-primary); font-weight: 500; }
+.files-crumb-sep { flex: none; color: var(--text-secondary); opacity: 0.5; }
+.files-bar-note { padding: 0 4px; white-space: nowrap; font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.files-save-status { padding: 0 4px; white-space: nowrap; font-size: 11px; color: var(--text-secondary); }
 .files-save-status.error, .files-save-status.conflict { color: var(--danger); }
 .files-conflict { display: flex; align-items: center; gap: 8px; }
 .files-conflict-actions { display: flex; gap: 6px; margin-left: auto; }
@@ -21,12 +30,15 @@
   transition: opacity var(--ui-dur) ease, transform var(--ui-dur) ease, visibility 0s linear 0s;
 }
 .files-header-title { justify-content: space-between; }
+/* The folder path is the row's title: it takes the room the buttons leave. */
+.files-header-title .files-path { flex: 1 1 auto; min-width: 0; padding: 0; }
+.files-header-title .files-path-error { padding-left: 30px; }
 .files-header .files-header-search { opacity: 0; transform: translateX(10px); visibility: hidden; transition-delay: 0s, 0s, var(--ui-dur); }
 .files-header.searching .files-header-title { opacity: 0; transform: translateX(-10px); visibility: hidden; transition-delay: 0s, 0s, var(--ui-dur); }
 .files-header.searching .files-header-search { opacity: 1; transform: none; visibility: visible; transition-delay: 0s; }
 
 /* ONE field: a rounded box with the icon inside at the left and a bare input filling the rest. Focus shows on the
-   box only, as a slightly stronger hairline; the app's input rules (border, fill, focus ring) are taken off the input. */
+   box only, as a slightly stronger hairline; the app's input rules (border, focus fill) are taken off the input. */
 .files-search-field {
   display: flex;
   flex: 1 1 auto;
@@ -154,7 +166,7 @@
 .file-tree-more:hover { color: var(--text-primary); background: var(--ui-hover); }
 /* Closing the last file puts focus on its tree row or on the empty editor: both show it, like a tab does. */
 .file-tree-row:focus-visible,
-.files-editor-empty:focus-visible { outline: 2px solid rgba(var(--accent-rgb), 0.6); outline-offset: -2px; }
+.files-editor-empty:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .file-tree-loader { display: flex; padding: 4px 16px; justify-content: flex-start; }
 /* The tree draws only the rows on screen: the list keeps the full height, and its top padding stands in for the rows above. */
 .file-tree { position: relative; }
@@ -190,8 +202,10 @@
 }
 .files-panel .files-icon-btn svg { display: block; width: 14px; height: 14px; flex: none; }
 .files-panel .files-icon-btn:hover:not(:disabled),
-.files-panel .files-icon-btn:active:not(:disabled) { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.14); }
-.files-panel .files-icon-btn:focus-visible { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.14); outline: 2px solid rgba(var(--accent-rgb), 0.5); outline-offset: -2px; }
+.files-panel .files-icon-btn:active:not(:disabled) { color: var(--text-primary); background: var(--ui-hover); }
+.files-panel .files-icon-btn:focus-visible { outline: none; color: var(--text-primary); background: var(--ui-hover); }
+/* A toggle that is on: the icon at full strength on a quiet fill, never a coloured chip. */
+.files-panel .files-icon-btn[aria-pressed='true'] { color: var(--text-primary); background: color-mix(in srgb, var(--text-primary) 9%, transparent); }
 .files-panel .files-icon-btn:disabled { opacity: 0.4; cursor: default; }
 
 /* The folder the tree shows, as a path to click through. The current folder and an open menu only get a background. */
@@ -233,7 +247,7 @@
 .files-path-crumb.root { font-weight: 600; }
 .files-path-crumb:disabled { cursor: default; }
 .files-path-crumb.static { cursor: default; }
-.files-path-crumb:focus-visible { outline: 2px solid rgba(var(--accent-rgb), 0.6); outline-offset: -2px; }
+.files-path-crumb:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .files-path-input {
   flex: 1 1 auto;
   min-width: 0;
@@ -295,3 +309,7 @@
 .files-places-menu .files-places-item .files-places-check { margin-left: auto; padding-left: 8px; color: var(--accent); box-sizing: content-box; }
 .files-places-separator { flex: none; height: 1px; margin: 4px 5px; background: var(--border); }
 .files-places-note { padding: 7px 10px; font-size: 12px; color: var(--text-secondary); }
+
+/* An image fits the panel, or shows at its own size and scrolls; `safe` keeps a large one's left edge reachable. */
+div.files-image-preview.actual-size { place-items: safe center; }
+.files-image-preview.actual-size img { max-width: none; max-height: none; }

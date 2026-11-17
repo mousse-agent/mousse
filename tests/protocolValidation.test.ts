@@ -143,7 +143,11 @@ describe('protocol nested validators', () => {
     })
     for (const bad of [{ defaultMode: 'root' }, { defaultMode: 1 }, { extra: 'ask' }])
       expect(() => asSettingsPartial({ permissions: bad }), JSON.stringify(bad)).toThrow(/permissions/)
-    for (const bad of [{ resumeAfterUsageLimit: 'yes' }, { usageLimitPauseCap: 0 }, { usageLimitPauseCap: 2.5 }, { usageLimitPauseCap: 99 }, { worktreeByDefault: false }, { extra: 1 }])
+    // Strict or best-effort release of a held steer, per provider instance.
+    expect(asSettingsPartial({ runs: { steerRelease: { codex: 'strict', 'acp:grok': 'best_effort' } } })).toEqual({
+      runs: { steerRelease: { codex: 'strict', 'acp:grok': 'best_effort' } }
+    })
+    for (const bad of [{ resumeAfterUsageLimit: 'yes' }, { usageLimitPauseCap: 0 }, { usageLimitPauseCap: 2.5 }, { usageLimitPauseCap: 99 }, { worktreeByDefault: false }, { extra: 1 }, { steerRelease: { codex: 'always' } }, { steerRelease: 'strict' }])
       expect(() => asSettingsPartial({ runs: bad }), JSON.stringify(bad)).toThrow(/runs/)
     expect(asStringEnvMap({ FOO: 'bar' }).FOO).toBe('bar')
     expect(() => asStringEnvMap({ 'bad-key': 'x' })).toThrow()

@@ -71,6 +71,21 @@ describe('an open ask', () => {
     await click(button('Not now'))
     expect(onAnswer.mock.calls).toEqual([['allow'], ['not_now']])
   })
+
+  it('an MCP server still loading its tools: Allow is off, Not now works; once filled in, Allow is on and the tools show', async () => {
+    const onAnswer = vi.fn()
+    const loading = ask({ title: 'use your GitHub tools', note: 'GitHub is still starting, so its tools aren\'t listed yet. Allow turns on once they are.', loading: true })
+    act(() => root.render(createElement(BotAsk, { botName: 'Kai', ask: loading, onAnswer })))
+    expect(button('Allow')!.disabled).toBe(true)
+    expect(button('Allow')!.title).toBe('Its tools are still loading')
+    expect(host.querySelector('.ask-card-details')).toBeNull()
+    await click(button('Not now'))
+    expect(onAnswer.mock.calls).toEqual([['not_now']])
+    const filled = ask({ title: 'use your GitHub tools', note: 'GitHub says some of these tools can change things.', details: { summary: '2 tools', items: ['create_issue', 'list_issues'], more: '1 more of GitHub\'s tools can\'t be used by a bot.' } })
+    act(() => root.render(createElement(BotAsk, { botName: 'Kai', ask: filled, onAnswer })))
+    expect(button('Allow')!.disabled).toBe(false)
+    expect([...host.querySelectorAll('.ask-card-details p')].map((element) => element.textContent)).toEqual(['create_issue, list_issues', '1 more of GitHub\'s tools can\'t be used by a bot.'])
+  })
 })
 
 describe('an answered ask', () => {
@@ -83,8 +98,20 @@ describe('an answered ask', () => {
 
   it('says a run’s permission applies from the next run, and words Not now and withdrawn', () => {
     expect(askAnswerLine(ask({ status: 'allowed' }), true)).toBe('Allowed: use files on this computer. It uses it from the next run.')
+    // A limit the owner's work waits on: Allow carries that work on now, and says how many when it was several.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'work for up to 2 hours per run', carriesOn: true }), true)).toBe('Allowed: work for up to 2 hours per run. It carries on with this now.')
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'work for up to 2 hours per run', carriesOn: true, carried: 3 }), true)).toBe('Allowed: work for up to 2 hours per run. 3 pieces of work carry on now.')
     expect(askAnswerLine(ask({ status: 'not_now' }))).toBe('Not now: use files on this computer')
     expect(askAnswerLine(ask({ status: 'withdrawn' }))).toBe('No longer needed: use files on this computer')
+  })
+
+  it('says what Allow did for a run’s permission: the work carries on, the next run has it, or nothing is running', () => {
+    // The work that asked is still running or waiting: it continues with the permission.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'run commands', carriesOn: true }), true)).toBe('Allowed: run commands. It carries on with this now.')
+    // It ended, and other work runs: the next run has it.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'run commands' }), true)).toBe('Allowed: run commands. It uses it from the next run.')
+    // Nothing of the bot was running or waiting.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'run commands', idle: true }), true)).toBe('Allowed: run commands. Nothing is running now; it has this from now on.')
   })
 })
 
@@ -97,11 +124,14 @@ describe('in the chat', () => {
     act(() => root.render(createElement(BotChatView, { bot })))
   }
 
-  it('sends the answer and shows the line the reply carries', async () => {
+  it('answers from the quick replies, then says so in a quiet line with what Allow did on hover', async () => {
     await show(ask())
     await click(button('Allow'))
     expect(fake.calls).toContainEqual(['answer', 'b1', 'k1', 'allow'])
-    expect(host.querySelector('.ask-card-answer')?.textContent).toBe('Allowed: use files on this computer')
+    const line = host.querySelector('.bot-system-line')!
+    expect(line.textContent).toBe('You let Notes tidier use files on this computer')
+    expect(line.getAttribute('title')).toBe('Allowed: use files on this computer')
+    expect(host.querySelector('.bot-ask-buttons')).toBeNull()
   })
 
   it('exports the memory to the folder picked, then closes the ask', async () => {
@@ -111,7 +141,7 @@ describe('in the chat', () => {
     expect(fake.calls).toContainEqual(['exportMemory', 'b1', '/home/me/Backups'])
     expect(fake.calls).toContainEqual(['answer', 'b1', 'k1', 'allow'])
     expect(fake.calls.findIndex(([name]) => name === 'exportMemory')).toBeLessThan(fake.calls.findIndex(([name]) => name === 'answer'))
-    expect(host.querySelector('.ask-card-answer')?.textContent).toBe('Saved its memory to the folder you picked')
+    expect(host.querySelector('.bot-system-line')?.getAttribute('title')).toBe('Saved its memory to the folder you picked')
   })
 
   it('keeps the export ask open when no folder is picked', async () => {
@@ -119,7 +149,7 @@ describe('in the chat', () => {
     await show(ask({ kind: 'export_memory', title: 'save its memory to a folder' }))
     await click(button('Allow'))
     expect(fake.calls.some(([name]) => name === 'exportMemory' || name === 'answer')).toBe(false)
-    expect(host.querySelector('.ask-card')).not.toBeNull()
+    expect(host.querySelector('.bot-ask-buttons')).not.toBeNull()
   })
 
   it('does nothing but answer for Not now on an export ask', async () => {
@@ -127,6 +157,22 @@ describe('in the chat', () => {
     await click(button('Not now'))
     expect(pickFolder).not.toHaveBeenCalled()
     expect(fake.calls).toContainEqual(['answer', 'b1', 'k1', 'not_now'])
+  })
+
+  it('keeps Allow off, with why, once the service refuses it ("Use your threads" from a device below Full access); Not now still works', async () => {
+    vi.mocked(fake.client.answer).mockRejectedValueOnce(new Error('Allow this on the computer.'))
+    await show(ask({ title: 'use your threads' }))
+    await click(button('Allow'))
+    expect(button('Allow')?.disabled).toBe(true)
+    expect(button('Allow')?.title).toBe('Allow this on the computer.')
+    await click(button('Not now'))
+    expect(fake.calls).toContainEqual(['answer', 'b1', 'k1', 'not_now'])
+  })
+
+  it('keeps Allow off while an MCP ask’s tools are still loading', async () => {
+    await show(ask({ loading: true }))
+    expect(button('Allow')?.disabled).toBe(true)
+    expect(button('Allow')?.title).toBe('Its tools are still loading')
   })
 })
 

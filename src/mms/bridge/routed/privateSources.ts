@@ -77,7 +77,7 @@ export class PrivateSources {
     switch (spec.kind) {
       case 'thread': {
         const source = new MmsThreadSource(this.services, undefined, {
-          private: { limit: () => this.policy.get(spec.reader).maxPermissionMode }
+          private: { limit: () => this.policy.get(spec.reader).maxPermissionMode, reader: spec.reader }
         })
         return {
           snapshot: () => source.snapshot(spec.subject),
@@ -85,8 +85,10 @@ export class PrivateSources {
         }
       }
       case 'lists': {
+        // The bots in them are the ones that computer reaches.
         const lists = new MmsListsSource(this.services as unknown as ListsServices, undefined, {
-          private: true
+          private: true,
+          reader: spec.reader
         })
         return {
           snapshot: () => lists.snapshot(),

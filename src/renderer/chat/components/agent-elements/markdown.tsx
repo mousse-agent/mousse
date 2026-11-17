@@ -1,12 +1,17 @@
 "use client";
 
-import { memo, useRef, type ComponentProps, type ReactNode } from "react";
-import { parseMarkdownIntoBlocks, Streamdown, type Components } from "streamdown";
+import { memo, useEffect, useRef, type ComponentProps, type ComponentType, type ReactNode } from "react";
+import type { Element, ElementContent, Root } from "hast";
+import { defaultRehypePlugins, parseMarkdownIntoBlocks, Streamdown, type Components } from "streamdown";
 import { Children, cloneElement, isValidElement } from "react";
 import { cn } from "./utils/cn";
 import { MessageImage } from "./message-image";
 import { codeHighlighter } from "./code-highlighter";
+import { codeBlockPre } from "./code-block";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
+import { LinkLabel, threadLinkLabel } from "./link-label-view";
+import { ThreadChip } from "../../../components/ThreadChip";
+import { THREAD_LINK_PREFIX } from "../../../../shared/threadLink";
 import { copyMathAsTex } from "../../../markdown/math/copyMathAsTex";
 import {
   hideUnclosedMathFence,
@@ -17,8 +22,11 @@ import { readMathClass } from "../../../markdown/math/math-markup";
 import { MathInline } from "../../../markdown/math/MathView";
 import { useRenderMath } from "../../../markdown/math/renderMathSetting";
 import { mathRenderers, mousseMathPlugin } from "../../../markdown/math/streamdown-math";
+import { HTML_TAG, isDrawnTag } from "./utils/html-tags";
 import { mermaidRenderer } from "./markdown-mermaid";
+import { CachedBlock, cachedSplit, MarkdownSetupContext } from "./markdown-cache";
 import { countRender } from "./render-counts";
+import { addCodeWrapToggles } from "./code-block-wrap";
 import { createIncrementalNormalizer, createIncrementalSplitter } from "./streaming-markdown";
 
 function fixNumberedListBreaks(text: string): string {
@@ -32,11 +40,111 @@ function collapseLooseListGaps(text: string): string {
 
 /** Preserve fenced code exactly while normalizing prose and list whitespace. */
 const MOUSSE_FILE_MARKER = "/__mousse_file_open__?";
+const MOUSSE_THREAD_MARKER = "/__mousse_thread__/";
 
-function restoreMousseFileHref(href: string): string {
-  return href.startsWith(MOUSSE_FILE_MARKER)
-    ? `mousse-file://open?${href.slice(MOUSSE_FILE_MARKER.length)}`
-    : href;
+/** The `mousse-file:` or `mousse://thread/` address a link's marker stands for (see `normalizeMarkdown`). */
+export function restoreMousseHref(href: string): string {
+  if (href.startsWith(MOUSSE_FILE_MARKER)) return `mousse-file://open?${href.slice(MOUSSE_FILE_MARKER.length)}`;
+  if (href.startsWith(MOUSSE_THREAD_MARKER)) return `${THREAD_LINK_PREFIX}${href.slice(MOUSSE_THREAD_MARKER.length)}`;
+  return href;
+}
+
+/**
+ * A thread address: in a link's target, as `<…>`, inside a link's text (`[`), or bare in prose. The id may be a thread of
+ * another computer, `<node>:<id>`.
+ */
+const THREAD_ADDRESS = /(\]\(\s*<?|<|\[)?mousse:\/\/thread\/([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?)\/?(>)?/gi;
+
+/**
+ * A thread's address (`mousse://thread/<id>`) becomes a link to the thread's marker, which the anchor restores: in a
+ * link's target, and written bare or as `<…>`, where its text stays the address (the anchor labels it with the
+ * thread's title). Inline code is left as written.
+ */
+function linkThreadAddresses(text: string): string {
+  if (!/mousse:\/\/thread\//i.test(text)) return text;
+  return text
+    .split(/(`[^`\n]*`)/g)
+    .map((piece, index) => index % 2 === 1 ? piece : piece.replace(THREAD_ADDRESS, (match, before: string | undefined, id: string, after: string | undefined) => {
+      if (before?.startsWith("]")) return `${before}${MOUSSE_THREAD_MARKER}${id}${after ?? ""}`;
+      if (before === "[") return match;
+      const link = `[${THREAD_LINK_PREFIX}${id}](${MOUSSE_THREAD_MARKER}${id})`;
+      return before === "<" && after === ">" ? link : `${before ?? ""}${link}${after ?? ""}`;
+    }))
+    .join("");
+}
+
+/** Characters that mean nothing to Markdown, so a backslash before one is part of the text. */
+const LITERAL_AFTER_BACKSLASH = new Set(["/", '"', "'", "\\"]);
+/** ASCII punctuation: what Markdown lets a backslash escape. */
+const ESCAPABLE = /[!-/:-@[-`{-~]/;
+/** The text before a backslash ends inside a drive path (`C:\…`) or a network path (`\\host\…`). */
+const IN_PATH = /(?:^|[^\w\\])(?:[A-Za-z]:[\\/]?|\\\\[\w.$-])\S*$/;
+/** Math, where a backslash belongs to TeX: `\(`, `\[`, `\begin{` or a pair of `$`. Such a line is left as written. */
+const MATH = /\\[([]|\\begin\{|\$[^$]*\$/;
+
+/**
+ * Markdown drops the backslash of an escape in prose, so `/^a\/b$/` showed as `/^a/b$/`, `\"hi\"` as
+ * `"hi"`, `\\server` as `\server` and `C:\me\.cache` as `C:\me.cache`. The backslash is kept (by
+ * escaping it) before `/`, `"`, `'` and `\`, which mean nothing to Markdown, and before any
+ * punctuation inside a drive or network path. Other escapes still work: `\*` and `\_` show `*` and
+ * `_`. Code spans, `~~~` fences, math, and indented lines (possibly indented code) are left as
+ * written; ``` fences never reach here (see `normalizeMarkdown`).
+ */
+export function keepLiteralBackslashes(prose: string): string {
+  if (!prose.includes("\\")) return prose;
+  // An open code span carries over to the next line of its paragraph.
+  let span = 0;
+  let fence: string | null = null;
+  let math = false;
+  return prose
+    .split("\n")
+    .map((line) => {
+      const marker = span ? undefined : /^ {0,3}(~{3,})/.exec(line)?.[1];
+      if (fence) {
+        if (marker && marker.length >= fence.length && !line.trim().slice(marker.length).trim()) fence = null;
+        return line;
+      }
+      if (marker) {
+        fence = marker;
+        return line;
+      }
+      // A display math block: from a line starting with `$$` to the one that closes it.
+      if (math || /^\s*\$\$/.test(line)) {
+        if ((line.match(/\$\$/g)?.length ?? 0) % 2 === 1) math = !math;
+        return line;
+      }
+      if (!line.trim()) span = 0;
+      if ((/^(?: {4}|\t)/.test(line) && !span) || MATH.test(line)) return line;
+      let out = "";
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i]!;
+        if (char === "`") {
+          let run = 1;
+          while (line[i + run] === "`") run++;
+          if (!span) span = run;
+          else if (run === span) span = 0;
+          out += line.slice(i, i + run);
+          i += run - 1;
+          continue;
+        }
+        if (char !== "\\" || span) {
+          out += char;
+          continue;
+        }
+        const next = line[i + 1];
+        if (next === undefined) {
+          out += char;
+          continue;
+        }
+        const literal = LITERAL_AFTER_BACKSLASH.has(next) || (ESCAPABLE.test(next) && IN_PATH.test(line.slice(0, i)));
+        if (!literal) out += char + next;
+        else if (next === "\\") out += "\\\\\\\\";
+        else out += "\\\\" + next;
+        i++;
+      }
+      return out;
+    })
+    .join("\n");
 }
 
 export function normalizeMarkdown(text: string): string {
@@ -47,8 +155,8 @@ export function normalizeMarkdown(text: string): string {
       // Streamdown rejects custom schemes before its component/urlTransform
       // hooks run. A same-origin marker survives sanitation and is restored by
       // the anchor renderer; fenced examples remain byte-identical.
-      const protectedLinks = part.replace(/mousse-file:\/\/open\?/gi, MOUSSE_FILE_MARKER);
-      return collapseLooseListGaps(fixNumberedListBreaks(protectedLinks)).replace(
+      const protectedLinks = linkThreadAddresses(part.replace(/mousse-file:\/\/open\?/gi, MOUSSE_FILE_MARKER));
+      return collapseLooseListGaps(fixNumberedListBreaks(keepLiteralBackslashes(protectedLinks))).replace(
         /\n{3,}/g,
         "\n\n",
       );
@@ -88,94 +196,26 @@ function endsInOpenMermaidFence(text: string): boolean {
   return open?.mermaid ?? false;
 }
 
-/** Lightweight synchronous tokenizer for inline `code` chips.
- *  Full shiki per chip is async + far too heavy (see perf note on
- *  `markdownComponents`); inline snippets have no language tag anyway.
- *  This highlights the shapes that actually appear in chat — quoted
- *  strings, numbers, JS/TS keywords, and `fn()` calls — leaving file
- *  paths and plain identifiers in the chip's base color. */
-const INLINE_KW = new Set([
-  "as",
-  "async",
-  "await",
-  "break",
-  "case",
-  "catch",
-  "class",
-  "const",
-  "continue",
-  "default",
-  "delete",
-  "else",
-  "enum",
-  "export",
-  "extends",
-  "false",
-  "finally",
-  "for",
-  "from",
-  "function",
-  "if",
-  "implements",
-  "import",
-  "in",
-  "instanceof",
-  "interface",
-  "let",
-  "new",
-  "null",
-  "return",
-  "switch",
-  "this",
-  "throw",
-  "true",
-  "try",
-  "type",
-  "typeof",
-  "undefined",
-  "var",
-  "void",
-  "while",
-  "yield",
-]);
+/**
+ * The source's line breaks between a list item's or a quote's blocks arrive as "\n" text. Prose
+ * keeps single newlines as line breaks (white-space: pre-line), so one of those between blocks
+ * would draw an empty line; they carry nothing, so they are dropped.
+ */
+const BLOCK_TAGS = new Set(["p", "ul", "ol", "pre", "blockquote", "table", "div", "h1", "h2", "h3", "h4", "h5", "h6", "hr"]);
 
-const INLINE_TOKEN_RE =
-  /("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|\b\d+(?:\.\d+)?\b|\b(?:as|async|await|break|case|catch|class|const|continue|default|delete|else|enum|export|extends|false|finally|for|from|function|if|implements|import|in|instanceof|interface|let|new|null|return|switch|this|throw|true|try|type|typeof|undefined|var|void|while|yield)\b|[A-Za-z_$][\w$]*(?=\())/g;
-
-function tokenizeInlineCode(text: string): ReactNode[] {
-  const out: ReactNode[] = [];
-  let last = 0;
-  let key = 0;
-  INLINE_TOKEN_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = INLINE_TOKEN_RE.exec(text)) !== null) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    const tok = m[0];
-    const first = tok[0];
-    let cls: string;
-    if (first === '"' || first === "'" || first === "`") cls = "tok-str";
-    else if (first >= "0" && first <= "9") cls = "tok-num";
-    else if (INLINE_KW.has(tok)) cls = "tok-kw";
-    else cls = "tok-fn";
-    out.push(
-      <span key={key++} className={cls}>
-        {tok}
-      </span>,
-    );
-    last = m.index + tok.length;
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out;
+function isBlock(part: ReactNode): boolean {
+  if (!isValidElement<{ node?: { tagName?: unknown } }>(part)) return false;
+  const tag = typeof part.type === "string" ? part.type : part.props.node?.tagName;
+  return typeof tag === "string" && BLOCK_TAGS.has(tag);
 }
 
-/** Tokenize only when children are plain text; otherwise pass through. */
-function renderInlineChildren(children: ReactNode): ReactNode {
+function withoutBreaksBetweenBlocks(children: ReactNode): ReactNode {
   const parts = Children.toArray(children);
-  if (!parts.every((p) => typeof p === "string" || typeof p === "number"))
-    return children;
-  const text = parts.join("");
-  if (!text) return children;
-  return tokenizeInlineCode(text);
+  if (!parts.some(isBlock)) return children;
+  return parts.filter(
+    (part, index) =>
+      typeof part !== "string" || part.trim() !== "" || !(isBlock(parts[index - 1]) || isBlock(parts[index + 1])),
+  );
 }
 
 const ALERT_KINDS = {
@@ -208,6 +248,14 @@ function splitAlert(children: ReactNode): { kind: AlertKind; body: ReactNode[] }
   return { kind: match[1].toLowerCase() as AlertKind, body };
 }
 
+/**
+ * A conversation's own rule for the pictures in its text, in place of a thread's: `Image` draws every image, written in
+ * Markdown or as HTML, and gets its `src` exactly as written (a `data:` URL or a path included), so it alone decides
+ * what may load. Nothing else in the text loads a picture: a `<picture>`'s sources are dropped. A bot's chat uses it
+ * (`BotMarkdownImage`), since a bot's reply can be shaped by what it read on the web. Keep it stable (module scope).
+ */
+export type MarkdownImages = { Image: ComponentType<{ src?: string; alt?: string }> };
+
 export type MarkdownProps = {
   content: string;
   className?: string;
@@ -217,6 +265,13 @@ export type MarkdownProps = {
    * each update, and blocks that appear fade in. Off for everything already written.
    */
   streaming?: boolean;
+  /** The images' own rule (`MarkdownImages`); absent: a thread's. */
+  images?: MarkdownImages;
+  /**
+   * Elements drawn the caller's way instead (a bot's chat draws its own images and paths). Pass one object kept for
+   * the module's life: a new one each render would make Streamdown draw every block again.
+   */
+  components?: Partial<Components>;
 };
 
 /** Splits text into blocks as Streamdown does, counting the blocks it splits (see render-counts). */
@@ -225,6 +280,11 @@ function splitBlocks(text: string): string[] {
   countRender("blocksSplit", blocks.length);
   return blocks;
 }
+
+// A finished reply splits the same way each time it is drawn: kept in the markdown cache. A reply
+// still streaming changes on every update, so its splits are not kept.
+const splitFinished = cachedSplit("plain", splitBlocks);
+const splitFinishedWithMath = cachedSplit("math", parseBlocksKeepingMath);
 
 function normalizeText(text: string): string {
   return normalizeCodeFenceLanguages(normalizeMarkdown(text), false);
@@ -250,23 +310,68 @@ const markdownMathPlugins = {
   math: mousseMathPlugin,
   renderers: [...mathRenderers, mermaidRenderer],
 };
+/**
+ * Closes a `code` span left open at the end of a reply that is still streaming, as Markdown reads
+ * it: a backslash escapes only outside a code span, so `` `C:\dir\` `` and `` `\\` `` are closed
+ * spans. Fenced code and earlier paragraphs are left alone (an open span ends at a blank line).
+ */
+export function completeInlineCode(text: string): string {
+  let fence: string | null = null;
+  let open = 0;
+  for (const line of text.split("\n")) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && !line.trim().slice(marker.length).trim()) fence = null;
+      continue;
+    }
+    if (marker && !open) {
+      fence = marker;
+      continue;
+    }
+    if (!line.trim()) {
+      open = 0;
+      continue;
+    }
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === "\\" && !open) {
+        i++;
+        continue;
+      }
+      if (char !== "`") continue;
+      let run = 1;
+      while (line[i + run] === "`") run++;
+      if (!open) open = run;
+      else if (run === open) open = 0;
+      i += run - 1;
+    }
+  }
+  return open && !fence ? text + "`".repeat(open) : text;
+}
+
 // Math is typeset by our own components. Streamdown's own completion of an
 // unclosed `$$` would otherwise rewrite the text before our parser sees it.
-const markdownRemend = { katex: false };
+// Its inline code completion reads a backslash inside a span as an escape and
+// adds a stray backtick after `` `C:\dir\` ``; ours follows Markdown.
+const markdownRemend = {
+  katex: false,
+  inlineCode: false,
+  handlers: [{ name: "inline-code", handle: completeInlineCode }],
+};
 // Navigation is synchronously allowlisted by safeMarkdownUrl/classifyLink and
 // handled inside Mousse; disable Streamdown's HTTP-only interstitial so the
 // canonical mousse-file scheme reaches our anchor renderer.
 const markdownLinkSafety = { enabled: false };
 // Code blocks offer Copy only: saving a snippet as a file is rare, and the agent writes files itself.
+// (Wrap is added beside it, see code-block-wrap.ts.)
 const markdownControls = { code: { copy: true, download: false } };
+// A tall block shows this much and scrolls inside.
+const CODE_BLOCK_MAX_HEIGHT = 640;
 
 function renderInlineCode(children: ReactNode, props: ComponentProps<"code">): ReactNode {
   return (
-    <code
-      className="an-md-code rounded border border-an-border-color bg-an-tool-background px-1 py-px text-[0.85em] text-an-foreground"
-      {...props}
-    >
-      {renderInlineChildren(children)}
+    <code className="an-md-code" {...props}>
+      {children}
     </code>
   );
 }
@@ -277,78 +382,73 @@ function renderInlineCode(children: ReactNode, props: ComponentProps<"code">): R
 // on ANY parent re-render (e.g. prompt-marker updates after an
 // expand/collapse resize). Stable identity keeps unrelated re-renders cheap.
 const markdownComponents: Components = {
+  // Sizes, spacing and colours live in agent-ui.css (`.an-markdown .an-md-*`), so the rhythm of a
+  // reply is set in one place and a caller's text size cannot change it.
   h1: ({ children, ...props }) => (
-    <h1 className="an-md-h1 text-xl font-semibold mt-5 mb-2 leading-snug" {...props}>
+    <h1 className="an-md-h1" {...props}>
       {children}
     </h1>
   ),
   h2: ({ children, ...props }) => (
-    <h2 className="an-md-h2 text-lg font-semibold mt-4 mb-2 leading-snug" {...props}>
+    <h2 className="an-md-h2" {...props}>
       {children}
     </h2>
   ),
   h3: ({ children, ...props }) => (
-    <h3 className="an-md-h3 text-base font-semibold mt-4 mb-1.5" {...props}>
+    <h3 className="an-md-h3" {...props}>
       {children}
     </h3>
   ),
   h4: ({ children, ...props }) => (
-    <h4 className="an-md-h4 text-base font-medium mt-3 mb-1.5" {...props}>
+    <h4 className="an-md-h4" {...props}>
       {children}
     </h4>
   ),
   p: ({ children, ...props }) => (
-    <p
-      className="an-md-p text-base leading-relaxed text-an-foreground/80"
-      {...props}
-    >
+    <p className="an-md-p" {...props}>
       {children}
     </p>
   ),
   ul: ({ children, ...props }) => (
-    <ul
-      className="an-md-ul list-disc list-outside space-y-1.5 text-base my-2 pl-5 text-an-foreground/80"
-      {...props}
-    >
+    <ul className="an-md-ul list-outside" {...props}>
       {children}
     </ul>
   ),
   ol: ({ children, ...props }) => (
-    <ol
-      className="an-md-ol list-decimal list-outside space-y-1.5 text-base my-2 pl-5 text-an-foreground/80"
-      {...props}
-    >
+    <ol className="an-md-ol list-decimal list-outside" {...props}>
       {children}
     </ol>
   ),
   li: ({ children, ...props }) => (
-    <li className="an-md-li text-base pl-1 text-an-foreground/80" {...props}>
-      {children}
+    <li className="an-md-li" {...props}>
+      {withoutBreaksBetweenBlocks(children)}
     </li>
   ),
-  // Streamdown's default inline code is a roomy `px-1.5` pill that reads
-  // like stray spaces in `( code )`. Keep it compact and on-theme so it
-  // hugs the code text, in the Git diff console font, with lightweight
-  // token highlighting (strings / numbers / keywords / fn calls).
-  // (Block code still goes through the code plugin.)
+  // Inline code is plain text on a light tint: no border and no token colours, so it reads as part
+  // of the sentence.
   inlineCode: ({ children, ...props }) => renderInlineCode(children, props),
+  // Fenced code draws with few nodes per line (code-block.tsx). Mermaid goes to its renderer.
+  pre: codeBlockPre(markdownPlugins.renderers),
   strong: ({ children, ...props }) => (
-    <strong className="font-medium text-an-foreground" {...props}>
+    <strong className="an-md-strong" {...props}>
       {children}
     </strong>
   ),
   a: ({ href, children, ...props }) => {
     if (!href) return <span>{children}</span>;
-    const routedHref = restoreMousseFileHref(href);
-    if (classifyLink(routedHref).kind === "reject") return <span>{children}</span>;
+    const routedHref = restoreMousseHref(href);
+    const route = classifyLink(routedHref);
+    if (route.kind === "reject") return <span>{children}</span>;
+    // A thread link is a chip with the thread's title (or the link's own text) and its live status.
+    if (route.kind === "thread") return <ThreadChip threadId={route.threadId} label={threadLinkLabel(routedHref, children)} />;
     return (
       <a
         {...props}
         href={routedHref}
         onClick={(event) => { event.preventDefault(); routeLink(routedHref); }}
-        className="an-md-link hover:underline underline-offset-2 text-an-primary-color"
+        className="an-md-link"
       >
-        {children}
+        <LinkLabel href={routedHref}>{children}</LinkLabel>
       </a>
     );
   },
@@ -369,41 +469,34 @@ const markdownComponents: Components = {
     }
     return (
       <blockquote
-        className="an-md-blockquote pl-3 italic mb-2 text-base border-l-2 border-an-border-color text-an-foreground/70"
+        className="an-md-blockquote"
         {...props}
       >
-        {children}
+        {withoutBreaksBetweenBlocks(children)}
       </blockquote>
     );
   },
   hr: ({ ...props }) => (
-    <hr className="an-md-hr my-4 border-an-border-color" {...props} />
+    <hr className="an-md-hr border-an-border-color" {...props} />
   ),
   // Images open large on click or Enter, in place of Streamdown's hover download button.
   img: (props) => <MessageImage {...props} />,
+  // A table has no frame or header fill: a hairline under each row, the first and last columns
+  // flush with the prose.
   table: ({ children, ...props }) => (
-    <div className="overflow-x-auto my-3 border border-an-border-color rounded-an-tool-border-radius">
-      <table
-        className="an-md-table w-full text-base [&>thead]:bg-an-tool-background [&>thead>tr>th]:bg-an-tool-background"
-        {...props}
-      >
+    <div className="an-md-table-wrap overflow-x-auto">
+      <table className="an-md-table" {...props}>
         {children}
       </table>
     </div>
   ),
   th: ({ children, ...props }) => (
-    <th
-      className="text-left font-medium px-3 py-2 bg-an-background-secondary"
-      {...props}
-    >
+    <th className="an-md-th" {...props}>
       {children}
     </th>
   ),
   td: ({ children, ...props }) => (
-    <td
-      className="px-3 py-2 border-t border-an-border-color text-an-foreground/80"
-      {...props}
-    >
+    <td className="an-md-td" {...props}>
       {children}
     </td>
   ),
@@ -412,6 +505,8 @@ const markdownComponents: Components = {
 // Inline math arrives as inline code tagged by remarkMousseMath.
 const markdownMathComponents: Components = {
   ...markdownComponents,
+  // Math fences go to the math renderer.
+  pre: codeBlockPre(markdownMathPlugins.renderers),
   inlineCode: ({ children, ...props }) => {
     const math = readMathClass(props.className);
     if (!math) return renderInlineCode(children, props);
@@ -420,10 +515,132 @@ const markdownMathComponents: Components = {
   },
 };
 
-export const Markdown = memo(function Markdown({ content, className, streaming = false }: MarkdownProps) {
+/**
+ * With an image rule (`MarkdownImages`), an image's `src` is carried through the sanitizer and the URL hardening as a
+ * same-origin marker, which both keep as written, and handed back unchanged to the rule's `Image`. Without it the
+ * sanitizer drops a `data:` image and a Windows path, and the hardening a `file:` URL, before the rule could judge them.
+ */
+const IMAGE_MARK = "/__mousse_image__?src=";
+
+function markImageSources(node: Root | Element): void {
+  node.children = node.children.filter((child: ElementContent | Root["children"][number]) => {
+    if (child.type !== "element") return true;
+    // A `<picture>`'s sources would load beside its image, past the rule.
+    if (child.tagName === "source") return false;
+    if (child.tagName === "img") {
+      const src = child.properties.src;
+      child.properties.src = `${IMAGE_MARK}${encodeURIComponent(typeof src === "string" ? src : "")}`;
+      delete child.properties.srcSet;
+    }
+    markImageSources(child);
+    return true;
+  }) as typeof node.children;
+}
+
+/** Runs after raw HTML is parsed and before it is sanitized, so HTML images are marked like Markdown ones. */
+const markImages = () => markImageSources;
+
+type RawNode = { type: "raw"; value: string };
+type TextNode = { type: "text"; value: string };
+
+/**
+ * A raw HTML piece with each tag the chat would not draw (`isDrawnTag`) turned into text, so it shows as written. A
+ * comment with no end (`<!-- note` and nothing closing it) would hide the rest of the message: it shows as written too.
+ */
+function literalUnknownTags(raw: RawNode): Array<RawNode | TextNode> {
+  if (raw.value.trimStart().startsWith("<!--") && !raw.value.includes("-->")) return [{ type: "text", value: raw.value }];
+  const out: Array<RawNode | TextNode> = [];
+  let last = 0;
+  for (const match of raw.value.matchAll(HTML_TAG)) {
+    if (isDrawnTag(match[1]!, match[2])) continue;
+    if (match.index > last) out.push({ type: "raw", value: raw.value.slice(last, match.index) });
+    out.push({ type: "text", value: match[0] });
+    last = match.index + match[0].length;
+  }
+  if (!out.length) return [raw];
+  if (last < raw.value.length) out.push({ type: "raw", value: raw.value.slice(last) });
+  return out;
+}
+
+function showUnknownTags(node: { children?: unknown[] }): void {
+  if (!node.children) return;
+  node.children = node.children.flatMap((child) => {
+    const item = child as { type: string; children?: unknown[] };
+    if (item.type === "raw") return literalUnknownTags(item as RawNode);
+    showUnknownTags(item);
+    return [child];
+  });
+}
+
+/**
+ * Text in angle brackets that is not HTML the chat draws (`<command>`, `<thinking>`) shows as written: before raw HTML
+ * is parsed, each tag the sanitizer would drop becomes plain text. Code is never raw HTML, so it is untouched.
+ */
+const literalTags = () => showUnknownTags;
+const threadPlugins = [literalTags, defaultRehypePlugins.raw!, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
+const imageRulePlugins = [literalTags, defaultRehypePlugins.raw!, markImages, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
+
+function unmarkImageSource(src: unknown): string | undefined {
+  if (typeof src !== "string" || !src.startsWith(IMAGE_MARK)) return undefined;
+  try {
+    return decodeURIComponent(src.slice(IMAGE_MARK.length)) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+type RuledSetup = { plain: Components; math: Components; setup: string };
+
+/**
+ * The components for one image rule, made once per rule so their identity stays stable (see `markdownComponents`), and
+ * the name its blocks are cached under: a block parsed under a rule is never drawn for a thread, nor the other way.
+ */
+const ruledComponents = new WeakMap<MarkdownImages, RuledSetup>();
+let rules = 0;
+function componentsFor(images: MarkdownImages): RuledSetup {
+  let made = ruledComponents.get(images);
+  if (!made) {
+    const { Image } = images;
+    const img: Components["img"] = ({ src, alt }) => <Image src={unmarkImageSource(src)} alt={typeof alt === "string" ? alt : undefined} />;
+    made = { plain: { ...markdownComponents, img }, math: { ...markdownMathComponents, img }, setup: `images${++rules}` };
+    ruledComponents.set(images, made);
+  }
+  return made;
+}
+
+/** A conversation's own setup: no image rule, or no override, is this key. */
+const NONE = {};
+/** Setups made so far, by image rule and then by components override, each with its own cache name. */
+const customSetups = new WeakMap<object, WeakMap<object, RuledSetup>>();
+
+/**
+ * The components for a conversation's own image rule and its own elements (`components`): the thread's, the caller's
+ * over them, and the rule's image last, so no override can draw an image past the rule. Made once per pair, with a
+ * cache name of its own: its blocks are never drawn for a thread, nor a thread's for it.
+ */
+function setupFor(images: MarkdownImages | undefined, override: Partial<Components> | undefined): RuledSetup | undefined {
+  if (!images && !override) return undefined;
+  if (!override) return componentsFor(images!);
+  let byOverride = customSetups.get(images ?? NONE);
+  if (!byOverride) {
+    byOverride = new WeakMap();
+    customSetups.set(images ?? NONE, byOverride);
+  }
+  let made = byOverride.get(override);
+  if (!made) {
+    const rule = images ? componentsFor(images) : undefined;
+    const img = rule ? { img: rule.plain.img } : {};
+    made = { plain: { ...markdownComponents, ...override, ...img }, math: { ...markdownMathComponents, ...override, ...img }, setup: `custom${++rules}` };
+    byOverride.set(override, made);
+  }
+  return made;
+}
+
+export const Markdown = memo(function Markdown({ content, className, streaming = false, images, components }: MarkdownProps) {
   countRender("Markdown");
   const renderMath = useRenderMath();
   const math = renderMath && mayContainMath(content);
+  const ruled = setupFor(images, components);
   const live = useLiveMarkdown();
   // Math has a split of its own and is worked on whole; the live tail gives the same text and
   // blocks as the whole would, so the end of the stream changes nothing on screen.
@@ -438,9 +655,14 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
   // derive it from the text. Limited to mermaid because `isAnimating` also
   // disables every code block's copy button.
   const drawingDiagram = endsInOpenMermaidFence(safeContent);
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (root.current) addCodeWrapToggles(root.current);
+  });
 
   return (
     <div
+      ref={root}
       className={cn(
         "an-markdown",
         "overflow-hidden wrap-break-word",
@@ -450,11 +672,21 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
       onCopy={math ? copyMathAsTex : undefined}
       data-streaming={streaming || undefined}
     >
+      <MarkdownSetupContext.Provider value={`${ruled ? `${ruled.setup}:` : ""}${math ? "math" : "plain"}`}>
       <Streamdown
-        components={math ? markdownMathComponents : markdownComponents}
+        components={ruled ? ruled[math ? "math" : "plain"] : math ? markdownMathComponents : markdownComponents}
+        rehypePlugins={images ? imageRulePlugins : threadPlugins}
         plugins={math ? markdownMathPlugins : markdownPlugins}
-        parseMarkdownIntoBlocksFn={math ? parseBlocksKeepingMath : incremental ? live.split : splitBlocks}
+        BlockComponent={CachedBlock}
+        parseMarkdownIntoBlocksFn={
+          math
+            ? streaming ? parseBlocksKeepingMath : splitFinishedWithMath
+            : incremental ? live.split : splitFinished
+        }
+        // Only a reply still being written has unfinished Markdown to complete; finished text is read as written.
+        parseIncompleteMarkdown={streaming}
         remend={markdownRemend}
+        codeBlockMaxHeight={CODE_BLOCK_MAX_HEIGHT}
         isAnimating={drawingDiagram}
         urlTransform={safeMarkdownUrl}
         linkSafety={markdownLinkSafety}
@@ -462,6 +694,7 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
       >
         {safeContent}
       </Streamdown>
+      </MarkdownSetupContext.Provider>
     </div>
   );
 });

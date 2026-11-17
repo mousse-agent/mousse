@@ -1,6 +1,5 @@
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import { isWorkflowPrompt, permissionsAfterEdit } from '../../../scheduled/jobPermission'
-import { narrowAgentAccess } from '../../../../shared/settings'
 import type { JobSchedule, ScheduledJob } from '../../../../shared/types'
 import { AGENT_JOB_LIMIT_DEFAULTS, type AgentJobLimits } from '../../../../shared/agentJobLimits'
 import { agentJobExpiry, isActiveAgentJob, isExpired } from '../../../scheduled/agentJobLimits'
@@ -9,13 +8,17 @@ import { cronProblem, minCronGapMinutes } from '../../../scheduled/computeNextRu
 import { asCreateScheduledJobInput, asScheduledJobPatch } from '../../../protocol/validators'
 import type { RunEngine } from '../../RunEngine'
 import type { AgentScheduleHost, AppToolHost } from './host'
-import { lineageRelation } from './thread'
-import { CLIENT_REQUEST_ID_SCHEMA, json, McpToolError, type MousseTool, type ToolCallContext } from './types'
+import { botThreadReach, lineageRelation } from './thread'
+import { checkedInHandler, CLIENT_REQUEST_ID_SCHEMA, json, McpToolError, type MousseTool, type ToolCallContext } from './types'
 
 /** The prompt `schedule_list` returns is cut to this many characters. */
 const PROMPT_LIST_CHARS = 2000
 /** Run records `schedule_list` returns per job. */
 const RECENT_RUNS = 3
+/** Subagent links followed up from a job's creating thread to the caller; a deeper chain is not the caller's. */
+const SUBAGENT_DEPTH = 64
+/** Removals remembered for repeats and retries (`schedule_delete`); the oldest is forgotten first. */
+const REMEMBERED_REMOVALS = 512
 
 /** The schedule's schema with the profile's shortest interval as it is now. */
 function scheduleSchema(minMinutes: number) {
@@ -125,13 +128,15 @@ function permissionFieldsAfterAgentEdit(job: ScheduledJob, editor: PermissionMod
 }
 
 /**
- * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause` and `schedule_run`: an agent's hand on the jobs
- * its own thread made (docs/run-engine/SPEC.md §15.1). Every tool needs the `manage` agent access level. The
+ * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_run` and `schedule_delete`: an
+ * agent's hand on the jobs its own thread made (docs/run-engine/SPEC.md §15.1). `schedule_delete` also removes a job one
+ * of the thread's subagents made; a subagent has these tools as its parent has them. The
  * first automation a thread's agent adds is an ask the person answers (Allow or Not now); after Allow it adds more
- * within the limits. Only a turn a person started may create or start a job or change what one does, so
- * no scheduled run, agent message, subagent or remote send can make jobs of its own and no chain of jobs can form. A job an
- * agent creates runs no wider than the agent that made it (its access level and permission mode are recorded on the
- * job, and a later change can only narrow them), ends after the profile's lifetime for such jobs unless a person
+ * within the limits. Only a turn that holds `person` (a person started it, in a thread that is not a subagent: §1.3) may
+ * create or start a job or change what one does (`needsPerson`), so no scheduled run, agent message, remote send or
+ * subagent can make jobs of its own and no chain of jobs can form. A job an
+ * agent creates runs no wider than the agent that made it (its permission mode is recorded on the job, and a later
+ * change can only narrow it), ends after the profile's lifetime for such jobs unless a person
  * extends it, and counts against a profile-wide cap. The three limits are settings only a person changes
  * (`schedules.jobLimits`, read at every use, so the tool text and checks follow a change at once; no tool writes
  * them). Offered over MCP only, like the other tools that act on the profile.
@@ -159,33 +164,44 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
   }
   const projectOf = (job: Pick<ScheduledJob, 'projectId' | 'threadId'>): string | undefined =>
     job.projectId ?? (job.threadId ? host.threadMeta?.(job.threadId)?.projectId : undefined)
+  /**
+   * Whose jobs the caller makes and sees: its own thread's. A personal bot's are the bot's ("schedule work in your
+   * threads"), whichever of its turns made them: they are filed under its chat thread.
+   */
+  const ownerOf = (ctx: ToolCallContext): string => (ctx.turn.bot ? host.botHomeOf?.(ctx.caller.threadId) ?? ctx.caller.threadId : ctx.caller.threadId)
   /** The jobs an agent may see and change: the ones made through these tools by its own thread. A person's job is never one. */
-  const visible = (job: ScheduledJob, ctx: ToolCallContext): boolean => job.createdBy?.threadId === ctx.caller.threadId
+  const visible = (job: ScheduledJob, ctx: ToolCallContext): boolean => job.createdBy?.threadId === ownerOf(ctx)
+  /** The thread that delegated `threadId` as a subagent; undefined for a thread that is no one's subagent (a fork is not one). */
+  const subagentParent = (threadId: string): string | undefined => {
+    const lineage = engine.delegations.getLineage(threadId)
+    return lineage?.relationship === 'subagent' ? lineage.parentThreadId : undefined
+  }
+  /** Whether a subagent of the caller (or a subagent of one of those) made the job through these tools. */
+  const madeBySubagent = (job: ScheduledJob, ctx: ToolCallContext): boolean => {
+    let current = job.createdBy?.threadId
+    for (let depth = 0; current && depth < SUBAGENT_DEPTH; depth += 1) {
+      current = subagentParent(current)
+      if (current === ctx.caller.threadId) return true
+    }
+    return false
+  }
+  /** Jobs this tool set removed, by job id and by request key, so a repeat or a retry is answered rather than refused. */
+  const removals = new Map<string, { removedBy: string; job: { id: string; name: string } }>()
+  const remember = (key: string, entry: { removedBy: string; job: { id: string; name: string } }): void => {
+    removals.set(key, entry)
+    while (removals.size > REMEMBERED_REMOVALS) removals.delete(removals.keys().next().value as string)
+  }
   const findVisible = (id: string, ctx: ToolCallContext): ScheduledJob => {
     const job = schedules.get(id)
     // A job the caller may not see is refused the same way whether it exists or not.
     if (!job || !visible(job, ctx)) throw new McpToolError('mousse_scope_denied', `No scheduled job ${id} that you made.`)
     return job
   }
-  /** Creating or starting a job, and changing what one does, is for a turn a person started. Everything else is refused. */
-  const requirePerson = (ctx: ToolCallContext, what: string): void => {
-    let person = false
-    try {
-      person = schedules.startedByPerson(ctx.caller)
-    } catch {
-      person = false
-    }
-    if (!person)
-      throw new McpToolError(
-        'mousse_scope_denied',
-        `${what} is only for a turn a person started. This run was started by a job, an agent's message, a subagent, a wake, a continuation, a bot or a remote send, or its origin cannot be read; ask from the person's own turn.`
-      )
-  }
   /** Every change an agent makes is an `agent.action` event on its own thread, with a row in its transcript. */
-  const record = (ctx: ToolCallContext, action: string, job: Pick<ScheduledJob, 'id' | 'name'>, summaryText: string): void => {
+  const record = (ctx: ToolCallContext, action: string, job: Pick<ScheduledJob, 'id' | 'name'>, summaryText: string, target: { threadId: string; runId?: string } = { threadId: ctx.caller.threadId, runId: ctx.caller.runId }): void => {
     try {
       host.recordAgentAction?.(
-        { threadId: ctx.caller.threadId, runId: ctx.caller.runId },
+        target,
         { kind: 'agent', threadId: ctx.caller.threadId, runId: ctx.caller.runId, toolCallId: ctx.toolCallId },
         action,
         { jobId: job.id, jobName: job.name.slice(0, 120), summary: summaryText }
@@ -197,7 +213,11 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
   const planOnly = (ctx: ToolCallContext): boolean => ctx.caller.modeCeiling === 'plan' || ctx.turn.modeCeiling === 'plan'
   /** A thread a job may be bound to: the caller's own or one in its delegation lineage; never a bot's, never an archived one. */
   const checkTarget = (threadId: string, ctx: ToolCallContext): void => {
-    if (threadId !== ctx.caller.threadId && lineageRelation(engine, ctx.caller.threadId, threadId) === null)
+    // A personal bot binds a job to one of its owner's threads it may reach (`botThreadReach`), never its own.
+    if (ctx.turn.bot) {
+      const reach = botThreadReach(host, engine, ctx.caller.threadId, threadId)
+      if ('refused' in reach) throw new McpToolError('mousse_scope_denied', reach.refused)
+    } else if (threadId !== ctx.caller.threadId && lineageRelation(engine, ctx.caller.threadId, threadId) === null)
       throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not this thread or one of its lineage; a job can only be bound to those.`)
     const thread = host.threadMeta?.(threadId)
     if (!thread) throw new Error(`Thread ${threadId} was not found.`)
@@ -229,10 +249,10 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     workspace: job.workspace ?? null,
     ...(job.repeat ? { repeat: job.repeat } : {}),
     createdByAgent: Boolean(job.createdBy),
-    createdByYou: job.createdBy?.threadId === ctx.caller.threadId,
+    createdByYou: job.createdBy?.threadId === ownerOf(ctx),
+    ...(job.createdBy && job.createdBy.threadId !== ownerOf(ctx) ? { createdBySubagent: job.createdBy.threadId } : {}),
     ...(job.expiresAt ? { expiresAt: job.expiresAt } : {}),
     ...(job.pausedReason ? { pausedReason: job.pausedReason } : {}),
-    ...(job.accessCap ? { accessCap: job.accessCap } : {}),
     ...(job.permissionCeiling ? { permissionCeiling: job.permissionCeiling } : {}),
     ...(job.pendingOccurrence ? { pendingRun: job.pendingOccurrence.state } : job.state === 'running' ? { pendingRun: 'running' } : {}),
     recentRuns: (job.runHistory ?? []).slice(-RECENT_RUNS).reverse().map((record) => ({
@@ -252,11 +272,10 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
 
   const common = {
     access: 'managesOthers' as const,
-    minLevel: 'manage' as const,
-    // The central check reads this as a listing: it needs the manage level and nothing else. Which jobs the caller may
-    // touch is the handler's decision (`visible`): the ones its own thread made.
+    // The central check reads this as a listing. Which jobs the caller may touch is the handler's decision (`visible`):
+    // the ones its own thread made.
     target: () => ({}),
-    threadArgChecked: 'the handlers accept the caller\'s own thread or its lineage only (checkTarget)',
+    authorize: checkedInHandler('the handlers accept the caller\'s own thread or its lineage only (checkTarget)'),
     offered: () => false,
     listed: () => host.schedules !== undefined,
     available: () => (host.schedules ? true as const : 'Scheduled jobs are not available in this profile.')
@@ -267,11 +286,11 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       ...common,
       name: 'schedule_list',
       description:
-        'List the scheduled jobs your thread created (needs the manage agent access level). Jobs a person made, and jobs other threads made, are not shown and cannot be changed. Each job shows its cadence, state, when it ends, last runs and the limits its runs have.',
+        'List the scheduled jobs your thread created, and the ones your subagents created (createdBySubagent names the subagent\'s thread: you may remove those with schedule_delete, not change them). Jobs a person made, and jobs other threads made, are not shown and cannot be changed. Each job shows its cadence, state, when it ends, last runs and the limits its runs have.',
       inputSchema: { type: 'object', properties: {} },
       class: 'read',
       handler: (_args, ctx) => {
-        const jobs = schedules.list().filter((job) => visible(job, ctx)).map((job) => summary(job, ctx))
+        const jobs = schedules.list().filter((job) => visible(job, ctx) || madeBySubagent(job, ctx)).map((job) => summary(job, ctx))
         return json({ jobs })
       }
     },
@@ -281,7 +300,23 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       // Read at every listing: the tool is built once, and a person may change the limits at any time.
       get description() {
         const limits = limitsNow()
-        return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs the manage agent access level and a turn a person started: a job, another agent, a subagent or a remote send cannot create jobs; the first time, the person is asked and the job is made only if they allow it). The job outlives this run. It runs no wider than you do: its runs get at most your access level and permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
+        return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs a turn a person started, or a subagent of one: a job, another agent's message or a remote send cannot create jobs; the first time, the person is asked and the job is made only if they allow it; a subagent's every job is asked). The job outlives this run. It runs no wider than you do: its runs get at most your permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
+      },
+      // A personal bot ("schedule work in your threads"): its owner allowed its jobs once, and it names where they run.
+      get botDescription() {
+        const limits = limitsNow()
+        return `Create a scheduled job for your owner that runs a prompt later or on a cadence, as Mousse's Scheduled jobs do: a turn in one of your owner's threads (threadId) or a new thread per run in one of their projects (projectId). Use it when your owner asks for work in their threads on a schedule; for something only you do at a time, use bot_schedule_add. Your owner allowed this, so nothing asks first. Its runs work in Full access (or no wider than the device your owner wrote from). Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless your owner extends it. You see and change only the jobs you made. Use schedule_run to start it at once.`
+      },
+      get botInputSchema() {
+        const schema = this.inputSchema as { properties: Record<string, unknown> }
+        return {
+          ...schema,
+          properties: {
+            ...schema.properties,
+            threadId: { type: 'string', description: 'Run in this thread of your owner\'s (thread_list).' },
+            projectId: { type: 'string', description: 'Or a new thread per run in this project of your owner\'s (thread_list\'s projects).' }
+          }
+        }
       },
       get inputSchema() {
         return {
@@ -301,14 +336,23 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         }
       },
       class: 'mutation',
+      needsPerson: true,
       handler: (args, ctx) => {
-        requirePerson(ctx, 'schedule_create')
-        refuseForbidden(args)
-        const requestKey = `schedule_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        // A personal bot has no project of its own: a job that starts a new thread per run names the project. Any other
+        // caller's job takes its thread's project, so naming one is refused as before.
+        const bot = Boolean(ctx.turn.bot)
+        const { projectId: _named, ...checkedArgs } = args
+        refuseForbidden(bot ? checkedArgs : args)
+        if (bot && args.projectId !== undefined && (typeof args.projectId !== 'string' || !args.projectId.trim()))
+          throw new Error('projectId must be one of your owner\'s projects (thread_list).')
+        const botProject = bot && typeof args.projectId === 'string' ? args.projectId.trim() : undefined
+        const owner = ownerOf(ctx)
+        const requestKey = `schedule_create:${owner}:${toolRequestId(args, ctx)}`
         // A retry of a call that already made its job returns that job and changes nothing, however many jobs exist.
         const earlier = schedules.list().find((job) => job.createdBy?.requestId === requestKey)
         if (earlier) return json({ job: summary(earlier, ctx), replayed: true })
-        const input = asCreateScheduledJobInput(without(args, 'clientRequestId'))
+        const { projectId: _botProject, ...rest } = args
+        const input = asCreateScheduledJobInput(without(rest, 'clientRequestId'))
         const refusal = scheduleRefusal(input.schedule, limitsNow().minIntervalMinutes) ?? promptRefusal(input.prompt)
         if (refusal) throw new Error(refusal)
         if (input.workspace?.kind === 'worktree') throw new Error('A job an agent creates cannot run in an existing worktree.')
@@ -320,10 +364,14 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         const caller = host.threadMeta?.(ctx.caller.threadId)
         if (!caller) throw new Error(`Thread ${ctx.caller.threadId} was not found.`)
         if (!input.threadId && caller.localOnly === true) throw new Error(PRIVATE_JOB_REFUSAL)
-        let projectId = caller.projectId
+        let projectId = bot ? botProject : caller.projectId
         if (input.threadId) {
           checkTarget(input.threadId, ctx)
           projectId = host.threadMeta?.(input.threadId)?.projectId
+        } else if (bot && !botProject) {
+          throw new Error('Name where its runs happen: threadId (one of your owner\'s threads) for a turn there, or projectId (one of their projects) for a new thread per run.')
+        } else if (bot && !host.listProjects?.().some((project) => project.id === botProject)) {
+          throw new Error(`There is no project ${botProject}.`)
         }
         const candidate = { ...(input.threadId ? { threadId: input.threadId } : {}), ...(projectId ? { projectId } : {}), ...(input.selection ? { selection: input.selection } : {}), ...(mode ? { mode } : {}), ...(input.workspace ? { workspace: input.workspace } : {}) }
         const checked = schedules.validate(candidate)
@@ -335,12 +383,13 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
           ...candidate,
           ...(checked.selection ? { selection: checked.selection } : {}),
           ...(input.repeat ? { repeat: input.repeat } : {}),
-          createdBy: { threadId: ctx.caller.threadId, runId: ctx.caller.runId, requestId: requestKey },
-          accessCap: limits.accessCap,
+          createdBy: { threadId: owner, runId: ctx.caller.runId, requestId: requestKey },
           permissionCeiling: limits.permissionCeiling
         }
         // The first time, the person is asked; the job is made only when they allow it, which also lets this thread add more.
-        if (!allowed(ctx.caller.threadId)) {
+        // A personal bot's owner allowed "schedule work in your threads" once: that is their Allow for the bot's jobs.
+        // A subagent never gets here: it does not hold `person`.
+        if (!bot && !allowed(ctx.caller.threadId)) {
           const ask = schedules.askFirst({ threadId: ctx.caller.threadId, requestKey, job })
           return json({
             waiting: true,
@@ -359,7 +408,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       ...common,
       name: 'schedule_update',
       description:
-        'Change a scheduled job your thread created (needs the manage agent access level). Pass jobId and only the fields to change; null clears model, workspace, thread or mode back to the default. Changing anything but the name needs a turn a person started. The rules of schedule_create hold. A change can only narrow the access and permission mode its runs get, to yours at most, and can only shorten how many runs it has; it never lengthens the job\'s life. To pause a job use schedule_pause; resuming or extending one is for a person.',
+        'Change a scheduled job your thread created. Pass jobId and only the fields to change; null clears model, workspace, thread or mode back to the default. Changing anything but the name needs a turn a person started. The rules of schedule_create hold. A change can only narrow the access and permission mode its runs get, to yours at most, and can only shorten how many runs it has; it never lengthens the job\'s life. To pause a job use schedule_pause; resuming or extending one is for a person.',
       get inputSchema() {
         return {
           type: 'object',
@@ -378,6 +427,14 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         }
       },
       class: 'mutation',
+      // Changing what a job does; renaming it is for any turn.
+      needsPerson: (args) => {
+        try {
+          return Object.keys(asScheduledJobPatch(without(args, 'jobId'))).some((key) => key !== 'name')
+        } catch {
+          return false
+        }
+      },
       handler: (args, ctx) => {
         refuseForbidden(args)
         if (args.enabled !== undefined) throw new Error('schedule_update does not change whether a job is enabled: pause it with schedule_pause; a person resumes it.')
@@ -385,10 +442,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         const patch = asScheduledJobPatch(without(args, 'jobId'))
         if (Object.keys(patch).length === 0) throw new Error('Pass at least one field to change.')
         const executable = Object.keys(patch).some((key) => key !== 'name')
-        if (executable) {
-          requirePerson(ctx, 'schedule_update of anything but the name')
-          if (isWorkflowPrompt(job.prompt)) throw new Error('This job runs a workflow; an agent does not change those.')
-        }
+        if (executable && isWorkflowPrompt(job.prompt)) throw new Error('This job runs a workflow; an agent does not change those.')
         if (patch.repeat === null) throw new Error('A job\'s number of runs cannot be removed; it can only be shortened.')
         if (patch.repeat?.times !== undefined && job.repeat?.times !== undefined && patch.repeat.times > job.repeat.times)
           throw new Error(`A job's number of runs can only be shortened (it has ${job.repeat.times}).`)
@@ -434,14 +488,9 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
           ...(patch.mode !== undefined ? { mode: patch.mode ?? undefined } : {}),
           ...(patch.workspace !== undefined ? { workspace: patch.workspace ?? undefined } : {}),
           ...(patch.repeat !== undefined && patch.repeat !== null ? { repeat: { times: patch.repeat.times, completed: job.repeat?.completed ?? 0 } } : {}),
-          // Whatever the job could do before, it can do no more now: its limits are the narrower of what it had (a job
-          // with none reads as the narrowest access) and what this caller holds. They are never raised.
-          ...(limits
-            ? {
-                accessCap: narrowAgentAccess(job.accessCap ?? 'lineage', limits.accessCap) ?? 'lineage',
-                ...permissionFieldsAfterAgentEdit(job, limits.permissionCeiling)
-              }
-            : {})
+          // Whatever mode the job could run in before, it can run in no wider one now: the narrower of what it had and what
+          // this caller holds. It is never raised.
+          ...(limits ? permissionFieldsAfterAgentEdit(job, limits.permissionCeiling) : {})
         }
         const updated = schedules.update(job.id, changes)
         if (!updated) throw new Error(`Job ${job.id} no longer exists.`)
@@ -453,7 +502,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       ...common,
       name: 'schedule_pause',
       description:
-        'Pause a scheduled job your thread created, so it starts no further runs (needs the manage agent access level). A run in progress finishes. Only a person resumes a paused job.',
+        'Pause a scheduled job your thread created, so it starts no further runs. A run in progress finishes. Only a person resumes a paused job.',
       inputSchema: {
         type: 'object',
         properties: { jobId: { type: 'string' }, reason: { type: 'string', description: 'Shown next to the paused job.' } },
@@ -474,11 +523,11 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       ...common,
       name: 'schedule_run',
       description:
-        'Start a scheduled job your thread created now, as Run now does (needs the manage agent access level and a turn a person started: a job cannot start another). It starts within seconds, runs under the limits recorded on the job, and is refused while the job is running, waits in a queue, is paused, or has ended (a person resumes or extends it). The result is in the job\'s run history: read it with schedule_list.',
+        'Start a scheduled job your thread created now, as Run now does (needs a turn a person started: a job cannot start another). It starts within seconds, runs under the limits recorded on the job, and is refused while the job is running, waits in a queue, is paused, or has ended (a person resumes or extends it). The result is in the job\'s run history: read it with schedule_list.',
       inputSchema: { type: 'object', properties: { jobId: { type: 'string' } }, required: ['jobId'] },
       class: 'mutation',
+      needsPerson: true,
       handler: (args, ctx) => {
-        requirePerson(ctx, 'schedule_run')
         const job = findVisible(requiredId(args, 'jobId'), ctx)
         if (isWorkflowPrompt(job.prompt)) return { text: 'This job runs a workflow; an agent does not start those.', isError: true }
         if (planOnly(ctx) && (job.mode ?? 'agent') !== 'plan')
@@ -495,6 +544,46 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         schedules.wake()
         record(ctx, 'scheduled_job_run', started, `started scheduled job "${started.name}" (${started.id})`)
         return json({ job: summary(started, ctx), started: true })
+      }
+    },
+    {
+      ...common,
+      name: 'schedule_delete',
+      description:
+        'Remove a scheduled job your thread created, or one your subagents created, for good: it leaves Automations and schedule_list and starts no further runs. A run that already started, or already waits in its thread\'s queue, still runs and finishes in that thread; its result is not recorded on any job. A person\'s job and another thread\'s job are never removed. A subagent removes the jobs it made, as its parent does. Any turn of your thread may remove one, so a job bound to your thread can remove itself when its work is done. The removal is recorded in your thread with the job\'s name. A repeat for a job already removed, or a retry with the same clientRequestId, says it is gone and changes nothing.',
+      inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, clientRequestId: CLIENT_REQUEST_ID_SCHEMA }, required: ['jobId'] },
+      class: 'mutation',
+      handler: (args, ctx) => {
+        const id = requiredId(args, 'jobId')
+        const requestKey = `schedule_delete:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        const replay = removals.get(requestKey)
+        if (replay) return json({ removed: true, alreadyRemoved: true, replayed: true, job: replay.job })
+        const job = schedules.get(id)
+        if (!job || !(visible(job, ctx) || madeBySubagent(job, ctx))) {
+          // A job this thread removed before is gone, not refused; anything else is refused the same way whether it exists or not.
+          const earlier = removals.get(`job:${id}`)
+          if (!job && earlier?.removedBy === ctx.caller.threadId) return json({ removed: true, alreadyRemoved: true, job: earlier.job })
+          throw new McpToolError(
+            'mousse_scope_denied',
+            `No scheduled job ${id} that you or your subagents made. A thread removes only the jobs it made and the ones its subagents made; a person's job and another thread's job are not removed by an agent. A job you removed already is gone: schedule_list shows the ones you can remove.`
+          )
+        }
+        const entry = { removedBy: ctx.caller.threadId, job: { id: job.id, name: job.name } }
+        // The deletion Automations' Delete makes. False: someone removed it in between, which is the same outcome.
+        if (!schedules.remove(job.id)) return json({ removed: true, alreadyRemoved: true, job: entry.job })
+        remember(`job:${job.id}`, entry)
+        remember(requestKey, entry)
+        const summaryText = `removed scheduled job "${job.name}" (${job.id})`
+        record(ctx, 'scheduled_job_deleted', job, summaryText)
+        // A subagent's job: its own thread shows the removal too, by whom.
+        const creator = job.createdBy!.threadId
+        if (creator !== ctx.caller.threadId) record(ctx, 'scheduled_job_deleted', job, `${summaryText}, which this thread made; removed by thread ${ctx.caller.threadId}`, { threadId: creator })
+        const started = job.state === 'running' || job.pendingOccurrence !== undefined
+        return json({
+          removed: true,
+          job: entry.job,
+          ...(started ? { runInProgress: 'A run of this job had started or was waiting in its thread\'s queue; it still runs and finishes there, and its result is not recorded on any job.' } : {})
+        })
       }
     }
   ]

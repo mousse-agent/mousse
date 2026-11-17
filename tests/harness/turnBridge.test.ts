@@ -128,6 +128,9 @@ describe('TurnBridge (PR 2 §2)', () => {
       ['manage', 'claude|default|0|0|access:manage'],
       ['lineage', 'claude|default|0|0']
     ])
+    // The bridge names what decides the tool list apart from the bearer, so a runtime that renews a bearer in place
+    // knows when it must not (#358).
+    expect(s.claude.hosts.map((host) => host.bridge?.mcp?.tools)).toEqual([undefined, 'access:read', 'access:manage', undefined])
   })
 
   it('settles the bearer from how the turn ended and what the runtime reported', async () => {

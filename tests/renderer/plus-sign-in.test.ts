@@ -155,6 +155,22 @@ describe('sign-in errors', () => {
       )
   })
 
+  it('says a removed computer is added back by signing in, and only when status says it was removed', () => {
+    const live = { enabled: true, keystore: 'unlocked', protected: true, routes: [], peers: [],
+      self: { node: 'n', user: 'u', isAuthority: false } } as unknown as NetStatus
+    const removed = { ...live, self: { ...live.self!, removed: true } } as NetStatus
+    for (const code of ['bad_delegation', 'revoked']) {
+      expect(signInErrorMessage({ code }, origin, removed)).toBe(
+        'This computer was removed from your devices. Sign in to add it back.'
+      )
+      expect(signInErrorMessage({ code }, origin, live)).toBe(
+        'This computer was away too long to reconnect on its own. Open Mousse on the computer that owns your devices, then sign in here again to get the renewed device list.'
+      )
+    }
+    // Joining back needs the owner computer online; that message is unchanged.
+    expect(signInErrorMessage({ code: 'authority_offline' }, origin, removed)).toContain('Open Mousse on it, then sign in again.')
+  })
+
   it('points to the setup step when the keystore is locked', () => {
     const net = { enabled: true, self: {}, keystore: 'locked', protected: true } as never
     expect(signInErrorMessage({ code: 'keystore_locked' }, origin, net)).toBe(mousseIdSetupStep(net))
@@ -176,5 +192,10 @@ describe('networking preparation', () => {
     expect(mousseIdPreparation({ ...base, enabled: false })).toBe('automatic')
     expect(mousseIdPreparation({ ...base, protected: false })).toBe('automatic')
     expect(mousseIdPreparation({ ...base, keystore: 'locked' })).toBe('manual')
+  })
+  it('leaves a removed computer to sign in, since signing in sets its old identity aside', () => {
+    const removed = { ...base, self: { ...base.self!, isAuthority: false, removed: true } } as NetStatus
+    expect(mousseIdPreparation(removed)).toBe('automatic')
+    expect(mousseIdPreparation({ ...removed, keystore: 'locked' })).toBe('automatic')
   })
 })

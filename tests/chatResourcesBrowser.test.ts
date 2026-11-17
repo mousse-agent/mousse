@@ -91,6 +91,9 @@ describe.skipIf(!chrome.ok)('real group browser sharing', () => {
     await resources.browserControl(gui, id, true)
     await expect(runtime.dispatch(context, 'browser_act', { sessionId: id, tabId: observed.tabId,
       generation: observed.generation, observationId: observed.observationId, action: { type: 'reload' } })).rejects.toThrow('person is controlling')
+    // Nor does an agent open or load a page meanwhile.
+    await expect(runtime.dispatch(context, 'browser_open', { url: `${url}?during-hold` })).rejects.toThrow('person is controlling')
+    await expect(runtime.dispatch(context, 'browser_tabs', { sessionId: id, operation: 'new', url: `${url}?during-hold` })).rejects.toThrow('person is controlling')
     await resources.browserControl(gui, id, false)
     const refreshed = await resources.browserObserve({ ...gui, clientId: 'gui-b' }, id)
     const extract = await runtime.dispatch(context, 'browser_extract', { sessionId: id, tabId: refreshed.observation!.tabId })

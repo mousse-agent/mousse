@@ -11,11 +11,18 @@ const ENTRY_POINTS = [
   'tests/fixtures/agent-platform/main-browser-e2e/electron-main.ts',
   'tests/fixtures/agent-platform/main-browser-e2e/launch.mjs',
   'tests/fixtures/agent-platform/scheduled-browser-e2e/electron-gui.ts',
+  'tests/fixtures/applet-cached-frame/main.ts',
+  'tests/fixtures/applet-height/main.ts',
+  'tests/fixtures/bot-chat-width/main.ts',
+  'tests/fixtures/bot-list/main.ts',
   'tests/fixtures/browser-host-probe/main.ts',
   'tests/fixtures/chat-undo-full-shell-driver.mjs',
   'tests/fixtures/code-block-copy/main.ts',
+  'tests/fixtures/dialog-surface/main.ts',
   'tests/fixtures/git-foundation-full-shell-driver.mjs',
+  'tests/fixtures/image-clipboard/main.ts',
   'tests/fixtures/menu-shortcuts/main.ts',
+  'tests/fixtures/mermaid-size/main.ts',
   'tests/fixtures/net-gui/mounted-lifecycle/main.ts',
   'tests/fixtures/net-gui/task-picker-electron.ts',
   'tests/fixtures/profile-footer/main.ts',
@@ -27,8 +34,11 @@ const ENTRY_POINTS = [
   'tests/fixtures/repository-upgrades/electron-error-bridge.ts',
   'tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts',
   'tests/fixtures/resource-lifecycle-full-shell-driver.mjs',
+  'tests/fixtures/shell-scroll/main.ts',
   'tests/fixtures/storage-settings/main.ts',
-  'tests/fixtures/turn-window/main.ts'
+  'tests/fixtures/theme-css/main.ts',
+  'tests/fixtures/turn-window/main.ts',
+  'tests/fixtures/wallpaper/main.ts'
 ]
 
 /** Modules that use Electron's `app` but only run inside an entry point that imports them, after its own call. */
@@ -43,6 +53,7 @@ const PRELOAD_SCRIPTS = ['tests/fixtures/agent-platform/editor-cross-feature/pre
  * of string literals is checked against ENTRY_POINTS instead and needs no entry here.
  */
 const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
+  'tests/applet-height-electron.test.ts:22': { starts: 'tests/fixtures/applet-height/main.ts', how: 'esbuild bundle of tests/fixtures/applet-height/main.ts (line 19) in a temporary folder' },
   'tests/chatUndoFullShell.test.ts:30': { starts: 'tests/fixtures/chat-undo-full-shell-driver.mjs', how: 'fullShellElectronArgs(resolve(the driver)) adds only display flags' },
   'tests/errorElectronBridge.test.ts:44': { starts: 'tests/fixtures/repository-upgrades/electron-error-bridge.ts', how: 'esbuild bundle of tests/fixtures/repository-upgrades/electron-error-bridge.ts (line 36) in a temporary folder' },
   'tests/gitFoundationFullShell.test.ts:29': { starts: 'tests/fixtures/git-foundation-full-shell-driver.mjs', how: 'fullShellElectronArgs(resolve(the driver)) adds only display flags' },
@@ -55,14 +66,23 @@ const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
   'tests/providerCredentialVaultRuntime.test.ts:48': { starts: 'tests/fixtures/provider-credentials/vault-probe-electron.ts', how: 'esbuild bundle of tests/fixtures/provider-credentials/vault-probe-electron.ts (line 46) in a temporary folder' },
   'tests/providerCredentialVaultRuntime.test.ts:56': { starts: 'tests/fixtures/provider-credentials/vault-probe-electron.ts', how: 'esbuild bundle of tests/fixtures/provider-credentials/vault-probe-electron.ts (line 46) in a temporary folder' },
   'tests/resourceLifecycleFullShell.test.ts:42': { starts: 'tests/fixtures/resource-lifecycle-full-shell-driver.mjs', how: 'fullShellElectronArgs(resolve(the driver)) adds only display flags' },
+  'tests/renderer/bot-chat-width-electron.test.ts:45': { starts: 'tests/fixtures/bot-chat-width/main.ts', how: 'esbuild bundle of tests/fixtures/bot-chat-width/main.ts (line 42) in a temporary folder' },
+  'tests/renderer/applet-cached-frame-electron.test.ts:24': { starts: 'tests/fixtures/applet-cached-frame/main.ts', how: 'esbuild bundle of tests/fixtures/applet-cached-frame/main.ts (line 20) in a temporary folder' },
+  'tests/renderer/image-clipboard-electron.test.ts:44': { starts: 'tests/fixtures/image-clipboard/main.ts', how: 'esbuild bundle of tests/fixtures/image-clipboard/main.ts (line 40) in a temporary folder' },
+  'tests/renderer/shell-scroll-electron.test.ts:34': { starts: 'tests/fixtures/shell-scroll/main.ts', how: 'esbuild bundle of tests/fixtures/shell-scroll/main.ts (line 31) in a temporary folder' },
+  'tests/renderer/wallpaper-electron.test.ts:25': { starts: 'tests/fixtures/wallpaper/main.ts', how: 'esbuild bundle of tests/fixtures/wallpaper/main.ts (line 22) in a temporary folder' },
+  'tests/renderer/bot-list-electron.test.ts:53': { starts: 'tests/fixtures/bot-list/main.ts', how: 'esbuild bundle of tests/fixtures/bot-list/main.ts (line 50) in a temporary folder' },
   'tests/renderer/code-block-copy-electron.test.ts:24': { starts: 'tests/fixtures/code-block-copy/main.ts', how: 'esbuild bundle of tests/fixtures/code-block-copy/main.ts (line 21) in a temporary folder' },
+  'tests/renderer/mermaid-size-electron.test.ts:33': { starts: 'tests/fixtures/mermaid-size/main.ts', how: 'esbuild bundle of tests/fixtures/mermaid-size/main.ts (line 30) in a temporary folder' },
+  'tests/renderer/dialog-surface-electron.test.ts:32': { starts: 'tests/fixtures/dialog-surface/main.ts', how: 'esbuild bundle of tests/fixtures/dialog-surface/main.ts (line 29) in a temporary folder' },
   'tests/renderer/menu-shortcut-gate-electron.test.ts:26': { starts: 'tests/fixtures/menu-shortcuts/main.ts', how: 'esbuild bundle of tests/fixtures/menu-shortcuts/main.ts (line 16) in a temporary folder' },
   'tests/renderer/networkTaskPicker-electron.test.ts:21': { starts: 'tests/fixtures/net-gui/task-picker-electron.ts', how: 'esbuild bundle of tests/fixtures/net-gui/task-picker-electron.ts (line 14) in a temporary folder' },
   'tests/renderer/profile-footer-electron.test.ts:18': { starts: 'tests/fixtures/profile-footer/main.ts', how: 'esbuild bundle of tests/fixtures/profile-footer/main.ts (line 15) in a temporary folder' },
   'tests/renderer/profileReady-startup-electron.test.ts:40': { starts: 'tests/fixtures/renderer-startup/main.ts', how: 'esbuild bundle of tests/fixtures/renderer-startup/main.ts (line 37) in a temporary folder' },
-  'tests/renderer/prompt-rail-electron.test.ts:32': { starts: 'tests/fixtures/prompt-rail/main.ts', how: 'esbuild bundle of tests/fixtures/prompt-rail/main.ts (line 29) in a temporary folder' },
+  'tests/renderer/prompt-rail-electron.test.ts:33': { starts: 'tests/fixtures/prompt-rail/main.ts', how: 'esbuild bundle of tests/fixtures/prompt-rail/main.ts (line 30) in a temporary folder' },
   'tests/renderer/storage-settings-electron.test.ts:25': { starts: 'tests/fixtures/storage-settings/main.ts', how: 'esbuild bundle of tests/fixtures/storage-settings/main.ts (line 20) in a temporary folder' },
-  'tests/renderer/turn-window-electron.test.ts:87': { starts: 'tests/fixtures/turn-window/main.ts', how: 'esbuild bundle of tests/fixtures/turn-window/main.ts (line 84) in a temporary folder' },
+  'tests/renderer/theme-css-electron.test.ts:33': { starts: 'tests/fixtures/theme-css/main.ts', how: 'esbuild bundle of tests/fixtures/theme-css/main.ts (line 30) in a temporary folder' },
+  'tests/renderer/turn-window-electron.test.ts:88': { starts: 'tests/fixtures/turn-window/main.ts', how: 'esbuild bundle of tests/fixtures/turn-window/main.ts (line 85) in a temporary folder' },
   'tests/net/chats/gui-electron.test.ts:37': { starts: 'tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts', how: 'esbuild bundle of tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts (line 32) in a temporary folder' },
   'tests/net/chats/gui-renderer-lifecycle.test.ts:19': { starts: 'tests/fixtures/net-gui/mounted-lifecycle/main.ts', how: 'esbuild bundle of tests/fixtures/net-gui/mounted-lifecycle/main.ts (line 16) in a temporary folder' },
   'tests/fixtures/agent-platform/electron-attached-browser/run-electron-fixture.mjs:49': { starts: 'tests/fixtures/agent-platform/electron-attached-browser/electron-main.ts', how: 'esbuild bundle of fixtureDir/electron-main.ts (line 33) in a temporary folder; a manual runner' }

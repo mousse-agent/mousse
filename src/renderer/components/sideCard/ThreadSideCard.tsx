@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useAppStore } from '../../stores/appStore'
+import { chatColumnWidth, useChatWidth } from '../../lib/chatWidth'
 import { useDialogFocus } from '../ui/Modal'
 import { ActionsSection } from './ActionsSection'
 import { DeviceSection } from './DeviceSection'
@@ -98,7 +99,8 @@ export function ThreadSideCard() {
 
   // Written on the pane, not passed up: the width follows the window while it is
   // resized, and nothing above the pane needs to render for it.
-  const reservedWidth = !overlay && reserved && threadWidth !== null ? sideCardReservedWidth(threadWidth) : 0
+  const columnWidth = chatColumnWidth(useChatWidth())
+  const reservedWidth = !overlay && reserved && threadWidth !== null ? sideCardReservedWidth(threadWidth, columnWidth) : 0
   useLayoutEffect(() => {
     layerRef.current?.parentElement?.style.setProperty('--side-card-reserved', `${reservedWidth}px`)
   }, [reservedWidth])
@@ -113,7 +115,7 @@ export function ThreadSideCard() {
   // Focus moves into the overlay once it has faded in and returns to the control that opened it
   // when it starts to fade out. Docked, the card is a plain part of the page.
   useDialogFocus(cardRef, overlay && shown, closeOverlay)
-  // The dialog helper lands on the first control, which would draw a focus ring on a row the user
+  // The dialog helper lands on the first control, which would show the focus fill on a row the user
   // did not pick. The card itself takes focus instead; Tab moves on to its first control.
   useEffect(() => {
     if (overlay && shown) cardRef.current?.focus({ preventScroll: true })
@@ -135,6 +137,7 @@ export function ThreadSideCard() {
       {mounted && (
         <section
           ref={cardRef}
+          data-mousse="side-card"
           className="thread-side-card"
           aria-label="Thread details"
           role={overlay ? 'dialog' : undefined}

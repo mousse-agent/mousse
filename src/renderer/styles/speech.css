@@ -22,6 +22,52 @@
   opacity: 0.6;
 }
 
+/* The recording wave in the composer's footer: the last few seconds, newest on the right. The strip
+   is anchored to the right edge and overflows to the left, where the wave fades out. One bar plus
+   its gap is 5px, the PITCH in SpeechHistoryWave.tsx. */
+.speech-history-wave {
+  position: relative;
+  display: block;
+  min-width: 0;
+  height: 22px;
+  overflow: hidden;
+  color: currentColor;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 18%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 18%);
+}
+
+.speech-history-strip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  will-change: transform;
+}
+
+.speech-history-bar {
+  flex-shrink: 0;
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: currentColor;
+  transform: scaleY(0.12);
+}
+
+/* Motion off: the bars stay put, so the wave needs no fade. */
+.speech-history-wave.still {
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.speech-history-wave.still .speech-history-strip {
+  left: 0;
+  justify-content: space-between;
+  will-change: auto;
+}
+
 /* Threads sidebar: the thread whose message is being read aloud. */
 .threads-sidebar-speech {
   position: absolute;
@@ -247,7 +293,7 @@
 
 .speech-models-more:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .speech-models-group + .speech-models-group {

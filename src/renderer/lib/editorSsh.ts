@@ -52,13 +52,13 @@ export function editorSshSwitch(status: EditorSshStatus): { on: boolean; disable
     return {
       on: status.enabled,
       disabled: false,
-      description: `On · ${where} includes ${status.mousseConfig ? 'Mousse’s SSH settings' : 'Mousse’s file'}, so your editor can reach your other computers.${detail}`
+      description: `On · ${where} includes ${status.mousseConfig ? 'Mousse’s SSH settings' : 'Mousse’s file'}, so my editor can reach my other devices.${detail}`
     }
   }
   if (!status.enabled) {
-    return { on: false, disabled: false, description: `Off · Mousse added nothing to ${where}. Turn it on to let your editor reach your other computers by name.` }
+    return { on: false, disabled: false, description: `Off · Mousse added nothing to ${where}. Turn it on to let my editor reach my other devices by name.` }
   }
-  return { on: false, disabled: false, description: `Mousse adds one Include line to ${where} the first time you open a folder of another computer in your editor.` }
+  return { on: false, disabled: false, description: `Mousse adds one Include line to ${where} the first time you open a folder of another device in your editor.` }
 }
 
 interface Calls {

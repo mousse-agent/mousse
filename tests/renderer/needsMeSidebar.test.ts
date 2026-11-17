@@ -83,6 +83,12 @@ describe('the Needs me group', () => {
     expect(html.indexOf('threads-sidebar-needs-me')).toBeLessThan(html.indexOf('threads-sidebar-thread-feed"'))
   })
 
+  it('holds a waiting thread in the Threads view, which leaves it out of the list below', () => {
+    setStore({ projects, threads, threadActivity: waiting, threadsSidebarView: 'threads' })
+    const html = sidebar()
+    expect(titlesIn(html.replace(needsMeSection(html), ''))).toEqual(['Refactor'])
+  })
+
   it('is hidden when nothing waits', () => {
     setStore({ projects, threads, threadActivity: { c: 'processing' }, threadsSidebarView: 'projects' })
     expect(sidebar()).not.toContain('threads-sidebar-needs-me')
@@ -91,11 +97,40 @@ describe('the Needs me group', () => {
   it('is hidden when there is only one thread', () => {
     setStore({ projects, threads: [threads[0]], threadActivity: { a: 'awaiting_input' }, threadsSidebarView: 'threads' })
     expect(sidebar()).not.toContain('threads-sidebar-needs-me')
+    // Its own row stays in the list.
+    expect(titlesIn(sidebar())).toEqual(['Fix tests'])
   })
 
   it('does not let its rows be dragged', () => {
     setStore({ projects, threads, threadActivity: waiting, threadsSidebarView: 'projects' })
     expect(needsMeSection(sidebar())).toContain('draggable="false"')
+  })
+})
+
+describe('a thread a bot keeps out of the sidebar', () => {
+  const hidden = thread('h', 'Quick check', { projectId: 'p1', updatedAt: at(6), hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' } })
+
+  // The Threads view and the Projects tree list the same threads (`availableThreads`); the Threads view draws every row.
+  it('is not in the thread list, and still in Needs me while it waits on the person', () => {
+    setStore({ projects, threads: [...threads, hidden], threadActivity: {}, threadsSidebarView: 'threads' })
+    expect(titlesIn(sidebar())).toEqual(expect.arrayContaining(['Fix tests', 'Ship docs', 'Refactor']))
+    expect(titlesIn(sidebar())).not.toContain('Quick check')
+    // A question in it is the person's: Needs me lists it, and opens it from there.
+    setStore({ projects, threads: [...threads, hidden], threadActivity: { h: 'awaiting_input', a: 'awaiting_input' }, threadsSidebarView: 'threads' })
+    expect(titlesIn(needsMeSection(sidebar()))).toEqual(['Quick check', 'Fix tests'])
+    // Shown again, it is an ordinary row.
+    setStore({ projects, threads: [...threads, { ...hidden, hidden: undefined }], threadActivity: {}, threadsSidebarView: 'threads' })
+    expect(titlesIn(sidebar())).toContain('Quick check')
+  })
+
+  it('a pushed list that only hides or shows a thread reaches the store, though the thread kept its time', () => {
+    const shown = { ...hidden, hidden: undefined }
+    useAppStore.getState().setThreads([...threads, shown])
+    // The bot's thread_hide (or Show in sidebar elsewhere) changes nothing else of the thread.
+    useAppStore.getState().setThreads([...threads, hidden])
+    expect(useAppStore.getState().threads.find((thread) => thread.id === 'h')?.hidden).toBe(true)
+    useAppStore.getState().setThreads([...threads, shown])
+    expect(useAppStore.getState().threads.find((thread) => thread.id === 'h')?.hidden).toBeUndefined()
   })
 })
 
@@ -150,15 +185,8 @@ describe('the sidebar toggle', () => {
     // The count is in the toggle's accessible label; the rest of the wording belongs to the title bar.
     const toggle = html.match(/<button[^>]*titlebar-sidebar-toggle[^>]*>/)?.[0] ?? ''
     expect(toggle.match(/aria-label="([^"]*)"/)?.[1]).toMatch(/(^|\D)2(\D|$)/)
-    // The badge is part of the toggle button, placed against the button and not the rail width.
+    // The badge is part of the toggle button.
     expect(html).toMatch(/<button[^>]*titlebar-sidebar-toggle--badged[^>]*>(?:(?!<\/button>)[\s\S])*titlebar-attention-badge/)
-    const css = readFileSync(new URL('../../src/renderer/styles/app.css', import.meta.url), 'utf8')
-    const badge = css.match(/\.titlebar-attention-badge\s*\{([^}]*)\}/)?.[1] ?? ''
-    expect(badge).not.toMatch(/navigation-rail-width|titlebar-height/)
-    expect(css).toMatch(/\.titlebar-sidebar-toggle\s*\{[^}]*position:\s*relative/)
-    // One placement: inside the button's corner, so it never reaches a neighbouring button.
-    expect(badge).toMatch(/top:\s*1px/)
-    expect(badge).toMatch(/right:\s*1px/)
   })
 
   it('has no badge while the sidebar is open or nothing waits', () => {

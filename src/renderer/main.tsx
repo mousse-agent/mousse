@@ -1,6 +1,8 @@
 import React, { Suspense, useState } from 'react'
-import ReactDOM from 'react-dom/client'
 import App from './App'
+import { createAppRoot, RootErrorBoundary } from './lib/appRoot'
+import { installWindowErrorReporting } from './services/rendererErrors'
+import { keepShellUnscrolled } from './lib/shellScroll'
 // Settings loads as its own chunk the first time it opens (preloaded once the workspace has painted).
 import { SettingsPage } from './lib/lazySurfaces'
 import { applyAppearance, useTheme } from './hooks/useTheme'
@@ -12,12 +14,20 @@ import { ReadAloudHost } from './readAloud/ReadAloudModal'
 import { PhoneSpeechHost } from './speechRelay/PhoneSpeechHost'
 import { EnrollmentRequestHost } from './components/EnrollmentRequestPrompt'
 import { EditorAskHost } from './components/EditorAskPrompt'
+import { startFaceFrameStore, warmFaceRendererAfterPaint } from './components/bots/face/faceRenderer'
 import './styles/global.css'
 import './styles/compact-shell.css'
 import './styles/sentence-case.css'
 import './styles/polish.css'
 import './styles/ambient-glow.css'
+import './styles/wallpaper.css'
 import './styles/geist-fonts.css'
+
+// Uncaught errors and rejected promises outside React go to main's log, from here on.
+installWindowErrorReporting()
+
+// The page and the app's frame never scroll, whatever a scrollIntoView or focus deep inside asks.
+keepShellUnscrolled()
 
 // Apply the saved profile's appearance before React paints or MMS connects.
 const startupAppearance = window.mousse?.startupAppearance
@@ -28,6 +38,10 @@ applyAppearance(startupAppearance && typeof startupAppearance === 'object'
 // Warm the local monospace face before canvas-based terminals measure glyphs.
 // The normal app shell renders immediately while the asset loads.
 void document.fonts.load('400 13px "Geist Mono"').catch(() => { /* system monospace fallback */ })
+
+// Bot faces: read the pictures saved in earlier runs now (IndexedDB, off the main thread), so a
+// known face shows its real picture from its first paint.
+startFaceFrameStore()
 
 function ProfilePages() {
   useTheme()
@@ -61,8 +75,15 @@ function Root() {
   )
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+// A component that throws shows one line with Reload in place of the app (never a blank window), and is logged.
+createAppRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <Root />
+    <RootErrorBoundary>
+      <Root />
+    </RootErrorBoundary>
   </React.StrictMode>
 )
+
+// Start compiling the bot face shader once the first frame is painted (seconds on Direct3D 11), so
+// faces are live by the time one shows.
+warmFaceRendererAfterPaint()

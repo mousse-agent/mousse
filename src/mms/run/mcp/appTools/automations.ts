@@ -2,7 +2,7 @@ import { AutomationDraftError, type AutomationDrafts, type AutomationEditor, typ
 import { RunReportError } from '../../../automations/AutomationRuns'
 import type { InboxRun } from '../../../../shared/automationInbox'
 import type { AppToolHost } from './host'
-import { json, McpToolError, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
+import { checkedInHandler, json, McpToolError, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /** What the automation tools reach: the drafts service, and who the caller is. Read at every call. */
 export interface AutomationToolHost {
@@ -13,10 +13,15 @@ export interface AutomationToolHost {
   managerWorkspace?(): string
   /** The bot whose thread this is, on a bot's turn. */
   botOf(threadId: string): string | undefined
-  /** The person's latest message on a thread (the manager's): the request an automation must be named in to change. */
-  personRequest?(threadId: string): string | undefined
+  /**
+   * The person's request in the manager's turn `runId`: their own message that started that turn, which an automation
+   * must be named in to change. Undefined when an agent's or a bot's message started it.
+   */
+  personRequest?(threadId: string, runId: string): string | undefined
   /** The bot activation a thread belongs to, for a bot's scheduled run. */
   activationOf?(threadId: string): string | undefined
+  /** Saves only a bot schedule cursor, through its engine and bot store. */
+  saveLeftOff?(activationId: string, text: string): string | undefined
   /**
    * An ordinary chat a person works in (not the manager's, a bot's, or an automation's run thread): its agent may
    * write a draft with `automation_draft_save`, shown as a card in the chat.
@@ -80,13 +85,13 @@ export function automationTools(host: AppToolHost): MousseTool[] {
     if (botId) return { botId }
     return tools.isManagerThread(ctx.caller.threadId) ? { managerThreadId: ctx.caller.threadId } : { originThreadId: ctx.caller.threadId }
   }
-  /** Who edits: a bot, or the manager with the person's current request. */
+  /** Who edits: a bot, or the manager with the person's request in its current turn (none when no person started it). */
   const editor = (tools: AutomationToolHost, ctx: ToolCallContext): AutomationEditor => {
     const botId = tools.botOf(ctx.caller.threadId)
     if (botId) return { botId }
     let request: string | undefined
     try {
-      request = tools.personRequest?.(ctx.caller.threadId)
+      request = tools.personRequest?.(ctx.caller.threadId, ctx.caller.runId)
     } catch {
       request = undefined
     }
@@ -106,7 +111,7 @@ export function automationTools(host: AppToolHost): MousseTool[] {
   const common = {
     access: 'actsAsCaller' as const,
     // The only thread a draft names is a thread event's pull request thread: the service reads it and binds nothing else.
-    threadArgChecked: 'trigger.threadId of a thread event: AutomationDrafts checks the thread exists and has a pull request',
+    authorize: checkedInHandler('trigger.threadId of a thread event: AutomationDrafts checks the thread exists and has a pull request'),
     available: (turn: { threadId: string }) => (reach(turn.threadId) ? true as const : 'Only the Automation manager or a bot can use this.'),
     // Listed only to the manager's thread and to bots; every other agent never sees them.
     listed: (listing: { threadId?: string }) => Boolean(listing.threadId && reach(listing.threadId))
@@ -182,6 +187,7 @@ export function automationTools(host: AppToolHost): MousseTool[] {
         type: 'object',
         properties: {
           level: { type: 'string', enum: ['quiet', 'fyi', 'look', 'needs_you'] },
+          leftOff: { type: 'string', maxLength: 600, description: 'Only bot schedules keep this in bot memory after a successful run: what you checked up to and what is pending. At most 600 characters; data, not instructions.' },
           summary: { type: 'string', description: 'One short line: what happened and, for look or needs_you, what the person should do.' }
         },
         required: ['level', 'summary']
@@ -194,8 +200,13 @@ export function automationTools(host: AppToolHost): MousseTool[] {
         const found = liveRun(ctx.caller.threadId, ctx.caller.runId)
         if (!found?.tools.runs) return { text: 'This thread has no automation run going now; run_report is for an automation\'s own run.', isError: true }
         try {
+          if (args.leftOff !== undefined && (typeof args.leftOff !== 'string' || args.leftOff.length > 600))
+            return { text: 'leftOff must be text of at most 600 characters; shorten it to what you checked up to and what is pending.', isError: true }
           const reported = found.tools.runs.report(found.caller, args.level, args.summary)
-          return json({ runId: reported.id, level: reported.level, summary: reported.summary })
+          const leftOff = typeof args.leftOff !== 'string' ? undefined
+            : found.caller.activationId ? found.tools.saveLeftOff?.(found.caller.activationId, args.leftOff) ?? 'not kept: bot memory is unavailable'
+              : 'not kept: only a bot scheduled run keeps leftOff'
+          return json({ runId: reported.id, level: reported.level, summary: reported.summary, ...(leftOff ? { leftOff } : {}) })
         } catch (error) {
           if (error instanceof RunReportError) return { text: error.message, isError: true }
           throw error

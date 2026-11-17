@@ -22,6 +22,30 @@ window.dispatchEvent(new CustomEvent('mousse:open-file', {
 }))
 ```
 
+## Thread links
+
+A link to a Mousse thread uses this target:
+
+```text
+mousse://thread/<threadId>
+mousse://thread/<node>:<threadId>
+```
+
+The second form names a thread of another of the user's computers by its node id (`nod_…`) and its id there, as the merged lists do (`src/shared/threadRef.ts`). `parseThreadLink` in `src/shared/threadLink.ts` is the one parser. The thread tools (`thread_create`, `thread_list`, `thread_search`, …) return the link as `link`, so an agent can put it in its reply, bare, as `<…>` or as `[text](mousse://thread/<id>)`.
+
+An agent's reply (a thread's or a bot's) draws every thread link as a chip: the thread's title (or the link's own text, when it has some), and its live status from the thread list (Working, Waiting, Needs you, Paused, Done, Archived; nothing for a quiet thread). A click switches the main view to that thread in the same window; the window's thread history records the switch, so Back returns to the thread with the chip. The chip also says when the thread cannot be reached. One this window does not list says why, and a click repeats it in a toast instead of opening anything; a listed thread whose computer is not connected still opens, as its sidebar row does, with what it last said:
+
+| The window | The chip says |
+|---|---|
+| Lists the thread | Its title and status |
+| Lists it, but its computer is not connected, or stopped sharing its threads | Its title, and "<computer> is offline" or "is not sharing" |
+| Does not list it, and the id names a computer that is not connected (or unknown), or stopped sharing | "A thread on another computer", and why |
+| Does not list it otherwise | "A thread", struck through, "Deleted" |
+
+Only links become chips. A thread id written in prose, or a link inside inline code or a code block, stays text.
+
+When an agent starts a thread with `thread_create`, Mousse writes a note in the agent's thread's record with a `launchedThread` field (`ChatMessage.launchedThread`): the new thread, and the model, mode and place it chose. The chat does not show the note, because the agent's reply names and links the new thread; agents that read the thread (`thread_read`) see it. The new thread shows "Started by an agent in «title»" at its top (`ThreadStartedByBar`), whose title opens the launching thread; a launcher that is no longer listed is named without a link.
+
 HTTP(S) links open in a new Mousse built-in browser tab. Unsafe and unsupported schemes (`javascript:`, `data:`, `vbscript:`, `file:`, `mailto:`, and `tel:`) are not navigated.
 
 ## Drag references

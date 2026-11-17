@@ -4,8 +4,13 @@ import type { ChatMessage } from '../src/shared/types'
 import type { AgentActivityItem } from '../src/shared/agentActivity'
 import type { StreamingLlmToolEvent } from '../src/mms/harness/turnEvents'
 import { TranscriptAssembler } from '../src/mms/run/transcript/TranscriptAssembler'
-import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
+import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
+import { codexToolEvent } from '../src/mms/harness/vendors/codex/codexActivity'
+import { claudeActivityComplete, claudeActivityStart, claudeCallContext } from '../src/mms/harness/vendors/claude/claudeActivity'
+import { cursorToolActivity, cursorToolName, cursorToolTitle } from '../src/mms/harness/cursor/session'
+import { formatSearchRowLabels, getToolStatus, searchResultCount } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
+import { toolRegistry } from '../src/renderer/chat/components/agent-elements/tools/tool-registry'
 
 const base = (overrides: Partial<ChatMessage>): ChatMessage => ({
   id: 'm1',
@@ -16,63 +21,17 @@ const base = (overrides: Partial<ChatMessage>): ChatMessage => ({
 })
 
 describe('mousseToUIMessages standardize layer', () => {
-  it('maps plan_card to an inline tool-PlanWrite approval card, not plain text', () => {
-    const out = mousseToUIMessages([
-      base({
-        id: 'plan-1',
-        role: 'assistant',
-        kind: 'plan_card',
-        content: '',
-        planCard: {
-          originalRequest: 'Build a login form',
-          planMarkdown: '# Implementation Plan\n\n1. Add form',
-        },
-      }),
-    ])
+  it("shows an older thread's stored plan card as a plain reply, with no approval card", () => {
+    // As older versions stored a Plan-mode reply: the plan is the content, with card metadata beside it.
+    const plan = '# Implementation Plan\n\n1. Add form'
+    const stored = { ...base({ id: 'plan-1', role: 'assistant', kind: 'plan_card', content: plan }), planCard: { originalRequest: 'Build a login form', planMarkdown: plan } }
+    const out = mousseToUIMessages([stored as ChatMessage])
     expect(out).toHaveLength(1)
     expect(out[0].role).toBe('assistant')
-    const part = out[0].parts[0] as unknown as Record<string, any>
-    expect(part.type).toBe('tool-PlanWrite')
-    expect(part.toolCallId).toBe('plan-1')
-    expect(part.state).toBe('output-available')
-    expect(part.input?.plan?.title).toBe('Build a login form')
-    expect(part.input?.plan?.summary).toBe('# Implementation Plan\n\n1. Add form')
+    expect(out[0].parts).toHaveLength(1)
+    expect(out[0].parts[0]).toMatchObject({ type: 'text', text: plan })
   })
 
-  it('falls back to message content when planMarkdown is empty', () => {
-    const out = mousseToUIMessages([
-      base({
-        id: 'plan-2',
-        role: 'assistant',
-        kind: 'plan_card',
-        content: '# From content',
-        planCard: { originalRequest: 'ship it', planMarkdown: '' },
-      }),
-    ])
-    const part = out[0].parts[0] as unknown as Record<string, any>
-    expect(part.type).toBe('tool-PlanWrite')
-    expect(part.input?.plan?.summary).toBe('# From content')
-  })
-
-  it('routes present_plan tool calls to the PlanWrite card', () => {
-    const out = mousseToUIMessages([
-      base({
-        id: 'tool-plan-1',
-        kind: 'build_tool_call',
-        toolCall: {
-          title: 'Plan tool present_plan',
-          summary: 'The assistant called a plan tool.',
-          details: ['Tool: present_plan'],
-          response: JSON.stringify({ title: 'Auth plan', markdown: '# Plan' }),
-          status: 'processing',
-          toolName: 'present_plan',
-          input: { title: 'Auth plan', markdown: '# Plan' },
-        },
-      }),
-    ])
-    const part = out[0].parts[0] as unknown as Record<string, unknown>
-    expect(part.type).toBe('tool-PlanWrite')
-  })
   it('uses structured provider toolName/input instead of title string-matching', () => {
     const out = mousseToUIMessages([
       base({
@@ -459,6 +418,15 @@ describe('mousseToUIMessages standardize layer', () => {
     expect(files.some((p) => p.type === 'file' && p.filename === 'notes.md')).toBe(true)
   })
 
+  it('gives a file sent with its path a pill that knows the path, and shows no path in the text', () => {
+    const out = mousseToUIMessages([
+      base({ id: 'u3', role: 'user', content: 'cut it\n\n[Attached files: clip.mp4 (/tmp/mousse-attachments/t1/1a2b3c4d-clip.mp4)]' }),
+    ])
+    const parts = out[0].parts as unknown as Array<{ type: string; text?: string; filename?: string; path?: string }>
+    expect(parts.filter((p) => p.type === 'text').map((p) => p.text)).toEqual(['cut it'])
+    expect(parts.filter((p) => p.type === 'file')).toEqual([expect.objectContaining({ filename: 'clip.mp4', path: '/tmp/mousse-attachments/t1/1a2b3c4d-clip.mp4' })])
+  })
+
   it('routes timeline-rewritten quick-action calls to the rich card, not the MCP fallback', () => {
     // OrchestratorService rewrites build_tool_* to mcp_tool_* with no Server
     // detail; without RICH membership this rendered as "Created Quick Action".
@@ -576,6 +544,18 @@ describe('typed activity items', () => {
       output: { stdout: 'ok\n', exitCode: 1, durationMs: 1200, truncated: true, bytes: 70000 },
     })
     expect(part.output.interrupted).toBeUndefined()
+  })
+
+  it('moves the `Exit code N` line a runtime puts before a failed command\'s output to the exit code', () => {
+    const failed = row('c1', { ...activityBase, status: 'failed', id: 'c1', callId: 'x', toolName: 'bash', kind: 'command', command: 'npm test', output: 'Exit code 1\n FAIL tests/a.test.ts\n' })
+    expect(partOf(mousseToUIMessages([failed])[0]!).output).toMatchObject({ stdout: ' FAIL tests/a.test.ts\n', exitCode: 1 })
+    const own = row('c2', { ...activityBase, id: 'c2', callId: 'y', toolName: 'bash', kind: 'command', command: 'cat log', output: 'Exit code 3\n', exitCode: 0 })
+    expect(partOf(mousseToUIMessages([own])[0]!).output).toMatchObject({ stdout: 'Exit code 3\n', exitCode: 0 })
+  })
+
+  it('gives each call the time it started, for its row', () => {
+    const call = row('c1', { ...activityBase, id: 'c1', callId: 'x', toolName: 'bash', kind: 'command', command: 'make', output: '' })
+    expect(partOf(mousseToUIMessages([call])[0]!).createdAt).toBe(call.timestamp)
   })
 
   it('shows the output of a running command as it arrives', () => {
@@ -840,5 +820,229 @@ describe('provider events through the assembler into the cards', () => {
     expect(getToolStatus(part, 'ready').isInterrupted).toBe(true)
     expect(getToolStatus(part, 'streaming')).toMatchObject({ isInterrupted: true, isPending: false })
     expect(part.output).toMatchObject({ interrupted: true, summary: 'Stopped' })
+  })
+
+  it('names a tool search and a Mousse app tool by the names the runtime gave them', () => {
+    const query = 'select:mcp__mousse__profiler_overview'
+    const messages = replay([
+      event('start', 'toolu_ts', 'ToolSearch', { activity: { kind: 'generic', input: { query } } as never }),
+      event('complete', 'toolu_ts', 'ToolSearch', { activity: { kind: 'generic', output: '' } as never }),
+      event('start', 'toolu_po', 'mcp__mousse__profiler_overview', { activity: { kind: 'generic', server: 'mousse', input: {} } as never }),
+      event('complete', 'toolu_po', 'mcp__mousse__profiler_overview', { activity: { kind: 'generic', output: '{"cpu":3}' } as never }),
+    ])
+    const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as unknown as Array<Record<string, any>>
+    expect(parts[0]).toMatchObject({ type: 'tool-ToolSearch', state: 'output-available', input: { query } })
+    expect(parts[1]).toMatchObject({ type: 'tool-mcp__mousse__profiler_overview', state: 'output-available' })
+  })
+
+  it('shows a Codex MCP call (titled `server.tool`) as that server\'s tool', () => {
+    const call = { type: 'mcpToolCall', id: 'mcp1', server: 'docs', tool: 'search_pages', arguments: { query: 'install' }, status: 'inProgress' }
+    const done = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'found 2' }] } }
+    const messages = replay([
+      runtimeToolEvent(codexToolEvent(call as never, 'start')!),
+      runtimeToolEvent(codexToolEvent(done as never, 'complete')!),
+    ])
+    expect(messages[0]!.toolCall).toMatchObject({ title: 'docs.search_pages', toolName: 'mcp__docs__search_pages' })
+    const part = partOf(mousseToUIMessages(messages)[0]!)
+    expect(part).toMatchObject({ type: 'tool-mcp__docs__search_pages', state: 'output-available', input: { query: 'install' } })
+  })
+
+  it('shows a Cursor call by its tool, never its category as a search', () => {
+    const cursor = (callId: string, toolCall: unknown) =>
+      runtimeToolEvent({ phase: 'start', callId, title: cursorToolTitle(toolCall), ...(cursorToolName(toolCall) ? { toolName: cursorToolName(toolCall) } : {}) })
+    const messages = replay([
+      cursor('c1', { type: 'ls', args: { path: 'src' } }),
+      cursor('c2', { type: 'mcp', args: { providerIdentifier: 'mousse', toolName: 'thread_list', args: {} } }),
+      cursor('c3', { type: 'grep', args: { pattern: 'TODO' } }),
+    ])
+    const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as unknown as Array<Record<string, any>>
+    expect(parts.map((part) => part.type)).toEqual(['tool-mcp__custom__list_directory', 'tool-mcp__mousse__thread_list', 'tool-Grep'])
+  })
+
+  // A Cursor call as its session reports it: the title, the tool name, and a search's typed fields.
+  const cursorCall = (phase: 'start' | 'complete', callId: string, toolCall: unknown) => {
+    const toolName = cursorToolName(toolCall)
+    const activity = cursorToolActivity(toolCall)
+    return runtimeToolEvent({ phase, callId, title: cursorToolTitle(toolCall), ...(toolName ? { toolName } : {}), ...(activity ? { activity } : {}) })
+  }
+  const cardLabels = (part: Record<string, any>) =>
+    formatSearchRowLabels(part.type.replace('tool-', ''), part.input.pattern, searchResultCount(part.output) ?? 0)
+
+  it('shows a Cursor grep with matches by its pattern and how many it found', () => {
+    const call = { type: 'grep', args: { pattern: 'TODO', path: 'src' } }
+    const content = { type: 'content', output: { matches: [{ file: 'src/a.ts', lineNumber: 3, line: '// TODO one' }, { file: 'src/b.ts', lineNumber: 9, line: '// TODO two' }], totalMatches: 2 } }
+    const done = { ...call, result: { status: 'success', value: { workspaceResults: { '/repo': content } } } }
+    const part = partOf(mousseToUIMessages(replay([cursorCall('start', 'g1', call), cursorCall('complete', 'g1', done)]))[0]!)
+    expect(part).toMatchObject({
+      type: 'tool-Grep',
+      state: 'output-available',
+      input: { pattern: 'TODO', path: 'src' },
+      output: { numFiles: 2, text: 'src/a.ts:3:// TODO one\nsrc/b.ts:9:// TODO two' },
+    })
+    expect(cardLabels(part)).toEqual({ completeLabel: 'Found 2 results', detail: 'Grep “TODO”' })
+  })
+
+  it('shows a Cursor glob by its pattern and how many files it found', () => {
+    const call = { type: 'glob', args: { globPattern: '**/*.test.ts' } }
+    const done = { ...call, result: { status: 'success', value: { files: ['tests/a.test.ts', 'tests/b.test.ts', 'tests/c.test.ts'], totalFiles: 3, clientTruncated: false, ripgrepTruncated: false } } }
+    const part = partOf(mousseToUIMessages(replay([cursorCall('start', 'f1', call), cursorCall('complete', 'f1', done)]))[0]!)
+    expect(part).toMatchObject({ type: 'tool-Glob', state: 'output-available', input: { pattern: '**/*.test.ts' }, output: { numFiles: 3 } })
+    expect(cardLabels(part)).toEqual({ completeLabel: 'Found 3 results', detail: 'Glob “**/*.test.ts”' })
+  })
+
+  it('shows no pattern for a Cursor search saved before its arguments were kept', () => {
+    // Such a row has only a title, which named the folder rather than the pattern when Cursor passed one.
+    const saved = runtimeToolEvent({ phase: 'start', callId: 's1', title: 'Grep src', toolName: 'Grep' })
+    const part = partOf(mousseToUIMessages(replay([saved]))[0]!)
+    expect(part).toMatchObject({ type: 'tool-Grep', input: { pattern: '', query: '' } })
+  })
+
+  it('keeps a Claude Grep card as it was', () => {
+    const input = { pattern: 'foo', path: 'src' }
+    const context = claudeCallContext('Grep', input, true)
+    const done = claudeActivityComplete(context, { mode: 'files_with_matches', filenames: ['src/a.ts', 'src/b.ts'], numFiles: 2 }, undefined, false)
+    const messages = replay([
+      event('start', 'toolu_g', 'Grep', { activity: claudeActivityStart('Grep', input, true) }),
+      event('complete', 'toolu_g', 'Grep', { ...(done.activity ? { activity: done.activity } : {}) }),
+    ])
+    expect(partOf(mousseToUIMessages(messages)[0]!)).toEqual({
+      type: 'tool-Grep',
+      toolCallId: messages[0]!.id,
+      state: 'output-available',
+      input: { pattern: 'foo', query: 'foo', path: 'src' },
+      output: { numFiles: 2, text: 'src/a.ts\nsrc/b.ts' },
+      createdAt: messages[0]!.timestamp,
+    })
+  })
+
+  it('counts a Claude Grep in content mode by its matching lines, and a cut Glob by its real total', () => {
+    const grepInput = { pattern: 'TODO', output_mode: 'content' }
+    const grepContext = claudeCallContext('Grep', grepInput, true)
+    const grepDone = claudeActivityComplete(grepContext, { mode: 'content', numFiles: 0, filenames: [], content: 'a.ts:1:TODO\nb.ts:4:TODO', numLines: 2 }, undefined, false)
+    const globInput = { pattern: '**/*.ts' }
+    const globContext = claudeCallContext('Glob', globInput, true)
+    const globDone = claudeActivityComplete(globContext, { filenames: ['a.ts'], numFiles: 100, truncated: true, totalMatches: 240 }, undefined, false)
+    const messages = replay([
+      event('start', 'toolu_c', 'Grep', { activity: claudeActivityStart('Grep', grepInput, true) }),
+      event('complete', 'toolu_c', 'Grep', { ...(grepDone.activity ? { activity: grepDone.activity } : {}) }),
+      event('start', 'toolu_d', 'Glob', { activity: claudeActivityStart('Glob', globInput, true) }),
+      event('complete', 'toolu_d', 'Glob', { ...(globDone.activity ? { activity: globDone.activity } : {}) }),
+    ])
+    const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as Array<{ output?: { numFiles?: number } }>
+    expect(parts.map((part) => part.output?.numFiles)).toEqual([2, 240])
+  })
+
+  it('counts a Claude Grep cut by its limit by the real total', () => {
+    const counted = (result: Record<string, unknown>) => {
+      const input = { pattern: 'x' }
+      const done = claudeActivityComplete(claudeCallContext('Grep', input, true), result, undefined, false)
+      const messages = replay([
+        event('start', 'toolu_h', 'Grep', { activity: claudeActivityStart('Grep', input, true) }),
+        event('complete', 'toolu_h', 'Grep', { ...(done.activity ? { activity: done.activity } : {}) }),
+      ])
+      return (partOf(mousseToUIMessages(messages)[0]!) as { output?: { numFiles?: number } }).output?.numFiles
+    }
+    expect(counted({ mode: 'content', numFiles: 0, filenames: [], content: 'a', numLines: 250, totalLines: 1200, appliedLimit: 250 })).toBe(1200)
+    expect(counted({ mode: 'files_with_matches', numFiles: 250, filenames: ['a'], totalFiles: 900, appliedLimit: 250 })).toBe(900)
+    expect(counted({ mode: 'content', numFiles: 0, filenames: [], content: 'a', numLines: 3, totalLines: 3 })).toBe(3)
+  })
+})
+
+describe('tool rows without a name of their own', () => {
+  const unnamed = (id: string, title: string, extra: Partial<ChatMessage> = {}): ChatMessage =>
+    base({ id, kind: 'mcp_tool_call', toolCall: { title, summary: title, details: [], status: 'complete' }, ...extra })
+  const typeOf = (message: ChatMessage) => partOf(mousseToUIMessages([message])[0]!).type
+
+  it('reads an identifier title as the name, an MCP one as its server and tool', () => {
+    expect(typeOf(unnamed('a', 'ToolSearch'))).toBe('tool-ToolSearch')
+    // "thread" holds "read": the name is not guessed from the words of an identifier.
+    expect(typeOf(unnamed('b', 'mcp__mousse__thread_list'))).toBe('tool-mcp__mousse__thread_list')
+    expect(typeOf(unnamed('c', 'mcp__mousse__profiler_overview'))).toBe('tool-mcp__mousse__profiler_overview')
+  })
+
+  it('never guesses a web search from a title that says search: it stays a plain row', () => {
+    expect(typeOf(unnamed('a', 'Searching deferred tools'))).toBe('tool-mcp__custom__tool')
+    expect(typeOf(unnamed('b', 'Tool search'))).toBe('tool-mcp__custom__tool')
+  })
+
+  it('still guesses the tool from a one-word title that is not a tool name', () => {
+    expect(typeOf(unnamed('a', 'Terminal'))).toBe('tool-Bash')
+    expect(typeOf(unnamed('b', 'Command'))).toBe('tool-Bash')
+    expect(typeOf(unnamed('c', 'Reading'))).toBe('tool-Read')
+    expect(typeOf(unnamed('d', 'Editing'))).toBe('tool-Edit')
+    // A name the cards know, and a camel-case name, are taken as they are.
+    expect(typeOf(unnamed('e', 'Read'))).toBe('tool-Read')
+    expect(typeOf(unnamed('f', 'ToolSearch'))).toBe('tool-ToolSearch')
+  })
+
+  it('labels an untyped web fetch and web search', () => {
+    expect(typeOf(unnamed('a', 'WebFetch'))).toBe('tool-WebFetch')
+    expect(typeOf(unnamed('b', 'WebSearch'))).toBe('tool-WebSearch')
+    const named = (id: string, toolName: string) =>
+      base({ id, kind: 'mcp_tool_call', toolCall: { title: 'Called a tool', summary: '', details: [], status: 'complete', toolName } })
+    expect(typeOf(named('c', 'WebFetch'))).toBe('tool-WebFetch')
+    expect(typeOf(named('d', 'WebSearch'))).toBe('tool-WebSearch')
+  })
+
+  it('keeps a built-in tool\'s own name on a row without a server', () => {
+    const named = (id: string, toolName: string) =>
+      base({ id, kind: 'mcp_tool_call', toolCall: { title: toolName, summary: toolName, details: [], status: 'complete', toolName } })
+    expect(typeOf(named('a', 'TaskOutput'))).toBe('tool-TaskOutput')
+    expect(typeOf(named('b', 'TaskStop'))).toBe('tool-TaskStop')
+    expect(typeOf(named('c', 'ListMcpResourcesTool'))).toBe('tool-ListMcpResourcesTool')
+    // A name that is not a built-in stays a plain MCP row.
+    expect(typeOf(named('d', 'FancyThing'))).toBe('tool-mcp__custom__fancything')
+  })
+
+  it('takes the name an older row kept only on its item', () => {
+    const item = { ...activityBase, id: 'i', callId: 'i', toolName: 'mcp__mousse__profiler_overview', kind: 'generic', server: 'mousse', output: '{}' } as AgentActivityItem
+    expect(typeOf(unnamed('i', 'Called a tool', { activity: item }))).toBe('tool-mcp__mousse__profiler_overview')
+  })
+})
+
+describe('the tool search row', () => {
+  const meta = toolRegistry['tool-ToolSearch']!
+  const part = (state: string, query = 'select:Read,mcp__mousse__thread_list') => ({ type: 'tool-ToolSearch', state, input: { query } })
+
+  it('says what it does, names the tools it loads, and keeps the full query for the tooltip', () => {
+    expect(meta.title(part('input-available'))).toBe('Loading tools')
+    expect(meta.title(part('output-available'))).toBe('Loaded tools')
+    expect(meta.title(part('output-error'))).toBe("Couldn't load tools")
+    expect(meta.subtitle!(part('output-available'))).toBe('Read, thread_list')
+    expect(meta.detailTitle!(part('output-available'))).toBe('select:Read,mcp__mousse__thread_list')
+    expect(meta.subtitle!(part('output-available', 'slack send'))).toBe('slack send')
+  })
+})
+
+describe('failures the agent got past', () => {
+  const readCall = (id: string, status: 'done' | 'failed' | 'running') =>
+    row(id, { ...activityBase, status, id, callId: id, toolName: 'Read', kind: 'generic' } as unknown as AgentActivityItem)
+  const prompt = (id: string) => base({ id, role: 'user', content: 'Go' })
+  const reply = (id: string, content: string) => base({ id, role: 'assistant', content })
+  const failedParts = (out: UIMessage[]) =>
+    out.flatMap((message) => message.parts as unknown as Array<Record<string, any>>).filter((part) => part.state === 'output-error')
+
+  it('marks a failure recovered when a later call succeeds or a reply follows', () => {
+    const out = mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), readCall('b', 'done'), prompt('u2'), readCall('c', 'failed'), reply('r', 'Done.')])
+    expect(failedParts(out).map((part) => part.failureRecovered)).toEqual([true, true])
+  })
+
+  it('marks it recovered while the turn still runs, and when the turn ended normally', () => {
+    expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed')]))[0]!.failureRecovered).toBe(true)
+    expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), prompt('u2')]))[0]!.failureRecovered).toBe(true)
+  })
+
+  it('leaves a failure that ended the turn on an error, or a cut-off turn, loud', () => {
+    const error = base({ id: 'e', role: 'system', content: 'failed', error: { code: 'orchestrator_turn_failed', message: 'failed' } })
+    const ended = mousseToUIMessages([prompt('u1'), reply('r', 'Running it.'), readCall('a', 'failed'), error])
+    expect(failedParts(ended)[0]!.failureRecovered).toBeUndefined()
+    const stopped = base({ id: 's', role: 'system', content: 'Stopped', turnEnd: { cause: 'user' } as ChatMessage['turnEnd'] })
+    expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), stopped]))[0]!.failureRecovered).toBeUndefined()
+  })
+
+  it('does not count a thought after the failure as getting past it', () => {
+    const thought = base({ id: 't', role: 'system', kind: 'thinking', content: '', thinking: { content: 'Hmm', status: 'complete' } as ChatMessage['thinking'] })
+    const error = base({ id: 'e', role: 'system', content: 'failed', error: { code: 'x', message: 'failed' } })
+    expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), thought, error]))[0]!.failureRecovered).toBeUndefined()
   })
 })

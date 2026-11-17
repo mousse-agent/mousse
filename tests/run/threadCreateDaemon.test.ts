@@ -1,8 +1,8 @@
 /**
  * `thread_create` end to end (docs/run-engine/SPEC.md §15.1): a real `OrchestratorService`, Run Engine, effect
  * worker, thread store and Mousse MCP server, with a scripted provider runtime whose turns call the tool over
- * HTTP. Covers what the new thread is (project, workspace, model, mode, creator), the limits it carries, the first
- * message, the hop chain and the per-run cap, and a creation that is retried, raced, or interrupted by a crash at
+ * HTTP. Covers what the new thread is (project, workspace, model, mode, creator), the first message, the hop chain,
+ * that a run has no count of threads it creates, and a creation that is retried, raced, or interrupted by a crash at
  * each step.
  */
 import { execFileSync } from 'node:child_process'
@@ -14,14 +14,17 @@ import { readAgentThreadReceipt } from '../../src/mms/orchestrator/agentThreadIn
 import { findUnstartedThread, isThreadStarted } from '../../src/shared/threadTitle'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { agentMessageText, TURN_TOKEN_KEY, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
-import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
+import { agentMessageWords } from '../../src/shared/agentMessageWords'
+import { heuristicTitle } from '../../src/shared/threadTitleText'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
-import type { AgentAccessLevel } from '../../src/shared/settings'
 import type { ChatMessage } from '../../src/shared/types'
+import { adapterDriver } from '../../src/mms/run/testkit/harness'
+import type { DriverRuntime } from '../../src/mms/harness/driver'
+import { refusalOfResponse } from './appToolsFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /**
@@ -125,8 +128,8 @@ const parse = <T = Record<string, unknown>>(response: Rpc): T => {
   if (response.result?.isError) throw new Error(response.result.content?.[0]?.text ?? 'tool error')
   return JSON.parse(response.result!.content![0].text) as T
 }
-/** The text of an error result (a tool that refused), or of a JSON-RPC error. */
-const refusal = (response: Rpc): string => response.error?.message ?? (response.result?.isError ? response.result.content?.[0]?.text ?? '' : '')
+/** The words of a refusal, or of a JSON-RPC error. */
+const refusal = (response: Rpc): string => response.error?.message ?? refusalOfResponse(response)?.message ?? ''
 
 describe('thread_create end to end (SPEC §15.1)', () => {
   let home: string | undefined
@@ -147,7 +150,8 @@ describe('thread_create end to end (SPEC §15.1)', () => {
   const GO = 'Go'
 
   /** A daemon whose threads all run on one scripted runtime that talks to the real MCP server. `parent` is the usual creator. */
-  const world = (script: Script, level: AgentAccessLevel = 'manage') => {
+  /** `runtime`: what the Claude entry lists and its sign-in, as the model picker reads them (default: lists nothing). */
+  const world = (script: Script, runtime?: Partial<DriverRuntime>) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-thread-create-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -157,7 +161,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       const bridge = host.bridge
       return script(input, bridge?.mcp ? { ...bridge.mcp, turnToken: bridge.turnToken } : undefined, created!, self)
     })
-    const d = phase6Daemon(home, [adapter])
+    const d = runtime ? phase6Daemon(home, [], { drivers: [adapterDriver(adapter, { runtime })] }) : phase6Daemon(home, [adapter])
     created = d
     const credentials = new McpCredentials(d.engine.store)
     const server = new MousseMcpServer({ credentials, registry: d.orch.mcpToolRegistry() })
@@ -181,10 +185,6 @@ describe('thread_create end to end (SPEC §15.1)', () => {
     }
     const parent = thread('Parent')
     const other = thread('Other work')
-    const setProfile = (next: AgentAccessLevel, projectIds: string[] = []): void => {
-      ;(d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { level: next, projectIds, answerApprovals: false }
-    }
-    setProfile(level)
     const events = (threadId: string, type: string) => d.engine.listEvents(threadId).filter((event) => event.type === type)
     const marker = (threadId: string) => events(threadId, 'agent.action').filter((event) => (event.payload as { action?: string }).action === 'created_thread')
     const messages = (threadId: string): ChatMessage[] => d.orch.getOrCreateSession(threadId).messages
@@ -193,14 +193,14 @@ describe('thread_create end to end (SPEC §15.1)', () => {
     const turnsOf = (threadId: string) => adapter.turns.filter((turn) => turn.threadId === threadId)
     const run = (threadId: string, prompt: string, clientRequestId: string) => d.orch.send(prompt, false, { threadId, clientRequestId })
     return {
-      d, adapter, credentials, server, project, repo, parent, other, thread, setProfile, events, marker, messages, launchedBy, turnsOf, run,
+      d, adapter, credentials, server, project, repo, parent, other, thread, events, marker, messages, launchedBy, turnsOf, run,
       attach: async () => { await server.start(); d.orch.setMcpAttachment(server) },
       create: (mcp: Mcp, args: Record<string, unknown> = {}) => call(mcp, 'thread_create', { projectId: project.id, ...args })
     }
   }
 
   describe('what the new thread is', () => {
-    it('is made in the project on the creator\'s model, launched by the creator and not nested under it, with the creator\'s mode, a ceiling below manage, an audit event and a row on both threads', async () => {
+    it('is made in the project on the creator\'s model, launched by the creator and not nested under it, with the creator\'s mode, an audit event and a row on both threads', async () => {
       const seen: { result?: AgentCreatedThread } = {}
       const w = world(async (input, mcp) => {
         if (input.threadId === w.parent.id) seen.result = parse<AgentCreatedThread>(await w.create(mcp!, { title: 'Audit the logs', clientRequestId: 'c1' }))
@@ -215,7 +215,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       const result = seen.result!
       const made = w.d.store.getThread(result.threadId)!
       expect(result).toMatchObject({ projectId: w.project.id, title: 'Audit the logs', workspace: 'project', runsIn: 'project_folder', permissionMode: 'ask', replayed: false, model: { instanceId: 'claude', model: 'vendor-model' } })
-      expect(made).toMatchObject({ name: 'Audit the logs', projectId: w.project.id, createdByThreadId: w.parent.id, permissionMode: 'ask', accessCeiling: 'read', modelOverride: { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'vendor-model' } })
+      expect(made).toMatchObject({ name: 'Audit the logs', projectId: w.project.id, createdByThreadId: w.parent.id, permissionMode: 'ask', modelOverride: { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'vendor-model' } })
       expect(made.worktreeEnabled).toBeUndefined()
       // Launched, never owned: no lineage, no owner in the lifecycle store, so it is neither nested under nor deleted with the creator.
       expect(made.lineage).toBeUndefined()
@@ -232,6 +232,8 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.messages(w.parent.id).filter((message) => message.role === 'system').map((message) => message.content)).toEqual([
         `Created thread «Audit the logs» (${made.id}) in project ${w.project.id}: claude / vendor-model, ask mode, the project folder.`
       ])
+      // Stored with the thread it started, which the transcript draws as a chip that opens it.
+      expect(w.messages(w.parent.id).find((message) => message.role === 'system')?.launchedThread).toEqual({ threadId: made.id, summary: 'claude / vendor-model, ask mode, the project folder' })
       // Nothing ran: no first message was asked for.
       expect(w.d.engine.listRuns(made.id)).toEqual([])
     })
@@ -350,38 +352,6 @@ describe('thread_create end to end (SPEC §15.1)', () => {
     })
   })
 
-  describe('a launched thread cannot launch', () => {
-    it('its agents are granted read at most: thread_create and thread_send are not listed and are refused', async () => {
-      const seen: { made?: AgentCreatedThread; listed?: string[]; create?: Rpc; send?: Rpc } = {}
-      const w = world(async (input, mcp) => {
-        if (input.threadId === w.parent.id) seen.made = parse<AgentCreatedThread>(await w.create(mcp!, { clientRequestId: 'lv' }))
-        else if (seen.made && input.threadId === seen.made.threadId) {
-          seen.listed = (await rpc(mcp!, 'tools/list', {})).result!.tools!.map((tool) => tool.name)
-          seen.create = await w.create(mcp!, { clientRequestId: 'child-create' })
-          seen.send = await call(mcp!, 'thread_send', { threadId: w.parent.id, content: 'hello' })
-        }
-        return 'ok'
-      })
-      await w.attach()
-      await w.run(w.parent.id, GO, 'go')
-      const id = seen.made!.threadId
-      await w.run(id, 'work by hand', 'hand-1')
-      // The profile says manage, and a person drives the thread: its agents are still held to read.
-      expect(w.credentials.listForThread(id).map((row) => row.accessLevel).at(-1)).toBe('read')
-      expect(seen.listed).not.toContain('thread_create')
-      expect(seen.listed).not.toContain('thread_send')
-      expect(seen.listed).toContain('thread_wait')
-      for (const reply of [seen.create!, seen.send!]) expect(reply.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(w.launchedBy(id)).toEqual([])
-      // The ceiling is stored on the thread, so forks and subagents of it start from it.
-      expect(w.d.store.getThread(id)?.accessCeiling).toBe('read')
-      // And lowering the profile still lowers it further.
-      w.setProfile('lineage')
-      await w.run(id, 'second by hand', 'hand-2')
-      expect(w.credentials.listForThread(id).map((row) => row.accessLevel).at(-1)).toBe('lineage')
-    })
-  })
-
   describe('the provider instance and model', () => {
     it('are checked as threads.setModel checks them: an unknown instance, a hidden model and an instance the project turned off are refused before any receipt', async () => {
       const seen: Record<string, Rpc | AgentCreatedThread> = {}
@@ -414,6 +384,29 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       // Only the two good ones exist, and the refused four left no receipt.
       expect(w.launchedBy(w.parent.id)).toHaveLength(2)
       for (const key of ['m3', 'm4', 'm5', 'm6']) expect(w.d.engine.store.getReceipt(`thread_create:${w.parent.id}:mcp:${key}`), key).toBeNull()
+    })
+
+    it('take a reasoning level, and a model or level the picker does not offer is refused in words with no thread made', async () => {
+      const seen: Record<string, Rpc | AgentCreatedThread> = {}
+      const w = world(async (input, mcp) => {
+        if (input.threadId !== w.parent.id) return 'ok'
+        seen.high = parse<AgentCreatedThread>(await w.create(mcp!, { instanceId: 'claude', model: 'sonnet', effort: 'high', clientRequestId: 'e1' }))
+        seen.typo = await w.create(mcp!, { instanceId: 'claude', model: 'sonet', clientRequestId: 'e2' })
+        seen.level = await w.create(mcp!, { instanceId: 'claude', model: 'sonnet', effort: 'turbo', clientRequestId: 'e3' })
+        return 'ok'
+      }, { models: () => [{ id: 'sonnet', label: 'Claude Sonnet', efforts: ['low', 'high'] }, { id: 'vendor-model', label: 'Vendor' }], auth: async () => ({ state: 'signed_in' }) })
+      await w.attach()
+      await w.run(w.parent.id, GO, 'go')
+
+      const high = seen.high as AgentCreatedThread
+      expect(high.model).toEqual({ instanceId: 'claude', model: 'sonnet', effort: 'high' })
+      expect(w.d.store.getThread(high.threadId)?.modelOverride).toEqual({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet', effort: 'high' })
+      // The person watching the creator sees the level it chose.
+      expect(w.messages(w.parent.id).some((message) => message.role === 'system' && message.content.includes('claude / sonnet (high reasoning)'))).toBe(true)
+      expect(refusal(seen.typo as Rpc)).toMatch(/does not offer the model "sonet" \(offered: sonnet, vendor-model\)\. No thread was created\./)
+      expect(refusal(seen.level as Rpc)).toMatch(/takes reasoning levels low, high, not "turbo"\. No thread was created\./)
+      expect(w.launchedBy(w.parent.id)).toHaveLength(1)
+      for (const key of ['e2', 'e3']) expect(w.d.engine.store.getReceipt(`thread_create:${w.parent.id}:mcp:${key}`), key).toBeNull()
     })
   })
 
@@ -450,6 +443,25 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.events(seen.fromAsk.threadId, 'agent.action').map((event) => (event.payload as { action: string }).action)).toEqual(['created_thread', 'sent_message'])
     })
 
+    it('names the new thread and its branch from the creator\'s words, never from the label Mousse wrote around them', async () => {
+      const seen: Record<string, AgentCreatedThread> = {}
+      const w = world(async (input, mcp) => {
+        if (input.threadId === w.parent.id) seen.made = parse<AgentCreatedThread>(await call(mcp!, 'thread_create', { projectId: w.repo.id, firstMessage: 'Fix the login redirect', clientRequestId: 'named' }))
+        return 'ok'
+      })
+      await w.attach()
+      await w.run(w.parent.id, GO, 'go')
+      const runId = (seen.made.firstMessage as { runId: string }).runId
+      await waitFor(() => w.d.engine.getRun(runId)?.status === 'completed', 'the first run')
+      const stored = w.messages(seen.made.threadId).find((message) => message.role === 'user')!
+      expect(stored.content.startsWith(AGENT_MESSAGE_PREFIX)).toBe(true)
+      expect(agentMessageWords(stored.content, stored.origin)).toBe('Fix the login redirect')
+      // The title Mousse gives a thread from its first message, and the worktree's branch, come from the words alone.
+      expect(w.d.store.getThread(seen.made.threadId)?.name).toBe(heuristicTitle('Fix the login redirect'))
+      const branches = execFileSync('git', ['branch', '--list', 'mousse/*', '--format=%(refname:short)'], { cwd: join(home!, 'repo'), encoding: 'utf8' }).split('\n').filter(Boolean)
+      expect(branches).toEqual([expect.stringMatching(/^mousse\/fix-the-login-redirect/)])
+    })
+
     it('an agent message in a row counts: a creation at the hop limit is refused before anything is made, and so is one from a run that carries on that chain', async () => {
       const seen: { refused?: Rpc; bare?: AgentCreatedThread; hopsOf?: Record<string, number | undefined>; continued?: { threadId: string; runId: string } } = {}
       const w = world(async (input, mcp, d) => {
@@ -470,7 +482,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       await w.run(w.parent.id, GO, 'go')
       await waitFor(() => seen.bare !== undefined, 'the chain to reach the limit', 30_000)
 
-      expect(seen.refused!.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_hops_exceeded' } })
+      expect(refusalOfResponse(seen.refused!)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' } })
       // Refused before the receipt and before any thread: the only thread the run at the limit made is the bare one.
       expect(w.launchedBy(seen.continued!.threadId).map((entry) => entry.id)).toEqual([seen.bare!.threadId])
       expect(w.d.engine.store.getReceipt(`thread_create:${seen.continued!.threadId}:mcp:chain-3`)).toBeNull()
@@ -483,66 +495,36 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.d.engine.getRun(continuation.runId)?.outcome?.sentByAgent).toBeUndefined()
       await expect(w.d.orch.mcpToolHost().createThread!({ projectId: w.project.id, workspace: 'project', firstMessage: 'again' }, {
         clientRequestId: 'chain-continued',
-        actor: { kind: 'agent', threadId: seen.continued!.threadId, runId: continuation.runId, toolCallId: 'mcp:chain-continued' },
-        accessLevel: 'manage'
+        actor: { kind: 'agent', threadId: seen.continued!.threadId, runId: continuation.runId, toolCallId: 'mcp:chain-continued' }
       })).rejects.toMatchObject({ code: 'agent_hops_exceeded' })
       expect(w.d.engine.store.getReceipt('chain-continued')).toBeNull()
     })
   })
 
-  describe('the cap per run', () => {
-    it(`a run creates ${THREAD_CREATE_MAX_PER_RUN} threads and is refused the next`, async () => {
-      const results: Rpc[] = []
-      const w = world(async (input, mcp) => {
-        if (input.threadId !== w.parent.id) return 'ok'
-        for (let index = 0; index <= THREAD_CREATE_MAX_PER_RUN; index += 1) results.push(await w.create(mcp!, { clientRequestId: `cap-${index}` }))
-        return 'ok'
-      })
-      await w.attach()
-      await w.run(w.parent.id, GO, 'go')
-      expect(results.slice(0, THREAD_CREATE_MAX_PER_RUN).every((reply) => !reply.error && !reply.result?.isError)).toBe(true)
-      expect(refusal(results.at(-1)!)).toMatch(new RegExp(`limited to ${THREAD_CREATE_MAX_PER_RUN} threads per run`))
-      expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_PER_RUN)
-    })
-  })
-
-  describe('the cap on launched threads that are still working', () => {
-    it('holds across runs of the creator, unlike the per-run count: a fresh run is refused while enough of its launched threads have work', async () => {
+  describe('how many', () => {
+    it('has no count per run and none on launched threads still working: a run creates 12, all get work, and the next run creates more', async () => {
       const replies: Rpc[] = []
       const w = world(async (input, mcp) => {
         if (input.threadId !== w.parent.id) return 'ok'
+        const count = input.prompt === 'run-a' ? 12 : 1
         // Bare threads: the test gives each one queued work, so no turn occupies the worker.
-        for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) replies.push(await w.create(mcp!, { clientRequestId: `${input.prompt}-${index}` }))
+        for (let index = 0; index < count; index += 1) replies.push(await w.create(mcp!, { clientRequestId: `${input.prompt}-${index}` }))
         return 'ok'
       })
       await w.attach()
-      const giveWork = async () => {
-        for (const launched of w.launchedBy(w.parent.id)) {
-          if (w.d.engine.listRuns(launched.id).length) continue
-          const queued = await w.d.engine.dispatch({ kind: 'send', threadId: launched.id, clientRequestId: `work:${launched.id}`, source: 'gui' })
-          if (queued.status !== 'accepted') throw new Error('send rejected')
-        }
-      }
-      // Two runs of the creator, five threads each: ten launched threads have a queued run.
       await w.run(w.parent.id, 'run-a', 'go-a')
-      await giveWork()
+      for (const launched of w.launchedBy(w.parent.id)) {
+        const queued = await w.d.engine.dispatch({ kind: 'send', threadId: launched.id, clientRequestId: `work:${launched.id}`, source: 'gui' })
+        if (queued.status !== 'accepted') throw new Error('send rejected')
+      }
       await w.run(w.parent.id, 'run-b', 'go-b')
-      await giveWork()
+      expect(replies).toHaveLength(13)
       expect(replies.every((reply) => !reply.error && !reply.result?.isError)).toBe(true)
-      expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
-      // A third run has a fresh per-run count and is still refused: the launched threads have work.
-      replies.length = 0
-      await w.run(w.parent.id, 'run-c', 'go-c')
-      expect(refusal(replies[0])).toMatch(/still working/)
-      expect(replies[0].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'creation_limit' } })
-      expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
-      // Once their work is over the creator may launch again.
-      for (const run of w.d.engine.store.listNonTerminalRuns().filter((entry) => entry.threadId !== w.parent.id)) w.d.engine.markTerminal(run.runId, 'cancelled')
-      replies.length = 0
-      await w.run(w.parent.id, 'run-d', 'go-d')
-      expect(replies.slice(0, THREAD_CREATE_MAX_PER_RUN).every((reply) => !reply.error && !reply.result?.isError)).toBe(true)
+      expect(w.launchedBy(w.parent.id)).toHaveLength(13)
     })
+  })
 
+  describe('a person\'s Stop', () => {
     it('a person\'s Stop of the creator stops the launched threads that run work an agent started, and leaves one a person is working in', async () => {
       const release = deferred()
       const seen: { made?: AgentCreatedThread[] } = {}
@@ -611,7 +593,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       })
       await w.attach()
       await w.run(w.parent.id, GO, 'go')
-      for (const reply of [seen.other!, seen.title!]) expect(reply.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'client_request_id_conflict' } })
+      for (const reply of [seen.other!, seen.title!]) expect(refusalOfResponse(reply)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'client_request_id_conflict' } })
       expect(w.launchedBy(w.parent.id).map((entry) => entry.name)).toEqual(['One'])
     })
 
@@ -646,7 +628,9 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       const replies: Record<string, Rpc> = {}
       const w = world(async (input, mcp) => {
         if (input.threadId !== w.parent.id) return 'ok'
-        replies[input.prompt] = await w.create(mcp!, { title: 'Crash test', instanceId: 'claude', model: 'sonnet', firstMessage: 'Start here', clientRequestId: KEY })
+        // The retry runs on another model, so its prompt starts with the model-change note: key by the user's own text.
+        const own = input.prompt.split('\n\n').at(-1)!
+        replies[own] = await w.create(mcp!, { title: 'Crash test', instanceId: 'claude', model: 'sonnet', firstMessage: 'Start here', clientRequestId: KEY })
         return 'ok'
       })
       w.d.orch.setThreadPermissionMode(w.parent.id, 'ask')
@@ -784,7 +768,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.d.store.getThread(id)).toBeDefined()
       w.d.orch.setThreadPermissionMode(w.parent.id, 'full')
       await w.run(w.parent.id, 'again', 'go-2')
-      expect(replies.again.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'thread_in_use', threadId: id } })
+      expect(refusalOfResponse(replies.again)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'thread_in_use', threadId: id } })
       expect(w.marker(id)).toEqual([])
       expect(w.messages(id).filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['hello from a person'])
       expect(w.d.engine.listRuns(id)).toHaveLength(1)
@@ -799,7 +783,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       ;(w.d.orch as unknown as { recoverAgentThreadCreations(): void }).recoverAgentThreadCreations()
       expect(w.d.store.getThread(id)?.name).toBe('My own name')
       await w.run(w.parent.id, 'again', 'go-2')
-      expect(replies.again.error).toMatchObject({ data: { conflict: 'thread_in_use' } })
+      expect(refusalOfResponse(replies.again)).toMatchObject({ details: { conflict: 'thread_in_use' } })
       expect(w.d.engine.listRuns(id)).toEqual([])
     })
 
@@ -842,25 +826,9 @@ describe('thread_create end to end (SPEC §15.1)', () => {
     const host = w.d.orch.mcpToolHost()
     await expect(host.createThread!({ projectId: w.project.id, workspace: 'project' }, {
       clientRequestId: 'bot-1',
-      actor: { kind: 'agent', threadId: w.parent.id, runId: 'run-x', toolCallId: 'mcp:bot-1' },
-      accessLevel: 'manage'
+      actor: { kind: 'agent', threadId: w.parent.id, runId: 'run-x', toolCallId: 'mcp:bot-1' }
     })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
     expect(w.launchedBy(w.parent.id)).toEqual([])
     expect(w.d.engine.store.getReceipt(`bot-1`)).toBeNull()
-  })
-
-  it('a thread can be created below manage by nobody: lineage and read credentials are refused over the wire and the tool is not listed', async () => {
-    const seen: { listed?: string[]; refused?: Rpc } = {}
-    const w = world(async (input, mcp) => {
-      if (input.threadId !== w.parent.id) return 'ok'
-      seen.listed = (await rpc(mcp!, 'tools/list', {})).result!.tools!.map((tool) => tool.name)
-      seen.refused = await w.create(mcp!, { clientRequestId: 'low' })
-      return 'ok'
-    }, 'read')
-    await w.attach()
-    await w.run(w.parent.id, GO, 'go')
-    expect(seen.listed).not.toContain('thread_create')
-    expect(seen.refused!.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-    expect(w.launchedBy(w.parent.id)).toEqual([])
   })
 })

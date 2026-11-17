@@ -2,6 +2,7 @@ import {
   ROUTED_FORBIDDEN_KEYS,
   ROUTED_JOB_METHODS,
   ROUTED_METHODS,
+  ROUTED_AGENT_KEY,
   ROUTED_SEND_WINDOW_KEY,
   type RoutedRow
 } from '../../../shared/bridge/routed'
@@ -159,7 +160,7 @@ export class ThreadRouter implements ThreadRouterPort {
 
   /**
    * The other computers of the user whose threads are listed: devices of the roster that are not this one, not
-   * revoked, not blocked here, and not phones. The kind the authority recorded wins; a device of unknown kind
+   * revoked, connected here, not blocked here, and not phones. The kind the authority recorded wins; a device of unknown kind
    * counts only if its signed delegation holds "Works on threads". `undefined` when the roster cannot be read.
    */
   pairedComputers(): ComputerRef[] | undefined {
@@ -183,6 +184,7 @@ export class ThreadRouter implements ThreadRouterPort {
           (found) =>
             found.subject !== self.node &&
             !roster.revoked.some((row) => row.subject === found.subject && row.throughKeyEpoch >= found.keyEpoch) &&
+            rt.connections.connected(found.subject as NodeId) &&
             !rt.policy.get(found.subject as NodeId).blocked &&
             isListedComputer(rt.enrollment.nodeKind(found.subject as NodeId), found.caps)
         )
@@ -355,8 +357,15 @@ export class ThreadRouter implements ThreadRouterPort {
       if (LOCAL_BINDING_KEYS.includes(key)) continue
       // A window labels a send `gui`; the owner decides the source of a routed call itself.
       if (key === 'source' && value === 'gui') continue
+      // How many messages the app opens a thread with. A routed thread's snapshot comes from the stream this
+      // computer reads (`AttachedThreads.snapshot`), which already holds the newest messages; older ones page in.
+      if (key === 'newest' && method === 'thread.snapshot') continue
       // Set by this router below, never taken from a window.
       if (key === ROUTED_SEND_WINDOW_KEY && method === 'orchestrator.send') continue
+      // Only this computer's daemon marks a call as an agent's (remote subagents); a window is a person, so a window that
+      // names the key is refused, not passed through (the key is in the row, so the check below would let it go).
+      if (key === ROUTED_AGENT_KEY)
+        throw new DomainRpcError('invalid_params', `${method} does not take ${ROUTED_AGENT_KEY} from a window: only this computer's agents' calls are marked.`)
       // The owner answers a send once the turn is admitted, however long the turn runs.
       if (key === 'await' && method === 'orchestrator.send') continue
       // Numbers belong to the router: a window never picks one.

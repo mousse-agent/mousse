@@ -80,7 +80,8 @@ html[data-theme='light'] .titlebar,
 html[data-theme='light'] .main-area .header {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  background: var(--glass-bg-strong);
+  --pane-backdrop: var(--glass-bg-strong);
+  background: var(--pane-backdrop);
 }
 
 @media (prefers-color-scheme: light) {
@@ -94,7 +95,8 @@ html[data-theme='light'] .main-area .header {
   html[data-theme='system'] .main-area .header {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
-    background: var(--glass-bg-strong);
+    --pane-backdrop: var(--glass-bg-strong);
+    background: var(--pane-backdrop);
   }
 }
 

@@ -10,6 +10,25 @@ import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/c
 export type Frame = Record<string, unknown>
 type Handler = (message: SDKUserMessage, process: FakeClaudeProcess) => void
 
+/**
+ * What `FakeClaudeProcess.startup` reads: the `mcpServers` of the channel Mousse's spawn hands its process, read by the
+ * path on its command line as Claude Code reads it (`/dev/fd/3`, or a named pipe).
+ */
+async function readStartup(options: Options, refusal?: string): Promise<Record<string, unknown> | undefined> {
+  const path = options.extraArgs?.['mcp-config']
+  if (typeof path !== 'string' || !options.spawnClaudeCodeProcess) return undefined
+  const child = options.spawnClaudeCodeProcess({
+    command: process.execPath,
+    // A refusal: what Claude Code writes to its error stream when it will not start with these servers, and its exit.
+    args: ['-e', refusal === undefined ? `process.stdout.write(require("fs").readFileSync(${JSON.stringify(path)}))` : `require("fs").readFileSync(${JSON.stringify(path)}); process.stderr.write(${JSON.stringify(refusal)}); process.exit(1)`],
+    env: { PATH: process.env.PATH },
+    signal: new AbortController().signal
+  }) as unknown as { stdout: NodeJS.ReadableStream }
+  let text = ''
+  for await (const chunk of child.stdout) text += String(chunk)
+  return (JSON.parse(text) as { mcpServers: Record<string, unknown> }).mcpServers
+}
+
 export const SESSION = 'vendor-session'
 
 export const textDelta = (text: string, uuid?: string, extra: Frame = {}): Frame => ({
@@ -21,12 +40,32 @@ export const textDelta = (text: string, uuid?: string, extra: Frame = {}): Frame
   ...extra
 })
 
+/** A new top-level assistant message starts (what Claude Code sends when it begins reading a steer). */
+export const messageStart = (uuid?: string): Frame => ({
+  type: 'stream_event',
+  session_id: SESSION,
+  parent_tool_use_id: null,
+  ...(uuid ? { user_message_uuid: uuid, user_message_uuids: [uuid] } : {}),
+  event: { type: 'message_start', message: { id: `msg-${uuid ?? 'next'}`, type: 'message', role: 'assistant', content: [] } }
+})
+
 export const toolStart = (id: string, name: string, uuid?: string): Frame => ({
   type: 'stream_event',
   session_id: SESSION,
   parent_tool_use_id: null,
   ...(uuid ? { user_message_uuid: uuid, user_message_uuids: [uuid] } : {}),
   event: { type: 'content_block_start', content_block: { type: 'tool_use', id, name } }
+})
+
+/**
+ * The whole `assistant` message that holds a `tool_use` block: its input is complete, and Claude Code runs the call.
+ * A call announced (`toolStart`) that never gets this message was dropped before it ran.
+ */
+export const toolUse = (id: string, name: string, input: Record<string, unknown> = {}): Frame => ({
+  type: 'assistant',
+  session_id: SESSION,
+  parent_tool_use_id: null,
+  message: { id: `msg-${id}`, role: 'assistant', model: 'claude-test', content: [{ type: 'tool_use', id, name, input }] }
 })
 
 export const toolResult = (id: string): Frame => ({
@@ -52,6 +91,26 @@ export function resultFrame(options: { uuids?: string[]; text?: string; origin?:
   }
 }
 
+/** Claude Code's word on a pushed message: `started` when a turn takes it (the model reads it). */
+export const lifecycle = (uuid: string, state: 'queued' | 'started' | 'completed' | 'cancelled'): Frame => ({
+  type: 'command_lifecycle',
+  command_uuid: uuid,
+  state,
+  uuid: `lifecycle-${uuid}-${state}`,
+  session_id: SESSION
+})
+
+/** Claude Code runs the call `callId` as task `taskId` (about 3 s after a command starts; at once for a subagent). */
+export const taskStarted = (callId: string, taskId: string, extra: Frame = {}): Frame => ({
+  type: 'system',
+  subtype: 'task_started',
+  session_id: SESSION,
+  task_id: taskId,
+  tool_use_id: callId,
+  description: 'run it',
+  ...extra
+})
+
 export const roster = (...tasks: Array<{ id: string; type?: string; ambient?: boolean }>): Frame => ({
   type: 'system',
   subtype: 'background_tasks_changed',
@@ -73,10 +132,20 @@ export class FakeClaudeProcess {
   /** Every message read from the prompt stream, in order. */
   readonly inputs: SDKUserMessage[] = []
   readonly permissionModes: string[] = []
+  /** Every `applyFlagSettings` call, in order. */
+  readonly flagSettings: Array<Record<string, unknown>> = []
+  /** `applyFlagSettings` rejects (`'throw'`) or never answers (`'hang'`), like a Claude Code that cannot switch in place. */
+  flagSettingsFail: 'throw' | 'hang' | undefined
   interrupts = 0
   /** The options of each `interrupt()` call. */
   readonly interruptOptions: Array<{ cancelQueued?: boolean } | undefined> = []
   stoppedTasks: string[] = []
+  /** `stopTask` rejects (the task ended or is unknown to Claude Code). */
+  stopTaskFails = false
+  /** The ids `cancelAsyncMessage` was asked to drop, in order. */
+  readonly cancelAsyncCalls: string[] = []
+  /** Whether the process has `cancelAsyncMessage` (an older Claude Code has no per-message cancel). */
+  cancelAsync = true
   /** The roster's tasks that have not ended: `local_agent` or `local_bash` by id. */
   private readonly liveTasks = new Map<string, string>()
   /**
@@ -84,14 +153,64 @@ export class FakeClaudeProcess {
    * undefined, like an older one that cannot say what it cancelled.
    */
   receipts = true
+  /**
+   * A Claude Code that sends interrupt receipts but predates `interrupt_cancel_queued_v1`: it ignores `cancelQueued`,
+   * answers like a plain interrupt (`still_queued`, no `cancelled`), and then (spike S1) starts what is still queued at
+   * once as a new turn, unless its process was closed first. What it started that way is in `ranAfterInterrupt`.
+   */
+  ignoresCancelQueued = false
+  /** The ids an interrupt left queued that the process then ran as turns of their own (`ignoresCancelQueued`). */
+  readonly ranAfterInterrupt: string[] = []
+  /**
+   * Like the real Claude Code, the process keeps running for a while after its input closes (the SDK's close only ends
+   * its stdin and signals it seconds later): the turn it runs goes on, and when that turn's result is written it starts
+   * what is still queued as turns of their own (`ranAfterClose`). Only a signal (`signals`) ends it.
+   */
+  lingersAfterClose = false
+  /** The ids the process ran after its input closed (`lingersAfterClose`). */
+  readonly ranAfterClose: string[] = []
+  /** The pid its process transport shows, as the Agent SDK's does; without one the query has no transport. */
+  pid: number | undefined
+  /** The signals sent through the process transport's handle, in order. */
+  readonly signals: string[] = []
   /** While set, `setPermissionMode` and `backgroundTasks` wait for it. */
   permissionGate: Promise<unknown> | undefined
   /** While set, `interrupt()` waits for it before it answers (a slow receipt). */
   interruptGate: Promise<unknown> | undefined
+  /** While set, `cancelAsyncMessage` waits for it before it answers (a slow answer). */
+  cancelAsyncGate: Promise<unknown> | undefined
+  /**
+   * Like the real Claude Code when its queue gave a message up a moment before the cancel came: `cancelAsyncMessage`
+   * answers false for a message still queued, yet the message never runs (the turn that took it drops it as it starts).
+   * `'lifecycle'` then says so with a `cancelled` lifecycle; `'silent'` says nothing at all, ever (the worst case).
+   */
+  cancelAsyncTakenThenDropped: 'silent' | 'lifecycle' | undefined
   backgroundGate: Promise<unknown> | undefined
+  /** Every `setMcpServers` call: the servers registered over the process's input (#358), in order. */
+  readonly mcpRegistrations: Array<Record<string, unknown>> = []
+  /** Servers `setMcpServers` reports as failed, with Claude Code's error for each. */
+  mcpErrors: Record<string, string> = {}
+  /**
+   * `setMcpServers` rejects as a Claude Code without the request answers (`'unsupported'`), rejects otherwise (`'throw'`,
+   * the process ended), or never answers (`'hang'`).
+   */
+  mcpFail: 'unsupported' | 'throw' | 'hang' | undefined
+  /** While set, `setMcpServers` waits for it before it answers. */
+  mcpGate: Promise<unknown> | undefined
+  /** Read with each `setMcpServers` call's servers: what that call waits for before it answers (none: undefined). */
+  mcpHold: ((servers: Record<string, unknown>) => Promise<unknown> | undefined) | undefined
   private readonly started = new Set<string>()
   private readonly cancelled = new Set<string>()
   backgrounded = 0
+  /** The call each `backgroundTasks` named (undefined: the call with no id, which also moves a running command). */
+  readonly backgroundCalls: Array<string | undefined> = []
+  /**
+   * What `backgroundTasks` answers: `true` (moved), `false`, or `throw` (background tasks are off for the session). Like
+   * the real Claude Code (spike S1), a call named by id that is not a task yet (no `task_started` for it) answers false.
+   */
+  backgroundAnswer: boolean | 'throw' = true
+  /** The calls Claude Code runs as a task (`task_started` emitted for them): only these can be moved by id. */
+  private readonly taskCalls = new Set<string>()
   closed = false
   /** The prompt stream ended (the real process would exit and take its background work with it). */
   inputEnded = false
@@ -106,11 +225,22 @@ export class FakeClaudeProcess {
   private waiting: ((result: IteratorResult<SDKMessage>) => void) | undefined
   private ended = false
 
+  /**
+   * The servers Mousse gave the process through its startup pipe (`--mcp-config /dev/fd/3`, #358), read the way
+   * Claude Code reads them: Mousse's own spawn is run with a command that prints its fourth stream. Undefined when the
+   * process got none.
+   */
+  readonly startup: Promise<Record<string, unknown> | undefined>
+
   constructor(
     readonly prompt: string | AsyncIterable<SDKUserMessage>,
     readonly options: Options,
-    private readonly reply: () => Handler | undefined
+    private readonly reply: () => Handler | undefined,
+    /** Claude Code refuses to start with the servers of its startup channel, writing this (`FakeClaudeCli.startupRefusal`). */
+    readonly startupRefusal?: string
   ) {
+    this.startup = readStartup(options, startupRefusal)
+    this.startup.catch(() => undefined)
     if (typeof prompt !== 'string') void this.readPrompt(prompt)
   }
 
@@ -122,7 +252,7 @@ export class FakeClaudeProcess {
     }
     this.inputEnded = true
     // Like the real process: with its input closed it finishes what it was asked and exits.
-    this.end()
+    if (!this.lingersAfterClose) this.end()
   }
 
   /** The text of the n-th message the process read. */
@@ -135,6 +265,11 @@ export class FakeClaudeProcess {
     return String(this.inputs[index]?.uuid)
   }
 
+  /** The MCP servers the process has now: its last registration. */
+  get mcpServers(): Record<string, unknown> | undefined {
+    return this.mcpRegistrations[this.mcpRegistrations.length - 1]
+  }
+
   emit(...emitted: Frame[]): void {
     // Like the real process: a session resumed into a fork writes its frames under the fork's id.
     const branch = this.options.forkSession && this.options.sessionId
@@ -142,13 +277,18 @@ export class FakeClaudeProcess {
     for (const frame of frames) {
       if (this.ended) return
       this.trackTasks(frame)
+      if (frame.subtype === 'task_started' && typeof frame.tool_use_id === 'string') this.taskCalls.add(frame.tool_use_id)
       const stamped = frame.user_message_uuids
       if (Array.isArray(stamped)) for (const id of stamped) this.started.add(String(id))
+      if (frame.type === 'command_lifecycle' && frame.state === 'started') this.started.add(String(frame.command_uuid))
       if (this.waiting) {
         const resolve = this.waiting
         this.waiting = undefined
         resolve({ value: frame as unknown as SDKMessage, done: false })
       } else this.frames.push(frame)
+      // A turn ended while the process lingers with its input closed: it starts what is still queued.
+      if (frame.type === 'result' && this.lingersAfterClose && (this.closed || this.inputEnded))
+        setTimeout(() => this.runQueued(this.ranAfterClose), 0)
     }
   }
 
@@ -196,6 +336,16 @@ export class FakeClaudeProcess {
     this.emit(textDelta(text, uuids[uuids.length - 1], { user_message_uuids: uuids }), resultFrame({ uuids, text }))
   }
 
+  /** Each message still queued starts as a turn of its own and runs to its result, as after an interrupt (spike S1). */
+  private runQueued(ran: string[] = this.ranAfterInterrupt): void {
+    for (const id of this.queued) {
+      if (this.ended) return
+      ran.push(id)
+      this.emit(lifecycle(id, 'started'))
+      this.answer(id, 'ran after the interrupt')
+    }
+  }
+
   /** The process took this message into the turn it is running (folded in) without a frame naming it. */
   markStarted(uuid: string): void {
     this.started.add(uuid)
@@ -229,7 +379,19 @@ export class FakeClaudeProcess {
       },
       [Symbol.asyncDispose]: async () => undefined
     } as AsyncGenerator<SDKMessage>
-    return Object.assign(iterator, {
+    // The SDK's process handle: a signal ends the process at once.
+    const handle = {
+      pid: this.pid,
+      exitCode: null as number | null,
+      signalCode: null as string | null,
+      kill: (signal: string = 'SIGTERM') => {
+        this.signals.push(signal)
+        handle.signalCode = signal
+        this.end()
+        return true
+      }
+    }
+    return Object.assign(iterator, this.pid === undefined ? {} : { transport: { process: handle } }, {
       interrupt: async (options?: { cancelQueued?: boolean }) => {
         this.interrupts++
         this.interruptOptions.push(options)
@@ -240,25 +402,77 @@ export class FakeClaudeProcess {
         for (const [id, type] of [...this.liveTasks]) if (type === 'local_agent') this.emit(notification(id, 'stopped'))
         if (!this.receipts) return undefined
         const queued = this.queued
+        if (this.ignoresCancelQueued) {
+          setTimeout(() => this.runQueued(), 0)
+          return { still_queued: queued }
+        }
         if (!options?.cancelQueued) return { still_queued: queued }
         for (const id of queued) this.cancelled.add(id)
         return { still_queued: [], cancelled: queued }
       },
       stopTask: async (taskId: string) => {
         this.stoppedTasks.push(taskId)
+        if (this.stopTaskFails) throw new Error(`no task ${taskId}`)
+      },
+      // Like the real process: a message still in the queue is dropped (true); one a turn already took is not (false).
+      cancelAsyncMessage: async (uuid: string) => {
+        if (!this.cancelAsync) throw new Error('cancel_async_message is not supported')
+        this.cancelAsyncCalls.push(uuid)
+        await this.cancelAsyncGate
+        if (this.cancelAsyncTakenThenDropped && this.queued.includes(uuid)) {
+          this.cancelled.add(uuid)
+          if (this.cancelAsyncTakenThenDropped === 'lifecycle') setTimeout(() => this.emit(lifecycle(uuid, 'cancelled')), 0)
+          return false
+        }
+        if (!this.queued.includes(uuid)) return false
+        this.cancelled.add(uuid)
+        return true
       },
       close: () => {
         this.closed = true
-        this.end()
+        if (!this.lingersAfterClose) this.end()
       },
       setPermissionMode: async (mode: string) => {
         await this.permissionGate
         this.permissionModes.push(mode)
       },
-      backgroundTasks: async () => {
+      // Like the real Claude Code (2.1.322): the set replaces the one registered before; a server is added when its
+      // config is new or changed (an unchanged one stays connected), and one that failed is added and named in `errors`.
+      setMcpServers: async (servers: Record<string, unknown>) => {
+        const previous = this.mcpServers ?? {}
+        this.mcpRegistrations.push(servers)
+        // A process that refused its startup servers has exited: the request fails.
+        if (this.startupRefusal !== undefined && this.options.extraArgs?.['mcp-config']) {
+          await this.startup.catch(() => undefined)
+          this.end()
+          throw new Error('ProcessTransport is not ready for writing')
+        }
+        await this.mcpGate
+        await this.mcpHold?.(servers)
+        if (this.mcpFail === 'unsupported') throw new Error('Unsupported control request subtype: mcp_set_servers')
+        if (this.mcpFail === 'throw') throw new Error('ProcessTransport is not ready for writing')
+        if (this.mcpFail === 'hang') await new Promise(() => undefined)
+        // An in-process server holds a live MCP server object: it is the same server while its name is.
+        const shape = (config: unknown) => (config as { type?: string } | undefined)?.type === 'sdk' ? 'sdk' : JSON.stringify(config)
+        const same = (name: string) => Object.hasOwn(previous, name) && shape(previous[name]) === shape(servers[name])
+        return {
+          added: Object.keys(servers).filter((name) => !same(name)),
+          removed: Object.keys(previous).filter((name) => !Object.hasOwn(servers, name)),
+          errors: Object.fromEntries(Object.entries(this.mcpErrors).filter(([name]) => Object.hasOwn(servers, name)))
+        }
+      },
+      applyFlagSettings: async (settings: Record<string, unknown>) => {
+        this.flagSettings.push(settings)
+        if (this.flagSettingsFail === 'throw') throw new Error('apply_flag_settings is not supported')
+        if (this.flagSettingsFail === 'hang') await new Promise(() => undefined)
+      },
+      backgroundTasks: async (toolUseId?: string) => {
         this.backgrounded++
+        this.backgroundCalls.push(toolUseId)
         await this.backgroundGate
-        return true
+        if (this.backgroundAnswer === 'throw') throw new Error('Background tasks are disabled in this session.')
+        if (toolUseId !== undefined && !this.taskCalls.has(toolUseId)) return false
+        return this.backgroundAnswer
       },
       supportedModels: async () => []
     }) as unknown as Query
@@ -274,8 +488,30 @@ export class FakeClaudeCli {
     process.answer(String(message.uuid), `reply to ${process.inputs.length}`)
   }
 
+  /** Each new process lingers after its input closes (`FakeClaudeProcess.lingersAfterClose`). */
+  lingersAfterClose = false
+  /** The pid each new process's transport shows (`FakeClaudeProcess.pid`); none by default. */
+  pid: number | undefined
+  /** What each new process's `setMcpServers` reports failed (`FakeClaudeProcess.mcpErrors`). */
+  mcpErrors: Record<string, string> = {}
+  /** How each new process's `setMcpServers` fails (`FakeClaudeProcess.mcpFail`). */
+  mcpFail: 'unsupported' | 'throw' | 'hang' | undefined
+  /** What each new process's `setMcpServers` waits for (`FakeClaudeProcess.mcpGate`). */
+  mcpGate: Promise<unknown> | undefined
+  /** What each new process's `setMcpServers` waits for, by the servers sent (`FakeClaudeProcess.mcpHold`). */
+  mcpHold: ((servers: Record<string, unknown>) => Promise<unknown> | undefined) | undefined
+
+  /** What each new process given servers through its startup channel writes as it refuses to start with them. */
+  startupRefusal: string | undefined
+
   readonly query = ({ prompt, options }: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }): Query => {
-    const process = new FakeClaudeProcess(prompt, options, () => this.reply)
+    const process = new FakeClaudeProcess(prompt, options, () => this.reply, this.startupRefusal)
+    process.lingersAfterClose = this.lingersAfterClose
+    process.pid = this.pid
+    process.mcpErrors = { ...this.mcpErrors }
+    process.mcpFail = this.mcpFail
+    process.mcpGate = this.mcpGate
+    process.mcpHold = this.mcpHold
     this.processes.push(process)
     return process.asQuery()
   }

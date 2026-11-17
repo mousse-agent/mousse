@@ -203,7 +203,7 @@
 .orb-swatches > button { padding: 4px; width: 28px; height: 28px; border: 1px solid transparent; border-radius: 50%; background: transparent; cursor: pointer; }
 .orb-swatches > button > span { width: 100%; height: 100%; display: block; border-radius: 50%; box-shadow: inset 0 0 0 1px #ffffff45, inset 0 2px 4px #fff8; }
 .orb-swatches > button[aria-pressed='true'] { border-color: var(--text-secondary, #9298a5); }
-.orb-identity button:focus-visible, .orb-identity input:focus-visible, .orb-customize summary:focus-visible { outline: 2px solid var(--accent, #a8baff); outline-offset: 4px; }
+.orb-identity button:focus-visible, .orb-identity input:focus-visible, .orb-customize summary:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .orb-identity button:disabled { opacity: .4; cursor: default; }
 .orb-customize { position: relative; border-top: 1px solid var(--border, #ffffff14); }
 .orb-customize summary { cursor: pointer; font-size: 11px; color: var(--text-secondary, #9298a5); text-align: center; padding: 14px 0; }

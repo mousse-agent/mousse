@@ -1,4 +1,7 @@
+import { appPresence } from '../mms/appPresence'
+import type { BotTelling } from '../../shared/bots/personal/telling'
 import { registerAppletIpc } from '../applets/registerAppletIpc'
+import { registerMemoryDiagnosticsIpc } from '../diagnostics/memoryIpc'
 import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 import { PENDING_CHANGES_ERROR_CODES } from '../../shared/workspace'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
@@ -13,30 +16,33 @@ import { BRIDGE_ACTIVITY_METHODS } from '../../shared/bridge/deviceActivity'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
 import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
 import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS } from '../../shared/bots/personal/methods'
+import { BOT_DEVICE_METHODS } from '../../shared/bots/personal/deviceAccess'
 import { BOTS_BROWSER_METHODS } from '../../shared/bots/personal/browser'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { AUTOMATIONS_METHODS, type ScheduledRunEnded } from '../../shared/automations'
+import { SECRET_METHODS } from '../../shared/secretRequests'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
  * Does not take a MousseMainService / owner lease.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMonitor, screen, session, shell } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces } from './assetPieces'
 import { browsedRootParams, browseSupport } from './browsedRoot'
 import { daemonGitParams } from './daemonGitParams'
 import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
-import { getComputerName } from '../computerName'
+import { getComputerName } from '../../mms/computerName'
 import { randomUUID } from 'node:crypto'
-import type { GuiMmsController } from '../mms/GuiMmsController'
+import type { GuiMmsController, ReadOrder, ThreadSnapshotResult } from '../mms/GuiMmsController'
+import { updateOrders, type UpdateKind } from '../mms/updateOrder'
 import { PresentationState } from '../mms/PresentationState'
 import { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { coalescedRunner } from '../mms/coalescedRunner'
 export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
-import { guiChatRequestError } from '../mms/requestErrors'
+import { guiChatRequestError, guiSendFailureAnswer } from '../mms/requestErrors'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
@@ -45,6 +51,8 @@ import {
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
+import { openLocalPath, saveFileCopy, showFileInFolder } from '../localFiles'
+import { startFileDrag } from './fileDragIpc'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
 import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { askForEditorAccess } from '../remoteEditorAsk'
@@ -71,6 +79,7 @@ import type { KokoroFrontEnd } from '../readAloud/kokoroText'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
+import { BROWSER_VIEW_METHODS } from '../../shared/browser/threadView'
 import { BROWSER_ACCESS_METHODS } from '../../shared/browser/access'
 import { BROWSER_SETUP_METHODS } from '../../shared/browser/setup'
 import {
@@ -82,9 +91,12 @@ import {
 } from '../../shared/settings'
 import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
-import { showCopyMenu } from '../contextMenu'
+import { showCopyMenu, writePngToClipboard } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
-import { stageBotAttachment } from './botAttachments'
+import { stageBotAttachment, stageThreadAttachment } from './botAttachments'
+import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
+import { botBrowserWindow, type BotBrowserWindowDeps } from './botBrowserWindow'
+import { stat } from 'node:fs/promises'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import { MousseIdCallbacks, runtimeMousseIdOrigin } from '../mousseIdCallback'
@@ -111,6 +123,7 @@ import {
   type ThreadToastPayload
 } from '../notifications/threadNotification'
 import { NotificationThreadIndex } from '../notifications/threadNotificationTarget'
+import { seenReporter, showsDone } from './threadSeen'
 import { playThreadCompletionSound } from '../notifications/completionSound'
 import { AttentionCounts, showAttentionCount } from '../attentionBadge'
 import type {
@@ -155,11 +168,16 @@ import type {
   QuestionAnswerOutcome,
   PendingUserQuestions,
   ThreadApprovalRequest,
-  UserQuestionAnswers,
+  UserQuestionAnswers, UserQuestionAttachments,
   QueuedMessage,
   QueueEditResult
 } from '../../shared/types'
-import { isThreadActivityActive } from '../../shared/types'
+import { isThreadActivityActive, isTurnStoppable } from '../../shared/types'
+import { resnapshotTurnState } from '../mms/resnapshotTurnState'
+import type { GuiConnectionLog } from '../mms/guiConnectionLog'
+import { describeLinkError } from '../mms/guiConnectionLog'
+import { QuietTurnWatch } from '../mms/quietTurnWatch'
+import { createDevTurnEndDropper } from '../mms/devTurnEndDropper'
 import { isQualifiedId, parseQualifiedId, unqualifyId } from '../../shared/threadRef'
 import type {
   CreatePullRequestResult,
@@ -179,7 +197,6 @@ import type {
   StartPullRequestThreadInput,
   StartPullRequestThreadResult
 } from '../../shared/pullRequests'
-import { visibleThreads } from '../../shared/threadLineage'
 import type {
   GitHubCloneRepositoryInput,
   GitHubCreateRepositoryInput
@@ -198,9 +215,19 @@ export interface GuiIpcServices {
   attachedBrowserHost?: AttachedBrowserHost
   repoRoot: string
   requestAppRestart?: () => Promise<void>
+  /** `<home>/logs/gui-connection.log`: what happened to the windows' updates and each catch-up (#1042). */
+  connectionLog?: Pick<GuiConnectionLog, 'write' | 'undeliverable'>
+  /**
+   * Development only (`MOUSSE_DEV_DROP_TURN_END=1` in an unpackaged build): drops a turn's updates after its first
+   * second, to see the catch-up recover by hand.
+   */
+  devDropTurnEnd?: boolean
 }
 
 let activeGuiMms: GuiMmsController | null = null
+
+/** An update main could not hand to a window is followed by a catch-up this long after the first of a burst. */
+const UNDELIVERED_CATCH_UP_DELAY_MS = 1_000
 
 /**
  * The renderer feature bridge is deliberately smaller than the legacy GUI IPC
@@ -218,12 +245,15 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...BOTS_LOCAL_METHODS,
   ...BOTS_PERSONAL_V2_METHODS,
   ...BOTS_WORK_METHODS,
+  ...BOT_DEVICE_METHODS,
   ...BOTS_BROWSER_METHODS,
   ...AUTOMATIONS_METHODS,
+  ...SECRET_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
+  ...BROWSER_VIEW_METHODS,
   ...BROWSER_SETUP_METHODS,
   ...WORKFLOW_RUN_METHODS,
   'workflows.list', 'workflows.get', 'workflows.getRevision', 'workflows.create',
@@ -241,7 +271,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
   'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth',
-  'runs.resumeNow', 'runs.cancelPause'
+  'runs.resumeNow', 'runs.cancelPause', 'threads.goal', 'threads.setHidden'
 ])
 
 class PlatformRequestError extends AppError {
@@ -266,6 +296,8 @@ export function getWindowShortcuts(senderId: number): ShortcutOverrides | undefi
  * possibly out of date. Set once handlers are registered: reads the thread in view again.
  */
 let refreshAfterUncertain: ((node: string) => void) | undefined
+/** Display changes are watched once per process, however often the handlers are registered. */
+let displaysWatched = false
 
 function noteUncertainOutcome(error: unknown): void {
   if (!error || typeof error !== 'object') return
@@ -307,6 +339,11 @@ function registerHandler(
  * `params` with the thread a call is about, when the window named one. The daemon routes a call
  * about a thread on another computer by it and ignores it for a thread of this one.
  */
+/** An activity event the service marked as a turn a person stopped (theirs, or the one that launched it). */
+function stoppedByPerson(data: unknown): boolean {
+  return (data as { stoppedByPerson?: unknown } | null)?.stoppedByPerson === true
+}
+
 function withThreadId<T extends object>(params: T, threadId: unknown): T & { threadId?: string } {
   return typeof threadId === 'string' && threadId.length > 0 ? { ...params, threadId } : params
 }
@@ -356,12 +393,19 @@ function normalizeSendContent(request: OrchestratorSendInput): {
   images?: unknown
   conversationBranchId?: string
   expect?: unknown
+  continuationOfRunId?: string
+  acknowledgeUncertain?: boolean
+  await?: 'ack'
 } {
   if (typeof request === 'string') return { content: request }
   return {
     content: request.content,
     requestId: request.requestId,
+    ...(request.await === 'ack' ? { await: 'ack' as const } : {}),
     ...(typeof request.conversationBranchId === 'string' ? { conversationBranchId: request.conversationBranchId } : {}),
+    ...(typeof request.continuationOfRunId === 'string' && request.continuationOfRunId
+      ? { continuationOfRunId: request.continuationOfRunId, ...(request.acknowledgeUncertain === true ? { acknowledgeUncertain: true } : {}) }
+      : {}),
     ...(request.expect && typeof request.expect === 'object' ? { expect: request.expect } : {}),
     mode: request.mode,
     images: request.images
@@ -392,6 +436,7 @@ export function registerGuiIpc(
   activeGuiMms = guiMms
   registerLinuxWindowResizeIpc(getWindow)
   registerAppletIpc(registerHandler, guiMms, () => [getWindow()])
+  registerMemoryDiagnosticsIpc(registerHandler, guiMms, { acrylic: () => appearanceUsesAcrylic(normalizeAppearance(settings.get().appearance)) })
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
@@ -487,6 +532,20 @@ export function registerGuiIpc(
   const notificationThreads = new NotificationThreadIndex()
   // How many threads need the person in each window, for the dock or taskbar badge.
   const attentionCounts = new AttentionCounts()
+  // Done is "finished, and you haven't seen it": a window that opens a thread, or shows it in focus, clears it everywhere.
+  const reportSeen = seenReporter((senderId, threadId) => {
+    const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
+    if (!win || win.isDestroyed()) return Promise.resolve()
+    return guiMms.runWithSender(win.webContents, () => guiMms.request('threads.markSeen', { threadId }))
+  })
+  const reportSeenIfDone = (win: BrowserWindow): void => {
+    const senderId = win.webContents.id
+    const binding = guiMms.getWindowBindingForSender(senderId)
+    const shownId = binding ? windowPresentations.get(senderId)?.getActiveThreadId() : null
+    if (!binding || !shownId || !win.isFocused()) return
+    if (showsDone(activityTrackerFor(binding.profileId).getSnapshot(), shownId, (id) => notificationThreads.listedAs(binding.profileId, id))) reportSeen(senderId, shownId)
+  }
+  app.on('browser-window-focus', (_event, win) => reportSeenIfDone(win))
 
   const broadcast = (channel: string, data: unknown, profileId?: string): void => {
     const senderId = guiMms.getCurrentSenderId()
@@ -572,11 +631,24 @@ export function registerGuiIpc(
    * An automation's run ended (`scheduled.runEnded`). It notifies only when its Tell me lets it (the daemon decides),
    * through the person's choices for a finished thread, or for a question when the run failed. A click opens its thread.
    */
+  const reportPresence = appPresence({
+    windows: () => BrowserWindow.getAllWindows(),
+    idleSeconds: () => powerMonitor.getSystemIdleTime(),
+    audience: id => guiMms.presenceAudience?.(id),
+    send: (id, presence) => guiMms.sendPresence(id, presence)
+  })
+  const presenceTimer = setInterval(reportPresence, 10_000)
+  presenceTimer.unref()
+  app.on('browser-window-focus', reportPresence)
+  app.on('will-quit', () => { clearInterval(presenceTimer); app.removeListener('browser-window-focus', reportPresence) })
+
   const notifyAutomationRun = (data: unknown, win: BrowserWindow, activeThreadId: string | null, profileSettings: MousseSettings): void => {
     const run = (data ?? {}) as Partial<ScheduledRunEnded>
     if (run.notify !== true || typeof run.jobName !== 'string' || typeof run.outcome !== 'string') return
     const kind: ThreadNotificationKind = run.outcome === 'failed' || run.outcome === 'incomplete' ? 'idle' : 'completed'
-    const plan = planThreadNotification({ ...threadNotificationChannels(profileSettings.notifications, kind), toast: false }, {
+    const channels = threadNotificationChannels(profileSettings.notifications, kind)
+    if (run.quietHours === true) channels.sound = false
+    const plan = planThreadNotification({ ...channels, toast: false }, {
       windowFocused: win.isFocused(),
       viewingThread: Boolean(run.threadId && activeThreadId === run.threadId),
       systemSupported: Notification.isSupported()
@@ -585,7 +657,7 @@ export function registerGuiIpc(
       if (plan.playSound) playThreadCompletionSound()
       return
     }
-    const content = getThreadNotificationPresentation(kind, profileSettings)
+    const content = { ...getThreadNotificationPresentation(kind, profileSettings), ...(run.quietHours === true ? { silent: true } : {}) }
     const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
     const notification = new Notification({
       ...content,
@@ -606,6 +678,37 @@ export function registerGuiIpc(
 
   // The bot whose chat each window shows, so that bot's rows only sound while it is on screen.
   const viewedBots = new Map<number, string | null>()
+  const tellingBanners = new Map<string, Notification>()
+  const tellingDeliveries = new Map<string, number>()
+  const notifyTelling = (telling: BotTelling, win: BrowserWindow, profileSettings: MousseSettings, profileId: string, sequence: number, instance?: string): void => {
+    const audience = `${instance ?? ''}:${profileId}`
+    const key = `${audience}:${telling.id}`
+    // One protocol event reaches each window; only the first shows this revision.
+    if ((tellingDeliveries.get(audience) ?? -1) >= sequence) return
+    tellingDeliveries.set(audience, sequence)
+    tellingBanners.get(key)?.close()
+    tellingBanners.delete(key)
+    if (!telling.rows.length) return
+    const botId = telling.rows[0]!.botId
+    const channels = { ...threadNotificationChannels(profileSettings.notifications, telling.kind), toast: false }
+    channels.sound &&= telling.sound
+    const viewing = BrowserWindow.getAllWindows().some(w => !w.isDestroyed() && w.isFocused() &&
+      guiMms.getWindowBindingForSender(w.webContents.id)?.profileId === profileId && viewedBots.get(w.webContents.id) === botId)
+    const plan = planThreadNotification(channels, { windowFocused: viewing, viewingThread: viewing, systemSupported: Notification.isSupported() })
+    if (!plan.system) { if (plan.playSound) playThreadCompletionSound(); return }
+    const audible = channels.sound
+    const notification = new Notification({ title: telling.title, body: telling.body,
+      silent: !audible || process.platform === 'win32', ...(audible && process.platform === 'darwin' ? { sound: 'Ping' } : {}) })
+    notification.on('click', () => {
+      if (win.isDestroyed()) return
+      if (win.isMinimized()) win.restore()
+      win.show(); win.focus(); win.webContents.send('notifications:openBot', botId)
+    })
+    tellingBanners.set(key, notification)
+    notification.on('close', () => { if (tellingBanners.get(key) === notification) tellingBanners.delete(key) })
+    notification.show()
+    if (audible && process.platform === 'win32') playThreadCompletionSound()
+  }
   registerHandler('notifications:viewBot', async (event, botId: unknown) => {
     viewedBots.set(event.sender.id, typeof botId === 'string' && botId ? botId : null)
   })
@@ -618,7 +721,7 @@ export function registerGuiIpc(
   const notifyBot = (data: unknown, win: BrowserWindow, profileSettings: MousseSettings, profileId: string): void => {
     const { botId, message, botName, quiet } = (data ?? {}) as { botId?: unknown; message?: BotChatMessage; botName?: unknown; quiet?: unknown }
     if (typeof botId !== 'string' || !message || typeof message.id !== 'string') return
-    // A run report its schedule's Tell me keeps quiet (Only problems) stays in the chat without a notification.
+    // A scheduled report below its Tell me level stays in the chat without a notification.
     if (quiet === true) return
     const kind = botNotificationKind(message)
     if (!kind || !botNotifications.first(profileId, message.id)) return
@@ -745,6 +848,9 @@ export function registerGuiIpc(
   const setThreadActivity = (threadId: string, state: ThreadActivityState): void => {
     activityTrackerFor().setState(threadId, state)
     broadcast('threads:activity', activityTrackerFor().getSnapshot())
+    // A send marks its thread Working before the service says so: the window's quiet-turn watch starts from here.
+    const senderId = guiMms.getCurrentSenderId()
+    if (senderId !== null) noteShown(senderId)
   }
 
   let activeEventProfileId: string | undefined
@@ -779,21 +885,45 @@ export function registerGuiIpc(
   }
   const getTurnSnapshot = (): TurnStateSnapshot => Object.fromEntries(turnStateMapFor())
 
+  // Each profile's updates, in the order main applied them: an answer to a read never puts back state older than one
+  // of them (#1042, `UpdateOrder`).
+  const orderFor = updateOrders()
+  /** Whether an answer read at `order` may replace this thread's state in the profile. */
+  const answerApplies = (profileId: string, kind: UpdateKind, order: ReadOrder | undefined, threadId: string): boolean =>
+    !order || orderFor(profileId).mayApply(kind, order, threadId)
+  /** The answer's order: the revision the service read at, on the connection the read went through. */
+  const orderOfAnswer = (answer: unknown, instance: string | undefined, threadId?: string): ReadOrder => {
+    const revision = (answer as { revision?: unknown } | null)?.revision
+    return {
+      ...(instance ? { instance } : {}),
+      ...(typeof revision === 'number' && Number.isFinite(revision) && !(threadId && isQualifiedId(threadId)) ? { revision } : {})
+    }
+  }
+  /** The order of an answer read in the current window's context (an IPC handler). */
+  const orderInWindow = (answer: unknown, threadId?: string): ReadOrder | undefined => {
+    const senderId = guiMms.getCurrentSenderId()
+    return senderId === null ? orderOfAnswer(answer, guiMms.hello?.instanceId, threadId) : orderOfAnswer(answer, guiMms.instanceForSender?.(senderId), threadId)
+  }
+
   /** Update per-profile live state for a window session before bridging it. */
   const routeWindowState = (
     event: ProtocolEvent,
     profileId: string,
-    target: (channel: string, data: unknown) => void
+    target: (channel: string, data: unknown) => void,
+    instance?: string
   ): void => {
     const tracker = activityTrackerFor(profileId)
+    const order = orderFor(profileId)
     if (event.type === 'activity' || event.type === 'activity.snapshot') {
       const data = event.data as { state?: ThreadActivityState; activity?: ThreadActivitySnapshot } | null
       if (event.type === 'activity' && event.threadId && data?.state) {
         tracker.setState(event.threadId, data.state)
+        order.noteUpdate('activity', instance, event.sequence, event.threadId)
         target('threads:activity', tracker.getSnapshot())
       }
       if (data?.activity && typeof data.activity === 'object' && !Array.isArray(data.activity)) {
         tracker.reconcileSnapshot(data.activity)
+        order.noteUpdate('activity', instance, event.sequence)
         target('threads:activity', tracker.getSnapshot())
       }
     }
@@ -802,11 +932,15 @@ export function registerGuiIpc(
       const state = raw?.state ?? raw
       const snapshot = raw?.snapshot ?? raw?.turns ?? (event.type === 'turn.state' ? undefined : raw as unknown as TurnStateSnapshot)
       const map = turnStateMapFor(profileId)
-      if (state && typeof state === 'object' && 'threadId' in state) map.set(state.threadId, state as TurnState)
+      if (state && typeof state === 'object' && 'threadId' in state) {
+        map.set(state.threadId, state as TurnState)
+        order.noteUpdate('turn', instance, event.sequence, (state as TurnState).threadId)
+      }
       if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
         for (const [threadId, value] of Object.entries(snapshot)) {
           if (value && typeof value === 'object' && 'threadId' in value) map.set(threadId, value as TurnState)
         }
+        order.noteUpdate('turn', instance, event.sequence)
       }
       target('turns:state', Object.fromEntries(map))
       if (state && typeof state === 'object' && 'threadId' in state) target('orchestrator:turn-state', state)
@@ -828,8 +962,11 @@ export function registerGuiIpc(
       turnState?: TurnState
       turnSnapshot?: TurnStateSnapshot
     } | null
+    const profileId = currentProfileKey()
     const single = full?.turnState
-    if (single && typeof single === 'object' && single.threadId) {
+    // Only threads with no newer update applied take the answer's turn (#1042).
+    const order = orderInWindow(snap, single?.threadId)
+    if (single && typeof single === 'object' && single.threadId && answerApplies(profileId, 'turn', order, single.threadId)) {
       turnStateMapFor().set(single.threadId, single)
       broadcast('orchestrator:turn-state', single)
     }
@@ -837,7 +974,7 @@ export function registerGuiIpc(
     if (multi && typeof multi === 'object' && !Array.isArray(multi)) {
       let has = false
       for (const [k, v] of Object.entries(multi)) {
-        if (v && typeof v === 'object' && 'threadId' in (v as object)) {
+        if (v && typeof v === 'object' && 'threadId' in (v as object) && answerApplies(profileId, 'turn', order, k)) {
           turnStateMapFor().set(k, v as TurnState)
           has = true
         }
@@ -871,8 +1008,8 @@ export function registerGuiIpc(
             notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
             notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
-          } else if (state === 'idle' || state === 'paused') {
-            // A run that hit a usage limit stopped and waits for the person (or the reset).
+          } else if ((state === 'idle' && !stoppedByPerson(event.data)) || state === 'paused') {
+            // A run that hit a usage limit stopped and waits for the person (or the reset). A turn a person stopped is not news.
             notifyThread(event.threadId, 'idle', currentPresentation().getActiveThreadId())
           }
         }
@@ -883,7 +1020,8 @@ export function registerGuiIpc(
       // event. If the thread is still tracked as working, flip it and ding;
       // if the activity event already landed, that path already notified.
       if (isThreadActivityActive(activityTrackerFor().getState(event.threadId))) {
-        setThreadActivity(event.threadId, 'awaiting_input')
+        // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
+        if ((event.data as { wait?: unknown } | null)?.wait !== false) setThreadActivity(event.threadId, 'awaiting_input')
         notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
       }
     }
@@ -1022,15 +1160,36 @@ export function registerGuiIpc(
     }
     // Live output of a Git action: the daemon sent it on this window's own connection, so only this window gets it.
     if (event.type === 'git.operation') win.webContents.send('git:operation', (event.data as { event?: unknown } | null)?.event)
+    // A picture of a bot's browser this window watches, on its own connection too.
+    if (event.type === 'bots.browser.frame') win.webContents.send('bots:browserFrame', event.data)
+    // A picture of a thread's browser without a window this window watches.
+    if (event.type === 'browser.view.frame') win.webContents.send('browser:viewFrame', event.data)
   })
-  guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
+  guiMms.on('window-event', ({ senderId, event, replay, instance }: { senderId: number; event: ProtocolEvent; replay?: boolean; instance?: string }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
     if (!win || win.isDestroyed()) return
     const binding = guiMms.getWindowBindingForSender(senderId)
+    if (!binding && event.profileId) {
+      // A profile switch: the new profile's replay arrives while it is in progress, and the window reads that profile
+      // in full once it ends. Nothing is lost, so nothing is logged or caught up.
+      if (guiMms.isProfileChanging?.(senderId)) return
+      // The window's connection is being replaced: this update is not shown. The window reads what it missed once the
+      // connection is back (#1042).
+      linkLog.undeliverable(senderId, 'connection-changing', event.type, event.threadId)
+      requestCatchUp(senderId, 'undelivered', UNDELIVERED_CATCH_UP_DELAY_MS)
+      return
+    }
     if (!binding || (event.profileId && event.profileId !== binding.profileId)) return
     // Installation events are already bridged by the base session. Personal
     // events, including Default, need this exact window's presentation state.
     if (!event.profileId) return
+    if (dropTurnEnd?.drop(event)) {
+      linkLog.undeliverable(senderId, 'dev-dropped', event.type, event.threadId)
+      return
+    }
+    // The update is about the thread this window shows: its turn is not quiet.
+    quietWatch.touch(senderId, event.threadId)
+    queueMicrotask(() => noteShown(senderId))
     const target = (channel: string, data: unknown): void => {
       if (!win.isDestroyed()) win.webContents.send(channel, data)
     }
@@ -1038,7 +1197,9 @@ export function registerGuiIpc(
     const previousActivity = event.type === 'activity' && event.threadId
       ? tracker.getState(event.threadId)
       : undefined
-    routeWindowState(event, binding.profileId, target)
+    routeWindowState(event, binding.profileId, target, instance)
+    // A thread that finishes while a focused window shows it was seen as it finished.
+    if (event.type === 'activity' || event.type === 'activity.snapshot') reportSeenIfDone(win)
     if (event.type === 'threads.updated') notificationThreads.note(binding.profileId, event.data)
     if (event.type === 'projects.updated') notificationThreads.noteProjects(binding.profileId, event.data)
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
@@ -1047,7 +1208,8 @@ export function registerGuiIpc(
       // Working → Waiting is still the same work cycle; only its end notifies. A scheduled occurrence's end is the
       // automation's to announce (`scheduled.runEnded`, as its Tell me says), unless it stopped to ask.
       const scheduledTurn = (event.data as { scheduled?: unknown } | null)?.scheduled === true
-      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input')) {
+      // A turn a person stopped (theirs, or the thread that launched it) is not announced to them as stopped.
+      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input') && !(state === 'idle' && stoppedByPerson(event.data))) {
         const kind: ThreadNotificationKind = state === 'completed'
           ? 'completed'
           : state === 'awaiting_input'
@@ -1063,11 +1225,15 @@ export function registerGuiIpc(
         )
       }
     }
-    if (event.type === 'bots.message' && !replay) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
+    if (event.type === 'bots.tell' && !replay) notifyTelling(event.data as BotTelling, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId, event.sequence, instance)
+    if (event.type === 'bots.message' && !replay && !guiMms.tellsForSender?.(senderId)) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
     if (event.type === 'scheduled.runEnded' && !replay) notifyAutomationRun(event.data, win, presentationForSender(senderId).getActiveThreadId(), windowSettings.get(senderId) ?? settings.get())
     if (event.type === 'questions.pending' && event.threadId && isThreadActivityActive(tracker.getState(event.threadId))) {
-      tracker.setState(event.threadId, 'awaiting_input')
-      target('threads:activity', tracker.getSnapshot())
+      // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
+      if ((event.data as { wait?: unknown } | null)?.wait !== false) {
+        tracker.setState(event.threadId, 'awaiting_input')
+        target('threads:activity', tracker.getSnapshot())
+      }
       if (!replay) notifyThread(
         event.threadId,
         'question',
@@ -1101,43 +1267,448 @@ export function registerGuiIpc(
   // A window's replacement connection (after a daemon restart or a dropped connection) shows the daemon its thread again.
   guiMms.setShownThreadSource?.((senderId) => presentationForSender(senderId).getActiveThreadId())
 
-  // A window asks for a resnapshot on every event while its gap flag is set, which is a burst during
-  // streaming. One snapshot runs at a time per window (and one more if asked meanwhile); one per
-  // event filled the connection's request limit and failed unrelated calls.
-  const resnapshotWindow = coalescedRunner(async (senderId: number) => {
-    const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
+  /**
+   * Shows a thread as the service has it: its transcript, queue, agents, tasks, open questions and turn. Opening a
+   * thread and catching a window up both end here, so the two cannot disagree (#1042). The turn goes last, so a turn
+   * that ended shows with its reply, never a frame without it.
+   */
+  const showThreadSnapshot = (
+    threadId: string,
+    snap: ThreadSnapshotResult,
+    out: { send: (channel: string, data: unknown) => void; presentation: PresentationState; profileId?: string; order?: ReadOrder }
+  ): TurnState => {
+    const full = snap as {
+      agents?: unknown[]
+      tasks?: unknown[]
+      pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown; wait?: false }>
+      turnSnapshot?: TurnStateSnapshot
+    }
+    const profileId = out.profileId ?? currentProfileKey()
+    const map = turnStateMapFor(profileId)
+    // The service read the turns, then loaded the thread before answering; an update it sent meanwhile may already be
+    // here, and it is newer than this answer. Only threads with nothing newer take the answer's turn (#1042).
+    const applies = (id: string): boolean => answerApplies(profileId, 'turn', out.order, id)
+    // The snapshot carries every thread's turn: one that ended while this window missed it ends here too.
+    if (full.turnSnapshot && typeof full.turnSnapshot === 'object' && !Array.isArray(full.turnSnapshot)) {
+      for (const [id, value] of Object.entries(full.turnSnapshot)) {
+        if (id !== threadId && value && typeof value === 'object' && 'threadId' in (value as object) && applies(id)) map.set(id, value as TurnState)
+      }
+    }
+    const held = map.get(threadId)
+    const turn = held && !applies(threadId) ? held : resnapshotTurnState(threadId, snap, held)
+    map.set(threadId, turn)
+    broadcastThreadSnapshot(
+      threadId,
+      {
+        messages: snap.messages,
+        queue: snap.queue,
+        connectionFailed: snap.connectionFailed,
+        agents: full.agents,
+        tasks: full.tasks,
+        earlier: snap.earlier
+      },
+      out.send,
+      out.presentation
+    )
+    for (const q of full.pendingQuestions ?? []) {
+      out.send('orchestrator:questionsPending', {
+        requestId: q.requestId,
+        questions: q.questions,
+        // The window shows the question only while it shows this thread.
+        threadId,
+        ...(q.approval ? { approval: q.approval } : {}),
+        ...(q.wait === false ? { wait: false } : {})
+      })
+    }
+    out.send('orchestrator:turn-state', turn)
+    out.send('turns:state', Object.fromEntries(map))
+    return turn
+  }
+
+  // ── Catching a window up with the service (#1042) ────────────────────────
+  // A window learns a turn's state only from pushed updates. When one is lost (a gap in the window connection's
+  // event numbers, a connection that dropped and was opened again, an update main could not hand over), or a turn
+  // that looks active goes quiet, main reads the thread again the way opening it does.
+
+  const linkLog = services.connectionLog ?? { write: () => undefined, undeliverable: () => undefined }
+  const dropTurnEnd = services.devDropTurnEnd ? createDevTurnEndDropper() : null
+  const windowBySender = (senderId: number): BrowserWindow | undefined =>
+    BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed() && candidate.webContents.id === senderId)
+
+  /** Whether the window's shown thread has a turn that looks active there: what the quiet-turn watch follows. */
+  const noteShown = (senderId: number): void => {
     const binding = guiMms.getWindowBindingForSender(senderId)
-    if (!win || win.isDestroyed() || !binding) return
-    const activeId = presentationForSender(senderId).getActiveThreadId()
+    if (!binding) return
+    const threadId = presentationForSender(senderId).getActiveThreadId()
+    const active = Boolean(threadId) && (
+      isTurnStoppable(turnStateMapFor(binding.profileId).get(threadId!)) ||
+      isThreadActivityActive(activityTrackerFor(binding.profileId).getState(threadId!))
+    )
+    quietWatch.setShown(senderId, threadId, active)
+  }
+
+  const takeReasons = (pending: Map<number, Set<string>>, senderId: number): string[] => {
+    const reasons = [...(pending.get(senderId) ?? [])]
+    pending.delete(senderId)
+    return reasons.length ? reasons : ['unspecified']
+  }
+
+  /**
+   * Every thread's status from the service, through the window's connection. A thread main applied a newer status
+   * update about (sent after the service read, arrived before its answer) keeps it (#1042). Returns how many moved.
+   */
+  const readStatuses = async (senderId: number, profileId: string, clearsGap: boolean): Promise<number> => {
+    const tracker = activityTrackerFor(profileId)
+    const before = tracker.getSnapshot()
+    const answer = await guiMms.activityForSender(senderId, clearsGap)
+    tracker.reconcileSnapshot(answer.activity, (threadId) => !answerApplies(profileId, 'activity', answer, threadId))
+    const after = tracker.getSnapshot()
+    return new Set([...Object.keys(before), ...Object.keys(after)].filter((id) => before[id] !== after[id])).size
+  }
+
+  /** Reasons after which updates other than the shown thread's may be missing: a reopened connection, a lost replay. */
+  const LIST_REREAD_REASONS = new Set(['reconnected', 'gap', 'undelivered'])
+  /**
+   * The window's lists read again through its own connection: projects and threads for the sidebar, and its bot chats
+   * and chat list (`bots:changed` with `reread`, `chats:changed`), which read themselves. A service that restarted
+   * replays only what it sent since it started, so these would otherwise wait for their next change.
+   */
+  const rereadLists = async (win: BrowserWindow, profileId: string, target: (channel: string, data: unknown) => void): Promise<string | undefined> => {
+    const senderId = win.webContents.id
+    const stillBound = (): boolean => guiMms.getWindowBindingForSender(senderId)?.profileId === profileId
+    let failed: string | undefined
+    try {
+      const [projects, threads] = await guiMms.runWithSender(win.webContents, () => Promise.all([
+        guiMms.request<{ projects?: unknown[] }>('projects.list'),
+        guiMms.request<{ threads?: unknown[] }>('threads.list')
+      ]))
+      if (stillBound()) {
+        if (Array.isArray(projects?.projects)) {
+          notificationThreads.noteProjects(profileId, projects.projects)
+          target('projects:updated', projects.projects)
+        }
+        if (Array.isArray(threads?.threads)) {
+          const payload = threadListPayload(threads)
+          notificationThreads.note(profileId, payload)
+          target('threads:updated', payload)
+        }
+      }
+    } catch (error) {
+      failed = describeLinkError(error)
+    }
+    if (stillBound()) {
+      target('bots:changed', { reread: true })
+      target('chats:changed', null)
+    }
+    return failed
+  }
+
+  const catchUpReasons = new Map<number, Set<string>>()
+  /** Windows whose catch-up waits for their connection to be opened again, logged once each time. */
+  const catchUpWaiting = new Set<number>()
+  // A window asks for this on every event while its gap flag is set, which is a burst during streaming. One read runs
+  // at a time per window (and one more if asked meanwhile); one per event filled the connection's request limit.
+  const catchUpWindow = coalescedRunner(async (senderId: number) => {
+    const reasons = takeReasons(catchUpReasons, senderId)
+    const win = windowBySender(senderId)
+    if (!win) return
+    const binding = guiMms.getWindowBindingForSender(senderId)
+    if (!binding) {
+      // A profile switch reads the new profile in full when it ends: nothing to catch up.
+      if (guiMms.isProfileChanging?.(senderId)) return
+      // The connection is closed or being opened again. Its reopening (`window-session-reopened`) runs this catch-up
+      // with these reasons. The catch-up never opens it: only the controller's reopen does, after the main connection.
+      for (const reason of reasons) addCatchUpReason(senderId, reason)
+      if (!catchUpWaiting.has(senderId)) {
+        catchUpWaiting.add(senderId)
+        linkLog.write('catch-up.waiting', { window: senderId, reasons })
+      }
+      return
+    }
+    catchUpWaiting.delete(senderId)
+    const profileId = binding.profileId
+    const presentation = presentationForSender(senderId)
+    const activeId = presentation.getActiveThreadId()
     const target = (channel: string, data: unknown): void => {
       if (!win.isDestroyed()) win.webContents.send(channel, data)
     }
-    // The missed events may have changed any thread's status (a turn ended, the service restarted): read them all again.
+    const tracker = activityTrackerFor(profileId)
+    const activityBefore = activeId ? tracker.getState(activeId) ?? 'idle' : undefined
+    const turnBefore = activeId ? turnStateMapFor(profileId).get(activeId) : undefined
+    const changed: string[] = []
+    const kept: string[] = []
+    let failed: string | undefined
+    // The missed events may have changed any thread's status (a turn ended, the service restarted): read them all
+    // again, so the sidebar's Working and Done marks are the service's.
     try {
-      const tracker = activityTrackerFor(binding.profileId)
-      tracker.reconcileSnapshot(await guiMms.activityForSender(senderId, !activeId))
+      const moved = await readStatuses(senderId, profileId, !activeId)
+      if (moved) changed.push(`activity:${moved}`)
       target('threads:activity', tracker.getSnapshot())
     } catch (error) {
-      console.error('window thread statuses resnapshot failed:', error)
+      failed = describeLinkError(error)
+      console.error('window thread statuses could not be read again:', failed)
     }
-    if (!activeId) return
+    let turnAfter: TurnState | undefined
+    let messages: number | undefined
+    if (activeId) {
+      try {
+        const instance = guiMms.instanceForSender?.(senderId)
+        const snap = await guiMms.snapshotThreadForSender(senderId, activeId)
+        // The window moved to another thread meanwhile; opening that one read it.
+        if (!win.isDestroyed() && presentation.getActiveThreadId() === activeId) {
+          const order = orderOfAnswer(snap, instance, activeId)
+          if (!answerApplies(profileId, 'turn', order, activeId)) kept.push('turn')
+          turnAfter = showThreadSnapshot(activeId, snap, { send: target, presentation, profileId, order })
+          messages = Array.isArray(snap.messages) ? snap.messages.length : undefined
+          if (turnBefore?.phase !== turnAfter.phase || turnBefore?.turnId !== turnAfter.turnId) changed.push('turn')
+        }
+      } catch (error) {
+        failed = describeLinkError(error)
+        console.error('window thread could not be read again:', failed)
+      }
+    }
+    if (reasons.some((reason) => LIST_REREAD_REASONS.has(reason))) {
+      const listsFailed = await rereadLists(win, profileId, target)
+      if (listsFailed) failed ??= listsFailed
+      else changed.push('lists')
+    }
+    // A thread that finished while a focused window showed it was seen as it finished.
+    reportSeenIfDone(win)
+    linkLog.write(failed ? 'catch-up.failed' : 'catch-up', {
+      window: senderId,
+      thread: activeId ?? null,
+      reasons,
+      turn: activeId ? `${turnBefore?.phase ?? 'none'}→${turnAfter?.phase ?? turnBefore?.phase ?? 'none'}` : undefined,
+      activity: activeId ? `${activityBefore}→${tracker.getState(activeId) ?? 'idle'}` : undefined,
+      changed,
+      // The answer was older than an update already applied: the update stays.
+      kept: kept.length ? kept : undefined,
+      messages,
+      error: failed
+    })
+    noteShown(senderId)
+  })
+
+  const catchUpTimers = new Map<number, ReturnType<typeof setTimeout>>()
+  const addCatchUpReason = (senderId: number, reason: string): void => {
+    let reasons = catchUpReasons.get(senderId)
+    if (!reasons) {
+      reasons = new Set()
+      catchUpReasons.set(senderId, reasons)
+    }
+    reasons.add(reason)
+  }
+  /** Catches the window up now, or after `delayMs` (a burst of reasons becomes one read). */
+  function requestCatchUp(senderId: number, reason: string, delayMs = 0): void {
+    addCatchUpReason(senderId, reason)
+    if (delayMs <= 0) {
+      void catchUpWindow(senderId)
+      return
+    }
+    if (catchUpTimers.has(senderId)) return
+    const timer = setTimeout(() => {
+      catchUpTimers.delete(senderId)
+      void catchUpWindow(senderId)
+    }, delayMs)
+    ;(timer as { unref?: () => void }).unref?.()
+    catchUpTimers.set(senderId, timer)
+  }
+
+  /**
+   * The window was not told the service's turn: it holds none, an older one, or another at the same moment. One newer
+   * than the service's answer is not behind: an update sent after the service read its state arrives before the answer.
+   * An idle state the service does not hold (`turnHeld` false) means no turn ran there since it started: a window
+   * showing idle is current whatever the times, as an older service stamps that state with the time of each read. An
+   * idle state it holds is compared like any other: a paused turn that was cancelled or stopped ends idle (#1086).
+   */
+  const turnBehind = (held: TurnState | undefined, service: TurnState, serviceHolds?: boolean): boolean => {
+    if (service.phase === 'idle' && serviceHolds === false && (held?.phase ?? 'idle') === 'idle') return false
+    if (!held) return true
+    const heldAt = Date.parse(held.updatedAt)
+    const serviceAt = Date.parse(service.updatedAt)
+    if (Number.isFinite(heldAt) && Number.isFinite(serviceAt) && heldAt !== serviceAt) return heldAt < serviceAt
+    return held.turnId !== service.turnId || held.phase !== service.phase
+  }
+
+  /**
+   * A gap in live events is only the service replacing a waiting update with its newer copy (a streamed message, the
+   * thread list, every thread's status), which the window then receives: its lists lost nothing. A check that finds the
+   * turn behind after one reads the thread again, not the lists (`LIST_REREAD_REASONS`).
+   */
+  const catchUpReasonOfCheck = (reason: string): string => reason === 'gap' ? 'live-gap' : reason
+
+  const checkReasons = new Map<number, Set<string>>()
+  /**
+   * The cheap check: the service's turn for the window's thread, read without its transcript, against what the window
+   * was told. The window missed something only when the service's state, as of its read, differs from what main applied
+   * and main applied nothing about the thread newer than that read (#1042): numbers merely skipped (a streamed update
+   * replaced by its newer copy, which arrives after this answer) are not a loss. Only a difference leads to the full
+   * read; a turn that is really running is left alone: nothing is sent to the window.
+   */
+  const checkWindow = coalescedRunner(async (senderId: number) => {
+    const reasons = takeReasons(checkReasons, senderId)
     try {
-      const snap = await guiMms.snapshotThreadForSender(senderId, activeId)
-      const full = snap as { agents?: unknown[]; tasks?: unknown[]; pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }> }
-      target('queue:updated', { threadId: activeId, items: snap.queue })
-      target('agents:updated', full.agents ?? [])
-      target('tasks:updated', full.tasks ?? [])
-      for (const q of full.pendingQuestions ?? []) target('orchestrator:questionsPending', { requestId: q.requestId, questions: q.questions, threadId: activeId, ...(q.approval ? { approval: q.approval } : {}) })
-      const state = snap.activeTurn?.active ? { threadId: activeId, state: snap.activeTurn.running ? 'processing' : 'idle' } : { threadId: activeId, state: 'idle' }
-      turnStateMapFor(binding.profileId).set(activeId, state as unknown as TurnState)
-      target('orchestrator:turn-state', state)
-      target('turns:state', Object.fromEntries(turnStateMapFor(binding.profileId)))
+      const win = windowBySender(senderId)
+      if (!win) {
+        quietWatch.forget(senderId)
+        return
+      }
+      const binding = guiMms.getWindowBindingForSender(senderId)
+      if (!binding) {
+        for (const reason of reasons) addCatchUpReason(senderId, catchUpReasonOfCheck(reason))
+        await catchUpWindow(senderId)
+        return
+      }
+      const activeId = presentationForSender(senderId).getActiveThreadId()
+      const answersGap = reasons.includes('gap')
+      if (!activeId) {
+        // With no thread open, a gap is answered by reading every thread's status (it clears the gap flag).
+        if (answersGap) {
+          addCatchUpReason(senderId, 'live-gap')
+          await catchUpWindow(senderId)
+        }
+        return
+      }
+      // The status read starts first: it clears the gap flag as it starts, so the updates that arrive while the
+      // statuses below are read do not ask for a second check of the same gap.
+      const statusRead = guiMms.turnStatusForSender(senderId, activeId, answersGap)
+      statusRead.catch(() => undefined)
+      if (answersGap) {
+        // Every thread's status is small to read: after a gap the sidebar's marks are the service's again.
+        try {
+          await readStatuses(senderId, binding.profileId, false)
+          if (!win.isDestroyed()) win.webContents.send('threads:activity', activityTrackerFor(binding.profileId).getSnapshot())
+        } catch (error) {
+          linkLog.write('check.failed', { window: senderId, reasons, read: 'activity', error: describeLinkError(error) })
+        }
+      }
+      const status = await statusRead
+      const held = turnStateMapFor(binding.profileId).get(activeId)
+      const shownActive = isTurnStoppable(held) || isThreadActivityActive(activityTrackerFor(binding.profileId).getState(activeId))
+      const serviceActive = status.turnState
+        ? isTurnStoppable(status.turnState)
+        : status.activeTurn.active || status.activeTurn.running
+      // What main applied after the service read wins over the answer: the window is not behind on it.
+      const turnCurrent = !answerApplies(binding.profileId, 'turn', status, activeId)
+      const statusCurrent = !answerApplies(binding.profileId, 'activity', status, activeId)
+      const behind: string[] = []
+      if (!turnCurrent && (status.turnState ? turnBehind(held, status.turnState, status.turnHeld) : isTurnStoppable(held) !== serviceActive)) behind.push('turn-differs')
+      if (!turnCurrent && !statusCurrent && shownActive && !serviceActive && status.activity !== undefined && !isThreadActivityActive(status.activity as ThreadActivityState)) behind.push('ended')
+      if (!behind.length) {
+        // The thread's activity tells a turn that is running, or a finished turn whose thread still works (its
+        // subagents, a checkpoint), from a window that shows Working the service does not.
+        if (reasons.includes('quiet')) linkLog.write('check.running', { window: senderId, thread: activeId, reasons, phase: status.turnState?.phase ?? null, activity: status.activity ?? null, shown: activityTrackerFor(binding.profileId).getState(activeId) ?? 'idle', newer: turnCurrent || undefined })
+        return
+      }
+      linkLog.write('check.behind', { window: senderId, thread: activeId, reasons, found: behind, shown: held?.phase ?? null, service: status.turnState?.phase ?? null })
+      for (const reason of reasons) addCatchUpReason(senderId, catchUpReasonOfCheck(reason))
+      await catchUpWindow(senderId)
     } catch (error) {
-      console.error('window resnapshot failed:', error)
+      linkLog.write('check.failed', { window: senderId, reasons, error: describeLinkError(error) })
+    } finally {
+      if (reasons.includes('quiet')) quietWatch.checked(senderId)
     }
   })
-  guiMms.on('window-resnapshot', ({ senderId }: { senderId: number }) => {
-    void resnapshotWindow(senderId)
+  /** Runs the cheap check for a window; `reason` says why, in the log. */
+  function requestCheck(senderId: number, reason: string): void {
+    let reasons = checkReasons.get(senderId)
+    if (!reasons) {
+      reasons = new Set()
+      checkReasons.set(senderId, reasons)
+    }
+    reasons.add(reason)
+    void checkWindow(senderId)
+  }
+
+  const quietWatch = new QuietTurnWatch({
+    onQuiet: (senderId) => requestCheck(senderId, 'quiet')
+  })
+
+  guiMms.on('window-resnapshot', ({ senderId, subscribed }: { senderId: number; subscribed?: boolean }) => {
+    // The service's replay no longer held what the window missed: read it all again.
+    if (subscribed) {
+      requestCatchUp(senderId, 'gap')
+      return
+    }
+    // A gap in live events is mostly the service replacing a waiting streamed update with its newer copy, which
+    // arrives next: the cheap check answers it, and reads the thread again only if the window really is behind.
+    // While a streaming reply is replaced like this many times a turn, its transcript is not sent again each time.
+    if (dropTurnEnd?.cutting()) return
+    requestCheck(senderId, 'gap')
+  })
+  // The window's own connection dropped and was opened again: everything since is unknown.
+  guiMms.on('window-session-reopened', ({ senderId }: { senderId: number }) => {
+    requestCatchUp(senderId, 'reconnected')
+  })
+  // A window subscribed to its profile's updates: a counter that started again voids the numbers held for it.
+  guiMms.on('window-subscribed', ({ senderId, profileId, instance, sequence, how }: { senderId: number; profileId: string; instance?: string; sequence: number; how?: string }) => {
+    orderFor(profileId).subscribed(instance, sequence)
+    // A window's first connection: the window reads everything as it starts, so a catch-up asked before it had one
+    // (the service came up after the window) has nothing to add.
+    if (how === 'opened') {
+      catchUpReasons.delete(senderId)
+      catchUpWaiting.delete(senderId)
+    }
+  })
+
+  // Windows becoming visible again, and their renderer or graphics process being replaced.
+  const VISIBLE_CHECK_MIN_MS = 5_000
+  const lastVisibleCheck = new Map<number, number>()
+  const visibleAgain = (senderId: number, reason: string): void => {
+    const now = Date.now()
+    if (now - (lastVisibleCheck.get(senderId) ?? 0) < VISIBLE_CHECK_MIN_MS) return
+    lastVisibleCheck.set(senderId, now)
+    requestCheck(senderId, reason)
+  }
+  const watchedWindows = new WeakSet<BrowserWindow>()
+  const watchWindow = (win: BrowserWindow): void => {
+    if (watchedWindows.has(win) || typeof (win as { on?: unknown }).on !== 'function') return
+    watchedWindows.add(win)
+    const senderId = win.webContents.id
+    let rendererGone = false
+    win.on('show', () => visibleAgain(senderId, 'shown'))
+    win.on('restore', () => visibleAgain(senderId, 'restored'))
+    win.on('focus', () => visibleAgain(senderId, 'focused'))
+    // A key or a click: a request the window makes soon after is the person's (after the service connection gave up,
+    // only those try it again).
+    win.webContents.on('input-event', (_event, input) => {
+      const type = (input as { type?: string } | undefined)?.type
+      if (type === 'mouseDown' || type === 'keyDown' || type === 'rawKeyDown') guiMms.notePersonInput?.(senderId)
+    })
+    win.on('unresponsive', () => linkLog.write('window.unresponsive', { window: senderId }))
+    win.on('responsive', () => {
+      linkLog.write('window.responsive', { window: senderId })
+      requestCheck(senderId, 'responsive-again')
+    })
+    win.webContents.on('render-process-gone', (_event, details) => {
+      rendererGone = true
+      linkLog.write('renderer.gone', { window: senderId, reason: details?.reason, exitCode: details?.exitCode })
+    })
+    win.webContents.on('did-finish-load', () => {
+      if (!rendererGone) return
+      rendererGone = false
+      // The new page reads its threads as it starts; this checks the shown turn once it has.
+      const timer = setTimeout(() => requestCheck(senderId, 'renderer-replaced'), 3_000)
+      ;(timer as { unref?: () => void }).unref?.()
+    })
+    win.on('closed', () => {
+      quietWatch.forget(senderId)
+      lastVisibleCheck.delete(senderId)
+      const timer = catchUpTimers.get(senderId)
+      if (timer) clearTimeout(timer)
+      catchUpTimers.delete(senderId)
+      catchUpReasons.delete(senderId)
+      catchUpWaiting.delete(senderId)
+    })
+  }
+  for (const win of BrowserWindow.getAllWindows()) watchWindow(win)
+  app.on('browser-window-created', (_event, win) => watchWindow(win))
+  app.on('child-process-gone', (_event, details) => {
+    if (details?.type !== 'GPU') return
+    linkLog.write('gpu.gone', { reason: details.reason, exitCode: details.exitCode })
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) requestCheck(win.webContents.id, 'gpu-replaced')
+    }
   })
 
   // Same burst for the base connection, and each run here costs three requests.
@@ -1149,7 +1720,7 @@ export function registerGuiIpc(
       const full = snap as {
         agents?: unknown[]
         tasks?: unknown[]
-        pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
+        pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown; wait?: false }>
       }
       syncDaemonTurnSnapshot(snap)
       broadcastThreadSnapshot(
@@ -1172,7 +1743,8 @@ export function registerGuiIpc(
           requestId: q.requestId,
           questions: q.questions,
           threadId: activeId,
-          ...(q.approval ? { approval: q.approval } : {})
+          ...(q.approval ? { approval: q.approval } : {}),
+          ...(q.wait === false ? { wait: false } : {})
         })
       }
       const projects = await guiMms.request<{ projects: unknown[] }>('projects.list')
@@ -1186,7 +1758,14 @@ export function registerGuiIpc(
   })
   guiMms.on('resnapshot', (event?: { reason?: string }) => {
     // A reconnect may be to a restarted service: provider operations the windows wait on are gone.
-    if (event?.reason?.startsWith('reconnect')) broadcast('providers:serviceRestarted', null)
+    if (event?.reason?.startsWith('reconnect')) {
+      broadcast('providers:serviceRestarted', null)
+      // Each window's own connection carries its threads' updates: check what every window shows against the
+      // service. A window whose connection also dropped is caught up when that one is opened again.
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) requestCheck(win.webContents.id, 'service-reconnected')
+      }
+    }
     void resnapshotBase('base')
   })
 
@@ -1207,6 +1786,9 @@ export function registerGuiIpc(
     try {
       const body = normalizeSendContent(request)
       const requestId = body.requestId ?? randomUUID()
+      // SPEC §16.4: a continuation of a run is `continue:<runId>`, so a second click replays the first. Only the
+      // receipt key: `requestId` stays the send's own (a slash workflow's receipt, 64 characters at most).
+      const clientRequestId = body.continuationOfRunId ? `continue:${body.continuationOfRunId}` : requestId
       const result = await guiMms.request<{ queued?: boolean; heldByPause?: boolean; message?: string }>(
         'orchestrator.send',
         {
@@ -1215,12 +1797,15 @@ export function registerGuiIpc(
           requestId,
           // The composer sends a message again with the same id only when it may have arrived, so the
           // service answers with the run it already has instead of running it twice.
-          clientRequestId: requestId,
+          clientRequestId,
           mode: body.mode,
           images: body.images,
           source: 'gui',
           ...(body.conversationBranchId ? { conversationBranchId: body.conversationBranchId } : {}),
-          ...(body.expect ? { expect: body.expect } : {})
+          ...(body.continuationOfRunId ? { continuationOfRunId: body.continuationOfRunId, ...(body.acknowledgeUncertain ? { acknowledgeUncertain: true } : {}) } : {}),
+          ...(body.expect ? { expect: body.expect } : {}),
+          // Opt-in: answer once the run is committed, so a caller that watches the turn is not held for all of it.
+          ...(body.await === 'ack' ? { await: 'ack' } : {})
         }
       )
       if (result.heldByPause) {
@@ -1235,14 +1820,13 @@ export function registerGuiIpc(
     } catch (err) {
       // A send to another computer that was not confirmed: the window reads the thread in view again.
       noteUncertainOutcome(err)
-      const error = guiChatRequestError(err)
-      const disconnected = error.code === 'workspace_connection_lost'
-      if (!disconnected) {
+      const { error, answer } = guiSendFailureAnswer(err)
+      if (answer.requestAcknowledged === false) {
         setThreadActivity(targetThreadId, 'idle')
         activityTrackerFor().setBusyThreadId(null)
       }
       console.error('GUI chat request failed', errorDiagnostic(error, 'orchestrator.send'))
-      return { message: '', actions: [], ...(disconnected ? {} : { requestAcknowledged: false }), error: serializeAppError(error) }
+      return answer
     }
   }
 
@@ -1264,7 +1848,10 @@ export function registerGuiIpc(
   registerHandler(
     'orchestrator:getContextUsage',
     async (_e, request?: OrchestratorContextUsageInput) => {
-      const threadId = currentPresentation().getActiveThreadId()
+      // The thread the window shows, named by the window: right after a switch the active thread here may
+      // still be the one before.
+      const named = typeof request === 'object' && typeof request?.threadId === 'string' && request.threadId ? request.threadId : undefined
+      const threadId = named ?? currentPresentation().getActiveThreadId()
       const body =
         typeof request === 'string'
           ? { draftInput: request, threadId }
@@ -1277,10 +1864,12 @@ export function registerGuiIpc(
     }
   )
 
-  const answerQuestions = async (requestId: string, answers: UserQuestionAnswers, threadId?: unknown): Promise<QuestionAnswerOutcome> => {
+  const answerQuestions = async (requestId: string, answers: UserQuestionAnswers, threadId?: unknown, attachments?: unknown): Promise<QuestionAnswerOutcome> => {
     const res = await guiMms.request<QuestionAnswerOutcome>('orchestrator.answerQuestions', withThreadId({
       requestId,
-      answers
+      answers,
+      // Images sent with the answers, by question id; the daemon checks them.
+      ...(attachments && typeof attachments === 'object' && Object.keys(attachments).length ? { attachments: attachments as UserQuestionAttachments } : {})
     }, threadId))
     const busy = activityTrackerFor().getBusyThreadId()
     if (res.ok && busy) setThreadActivity(busy, 'processing')
@@ -1294,7 +1883,7 @@ export function registerGuiIpc(
   // the card says who decided what (SPEC §17.4).
   registerHandler(
     'orchestrator:answerQuestionsDetailed',
-    async (_e, requestId: string, answers: UserQuestionAnswers, threadId?: unknown) => answerQuestions(requestId, answers, threadId)
+    async (_e, requestId: string, answers: UserQuestionAnswers, threadId?: unknown, attachments?: unknown) => answerQuestions(requestId, answers, threadId, attachments)
   )
   registerHandler('orchestrator:dismissQuestions', async (_e, requestId: string, threadId?: unknown) => {
     const res = await guiMms.request<{ ok: boolean }>('orchestrator.dismissQuestions', withThreadId({
@@ -1323,12 +1912,25 @@ export function registerGuiIpc(
   registerHandler('orchestrator:steer', async (_e, text: string, threadId?: string) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
     if (!id) return false
-    const res = await guiMms.request<{ ok: boolean }>('orchestrator.steer', {
+    const res = await guiMms.request<{ ok: boolean; steered?: boolean; queued?: boolean }>('orchestrator.steer', {
       threadId: id,
       text: String(text ?? ''),
       source: 'gui-steer'
     })
+    // Queued instead (the running turn could not take it): said apart, so the composer does not call it steered.
+    if (res.ok && res.steered === false && res.queued) return 'queued'
     return res.ok
+  })
+
+  registerHandler('orchestrator:steerNow', async (_e, request: { threadId: string; runId: string; holdGeneration: number; itemIds: string[]; clientRequestId: string }) => {
+    const res = await guiMms.request<{ ok: boolean; reason?: string }>('orchestrator.steerNow', {
+      threadId: String(request?.threadId ?? ''),
+      runId: String(request?.runId ?? ''),
+      holdGeneration: Number(request?.holdGeneration),
+      itemIds: Array.isArray(request?.itemIds) ? request.itemIds.map(String) : [],
+      clientRequestId: String(request?.clientRequestId ?? '')
+    })
+    return { ok: res.ok === true, ...(res.reason ? { reason: res.reason } : {}) }
   })
 
   registerHandler('orchestrator:isTurnActive', async (_e, threadId?: string) => {
@@ -1434,6 +2036,7 @@ export function registerGuiIpc(
   )
   registerHandler('review:files', async (_e, params: Record<string, unknown>) => guiMms.request('review.files', params))
   registerHandler('review:file', async (_e, params: Record<string, unknown>) => guiMms.request('review.file', params))
+  registerHandler('review:turnFile', async (_e, params: Record<string, unknown>) => guiMms.request('review.turnFile', params))
   registerHandler('actions:pin', async (_e, params: Record<string, unknown>) => guiMms.request('actions.pin', params))
   registerHandler('actions:configureRetention', async (_e, params: Record<string, unknown>) => guiMms.request('actions.configureRetention', params))
   registerHandler('actions:sweepRetention', async (_e, threadId: string) => guiMms.request('actions.sweepRetention', { threadId }))
@@ -1566,6 +2169,58 @@ export function registerGuiIpc(
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
+  // Theme wallpapers. The file dialog and the import are one step here, so the page never names a file; the daemon keeps
+  // its own copy (`WallpaperStore`). Each call carries the profile it was made for, and the daemon refuses it once the
+  // window shows another one.
+  registerHandler('appearance:chooseWallpaper', async (_e, profileId: unknown) => {
+    const expectedProfileId = typeof profileId === 'string' ? profileId : guiMms.getWindowBinding()?.profileId
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose a wallpaper',
+      properties: ['openFile'],
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    const res = await guiMms.request<{ wallpaper: unknown }>('appearance.wallpaperImport', { path: result.filePaths[0], expectedProfileId })
+    return res.wallpaper
+  })
+  registerHandler('appearance:importWallpaperBytes', async (_e, profileId: unknown, dataBase64: unknown) => {
+    const res = await guiMms.request<{ wallpaper: unknown }>('appearance.wallpaperImportBytes', {
+      dataBase64,
+      expectedProfileId: typeof profileId === 'string' ? profileId : undefined
+    })
+    return res.wallpaper
+  })
+  registerHandler('appearance:readWallpaper', async (_e, profileId: unknown, id: unknown, bucket: unknown, offset: unknown) =>
+    guiMms.request('appearance.wallpaperRead', {
+      id,
+      ...(bucket == null ? {} : { bucket }),
+      offset,
+      expectedProfileId: typeof profileId === 'string' ? profileId : undefined
+    })
+  )
+  registerHandler('appearance:saveWallpaperCopy', async (_e, profileId: unknown, id: unknown, bucket: unknown, dataBase64: unknown, replace: unknown) => {
+    const res = await guiMms.request<{ saved: boolean }>('appearance.wallpaperSaveCopy', {
+      id,
+      bucket,
+      dataBase64,
+      replace: replace === true,
+      expectedProfileId: typeof profileId === 'string' ? profileId : undefined
+    })
+    return res.saved
+  })
+  /** The longest edge of the largest display, in physical pixels: the size of the wallpaper copy windows show. */
+  registerHandler('appearance:displayLongEdge', () =>
+    Math.max(0, ...screen.getAllDisplays().map((display) => Math.round(Math.max(display.size.width, display.size.height) * display.scaleFactor)))
+  )
+  if (!displaysWatched) {
+    displaysWatched = true
+    const changed = (): void => broadcast('appearance:displaysChanged', null)
+    screen.on('display-added', changed)
+    screen.on('display-removed', changed)
+    screen.on('display-metrics-changed', changed)
+  }
   registerHandler('projects:reorder', async (_e, projectIds: string[]) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.reorder', {
       projectIds
@@ -1594,10 +2249,14 @@ export function registerGuiIpc(
   // are the service's last 512 (less when they are large), so after a long reply they hold no status at all, and the
   // sidebar showed no Done, Working or Input icon until some thread's status changed.
   registerHandler('threads:activity', async () => {
-    const tracker = activityTrackerFor()
+    const profileId = currentProfileKey()
+    const tracker = activityTrackerFor(profileId)
     try {
-      const result = await guiMms.request<{ activity?: ThreadActivitySnapshot }>('activity.snapshot')
-      if (result?.activity && typeof result.activity === 'object' && !Array.isArray(result.activity)) tracker.reconcileSnapshot(result.activity)
+      const result = await guiMms.request<{ activity?: ThreadActivitySnapshot; revision?: number }>('activity.snapshot')
+      const order = orderInWindow(result)
+      if (result?.activity && typeof result.activity === 'object' && !Array.isArray(result.activity)) {
+        tracker.reconcileSnapshot(result.activity, (threadId) => !answerApplies(profileId, 'activity', order, threadId))
+      }
     } catch (error) {
       console.warn('thread statuses could not be read; showing the last ones received', error)
     }
@@ -1660,6 +2319,8 @@ export function registerGuiIpc(
         console.warn('threads.focus failed:', errorCodeOf(error))
       }
     }
+    // Opening a thread clears its Done (on the computer that owns it, for every window). Nothing waits for it.
+    void guiMms.request('threads.markSeen', { threadId }).catch(() => undefined)
 
     const snap = await guiMms.snapshotThread(threadId)
     // A newer select won the race — discard this snapshot.
@@ -1669,11 +2330,7 @@ export function registerGuiIpc(
 
     const full = snap as {
       activity?: import('../../shared/types').ThreadActivityState
-      agents?: unknown[]
-      tasks?: unknown[]
-      pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
     }
-    syncDaemonTurnSnapshot(snap)
     // The runtime activity label is normally authoritative. During reconnects or
     // startup it can briefly lag the session snapshot, though; never clear a spinner
     // for a thread whose turn is still active.
@@ -1696,29 +2353,12 @@ export function registerGuiIpc(
             : 'idle'
       setThreadActivity(threadId, activity)
     }
-    broadcastThreadSnapshot(
-      threadId,
-      {
-        messages: snap.messages,
-        queue: snap.queue,
-        connectionFailed: snap.connectionFailed,
-        agents: full.agents,
-        tasks: full.tasks,
-        earlier: snap.earlier
-      },
-      broadcast,
-      // The window's own selection, which `threads:select` just set (see `resnapshotBase`).
-      currentPresentation()
-    )
-    for (const q of full.pendingQuestions ?? []) {
-      broadcast('orchestrator:questionsPending', {
-        requestId: q.requestId,
-        questions: q.questions,
-        // The window shows the question only while it shows this thread.
-        threadId,
-        ...(q.approval ? { approval: q.approval } : {})
-      })
-    }
+    // The window's own selection, which `threads:select` just set (see `resnapshotBase`). The same path a catch-up
+    // takes, so reopening a thread and catching up cannot disagree; a turn update that arrived while the service
+    // loaded the thread is newer than this answer and stays (#1042).
+    showThreadSnapshot(threadId, snap, { send: broadcast, presentation: currentPresentation(), order: orderInWindow(snap, threadId) })
+    const senderId = guiMms.getCurrentSenderId()
+    if (senderId !== null) noteShown(senderId)
     // Selecting a thread does not mutate the thread list — skip threads.list
     // (full project scan) on the hot path.
   }
@@ -1807,24 +2447,27 @@ export function registerGuiIpc(
   }
 
   // Deletes an archived thread for good; its worktrees, branches and Git refs stay. The window asked first, so scratch
-  // files only the thread had go with it.
+  // files only the thread had go with it. A window showing the thread leaves it when the list without it arrives
+  // (`watchDeletedShownThread`), as for a delete from anywhere else. Another computer's thread is never deleted from here.
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
     const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
       'threads.delete',
       { threadId, discard: true }
     )
     broadcastIfRouted([threadId], res)
-    if (currentPresentation().getActiveThreadId() === threadId) {
-      // Never fall back to a subagent: it sits under its parent in the sidebar.
-      const next = visibleThreads(res.threads).find((t) => !t.settledAt)
-      if (next) await selectThread(next.id)
-      else {
-        const created = await guiMms.request<{ thread: { id: string } }>('threads.create', {
-          name: 'New Chat'
-        })
-        await selectThread(created.thread.id)
-      }
-    }
+  })
+
+  // The new chat a window goes to after the thread it showed was deleted. Every window of a profile that showed it asks
+  // at once; they share one chat instead of making one each.
+  let chatAfterDelete: { profile: string; at: number; thread: Promise<Thread> } | undefined
+  registerHandler('threads:newChatAfterDelete', async () => {
+    const profile = currentProfileKey()
+    if (chatAfterDelete && chatAfterDelete.profile === profile && Date.now() - chatAfterDelete.at < 10_000) return chatAfterDelete.thread
+    const thread = guiMms.request<{ thread: Thread }>('threads.create', { name: 'New Chat' }).then((res) => res.thread)
+    const made = { profile, at: Date.now(), thread }
+    chatAfterDelete = made
+    thread.catch(() => { if (chatAfterDelete === made) chatAfterDelete = undefined })
+    return thread
   })
 
   registerHandler('threads:rename', async (_e, threadId: string, name: string) => {
@@ -1909,9 +2552,17 @@ export function registerGuiIpc(
     return res.thread
   })
   // One thread as the computer that runs it has it now (its settings revision included), or null.
+  // A thread the service no longer has is null; one whose delete is still under way (in the trash) is an error, as it
+  // may yet be put back.
   registerHandler('threads:get', async (_e, threadId: string) => {
-    const res = await guiMms.request<{ thread?: unknown }>('threads.get', { threadId })
-    return res.thread ?? null
+    try {
+      const res = await guiMms.request<{ thread?: unknown }>('threads.get', { threadId })
+      return res.thread ?? null
+    } catch (error) {
+      const details = error instanceof MmsProtocolError ? error.details as { deleting?: unknown } | undefined : undefined
+      if (error instanceof MmsProtocolError && error.code === 'thread_not_found' && details?.deleting !== true) return null
+      throw error
+    }
   })
   registerHandler('threads:setWorktreeEnabled', async (_e, threadId: string, enabled: boolean, picked?: boolean) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
@@ -2098,6 +2749,7 @@ export function registerGuiIpc(
         command?: string
         env?: Record<string, string>
         shellArgs?: string[]
+        label?: string
       }
     ) => {
       // The terminal belongs to the thread its tab names, not to whichever thread the window shows when it starts.
@@ -2120,7 +2772,8 @@ export function registerGuiIpc(
               cwd: request.cwd,
               command: request.command,
               env: request.env,
-              shellArgs: request.shellArgs
+              shellArgs: request.shellArgs,
+              ...(typeof request.label === 'string' && request.label.trim() ? { label: request.label.trim().slice(0, 60) } : {})
             }
       )
       return { ptyId: res.ptyId }
@@ -2684,6 +3337,21 @@ export function registerGuiIpc(
   registerHandler('editors:open', async (_e, editorId: string, path: string) => {
     await openInEditor(editorId, path)
   })
+  // A file or folder of this computer that a bot's chat names (localFiles.ts): only an existing one by its absolute path.
+  registerHandler('localFiles:open', async (_e, path: unknown) => openLocalPath(path))
+  registerHandler('localFiles:showInFolder', async (_e, path: unknown) => { await showFileInFolder(path) })
+  registerHandler('localFiles:saveCopy', async (event, path: unknown) =>
+    saveFileCopy(path, BrowserWindow.fromWebContents(event.sender) ?? getWindow(), app.getPath('downloads')))
+  // A file dragged out of the window into Finder, Explorer or another app (fileDrag.ts): the window names it, this
+  // process checks that it belongs to the thread and starts the system's drag.
+  registerHandler('files:startDrag', async (event, request: unknown) => startFileDrag(event.sender, request, {
+    temp: app.getPath('temp'),
+    filesRoot: async (scope) => (await guiMms.request<{ root?: string }>('files.root', scope)).root,
+    messageTexts: async (threadId) => {
+      const snapshot = await guiMms.request<{ messages?: Array<{ content?: unknown }> }>('thread.snapshot', { threadId, newest: 200 })
+      return (snapshot.messages ?? []).flatMap((message) => (typeof message.content === 'string' ? [message.content] : []))
+    }
+  }))
   // A thread of another computer: its folder opens in an editor of this one over SSH. The window names the
   // thread only; the folder is the one the owner answers, and the SSH address is read here from this
   // computer's own records.
@@ -3030,10 +3698,30 @@ export function registerGuiIpc(
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
-  // A file pasted into a bot's composer has no path: it waits in the temporary folder until the service copies it.
-  registerHandler('bots:stageAttachment', async (_event, name: unknown, bytes: unknown) =>
-    stageBotAttachment(app.getPath('temp'), name, bytes)
-  )
+  // A file pasted into a composer has no path: it is written to the temporary folder. A bot's waits there until the
+  // service copies it; a thread's is read there by the thread's agent.
+  registerHandler('attachments:stage', async (_event, target: unknown, name: unknown, bytes: unknown) => {
+    const scope = target as { kind?: unknown; threadId?: unknown } | null
+    if (scope?.kind === 'bot') return stageBotAttachment(app.getPath('temp'), name, bytes)
+    if (scope?.kind === 'thread') return stageThreadAttachment(app.getPath('temp'), scope.threadId, name, bytes)
+    throw new Error('A pasted file needs a bot or a thread.')
+  })
+  // A page in a browser without a window (a bot's, or a thread's) asks for files: this computer's own dialog
+  // picks them, and the window's renderer gets a one-time token for them, never the paths.
+  const browserFilesDeps = (event: Electron.IpcMainInvokeEvent): BrowserViewFilesDeps => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
+    return {
+      showOpenDialog: (options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)),
+      stat: (path) => stat(path),
+      request: ((method: string, params: unknown) => guiMms.request(method as never, params as never)) as BrowserViewFilesDeps['request']
+    }
+  }
+  registerHandler('bots:chooseBrowserFiles', async (event, request: unknown) => chooseBrowserViewFiles(request, 'botId', browserFilesDeps(event)))
+  registerHandler('browser:chooseViewFiles', async (event, request: unknown) => chooseBrowserViewFiles(request, 'threadId', browserFilesDeps(event)))
+  // Open in a window and Close window in a bot's browser view: this app names its own screen, on the window's own connection.
+  registerHandler('bots:browserWindow', async (_event, request: unknown) => botBrowserWindow(request, {
+    request: ((method: string, params: unknown) => guiMms.request(method as never, params as never)) as BotBrowserWindowDeps['request']
+  }))
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)
@@ -3140,6 +3828,7 @@ export function registerGuiIpc(
   registerHandler('clipboard:showCopyMenu', (_e, x: number, y: number, text: string) => {
     showCopyMenu(getWindow, x, y, text)
   })
+  registerHandler('clipboard:writeImage', (_e, png: unknown) => { writePngToClipboard(png) })
 
   return { syncDaemonTurnSnapshot }
 }

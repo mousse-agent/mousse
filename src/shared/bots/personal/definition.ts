@@ -1,7 +1,10 @@
+import type { ScheduledMissedRuns, TellMe } from '../../types'
 import type { NeutralTool } from '../../harness/tools'
 import type { ProviderSelection } from '../../harness/types'
+import type { BotMessageSender } from './botMessages'
 import type { BotEscalationSummary } from './escalation'
 import type { BotLook } from './look'
+import type { PermissionMode } from '../../permissionMode'
 
 /**
  * A personal bot (PR 6 §4): a role, the thread it works in on each activation, and the permissions
@@ -15,15 +18,14 @@ export interface BotManifest {
   /** Mousse app tools, by their app-tool name. */
   appTools: string[]
   /** The user's MCP tools, server-qualified. */
-  mcp: Array<{ serverId: string; tool: string }>
+  mcp: Array<{ serverId: string; tool: string; level?: 'asks_first' }>
   /** Skill ids. */
   skills: string[]
   /**
-   * File access (bot-architecture.md §3.7): non-null lets the bot read and change files anywhere on
-   * this computer but Mousse's own data; null keeps it to its files folder. One permission, asked
-   * once: Allow writes `{ roots: [<top of the file system>], access: 'write' }`. A workspace an
-   * older build wrote for some folders is kept as it is (its digest stays approved) and grants the
-   * same; its roots and access no longer narrow anything.
+   * No longer grants anything. Older builds wrote file access outside the bot's files folder here ("use files on this
+   * computer", removed because a bot that runs commands reached past it anyway). A stored value is kept exactly as it
+   * was written, so grants and revisions that hold one keep their digest and stay approved; nothing reads it for what a
+   * bot may do, and a new bot's is null.
    */
   workspace: BotWorkspace | null
   budget: BotBudget
@@ -85,24 +87,126 @@ export type BotDepth = 'quick' | 'normal' | 'deep'
 export const BOT_DEPTHS: readonly BotDepth[] = ['quick', 'normal', 'deep']
 
 /**
- * What a bot thread runs on. Never shown: `auto` is resolved per activation from the owner's ready
- * providers; `named` is a model the owner asked for in words (a catalog id, the instance's model
- * id, or a family word), used only while it is available.
+ * How hard a piece of work is (#673): the bot gives each job a level (`work_start`), and a level picks its Work model.
+ * Light, medium and hard are the depths quick, normal and deep.
+ */
+export type BotWorkLevel = 'light' | 'medium' | 'hard'
+export const BOT_WORK_LEVELS: readonly BotWorkLevel[] = ['light', 'medium', 'hard']
+export const LEVEL_DEPTH: Readonly<Record<BotWorkLevel, BotDepth>> = { light: 'quick', medium: 'normal', hard: 'deep' }
+export const DEPTH_LEVEL: Readonly<Record<BotDepth, BotWorkLevel>> = { quick: 'light', normal: 'medium', deep: 'hard' }
+
+/**
+ * What a bot thread runs on, as format 2 writes it. `auto` is by usage: resolved per activation from the owner's ready
+ * providers (bots from before picks only); `named` is a model by name (a catalog id, the instance's model id, or a family
+ * word), matched across entries. `depth` is the bot's standing level: work that names no level runs at it. Older builds
+ * run every turn on this choice; this build reads `slots` beside it (`slotsOf`).
  */
 export type BotModelChoice =
   | { mode: 'auto'; depth: BotDepth }
   | { mode: 'named'; model: string; depth: BotDepth }
 
-/** A new bot's model: automatic, at normal depth. */
+/** The longest model name a definition, a pick or a method takes. */
+export const MAX_BOT_MODEL_CHARS = 200
+
+/** The kinds of sign-in a pick remembers (`CredentialKind` without `unknown`). */
+export type BotPickCredential = 'subscription' | 'api_key' | 'ambient'
+
+/**
+ * One activation's own choice (`set_depth` and `use_model` with `now`, an automation's model by hand): a depth, and a
+ * named pick that replaces its row for that activation. `auto` changes the depth only.
+ */
+export type BotModelOverride =
+  | { mode: 'auto'; depth: BotDepth }
+  | { mode: 'named'; model: string; depth: BotDepth; instanceId?: string; effort?: string; credential?: BotPickCredential; account?: string }
+
+/** The model of a bot made without picks (an app from before them): by usage, at normal depth. */
 export const DEFAULT_BOT_MODEL: BotModelChoice = { mode: 'auto', depth: 'normal' }
+
+/**
+ * A model the owner picked for a row (#673): a provider entry, its model and a reasoning level. It runs only there: when
+ * it can't, nothing runs on another model or entry (a paid API key beside a subscription included).
+ */
+export interface BotModelPick {
+  /** The provider entry. Absent only on a pick by name from an older bot: matched across entries, as before. */
+  instanceId?: string
+  model: string
+  /** One of the model's reasoning levels; absent is the model's default. */
+  effort?: string
+  /**
+   * How the entry was signed in when the pick was saved, and the account it was signed in to (the gateway's salted
+   * hash, never a secret). Written by the daemon, never taken from a client. A pick whose entry now signs in another way
+   * (a subscription switched to an API key) or to another account (an entry removed and added again under the same
+   * name) can't run: the owner picks again.
+   */
+  credential?: BotPickCredential
+  account?: string
+}
+
+/**
+ * A bot's models (#673): Talk for every chat turn, and one per work level. A bot made with picks has a pick on every
+ * row. null is a row a bot from before picks has not been given yet: it runs on another picked row's model
+ * (`pickSourceOf`: Medium work's, else Talk's), and only while no row is picked does Mousse choose (by usage). The simple
+ * view shows Talk and Work, where Work is all three levels on one pick; Advanced shows the levels apart.
+ */
+export interface BotModelSlots {
+  talk: BotModelPick | null
+  light: BotModelPick | null
+  medium: BotModelPick | null
+  hard: BotModelPick | null
+}
+export type BotModelSlotKey = keyof BotModelSlots
+export const BOT_MODEL_SLOT_KEYS: readonly BotModelSlotKey[] = ['talk', 'light', 'medium', 'hard']
+
+/**
+ * The rows as `main.slots` stores them: the four model rows, and the Images row (#1088), the model `make_image` runs on.
+ * The Images row is no turn's model and is never chosen by Mousse: absent or null, the bot has no image tool. Older
+ * builds ignore it (`modelSlotsProblem` skips a key it does not know) and keep it while the rows are live (`withSlots`).
+ */
+export type BotStoredSlots = BotModelSlots & { image?: BotModelPick | null; custom?: BotCustomSlot[] }
+
+/**
+ * A slot the owner named (`/model iosdev <model> iOS apps, Swift, Xcode`): work whose job matches its name or
+ * description runs on its pick; other work runs on its level's row. Stored as `main.slots.custom` beside the rows, which
+ * older builds ignore and keep (`modelSlotsProblem`, `withSlots`). `name` is lower case, never a base slot's name.
+ */
+export interface BotCustomSlot {
+  name: string
+  pick: BotModelPick
+  /** Plain text, one line: what work it is for. */
+  description?: string
+}
+
+/** The slot names the owner can't give a custom slot: the rows, Work (all three levels) and Images. */
+export const BOT_BASE_SLOT_NAMES = ['talk', 'work', 'light', 'medium', 'hard', 'images', 'image'] as const
+/** A custom slot's name: a letter, then letters, digits, `-` or `_`; at most 24 characters, lower case. */
+export const BOT_CUSTOM_SLOT_NAME = /^[a-z][a-z0-9_-]{0,23}$/
+/** The most custom slots a bot keeps. */
+export const MAX_BOT_CUSTOM_SLOTS = 12
+/** The longest custom slot description. */
+export const MAX_BOT_CUSTOM_SLOT_DESCRIPTION = 200
+
+/** At most this many images a bot makes in a day (the owner's local day), counted by the service (#1088). */
+export const BOT_IMAGES_PER_DAY = 20
+/** At most this many images one activation (a chat turn with its continuations, or one piece of work) makes. */
+export const BOT_IMAGES_PER_TURN = 4
+/** The largest image file a bot saves; a bigger one is refused and nothing is saved. */
+export const MAX_BOT_IMAGE_BYTES = 8 * 1024 * 1024
+/** The longest description `make_image` sends. */
+export const MAX_BOT_IMAGE_PROMPT_CHARS = 4000
 
 /** The thread a bot works in: who it is (an agent definition or plain instructions) and what it runs on. */
 export interface BotThreadSpec {
   key: string
   title: string
   agent: { definitionId: string; pinRevision: string } | { instructions: string }
-  /** Replaces format 1's fixed `selection`. */
+  /** Replaces format 1's fixed `selection`. Mirrors the rows while `slots` is written (`withSlots`, `mirrorOf`). */
   model: BotModelChoice
+  /**
+   * The rows by hand (#673), written whenever a row holds a pick on an entry. Older builds ignore it and run on `model`;
+   * once one rewrites `model`, the rows no longer match it and are dropped (`slotsOf`). Rows this build does not know
+   * are kept as they are. `image` is the Images row (#1088).
+   */
+  slots?: BotStoredSlots
   /** Removes permissions for this thread only; never adds any. */
   narrow?: Partial<Pick<BotManifest, 'tools' | 'mcp' | 'skills' | 'workspace'>>
 }
@@ -129,8 +233,15 @@ export interface BotDefinition {
   owner: { kind: 'person'; id: 'self' }
   /** Reserved for bot servers (Phase 3). */
   placement: { kind: 'this_computer' }
-  /** The bot's own working instructions; starts as the description. */
+  /** The bot's own working instructions; starts as the description, and the owner's prompt edit in About sets both. */
   role: string
+  /**
+   * The description and role from before the owner first edited the prompt in About: Reset to default puts them back.
+   * Absent: never edited, or reset since.
+   */
+  promptDefault?: { description: string; role: string }
+  /** When the owner last edited or reset the prompt in About (ISO): replies written before it may follow older words. */
+  promptChangedAt?: string
   main: BotThreadSpec
   /** Context threads it consults (6c-2); at most 8. */
   context: BotThreadSpec[]
@@ -194,15 +305,45 @@ export const MAX_BOT_SCHEDULES = 8
  * What started an activation: the Bots tab or a schedule occurrence. Activations saved by older
  * builds may carry other kinds (the removed Channels feature); they are read like these, by `input`.
  */
+/**
+ * Where the owner wrote from in a chat turn ("use your threads"): `limit`, the narrowest permission limit of another
+ * device whose message started or continued the turn (a phone or computer held below Full access). What the bot starts
+ * or messages in that turn is held to it. Absent: the owner wrote in this computer's own window. Older builds ignore it.
+ */
+export interface BotOwnerTurn {
+  limit?: PermissionMode
+  /**
+   * The other device the message came from (its Net node id). A chat activation it queued that has not started is not
+   * delivered once that device can no longer reach the bot (`docs/bots.md`, Which devices reach a bot). Older builds
+   * ignore it.
+   */
+  node?: string
+}
+
 export type BotActivationTrigger =
-  | { kind: 'manual'; input: string }
-  | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string }
+  /**
+   * `fromBot`: the turn was started by a message from another of the owner's bots (`bot_send`), never by the owner: who
+   * sent it and which turn in a row without the owner it is.
+   */
+  | { kind: 'manual'; input: string; owner?: BotOwnerTurn; fromBot?: BotMessageSender }
+  | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string; missed?: ScheduledMissedRuns; removedTelling?: { tellMe: TellMe; canWakeMe?: boolean }; completed?: { why: string; name: string; tellMe?: TellMe; canWakeMe?: boolean; removed?: true } }
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the
    * chat, whose report answers `replyTo`, the owner's message that asked for it. `from`: the chat activation or
-   * reminder that started it.
+   * reminder that started it. `level`: how hard the bot judged it (#673); absent, the bot's standing level. `model`: the
+   * model the owner asked for this work alone, as the work line names it, when it is not the bot's usual one for that
+   * level; the pick itself is the activation's own (`BotActivationRow.modelOverride`). `slot`: the owner's custom slot
+   * (`BotCustomSlot.name`) the bot routed this work to; it runs on that slot's pick while the slot exists, else on its
+   * level's row.
    */
-  | { kind: 'work'; input: string; title: string; replyTo?: string; from: string }
+  | { kind: 'work'; input: string; title: string; replyTo?: string; from: string; level?: BotWorkLevel; model?: BotWorkModelName; slot?: string }
+
+/** The model one piece of work was asked to run on, for the work line: its name, its entry's, and a reasoning level. */
+export interface BotWorkModelName {
+  name: string
+  entry: string
+  effort?: string
+}
 
 /** The default active time of one activation: an hour. */
 export const DEFAULT_BOT_ACTIVE_MS = 60 * 60_000
@@ -296,7 +437,11 @@ export const BOT_SCHEDULE_SKIP_TEXT: Record<string, string> = {
   bot_approval_required: 'skipped: approve the bot\'s permissions first',
   bot_home_trashed: 'skipped: the bot\'s thread is in the trash',
   bot_waiting_for_owner: 'skipped: the bot is waiting for your answer',
-  previous_run_still_queued: 'skipped: the previous run has not started yet'
+  previous_run_still_queued: 'skipped: the previous run has not started yet',
+  previous_run_still_running: 'skipped: the previous run is still going',
+  dropped_queue_full: 'dropped: the bot had too much waiting',
+  model_unavailable: 'skipped: the model picked for this work can\'t run; pick one in About → Runs on',
+  usage_limited: 'skipped: waiting for a usage limit to reset'
 }
 
 /** What approving the published revision means (`bots.definitions.get`'s `approval`). */

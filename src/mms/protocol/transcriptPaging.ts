@@ -111,6 +111,27 @@ interface WithImages {
   images?: Array<{ name: string; mimeType: string; data?: string }>
 }
 
+/**
+ * The message with image data kept for its newest images while `remaining` base64 characters last, and what is left.
+ * Once one image does not fit, it and every older one keep only their name and type, and nothing is left. Applied
+ * from the newest message back, this is the image budget of a remote reader's transcript.
+ */
+export function keepImagesWithin<T extends WithImages>(message: T, remaining: number): { message: T; remaining: number } {
+  if (!Array.isArray(message?.images)) return { message, remaining }
+  const images = message.images.slice()
+  for (let at = images.length - 1; at >= 0; at -= 1) {
+    const image = images[at]!
+    const size = typeof image.data === 'string' ? image.data.length : 0
+    if (size <= remaining) {
+      remaining -= size
+    } else {
+      remaining = 0
+      images[at] = { name: image.name, mimeType: image.mimeType }
+    }
+  }
+  return { message: { ...message, images }, remaining }
+}
+
 /** The message with each image reduced to its name and type; the data is fetched with `thread.messageImage`. */
 export function withoutImageBytes<T extends WithImages>(message: T): T {
   if (!Array.isArray(message.images) || !message.images.length) return message

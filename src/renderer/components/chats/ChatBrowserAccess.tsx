@@ -65,7 +65,7 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
     }
   }
   if (!requestId) return null
-  return <div className="chat-browser-permission" role="region" aria-label="Agent browser access request">
+  return <div className="chat-browser-permission" data-mousse-decision="" role="region" aria-label="Agent browser access request">
     <span role="status">Waiting for browser permission</span>
     <span>Allow agents to use this profile’s browser?</span>
     <button type="button" disabled={busy} onClick={() => void answer(true)}>Allow</button>

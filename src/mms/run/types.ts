@@ -1,5 +1,6 @@
 import type { ExecutionBinding } from '../../shared/harness/types'
 import type { AgentAccessLevel } from '../../shared/settings'
+import type { PermissionMode } from '../../shared/permissionMode'
 export type RunStatus =
   | 'queued'
   | 'starting'
@@ -64,6 +65,8 @@ export interface RunOutcome {
    * scheduler records the occurrence as waiting and runs the job again then.
    */
   usageLimitUntil?: string
+  /** With `usageLimitUntil`: the window the provider named (`five_hour`, `seven_day_opus`), when it named one. */
+  usageLimitKind?: string
   /**
    * `bot_wall`: a personal bot's dispatch ended at a wall (PR 6 §5); the run engine never retries it.
    * `agent`: another thread's agent stopped the run (`thread_interrupt`); it settles as a user's Stop does (`stoppedByPerson`).
@@ -233,10 +236,10 @@ export interface EffectKindSpec {
 export const DEFAULT_EFFECT_MAX_ATTEMPTS = 5
 
 /**
- * Which worker fibres may claim an effect kind (SPEC §12.3): `turn` fibres run `turn.start` (one
- * per live turn, so their count caps a profile's concurrent turns), `control` fibres run the
- * interrupts, steers and answers that must reach a live turn, and `replaySafe` fibres run the
- * replay-safe kinds. A long turn can therefore never starve a Stop.
+ * Which part of the worker may claim an effect kind (SPEC §12.3): the turn claimer runs `turn.start`
+ * (every due turn at once, no limit), `control` fibres run the interrupts, steers and answers that
+ * must reach a live turn, and `replaySafe` fibres run the replay-safe kinds. A turn can therefore
+ * never hold up a Stop.
  */
 export type EffectLaneClass = 'turn' | 'control' | 'replaySafe'
 
@@ -409,6 +412,14 @@ export interface AgentActor {
   toolCallId: string
   /** How many agent messages in a row led to this one (the sender's own count plus one); set by the thread owner. */
   hops?: number
+  /**
+   * Set when the agent is on another of the user's computers (a routed call marked as an agent's): `threadId` and `runId`
+   * are then its ids on that computer, and nothing about the sender is looked up here. `node` is the calling computer
+   * as the authenticated link names it, `computer` its name from this computer's pairing record, `title` the sender's
+   * cleaned title, and `mode` the most the sender may do here: the narrowest of the mode it carried and the limit this
+   * computer set for that device. `hops` is already the owner's own count (the larger of the carried count and its own).
+   */
+  remote?: { node: string; computer: string; title: string; mode: PermissionMode }
 }
 
 /** `pr_update` is no longer written (see `isRetiredInboxRow`). */
@@ -461,8 +472,52 @@ export interface ChildQuestionPayload {
   delegationId?: string
 }
 
+/**
+ * Payload of a `reconcile_notice` row that tells a thread a subagent below it was refused a capability it lacks
+ * (docs/plans/tool-api.md §2.4): its parent when the parent holds it (`to: 'parent'`), else the root of its tree, which
+ * is told what would give it (`fix`). Written once per capability of the subagent's work.
+ */
+export interface ChildLacksPayload {
+  kind: 'child_lacks'
+  childThreadId: string
+  childRunId: string
+  tool: string
+  lacks: string
+  fix?: string
+  to: 'parent' | 'root'
+  delegationId?: string
+}
+
 export function isChildQuestionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'child_question'
+}
+
+/**
+ * Payload of a `reconcile_notice` row that carries another agent's note (docs/plans/tool-api.md §2.2): information that
+ * grants nothing, labelled with who sent it and what it may do. It is delivered as any notice is: steered into a native
+ * run, handed over with a Mousse tool's result on a runtime that restarts its reply, or with the thread's next turn.
+ */
+export interface AgentNotePayload {
+  kind: 'agent_note'
+  senderThreadId: string
+  senderRunId: string
+  senderTitle: string | null
+  /** What the sender may do, for the label: a read-only subagent, a Plan ceiling, or an agent that may change files. */
+  senderAccess: 'read_only' | 'plan' | 'agent'
+  /** Who the sender is to the receiver. */
+  from: 'parent' | 'ancestor' | 'subagent' | 'sibling'
+  text: string
+  /** `needed` starts a notice turn on an idle thread; `none` waits for the thread's next turn. */
+  attention: 'needed' | 'none'
+}
+
+export function isAgentNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'agent_note'
+}
+
+/** A note sent with `attention: none`: it never starts a turn of its own. */
+export function isQuietNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return isAgentNoteRow(row) && (row.payload as AgentNotePayload).attention === 'none'
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */

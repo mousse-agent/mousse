@@ -6,6 +6,7 @@ import type { ProviderAuthService } from '../../../providers/ProviderAuthService
 import type { ProviderAdapter } from '../../adapter'
 import type { DriverRuntime } from '../../driver'
 import { PI_AMBIENT_MARKER, piAmbientProvider } from '../../pi/envKeys'
+import { piImageModels, runPiImage } from './images'
 import { runPiOneShot } from './oneShot'
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,
@@ -85,6 +86,16 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
       const models = credentials()?.models
       if (!models) throw harnessAppError({ code: 'signed_out', message: 'Mousse has no provider credentials loaded yet.', instanceId })
       return runPiOneShot(models, providerId, spec, signal)
+    },
+    // A bot's pictures (#1088): the provider's image models in pi-ai's catalogue, one request in Mousse's process.
+    imageModels: () => {
+      const models = credentials()?.models
+      return models && signedIn() ? piImageModels(models, providerId) : []
+    },
+    generateImage: (spec, signal) => {
+      const models = credentials()?.models
+      if (!models) throw harnessAppError({ code: 'signed_out', message: 'Mousse has no provider credentials loaded yet.', instanceId })
+      return runPiImage(models, providerId, spec, signal)
     },
     stop: () => {}
   }

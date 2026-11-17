@@ -210,7 +210,14 @@ export function validateAttachedBrowserWorkerRequest(value: unknown): BrowserWor
     }
     // Viewer frames and a person's input are managed-browser methods: an in-app tab is on screen itself.
     case 'frame':
+    case 'frame.next':
+    case 'frame.stop':
     case 'human.input':
+    // A window of its own is a managed browser's: an in-app tab is already in the app's window.
+    case 'window.open':
+    case 'window.close':
+    case 'window.wait':
+    case 'page.resize':
       throw new Error(`${request.method} is not an attached browser method`)
   }
   return { ...request, params }

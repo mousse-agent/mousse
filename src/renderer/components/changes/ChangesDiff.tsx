@@ -74,6 +74,8 @@ export interface ChangesDiffProps {
   /** The lines selected in the diff, read by Space to include part of a hunk. */
   selectionRef: MutableRefObject<LineRange | null>
   actions: HunkActions
+  /** Reads both sides another way than `review.file` (a file outside the thread's lists); `version` reads it again. */
+  read?: () => Promise<ReviewFileResult>
 }
 
 const textOf = (side: ReviewFileSide): string => (side && 'content' in side ? side.content : '')
@@ -128,7 +130,8 @@ export function ChangesDiff({
   onContent,
   commentRequest,
   selectionRef,
-  actions
+  actions,
+  read: readOther
 }: ChangesDiffProps) {
   const { threadId, projectId, scope } = target
   const scopeJson = JSON.stringify(scope)
@@ -149,13 +152,16 @@ export function ChangesDiff({
   const references = useAppStore((s) => s.composerReferences[s.activeThreadId ?? '__blank__'] ?? NO_REFERENCES)
   const platform = useAppStore((s) => s.appInfo?.platform ?? '')
   const pendingReveal = useChangesStore((s) => (threadId ? s.byThread[threadId]?.reveal : undefined))
+  const readOtherRef = useRef(readOther)
+  readOtherRef.current = readOther
 
   useEffect(() => {
     let cancelled = false
     const scope = JSON.parse(scopeJson) as ReviewScope
     const read = (side: ReviewScope) => window.mousse.review.file({ threadId, projectId, scope: side, path, oldPath })
     // Uncommitted is HEAD → working tree: a staged file's HEAD side comes from the staged diff (HEAD → index).
-    const reading = scope.kind === 'worktree' && staged
+    const other = readOtherRef.current
+    const reading = other ? other() : scope.kind === 'worktree' && staged
       ? Promise.all([read({ kind: 'worktree', staged: true }), unstaged ? read({ kind: 'worktree' }) : Promise.resolve(null)])
         .then(([fromHead, fromIndex]) => combineUncommittedSides({ staged, unstaged }, fromHead, fromIndex)!)
       : read(scope)

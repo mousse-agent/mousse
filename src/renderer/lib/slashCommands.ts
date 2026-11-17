@@ -12,7 +12,7 @@ export interface SlashCommandEnv {
   openUsage(): void
   stop(): Promise<void>
   /** Adds the text to the running turn; false when no turn took it. */
-  steer(text: string): Promise<boolean>
+  steer(text: string): Promise<boolean | 'queued'>
   newThread(title?: string): Promise<void>
   clearContext(threadId: string): Promise<void>
   compact(threadId: string, focus?: string): Promise<void>
@@ -20,6 +20,8 @@ export interface SlashCommandEnv {
   rename(threadId: string, title: string): Promise<void>
   /** Opens the thread's rename box; false when none is on screen. */
   openRename(threadId: string): boolean
+  /** The thread's goal (`/goal`): `show` answers with it in words. */
+  goal(threadId: string, action: 'show' | 'set' | 'clear', text?: string): Promise<{ text?: string }>
 }
 
 /** What the composer does after a command ran. */
@@ -30,8 +32,10 @@ export type SlashOutcome =
   | { kind: 'keep' }
   /** Not run: keep the text and show this one line. */
   | { kind: 'refused'; message: string }
-  /** Send this text as an ordinary message instead. */
-  | { kind: 'send'; text: string }
+  /** Handled: empty the composer and show this one line. */
+  | { kind: 'info'; message: string }
+  /** Send this text as an ordinary message instead; with `adoptGoal`, it becomes the goal of the thread it starts. */
+  | { kind: 'send'; text: string; adoptGoal?: true }
 
 export interface SlashCommand {
   def: ComposerCommandDef
@@ -119,6 +123,22 @@ export const SLASH_COMMANDS: ReadonlyMap<string, SlashCommand> = new Map(
       needsThread: true,
       run: async (_argument, env) => {
         await env.fork(env.threadId!)
+        return DONE
+      }
+    },
+    {
+      def: def('goal'),
+      // A goal set while a turn runs starts after it.
+      duringTurn: true,
+      run: async (argument, env) => {
+        const clear = argument.toLowerCase() === 'clear'
+        if (!env.threadId) {
+          // A new chat: the goal is its first message, and becomes its goal once the thread exists.
+          if (!argument || clear) return refused('Type what done looks like: /goal <text>')
+          return { kind: 'send', text: argument, adoptGoal: true }
+        }
+        if (!argument) return { kind: 'info', message: (await env.goal(env.threadId, 'show')).text ?? 'This thread has no goal.' }
+        await env.goal(env.threadId, clear ? 'clear' : 'set', clear ? undefined : argument)
         return DONE
       }
     },

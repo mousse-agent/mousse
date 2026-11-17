@@ -48,7 +48,7 @@ Quotes are from the founders' notes (17 Oct and 29 Oct 2026) and from `bot-ui.md
 | Containers, desktop computer use, public webhook ingress | Phase 5 |
 | Layer 2 Mousse MCP (Track M) | Parallel track (§11.6) |
 | Team bots, Space bots, bots in groups | Teams is parked. Fields are reserved (§12.2). |
-| The user's MCP tools for bots | Phase 2. Compile still refuses them (`compile.ts`). Shell ("run commands") moved into Phase 1 in revision 5 (§3.6). |
+| The user's MCP tools for bots | Shipped ahead of Phase 2: one ask per server, stored per tool, every call through Mousse (`docs/bots.md`, "Use your MCP tools"). Shell ("run commands") moved into Phase 1 in revision 5 (§3.6). |
 
 **Decisions the founders already made, and how this plan respects them:**
 
@@ -68,7 +68,7 @@ All paths are relative to the repository root. Each one was re-checked at `a6e46
 |---|---|---|
 | **Bots can't run** | `BOT_RUNTIME_GAPS` lists three things every runtime still lacks. `checkPolicy` refuses every bot policy at approval, at dispatch (`BotEngine.ts:763,835`) and at turn admission (`gateway.ts:1508`). | `src/mms/harness/policy.ts:170-213` |
 | Gap 1: a supervisor outside the daemon loop | **Missing.** Both deadlines are timers inside the daemon: `BotEngine.ts:779-783` and the gateway's `AbortSignal.timeout` (`gateway.ts:1348-1349`). `exit_at` and `child_pid/child_group` exist in `bots.db` (`BotStore.ts:69-81`) but are never written. The startup pass has a stub that kills nothing (`BotEngine.ts:1754`). | |
-| Gap 2: never warm, in its own process group | **Locked Claude: done.** It never keeps a live process (`ClaudeSubscriptionProviderService.ts:2279`) and spawns detached with `kill(-pgid)` (`claude/locked.ts:394-464`). But `onLockedProcess` is never passed (`drivers/claudeCode.ts:143,545`; `MmsProfileServices.ts:487`). **Pi: open.** Bot turns keep Pi warm (`pi/engine.ts:1408-1412`) and report no pid. | |
+| Gap 2: never warm, in its own process group | **Locked Claude: done.** A chat turn on the owner's entry without Bash runs on the chat's warm process, kept only while its launch stays the same and closed on any change (`botKeepsWarm`, `claudeBotLaunchKey`); every other turn keeps no live process and spawns detached with `kill(-pgid)` (`claude/locked.ts:394-464`). But `onLockedProcess` is never passed (`drivers/claudeCode.ts:143,545`; `MmsProfileServices.ts:487`). **Pi: open.** Bot turns keep Pi warm (`pi/engine.ts:1408-1412`) and report no pid. | |
 | Gap 3: the locked environment | **Locked Claude: done** (`lockedEnv`, `harness/env.ts:330-392`). **Pi: open.** It copies the instance's environment (`pi/launch.ts:108-133`). | |
 | Evidence that a runtime holds a bot | Pi RPC 1.4.0 has records for Linux, macOS and Windows (Windows without shell). **Locked Claude has none**, so `claudeLockedHoldsBots` is false. The real-CLI evidence test runs against a localhost Messages API mock with a fake key, so nothing signs in, but it only runs the win32 binary (`tests/harness/claudeLockedProcess.test.ts:1-22`). | `src/mms/harness/compatibility.ts:153-200` |
 | Locked Claude entry | `profile: 'locked'` with a **private home**, which needs its own sign-in. It runs bot turns only (`drivers/claudeCode.ts:73-84`, `drivers/claudeCode/adapter.ts:84-109`). Private-home sign-in already exists for second accounts (`docs/PROVIDER_CREDENTIALS.md:8`). | |
@@ -142,6 +142,7 @@ The bot engine (grants, walls, crash-safe dispatch, spend ledgers) is built. Fiv
    - Subscription credentials are preferred.
    - A usage limit tries the next candidate, then pauses the bot until the reset time.
    - The internal tools `set_depth` and `use_model` change the choice. Their effects never reach the UI.
+   - **Since #673 the choice is rows** (`docs/bots.md`, Model and depth): Talk for the chat lane, and Light, Medium and Hard work for the run lane, each a pick of a provider entry, a model and a reasoning level that runs only on that entry, never chosen by Mousse. `work_start` names a level per job, and `set_depth` `always` sets the standing level for work that names none. A pick at its usage limit waits for the reset; one that can't run for another reason leaves the bot stuck with Pick a model. Bots made before picks keep the automatic choice above until their owner picks. `main.model` stays as a mirror older builds run, so the definition is still format 2; the rows sit beside it in `main.slots`. `use_model` picks only among the Runs on choices, `always` only when the owner's message names the model, and shows a chip.
 8. **Chips are made by Mousse, never by the model.**
    - Every call the authority allows produces a live chip worded as an attempt ("searching the web"). These are rolled up when the dispatch settles ("searched the web · 3").
    - App tools, whose results pass through Mousse, may produce outcome chips ("every weekday · 09:00").
@@ -177,9 +178,13 @@ This plan follows the Bot UI:
 
 The usage-window reserve is deferred to Phase 2, and a computer other than this one to Phase 3.
 
+**Update (#673, #769, #996, rows):** by hand was added after all, and replaced the automatic choice for new bots. About → Runs on and New bot pick a model by hand, one per situation: Talk, and Work (Light, Medium and Hard work under Advanced), each an entry's model at a reasoning level. These pickers, and the one chat line for the owner about a pick that can't run, are the only places a bot names a model. See `docs/bots.md`, Model and depth.
+
 **Action for the orchestrating thread:** update #673's "Done when" to match, or reopen the UI decision. This plan writes nothing to GitHub.
 
 ### 3.7 Changed in revision 6: file access is one permission
+
+> **Removed since.** "Use files on this computer" no longer exists: a bot that may run commands reached past it, so a bot's file tools now reach only its files folder and scratch, and no bot can ask for more. Stored grants and revisions that hold a `workspace` keep it unchanged (same digest, no new approval) and it grants nothing; open file asks are withdrawn when bots open. A real design for file access is still to come. What follows is history; `docs/bots.md`, Files, describes the current behaviour.
 
 A bot on the owner's Claude Code searched the web, then stopped to ask to "read files in ~/.claude/projects/…/tool-results": Claude Code had saved the search results there and was reading them back. Folder asks also came back for each new folder, blocking runs. The owner's decisions:
 
@@ -631,7 +636,7 @@ bot_schedule_remove({ scheduleId }) → { removed: true }
 bot_schedule_list() → Array<{ scheduleId, label, nextAt }>
 ```
 
-- Each tool is checked with `scheduleProblem` (`triggers/scheduler.ts`). There are at most 8 schedules per bot (`MAX_BOT_SCHEDULES`), and the minimum interval is 5 minutes.
+- Each tool is checked with `scheduleProblem` (`triggers/scheduler.ts`). There are at most 8 schedules per bot (`MAX_BOT_SCHEDULES`), and the minimum interval is 1 minute.
 - The tools write `bot_schedules` and call `schedulesChanged` (`MmsProfileServices.ts:571`).
 - **Label.** `describeSchedule` and `humanCron` move from `src/renderer/components/scheduled/scheduledLabels.ts` to `src/shared/scheduleLabel.ts`, as pure code with the locale passed in. The renderer file re-exports them. Examples: "every weekday · 09:00", "every 30 minutes".
 - **`BotScheduler.tickBot`** reads `bot_schedules` instead of the revision. The idempotency key `sched:<bot>:<schedule>:<occurrenceAt>` is unchanged.
@@ -704,6 +709,7 @@ set_depth({ depth: 'quick' | 'normal' | 'deep', scope: 'now' | 'always' }) → {
 use_model({ model: string /* as the owner said it */, scope: 'now' | 'always' }) → { ok: true } | { ok: false, reason: string }
 ```
 
+- **Rows (#673).** `set_depth` sets a level: `now` for the activation it is called in, `always` the standing level (`main.model.depth`) that work naming none uses. `use_model` takes only a Runs on choice the owner's own message names (`ownerModelChoice`: a full name for `always`, a family word on Talk's entry also for `now`); `now` puts it on this chat, `always` on Talk, Work or both (`for`), each row kept on its entry when two entries offer the model. `work_start` takes `level` (light, medium, hard). See `docs/bots.md`.
 - **`always`** saves `main.model` through a revision with the manifest unchanged, so no approval is needed.
 - **`now`** writes `bot_activations.model_override_json` and sets `reload_pending`. After that tool call's result, the engine ends the dispatch with `BotReloadAbort`, which is the wall-abort path with no wall. It then continues on the same thread with the new selection and the input `[Mousse] You now have more time to think. Continue where you left off.` On Claude this is the process restart that #359 describes, which locked turns pay on every dispatch anyway.
 - **Hiding the model:**
@@ -807,7 +813,7 @@ use_model({ model: string /* as the owner said it */, scope: 'now' | 'always' })
 6. **`BOT_RUNTIME_GAPS`.** Each item is removed by the change that builds it. The list is empty when 1–4 land.
 7. **No bot runner entry (revision 4).** Bots run on the owner's own entries. If no candidate exists and one of the owner's entries could hold the bot once signed in, the bot is stuck with `sign_in {instanceId}`, which opens that entry's card. An earlier build's `claude:bots` ("Claude for bots") is removed at startup.
 8. **Approval-based runtimes (revision 4).** On Claude Code and Codex the bot's authority answers the runtime's approvals:
-   - **Claude Code:** the locked profile's options (`claudeLockedOptions`: asking mode, no settings files, plugins or user MCP servers, the granted built-ins only) and its grant gate (`ClaudeLockedGate`, in `PreToolUse` and `canUseTool`), in the owner's own environment (`ClaudeLockedTurn.ownerEntry`), as one query never kept warm. A relative path is checked under the turn's folder.
+   - **Claude Code:** the locked profile's options (`claudeLockedOptions`: asking mode, no settings files, plugins or user MCP servers, the granted built-ins only) and its grant gate (`ClaudeLockedGate`, in `PreToolUse` and `canUseTool`), in the owner's own environment (`ClaudeLockedTurn.ownerEntry`). A chat turn without Bash runs on the chat's warm process (docs/bots.md, Warm chat process); every other turn is one query. A relative path is checked under the turn's folder.
    - **Codex:** `untrusted` approvals and the read-only sandbox (`workspace-write` over the bot's folders with "run commands", §3.6). `item/commandExecution/requestApproval` is a `shell` call, accepted whenever the grant holds `shell` and declined when it asks to retry outside the sandbox; `item/fileChange/requestApproval` a `write` or `edit` call per path (`vendors/codex/botApprovals.ts`); a change it does not describe or one with `grantRoot` is declined; `requestUserInput` is refused. The owner's own Codex MCP servers are switched off in the thread's config, and the turn is refused when they can't be read.
    - The turn's working directory is the bot's files folder. No process is reported to the supervisor; the deadline ends the turn through its signal (`turn/interrupt`, closing the query).
    - A cleared chat context starts a new native session on both, since each resumes only while the history it saved matches.
@@ -1509,7 +1515,7 @@ These are condensed from revision 1, whose detailed designs still hold unless no
    - **Polling triggers**, using no model tokens: GitHub PRs and issues, a web page, HTTP JSON, every 5 minutes by default. A cursor of seen items is kept per trigger, and each new item becomes a run. The UI's "within 5 minutes".
    - **A network domain grant**, enforced in the authority for `web_fetch` (which skips every check today) and in the sandbox for shell.
    - **A sandbox for Pi's commands**, and Claude Code's sandbox evidence on more platforms (shell itself shipped in Phase 1, revision 5).
-   - **The user's MCP tools for bots** through the relay, per tool.
+   - **The user's MCP tools for bots**: shipped, through the relay (Claude Code, Codex) and the user MCP proxy (Pi), asked for once per server and stored per tool (`docs/bots.md`, "Use your MCP tools").
    - **The `setsid` sweep**, with shell (§5.9).
    - **Memory Phase 2** (bot-context.md §11): budgeted idle consolidation, auto-recall, an About "Memory" list, shared owner facts, the CJK trigram index, `bots.memory.reindex` as a client method.
    - **The usage-window reserve** (30% by default), with `usage()` on the Claude driver.
@@ -1559,7 +1565,7 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
   - #677 (Claude session cut) touches `ClaudeSubscriptionProviderService.ts` next to the locked paths. WP1 changes `locked.ts` and `drivers/claudeCode.ts`, not that file. Rebase if both land.
   - #590 (approval colours) sets the colours the ask card shares.
 - **Related open issues:**
-  - #359: a model change restarts Claude Code. Bots are never warm anyway.
+  - #359: a model change restarts Claude Code. A bot's warm chat process restarts too: the model is part of its launch.
   - #358: the MCP token on the command line (Track M).
   - #595: secret requests (Phase 2 accounts).
   - #568 and #569: extensions and computer use (Phase 5).
@@ -1595,7 +1601,7 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
 - A deleted bot is kept, archived, for 30 days with no restore UI in Phase 1.
 - The `setsid` sweep moves to Phase 2 (a known gap for Pi bots with "run commands" since revision 5).
 - An hour of active time per activation, chat or run. Time spent waiting for the internet is not charged (docs/bots.md, No internet).
-- Minimum schedule interval 5 minutes; at most 8 schedules per bot.
+- Minimum schedule interval 1 minute; at most 8 schedules per bot.
 - Not now on a run ask: no new ask for 24 hours.
 - Pause stops schedules only. Chat works while paused.
 - Three failed runs pause schedules. Chat failures, refused asks, usage-limit pauses and waiting for the internet don't count.

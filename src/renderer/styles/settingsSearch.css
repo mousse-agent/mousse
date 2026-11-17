@@ -1,4 +1,4 @@
-/* SettingsSearch: a soft filled field, no border or bevel; focus is the shared focus ring. */
+/* SettingsSearch: a soft filled field, no border or bevel; focus deepens the fill. */
 
 .settings-search {
   position: relative;
@@ -15,8 +15,8 @@
 }
 
 .settings-search:focus-within {
+  outline: none;
   background: var(--ui-hover);
-  box-shadow: var(--ui-focus-ring);
 }
 
 .settings-search-icon {
@@ -85,5 +85,5 @@ html[data-theme] .settings-search input[type='search'] {
 
 .settings-search-clear:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }

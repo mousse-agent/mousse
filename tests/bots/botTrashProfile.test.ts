@@ -123,7 +123,7 @@ async function withBot() {
   const host = (bots as unknown as { host: BotEngineHost }).host
   host.models = { resolve: async () => ({ selection: { instanceId: 'pi:test', model: 'test' } }), markLimited: () => {} }
   host.archiveThread = (threadId) => { services.threads.setThreadSettled(threadId, true) }
-  host.memory = { list: () => ({ entries: [], gauge: '' }), forget: () => ({ redacted: [] }), export: async () => ({ files: [] }), reindex: async () => {}, purge: async (botId) => { purged.push(botId) } }
+  host.memory = { list: () => ({ entries: [], gauge: '' }), forget: () => ({ redacted: [] }), edit: () => { throw new Error('unused') }, export: async () => ({ files: [] }), reindex: async () => {}, purge: async (botId) => { purged.push(botId) } }
   const definition: BotDefinition = {
     format: 2, id: 'review-bot', name: 'Review bot', description: 'test', look: { colour: 'coral', accessory: 'none' },
     owner: { kind: 'person', id: 'self' }, placement: { kind: 'this_computer' }, role: 'test',
@@ -224,11 +224,40 @@ describe('round 3: a running bot holding its thread\'s execution lease', () => {
   it('a trash refused by other work leaves the bot running', async () => {
     const { services, bots, activation } = await withBot()
     const stop = vi.spyOn(services.orchestrator, 'stopThread')
-    // An ordinary turn elsewhere in the profile: the trash is refused at admission.
-    vi.spyOn(services.orchestrator, 'getOwnedActivity').mockReturnValue({ turn: 1 })
+    // Work of the whole profile (an automation's turn, tied to no thread): the trash is refused at admission. An
+    // ordinary turn in another thread no longer refuses it (`MmsProfileServices.deleteGuard`).
+    vi.spyOn(services.orchestrator, 'getOwnedWork').mockReturnValue([{ label: 'scheduled-turn', scope: null }])
     await expect(services.trashThread(activation.threadId!, 'refused-trash')).rejects.toMatchObject({ code: 'busy' })
     expect(stop).not.toHaveBeenCalled()
     expect(bots.getActivation(activation.id).status).toBe('running')
     expect(services.threads.lifecycleStore.require(activation.threadId!).state).toBe('active')
+  }, 60_000)
+
+  it('a turn in another thread does not refuse the trash: the bot is stopped and its thread trashed', async () => {
+    const { services, bots, activation } = await withBot()
+    const other = services.threads.createThread('Mine, still working', undefined, undefined, { started: true })
+    // Another thread's turn and an MCP call it makes, both counted under that thread.
+    vi.spyOn(services.orchestrator, 'getOwnedWork').mockReturnValue([{ label: 'turn', scope: { threadIds: [other.id] } }])
+    vi.spyOn(services.mcpManager, 'getActiveWork').mockReturnValue([{ label: 'mcp-call', scope: { threadIds: [other.id] } }])
+    const stop = vi.spyOn(services.orchestrator, 'stopThread')
+    await services.trashThread(activation.threadId!, 'trash-beside-other-work')
+    expect(services.threads.lifecycleStore.require(activation.threadId!).state).toBe('trashed')
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'thread_trashed' })
+    // Only the bot's own thread was stopped.
+    expect(stop.mock.calls.map((call) => call[0])).not.toContain(other.id)
+    expect(services.threads.lifecycleStore.get(other.id)?.state ?? 'active').toBe('active')
+  }, 60_000)
+
+  it('a deleted bot\'s threads are deleted for good while a turn in another thread runs', async () => {
+    const { services, bots, home, domains, profileId, purged } = await withBot()
+    registerPersonalBotMethods(domains, () => bots.service)
+    await dispatchMethod({ mms: services, connection: { id: 'test', binding: { profileId, epoch: 1 }, capabilities: new Set() } } as never, 'bots.delete', { botId: 'review-bot' })
+    const other = services.threads.createThread('Mine, still working', undefined, undefined, { started: true })
+    vi.spyOn(services.orchestrator, 'getOwnedWork').mockReturnValue([{ label: 'turn', scope: { threadIds: [other.id] } }])
+    // The 30-day sweep trashes the bot's threads through `BotEngineHost.trashThread` (the one delete, for good).
+    expect(await bots.sweepDeleted(Date.now() + 31 * 24 * 60 * 60_000)).toEqual(['review-bot'])
+    expect(services.threads.lifecycleStore.require(home).state).toBe('purged')
+    expect(purged).toEqual(['review-bot'])
+    expect(services.threads.getThread(other.id)).toBeDefined()
   }, 60_000)
 })

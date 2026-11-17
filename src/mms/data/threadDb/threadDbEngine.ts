@@ -14,7 +14,10 @@ import { compose, decompose, normalizedForCompare, rowFields, type StoredThreadD
 import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStamp } from '../legacyThreadData'
 import { skeletonOf } from './jsonSkeleton'
 import { formatCursor, parseCursor } from '../../../shared/pageCursor'
+import { keepImagesWithin } from '../../protocol/transcriptPaging'
 import { ThreadIndex, type IndexHit, type IndexSearchRequest, type IndexTarget } from './threadIndex'
+import { estimateMessage, withoutMissingImages, type MessageEstimate } from '../../orchestrator/contextEstimate'
+import type { Message } from '../../../shared/transcript'
 import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
 export const THREAD_DB_FILE = 'thread.db'
@@ -50,8 +53,23 @@ export type BuildResult =
   | { ok: false; stale: true }
 
 export interface ThreadDbSummary { seq: number; messages: number }
+/** See `ThreadDbEngine.gauge`. */
+export interface ThreadDbGauge { context?: string; estimates: MessageEstimate[]; latest?: string }
+/** How many of the newest transcript messages the gauge looks through for the newest token count. */
+export const GAUGE_TOKEN_LOOKBACK = 500
 
-export interface MessagePageRequest { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean }
+export interface MessagePageRequest {
+  before?: string
+  after?: string
+  limit: number
+  maxBytes: number
+  images?: boolean
+  /**
+   * With `images`: the base64 characters of image data the page keeps, newest image first (`keepImagesWithin`); older
+   * images keep only their name and type, and a message is measured as it is returned. For a newest page only.
+   */
+  imageBudget?: number
+}
 export interface MessagePage {
   info: DbInfo
   /** Message payloads (JSON), oldest first. */
@@ -150,7 +168,7 @@ function readInfo(db: DatabaseSync): DbInfo {
 }
 
 /** Rows as read from the table, with their blobs put back (image data too, unless `images` is false). */
-function hydrateRows(dir: string, raw: Array<DbRow & { blob_paths: string | null }>, options: { images?: boolean } = {}): DbRow[] {
+function hydrateRows(dir: string, raw: Array<DbRow & { blob_paths: string | null }>, options: { images?: boolean | 'presence' } = {}): DbRow[] {
   return raw.map((row) => {
     const base = { rid: row.rid, coll: row.coll, ord: row.ord, seq: row.seq }
     if (!row.blob_paths) return { ...base, payload: row.payload }
@@ -196,7 +214,13 @@ export function dataFromLoad(load: DbLoad): StoredThreadData {
 export class ThreadDbEngine {
   private readonly connections = new Map<string, Connection>()
 
-  constructor(private readonly options: { idleCloseMs: number; checkpointOnClose?: boolean }) {}
+  /** `onOpenCount` hears the number of open connections each time it changes (the memory monitor's shared counter). */
+  constructor(private readonly options: { idleCloseMs: number; checkpointOnClose?: boolean; onOpenCount?: (count: number) => void }) {}
+
+  /** Open SQLite connections held by this engine (the memory monitor's count). */
+  openCount(): number {
+    return this.connections.size
+  }
 
   private path(dir: string): string {
     return join(dir, THREAD_DB_FILE)
@@ -242,6 +266,7 @@ export class ThreadDbEngine {
       }
       connection = { db, ino: stat.ino, statements: new Map() }
       this.connections.set(dir, connection)
+      this.options.onOpenCount?.(this.connections.size)
     }
     if (connection.timer) clearTimeout(connection.timer)
     if (this.options.idleCloseMs > 0) {
@@ -267,6 +292,7 @@ export class ThreadDbEngine {
     const connection = this.connections.get(dir)
     if (!connection) return
     this.connections.delete(dir)
+    this.options.onOpenCount?.(this.connections.size)
     if (connection.timer) clearTimeout(connection.timer)
     if (this.options.checkpointOnClose !== false) try {
       connection.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
@@ -302,6 +328,37 @@ export class ThreadDbEngine {
     db.exec('BEGIN')
     try {
       return { info: readInfo(db), state: db.prepare('SELECT key, payload FROM state').all() as unknown as DbStateRow[] }
+    } finally {
+      db.exec('COMMIT')
+    }
+  }
+
+  /**
+   * What the context gauge measures, without the transcript: the model context's header (`context` state), the
+   * estimate of each active message (those from `activeStartIndex`, see `estimateMessage`), and the newest transcript
+   * message that reports the tokens its turn used, among the newest `GAUGE_TOKEN_LOOKBACK` messages. The messages are
+   * parsed and estimated here, so the daemon's loop only sums the estimates. Image data is not read (an image counts
+   * the same whatever its size); an image whose file is missing counts as the note the model is sent instead, as in
+   * a full read. `context` is absent when the thread has no model context, which the gauge then estimates from the
+   * whole transcript.
+   */
+  gauge(dir: string): ThreadDbGauge {
+    const { db } = this.open(dir)
+    db.exec('BEGIN')
+    try {
+      const header = db.prepare("SELECT payload FROM state WHERE key = 'context'").get() as { payload: string } | undefined
+      if (!header) return { estimates: [] }
+      const parsed = JSON.parse(header.payload) as { activeStartIndex?: unknown }
+      const start = Number.isInteger(parsed.activeStartIndex) ? Math.max(0, parsed.activeStartIndex as number) : 0
+      const rows = db.prepare("SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'c:a' ORDER BY ord, rid LIMIT -1 OFFSET ?").all(start) as unknown as Array<DbRow & { blob_paths: string | null }>
+      // Only the newest messages are looked at: a runtime that never reports tokens would otherwise walk the whole
+      // transcript.
+      const latest = db.prepare(`SELECT rid, coll, ord, payload, blob_paths FROM (SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'm' ORDER BY ord DESC, rid DESC LIMIT ${GAUGE_TOKEN_LOOKBACK}) WHERE json_extract(payload, '$.responseMetadata.tokensUsed') IS NOT NULL ORDER BY ord DESC, rid DESC LIMIT 1`).get() as (DbRow & { blob_paths: string | null }) | undefined
+      return {
+        context: header.payload,
+        estimates: hydrateRows(dir, rows, { images: 'presence' }).map((row) => estimateMessage(withoutMissingImages([JSON.parse(row.payload) as Message])[0]!)),
+        ...(latest ? { latest: hydrateRows(dir, [latest], { images: false })[0]!.payload } : {})
+      }
     } finally {
       db.exec('COMMIT')
     }
@@ -436,9 +493,15 @@ export class ThreadDbEngine {
       const statement = db.prepare(`SELECT rid, coll, ord, msg_id, payload, blob_paths FROM items WHERE coll = 'm' AND hidden = 0 ${where} ${order} LIMIT ?`)
       const kept: Array<DbRow & { msg_id: string | null }> = []
       let bytes = 0
+      let imageChars = request.images === true && !cursor ? request.imageBudget : undefined
       // Measured as returned: blobs put back, in UTF-8.
       for (const raw of statement.iterate(...args, request.limit) as Iterable<DbRow & { msg_id: string | null; blob_paths: string | null }>) {
         const row = hydrateRows(dir, [raw], { images: request.images === true })[0]!
+        if (imageChars !== undefined && row.payload.includes('"images"')) {
+          const budgeted = keepImagesWithin(JSON.parse(row.payload) as { images?: Array<{ name: string; mimeType: string; data?: string }> }, imageChars)
+          imageChars = budgeted.remaining
+          if (Array.isArray(budgeted.message.images)) row.payload = JSON.stringify(budgeted.message)
+        }
         const size = Buffer.byteLength(row.payload)
         if (kept.length && bytes + size > request.maxBytes) break
         bytes += size

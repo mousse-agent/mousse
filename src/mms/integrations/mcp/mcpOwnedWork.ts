@@ -1,4 +1,5 @@
-import { OwnedWorkBarrier } from '../../execution/OwnedWorkBarrier'
+import { OwnedWorkBarrier, type OwnedWorkEntry } from '../../execution/OwnedWorkBarrier'
+import { currentWorkScope, type WorkScope } from '../../execution/workScope'
 
 export const DEFAULT_MCP_SHUTDOWN_TIMEOUT_MS = 30_000
 
@@ -54,7 +55,7 @@ export function observePromise<T>(work: Promise<T>): Promise<T> {
  */
 export class McpOwnedWork {
   private readonly barrier = new OwnedWorkBarrier()
-  private readonly retained = new Map<symbol, string>()
+  private readonly retained = new Map<symbol, OwnedWorkEntry>()
   private readonly idle = new Set<() => void>()
 
   get signal(): AbortSignal {
@@ -73,13 +74,19 @@ export class McpOwnedWork {
     this.barrier.beginShutdown()
   }
 
-  run<T>(label: string, work: () => T | Promise<T>): Promise<T> {
-    return this.barrier.run(label, work)
+  /** `scope` as in `OwnedWorkBarrier.run`: a tool call a turn makes is that turn's thread's; a shared connection is the profile's (`null`). */
+  run<T>(label: string, work: () => T | Promise<T>, scope?: WorkScope | null): Promise<T> {
+    return this.barrier.run(label, work, scope)
+  }
+
+  /** The work in flight, each with the threads it belongs to. */
+  entries(): OwnedWorkEntry[] {
+    return [...this.barrier.entries(), ...this.retained.values()]
   }
 
   retain<T>(label: string, work: Promise<T>): Promise<T> {
     const identity = Symbol(label)
-    this.retained.set(identity, label)
+    this.retained.set(identity, { label, scope: currentWorkScope() })
     return work.finally(() => {
       this.retained.delete(identity)
       this.notifyIdle()
@@ -97,7 +104,7 @@ export class McpOwnedWork {
 
   snapshot(): Record<string, number> {
     const result = this.barrier.snapshot()
-    for (const label of this.retained.values()) {
+    for (const { label } of this.retained.values()) {
       result[label] = (result[label] ?? 0) + 1
     }
     return result

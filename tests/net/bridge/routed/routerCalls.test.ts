@@ -2,6 +2,7 @@
  * What the router does with a call on its way: refusals that reach the window unchanged, the words for
  * a computer that refused or is older, a lost reply, big replies and queue changes.
  */
+import { readFileSync } from 'node:fs'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { NetError, type NodeId } from '../../../../src/shared/net'
 import { RoutedClient } from '../../../../src/mms/bridge/routed/RoutedClient'
@@ -137,6 +138,34 @@ describe('refusals', () => {
     vi.restoreAllMocks()
   }, 60_000)
 
+  it('carries the images of an answer to the owner, a large one staged, each to the question it answers', async () => {
+    const thread = t.thread()
+    const answered = t.owner.questions.requestAnswers(
+      [
+        { id: 'screen', prompt: 'Which screen?', options: [{ id: 'home', label: 'Home' }] },
+        { id: 'more', prompt: 'Anything else?', options: [{ id: 'no', label: 'No' }] }
+      ],
+      thread.id
+    )
+    const requestId = t.owner.questions.listPendingForThread(thread.id)[0]!.requestId
+    // Larger than a routed call carries inline, so it goes as a staged value.
+    const big = Buffer.alloc(96 * 1024, 7).toString('base64')
+    const reply = await t.dispatch('orchestrator.answerQuestions', {
+      threadId: t.qualified(thread.id),
+      requestId,
+      answers: { screen: 'This one', more: 'no' },
+      attachments: { screen: [{ name: 'screen.png', mimeType: 'image/png', data: big }] }
+    })
+    expect(reply).toMatchObject({ ok: true })
+    const answers = await answered
+    expect(answers.more).toBe('no')
+    const path = /\[Image attached: ([^\]]+)\]/.exec(String(answers.screen))?.[1]
+    expect(path?.startsWith(t.owner.threads.getThreadDir(thread.id))).toBe(true)
+    expect(readFileSync(path!).equals(Buffer.from(big, 'base64'))).toBe(true)
+    const message = t.owner.orchestrator.getMessages(thread.id).find((each) => each.questionAnswers?.length)!
+    expect(message.questionAnswers?.map((answer) => answer.images)).toEqual([[0], undefined])
+  }, 60_000)
+
   it('follows a large reply to its end and qualifies what it holds', async () => {
     const thread = t.thread()
     const session = t.owner.orchestrator.getOrCreateSession(thread.id)
@@ -222,6 +251,14 @@ describe('what a computer refused, in words', () => {
     expect(blocked).toMatchObject({ code: 'computer_forbidden', details: { reason: 'blocked' } })
     expect(blocked.message).toMatch(/refused this device\.$/)
     await t.owner.net.request('bridge.policy', { node: t.callerNode, blocked: false })
+    await expect(t.dispatch('threads.get', { threadId: id })).resolves.toBeDefined()
+
+    // Disconnected on the owner, the caller keeps its session with it (the keeper) and its calls are refused.
+    await t.owner.net.request('bridge.disconnect', { node: t.callerNode })
+    const disconnected = await t.refused(t.dispatch('threads.get', { threadId: id }))
+    expect(disconnected).toMatchObject({ code: 'computer_forbidden', details: { reason: 'not_connected' } })
+    expect(disconnected.message).toMatch(/hasn't connected this computer\.$/)
+    await t.owner.net.request('bridge.connect', { node: t.callerNode })
     await expect(t.dispatch('threads.get', { threadId: id })).resolves.toBeDefined()
   }, 60_000)
 

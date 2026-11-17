@@ -1,5 +1,6 @@
 import { buildAccentCssVars } from './accentPalette'
 import type { AppearanceSettings, ThemeId } from './settings'
+import { activeUserTheme } from './themes/userThemes'
 
 /** Themes with fixed workbench surfaces (not derived from accent). */
 export const FIXED_SURFACE_THEMES: Partial<
@@ -92,10 +93,14 @@ export const FIXED_SURFACE_THEMES: Partial<
 }
 
 export function appearanceSurfaceBase(
-  appearance: Pick<AppearanceSettings, 'theme' | 'accentColor'>,
+  appearance: Pick<AppearanceSettings, 'theme' | 'accentColor'> & Partial<Pick<AppearanceSettings, 'userThemes' | 'userTheme'>>,
   systemDark = true
 ): string {
-  const accent = buildAccentCssVars(appearance.accentColor)
+  // A user theme's own window background, when it sets one as a hex color the native window can take.
+  const user = activeUserTheme(appearance)
+  const own = user?.colors['--surface-base']
+  if (own && /^#[0-9a-f]{6}$/i.test(own)) return own
+  const accent = buildAccentCssVars(user?.accent || appearance.accentColor)
   if (appearance.theme === 'light' || (appearance.theme === 'system' && !systemDark)) {
     return accent['--surface-light-base']
   }

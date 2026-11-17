@@ -1,4 +1,6 @@
+import { canonicalJson, sha256Bytes } from '../revision'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import type { OwnedWorkEntry } from '../../execution/OwnedWorkBarrier'
 import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -49,6 +51,8 @@ const LIST_TOOLS_TIMEOUT_MS = 8_000
 const CALL_TOOL_TIMEOUT_MS = 20_000
 /** `getEnabledToolsByServer`: one server's connect and listing, after which it is reported as failed. */
 const SERVER_TOOLS_TIMEOUT_MS = 20_000
+/** After a call to a stdio server timed out: how long a ping may take before the server counts as stuck and restarts. */
+const PING_TIMEOUT_MS = 5_000
 
 export interface InjectedMcpClient {
   listTools(options?: { signal?: AbortSignal; cursor?: string }): Promise<{
@@ -57,6 +61,8 @@ export interface InjectedMcpClient {
       description?: string
       inputSchema?: Record<string, unknown>
       outputSchema?: Record<string, unknown>
+      /** The server's own hints (MCP `ToolAnnotations`); only `readOnlyHint` is read. */
+      annotations?: { readOnlyHint?: boolean }
     }>
     nextCursor?: string
   }>
@@ -64,6 +70,8 @@ export interface InjectedMcpClient {
     args: { name: string; arguments?: Record<string, unknown> },
     options?: { signal?: AbortSignal; timeout?: number }
   ): Promise<unknown>
+  /** MCP `ping`: whether the server still answers (after a call timed out). Absent: it is taken as stuck. */
+  ping?(options?: { signal?: AbortSignal; timeout?: number }): Promise<unknown>
   close(): Promise<void>
 }
 
@@ -75,16 +83,26 @@ export interface McpClientFactory {
 export interface McpToolExecutionPin {
   installationId: string
   configRevision: string
+  schemaDigest?: string
   toolName: string
   /** Workflow defaults must remain selected even though dispatch narrows to one tool. */
   requireProfileSelection?: boolean
   assertExecutionActive?: () => Promise<void>
+  /** A synchronous fence after all asynchronous authorization, immediately before dispatch. */
+  assertDispatchActive?: () => void
 }
 
 /** Per-call options of `callTool`. */
 export interface McpCallOptions {
   /** How long the call may run (default 20 s); drives both Mousse's timer and the SDK request's. */
   timeoutMs?: number
+  /**
+   * `false`: the call never starts a sign-in (a bot's). An OAuth server without a session refuses it at once, and a
+   * session that cannot be renewed fails it (`auth-required`) instead of opening a sign-in page.
+   */
+  signIn?: false
+  /** Internal held-call certainty: distinguish failure before transport dispatch. */
+  trackDispatch?: true
 }
 
 /** One enabled server's tools (`getEnabledToolsByServer`). */
@@ -105,6 +123,8 @@ export interface McpManagerDependencies {
   context?: IntegrationRuntimeContext
   clientFactory?: McpClientFactory
   now?: () => number
+  /** How long the ping after a timed-out stdio call may take (default 5 s). */
+  pingTimeoutMs?: number
 }
 
 interface ConnectedServer {
@@ -116,7 +136,7 @@ interface ConnectedServer {
   ownedStdio: boolean
   closing?: Promise<void>
   releaseLifetime?: () => void
-  /** Tool calls running on this connection: a timed-out call restarts it only when it was the last. */
+  /** Tool calls running on this connection: a stdio server that stopped answering restarts only once none runs. */
   inFlight: number
 }
 
@@ -129,6 +149,7 @@ export class McpManager {
   private static readonly DISCOVERY_TTL_MS = 30_000
   private readonly context: IntegrationRuntimeContext
   private readonly clientFactory?: McpClientFactory
+  private readonly pingTimeoutMs: number
   private readonly owned = new McpOwnedWork()
   private drain: Promise<void> | null = null
   private drainFinished = false
@@ -144,6 +165,7 @@ export class McpManager {
   ) {
     this.context = deps.context ?? createLegacySingleProfileContext()
     this.clientFactory = deps.clientFactory
+    this.pingTimeoutMs = deps.pingTimeoutMs ?? PING_TIMEOUT_MS
   }
 
   beginShutdown(): void {
@@ -153,6 +175,11 @@ export class McpManager {
 
   getActiveCount(): number {
     return this.owned.count
+  }
+
+  /** The work `getActiveCount` counts, each with the threads it belongs to (`OwnedWorkEntry.scope`). */
+  getActiveWork(): OwnedWorkEntry[] {
+    return this.owned.entries()
   }
 
   snapshotOwnedWork(): Record<string, number> {
@@ -273,10 +300,12 @@ export class McpManager {
   /**
    * `getEnabledTools` per enabled server: each server is listed on its own, within its own timeout, and
    * one that fails reports its error instead of failing or delaying the rest (the MCP relay's catalogue).
+   * `onServer` hears each server's entry as soon as that server answers or fails, before the slowest one is done.
    */
   async getEnabledToolsByServer(
     projectPath?: string,
-    actor: IntegrationActor = defaultIntegrationActor(false)
+    actor: IntegrationActor = defaultIntegrationActor(false),
+    options: { signIn?: false; onServer?: (entry: McpServerTools) => void } = {}
   ): Promise<McpServerTools[]> {
     this.owned.assertAccepting()
     const settings = this.settingsStore.get().integrations.mcp
@@ -287,17 +316,7 @@ export class McpManager {
       actor
     }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
 
-    const listed = await Promise.allSettled(
-      eligibleServers.map((server) =>
-        withAbortTimeout(
-          (signal) => this.listToolsForServer(server, projectPath, signal),
-          SERVER_TOOLS_TIMEOUT_MS,
-          `Timed out listing tools for ${server.name}`
-        )
-      )
-    )
-    return eligibleServers.map((server, index) => {
-      const result = listed[index]!
+    const entryOf = (server: McpServerConfig, result: PromiseSettledResult<McpToolDescriptor[]>): McpServerTools => {
       const entry = {
         installationId: mcpInstallationId(server),
         serverName: server.name,
@@ -310,7 +329,38 @@ export class McpManager {
         ...entry,
         tools: result.value.filter((tool) => isMcpToolAllowedForActor(tool, server, actor) && !tool.schemaError)
       }
-    })
+    }
+    const listed = await Promise.all(
+      eligibleServers.map(async (server) => {
+        let result: PromiseSettledResult<McpToolDescriptor[]>
+        try {
+          // A listing that must not start a sign-in (`signIn: false`) holds each server's sign-in while it lists.
+          const release = options.signIn === false ? await this.holdSignIn(server) : undefined
+          try {
+            result = {
+              status: 'fulfilled',
+              value: await withAbortTimeout(
+                (signal) => this.listToolsForServer(server, projectPath, signal),
+                SERVER_TOOLS_TIMEOUT_MS,
+                `Timed out listing tools for ${server.name}`
+              )
+            }
+          } finally {
+            release?.()
+          }
+        } catch (error) {
+          result = { status: 'rejected', reason: error }
+        }
+        const entry = entryOf(server, result)
+        try {
+          options.onServer?.(entry)
+        } catch (err) {
+          logWarn('McpManager', `A listing listener failed: ${redactSensitiveText(formatError(err))}`)
+        }
+        return entry
+      })
+    )
+    return listed
   }
 
   /** Resolve and connect only the named enabled installation. Used by pinned execution preparation. */
@@ -423,7 +473,7 @@ export class McpManager {
   }
 
   async revokeServer(serverId: string, projectPath?: string): Promise<void> {
-    return this.owned.run('mcp-oauth-revoke', () => this.revokeServerOwned(serverId, projectPath))
+    return this.owned.run('mcp-oauth-revoke', () => this.revokeServerOwned(serverId, projectPath), null)
   }
 
   private async revokeServerOwned(serverId: string, projectPath?: string): Promise<void> {
@@ -452,24 +502,68 @@ export class McpManager {
     expected?: McpToolExecutionPin,
     options?: McpCallOptions
   ): Promise<McpToolCallResult> {
-    this.owned.assertAccepting()
-    const descriptor = this.toolMap.get(providerName)
-    if (!descriptor) {
-      throw new Error(`Unknown MCP tool: ${providerName}`)
+    let dispatched = false
+    try {
+      this.owned.assertAccepting()
+      const descriptor = this.toolMap.get(providerName)
+      if (!descriptor) {
+        throw new Error(`Unknown MCP tool: ${providerName}`)
+      }
+      const assertPin = (tool: McpToolDescriptor | undefined): void => {
+        if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName || (expected.schemaDigest !== undefined && sha256Bytes(canonicalJson(tool.inputSchema ?? {})) !== expected.schemaDigest))) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
+      }
+      assertPin(descriptor)
+
+      const authorization = await this.isToolCallAllowed(providerName, projectPath, actor)
+      assertPin(authorization.descriptor)
+      if (!authorization.allowed) throw new Error(authorization.reason ?? 'MCP tool is not enabled for this actor.')
+      const server = authorization.server
+      if (!server) {
+        throw new Error(`MCP server is no longer configured: ${descriptor.serverId}`)
+      }
+
+      // A call that must not start a sign-in holds the server's sign-in for as long as it runs.
+      const release = options?.signIn === false ? await this.holdSignIn(server) : undefined
+      try {
+        return await this.callConnected(server, descriptor, args, projectPath, signal, actor, expected, options, providerName, () => { dispatched = true })
+      } finally {
+        release?.()
+      }
+    } catch (error) {
+      if (options?.trackDispatch && !dispatched) {
+        const cause = error as { message?: string; category?: string; code?: string }
+        throw Object.assign(new Error(cause?.message ?? 'The call was refused before dispatch.'), { category: cause?.category, code: cause?.code, mcpNotDispatched: true })
+      }
+      throw error
     }
+  }
+
+  /**
+   * Holds an OAuth server's sign-in (`FileMcpOAuthProvider.holdSignIn`) for a call that must not start one; refuses at
+   * once when there is no session to use. Nothing to hold for a server that does not sign in with OAuth.
+   */
+  private async holdSignIn(server: McpServerConfig): Promise<(() => void) | undefined> {
+    if (inferMcpAuthMode(server) !== 'oauth' || !server.url || !shouldAttachOAuthProvider(server)) return undefined
+    // Throws `auth-required` when the owner never signed in, or signed out.
+    await this.prepareOAuthProvider(server)
+    return this.oauthProviders.get(mcpInstallationId(server))?.holdSignIn()
+  }
+
+  private async callConnected(
+    server: McpServerConfig,
+    descriptor: McpToolDescriptor,
+    args: Record<string, unknown>,
+    projectPath: string | undefined,
+    signal: AbortSignal | undefined,
+    actor: IntegrationActor,
+    expected: McpToolExecutionPin | undefined,
+    options: McpCallOptions | undefined,
+    providerName: string,
+    onDispatch?: () => void
+  ): Promise<McpToolCallResult> {
     const assertPin = (tool: McpToolDescriptor | undefined): void => {
-      if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName)) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
+      if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName || (expected.schemaDigest !== undefined && sha256Bytes(canonicalJson(tool.inputSchema ?? {})) !== expected.schemaDigest))) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
     }
-    assertPin(descriptor)
-
-    const authorization = await this.isToolCallAllowed(providerName, projectPath, actor)
-    assertPin(authorization.descriptor)
-    if (!authorization.allowed) throw new Error(authorization.reason ?? 'MCP tool is not enabled for this actor.')
-    const server = authorization.server
-    if (!server) {
-      throw new Error(`MCP server is no longer configured: ${descriptor.serverId}`)
-    }
-
     const connection = await this.connect(server, projectPath, signal)
     if (expected && (mcpInstallationId(connection.config) !== expected.installationId || connection.config.configRevision !== expected.configRevision)) throw Object.assign(new Error('MCP connection does not match the admitted revision.'), { category: 'disabled', code: 'stale_revision' })
     if (expected) {
@@ -482,6 +576,7 @@ export class McpManager {
       assertPin(this.toolMap.get(providerName))
       if (!current.allowed || current.server?.configRevision !== expected.configRevision) throw Object.assign(new Error(current.reason ?? 'MCP dependency is no longer admitted.'), { category: 'disabled', code: 'stale_revision' })
       if (signal?.aborted) throw Object.assign(new Error('MCP call cancelled before dispatch.'), { category: 'cancelled' })
+      expected.assertDispatchActive?.()
     }
     const timeoutMs = options?.timeoutMs ?? CALL_TOOL_TIMEOUT_MS
     connection.inFlight += 1
@@ -491,11 +586,13 @@ export class McpManager {
         timeoutMs,
         `Timed out calling MCP tool ${descriptor.toolName}`,
         signal,
-        (callSignal) =>
-          connection.client.callTool(
+        (callSignal) => {
+          onDispatch?.()
+          return connection.client.callTool(
             { name: descriptor.toolName, arguments: args },
             { signal: callSignal, timeout: timeoutMs }
           )
+        }
       ).finally(() => {
         connection.inFlight -= 1
       })
@@ -513,10 +610,9 @@ export class McpManager {
         artifacts: this.context.artifacts
       })
     } catch (err) {
-      // A stuck stdio server is restarted, but not under another call still running on it.
-      if (err instanceof TimeoutError && connection.ownedStdio && connection.inFlight === 0) {
-        await this.restartServer(mcpInstallationId(server))
-      }
+      // The SDK told the server the call was cancelled. A stdio server that no longer answers a ping is stuck and is
+      // restarted; one that answers keeps its process and its own state.
+      if (err instanceof TimeoutError && connection.ownedStdio) this.checkAfterTimeout(connection)
       const classified = classifyTransportError(err)
       throw Object.assign(new Error(classified.message), { category: classified.category })
     }
@@ -616,6 +712,36 @@ export class McpManager {
         toolCount: 0,
         connected: false
       }
+    }
+  }
+
+  /**
+   * After a call to a stdio server timed out: the server is pinged, and restarted only when the ping fails too, and no
+   * other call runs on it then. Runs as the profile's work, so the caller's error is not held for it.
+   */
+  private checkAfterTimeout(connection: ConnectedServer): void {
+    const work = (async () => {
+      if (await this.answersPing(connection)) return
+      if (connection.inFlight === 0 && this.connections.get(connection.key) === connection) await this.closeConnected(connection)
+    })().catch((error) => {
+      logWarn('McpManager', `A stuck MCP server could not be restarted: ${redactSensitiveText(formatError(error))}`)
+    })
+    void this.awaitRaw('mcp-ping', work)
+  }
+
+  private async answersPing(connection: ConnectedServer): Promise<boolean> {
+    const ping = connection.client.ping
+    if (!ping || connection.closing) return false
+    try {
+      await withAbortTimeout(
+        (signal) => ping.call(connection.client, { signal, timeout: this.pingTimeoutMs }),
+        this.pingTimeoutMs,
+        'Timed out pinging the MCP server',
+        this.owned.signal
+      )
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -753,6 +879,7 @@ export class McpManager {
     run: (signal: AbortSignal) => Promise<T>
   ): Promise<T> {
     const combined = this.operationSignal(signal)
+    // A call or a listing is the work of the turn that makes it (its thread, `currentWorkScope`); a connection is the profile's.
     return this.owned.run(label, async () => {
       return withAbortTimeout(
         (callSignal) => {
@@ -818,7 +945,8 @@ export class McpManager {
           installationId,
           configRevision: server.configRevision,
           profileId: this.context.profileId,
-          schemaError
+          schemaError,
+          ...(typeof tool.annotations?.readOnlyHint === 'boolean' ? { readOnlyHint: tool.annotations.readOnlyHint } : {})
         }
         tools.push(descriptor)
       }
@@ -831,48 +959,59 @@ export class McpManager {
     return tools
   }
 
+  /**
+   * The server's shared connection, opened when there is none. The connection, and its attempt to open, live as long as
+   * the profile's MCP work (`owned`), never as long as the call that opened it: `signal` only ends this caller's wait,
+   * so a call that is stopped (a bot's turn ending) never closes the connection other calls use.
+   */
   private async connect(
     server: McpServerConfig,
     projectPath?: string,
     signal?: AbortSignal
   ): Promise<ConnectedServer> {
+    if (signal?.aborted) throw abortFrom(signal.reason)
     const key = buildConnectionKey(server, this.context.profileId, projectPath)
     const existing = this.connections.get(key)
     if (existing && !existing.closing) return existing
     if (existing?.closing) {
-      await existing.closing.catch(() => undefined)
+      await untilAborted(existing.closing.catch(() => undefined), signal)
       const current = this.connections.get(key)
       if (current && !current.closing) return current
     }
     if (this.owned.stopping) throw abortFrom(this.owned.signal.reason)
     this.owned.assertAccepting()
     const inflight = this.connecting.get(key)
-    if (inflight) return inflight
+    if (inflight) return untilAborted(inflight, signal)
 
     const attempt = observePromise(
-      this.owned.run('mcp-connect', () => this.connectWithBackoff(server, key, signal))
+      // A connection is shared by every thread: the profile's work, whichever turn asked for it first.
+      this.owned.run('mcp-connect', async () => {
+        const connection = await this.connectWithBackoff(server, key)
+        if (this.owned.stopping) {
+          await this.closeConnected(connection)
+          throw abortFrom(this.owned.signal.reason)
+        }
+        this.connections.set(key, connection)
+        this.retainConnection(connection)
+        return connection
+      }, null)
     )
     this.connecting.set(key, attempt)
-    try {
-      const connection = await attempt
-      if (this.owned.stopping) {
-        await this.closeConnected(connection)
-        throw abortFrom(this.owned.signal.reason)
-      }
-      this.connections.set(key, connection)
-      this.retainConnection(connection)
-      return connection
-    } finally {
+    void attempt.then(
+      () => undefined,
+      () => undefined
+    ).finally(() => {
       if (this.connecting.get(key) === attempt) this.connecting.delete(key)
-    }
+    })
+    return untilAborted(attempt, signal)
   }
 
   private async connectWithBackoff(
     server: McpServerConfig,
-    key: string,
-    signal?: AbortSignal
+    key: string
   ): Promise<ConnectedServer> {
-    const combined = this.operationSignal(signal)
+    // The connection's own lifetime: the profile's MCP work, never a caller's.
+    const combined = this.operationSignal()
     let lastError: unknown
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (combined.aborted) throw abortFrom(combined.reason)
@@ -901,7 +1040,7 @@ export class McpManager {
   private async connectOnce(
     server: McpServerConfig,
     key: string,
-    signal?: AbortSignal
+    signal: AbortSignal
   ): Promise<ConnectedServer> {
     if (this.clientFactory) {
       let raw: Promise<InjectedMcpClient> | undefined
@@ -979,6 +1118,7 @@ export class McpManager {
         }
       },
       callTool: async (args, options) => requestWithSignal(client, 'callTool', args, options),
+      ping: async (options) => client.ping({ ...(options?.signal ? { signal: options.signal } : {}), ...(options?.timeout ? { timeout: options.timeout } : {}) }),
       close: async () => {
         await client.close()
       }
@@ -1028,9 +1168,11 @@ export class McpManager {
     server: McpServerConfig,
     stderrLines: string[],
     authProvider: FileMcpOAuthProvider | undefined,
-    signal?: AbortSignal
+    signal: AbortSignal
   ): Promise<Transport> {
-    const abort = this.operationSignal(signal)
+    // `signal` is the connection's lifetime (`connectWithBackoff`): every request on it ends with that, never with the
+    // call that opened it. A request's own signal (its timeout, a stop) reaches the SDK request, which cancels it.
+    const abort = signal
     if (server.transport === 'stdio') {
       if (!server.command) {
         throw new Error(`MCP server ${server.name} is missing a command.`)
@@ -1096,6 +1238,17 @@ export class McpManager {
       'MCP OAuth directory'
     )
   }
+}
+
+/** `work`, or an abort error as soon as `signal` aborts: the caller stops waiting; the work goes on. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work
+  if (signal.aborted) return Promise.reject(abortFrom(signal.reason))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortFrom(signal.reason))
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
 }
 
 async function requestWithSignal(

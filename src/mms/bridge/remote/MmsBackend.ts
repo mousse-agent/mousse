@@ -7,22 +7,27 @@ import {
   sensitiveFolderHolding,
   type FolderRuleEnvironment
 } from '../../files/sensitiveFolders'
-import { matchProjectWithEvidence, type ProjectIdentity } from './projectMatch'
+import { matchProjectWithEvidence, possibleProjects, type ProjectIdentity } from './projectMatch'
 import { repositoryIdentitiesFor } from './repositoryIdentity'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
+import { DomainRpcError } from '../../protocol/domainRegistry'
 import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
 import { normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
-import { newestMessages } from '../../protocol/transcriptPaging'
-import { ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
+import { keepImagesWithin, messagesBefore, newestMessages, type EarlierMessages } from '../../protocol/transcriptPaging'
+import { isOpenActivityRow } from '../../run/restartNote'
+import { listPendingQueue } from '../../queue/ThreadMessageQueue'
+import type { MessagePageResult } from '../../data/ThreadDataStore'
+import { PHONE_MESSAGES_PAGE_BYTES, PHONE_SNAPSHOT_MESSAGE_BYTES, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
 import { COMPOSER_COMMANDS } from '../../../shared/composerCommands'
+import { withHiddenBots } from './botReach'
 import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
-import type { OrchestratorSendRequest, QueuedMessage, Thread } from '../../../shared/types'
+import type { ChatMessage, OrchestratorSendRequest, QueuedMessage, Thread, ThreadStartedFrom } from '../../../shared/types'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import { resolveEffectiveSkills } from '../../integrations/catalog/EffectiveIntegrationResolver'
 
@@ -70,21 +75,9 @@ export function withImageBudget<T extends { images?: unknown }>(items: T[]): T[]
   let remaining = REMOTE_MESSAGE_IMAGES_MAX_CHARS
   const trimmed = items.slice()
   for (let index = trimmed.length - 1; index >= 0; index -= 1) {
-    const item = trimmed[index]
-    if (!Array.isArray(item?.images)) continue
-    const images = (item.images as RemoteImage[]).slice()
-    for (let at = images.length - 1; at >= 0; at -= 1) {
-      const image = images[at]
-      const size = typeof image.data === 'string' ? image.data.length : 0
-      if (size <= remaining) {
-        remaining -= size
-      } else {
-        // Once one image does not fit, every older one goes without data too.
-        remaining = 0
-        images[at] = { name: image.name, mimeType: image.mimeType }
-      }
-    }
-    trimmed[index] = { ...item, images }
+    const kept = keepImagesWithin(trimmed[index] as { images?: RemoteImage[] }, remaining)
+    trimmed[index] = kept.message as T
+    remaining = kept.remaining
   }
   return trimmed
 }
@@ -105,10 +98,15 @@ export function remoteThreadEventData(data: unknown): unknown {
   }
 }
 
+/** Newest pages read ahead by `warm` and not yet taken by a snapshot; each is at most 16 MiB. */
+const WARM_PAGES_MAX = 4
+
 /** Projects looked at for one match; a profile with more is matched against the first ones. */
 const MATCH_PROJECT_LIMIT = 256
 /** Folders read at once for a match. */
 const MATCH_CONCURRENCY = 4
+/** At most this many candidates are named when no single project matches. */
+const MATCH_CANDIDATES_SHOWN = 10
 
 /**
  * A Windows network or device path (`\\host\share`, `\\?\C:\x`, `\\.\pipe\x`). Resolving one makes
@@ -118,12 +116,19 @@ function isNetworkOrDevicePath(path: string): boolean {
   return process.platform === 'win32' && /^[\\/]{2}/.test(path)
 }
 
+/** The bytes of messages a snapshot holds: 16 MiB for another computer of the user (`newestOnly`), 8 MiB for a phone. */
+function snapshotBudget(options: { newestOnly?: boolean }): number {
+  return options.newestOnly ? ROUTED_SNAPSHOT_MESSAGE_BYTES : PHONE_SNAPSHOT_MESSAGE_BYTES
+}
+
 function failure(error: unknown): { ok: false; error: string } {
   return { ok: false, error: error instanceof Error ? error.message : String(error) }
 }
 
 /** Adapts the actual profile services, never a client-supplied ingress/profile/path. */
 export class MmsRemoteBackend implements RemoteBackendPort {
+  /** The newest page of a thread `warm` read from its database, by thread and byte budget, for the next snapshot. */
+  private readonly pages = new Map<string, MessagePageResult>()
   constructor(
     private readonly services: MmsProfileServices,
     private readonly revision: () => number = () => 0,
@@ -143,6 +148,47 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     return thread && !thread.botOwned && !isLocalOnlyThread(thread, inventory) ? thread : undefined
   }
   async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
+    const result = await this.executeFor(method, params, caller)
+    // A thread a bot started names that bot only to a device that reaches it ("Started by a bot" otherwise).
+    const shown = withHiddenBots(result, this.services.botReach?.hiddenFor(caller?.node))
+    return method === 'storage.usage' ? this.withoutBotThreadNames(shown) : shown
+  }
+  /**
+   * Disk usage as another device sees it: a personal bot's threads are its chat, never listed to a device, and are
+   * named after the bot and its work, so their space is counted without a thread (as a private thread's is).
+   */
+  private withoutBotThreadNames(usage: unknown): unknown {
+    const value = usage as { entries?: Array<{ threadId?: string }>; names?: { threads?: Record<string, string> } } | null
+    if (!value || !Array.isArray(value.entries)) return usage
+    const bots = new Set(this.services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
+    if (!bots.size) return usage
+    return {
+      ...value,
+      entries: value.entries.map((entry) => {
+        if (!entry.threadId || !bots.has(entry.threadId)) return entry
+        const { threadId: _bot, ...unattributed } = entry
+        return unattributed
+      }),
+      ...(value.names ? { names: { ...value.names, threads: Object.fromEntries(Object.entries(value.names.threads ?? {}).filter(([id]) => !bots.has(id))) } } : {})
+    }
+  }
+  /**
+   * `threads.create` for an agent on another of the user's computers (a routed call marked as an agent's, `remoteAgent.ts`):
+   * the thread records the agent that started it and is held to `permissionMode` from the start. Only the owner's routed
+   * API calls it; a phone's call never carries the mark (`dto.ts` takes exact keys, and `executeFor` refuses it).
+   */
+  async createThreadForAgent(
+    params: Record<string, unknown>,
+    caller: { node: NodeId },
+    started: { agent: NonNullable<ThreadStartedFrom['agent']>; permissionMode: PermissionMode }
+  ): Promise<unknown> {
+    if (typeof params.projectId === 'string' && !this.services.projects.listProjects().some((project) => project.id === params.projectId))
+      throw new NetError('bad_request', 'Project is outside this profile inventory.')
+    return mmsJson(await this.createThread(params, caller, started))
+  }
+  private async executeFor(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
+    // The mark of an agent's call is set only by another computer's daemon, through the routed API, never by a phone.
+    if (Object.hasOwn(params, 'agent')) throw new NetError('bad_request', `${method} does not take agent.`)
     if (typeof params.threadId === 'string' && !this.remoteThread(params.threadId))
       throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
     if (
@@ -164,32 +210,51 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const composer = await this.composer(method, params, caller)
     if (composer !== undefined) return mmsJson(composer)
     if (method === 'threads.create') return mmsJson(await this.createThread(params, caller))
-    return mmsJson(
-      await dispatchMethod(
-        {
-          mms: this.services,
-          globalSequence: this.revision,
-          emitEvent: (type, data) => {
-            if (type === 'threads.updated') this.services.events.broadcast('threads:updated', data)
-          }
-        },
-        method,
-        params
-      )
+    if (method === 'threads.regenerateTitle' || method === 'threads.setExpiry') {
+      // An expected refusal (no title came back, an expired thread, a time out of range) reaches the phone in words,
+      // as `{ ok: false, error }`: a mutating call that throws reports only that it may have happened.
+      try {
+        return mmsJson(await this.dispatch(method, params))
+      } catch (error) {
+        if (error instanceof DomainRpcError) return failure(error)
+        throw error
+      }
+    }
+    return mmsJson(await this.dispatch(method, params))
+  }
+  private dispatch(method: BridgeOrdinaryMethod, params: Record<string, unknown>): Promise<unknown> {
+    return dispatchMethod(
+      {
+        mms: this.services,
+        globalSequence: this.revision,
+        emitEvent: (type, data) => {
+          if (type === 'threads.updated') this.services.events.broadcast('threads:updated', data)
+        }
+      },
+      method,
+      params
     )
   }
   /**
    * Creates the thread as the local protocol does, then records the device that asked (and its own
    * project id) on it, so every device that lists this machine's threads can show where it began.
    */
-  private async createThread(params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
+  private async createThread(
+    params: Record<string, unknown>,
+    caller?: { node: NodeId },
+    started?: { agent: NonNullable<ThreadStartedFrom['agent']>; permissionMode: PermissionMode }
+  ): Promise<unknown> {
     const { startedFromProjectId, ...create } = params
     const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
       { thread: { id: string } } & Record<string, unknown>
     if (!caller) return result
+    // A thread an agent of the device started holds who started it and its mode from this same write on.
     const thread = this.services.threads.updateThreadMeta(
       result.thread.id,
-      { startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}) } },
+      {
+        startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}), ...(started ? { agent: started.agent } : {}) },
+        ...(started ? { permissionMode: started.permissionMode } : {})
+      },
       { touch: false }
     )
     this.services.events.broadcast('threads:updated', { threads: this.services.threads.listAllThreads() })
@@ -202,7 +267,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
    */
   private async matchProject(
     params: Record<string, unknown>
-  ): Promise<{ projectId?: string; weak?: true }> {
+  ): Promise<{ projectId?: string; weak?: true; candidates?: Array<{ projectId: string; name: string; weak?: true }> }> {
     // Projects are matched by the repository they are in, not by their folder: a project that is a
     // subfolder, or is reached through a link, has the identity of its repository. When two projects are
     // the same repository, the one at its top folder stands for it (else the first), so they do not
@@ -238,7 +303,16 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       candidates
     )
     // A match that rests on the root commit alone says so: the caller does not group by it.
-    return found ? { projectId: found.id, ...(found.weak ? { weak: true as const } : {}) } : {}
+    if (found) return { projectId: found.id, ...(found.weak ? { weak: true as const } : {}) }
+    // No single answer: the projects that may be it, by id and name, so an agent can be told which to name.
+    const names = new Map(projects.map((project) => [project.id, project.name]))
+    const possible = possibleProjects(
+      { roots: params.roots as string[], remotes: (params.remotes as string[] | undefined) ?? [] },
+      candidates
+    ).slice(0, MATCH_CANDIDATES_SHOWN)
+    return possible.length
+      ? { candidates: possible.map(({ id, weak }) => ({ projectId: id, name: names.get(id) ?? '', ...(weak ? { weak: true as const } : {}) })) }
+      : {}
   }
   /**
    * Registers an existing directory on this machine as a project. The path comes from another
@@ -446,33 +520,104 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       throw new Error('That skill is not available.')
   }
   /**
-   * What a reader is given on opening a thread. `newestOnly` is for another computer of the user: a
-   * long transcript is cut to its newest 16 MiB (`earlier` says where the rest begins, and
-   * `thread.messages` pages it), where a phone's snapshot is whole and fails past its bound.
+   * Reads what the next `snapshot` of the thread needs off the event loop. A thread that is not loaded and keeps its
+   * history in thread.db has its newest messages read in the read worker, as a window's newest page is, and is not
+   * loaded. Any other is read whole, so the snapshot finds it in memory. `newestOnly` as for `snapshot`.
    */
-  async warm(threadId: string): Promise<void> {
-    if (this.remoteThread(threadId)) await this.services.threads.warmThread(threadId)
+  async warm(threadId: string, options: { newestOnly?: boolean } = {}): Promise<void> {
+    const s = this.services
+    if (!this.remoteThread(threadId) || s.orchestrator.hasSession(threadId)) return
+    if (s.threads.usesThreadDb(threadId)) {
+      const budget = snapshotBudget(options)
+      const page = await s.threads.readMessagePage(threadId, {
+        limit: Number.MAX_SAFE_INTEGER,
+        maxBytes: budget,
+        images: true,
+        imageBudget: REMOTE_MESSAGE_IMAGES_MAX_CHARS
+      })
+      // A page showing work still running loads the thread after all: loading it settles work a previous daemon
+      // left running.
+      if (page && !page.messages.some(isOpenActivityRow)) {
+        const key = `${budget}:${threadId}`
+        this.pages.delete(key)
+        this.pages.set(key, page)
+        for (const stale of this.pages.keys()) {
+          if (this.pages.size <= WARM_PAGES_MAX) break
+          this.pages.delete(stale)
+        }
+        return
+      }
+    }
+    await s.threads.warmThread(threadId)
   }
 
+  /**
+   * The page `warm` read for this snapshot, while it is still the thread's newest: the thread was not loaded since
+   * (a loaded thread may hold what its database does not yet) and its database has not changed.
+   */
+  private warmPage(threadId: string, budget: number): MessagePageResult | undefined {
+    const key = `${budget}:${threadId}`
+    const page = this.pages.get(key)
+    if (!page) return undefined
+    this.pages.delete(key)
+    if (this.services.orchestrator.hasSession(threadId)) return undefined
+    const now = this.services.threads.threadDbPosition(threadId)
+    return now && now.seq === page.seq && now.epoch === page.epoch ? page : undefined
+  }
+
+  /**
+   * A phone's page of the messages before the cursor `before`, images included (within the budget a snapshot has),
+   * read the way a window reads one: an index range of thread.db in the read worker when the thread is not loaded.
+   * A page showing work still running loads the thread, which settles work a previous service left running.
+   */
+  async messagesBefore(threadId: string, before: string, limit: number): Promise<unknown> {
+    if (!this.remoteThread(threadId)) throw new NetError('stream_unknown', 'Thread not found.')
+    const s = this.services
+    const fromDatabase = !s.orchestrator.hasSession(threadId) && s.threads.usesThreadDb(threadId)
+    let page: { messages: ChatMessage[]; earlier?: EarlierMessages } | undefined = fromDatabase
+      ? await s.threads.readMessagePage(threadId, { before, limit, maxBytes: PHONE_MESSAGES_PAGE_BYTES, images: true })
+      : undefined
+    const settle = page !== undefined && page.messages.some(isOpenActivityRow)
+    if (!fromDatabase || settle) {
+      await s.threads.warmThread(threadId)
+      if (settle) s.orchestrator.getOrCreateSession(threadId)
+      page = messagesBefore(s.orchestrator.getMessages(threadId), before, limit, PHONE_MESSAGES_PAGE_BYTES)
+    }
+    if (!page) throw new NetError('snapshot_required', 'That message is no longer in this thread.')
+    return mmsJson({ messages: withImageBudget(page.messages), ...(page.earlier ? { earlier: page.earlier } : {}) })
+  }
+
+  /**
+   * What a reader is given on opening a thread: the newest part of a long transcript, so a thread of any
+   * length opens. `newestOnly` is for another computer of the user, which gets 16 MiB and pages the rest
+   * with `thread.messages`; a phone gets 8 MiB. `earlier` says where the rest begins and how much is left.
+   */
   snapshot(
     threadId: string,
-    maximumBytes = 25 * 1024 * 1024,
-    options: { newestOnly?: boolean; deviceLimit?: PermissionMode } = {}
+    options: { newestOnly?: boolean; deviceLimit?: PermissionMode; reader?: string } = {}
   ): unknown {
     const s = this.services,
-      thread = this.remoteThread(threadId)
+      found = this.remoteThread(threadId)
+    // A thread a bot started names that bot to a reader that reaches it; with no reader (a stream any device may read),
+    // only when every device does.
+    const thread = found && withHiddenBots(found, s.botReach?.hiddenFor(options.reader))
     if (!thread) throw new NetError('stream_unknown', 'Thread not found.')
     const pause = s.orchestrator.getTurnState(threadId).pause
-    const shown = withImageBudget(s.orchestrator.getMessages(threadId))
-    const kept = options.newestOnly
-      ? newestMessages(shown, ROUTED_SNAPSHOT_MESSAGE_BYTES)
-      : { messages: shown, earlier: undefined }
+    const budget = snapshotBudget(options)
+    // The newest page `warm` read is the same messages, image budget and `earlier` as the loaded thread would give.
+    const page = this.warmPage(threadId, budget)
+    const kept = page
+      ? { messages: page.messages, ...(page.earlier ? { earlier: page.earlier } : {}) }
+      : newestMessages(withImageBudget(s.orchestrator.getMessages(threadId)), budget)
+    const queue = page
+      ? listPendingQueue(s.threads.loadMessageQueue(threadId)).filter((item) => !item.internal)
+      : s.orchestrator.listQueue(threadId)
     return mmsJson(
       {
         thread,
         messages: kept.messages,
         ...(kept.earlier ? { earlier: kept.earlier } : {}),
-        queue: s.orchestrator.listQueue(threadId).map(withoutImageData),
+        queue: queue.map(withoutImageData),
         // A phone's cards have no "Always for this thread"; another computer's keep it where its limit allows the rule.
         pendingQuestions: options.deviceLimit
           ? s.questions.listPendingForDevice(threadId, options.deviceLimit)
@@ -484,8 +629,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
           ...(pause ? { paused: { runId: pause.runId, until: pause.until, estimated: pause.estimated, autoResume: pause.autoResume, ...(pause.stale ? { stale: true } : {}), ...(pause.limitKind ? { limitKind: pause.limitKind } : {}) } } : {})
         },
         revision: this.revision()
-      },
-      maximumBytes
+      }
     )
   }
   isActive(threadId: string): boolean {

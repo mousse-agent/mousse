@@ -103,7 +103,7 @@ export function moveFocus(event: ReactKeyboardEvent<HTMLElement>) {
 /** Puts focus on the chosen item of the run settings in `container` (the first item without one). */
 export function focusRunSettings(container: HTMLElement | null | undefined, focusVisible?: boolean): boolean {
   const item = container?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]') ?? container?.querySelector<HTMLElement>('[role="menuitemradio"]')
-  // `focusVisible` (Chromium) keeps the focus ring off when a pointer opened the menu.
+  // `focusVisible` (Chromium) keeps the focus fill off when a pointer opened the menu.
   item?.focus({ preventScroll: true, ...(focusVisible === undefined ? {} : { focusVisible }) } as FocusOptions)
   return Boolean(item)
 }
@@ -335,11 +335,22 @@ export function modelPickerRunSettings({ providers, selection, onSelect, onClose
       if (!all.some((entry) => hasReasoningLevels(resolveTarget(entry)))) return null
       return <ReasoningColumn key={target ? `${target.instanceId ?? target.providerId}:${target.label}` : 'none'} target={target && resolveTarget(target)} label={target && shortModelName(target.label)} onSelect={onSelect} onClose={onClose} />
     },
-    // Under the picker: the highlighted model's speed on the left, `footerEnd` on the right.
-    footer: (target: ModelPickTarget | undefined) => {
+    // Room for the longest level list, so hovering a model with fewer (or none) keeps the picker's size.
+    rows: (all: ModelPickTarget[]) => Math.max(1, ...all.map((entry) => {
+      const resolved = resolveTarget(entry)
+      return resolveReasoning(resolved.providerId, resolved.modelId, resolved.models).levels.length
+    })),
+    // Under the picker: the highlighted model's speed on the left, `footerEnd` on the right. The bar
+    // stays while any listed model has speeds, so hovering one without (Fable after Opus) keeps the
+    // picker's size instead of sliding the rows under the pointer.
+    footer: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {
+      const speedsOf = (entry: ModelPickTarget) => {
+        const resolved = resolveTarget(entry)
+        return getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models)
+      }
+      if (!footerEnd && !all.some((entry) => speedsOf(entry))) return null
       const resolved = target ? resolveTarget(target) : undefined
-      const speeds = resolved ? getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models) : undefined
-      if (!speeds && !footerEnd) return null
+      const speeds = target ? speedsOf(target) : undefined
       return <>
         <div className="model-picker-footer-start">
           {resolved && speeds ? <SpeedToggle key={`${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onSelect} onClose={onClose} /> : null}

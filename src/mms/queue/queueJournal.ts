@@ -15,6 +15,7 @@ import type { QueueCommandRow, QueueCommands, QueueIntent } from '../run/QueueCo
 import {
   demoteSteerItems,
   editQueuedMessage,
+  markSteerNow,
   normalizeQueuedMessages,
   promoteQueuedMessageToSteer,
   queueRevision,
@@ -39,6 +40,11 @@ export interface QueueEffects {
   audit(intent: QueueIntent, entry: QueueAudit): void
   /** An unfinished entry could not be finished now: try again later. */
   scheduleRepair(threadId: string): void
+  /**
+   * A Send now request (`steer_now`) that forces nothing: no named item was still held for its run, or its entry was
+   * given up (`failed`). Writes its `steer.now_stale` event; inside the entry's transaction when it is applied.
+   */
+  steerNowStale?(intent: QueueIntent): void
 }
 
 export interface QueueAudit {
@@ -110,6 +116,16 @@ export function applyIntent(items: QueuedMessage[], intent: QueueIntent, ctx: { 
       const { runId: _runId, ...steer } = promoted.item
       return done(promoted.items.map((entry) => (entry.id === steer.id ? steer : entry)), { outcome: 'promoted', steerRunId: intent.steerRunId ?? null })
     }
+    case 'steer_now': {
+      // Send now: the field goes on each named item still held for that run. None left is a stale click (the steer
+      // went in, the turn ended, a Stop gave it back): nothing is forced.
+      const request = intent.steerNow
+      if (!request) return done(items, { outcome: 'stale' })
+      const marked = markSteerNow(items, request, ctx.activeRunId)
+      return marked.applied.length
+        ? done(marked.items, { outcome: 'applied', itemIds: marked.applied, runId: request.runId, holdGeneration: request.holdGeneration })
+        : done(items, { outcome: 'stale', runId: request.runId, holdGeneration: request.holdGeneration })
+    }
   }
 }
 
@@ -129,6 +145,16 @@ function withoutRun(items: QueuedMessage[], id: string): QueuedMessage[] {
   })
 }
 
+/** An entry reached `failed`: a Send now request it held forces nothing, and windows are told (`steer.now_stale`). */
+function givenUp(journal: QueueJournal, row: QueueCommandRow): void {
+  if (row.intent.op !== 'steer_now') return
+  try {
+    journal.effects.steerNowStale?.(row.intent)
+  } catch (error) {
+    console.warn('a given-up Send now request could not be recorded', { commandKey: row.commandKey, error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
 /**
  * Commits an entry's effects and marks it applied in one transaction. A failure rolls both back and moves the entry
  * to `effects_pending` (result kept, error logged), to be retried; it never throws and never marks applied.
@@ -140,6 +166,7 @@ function finishCommand(journal: QueueJournal, row: QueueCommandRow, result: Queu
     if (row.intent.abandonWorkflowInvocationId) effects.abandonWorkflow(row.intent.abandonWorkflowInvocationId, row.intent.threadId)
     commands.db.transaction(() => {
       effects.applyEffects(row.intent)
+      if (row.intent.op === 'steer_now' && result.outcome === 'stale') effects.steerNowStale?.(row.intent)
       commands.markApplied(row, result)
     })
     return true
@@ -148,7 +175,7 @@ function finishCommand(journal: QueueJournal, row: QueueCommandRow, result: Queu
     try {
       commands.markEffectsPending(row, result)
       // A few tries, and then it is left alone: an entry that can never finish must not be retried by every change.
-      commands.recordFailure(row.commandKey, error instanceof Error ? error.message : String(error))
+      if (commands.recordFailure(row.commandKey, error instanceof Error ? error.message : String(error))) givenUp(journal, row)
     } catch (marking) {
       console.warn('a queue command could not be marked for repair', { commandKey: row.commandKey, error: marking instanceof Error ? marking.message : String(marking) })
     }
@@ -202,6 +229,7 @@ export function recoverQueueJournal(store: QueueStoreLike, threadId: string, ite
       } catch {
         /* The next change tries again. */
       }
+      if (failed) givenUp(journal, row)
       if (!failed) {
         try {
           journal.effects.scheduleRepair(threadId)

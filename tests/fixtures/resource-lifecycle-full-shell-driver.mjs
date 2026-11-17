@@ -62,7 +62,9 @@ async function check() {
   if (await evaluate(`Boolean(document.getElementById('storage-trash') || document.querySelector('[data-testid="storage-auto-empty-select"]'))`)) throw Error('Storage still shows a trash rule')
   await screenshot('02-storage-policy')
   // Leave Settings, archive the thread, bring it back, archive it again and delete it from Archived.
-  await click('Back')
+  // Settings' own Back: the title bar has a Back for the thread history too, disabled with no history.
+  stage = 'Leave Settings'
+  await evaluate(`(() => { const back = document.querySelector('.settings-header .overlay-titlebar-back'); if (!back || back.disabled || !back.checkVisibility()) throw Error('Settings has no Back'); back.click() })()`)
   await click('Threads')
   await until(() => evaluate(`Boolean(${threadRow})`), Boolean, 'Sidebar thread row')
   // A thread that is not archived offers no Delete. "Delete after ›" sets when the thread expires; it deletes nothing now.

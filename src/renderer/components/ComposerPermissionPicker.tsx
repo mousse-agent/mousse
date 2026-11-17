@@ -1,4 +1,5 @@
 import type { HarnessCaps } from '../../shared/harness/types'
+import { isRepeatClick } from '../lib/repeatClick'
 import {
   describePermissionMode,
   effectivePermissionMode,
@@ -103,7 +104,8 @@ export function PermissionModeSection({ control, choice, onPicked }: {
     if (approvesItself) return `${agent} approves tools itself.`
     return modeDescription(mode, agent, limits?.sandboxOffInFull === true)
   }
-  return <div className="composer-mode-menu-section composer-permission-modes" role="group" aria-label="Permissions">
+  // Choosing a permission mode grants access: the menu pauses a theme while it is open.
+  return <div className="composer-mode-menu-section composer-permission-modes" data-mousse-decision="" role="group" aria-label="Permissions">
     {offered.map((entry) => {
       const Icon = permissionModeIcon(entry)
       const name = describePermissionMode(entry)
@@ -118,8 +120,8 @@ export function PermissionModeSection({ control, choice, onPicked }: {
         aria-disabled={why ? true : undefined}
         aria-label={`${name}. ${line}`}
         className={`composer-permission-mode${on ? ' selected' : ''}${why ? ' is-disabled' : ''}`}
-        onClick={() => {
-          if (why) return
+        onClick={(event) => {
+          if (why || isRepeatClick(event)) return
           onPicked()
           if (entry !== selected) control.onSelect(entry)
         }}

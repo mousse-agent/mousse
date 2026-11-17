@@ -11,6 +11,11 @@ export type TurnActions = {
   retry: (promptId: string) => void;
   /** Sends "Continue" to the thread. */
   continueRun: () => void;
+  /**
+   * Continues a run a restart left `uncertain` (SPEC §16.4), acknowledging the tools that may have run: the send names
+   * the run (`continuationOfRunId`) with `acknowledgeUncertain`. Called only after the person confirmed.
+   */
+  continueUncertain?: (runId: string) => void;
   /** Stops the thread's running compaction; the full history stays. */
   stopCompaction?: () => void;
   /** Forks the thread after the finished turn with this `turnId` and opens the fork. */
@@ -40,15 +45,19 @@ export function createTurnActions<Image extends RetryImage>({
   send,
   forkFrom,
   editPrompt,
+  continueRunOf,
 }: {
   prompt: (promptId: string) => { content: string; images?: Image[] } | undefined;
   send: (content: string, images?: Image[]) => void;
+  /** Sends the continuation of run `runId`, acknowledged (`TurnActions.continueUncertain`). */
+  continueRunOf?: (runId: string) => void;
   forkFrom?: (turnId: string) => void;
   editPrompt?: TurnActions["editPrompt"];
 }): TurnActions {
   return {
     ...(forkFrom ? { forkFrom } : {}),
     ...(editPrompt ? { editPrompt } : {}),
+    ...(continueRunOf ? { continueUncertain: continueRunOf } : {}),
     retryTitle: (promptId) => {
       const message = prompt(promptId);
       if (!message || !(message.content || message.images?.length)) return null;

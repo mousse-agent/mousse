@@ -6,10 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { ToolRenderer } from '../../src/renderer/chat/components/agent-elements/tools/tool-renderer'
 import { ToolCallsGroup } from '../../src/renderer/chat/components/agent-elements/tools/tool-calls-group'
-import { BashToolTerminalCard } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
+import { BashToolRow } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
 import { ErrorMessage } from '../../src/renderer/chat/components/agent-elements/error-message'
 import { createTurnActions, TurnActionsContext, type TurnActions } from '../../src/renderer/chat/components/agent-elements/turn-actions'
-import { chatStatusFromPhase, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
+import { chatStatusFromPhase, errorTitle, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import type { ChatImageAttachment, ChatMessage } from '../../src/shared/types'
 import { RunInterruptedNotice } from '../../src/renderer/chat/components/MousseAgentChatShell'
 import type { TimelineStep } from '../../src/renderer/chat/components/agent-elements/types/timeline'
@@ -61,34 +61,45 @@ describe('a failed tool', () => {
 })
 
 describe('a tool call group with failures', () => {
-  const group = (failed: number, live: boolean) =>
-    createElement(ToolCallsGroup, { count: 3, failed, live, children: createElement('div', { 'data-testid': 'rows' }, 'rows') })
+  const group = (failed: number) =>
+    createElement(ToolCallsGroup, { count: 3, title: 'Ran 3 commands', failed, children: createElement('div', { 'data-testid': 'rows' }, 'rows') })
   const open = () => host.querySelector('[data-testid="rows"]') !== null && !host.querySelector('[hidden] [data-testid="rows"]')
 
   it('names the failures in the collapsed header', () => {
-    render(group(1, false))
-    expect(text()).toMatch(/Tool calls\s*3\s*· 1 failed/)
-    expect(open()).toBe(false)
-  })
-
-  it('opens itself the first time a failure lands while the turn runs', () => {
-    render(group(0, true))
-    expect(open()).toBe(false)
-    render(group(1, true))
-    expect(open()).toBe(true)
-  })
-
-  it('stays closed when an old turn loads with a failure', () => {
-    render(group(2, false))
+    render(group(1))
+    expect(text()).toMatch(/Ran 3 commands\s*· 1 failed/)
     expect(open()).toBe(false)
   })
 })
 
-describe('the command card', () => {
+describe('the turn line of a failed call', () => {
+  const at = (s: number) => `2026-11-05T10:00:0${s}.000Z`
+  const call = (id: string, status: 'done' | 'failed', s: number): ChatMessage => ({
+    id, role: 'system', content: '', timestamp: at(s), kind: 'mcp_tool_call',
+    toolCall: { title: 'Read', summary: 'Read', details: [], status: 'complete' },
+    activity: { id, callId: id, toolName: 'Read', kind: 'generic', status, startedAt: at(s) } as unknown as ChatMessage['activity'],
+  })
+  const thread = (...rest: ChatMessage[]): ChatMessage[] => [{ id: 'u1', role: 'user', content: 'Read the config', timestamp: at(0) }, ...rest]
+  const show = (messages: ChatMessage[], status: 'ready' | 'error') =>
+    render(createElement(MessageList, { messages: mousseToUIMessages(messages), status }))
+
+  it('does not name a failure the agent got past', () => {
+    show(thread(call('a', 'failed', 1), call('b', 'done', 2), { id: 'r', role: 'assistant', content: 'Done.', timestamp: at(3) }), 'ready')
+    expect(text()).not.toMatch(/· \d+ failed/)
+  })
+
+  it('names a failure that ended the turn', () => {
+    const error: ChatMessage = { id: 'e', role: 'system', content: 'failed', timestamp: at(3), error: { code: 'orchestrator_turn_failed', message: 'failed' } }
+    show(thread(call('a', 'done', 1), call('b', 'failed', 2), error), 'error')
+    expect(text()).toMatch(/· 1 failed/)
+  })
+})
+
+describe('the command row', () => {
   const step = (patch: Partial<Extract<TimelineStep, { type: 'tool-call' }>>) =>
     ({ id: 'b1', type: 'tool-call', toolName: 'Bash', bashCommand: 'npm test', ...patch }) as Extract<TimelineStep, { type: 'tool-call' }>
   const card = (patch: Partial<Extract<TimelineStep, { type: 'tool-call' }>>, isError = false) =>
-    createElement(BashToolTerminalCard, { step: step(patch), state: 'complete', onComplete: () => {}, isError })
+    createElement(BashToolRow, { step: step(patch), state: 'complete', onComplete: () => {}, isError })
 
   it('shows no status for a successful command', () => {
     render(card({ bashExitCode: 0 }))
@@ -98,15 +109,15 @@ describe('the command card', () => {
 
   it('shows the exit code of a failed command without expanding', () => {
     render(card({ bashExitCode: 2 }, true))
-    expect(text()).toContain('Failed npm')
+    expect(text()).toMatch(/^Failed\s*npm test/)
     expect(text()).toContain('exit 2')
   })
 
-  it('copies the command and the output from the expanded card', async () => {
+  it('copies the command and the output from the expanded row', async () => {
     const writeText = vi.fn(async () => {})
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     render(card({ bashExitCode: 0, bashOutput: 'all passed' }))
-    act(() => button('Expand command details')!.click())
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click())
     await act(async () => button('Copy command')!.click())
     await act(async () => button('Copy output')!.click())
     expect(writeText.mock.calls).toEqual([['npm test'], ['all passed']])
@@ -173,9 +184,40 @@ describe('a failed turn', () => {
 
   it('shows its error in the transcript with Retry', () => {
     render(shown(failedThread, vi.fn()))
-    expect(text()).toContain('Request failed')
+    expect(text()).toContain('Provider error')
     expect(text()).toContain('The provider could not accept this request.')
     expect(button('Retry')?.disabled).toBe(false)
+  })
+
+  it('shows the provider\'s own status and message, with its reference and Retry on a quiet line under it', () => {
+    const refused: ChatMessage[] = [
+      failedThread[0],
+      {
+        id: 's1', role: 'system', timestamp: '2026-11-05T10:00:01.000Z',
+        content: '[provider_api_error] 400 · messages.3.content.0: tool_use ids were found without tool_result blocks',
+        error: { code: 'provider_api_error', message: '400 · messages.3.content.0: tool_use ids were found without tool_result blocks', details: { provider: 'claude', status: 400, supportId: '1ecec6b5-2610-41b1-80f9-099a6f0732cc' } }
+      }
+    ]
+    render(shown(refused, vi.fn()))
+    expect(text()).toContain('Provider error')
+    expect(host.querySelector('.an-error-text')!.textContent).toBe('400 · messages.3.content.0: tool_use ids were found without tool_result blocks')
+    const meta = host.querySelector('.an-error-meta')!
+    expect(meta.textContent).toBe('Reference 1ecec6b5-2610-41b1-80f9-099a6f0732cc' + 'Retry')
+    expect(meta.querySelector('button[aria-label="Retry"]')).not.toBeNull()
+    expect(text()).not.toContain('Something went wrong')
+  })
+
+  it('moves the reference of a generic failure under its message', () => {
+    render(createElement(ErrorMessage, { title: 'Request failed', message: 'Something went wrong. Please try again or report this error. Reference: 02fb3fb4-25fb', onRetry: vi.fn() }))
+    expect(host.querySelector('.an-error-text')!.textContent).toBe('Something went wrong. Please try again or report this error.')
+    expect(host.querySelector('.an-error-meta')!.textContent).toBe('Reference 02fb3fb4-25fbRetry')
+  })
+
+  it('titles a failure by what refused it', () => {
+    expect(errorTitle({ code: 'provider_api_error' })).toBe('Provider error')
+    expect(errorTitle({ code: 'provider_usage_limit' })).toBe('Usage limit reached')
+    expect(errorTitle({ code: 'orchestrator_turn_failed' })).toBe('Request failed')
+    expect(errorTitle(undefined)).toBe('Request failed')
   })
 
   it('sends the prompt again through the send path on Retry', () => {
@@ -216,5 +258,49 @@ describe('a stopped run', () => {
   it('shows no Continue without one, as while a run is going', () => {
     render(createElement(RunInterruptedNotice, {}))
     expect(continueButton()).toBeUndefined()
+  })
+})
+
+describe('a run a restart left uncertain (SPEC §16.4)', () => {
+  const byText = (label: string) => [...host.querySelectorAll('button')].find((entry) => entry.textContent === label)
+  const uncertain = { runId: 'run:1', tools: ['bash', 'mcp__fs__write'] }
+
+  it('offers no plain Continue: Continue… names the tools first, and only the confirm continues the run', () => {
+    const onContinue = vi.fn()
+    const onContinueUncertain = vi.fn()
+    render(createElement(RunInterruptedNotice, { onContinue, uncertain, onContinueUncertain }))
+    expect(byText('Continue')).toBeUndefined()
+    const ask = byText('Continue…')!
+    expect(ask.title).toContain('bash, mcp__fs__write')
+    act(() => ask.click())
+    expect(onContinueUncertain).not.toHaveBeenCalled()
+    expect(text()).toContain('May have run: bash, mcp__fs__write')
+    act(() => byText('Continue anyway')!.click())
+    expect(onContinueUncertain).toHaveBeenCalledWith('run:1')
+    expect(onContinue).not.toHaveBeenCalled()
+  })
+
+  it('moves focus to Continue anyway when the confirm opens, and back to Continue… on Cancel', () => {
+    render(createElement(RunInterruptedNotice, { uncertain, onContinueUncertain: vi.fn() }))
+    act(() => byText('Continue…')!.click())
+    expect(document.activeElement).toBe(byText('Continue anyway'))
+    act(() => byText('Cancel')!.click())
+    expect(document.activeElement).toBe(byText('Continue…'))
+  })
+
+  it('Cancel goes back without continuing', () => {
+    const onContinueUncertain = vi.fn()
+    render(createElement(RunInterruptedNotice, { uncertain, onContinueUncertain }))
+    act(() => byText('Continue…')!.click())
+    act(() => byText('Cancel')!.click())
+    expect(onContinueUncertain).not.toHaveBeenCalled()
+    expect(text()).toContain('Run interrupted')
+  })
+
+  it('the turn actions continue the run acknowledged, through the window\'s continuation', () => {
+    const continueRunOf = vi.fn()
+    const actions = createTurnActions({ prompt: () => undefined, send: vi.fn(), continueRunOf })
+    actions.continueUncertain!('run:1')
+    expect(continueRunOf).toHaveBeenCalledWith('run:1')
   })
 })

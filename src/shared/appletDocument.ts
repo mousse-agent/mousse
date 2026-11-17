@@ -16,12 +16,23 @@ export interface AppletSource {
 export const APPLET_APPLY_APPEARANCE = '__mousseApplyAppearance'
 export const APPLET_EVENT_PREFIX = '__MOUSSE_APPLET_EVENT__'
 
-/** The document has no privileged preload. Its public bridge only reports untrusted data. */
+/**
+ * The document has no privileged preload. Its public bridge only reports untrusted data.
+ *
+ * Height: the page reports the height of its own content (the root element's box, which host styles never stretch
+ * to the frame), at once on first layout and then 100 ms after it settles, so the frame can shrink as well as grow.
+ * A frame that only changed height, with nothing in the page changed since the last report, must not move the
+ * report: such content is sized to the frame (`vh`, `height:100%`), and following it would grow the frame forever.
+ *
+ * Backdrop: `transparent` (the app) leaves the page itself unpainted, so the chat or panel behind it shows through,
+ * its theme surface or the acrylic window, as behind a reply. A standalone export keeps the opaque theme surface.
+ */
 export function appletDocument(
   source: AppletSource,
   state?: unknown,
   appearance?: AppletAppearance,
-  scrollPositions?: Array<{path:number[];top:number;left:number}>
+  scrollPositions?: Array<{path:number[];top:number;left:number}>,
+  options: { transparent?: boolean } = {}
 ): string {
   const nonce = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(24)), (value) =>
     value.toString(16).padStart(2, '0')
@@ -31,7 +42,7 @@ export function appletDocument(
   const script = source.js.replace(/<\/script/gi, '<\\/script')
   const css = source.css.replace(/<\/style/gi, '<\\/style')
   const policy = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'`
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="viewport" content="width=device-width,initial-scale=1"><style>@layer mousse-applet-scrollbars;</style><style>${css}</style><style id="mousse-applet-host-style">${APPLET_HOST_STYLES}</style><script nonce="${nonce}">
+  return `<!doctype html><html${options.transparent ? ' data-mousse-backdrop="transparent"' : ''}><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="viewport" content="width=device-width,initial-scale=1"><style>@layer mousse-applet-scrollbars;</style><style>${css}</style><style id="mousse-applet-host-style">${APPLET_HOST_STYLES}</style><script nonce="${nonce}">
 (()=>{
  for(const key of ['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','WebTransport'])Object.defineProperty(window,key,{value:undefined,writable:false,configurable:false});
  for(const [key,value] of Object.entries({alert:()=>{},confirm:()=>false,prompt:()=>null,print:()=>{}}))Object.defineProperty(window,key,{value,writable:false,configurable:false});
@@ -52,17 +63,17 @@ export function appletDocument(
   document.dispatchEvent(new CustomEvent('mousse-appearance-change',{detail:currentAppearance}));return true;
  };
  Object.defineProperty(window,${json(APPLET_APPLY_APPEARANCE)},{value:applyAppearance,writable:false,configurable:false});applyAppearance(${json(initialAppearance)});
- const iconGeometry=${json(APPLET_ICON_GEOMETRY)},iconAliases=${json(APPLET_ICON_ALIASES)},iconNames=Object.freeze(Object.keys(iconGeometry));
+ const iconGeometry=${json(APPLET_ICON_GEOMETRY)},missingIcon=[["circle",{cx:12,cy:12,r:8,strokeDasharray:"2 3"}]],iconAliases=${json(APPLET_ICON_ALIASES)},iconNames=Object.freeze(Object.keys(iconGeometry));
  const makeIcon=(name,options={})=>{
-  const canonical=Object.hasOwn(iconGeometry,name)?name:iconAliases[name];if(!canonical||!Object.hasOwn(iconGeometry,canonical))throw new Error('Unknown Mousse icon.');
+  const known=Object.hasOwn(iconGeometry,name)?name:Object.hasOwn(iconAliases,name)?iconAliases[name]:undefined,canonical=known&&Object.hasOwn(iconGeometry,known)?known:undefined;
   const size=typeof options.size==='number'&&Number.isFinite(options.size)?Math.min(128,Math.max(8,options.size)):16;
   const stroke=typeof options.strokeWidth==='number'&&Number.isFinite(options.strokeWidth)?Math.min(4,Math.max(.5,options.strokeWidth)):1.5;
-  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');for(const [key,value] of Object.entries({width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':stroke,'stroke-linecap':'round','stroke-linejoin':'round','data-icon-library':'hugeicons','data-mousse-icon-name':canonical,class:'mousse-icon',focusable:'false'}))svg.setAttribute(key,String(value));
+  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');for(const [key,value] of Object.entries({width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':stroke,'stroke-linecap':'round','stroke-linejoin':'round','data-icon-library':'hugeicons','data-mousse-icon-name':canonical??'missing',class:'mousse-icon',focusable:'false'}))svg.setAttribute(key,String(value));
   const label=typeof options.label==='string'?options.label.slice(0,160):'';if(label){svg.setAttribute('role','img');svg.setAttribute('aria-label',label)}else svg.setAttribute('aria-hidden','true');
-  for(const [tag,attributes] of iconGeometry[canonical]){const node=document.createElementNS(ns,tag);for(const [key,value] of Object.entries(attributes)){if(key==='key'||key==='strokeWidth')continue;const attr=key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase());node.setAttribute(attr,String(value))}svg.appendChild(node)}return svg;
+  for(const [tag,attributes] of canonical?iconGeometry[canonical]:missingIcon){const node=document.createElementNS(ns,tag);for(const [key,value] of Object.entries(attributes)){if(key==='key'||key==='strokeWidth')continue;const attr=key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase());node.setAttribute(attr,String(value))}svg.appendChild(node)}return svg;
  };
  Object.defineProperty(window,'mousseApplet',{value:Object.freeze({get appearance(){return currentAppearance},icon:makeIcon,iconNames,data:${json(source.data)},state:${json(state)},saveState:value=>send('state',value),resize:height=>send('resize',height),reportError:message=>send('error',String(message).slice(0,2000)),requestConversationInput:text=>send('conversation-input',String(text).slice(0,4000))}),writable:false,configurable:false});
- addEventListener('error',event=>{event.preventDefault();send('error',String(event.message).slice(0,2000))});
+ addEventListener('error',event=>{event.preventDefault();const message=String(event.message);if(message.startsWith('ResizeObserver loop'))return;send('error',message.slice(0,2000))});
  addEventListener('unhandledrejection',event=>{event.preventDefault();send('error','An applet promise failed.')});
  addEventListener('DOMContentLoaded',()=>{
 
@@ -72,6 +83,12 @@ export function appletDocument(
   const timers=new WeakMap();document.addEventListener('scroll',event=>{const node=event.target===document?document.documentElement:event.target;if(!(node instanceof Element))return;const path=[];let cursor=node;while(cursor&&cursor!==document.documentElement&&path.length<16){const parent=cursor.parentElement;if(!parent)break;path.unshift(Array.prototype.indexOf.call(parent.children,cursor));cursor=parent}if(cursor===document.documentElement){const key=JSON.stringify(path);if(scrollReports.size>=64&&!scrollReports.has(key))scrollReports.delete(scrollReports.keys().next().value);scrollReports.set(key,{path,top:node.scrollTop,left:node.scrollLeft});if(!scrollTimer){send('visual-changed',null);scrollTimer=setTimeout(flushScroll,100)}}node.classList.add('mousse-scrolling');clearTimeout(timers.get(node));timers.set(node,setTimeout(()=>{node.classList.remove('mousse-scrolling');timers.delete(node)},900))},true);
   const decorate=root=>{if(!(root instanceof Element))return;const nodes=[...(root.matches('[data-mousse-icon]')?[root]:[]),...root.querySelectorAll('[data-mousse-icon]')].slice(0,256);for(const node of nodes){const name=node.getAttribute('data-mousse-icon'),key=JSON.stringify([name,node.getAttribute('data-icon-size'),node.getAttribute('data-icon-label')]);if(node.dataset.mousseIconRendered===key)continue;try{node.replaceChildren(makeIcon(name,{size:Number(node.getAttribute('data-icon-size'))||16,label:node.getAttribute('data-icon-label')||''}));node.dataset.mousseIconRendered=key}catch{}}};decorate(document.body);new MutationObserver(records=>{for(const record of records){if(record.type==='attributes')decorate(record.target);else for(const node of record.addedNodes)decorate(node)}}).observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['data-mousse-icon','data-icon-size','data-icon-label']});
   setTimeout(()=>{
-  const savedScroll=${json(scrollPositions??[])};for(const position of savedScroll){let node=document.documentElement;for(const index of position.path)node=node?.children[index];if(node){node.scrollTop=position.top;node.scrollLeft=position.left}};send('ready',null)},0);let timer;new ResizeObserver(()=>{clearTimeout(timer);timer=setTimeout(()=>send('resize',Math.ceil(document.documentElement.scrollHeight)),100)}).observe(document.body)});
+  const savedScroll=${json(scrollPositions??[])};for(const position of savedScroll){let node=document.documentElement;for(const index of position.path)node=node?.children[index];if(node){node.scrollTop=position.top;node.scrollLeft=position.left}};send('ready',null)},0);
+  let sizeTimer,sized,changed=true;
+  const reportSize=()=>{sizeTimer=undefined;const height=Math.ceil(document.documentElement.getBoundingClientRect().height),width=innerWidth,viewport=innerHeight;if(sized&&height===sized.height)return;if(sized&&!changed&&width===sized.width&&viewport!==sized.viewport)return;changed=false;sized={height,width,viewport};send('resize',height)};
+  const ownMark=record=>record.type==='attributes'&&(record.attributeName==='data-mousse-icon-rendered'||record.attributeName==='class'&&String(record.oldValue??'').split(/\\s+/).filter(name=>name&&name!=='mousse-scrolling').join(' ')===[...record.target.classList].filter(name=>name!=='mousse-scrolling').join(' '));
+  new MutationObserver(records=>{if(records.some(record=>!ownMark(record)))changed=true}).observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeOldValue:true,characterData:true});
+  for(const type of ['load','transitionend','animationend'])document.addEventListener(type,()=>{changed=true},true);
+  const sizes=new ResizeObserver(()=>{clearTimeout(sizeTimer);if(sized)sizeTimer=setTimeout(reportSize,100);else reportSize()});sizes.observe(document.documentElement);sizes.observe(document.body)});
 })();</script></head><body>${source.html}<style id="mousse-applet-final-style">${APPLET_HOST_STYLES}</style><script nonce="${nonce}">${script}</script></body></html>`
 }

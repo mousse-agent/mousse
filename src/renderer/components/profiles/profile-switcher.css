@@ -36,7 +36,7 @@
   border-color: var(--ui-line-strong);
   background: var(--ui-hover);
 }
-.profile-sidebar-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.profile-sidebar-trigger:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .profile-sidebar-trigger > svg { flex-shrink: 0; color: var(--text-secondary); }
 .app .profile-sidebar-text { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .app .profile-sidebar-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; }
@@ -124,7 +124,7 @@
 .profile-menu-row > svg { flex: 0 0 auto; color: var(--text-secondary); }
 .profile-menu-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile-menu-row:hover:not(:disabled) { background: var(--ui-hover); }
-.profile-menu-row:focus-visible { outline: none; background: var(--ui-hover); box-shadow: var(--ui-focus-ring); }
+.profile-menu-row:focus-visible { outline: none; background: var(--ui-hover); }
 .profile-menu-row:disabled { opacity: 0.45; }
 .profile-menu-row-danger,
 .profile-menu-row-danger > svg { color: var(--danger); }
@@ -136,7 +136,7 @@
 .profile-menu-item > .profile-menu-row { flex: 1 1 auto; width: auto; min-width: 0; }
 .profile-menu-item > .profile-menu-row:hover:not(:disabled),
 .profile-menu-item > .profile-menu-row:focus-visible { background: transparent; box-shadow: none; }
-.profile-menu-item > .profile-menu-row:focus-visible { outline: 1px solid var(--ui-line-strong); outline-offset: -1px; }
+.profile-menu-item > .profile-menu-row:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .profile-menu-name { flex: 1 1 auto; }
 .profile-dot {
   flex: 0 0 auto;
@@ -162,7 +162,7 @@
 .profile-menu-kebab[aria-expanded='true'] { opacity: 1; }
 .profile-menu-kebab:hover:not(:disabled),
 .profile-menu-kebab[aria-expanded='true'] { background: var(--ui-line); color: var(--text-primary); }
-.profile-menu-kebab:focus-visible { outline: 1px solid var(--ui-line-strong); }
+.profile-menu-kebab:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 
 .profile-row-menu {
   display: flex;
@@ -207,7 +207,7 @@
   color: var(--text-primary);
   font-size: 13px;
 }
-.profile-edit-input:focus { outline: none; box-shadow: var(--ui-focus-ring); }
+.profile-edit-input:focus { outline: none; background-image: var(--ui-focus-layer); }
 .profile-edit-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
 .profile-edit-swatch {
   display: grid;
@@ -219,7 +219,9 @@
   color: white;
 }
 .profile-edit-swatch[aria-checked='true'] { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 0 0 2px var(--ui-raised), 0 0 0 3.5px var(--text-primary); }
-.profile-edit-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.profile-edit-swatch { transition: transform 0.12s; }
+/* A swatch is its colour, so focus grows it a little instead of filling it. */
+.profile-edit-swatch:focus-visible { transform: scale(1.18); }
 .profile-edit-archive { margin-right: auto; }
 
 /* The rail's avatar (variant="rail"): the current profile while the sidebar, and its footer, is

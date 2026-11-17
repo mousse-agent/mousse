@@ -18,11 +18,32 @@ export interface RemoteComputer {
 export interface RemoteComputersPort {
   /** The user's other computers that run threads; undefined while the device list cannot be read. */
   computers(): RemoteComputer[] | undefined
+  /** This computer's own Net node id, when it has one: an id another computer qualifies with it is one of this computer's. */
+  self?(): string | undefined
+  /**
+   * The versions of the routed rows `node` takes, asked once per link: the step that reaches the computer, which a call
+   * gives a deadline of its own (`signal`). Throws like `call` when it cannot be asked (offline, Bridge off, not shared).
+   */
+  versions?(node: string, signal?: AbortSignal): Promise<Record<string, number> | undefined>
   /** One routed call to `node`. Throws a `DomainRpcError` a person could read (offline, outdated, refused). */
   call(node: string, method: string, params: Record<string, unknown>, options?: { idem?: string; signal?: AbortSignal }): Promise<unknown>
+  /**
+   * Whether `node` takes calls marked as an agent's (`ROUTED_AGENT_KEY`) on every row that has the mark. Throws like
+   * `call` when the computer cannot be asked (offline, Bridge off), so nothing is decided from a guess.
+   */
+  takesAgentMark(node: string, signal?: AbortSignal): Promise<boolean>
   /**
    * The project of `node` that is the same Git repository as the folder `projectPath` here: its id, and
    * `weak` when only the root commit matched. Null when it has none, or the folder is not a repository.
    */
   matchProject(node: string, projectPath: string, signal?: AbortSignal): Promise<{ projectId: string; weak: boolean } | null>
+  /**
+   * The same as `matchProject`, with the projects that may be it when there is no single answer (`candidates`, from a
+   * computer that names them; an older one names none). Null when the folder here is not a repository.
+   */
+  projectCandidates(
+    node: string,
+    projectPath: string,
+    signal?: AbortSignal
+  ): Promise<{ match: { projectId: string; weak: boolean } | null; candidates: Array<{ projectId: string; name?: string; weak?: boolean }> } | null>
 }

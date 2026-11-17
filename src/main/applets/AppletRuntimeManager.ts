@@ -7,7 +7,9 @@ import {
   type Session
 } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { markWebContentsRole } from '../diagnostics/webContentsRoles'
 import type { AppletAppearance } from '../../shared/appletAppearance'
+import { appletFrameHeight } from '../../shared/appletRuntime'
 import { APPLET_EVENT_PREFIX, APPLET_APPLY_APPEARANCE, appletDocument, type AppletSource } from './document'
 
 // Fail closed between profile managers without retaining a former owner.
@@ -150,6 +152,7 @@ export class AppletRuntimeManager {
       }
     })
     guest.setBackgroundColor('#00000000')
+    markWebContentsRole(guest.webContents, 'applet', () => guest.getBounds(), () => guest.getVisible())
     const container = new View()
     container.addChildView(guest)
     this.owner.contentView.addChildView(container)
@@ -160,7 +163,7 @@ export class AppletRuntimeManager {
         ...(this.scrollPositions
           .get(JSON.stringify([input.threadId, input.revisionId]))
           ?.values() ?? [])
-      ])
+      ], { transparent: true })
     )
     const runtime: Runtime = {
       mount: input,
@@ -400,12 +403,8 @@ export class AppletRuntimeManager {
         this.notify(runtime, 'visual-changed', null)
       } else if (event.type === 'scroll-position') {
         this.rememberScroll(runtime, event.payload)
-      } else if (
-        event.type === 'resize' &&
-        typeof event.payload === 'number' &&
-        Number.isFinite(event.payload)
-      )
-        this.notify(runtime, 'resize', Math.max(120, Math.min(1200, Math.round(event.payload))))
+      } else if (event.type === 'resize' && appletFrameHeight(event.payload) !== null)
+        this.notify(runtime, 'resize', appletFrameHeight(event.payload))
       else if (event.type === 'state') this.notify(runtime, 'state', event.payload)
       else if (
         (event.type === 'error' || event.type === 'conversation-input') &&

@@ -1,6 +1,6 @@
 import type { BotAllowedObserver, NormalisedCall } from '../../../shared/bots/personal/authority'
 import type { BotChip } from '../../../shared/bots/personal/chat'
-import { chipForCall, rollUpChips, type BotChipCall, type BotChipContext } from '../../../shared/bots/personal/chips'
+import { actedChip, chipForCall, rollUpChips, type BotChipCall, type BotChipContext } from '../../../shared/bots/personal/chips'
 import { stableStringify } from '../../run/json'
 import type { BotActivityContext, BotActivitySink } from '../seams'
 
@@ -62,8 +62,9 @@ export function chipCallOf(call: NormalisedCall): { tool: string; input: unknown
     case 'builtin':
     case 'app':
       return { tool: call.tool, input: call.args }
+    // The server's name only ("used GitHub"): never the tool's arguments, nor the server's id.
     case 'mcp':
-      return { tool: 'mcp', input: { server: call.server, tool: call.tool } }
+      return { tool: 'mcp', input: call.serverName ? { server: call.serverName } : {} }
     case 'skill':
       return { tool: 'skill', input: { skill: call.skill } }
   }
@@ -110,6 +111,9 @@ export class BotActivityLog implements BotActivitySink {
     const call = [...dispatch.calls].reverse().find((entry) => entry.tool === tool && entry.result === undefined)
     if (call) call.result = result
     else dispatch.calls.push({ tool, input: undefined, result })
+    // A thread it started, messaged or stopped shows at once, with Open, not only once the turn ends.
+    const acted = actedChip(tool, call?.input, result)
+    if (acted) this.show({ ...dispatch.ctx, activationId: ctx.activationId }, acted)
   }
 
   drain(dispatchId: string): BotChip[] {

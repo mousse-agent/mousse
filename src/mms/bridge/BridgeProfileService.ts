@@ -23,8 +23,14 @@ import { BridgeHub } from './hub'
 import { validateHubParams } from './hub/validation'
 import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
-import { LISTS_STREAM_THREAD_ID, MmsListsSource } from './remote/MmsListsSource'
+import { LISTS_STREAM_THREAD_ID, MmsListsSource, readerListsKey, readerOfListsKey } from './remote/MmsListsSource'
+import { accountDevices, createBotReach, keepMakerInReach } from './remote/botReach'
+import type { BotReachPort } from '../protocol/botReachPort'
+import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
 import { remoteListMethods } from './remote/RemoteLists'
+import { botDeviceLimitFrom, remoteBotMethods } from './remote/RemoteBots'
+import type { BotsSharingPort } from '../protocol/botsSharingPort'
+import { cleanDeviceName } from '../../shared/bridge/editorAsk'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
@@ -89,6 +95,95 @@ export class BridgeProfileService {
   ) {
     const { services, runtime: rt, net } = options
     raiseStreamListenerLimits(services)
+    // "Share bots with other devices": the lists and the bot methods ask on every push and call.
+    const botsSharing: BotsSharingPort = {
+      refusal: () => {
+        if (net.sharesBots?.() !== false) return undefined
+        const self = rt.identity.self()?.node
+        const name = cleanDeviceName(self ? deviceNameOf(rt.identity, self, 'This computer') : 'This computer')
+        return `${name} doesn't share its bots with other devices.`
+      },
+      onChange: (listener) => net.onShareBotsChanged?.(listener) ?? (() => undefined)
+    }
+    services.botsSharing = botsSharing
+    this.disposers.add(() => {
+      if (services.botsSharing === botsSharing) services.botsSharing = undefined
+    })
+    // Which of the owner's devices reach which bot here: each device's switch (Settings, Devices) and each bot's Devices
+    // (About), both kept on this computer. Every path that shows a bot to another device asks it.
+    const access = services.botDeviceAccess
+    const reach = createBotReach({
+      access: (botId) => access.get(botId).access,
+      choices: () => access.choices(),
+      deviceOn: (node) => rt.policy.get(node as NodeId).bots,
+      // A blocked device, or one not connected here, reads nothing here, so it does not hold a bot back from the
+      // streams every device may read.
+      devices: () =>
+        accountDevices(rt.identity)?.filter(
+          (node) => !rt.policy.isBlocked(node) && rt.connections.connected(node)
+        ),
+      changes: [
+        (listener) => access.onChange(listener),
+        (listener) => rt.policy.onChange(() => listener()),
+        (listener) => rt.connections.onChange(() => listener()),
+        (listener) => rt.identity.onRosterChanged(() => listener())
+      ]
+    })
+    const botReach: BotReachPort = {
+      ...reach,
+      devices: async () => {
+        const view = (await net.request('bridge.nodes', {})) as {
+          nodes: Array<{
+            node: NodeId
+            name?: string
+            kind?: string
+            self?: boolean
+            revoked?: boolean
+            connection?: string
+            policy?: { bots?: boolean }
+          }>
+        }
+        // Only the devices connected here are offered.
+        return view.nodes
+          .filter((entry) => !entry.self && !entry.revoked && entry.connection === 'connected')
+          .map((entry): BotDeviceChoice => ({
+            node: entry.node,
+            name: cleanDeviceName(entry.name || 'Unnamed device'),
+            kind: entry.kind === 'phone' || entry.kind === 'computer' ? entry.kind : 'unknown',
+            ...(entry.policy?.bots === false ? { botsOff: true as const } : {})
+          }))
+      }
+    }
+    services.botReach = botReach
+    // A device that leaves the account leaves every bot's list of chosen devices; read once now for any that left while
+    // this computer was off.
+    const dropRemoved = (): void => {
+      const present = accountDevices(rt.identity)
+      if (!present) return
+      try {
+        access.dropDevices((node) => present.includes(node as NodeId))
+      } catch {
+        // The list is read again at the next change; a device that left can't call here anyway.
+      }
+    }
+    dropRemoved()
+    const offRoster = rt.identity.onRosterChanged(() => dropRemoved())
+    // A message from a device that lost the bot, still waiting for its turn, is not delivered.
+    const offWithdraw = reach.onChange(() => {
+      const chat = services.personalBots?.service
+      if (!chat) return
+      // A device that left the account, or is blocked here, reaches no bot whatever each bot's choice says. When the
+      // account's devices can't be read, only the two settings decide: a message is not dropped on a guess.
+      const present = accountDevices(rt.identity)?.filter((node) => !rt.policy.isBlocked(node))
+      const left = (node: string): boolean => present !== undefined && !present.includes(node as NodeId)
+      void this.track(chat.withdrawQueued((botId, node) => left(node) || !reach.canReach(botId, node))).catch(() => undefined)
+    })
+    this.disposers.add(() => {
+      offRoster()
+      offWithdraw()
+      reach.close()
+      if (services.botReach === botReach) services.botReach = undefined
+    })
     this.clock = options.clock ?? systemClock
     this.spaces = new SpaceProfileService({
       runtime: rt,
@@ -183,22 +278,36 @@ export class BridgeProfileService {
     // One display stream per open thread, plus one reserved stream for the sidebar lists.
     const threadSource = new MmsThreadSource(services),
       listsSource = new MmsListsSource(services),
+      // Each phone's own lists, with the bots it reaches; made when it opens them.
+      readerLists = new Map<string, MmsListsSource>(),
+      listsOf = (node: string): MmsListsSource => {
+        let lists = readerLists.get(node)
+        if (!lists) readerLists.set(node, (lists = new MmsListsSource(services, undefined, { reader: node })))
+        return lists
+      },
       // The streams one other computer of the user reads and nobody else does are stored under keys of
       // their own (see `remote/privateStreams.ts`) and sourced from what that computer may see.
       privateSources = new PrivateSources(services, rt.policy),
       source: ThreadSourcePort = {
-        snapshot: (threadId) =>
-          isPrivateKey(threadId)
-            ? privateSources.snapshot(threadId)
-            : threadId === LISTS_STREAM_THREAD_ID
-              ? listsSource.snapshot()
-              : threadSource.snapshot(threadId),
-        onThread: (threadId, listener, onError) =>
-          isPrivateKey(threadId)
-            ? privateSources.onThread(threadId, listener, onError)
-            : threadId === LISTS_STREAM_THREAD_ID
-              ? listsSource.watch(() => listener({ snapshot: true }), onError)
-              : threadSource.onThread(threadId, listener, onError)
+        snapshot: (threadId) => {
+          if (isPrivateKey(threadId)) return privateSources.snapshot(threadId)
+          if (threadId === LISTS_STREAM_THREAD_ID) return listsSource.snapshot()
+          const reader = readerOfListsKey(threadId)
+          return reader ? listsOf(reader).snapshot() : threadSource.snapshot(threadId)
+        },
+        // A phone's thread reads its newest messages before its stream opens; the lists are small.
+        warm: async (threadId) => {
+          if (!isPrivateKey(threadId) && threadId !== LISTS_STREAM_THREAD_ID && !readerOfListsKey(threadId))
+            await threadSource.warm(threadId)
+        },
+        onThread: (threadId, listener, onError) => {
+          if (isPrivateKey(threadId)) return privateSources.onThread(threadId, listener, onError)
+          if (threadId === LISTS_STREAM_THREAD_ID) return listsSource.watch(() => listener({ snapshot: true }), onError)
+          const reader = readerOfListsKey(threadId)
+          return reader
+            ? listsOf(reader).watch(() => listener({ snapshot: true }), onError)
+            : threadSource.onThread(threadId, listener, onError)
+        }
       }
     this.threads = new ThreadStreamAdapter({
       db: rt.db,
@@ -208,7 +317,12 @@ export class BridgeProfileService {
       keys: rt.keys,
       clock: this.clock,
       source,
-      unmetered: (threadId) => threadId === LISTS_STREAM_THREAD_ID,
+      unmetered: (threadId) => threadId === LISTS_STREAM_THREAD_ID || readerOfListsKey(threadId) !== undefined,
+      // A phone's own lists are read by that phone alone, and carry the lists' usual thread id.
+      boundReader: (threadId) => {
+        const reader = readerOfListsKey(threadId)
+        return reader ? { reader: reader as NodeId, subject: LISTS_STREAM_THREAD_ID } : undefined
+      },
       isSubscribed: (stream, holder) => net.streamSubscribed(stream, holder as NodeId | undefined),
       isTurnActive: (threadId) => services.orchestrator.isTurnActive(threadId),
       onDelta: (stream, data, key) => net.publishDelta(stream, data, key),
@@ -244,8 +358,9 @@ export class BridgeProfileService {
       validate: (value) => validateHubParams('bridge.thread.open', value),
       handle: async (value, context) => {
         const threadId = (value as { threadId: string }).threadId
-        if (threadId === LISTS_STREAM_THREAD_ID) throw new NetError('stream_unknown')
-        const descriptor = this.threads.activate(threadId, context.caller.node)
+        // The lists open with bridge.lists.open, each device its own; no id opens another device's.
+        if (threadId === LISTS_STREAM_THREAD_ID || readerOfListsKey(threadId) !== undefined) throw new NetError('stream_unknown')
+        const descriptor = await this.threads.open(threadId, context.caller.node)
         return { descriptor, head: this.threads.store.head(descriptor.id) }
       }
     })
@@ -376,11 +491,26 @@ export class BridgeProfileService {
     this.staging = staging
     this.disposers.add(() => routes.close())
     for (const method of remoteListMethods({
-      openLists: () => {
-        const descriptor = this.threads.activate(LISTS_STREAM_THREAD_ID)
+      // Each device opens lists of its own, which carry only the bots it reaches.
+      openLists: (context) => {
+        const descriptor = this.threads.activate(readerListsKey(context.caller.node), context.caller.node)
         return { descriptor, head: this.threads.store.head(descriptor.id) }
       },
       chats: () => services.platform.chats
+    }))
+      rt.rpc.register({
+        ...method,
+        handle: (params, context) => this.track(method.handle(params, context))
+      })
+    // The owner's personal bots, from a phone or another computer: their chats, asks and pause, and a new bot.
+    for (const method of remoteBotMethods({
+      bots: () => services.personalBots?.service ?? undefined,
+      refusal: () => botsSharing.refusal(),
+      // The device's own limit here: what a bot does with threads in a turn its message started is held to it.
+      deviceLimit: botDeviceLimitFrom(rt.policy),
+      // Which bots the calling device reaches; a bot it made stays within its reach, unless a choice was saved for it.
+      reach,
+      madeBy: keepMakerInReach(access, reach, (botId) => services.personalBots?.reachChanged(botId))
     }))
       rt.rpc.register({
         ...method,
@@ -425,7 +555,8 @@ export class BridgeProfileService {
       services,
       client: this.router.client,
       computers: () => (this.router.enabled() ? this.router.pairedComputers() : undefined),
-      online: (node) => this.router.isOnline(node)
+      online: (node) => this.router.isOnline(node),
+      self: () => rt.identity.self()?.node
     })
     services.orchestrator.setRemoteComputers(computersPort)
     this.disposers.add(() => services.orchestrator.setRemoteComputers(undefined))
@@ -446,11 +577,14 @@ export class BridgeProfileService {
     // This computer's own threads go to the front of a group in front of the other computers' rows too.
     const floor = (projectId: string | undefined): number | undefined => this.lists.frontFloor(projectId)
     services.threads.remoteFloor = floor
-    // A device this computer blocks (or unblocks) is dropped from (or read into) the lists at once.
+    // A device this computer blocks (or unblocks), connects or disconnects, is dropped from (or read into) the lists at
+    // once, cached rows and all.
     const offPolicy = rt.policy.onChange(() => void this.lists.reconcile())
+    const offConnections = rt.connections.onChange(() => void this.lists.reconcile())
     this.lists.start()
     this.disposers.add(() => {
       offPolicy()
+      offConnections()
       if (services.threads.remoteFloor === floor) services.threads.remoteFloor = undefined
       if (services.remoteLists === this.lists) services.remoteLists = undefined
       this.lists.close()

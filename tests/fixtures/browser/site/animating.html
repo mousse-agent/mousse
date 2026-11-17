@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Animating 0</title>
+  <style>
+    body { margin: 0; font: 16px sans-serif; height: 3000px; position: relative; }
+    .at { position: absolute; box-sizing: border-box; }
+    .spot { left: 40px; width: 300px; height: 60px; }
+    #target { top: 300px; background: #cfe; }
+    #above { top: 100px; background: #fde; }
+    #below { top: 500px; background: #def; }
+    #lower { top: 700px; background: #eed; }
+    /* The moving parts stay in view however far the page scrolls. */
+    #mover { position: fixed; left: 900px; top: 40px; width: 60px; height: 60px; background: #f80; }
+    #count { position: fixed; left: 900px; top: 120px; font: 13px monospace; }
+    #out { left: 500px; top: 200px; width: 600px; margin: 0; font: 13px monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <!-- A page that paints every frame (a moving box, a counter) beside buttons that stay put. -->
+  <button id="above" class="at spot">above</button>
+  <button id="target" class="at spot">target</button>
+  <button id="below" class="at spot">below</button>
+  <button id="lower" class="at spot">lower</button>
+  <div id="mover" class="at"></div>
+  <div id="count" class="at">0</div>
+  <pre id="out" class="at"></pre>
+  <script>
+    const out = document.getElementById('out')
+    const note = (line) => { out.textContent += line + '\n' }
+    for (const id of ['above', 'target', 'below', 'lower']) document.getElementById(id).addEventListener('click', () => note('clicked:' + id))
+    const mover = document.getElementById('mover')
+    const count = document.getElementById('count')
+    let frame = 0
+    const step = () => {
+      frame += 1
+      mover.style.transform = 'translateX(' + (frame % 240) + 'px)'
+      count.textContent = String(frame)
+      requestAnimationFrame(step)
+    }
+    requestAnimationFrame(step)
+    window.addEventListener('scroll', () => { document.title = 'Animating ' + Math.round(window.scrollY) })
+  </script>
+</body>
+</html>

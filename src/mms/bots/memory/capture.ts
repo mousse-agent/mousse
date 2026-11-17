@@ -1,3 +1,4 @@
+import { actionDigest, maskedActionData } from '../actions/BotActions'
 import type { BotLane } from '../../../shared/bots/personal/definition'
 import { memoryToolOf } from '../../../shared/bots/personal/memory'
 import type { ChatMessage, ThreadData } from '../../../shared/types'
@@ -27,8 +28,14 @@ export interface BotJournalCaptureOptions {
   readThread: (threadId: string) => Pick<ThreadData, 'messages'> | undefined
   /** Every bot thread, for the startup catch-up. */
   listThreads: () => BotThreadRef[]
+  /** Whether a bot thread is one of its work's subagents' (`BotStore.threadRole`): its rows are marked as theirs. */
+  isSubagentThread?: (threadId: string) => boolean
+  asksFirstEnabled?: () => boolean
   log?: (message: string, error?: unknown) => void
 }
+
+/** How a subagent's rows begin in the journal: what its work's helper did or said, never the bot to its owner. */
+export const SUBAGENT_JOURNAL_PREFIX = '[subagent] '
 
 interface Cursor {
   /** Messages at the start of the thread that are copied and settled. */
@@ -75,7 +82,21 @@ export function unsettled(message: ChatMessage): boolean {
  * every other non-presentation row the dispatch was given (its prompt, a wall answer) as a
  * `notice` from Mousse.
  */
-export function capturedRows(message: ChatMessage, ref: BotThreadRef): CapturedRow[] {
+export function capturedRows(message: ChatMessage, ref: BotThreadRef, subagent = false, maskArguments = false, heldDigests: ReadonlySet<string> = new Set()): CapturedRow[] {
+  const rows = botRows(message, ref, maskArguments, heldDigests)
+  if (!subagent) return rows
+  // A subagent of the bot's work: what it said is data it returned to the work (like a tool's result, from outside),
+  // and its calls are not the bot's, so search, the packs and an export never show them as the bot's own words.
+  return rows.map((row) => ({
+    ...row,
+    ...(row.kind === 'bot_msg' ? { kind: 'tool_result' as const, external: true } : {}),
+    who: row.who === 'bot' ? 'tool' : row.who,
+    text: `${SUBAGENT_JOURNAL_PREFIX}${row.text}`,
+    json: { ...(row.json && typeof row.json === 'object' ? row.json as Record<string, unknown> : {}), subagent: true }
+  }))
+}
+
+function botRows(message: ChatMessage, ref: BotThreadRef, maskArguments = false, heldDigests: ReadonlySet<string> = new Set()): CapturedRow[] {
   const kind = message.kind ?? 'message'
   if (SKIPPED_KINDS.has(kind) || message.role === 'system') return []
   const base = {
@@ -89,7 +110,12 @@ export function capturedRows(message: ChatMessage, ref: BotThreadRef): CapturedR
   if (CALL_KINDS.has(kind)) {
     const activity = message.activity
     const tool = message.toolCall?.toolName ?? activity?.toolName ?? message.toolCall?.title ?? 'tool'
-    const input = message.toolCall?.input ?? (activity && 'input' in activity ? activity.input : undefined)
+    let input = message.toolCall?.input ?? (activity && 'input' in activity ? activity.input : undefined)
+    // The progress journal owns this text. A captured JSON copy would outlive Forget.
+    if (/(?:^|__)run_report$/.test(tool) && input && typeof input === 'object') {
+      const { leftOff: _leftOff, ...report } = input as Record<string, unknown>
+      input = report
+    }
     const memory = memoryToolOf(tool)
     if (memory) {
       // A memory call is kept by its refs alone: its text, query or reason restates what a forget
@@ -97,10 +123,23 @@ export function capturedRows(message: ChatMessage, ref: BotThreadRef): CapturedR
       const refs = memoryRefsOf(input)
       return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: [memory, ...refs].join(' '), json: { tool: memory, ...(refs.length ? { refs } : {}) } }]
     }
+    // A card is kept by its kind alone: its words are on the message it went with, whose row Forget removes; a copy here
+    // would outlive that. Its result says nothing of it.
+    if (/(?:^|__)show_card$/.test(tool)) {
+      const type = (input as { card?: { type?: unknown } } | undefined)?.card?.type
+      const kind = typeof type === 'string' && /^[a-z]{1,20}$/.test(type) ? type : undefined
+      return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: ['show_card', ...(kind ? [kind] : [])].join(' '), json: { tool: 'show_card', ...(kind ? { card: kind } : {}) } }]
+    }
+    if (/(?:^|__)telling_set$/.test(tool)) {
+      return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: 'telling_set', json: { tool: 'telling_set' } }]
+    }
+    const held = maskArguments && input !== undefined && heldDigests.has(actionDigest(input))
+    if (maskArguments) input = maskedActionData(input) as typeof input
     const inputText = input === undefined ? '' : safeJson(input)
     const rows: CapturedRow[] = [{
       ...base,
       kind: 'tool_call',
+      ...(held ? { external: true } : {}),
       sourceKey: key,
       who: 'bot',
       text: `${tool} ${inputText || message.toolCall?.summary || ''}`.trim(),
@@ -158,15 +197,25 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       return 0
     }
     const cursorKey = `cursor:${ref.threadId}`
+    let subagent = false
+    try {
+      subagent = options.isSubagentThread?.(ref.threadId) === true
+    } catch (error) {
+      // Not known: the thread waits for the next sync rather than being copied as the bot's own words.
+      log(`bot memory: thread ${ref.threadId} could not be told apart`, error)
+      return 0
+    }
     return store.write(() => {
       const saved = store.getState<Cursor>(ref.botId, cursorKey)
       let start = saved && saved.n <= messages.length && (saved.n === 0 || messages[saved.n - 1]?.id === saved.lastId) ? saved.n : 0
       let settledPrefix = true
       let written = 0
+      const heldDigests = options.asksFirstEnabled?.() === true && ref.activationId ? store.storedActionDigests(ref.activationId) : new Set<string>()
+      const maskArguments = heldDigests.size > 0
       for (let index = start; index < messages.length; index++) {
         const message = messages[index]!
         const partial = unsettled(message)
-        for (const row of capturedRows(message, ref)) {
+        for (const row of capturedRows(message, ref, subagent, maskArguments, heldDigests)) {
           store.putCaptured(row, partial)
           written++
         }

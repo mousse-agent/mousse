@@ -297,3 +297,49 @@ describe('MarkdownPreview highlighting', () => {
     expect(second).toContain('<span class="hljs-keyword">def</span>')
   })
 })
+
+describe('chat Markdown text in angle brackets', () => {
+  const botImages = { Image: () => null }
+  const renderers: Array<[string, (content: string) => string]> = [
+    ['a thread', render],
+    ['a bot chat', (content) => renderToStaticMarkup(createElement(Markdown, { content, images: botImages }))],
+  ]
+
+  it.each(renderers)('shows tags it does not draw as written in %s', (_, draw) => {
+    const markup = draw('bug : <command> <stuff> (angular brackets content vanishing?)')
+    expect(markup).toContain('bug : &lt;command&gt; &lt;stuff&gt; (angular brackets content vanishing?)')
+
+    const block = draw('<thinking>\nplan it\n</thinking>')
+    expect(block).toContain('&lt;thinking&gt;')
+    expect(block).toContain('&lt;/thinking&gt;')
+    expect(block).not.toContain('<thinking>')
+  })
+
+  it.each(renderers)('still draws kept HTML and keeps code as written in %s', (_, draw) => {
+    expect(draw('press <kbd>Enter</kbd>')).toContain('<kbd>Enter</kbd>')
+    expect(draw('<script>alert(1)</script>')).not.toContain('<script>')
+    expect(draw('run `git <command>` now')).toContain('git &lt;command&gt;')
+    expect(draw('```\n<command> <stuff>\n```\n')).toContain('&lt;command&gt;')
+    expect(draw('see <https://example.com>')).toContain('href="https://example.com/"')
+    expect(draw('<details open><summary>More</summary>Body</details>')).toContain('<details open="">')
+    expect(draw('kept <!-- a note --> out')).not.toContain('a note')
+  })
+
+  // A tag the chat draws, written with words that are not its attributes, would become a blocked link or image or
+  // swallow the rest of the line; a comment with no end would hide the rest of the message.
+  it.each(renderers)('shows words in angle brackets as written when they only look like HTML in %s', (_, draw) => {
+    const cases: Array<[string, string]> = [
+      ['Do the <work of first task> next', 'Do the &lt;work of first task&gt; next'],
+      ['<work of first task>', '&lt;work of first task&gt;'],
+      ['Use <a of first task> then more text', 'Use &lt;a of first task&gt; then more text'],
+      ['See <img of first task> here', 'See &lt;img of first task&gt; here'],
+      ['Do <b first task> then more', 'Do &lt;b first task&gt; then more'],
+      ['<!-- work of first task\nand the rest', '&lt;!-- work of first task\nand the rest'],
+    ]
+    for (const [content, shown] of cases) {
+      const markup = draw(content)
+      expect(markup, content).toContain(shown)
+      expect(markup, content).not.toContain('blocked')
+    }
+  })
+})

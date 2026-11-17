@@ -33,7 +33,9 @@ import {
 import { installDaemonDiagnostics } from '../daemonDiagnostics'
 import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
+import { dropForeignAppImageMounts } from '../appImageMounts'
 import { MmsProtocolServer } from '../../mms/protocol'
+import { prepareMemoryMonitor } from '../../mms/diagnostics/startMemoryMonitor'
 import {
   stopRunningDaemon,
   shutdownDaemonLifecycle,
@@ -108,7 +110,10 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     shuttingDown: false
   }
 
+  let memoryMonitor: ReturnType<typeof prepareMemoryMonitor> = null
   const shutdown = async (reason: string, exitCode = 0): Promise<void> => {
+    memoryMonitor?.stop()
+    memoryMonitor = null
     if (state.shuttingDown) {
       // Already stopping: wait for teardown (and stop anything startup made since).
       await shutdownDaemonLifecycle(state)
@@ -182,6 +187,14 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       version: tryReadPackageVersion()
     })
     state.protocolServer = protocolServer
+    // Production daemon only: its methods are registered before the server seals its method list.
+    if (!opts.skipSignals) {
+      try {
+        memoryMonitor = prepareMemoryMonitor({ mms: opened.mms, protocolServer, homeDir, version: process.env.MOUSSE_VERSION || tryReadPackageVersion() || 'unknown' })
+      } catch (error) {
+        log(`memory monitor not started: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     const endpoint = await protocolServer.start()
     if (await stoppedDuringStartup()) return state
     if (opts.failAfter === 'protocol-start') {
@@ -220,6 +233,8 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       `Mousse MMS running (headless) — home: ${homeDir} pid: ${process.pid} owner=daemon endpoint=${endpoint} startup=${Math.round(performance.now() - startedAtMs)}ms`
     )
 
+    memoryMonitor?.start()
+
     state.pollStop = setInterval(() => {
       if (state.shuttingDown) return
       const req = readStopRequest(homeDir)
@@ -251,6 +266,8 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
 }
 
 async function runForeground(homeFlag?: string): Promise<void> {
+  // Before anything starts a program: the app that started the service may quit and take its mount with it.
+  dropForeignAppImageMounts()
   await runDaemonForeground({
     homeDir: resolveMousseHome(homeFlag)
   })

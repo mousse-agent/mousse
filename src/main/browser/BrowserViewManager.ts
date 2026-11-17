@@ -2,6 +2,7 @@ import { WebContentsView, type BrowserWindow } from 'electron'
 import { WINDOW_RESIZE_BORDER } from '../../shared/windowResize'
 import type { BrowserBounds, BrowserState } from '../../shared/types'
 import { isAllowedBrowserPopupUrl, profileBrowserPartition } from './browserPolicy'
+import { markWebContentsRole } from '../diagnostics/webContentsRoles'
 
 const BLANK_URL = 'about:blank'
 
@@ -90,6 +91,8 @@ export class BrowserViewManager {
       })
 
       const wc = this.view.webContents
+      const view = this.view
+      markWebContentsRole(wc, 'browser', () => view.getBounds(), () => view.getVisible())
       wc.setWindowOpenHandler(({ url }) => {
         if (!isAllowedBrowserPopupUrl(url)) return { action: 'deny' }
         return {

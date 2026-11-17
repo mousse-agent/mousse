@@ -934,6 +934,10 @@ export class ChatNetworkBindingService {
   beginShutdown(): void {
     this.stopped = true
   }
+  /** Accepts work again once Net loaded a new runtime after closing the one this stopped with. */
+  resume(): void {
+    this.stopped = false
+  }
   private accepting(): void {
     if (this.stopped) throw new NetError('cancelled')
     this.options.assertNetwork?.()

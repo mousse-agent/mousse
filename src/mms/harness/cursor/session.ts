@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
+import type { ActivityPatch } from '../../../shared/agentActivity'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { cursorMcpServers } from '../../run/mcp/attachment'
-import type { CursorAgentSetup, CursorHostMethods, CursorUsage } from '../hosts/cursorProtocol'
+import { redactCursorText, type CursorAgentSetup, type CursorHostMethods, type CursorUsage } from '../hosts/cursorProtocol'
+import { providerReportedError } from '../../orchestrator/providerErrors'
 import { interruptWithDeadline, LOAD_DEADLINE_MS, loadWithDeadline, recoverActiveRun, SessionLoadTimeoutError } from '../supervise'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { CursorHostCallError, CursorHostExitedError, type CursorHostClient, type CursorRunListener } from './hostClient'
@@ -23,6 +25,8 @@ export interface SavedCursorAgent {
   historyKey?: string
   /** Runs Mousse started on the agent for this thread (most recent last), for active-run recovery. */
   runIds: string[]
+  /** Hash of the session instructions the agent was given in its first prompt. */
+  instructionsHash?: string
 }
 
 export interface CursorSessionStore {
@@ -37,6 +41,8 @@ export interface CursorToolEvent {
   callId: string
   title: string
   toolName?: string
+  /** The typed fields Cursor's call carries (a search's pattern, and on completion its result count). */
+  activity?: ActivityPatch
   /** On completion: `unfinished` when the run ended before the tool reported its own end. */
   status?: 'completed' | 'unfinished'
 }
@@ -55,11 +61,33 @@ export interface CursorChatInput {
   signal?: AbortSignal
   mcp?: McpAttachment | null
   orchestrationInstructions?: string
+  /**
+   * A bot's turn: its session instructions are its system text (the owner's words, what it may use), so an agent given
+   * other ones is not reopened. A new agent gets them and the history in its first prompt, as Codex starts a new thread.
+   */
+  bot?: true
   onText(text: string): void
   onThinking?(text: string): void
   onTool?(event: CursorToolEvent): void
   drainSteer?(): string | undefined
-  onSteer?(text: string): void
+  /**
+   * A steer drain with its token (`TurnControl.drainSteerEntry`). With `expect`, it takes only when the decision now is
+   * one of those deliveries. A drain is read (`steerTaken`, then `onSteer` with its token) only once the run that
+   * carries it started, and handed back (`returnSteer`) when that never happens.
+   */
+  drainSteerEntry?(opts?: { expect?: Array<'cut' | 'native' | 'hold'> }): { text: string; token: string; images?: ChatImageAttachment[] } | undefined
+  /** The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. */
+  peekSteer?(): { delivery: 'cut' | 'native' | 'hold' } | undefined
+  /** The check right before the run is cancelled for a drained steer (`TurnControl.mayCut`): false hands it back. */
+  mayCut?(token: string): boolean
+  steerTaken?(token: string): void
+  returnSteer?(text: string, token: string): void
+  /** The steer is read: the run that carries it started. `token` names its drain, when it had one. */
+  onSteer?(text: string, token?: string): void
+  /** The run ended and none of its tools runs (`TurnSink.boundary`). */
+  onBoundary?(): void
+  /** Another run of the turn was sent (`TurnSink.providerTurn`). */
+  onProviderTurn?(): void
   /**
    * The id provider refs name for interrupt and terminate: a turn key at once, then the agent's id
    * once it is known.
@@ -77,6 +105,11 @@ export interface CursorChatResult {
 export interface CursorSessionsOptions {
   label: string
   host: CursorHostClient
+  /**
+   * The thread's questions: a person's steer that cancels a run answers the approvals and questions it waits on (Mousse's
+   * own, such as `ask_user`), as on every provider, so no card waits for a run that is being cut.
+   */
+  questions?: { autoRejectPendingForThread(threadId: string): unknown }
   /** `JsonlLocalAgentStore` directory of the instance. */
   storeDir: string
   /** The credential turns run with; undefined when the instance is signed out. */
@@ -123,11 +156,142 @@ export function cursorToolTitle(toolCall: unknown, label = 'Cursor'): string {
   const call = toolCall && typeof toolCall === 'object' ? (toolCall as { type?: unknown; args?: unknown }) : {}
   const type = str(call.type) ?? 'tool'
   const args = call.args && typeof call.args === 'object' ? (call.args as Record<string, unknown>) : {}
-  const subject = str(args.command) ?? str(args.path) ?? str(args.pattern) ?? str(args.globPattern) ?? str(args.description) ?? str(args.toolName) ?? str(args.name)
+  // A search is named by what it looks for, not the folder it looks in.
+  const subject = str(args.command) ?? str(args.pattern) ?? str(args.globPattern) ?? str(args.path) ?? str(args.description) ?? str(args.toolName) ?? str(args.name)
   const name = type.charAt(0).toUpperCase() + type.slice(1)
   if (!subject) return `${label} ${type}`
   const short = subject.length > 80 ? `${subject.slice(0, 77)}…` : subject
   return type === 'shell' ? `Shell: ${short}` : `${name} ${short}`
+}
+
+/**
+ * Tool names for Cursor's call types. Its `type` is a category, not a tool name: `ls` lists a folder (it is not a file
+ * search) and `task` runs a Cursor subagent, not a Mousse one. A type with no card of its own gets a neutral name,
+ * so it shows as a plain row ("List Directory") rather than a wrong card.
+ */
+const CURSOR_TOOL_NAMES: Record<string, string> = {
+  shell: 'Bash',
+  read: 'Read',
+  edit: 'Edit',
+  write: 'Write',
+  grep: 'Grep',
+  glob: 'Glob',
+  ls: 'list_directory',
+  delete: 'delete_file',
+  semSearch: 'semantic_search',
+  readLints: 'read_lints',
+  updateTodos: 'update_todos',
+  createPlan: 'create_plan',
+  task: 'cursor_task',
+  generateImage: 'generate_image',
+  recordScreen: 'record_screen'
+}
+
+/** An MCP server's name as a tool-name segment: `my-server` is `my_server`. */
+function mcpSegment(name: string): string {
+  return name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+}
+
+/**
+ * The tool name a Cursor call shows as: a known type's tool name, or an MCP call's `mcp__<server>__<tool>` (its
+ * tool name alone when Cursor does not say which server). Undefined when the call names nothing.
+ */
+export function cursorToolName(toolCall: unknown): string | undefined {
+  const call = toolCall && typeof toolCall === 'object' ? (toolCall as { type?: unknown; args?: unknown }) : {}
+  const type = str(call.type)
+  if (!type) return undefined
+  if (type === 'mcp') {
+    const args = call.args && typeof call.args === 'object' ? (call.args as Record<string, unknown>) : {}
+    const tool = str(args.toolName)?.trim()
+    if (!tool) return undefined
+    if (tool.startsWith('mcp__')) return tool
+    const server = mcpSegment(str(args.providerIdentifier) ?? '')
+    return server ? `mcp__${server}__${tool}` : tool
+  }
+  if (Object.prototype.hasOwnProperty.call(CURSOR_TOOL_NAMES, type)) return CURSOR_TOOL_NAMES[type]
+  // A type added after this list: snake case keeps it a plain row named after it.
+  return `cursor_${type.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()}`
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
+}
+
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(record).filter((item): item is Record<string, unknown> => Boolean(item)) : []
+}
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+interface SearchFound {
+  count: number
+  lines: string[]
+}
+
+/** One folder's grep result, in any of its output modes: matching lines, files, or counts per file. */
+function grepFound(value: unknown): SearchFound | undefined {
+  const result = record(value)
+  const output = record(result?.output)
+  if (!result || !output) return undefined
+  switch (result.type) {
+    case 'content': {
+      const matches = records(output.matches)
+      const lines = matches.map((match) => {
+        const line = typeof match.lineNumber === 'number' ? `:${match.lineNumber}` : ''
+        return `${str(match.file) ?? ''}${line}:${typeof match.line === 'string' ? match.line : ''}`
+      })
+      return { count: count(output.totalMatches) ?? matches.length, lines }
+    }
+    case 'files': {
+      const files = strings(output.files)
+      return { count: count(output.count) ?? files.length, lines: files }
+    }
+    case 'count': {
+      const counts = records(output.counts)
+      const total = counts.reduce((sum, entry) => sum + (count(entry.count) ?? 0), 0)
+      return { count: count(output.total) ?? total, lines: counts.map((entry) => `${str(entry.file) ?? ''}:${count(entry.count) ?? 0}`) }
+    }
+    default:
+      return undefined
+  }
+}
+
+/** What a finished Cursor search found: a grep's results across its folders, or a glob's files. */
+function searchFound(type: 'grep' | 'glob', value: Record<string, unknown>): SearchFound | undefined {
+  if (type === 'glob') {
+    const files = strings(value.files)
+    return { count: count(value.totalFiles) ?? files.length, lines: files }
+  }
+  const folders = Object.values(record(value.workspaceResults) ?? {}).map(grepFound).filter((found): found is SearchFound => Boolean(found))
+  const found = folders.length > 0 ? folders : [grepFound(value.activeEditorResult)].filter((one): one is SearchFound => Boolean(one))
+  if (found.length === 0) return undefined
+  return { count: found.reduce((sum, one) => sum + one.count, 0), lines: found.flatMap((one) => one.lines) }
+}
+
+/**
+ * A Cursor grep or glob call's search fields: what it searched for and where, and once it has a result, how many it
+ * found and what. Undefined for any other call, or a search without a pattern.
+ */
+export function cursorToolActivity(toolCall: unknown): ActivityPatch | undefined {
+  const call = record(toolCall)
+  const type = str(call?.type)
+  if (type !== 'grep' && type !== 'glob') return undefined
+  const args = record(call?.args) ?? {}
+  const query = type === 'grep' ? str(args.pattern) : str(args.globPattern)
+  if (!query) return undefined
+  const path = type === 'grep' ? str(args.path) : str(args.targetDirectory)
+  const patch = { kind: 'search', scope: type === 'grep' ? 'code' : 'files', query, ...(path ? { path } : {}) } as ActivityPatch
+  const result = record(call?.result)
+  if (result?.status === 'error') return { ...patch, status: 'failed' }
+  const value = record(result?.value)
+  const found = result?.status === 'success' && value ? searchFound(type, value) : undefined
+  return found ? { ...patch, resultCount: found.count, output: found.lines.join('\n') } as ActivityPatch : patch
 }
 
 /** Raised inside a turn when its Stop arrives before the work it waits for. */
@@ -145,6 +309,15 @@ interface Turn {
   stop: AbortController
   /** Resolves once the turn has ended, either way. */
   settled: Promise<void>
+  /** Hands back the steers the turn drained that no run took; called when the turn ends early. */
+  handBack?: () => void
+}
+
+/** A steer the turn drained, with the images sent with it; `token` names its drain when it had one. */
+interface DrainedSteer {
+  text: string
+  token?: string
+  images?: ChatImageAttachment[]
 }
 
 /** What a turn produced so far; kept when it ends early. */
@@ -300,6 +473,9 @@ export class CursorSessions {
       this.options.markSignedOut()
       return new Error(this.options.signInRequiredMessage)
     }
+    // Any other refusal the SDK reported (a bad request, an unknown model, a limit): its status and its own message.
+    if (error instanceof CursorHostCallError && !error.activeRun && error.message.trim())
+      return providerReportedError(redactCursorText(error.message), { provider: 'cursor', ...(error.status !== undefined ? { status: error.status } : {}), cause: error })
     return error instanceof Error ? error : new Error(String(error))
   }
 
@@ -313,7 +489,10 @@ export class CursorSessions {
     // A Stop that came first opens nothing (and starts no host).
     if (stop.aborted) throw new TurnStopped()
     const saved = store.saved(input.threadId)
-    const matches = saved?.cwd === input.cwd && saved.historyKey === historyKey
+    const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
+    // An agent reads the instructions in its first prompt only: a bot's agent given other ones is replaced.
+    const stale = input.bot === true && instructionsHash !== undefined && saved?.instructionsHash !== instructionsHash
+    const matches = saved?.cwd === input.cwd && saved.historyKey === historyKey && !stale
     const live = this.live.get(input.threadId)
     if (live && live.generation === this.generation && matches && live.agentId === saved?.agentId) return { agentId: live.agentId, resumed: true }
     if (live) this.closeLive(input.threadId)
@@ -349,7 +528,7 @@ export class CursorSessions {
       if (error instanceof TurnStopped) this.abandon(creating, { prune: true })
       throw error
     }
-    store.setSaved(input.threadId, { agentId, cwd: input.cwd, runIds: [] })
+    store.setSaved(input.threadId, { agentId, cwd: input.cwd, runIds: [], ...(instructionsHash ? { instructionsHash } : {}) })
     if (saved && saved.agentId !== agentId) this.prune([saved.agentId])
     this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation })
     return { agentId, resumed: false }
@@ -403,6 +582,7 @@ export class CursorSessions {
         input.onSession?.(id)
       })
     } catch (error) {
+      turn.handBack?.()
       if (error instanceof TurnStopped) return interrupted()
       if (error instanceof CursorHostExitedError) {
         // The prompt may already have reached Cursor: the outcome is unknown, so the turn ends as
@@ -447,8 +627,31 @@ export class CursorSessions {
     const model = { id: input.model || CURSOR_DEFAULT_MODEL }
     const mcpServers = input.mcp ? cursorMcpServers(input.mcp) : undefined
     let thinking = ''
-    const pendingSteers: string[] = []
+    // Steers drained for the next run, and those the next run carries until it starts. A drain with a token is read
+    // (`steerTaken`, `onSteer`) only once that run started; a failure before hands it back (`returnSteer`), so it is
+    // never lost (docs/design/steer-and-interruptions.md §2.6, §2.7).
+    const pendingSteers: DrainedSteer[] = []
+    let carried: DrainedSteer[] = []
     let steerFailure: Error | undefined
+    // The hold: a person's steer waits while a tool runs. While a run streams only a cut is taken; once it ended (the
+    // boundary), whatever can go in becomes the next run.
+    const holds = Boolean(input.peekSteer && input.drainSteerEntry)
+    let running = false
+    const drain = (): DrainedSteer | undefined => {
+      if (holds) {
+        const delivery = input.peekSteer!()?.delivery
+        if (!delivery || delivery === 'hold' || (running && delivery !== 'cut')) return undefined
+        return input.drainSteerEntry!({ expect: running ? ['cut'] : ['cut', 'native'] })
+      }
+      if (input.drainSteerEntry) return input.drainSteerEntry()
+      const text = input.drainSteer?.()
+      return text ? { text } : undefined
+    }
+    // However the turn ends early (a Stop, a failure, the host gone), drained steers no run took go back
+    // (`chat` calls it); they run as the follow-up.
+    turn.handBack = (): void => {
+      for (const entry of [...carried.splice(0), ...pendingSteers.splice(0)]) if (entry.token) input.returnSteer?.(entry.text, entry.token)
+    }
     for (;;) {
       if (stop.aborted) throw new TurnStopped()
       if (steerFailure) throw steerFailure
@@ -477,6 +680,25 @@ export class CursorSessions {
         throw this.failure(error)
       }
       started(runId)
+      running = true
+      // A boundary the previous run's end reported is over; the steers this run carries are read now.
+      input.onProviderTurn?.()
+      // Each is saved or handed back on its own, so one failed save loses none of the others.
+      let unsaved: { error: unknown } | undefined
+      for (const entry of carried.splice(0)) {
+        if (!entry.token) continue
+        input.steerTaken?.(entry.token)
+        try {
+          input.onSteer?.(entry.text, entry.token)
+        } catch (error) {
+          input.returnSteer?.(entry.text, entry.token)
+          unsaved ??= { error }
+        }
+      }
+      if (unsaved) {
+        void active.cancel().catch(() => undefined)
+        throw unsaved.error
+      }
       // An accepted prompt makes the history fingerprint stale until the turn commits.
       const saved = store.saved(input.threadId)
       if (saved) {
@@ -505,14 +727,22 @@ export class CursorSessions {
               if (!callId) return
               const title = cursorToolTitle(update.toolCall, label)
               tools.set(callId, title)
-              const toolName = str((update.toolCall as { type?: unknown } | undefined)?.type)
-              input.onTool?.({ phase: 'start', callId, title, ...(toolName ? { toolName } : {}) })
+              const toolName = cursorToolName(update.toolCall)
+              const activity = cursorToolActivity(update.toolCall)
+              input.onTool?.({ phase: 'start', callId, title, ...(toolName ? { toolName } : {}), ...(activity ? { activity } : {}) })
               return
             }
             case 'tool-call-completed': {
               const callId = str(update.callId)
               if (!callId) return
-              input.onTool?.({ phase: 'complete', callId, title: tools.get(callId) ?? cursorToolTitle(update.toolCall, label), status: 'completed' })
+              const activity = cursorToolActivity(update.toolCall)
+              input.onTool?.({
+                phase: 'complete',
+                callId,
+                title: tools.get(callId) ?? cursorToolTitle(update.toolCall, label),
+                status: 'completed',
+                ...(activity ? { activity } : {})
+              })
               tools.delete(callId)
               return
             }
@@ -525,18 +755,27 @@ export class CursorSessions {
       let cancelling = false
       const collectSteer = () => {
         if (stop.aborted || steerFailure) return
-        let steer: string | undefined
+        let entry: DrainedSteer | undefined
         try {
-          steer = input.drainSteer?.()?.trim()
+          entry = drain()
         } catch (error) {
           steerFailure = error instanceof Error ? error : new Error(String(error))
           return
         }
-        if (!steer) return
-        input.onSteer?.(steer)
-        pendingSteers.push(steer)
-        if (cancelling) return
+        const steer = entry?.text.trim()
+        if (!entry || !steer) return
+        const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}), ...(entry.images?.length ? { images: entry.images } : {}) }
+        // The check at dispatch: a tool that started since the decision is not cancelled for this steer.
+        if (running && !cancelling && drained.token && input.mayCut && !input.mayCut(drained.token)) {
+          input.returnSteer?.(drained.text, drained.token)
+          return
+        }
+        // A drain without a token keeps the old rule: read when it is drained.
+        if (!drained.token) input.onSteer?.(steer)
+        pendingSteers.push(drained)
+        if (!running || cancelling) return
         cancelling = true
+        this.options.questions?.autoRejectPendingForThread(input.threadId)
         void interruptWithDeadline({
           interrupt: async () => {
             await active.cancel()
@@ -558,6 +797,7 @@ export class CursorSessions {
       try {
         end = await ended
       } finally {
+        running = false
         clearInterval(steerTimer)
         stop.removeEventListener('abort', onStop)
       }
@@ -577,12 +817,18 @@ export class CursorSessions {
         throw new Error(`${label} lost its connection to Cursor (${end.transportFailure}). Send the message again.`)
       }
       if (stop.aborted) throw new TurnStopped()
+      if (steerFailure) throw steerFailure
+      // The run is over and none of its tools runs: a held steer goes in as the next run, with no cancel (strict
+      // release waits for this).
+      if (end.status !== 'cancelled' || cancelling) input.onBoundary?.()
       collectSteer()
       if (steerFailure) throw steerFailure
       if (end.status === 'cancelled' && !pendingSteers.length) throw new TurnStopped()
       if (!pendingSteers.length) return { text: progress.text, interrupted: false, ...(progress.usage ? { usage: progress.usage } : {}) }
-      prompt = pendingSteers.splice(0).join('\n')
-      images = []
+      carried = pendingSteers.splice(0)
+      prompt = carried.map((entry) => entry.text).join('\n')
+      // The run a steer becomes carries its images.
+      images = carried.flatMap((entry) => entry.images ?? []).map((image) => ({ data: image.data, mimeType: image.mimeType }))
     }
   }
 

@@ -5,8 +5,10 @@ import { lstat, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord, ThreadAction } from '../../shared/threadActions'
+import { onlyExcludedIgnored } from '../git/excludedIgnored'
+import { englishMessagesEnv } from '../git/gitProcess'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
-import { gitAsync, gitEnv, gitStep, ownGitRunner, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfAsync, treeOfSteps } from './git'
+import { gitAsync, gitEnv, gitStep, ownGitRunner, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, MOUSSE_DIRECTORY, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfAsync, treeOfSteps } from './git'
 import type { FrozenEntryProof } from '../lifecycle/verifiedDelete'
 import { readConvertedAsync } from './heldBytes'
 import { ROUND_TRIP_BUDGET, roundTripsAsync, storeCheckedAsync, sweepCopiesAsync, type RoundTrip, type RoundTripAsk, type Stored } from './filterRoundTrip'
@@ -449,7 +451,13 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
   const hidden = store ? yield* hiddenStoreCoverage(top) : undefined
   const env = { GIT_INDEX_FILE: index }
   // The store's exclude list already leaves `.mousse/` out, and Git refuses an exclusion that names an ignored path.
-  const addAll = (left: CoverageGap[]) => tryGitStep(top, ['add', '-A', '--', '.', ...(hidden ? [] : [NOT_MOUSSE]), ...left.map((gap) => `:(exclude,literal)${gap.path}`)], env, LISTING)
+  // A project whose `.gitignore` lists one of these exclusions makes Git report it as ignored and exit with 1, having
+  // added the rest; that is a success (`onlyExcludedIgnored`). Git's messages are read, so they are in English.
+  const addAll = function* (left: CoverageGap[]): Steps<{ ok: boolean; stdout: string; stderr: string }> {
+    const result = yield* tryGitStep(top, ['add', '-A', '--', '.', ...(hidden ? [] : [NOT_MOUSSE]), ...left.map((gap) => `:(exclude,literal)${gap.path}`)], { ...env, ...englishMessagesEnv() }, LISTING)
+    if (result.ok || !onlyExcludedIgnored(result.stderr, [...(hidden ? [] : [MOUSSE_DIRECTORY]), ...left.map((gap) => gap.path)])) return result
+    return { ...result, ok: true }
+  }
   const indexOnce = function* (): Steps<{ tree: string; gaps: CoverageGap[] }> {
     if (!(yield* disk.exists(index))) yield* gitStep(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
     // What can be read is recorded; what cannot (an unreadable file or folder, a nested repository with no commit) is

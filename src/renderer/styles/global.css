@@ -37,22 +37,18 @@
   --an-tool-background: #242832;
   --an-tool-border-color: rgba(255,255,255,0.10);
   --an-tool-color: #f0f0f0;
+  /* The running shimmer (agent-ui.css): the label rests in the muted colour and a band of the foreground sweeps it.
+     Without these it fell back to agent-ui's light-theme subtle grey, about the muted colour itself, so the band
+     could not be seen. A theme's own muted and foreground colours carry through. */
+  --an-shimmer-base: var(--an-foreground-muted);
+  --an-shimmer-peak: var(--an-foreground);
   --an-input-background: var(--surface-strong);
   --an-input-border-color: var(--border);
   --an-input-color: var(--text-primary);
-  --an-max-width: 680px;
-  /* Inline-code token defaults (github-dark palette — app default is dark).
-     Themes may override per palette; blacksphere-plus already defines its
-     own --syntax-*. Chips consume these via var(--syntax-*, fallback) so
-     they stay theme-compliant everywhere. */
-  --syntax-keyword: #ff7b72;
-  --syntax-string: #a5d6ff;
-  --syntax-number: #79c0ff;
-  --syntax-function: #d2a8ff;
+  --an-max-width: 784px;
 }
 /* Light: the transcript, tables, code chips and the user bubble take the
-   theme's text and surface tokens instead of the dark bridge above, and
-   inline code uses the github-light token ramp. */
+   theme's text and surface tokens instead of the dark bridge above. */
 html[data-theme='light'] {
   --an-foreground: var(--text-primary);
   --an-foreground-muted: var(--text-secondary);
@@ -66,13 +62,9 @@ html[data-theme='light'] {
   --an-tool-color-muted: var(--text-secondary);
   --an-input-placeholder-color: var(--text-secondary);
   /* Subtle and muted text are one colour here, so the running shimmer gets its own pair: a light resting
-     grey with a dark band sweeping it (agent-ui.css, thinking-icon.css). */
+     grey with a dark band sweeping it (agent-ui.css). */
   --an-shimmer-base: color-mix(in srgb, var(--text-primary) 48%, var(--surface-base));
   --an-shimmer-peak: var(--text-primary);
-  --syntax-keyword: #cf222e;
-  --syntax-string: #0a3069;
-  --syntax-number: #0550ae;
-  --syntax-function: #8250df;
 }
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] {
@@ -89,20 +81,20 @@ html[data-theme='light'] {
     --an-input-placeholder-color: var(--text-secondary);
     --an-shimmer-base: color-mix(in srgb, var(--text-primary) 48%, var(--surface-base));
     --an-shimmer-peak: var(--text-primary);
-    --syntax-keyword: #cf222e;
-    --syntax-string: #0a3069;
-    --syntax-number: #0550ae;
-    --syntax-function: #8250df;
   }
-}
-/* Make user bubbles pop in narrow sidebar */
-.an-message-list .max-w-\[calc\(95\%-40px\)\] {
-  max-width: calc(100% - 24px) !important;
-  margin-inline-start: 24px !important;
 }
 /* Mousse agent-elements deltas — live here (not the vendored agent-ui.css)
    so registry re-syncs can't silently drop them. Unlayered, so they also
    hold regardless of Tailwind layer ordering. */
+/* The image preview's Previous and Next: the whole edge strip is the button, but the focus shows around its chevron
+   only (group-focus-visible). The app's focus fill would paint the strip, a tall grey slab at the edge. */
+.image-preview-overlay .image-preview-edge:focus-visible {
+  background-image: none;
+}
+/* Keyboard focus on an edge: a faint fill around its chevron, which has none otherwise, so focus reads apart from hover. */
+.image-preview-overlay .image-preview-edge:focus-visible > span {
+  background-color: rgba(255, 255, 255, .16);
+}
 /* Headerless highlighted code (quick-action bash preview): the surrounding
    "Action" label already names the block, so the Streamdown language header
    row is hidden — highlighting and the themed border stay. */
@@ -117,20 +109,11 @@ html[data-theme='light'] {
   font-family: inherit;
   font-size: 12px;
 }
-.an-markdown [data-streamdown="code-block-body"] {
-  padding-left: 16px !important;
-  padding-right: 16px !important;
-}
-/* Dim tool chrome (thought rows, tool groups, tool cards) so the
-   assistant's text keeps the contrast. Hover and focus stay at the same
-   level — brightening them matches the reply text. A running shimmer and
-   a card waiting for approval still come up to full opacity. Nested chrome
-   inherits the group's level instead of dimming twice, and drops the
-   outer margin so rows inside a group sit close together. */
+/* Tool chrome (thought rows, tool groups, tool cards) is not faded: its rows step back from the reply by size
+   (14px, regular weight) and the muted text colour, so their words stay sharp. Nested chrome drops the outer
+   margin so rows inside a group sit close together. */
 .an-message-list .an-tool-chrome {
-  opacity: 0.55;
   margin-block: 2px;
-  transition: opacity 0.15s ease-out;
 }
 /* The spacing scale (see settings.css) for the turn's meta lines: "Worked
    for …" above the reply and the changed-files line after it. */
@@ -148,11 +131,55 @@ html[data-theme='light'] {
   margin-top: 6px;
 }
 .an-message-list .turn-work-label {
-  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
-  font-size: 12.5px;
-  font-weight: 450;
+  color: color-mix(in srgb, var(--text-secondary) 85%, transparent);
+  font-size: 14px;
+  font-weight: 400;
   letter-spacing: -0.011em;
   line-height: 1.3;
+}
+/* A finished turn's line is the control that opens its work in place: "Worked for 32s ›". Only its text
+   brightens on hover; the chevron turns down while the work is open. */
+.an-message-list .turn-work-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: color 150ms ease-out;
+}
+.an-message-list .turn-work-toggle:hover,
+.an-message-list .turn-work-toggle:focus-visible {
+  color: var(--text-primary);
+}
+.an-message-list .turn-work-toggle:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  border-radius: 4px;
+}
+/* " · (message icon) 3": how many replies the fold hides, in the line's own colour. */
+.an-message-list .turn-work-replies {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+.an-message-list .turn-work-replies-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+.an-message-list .turn-work-chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  transition: transform 150ms ease-out;
+}
+.an-message-list .turn-work-chevron[data-open] {
+  transform: rotate(90deg);
 }
 .an-message-list .turn-work-rule {
   height: 1px;
@@ -176,36 +203,44 @@ html[data-theme='light'] {
 .an-message-list .turn-work + .turn-answer {
   margin-top: var(--space-16);
 }
-.an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
-  opacity: 1;
-}
-/* Cards awaiting the user's decision (quick-action approval) stay at full
-   opacity — dimming a call to action to 0.55 buries exactly the card that
-   needs attention. Cleared when the card decides (attribute removed). */
-.an-message-list .an-tool-chrome[data-awaiting-approval="true"] {
-  opacity: 1;
+/* A reply's text with no block shown yet (reply pacing) renders nothing and takes no gap, nor does a
+   reply that holds only such text: the live line under it stays put until the first block shows. */
+.an-message-list .group\/assistant-text:empty,
+.an-message-list .turn-answer > .group\/assistant-turn:has(> .group\/assistant-text:empty):not(:has(> :not(.group\/assistant-text:empty))) {
+  display: none;
 }
 .an-message-list .an-tool-chrome .an-tool-chrome {
-  opacity: inherit;
   margin-block: 0;
 }
-/* A command inside a tool call group is one row like its neighbours: the
-   card keeps its outline but takes the row height (22px) and type size. */
-.an-message-list .an-tool-group-rows .an-bash-card > button {
-  height: 22px;
-  padding-inline: 6px 4px;
+/* A tool's output shown as a code block (an MCP call's result) sits in the same plain block as a command's output:
+   no header bar, no border, the tool background, 12px. */
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block"] {
+  margin: 0;
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-radius: 6px;
+  background: var(--an-tool-background);
 }
-.an-message-list .an-tool-group-rows .an-bash-card > button svg {
-  width: 14px;
-  height: 14px;
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block-header"] {
+  display: none;
+}
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block-body"] {
+  border: 0;
+  background: transparent;
+  padding: 8px 10px !important;
+  max-height: 240px;
+}
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block-body"] pre,
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block-body"] code {
+  font-size: 12px;
 }
 /* Chat convention: a single newline is an intended line break (verses,
    addresses, signatures). Spec markdown would join them into prose.
    pre-line keeps structure (blank lines, lists, fences) intact while
    honoring the author's breaks — same as user bubbles (pre-wrap). */
 .an-markdown .an-md-p,
-.an-markdown .an-md-li,
-.an-markdown .an-md-blockquote {
+.an-markdown .an-md-li {
   white-space: pre-line;
 }
 /* Chat text must stay selectable/copyable — the app root sets
@@ -229,7 +264,8 @@ html[data-theme='light'] {
   overflow-anchor: auto;
 }
 .an-message-list[data-windowed="true"],
-.an-message-list [aria-hidden][data-spacer] {
+.an-message-list [aria-hidden][data-spacer],
+.an-message-list > [data-end-reserve] {
   overflow-anchor: none;
 }
 /* While the list follows the end it writes scrollTop itself, once per frame
@@ -237,13 +273,16 @@ html[data-theme='light'] {
 .an-message-list[data-following-end] {
   overflow-anchor: none;
 }
-/* A block that appears in a reply while it streams fades in. Opacity only, so nothing around it
-   moves; only the live reply has data-streaming, so opening a finished thread replays nothing. */
-.an-markdown[data-streaming] > div > * {
-  transition: opacity calc(240ms * var(--ui-motion-scale, 1)) ease-out;
+/* A block that appears in a reply while it streams fades in, and so does a new item in a list.
+   Opacity only, so nothing around it moves and the compositor runs it; only the live reply has
+   data-streaming, so opening a finished thread replays nothing. */
+.an-markdown[data-streaming] > div > *,
+.an-markdown[data-streaming] li {
+  transition: opacity calc(320ms * var(--ui-motion-scale, 1)) ease-out;
 }
 @starting-style {
-  .an-markdown[data-streaming] > div > * {
+  .an-markdown[data-streaming] > div > *,
+  .an-markdown[data-streaming] li {
     opacity: 0;
   }
 }
@@ -274,8 +313,8 @@ html[data-theme='light'] {
   --mousse-blush: #f0def1;
   --mousse-cream: #f4e5f4;
 
-  /* Glass surfaces (semi-transparent for acrylic) */
-  --glass-blur: blur(24px);
+  /* Glass surfaces (semi-transparent for acrylic). The native acrylic material (useTheme) does the blur;
+     nested glass never blurs again. */
   /* Neutral charcoal surfaces keep accent colors expressive without tinting the whole UI. */
   --surface-base: #1b1c23;
   --surface-strong: #17191e;
@@ -360,6 +399,14 @@ body,
   background: var(--app-window-bg);
 }
 
+/* The shell never scrolls: Chromium lets scrollIntoView and focus scroll an overflow: hidden box, and once moved the
+   whole app up and left. clip can't be scrolled at all. (On html it would mean hidden anyway: the page itself is put
+   back by keepShellUnscrolled.) */
+body,
+#root {
+  overflow: clip;
+}
+
 #root {
   display: flex;
   flex-direction: column;
@@ -409,7 +456,6 @@ input:focus,
 textarea:focus {
   outline: none;
   background: rgba(var(--surface-elevated-rgb), 0.65);
-  box-shadow: 0 0 0 1px rgba(var(--accent-pale-rgb), 0.25);
 }
 
 ::-webkit-scrollbar {
@@ -482,7 +528,8 @@ html.platform-darwin .overlay-titlebar {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
+  /* A frame pane: clip, so scrollIntoView and focus can't scroll it (see body and #root above). */
+  overflow: clip;
 }
 
 .keep-mounted-pane[hidden] {
@@ -503,6 +550,12 @@ html.platform-darwin .overlay-titlebar {
   overflow: hidden;
 }
 
+/* At opacity 0 a browser guest still counts as on screen, so its page keeps rendering every frame. Hidden, it
+   keeps its layout, document and viewport but stops drawing. A tab an agent drives stays drawn for its screenshots. */
+.keep-mounted-layout-inactive .browser-webview:not([data-agent-controlled]) {
+  visibility: hidden;
+}
+
 /* A split-out page or panel whose chunk did not load (lib/lazyComponent.tsx). */
 .lazy-load-failed {
   padding: 12px 14px;
@@ -521,6 +574,64 @@ html.platform-darwin .overlay-titlebar {
 
 .lazy-load-failed-retry:hover {
   text-decoration: underline;
+}
+
+/* The whole window after a component threw while drawing (lib/appRoot.tsx). The window can still be dragged by its
+   empty area; the line, its button and the details stay clickable. */
+.root-render-failed {
+  position: fixed;
+  inset: 0;
+  overflow: auto;
+  padding: calc(var(--titlebar-height, 48px) + 8px) 24px 24px;
+  background: var(--app-window-bg, Canvas);
+  color: var(--text-secondary, CanvasText);
+  font-size: 13px;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.root-render-failed-line,
+.root-render-failed-details {
+  width: fit-content;
+  max-width: 100%;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.root-render-failed-line {
+  margin: 0;
+}
+
+.root-render-failed-reload {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent, LinkText);
+  font: inherit;
+  cursor: pointer;
+}
+
+.root-render-failed-reload:hover {
+  text-decoration: underline;
+}
+
+.root-render-failed-details {
+  margin-top: 8px;
+  opacity: 0.8;
+}
+
+.root-render-failed-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.root-render-failed-details pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  user-select: text;
 }
 
 .overlay-page[hidden] {
@@ -583,18 +694,123 @@ html.platform-darwin .overlay-titlebar {
   scroll-snap-align: start;
 }
 
+/* A prompt: 12px padding, at most 80% of the column, text at 14px on a 22.75px line. */
 .chat-user-bubble {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  font-size: 14px;
+  line-height: 1.625;
+}
+/* A long prompt shows its first 176px, fading out, until "Show full message" is pressed. */
+.chat-user-text.is-folded {
+  max-height: 176px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 1.75rem), transparent);
+}
+/* A link in a prompt: the accent colour, underlined on hover; a GitHub one leads with the GitHub mark. */
+.chat-user-link {
+  color: var(--an-md-link, var(--an-primary-color));
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.chat-user-link:hover,
+.chat-user-link:focus-visible {
+  text-decoration: underline;
+}
+/* The GitHub mark before a link to GitHub, in every chat surface (link-label-view.tsx). */
+.chat-link-mark {
+  display: inline-block;
+  margin-right: 0.25em;
+  vertical-align: -0.125em;
+}
+.chat-link-unbroken {
+  white-space: nowrap;
+}
+.chat-user-fold {
+  align-self: flex-start;
+  margin-top: -2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+.chat-user-fold:hover {
+  color: var(--text-primary);
+}
+.chat-user-fold:focus-visible {
+  border-radius: 4px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 .chat-user-bubble .chat-user-image-carousel {
   margin-left: 0;
 }
+/* A message another thread's agent sent: on the soft surface, not the person's colour, with a header naming the agent. */
+.chat-user-bubble.is-agent {
+  background: var(--surface-soft);
+  color: var(--text-primary);
+  border: 1px solid var(--ui-line, var(--border));
+}
+/* It folds sooner than a person's prompt (AGENT_FOLD_HEIGHT in user-message.tsx). */
+.chat-user-bubble.is-agent .chat-user-text.is-folded {
+  max-height: 110px;
+}
+/* "Agent · <sending thread>": the robot, the word, then the thread's title, which opens it. A bot's: "<face> <name> · open". */
+.chat-agent-sender {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.3;
+}
+.chat-agent-sender > svg {
+  flex: none;
+}
+.chat-agent-sender-kind {
+  flex: none;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.chat-agent-sender-link,
+.chat-agent-sender-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-agent-sender-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+/* A bot's message: its face, drawn still, in place of the robot. */
+.chat-bot-sender .chat-bot-sender-face {
+  flex: none;
+}
+.chat-agent-sender-link:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.chat-agent-sender-link:focus-visible {
+  border-radius: 4px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
 /* "from <computer>" under a turn that a person on another of the user's computers sent. */
 .chat-user-sent-from {
-  max-width: calc(95% - 40px);
+  max-width: 80%;
   padding-right: 4px;
   overflow: hidden;
   color: var(--text-secondary);

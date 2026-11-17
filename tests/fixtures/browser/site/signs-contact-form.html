@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Contact us</title>
+  <style>body { margin: 20px; font: 18px sans-serif; } input, textarea { display: block; width: 400px; margin: 8px 0; font: 18px sans-serif; } .g-recaptcha { width: 304px; height: 78px; }</style>
+</head>
+<body>
+  <!-- A contact form with a visible reCAPTCHA widget: a human check that is part of the page. -->
+  <h1>Contact us</h1>
+  <p>Questions about an order? Write to us and we answer within a day.</p>
+  <form>
+    <input name="name" placeholder="Your name">
+    <input name="email" placeholder="Email">
+    <textarea name="message" rows="4" placeholder="Message"></textarea>
+    <div class="g-recaptcha" data-sitekey="fixture"><iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?k=fixture&amp;size=normal" width="304" height="78" style="border:0"></iframe></div>
+    <button type="submit">Send</button>
+  </form>
+</body>
+</html>

@@ -205,6 +205,7 @@ it('recognises a closing window connection only by the messages main sends for i
   expect(isSessionClosing(new Error("Error invoking remote method 'threads:initialize': Error: Window MMS session is closing"))).toBe(true)
   expect(isSessionClosing(new Error('Window MMS session closed while opening'))).toBe(true)
   expect(isSessionClosing({ message: 'GuiMmsController is stopped' })).toBe(true)
+  expect(isSessionClosing(new Error("Error invoking remote method 'threads:activity': Error: Mousse is installing an update"))).toBe(true)
   expect(isSessionClosing(new Error('MMS client not connected'))).toBe(false)
   expect(isSessionClosing(new Error('Checkpoint is unavailable'))).toBe(false)
 })

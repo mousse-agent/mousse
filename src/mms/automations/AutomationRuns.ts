@@ -244,12 +244,15 @@ export class AutomationRuns {
         )
         return String(existing.id)
       }
-      const held = this.row(`SELECT id FROM runs WHERE job_id = ? AND state = 'paused_usage' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1`, input.jobId)
+      const held = this.row(`SELECT id, activation_id FROM runs WHERE job_id = ? AND state = 'paused_usage' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1`, input.jobId)
       if (held) {
+        // A bot's held run that starts again under another activation reports anew: the old one's report is not its.
+        const another = Boolean(input.activationId && held.activation_id && held.activation_id !== input.activationId)
         this.run(
           `UPDATE runs SET occurrence_key = ?, state = ?, until = NULL, thread_id = COALESCE(?, thread_id), activation_id = COALESCE(?, activation_id) WHERE id = ?`,
           input.occurrenceKey, input.state ?? 'running', input.threadId ?? null, input.activationId ?? null, String(held.id)
         )
+        if (another) this.run('UPDATE runs SET level = NULL, summary = NULL, reported_at = NULL WHERE id = ?', String(held.id))
         return String(held.id)
       }
       const number = Number(this.row('SELECT COALESCE(MAX(number), 0) + 1 AS next FROM runs WHERE job_id = ?', input.jobId)?.next ?? 1)
@@ -306,6 +309,12 @@ export class AutomationRuns {
     return this.get(id)!
   }
 
+  /** Open bot runs still need settlement even after their automation has been removed. */
+  openBotRuns(): Array<{ jobId: string; botId: string; activationId: string }> {
+    return this.rows('SELECT job_id, bot_id, activation_id FROM runs WHERE ended_at IS NULL AND bot_id IS NOT NULL AND activation_id IS NOT NULL')
+      .map(row => ({ jobId: String(row.job_id), botId: String(row.bot_id), activationId: String(row.activation_id) }))
+  }
+
   /** A bot's activations, as the bot engine reports them: a run's state follows its activation, and its end finishes it. */
   syncBotRuns(jobId: string, runs: ReadonlyArray<{ id: string; status: string; at: string; endedAt?: string; endReason?: string; threadId?: string }>): void {
     let touched = false
@@ -319,8 +328,10 @@ export class AutomationRuns {
       if (row.ended_at) continue
       const status = activation.status
       if (status === 'done' || status === 'failed' || status === 'cancelled' || status === 'blocked') {
-        const failed = status !== 'done'
-        this.finish({ jobId, occurrenceKey: String(row.occurrence_key), failed, ...(failed ? { error: activation.endReason ? reasonText(activation.endReason) : status === 'blocked' ? 'Stopped at a missing permission' : 'Failed' } : {}), ...(activation.threadId ? { threadId: activation.threadId } : {}) })
+        const removed = status === 'cancelled' && (activation.endReason === 'schedule_removed' || activation.endReason === 'bot_deleted')
+        if (removed) this.run("UPDATE runs SET level = 'quiet' WHERE id = ?", String(row.id))
+        const failed = status !== 'done' && !removed
+        this.finish({ jobId, occurrenceKey: String(row.occurrence_key), failed, ...(removed ? { silent: true } : {}), ...(failed ? { error: activation.endReason ? reasonText(activation.endReason) : status === 'blocked' ? 'Stopped at a missing permission' : 'Failed' } : {}), ...(activation.threadId ? { threadId: activation.threadId } : {}) })
         continue
       }
       const state: InboxRunState = status === 'queued' ? 'queued' : status === 'paused' ? 'paused_usage' : 'running'
@@ -352,6 +363,12 @@ export class AutomationRuns {
       `SELECT id, usage FROM runs WHERE thread_id = ? AND ended_at IS NULL AND state = 'running' AND (? IS NULL OR engine_run_id IS NULL) ORDER BY started_at DESC LIMIT 1`,
       caller.threadId, caller.runId ?? null
     )
+  }
+
+  /** The level a bot activation's run reported (`run_report`, or quiet from a `[SILENT]` end); undefined with none. */
+  levelOfActivation(activationId: string): RunLevel | undefined {
+    const row = this.row('SELECT level FROM runs WHERE activation_id = ? ORDER BY started_at DESC LIMIT 1', activationId)
+    return isRunLevel(row?.level) ? (row!.level as RunLevel) : undefined
   }
 
   /** `run_report`: the run's level and one line. At most one report per run; a second call replaces the first. */

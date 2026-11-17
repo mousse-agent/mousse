@@ -18,7 +18,7 @@ export function BotPermissionDecision({ stream, request, body, onChanged }: { st
     } catch (cause) { if (alive.current) setError(String((cause as Error)?.message ?? cause)) }
     finally { if (alive.current) setBusy(false) }
   }
-  return <section className="chat-network-permission" aria-label="Bot owner permission decision">
+  return <section className="chat-network-permission" aria-label="Bot owner permission decision" data-mousse-decision="">
     <p>{body.summary}</p><p>{body.kind === 'runtimeAction' ? 'Approve this exact runtime action' : 'Approve this audience policy change'} · expires {new Date(body.expiresAt).toLocaleString()}</p>
     {delivery && <p role="status">Decision {delivery.state}</p>}
     {error && <p role="alert" className="chat-error">{error}</p>}

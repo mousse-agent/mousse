@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mousseCallAsksPerson, mousseServerToolOf } from '../../src/mms/run/mcp/attachment'
 import {
   TEXT_EMIT_MS,
   TranscriptAssembler,
+  stoppedReplyText,
   unshownReplyText,
   type TranscriptHooks,
   type TranscriptStreamState,
@@ -109,6 +111,15 @@ describe('TranscriptAssembler', () => {
     expect(unshownReplyText(whole, [...['Checking the tests.', 'All pass.'], 'Done: everything works.'])).toBe('')
     // A row the reply does not hold, in that order, leaves the whole reply.
     expect(unshownReplyText(whole, ['All pass.', 'Checking the tests.'])).toBe(whole)
+  })
+
+  it('a stopped turn hands back its open reply; only work cut for room right after a call hands back its last one', () => {
+    const closed = ['Looking up the Roborock Q7 first.', 'Roborock Q7: 5,500 Pa suction. ']
+    expect(stoppedReplyText('Still typing', closed, true)).toBe('Still typing')
+    expect(stoppedReplyText('', closed, true)).toBe('Roborock Q7: 5,500 Pa suction.')
+    expect(stoppedReplyText('', [], true)).toBe('')
+    // A person's Stop, a chat's wall and a reload keep what was open, and nothing else.
+    expect(stoppedReplyText('', closed, false)).toBe('')
   })
 
   it('appends deltas to completed segments in append mode and keeps the reply open', () => {
@@ -255,6 +266,31 @@ describe('TranscriptAssembler', () => {
     failed.assembler.text({ phase: 'start', content: '', contentIndex: 0 })
     failed.assembler.abandonAssistant('', false)
     expect(failed.messages[0]).toMatchObject({ content: '', streaming: false, incomplete: true })
+  })
+
+  it('saves when a reply ended, not only when it started', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(Date.parse('2026-11-12T10:00:00.000Z'))
+      const finished = harness()
+      finished.assembler.text({ phase: 'start', content: '', contentIndex: 0 })
+      vi.setSystemTime(Date.parse('2026-11-12T10:00:05.000Z'))
+      finished.assembler.text({ phase: 'delta', content: 'Long', contentIndex: 0 })
+      expect(finished.messages[0]!.completedAt).toBeUndefined()
+      vi.setSystemTime(Date.parse('2026-11-12T10:00:20.000Z'))
+      finished.assembler.text({ phase: 'complete', content: 'Long reply', contentIndex: 0 })
+      expect(finished.messages[0]).toMatchObject({ timestamp: '2026-11-12T10:00:00.000Z', completedAt: '2026-11-12T10:00:20.000Z' })
+
+      // A reply a Stop cut off ends where it was cut.
+      const stopped = harness()
+      stopped.assembler.text({ phase: 'start', content: '', contentIndex: 0 })
+      stopped.assembler.text({ phase: 'delta', content: 'partial', contentIndex: 0 })
+      vi.setSystemTime(Date.parse('2026-11-12T10:00:31.000Z'))
+      stopped.assembler.abandonAssistant('partial', true)
+      expect(stopped.messages[0]).toMatchObject({ incomplete: true, completedAt: '2026-11-12T10:00:31.000Z' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('forgets the previous turn on reset', () => {
@@ -458,7 +494,7 @@ describe('TranscriptAssembler typed activity', () => {
     assembler.tool(piResult('done-1', 'bash', 'ok'))
     assembler.tool(piStart('open-1', 'bash', { command: 'sleep 99' }))
     assembler.tool(vendor('start', 'open-2', 'Agent', { activity: { kind: 'subagent', background: true } }))
-    assembler.tool(vendor('start', 'open-3', 'ExitPlanMode', { activity: { kind: 'plan', text: 'p' } }))
+    assembler.tool(vendor('start', 'open-3', 'update_plan', { activity: { kind: 'plan', text: 'p' } }))
     const forced = log.filter((entry) => entry === 'persist!').length
     assembler.closeOpenTools(reason)
     expect(log.filter((entry) => entry === 'persist!').length).toBe(forced + 1)
@@ -575,7 +611,7 @@ describe('TranscriptAssembler typed activity', () => {
       assembler.tool(vendor('start', 'e1', 'Edit', { activity: { kind: 'file_change', changes: [{ path: 'a.ts', change: 'update', diff: huge }] } as never }))
       assembler.tool(vendor('start', 'g2', 'mcp__srv__tool', { activity: { kind: 'generic', input: { blob: huge } } as never }))
       assembler.tool(vendor('start', 'a1', 'Agent', { activity: { kind: 'subagent', description: huge } as never }))
-      assembler.tool(vendor('start', 'p1', 'ExitPlanMode', { activity: { kind: 'plan', text: huge } as never }))
+      assembler.tool(vendor('start', 'p1', 'update_plan', { activity: { kind: 'plan', text: huge } as never }))
       for (const message of messages) expect(size(message)).toBeLessThan(100_000)
       expect(activityOf(messages[0])).toMatchObject({ changes: [{ path: 'a.ts', diffTruncated: true }] })
       expect(activityOf(messages[1])).toMatchObject({ input: { truncated: true } })
@@ -622,6 +658,159 @@ describe('TranscriptAssembler typed activity', () => {
       expect(activityOf(message)).toMatchObject({ kind: 'generic', output: JSON.stringify({ delegationId: 'del-1', status: 'running' }) })
       expect(size(message)).toBeLessThan(5000)
     })
+  })
+})
+
+describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)', () => {
+  const start = (callId: string, name: string, activity?: Record<string, unknown>, parentCallId?: string): StreamingLlmToolEvent => ({
+    kind: 'mcp_tool_call', phase: 'start', callId, title: name, summary: '', details: [],
+    activity: (activity ?? { toolName: name, kind: 'command', command: `run ${callId}` }) as StreamingLlmToolEvent['activity'],
+    ...(parentCallId ? { parentCallId } : {})
+  })
+  const done = (callId: string, name: string): StreamingLlmToolEvent => ({ kind: 'mcp_tool_result', phase: 'complete', callId, title: name, summary: '', details: [], response: 'ok' })
+  const agent = (callId: string, extra: Record<string, unknown> = {}) => start(callId, 'Agent', { toolName: 'Agent', kind: 'subagent', description: 'look around', ...extra })
+  const ids = (assembler: TranscriptAssembler, waiting?: ReadonlySet<string>) => assembler.foregroundTools(waiting).map((tool) => tool.callId)
+
+  it('names the turn\'s own running command with its first line, and drops it at its result', () => {
+    const { assembler } = harness()
+    assembler.tool(start('b1', 'Bash', { toolName: 'Bash', kind: 'command', command: 'npm test\n--watch' }))
+    expect(assembler.foregroundTools()).toEqual([{ callId: 'b1', toolName: 'Bash', detail: 'npm test' }])
+    assembler.tool(done('b1', 'Bash'))
+    expect(assembler.foregroundTools()).toEqual([])
+  })
+
+  it('leaves out background calls, subagent calls, wait-only tools and calls a person is asked about', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(agent('a2', { background: true }))
+    assembler.tool(start('w1', 'TaskOutput', { toolName: 'TaskOutput', kind: 'generic' }))
+    assembler.tool(start('q1', 'Bash'))
+    assembler.tool(start('mcp', 'mcp__mousse__delegate_task', { toolName: 'mcp__mousse__delegate_task', kind: 'generic' }))
+    expect(ids(assembler, new Set(['q1']))).toEqual([])
+    // Once the person answered, the call runs: it holds.
+    expect(ids(assembler)).toEqual(['q1'])
+  })
+
+  it('a plan row (open for the whole provider turn, nothing runs in it) holds nothing', () => {
+    const { assembler } = harness()
+    assembler.tool(start('plan:turn-1', 'update_plan', { toolName: 'update_plan', kind: 'plan', steps: [{ step: 'Run the tests', status: 'inProgress' }] }))
+    expect(ids(assembler)).toEqual([])
+    assembler.tool(start('b1', 'shell'))
+    expect(ids(assembler)).toEqual(['b1'])
+  })
+
+  it('a foreground subagent with a nested command holds nothing', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    expect(ids(assembler)).toEqual([])
+  })
+
+  it('the same subagent moved to the background holds nothing, nor does its command', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    assembler.tool({ kind: 'mcp_tool_call', phase: 'update', callId: 'a1', title: 'Agent', summary: '', details: [], activity: { kind: 'subagent', background: true } as StreamingLlmToolEvent['activity'] })
+    expect(ids(assembler)).toEqual([])
+  })
+
+  it('a root command and the subagent\'s child command: only the root one holds, and nothing once it ends', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    assembler.tool(start('root', 'Bash'))
+    expect(ids(assembler)).toEqual(['root'])
+    assembler.tool(done('root', 'Bash'))
+    expect(ids(assembler)).toEqual([])
+  })
+
+  it('a call whose parent cannot be found counts as the turn\'s own', () => {
+    const { assembler } = harness()
+    assembler.tool(start('orphan', 'Bash', undefined, 'never-seen'))
+    expect(ids(assembler)).toEqual(['orphan'])
+  })
+
+  it('a subagent the provider could not move to the background holds, and its own calls still do not', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    assembler.tool({ kind: 'mcp_tool_call', phase: 'update', callId: 'a1', title: 'Agent', summary: '', details: [], activity: { notMovable: true } })
+    // Named as the progress line names it ("Running subagent…").
+    expect(assembler.foregroundTools()).toEqual([{ callId: 'a1', toolName: 'subagent', detail: 'look around' }])
+  })
+
+  it('names an MCP tool by its own name, as a window shows it', () => {
+    const { assembler } = harness()
+    assembler.tool(start('m1', 'mcp__github__create_issue', { toolName: 'mcp__github__create_issue', kind: 'generic' }))
+    expect(assembler.foregroundTools()).toEqual([{ callId: 'm1', toolName: 'Create Issue' }])
+  })
+
+  it('names each call the way the progress line does, whatever the provider calls the tool', () => {
+    const { assembler } = harness()
+    // Codex's command tool is `shell`; the progress line reads "Running Bash…".
+    assembler.tool(start('c1', 'shell', { toolName: 'shell', kind: 'command', command: 'npm test' }))
+    // A provider that names the MCP server apart (Codex): the tool's own name, title-cased.
+    assembler.tool(start('m1', 'create_issue', { toolName: 'create_issue', kind: 'generic', server: 'github' }))
+    assembler.tool(start('e1', 'apply_patch', { toolName: 'apply_patch', kind: 'file_change', changes: [{ path: 'a.ts', change: 'update' }] }))
+    assembler.tool(start('e2', 'apply_patch', { toolName: 'apply_patch', kind: 'file_change', changes: [{ path: 'b.ts', change: 'add' }] }))
+    assembler.tool(start('g1', 'grep', { toolName: 'grep', kind: 'search', scope: 'code', query: 'TODO' }))
+    expect(assembler.foregroundTools().map((tool) => tool.toolName)).toEqual(['Bash', 'Create Issue', 'Edit', 'Write', 'Grep'])
+  })
+
+  it('Mousse\'s thread_wait only waits: it never holds, by its own name or as the Mousse server\'s tool', () => {
+    const { assembler } = harness()
+    assembler.tool(start('w1', 'thread_wait', { toolName: 'thread_wait', kind: 'generic' }))
+    assembler.tool(start('w2', 'mcp__mousse__thread_wait', { toolName: 'mcp__mousse__thread_wait', kind: 'generic' }))
+    expect(ids(assembler)).toEqual([])
+    // Another server's tool of the same name is not Mousse's wait.
+    assembler.tool(start('w3', 'mcp__other__thread_wait', { toolName: 'mcp__other__thread_wait', kind: 'generic' }))
+    expect(ids(assembler)).toEqual(['w3'])
+  })
+
+  it('asksPerson: a call that may be asking the pending question does not hold; the others still do', () => {
+    const { assembler } = harness()
+    assembler.tool(start('ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' }))
+    assembler.tool(start('b1', 'Bash'))
+    const asks = (name: string) => name === 'mcp__mousse__ask_user'
+    expect(assembler.foregroundTools(new Set(), asks).map((tool) => tool.callId)).toEqual(['b1'])
+    // With no question pending (no predicate), ask_user holds like any call.
+    expect(ids(assembler)).toEqual(['ask', 'b1'])
+  })
+
+  it('ownCallMayAsk: only the turn\'s own (root) call may be the asker, never one under a subagent', () => {
+    const { assembler } = harness()
+    const asks = (name: string) => mousseCallAsksPerson(name, (tool) => (tool === 'ask_user' ? { asksUser: 'question' } : undefined))
+    assembler.tool(agent('a1'))
+    assembler.tool(start('sub-ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' }, 'a1'))
+    expect(assembler.ownCallMayAsk(asks)).toBe(false)
+    assembler.tool(start('ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' }))
+    expect(assembler.ownCallMayAsk(asks)).toBe(true)
+  })
+
+  it('Mousse\'s asking tools are matched exactly: a look-alike title is no Mousse call', () => {
+    const lookup = (tool: string) => ({ ask_user: { asksUser: 'question' }, thread_read: { access: 'readsOthers' } } as Record<string, { asksUser?: string; access?: string }>)[tool]
+    for (const name of ['mcp__mousse__ask_user', 'mousse/ask_user', 'mousse.ask_user', 'mousse__ask_user', 'mousse: ask_user', 'ask_user (mousse MCP Server)', 'ask_user', 'mcp__mousse-relay__github__create_issue', 'mcp__mousse__newer_tool', 'mousse-relay/github__createIssue', 'mousse-relay.Linear__Create_Issue', 'github__createIssue (mousse-relay MCP Server)'])
+      expect(mousseCallAsksPerson(name, lookup), name).toBe(true)
+    for (const name of ['mousse/docs', 'Mousse.md', 'mousse.md', 'MOUSSE/ask_user', 'mousse/thread_read', 'mcp__mousse__thread_read', 'docs (mousse MCP Server)', 'ask_user.md'])
+      expect(mousseCallAsksPerson(name, lookup), name).toBe(false)
+    expect(mousseServerToolOf('Mousse.md')).toBeUndefined()
+  })
+
+  it('ownsForegroundCall: the turn\'s own calls, open or ended; not a subagent\'s, a background call or a wait tool', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    assembler.tool(agent('bg', { background: true }))
+    assembler.tool(start('w1', 'TaskOutput', { toolName: 'TaskOutput', kind: 'generic' }))
+    assembler.tool(start('root', 'Bash'))
+    expect(['a1', 'child', 'bg', 'w1', 'root'].map((id) => assembler.ownsForegroundCall(id))).toEqual([false, false, false, false, true])
+    assembler.tool(done('root', 'Bash'))
+    assembler.tool(done('child', 'Bash'))
+    expect(assembler.ownsForegroundCall('root')).toBe(true)
+    expect(assembler.ownsForegroundCall('child')).toBe(false)
+    // An event with no row, or no call id, counts as the turn's own.
+    expect(assembler.ownsForegroundCall('unknown')).toBe(true)
+    expect(assembler.ownsForegroundCall(undefined)).toBe(true)
   })
 })
 

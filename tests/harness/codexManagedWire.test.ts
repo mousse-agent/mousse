@@ -26,6 +26,8 @@ import { CodexTurnFailure, type CodexProviderService } from '../../src/mms/harne
 import { codexHarnessError } from '../../src/mms/harness/drivers/codex/adapter'
 import { FakeIssuer, plainCodec } from './chatgpt/fakeIssuer'
 import { signIn } from './chatgpt/signInFlow'
+import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import type { NeutralTool } from '../../src/shared/harness/tools'
 
 const root = resolve(__dirname, '..', '..')
 const pinHome = join(root, '.cache', 'codex-pin')
@@ -271,7 +273,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
         .chat({ threadId, instanceId, cwd: workspace, model: options.model ?? 'gpt-wire', prompt, mcp: null, ...(options.history ? { history: options.history } : {}), onText: (delta) => text.push(delta) })
         .then((result) => ({ result, text: text.join('') }))
     }
-    return { runtime, service, auth, launches, turn, instanceId }
+    return { runtime, service, auth, launches, turn, instanceId, dir, userHome }
   }
 
   /** What a failed turn carries, and the harness error a managed entry maps it to. */
@@ -392,4 +394,88 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     }
     expect(observed).toMatchSnapshot()
   }, 180_000)
+
+  describe('a bot turn: what the real Codex offers and lets a command reach', () => {
+    /** Codex's tools that run a command, by the names the pinned Codex gives them. */
+    const COMMAND_TOOL = /^(shell|exec_command|write_stdin|local_shell|unified_exec|container\.exec)$/
+    const toolNames = (body: Record<string, unknown> | undefined) =>
+      ((body?.tools as Array<{ type?: string; name?: string }> | undefined) ?? []).map((tool) => tool.name ?? tool.type ?? '?')
+
+    /** A real bot authority with `tools`, without file access: its own files folder and scratch only. */
+    function botWithout(dir: string, tools: NeutralTool[]) {
+      const files = join(dir, 'bot', 'files')
+      const scratch = join(dir, 'bot', 'scratch')
+      for (const folder of [files, scratch]) mkdirSync(folder, { recursive: true })
+      const bot = createBotAuthority({
+        activationId: 'act-wire', role: 'activation',
+        permissions: { tools, appTools: [], mcp: [], skills: [], workspace: { roots: [], access: 'read', writeRoots: [], scratch, files } },
+        waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) },
+        time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+      })
+      return { bot, files, scratch }
+    }
+
+    async function botTurn(setupResult: Awaited<ReturnType<typeof setup>>, bot: ReturnType<typeof botWithout>, threadId: string) {
+      const text: string[] = []
+      await setupResult.service.chat({ threadId, instanceId: setupResult.instanceId, cwd: bot.scratch, model: 'gpt-wire', prompt: 'Go.', mcp: null, bot: bot.bot, onText: (delta) => text.push(delta) })
+      return text.join('')
+    }
+
+    it('without "run commands" Codex offers no command tool at all; with it, it does', async () => {
+      const without = await setup()
+      await botTurn(without, botWithout(without.dir, ['read']), 'wire-bot-no-shell')
+      const offered = toolNames(openai.responses()[0]?.body)
+      expect(offered.length).toBeGreaterThan(0)
+      expect(offered.filter((name) => COMMAND_TOOL.test(name))).toEqual([])
+      // The control: the same bot holding "run commands" is offered a command tool by the same Codex.
+      openai.requests.length = 0
+      const withShell = await setup()
+      await botTurn(withShell, botWithout(withShell.dir, ['read', 'shell']), 'wire-bot-shell')
+      expect(toolNames(openai.responses()[0]?.body).filter((name) => COMMAND_TOOL.test(name)).length).toBeGreaterThan(0)
+    })
+
+    it.skipIf(process.platform !== 'linux')('with "run commands" and no file access, a command reads only the system and the bot\'s folders, whatever the user\'s Codex config says', async () => {
+      const run = await setup()
+      // The owner's own Codex config asks for no sandbox at all: the bot's profile still holds.
+      mkdirSync(join(run.userHome, '.codex'), { recursive: true })
+      writeFileSync(join(run.userHome, '.codex', 'config.toml'), 'sandbox_mode = "danger-full-access"\n')
+      const bot = botWithout(run.dir, ['read', 'shell'])
+      writeFileSync(join(bot.files, 'own.txt'), 'own\n')
+      const outside = join(run.dir, 'outside')
+      mkdirSync(outside, { recursive: true })
+      writeFileSync(join(outside, 'secret.txt'), 'secret\n')
+      const script = [
+        `for p in /etc/hostname ${join(bot.files, 'own.txt')} ${join(outside, 'secret.txt')} ${join(run.userHome, '.codex', 'config.toml')}; do`,
+        '  if cat "$p" >/dev/null 2>&1; then echo "read $p"; else echo "denied $p"; fi',
+        'done',
+        `echo w > ${join(bot.files, 'made.txt')} && echo "wrote own"`,
+        'python3 -c "print(\'python runs\')" 2>&1 || echo "python failed"'
+      ].join('\n')
+      openai.answer = (request, index) => {
+        if (index > 0) return { status: 200, sse: reply('Done.', `resp_${index + 1}`) }
+        const tool = toolNames(request.body).find((name) => COMMAND_TOOL.test(name) && name !== 'write_stdin')!
+        const args = tool === 'shell' ? { command: ['bash', '-c', script] } : { cmd: script }
+        const item = { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: tool, arguments: JSON.stringify(args), status: 'completed' }
+        return {
+          status: 200,
+          sse: sse([
+            { type: 'response.created', response: { id: 'resp_1' } },
+            { type: 'response.output_item.added', output_index: 0, item: { ...item, arguments: '', status: 'in_progress' } },
+            { type: 'response.output_item.done', output_index: 0, item },
+            { type: 'response.completed', response: { id: 'resp_1', usage: { input_tokens: 10, input_tokens_details: { cached_tokens: 0 }, output_tokens: 2, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 12 } } }
+          ])
+        }
+      }
+      await botTurn(run, bot, 'wire-bot-confined')
+      const second = openai.responses()[1]?.body?.input as Array<{ type?: string; output?: unknown }> | undefined
+      const output = JSON.stringify(second?.filter((entry) => entry.type === 'function_call_output').map((entry) => entry.output) ?? [])
+      expect(output).toContain('read /etc/hostname')
+      expect(output).toContain(`read ${join(bot.files, 'own.txt')}`)
+      expect(output).toContain('wrote own')
+      expect(output).toContain('python runs')
+      expect(output).toContain(`denied ${join(outside, 'secret.txt')}`)
+      expect(output).toContain(`denied ${join(run.userHome, '.codex', 'config.toml')}`)
+      expect(existsSync(join(bot.files, 'made.txt'))).toBe(true)
+    })
+  })
 })

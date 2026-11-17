@@ -1,7 +1,6 @@
 import type { Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { SkillDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
-import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { AgentAccessLevel } from '../../../../shared/settings'
 import type { ChatMode } from '../../../../shared/types'
@@ -13,6 +12,8 @@ import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
 import type { DelegationToolHost } from './delegation'
+import type { ToolAccessPolicy } from './authority'
+import { legacyRefusal, REFUSAL_FAULT_CODES } from './refusal'
 
 /**
  * What a tool may touch (docs/run-engine/SPEC.md §15.1):
@@ -24,30 +25,35 @@ import type { DelegationToolHost } from './delegation'
  *   only the caller's own thread, and it asks the thread's user first unless the caller's permission
  *   mode allows edits.
  * - `readsOthers`: reads threads other than the caller's own (`thread_read`, `thread_list`, `thread_search`);
- *   the registry checks the caller's agent access level before the handler runs and the handler
- *   limits what it returns by `ctx.scope`.
- * - `managesOthers`: changes threads other than the caller's own; needs the `manage` level.
+ *   the registry checks the target before the handler runs and the handler limits what it returns by
+ *   `ctx.scope`.
+ * - `managesOthers`: changes threads other than the caller's own.
+ * - `changesSettings`: changes the profile's settings (the theme). Like a change in Settings it needs a turn that may
+ *   edit: refused for a read-only child and under a Plan ceiling, and it asks the thread's user first unless the
+ *   caller's permission mode allows edits.
  */
-export type ToolAccess = 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads' | 'editsWorkspace' | 'readsOthers' | 'managesOthers'
+export type ToolAccess = 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads' | 'editsWorkspace' | 'readsOthers' | 'managesOthers' | 'changesSettings'
 
-export const ACCESS_CLASSES: ReadonlySet<string> = new Set<ToolAccess>(['reads', 'actsAsCaller', 'writesThreads', 'startsThreads', 'editsWorkspace', 'readsOthers', 'managesOthers'])
+export const ACCESS_CLASSES: ReadonlySet<string> = new Set<ToolAccess>(['reads', 'actsAsCaller', 'writesThreads', 'startsThreads', 'editsWorkspace', 'readsOthers', 'managesOthers', 'changesSettings'])
 
 /**
  * How a caller reaches the thread a `readsOthers` or `managesOthers` call targets: its own thread, a
  * thread below it in the delegation tree (`descendant`), above it or beside it (`ancestor_or_sibling`),
- * a thread it launched, or any other thread through its agent access level (`read`, `manage`).
+ * a thread it launched, or any other thread (`manage`). `read` is no longer given.
  */
 export type ToolScope = 'own' | 'descendant' | 'ancestor_or_sibling' | 'launched' | 'read' | 'manage'
 
-/** How a thread other than the caller's is related to it without the access level. */
+/** How a thread other than the caller's is related to it. */
 export type ThreadRelation = 'descendant' | 'ancestor_or_sibling' | 'launched'
 
-/** Agent access levels from narrowest to widest. */
-export const ACCESS_LEVEL_ORDER: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
+/**
+ * How a thread sits in the caller's family (docs/plans/tool-api.md §1.2): its parent, a direct child, a sibling, a
+ * descendant further down, or a native helper's mirror thread hosted by any of these or by the caller.
+ */
+export type FamilyRelation = 'parent' | 'child' | 'sibling' | 'descendant' | 'native'
 
-export function levelAtLeast(level: AgentAccessLevel, needed: AgentAccessLevel): boolean {
-  return ACCESS_LEVEL_ORDER.indexOf(level) >= ACCESS_LEVEL_ORDER.indexOf(needed)
-}
+/** What a message to another thread is (docs/plans/tool-api.md §2.2): a new assignment, or information. */
+export type MessageIntent = 'work' | 'note'
 
 /**
  * What a call does to the parent's work, read by the gate and the writer barrier of runtimes that
@@ -55,6 +61,13 @@ export function levelAtLeast(level: AgentAccessLevel, needed: AgentAccessLevel):
  * `mutation` changes state the turn's writer guards, `delegation` starts or steers a child.
  */
 export type ToolClass = 'read' | 'mutation' | 'delegation'
+
+/**
+ * A capability a tool declares it needs beyond its `access` (docs/plans/tool-api.md §1.3). `threads.delegate` (start a
+ * child no wider than yourself) is every delegation tool's and every thread holds it, readers and Plan included;
+ * `threads.start` (an independent thread or a fork) is not held under a Plan ceiling or by a read-only child.
+ */
+export type ToolCapability = 'threads.start' | 'themes' | 'quick_actions'
 
 export const TOOL_CLASSES: ReadonlySet<string> = new Set<ToolClass>(['read', 'mutation', 'delegation'])
 
@@ -64,7 +77,7 @@ export interface McpCaller {
   runId: string
   provider: string
   modeCeiling: ModeCeiling
-  /** The level the run was granted at turn start; the call-time check narrows it by the profile's setting as it is then. */
+  /** The level the run's credential recorded; it no longer limits anything (every agent reads and manages every thread). */
   accessLevel: AgentAccessLevel
 }
 
@@ -94,18 +107,16 @@ export interface AppToolTurn {
   modeCeiling: ModeCeiling
   /**
    * The permission mode the turn runs in; an MCP turn's is
-   * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent: no tool asks.
+   * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent, nothing runs unasked that a
+   * known mode would have asked for.
    */
   permissionMode?: PermissionMode
   /**
-   * The agent access level granted to the run, decided at turn start (SPEC §15.1); absent is
-   * `lineage`. The call-time check also narrows it by the profile's setting as it is then.
+   * The agent access level recorded for the run (SPEC §15.1). It no longer limits anything.
    */
   accessLevel?: AgentAccessLevel
-  /** A Mousse subagent implementing a delegated task. */
+  /** The thread is a Mousse subagent (its lineage says so): the owner's own preferences do not pass down to it. */
   subagent: boolean
-  /** The read-only pre-allocation phase of such a subagent. */
-  discovery: boolean
   projectPath?: string
   actor: IntegrationActor
   /** The turn's trusted browser binding, with `vision` from the selected model. */
@@ -115,7 +126,7 @@ export interface AppToolTurn {
    * chat's shared browser); absent: the profile's (`AppToolHost.browserRuntime`).
    */
   browserRuntime?: BrowserRuntimePort
-  /** Stages an applet for the response; absent when applets are off or the caller is a subagent. */
+  /** Stages an applet for the response (a subagent's too, in its own thread); absent when applets are off. */
   onPublishApplet?: (source: unknown) => unknown
   enabledSkills: SkillDescriptor[]
   loadedSkills: Array<{ name: string; content: string }>
@@ -137,6 +148,8 @@ export interface AppToolTurn {
    * skills are only the granted ones.
    */
   bot?: BotAuthority
+  /** The turn's model takes images in tool results (`toolImages`): an MCP result's images reach it, within limits. */
+  toolImages?: boolean
   /**
    * The run refuses everything that would wait for the user (`RunPolicy.approvals: 'never'`):
    * tools that ask for approval or put a question to the user are refused at call time.
@@ -161,8 +174,6 @@ export interface ToolCallContext {
   signal: AbortSignal
   /** Set by the registry's central check for `readsOthers` and `managesOthers` tools. */
   scope?: ToolScope
-  /** The caller's effective agent access level at this call: its grant narrowed by the profile's setting now. */
-  level?: AgentAccessLevel
   transport: 'mcp' | 'in_process'
   /** In-process calls only: the caller's timeline. */
   timeline?: ToolTimeline
@@ -178,16 +189,30 @@ export interface ToolImage {
 export interface ToolOutcome {
   text: string
   isError?: boolean
+  /**
+   * The tool ran and `text` is what it produced (a command's output and exit code, what the browser reported): an error
+   * result keeps its text as it is rather than becoming a refusal (`asRefusal`). Never sent to the caller.
+   */
+  ran?: boolean
   /** Images the result carries; the MCP server sends them as `image` content. */
   images?: ToolImage[]
 }
 
 export type JsonSchema = Record<string, unknown>
 
-/** Why a run that nobody answers (`approvals: 'never'`) refuses a tool that waits for the user; undefined when it may run. */
-export function unattendedRefusal(tool: Pick<MousseTool, 'asksUser'>, turn: Pick<AppToolTurn, 'approvals'>): string | undefined {
-  if (turn.approvals !== 'never' || !tool.asksUser) return undefined
-  return tool.asksUser === 'question' ? QUESTIONS_REFUSED_MESSAGE : APPROVALS_REFUSED_MESSAGE
+/**
+ * A tool's own check of arguments that name a thread, project, source or file beyond the central one
+ * (docs/plans/tool-api.md §1.2 `authorize`). Returns the scope the call reaches its target with, or undefined to keep
+ * the central check's. `where` says where the check is made when it is the handler's.
+ */
+export interface ToolAuthorize {
+  (actor: McpCaller, args: Record<string, unknown>, targets: ToolAccessPolicy | undefined): ToolScope | undefined
+  where?: string
+}
+
+/** `authorize` for a tool whose handler checks the thread arguments the central check does not cover; says where. */
+export function checkedInHandler(where: string): ToolAuthorize {
+  return Object.assign((() => undefined) as ToolAuthorize, { where })
 }
 
 /** Per-turn availability: `true`, or why the tool cannot be used now. */
@@ -202,28 +227,104 @@ export interface ToolListing {
   threadId?: string
   readOnly: boolean
   modeCeiling: ModeCeiling
-  /** The caller's effective agent access level; absent is `lineage`, which hides tools that need more. */
-  accessLevel?: AgentAccessLevel
+  /** The thread is a Mousse subagent: it does not list what never passes down (the owner's own preferences). */
+  subagent?: boolean
   /** The thread's role when it is a personal bot's thread (PR 6 §5): only bot threads list the bot tools. */
-  botRole?: 'activation' | 'context'
+  botRole?: 'activation' | 'context' | 'subagent'
+  /**
+   * A bot thread's turn now: the app tools it holds. Its thread tools ("use your threads") are listed only when held,
+   * so a bot is shown what it can call in that turn; with no turn running, none.
+   */
+  botTurnTools?: ReadonlySet<string>
+  /**
+   * A bot thread's turn reaches its tool catalogue so (`BotAuthority.catalogue`): `use_tool` lists the core set only
+   * (docs/plans/bot-context.md §15). Absent or `search`: every tool it may be offered, as before.
+   */
+  botCatalogue?: 'search' | 'use_tool'
 }
 
+/**
+ * A Mousse tool's declaration. Who may call it (`access`, `class`, `readOnlySafe`, `callable`, `listed`, `available`,
+ * `asksUser`, `launchedOk`, `botGrantAnswers`, `botAsksOwner`, `capabilities`, `authorize`) is read only by the authority
+ * compiler (`authority.ts`), which the list, the turn preamble and dispatch all ask.
+ */
 export interface MousseTool {
   name: string
   description: string
+  /**
+   * What a personal bot's thread lists instead of `description`: the same tool as a bot uses it, without what does not
+   * hold for a bot (an agent's counts per run, its limit on agent messages in a row) and with what does.
+   */
+  botDescription?: string
+  /**
+   * What a personal bot's thread lists instead of `inputSchema`, where a bot names what a thread's agent has as its own
+   * (a bot has no project: the git tools take the thread or project it reads).
+   */
+  botInputSchema?: JsonSchema
+  /**
+   * A tool whose personal bot's call its grant answers: once the registry has held the call to the bot's grant, it asks
+   * nobody, whatever `access` would ask of a thread (the owner allowing the permission is the bot's Full access for it).
+   */
+  botGrantAnswers?: true
+  /**
+   * A tool whose ask a personal bot's call shows its owner in the bot's own chat (a secret card), where the owner answers
+   * it: a bot's turn, which answers no approvals, may still call it, and waits for that answer as a thread's turn would.
+   */
+  botAsksOwner?: true
   /** Plain JSON Schema (no TypeBox symbols), byte-identical to `definition`'s parameters. */
   inputSchema: JsonSchema
   access: ToolAccess
-  /** The permission key an `editsWorkspace` tool asks under (`src/shared/permissionKeys.ts`). */
+  /** The permission key an `editsWorkspace` or `changesSettings` tool asks under (`src/shared/permissionKeys.ts`). */
   permissionKey?: string
+  /**
+   * The question an `editsWorkspace` or `changesSettings` tool asks the person when the permission mode does not allow it;
+   * a function when the question names what the call would do (the file a theme would use as its wallpaper).
+   */
+  approvalPrompt?: string | ((args: Record<string, unknown>) => string)
+  /**
+   * The permission mode a call runs in without asking: `edit` (default: any mode that allows edits) or `full` (only Full
+   * access; every other mode asks).
+   */
+  runsWithoutAsking?(args: Record<string, unknown>): 'edit' | 'full'
   class: ToolClass
   /**
    * A read-only (`shared`) delegated child may call this although it is not a `reads` tool: it
    * changes nothing but the caller's own conversation.
    */
   readOnlySafe?: boolean
-  /** Callable in process only and never listed (older names kept for replayed transcripts). */
-  hidden?: boolean
+  /**
+   * The tool sends a message to the thread its `target` names, of this intent (docs/plans/tool-api.md §2.2): the
+   * family rules decide who may send it (`familyMessageScope`), before the central check of a target outside the family.
+   */
+  messageIntent?(args: Record<string, unknown>): MessageIntent | undefined
+  /**
+   * Capabilities the tool needs beyond what its `access` says (docs/plans/tool-api.md §1.3): `threads.start` for a tool
+   * that starts an independent thread (a Plan ceiling and a read-only child lack it), `themes` and `quick_actions` for
+   * the owner's own preferences, which never pass down to a subagent.
+   */
+  capabilities?: readonly ToolCapability[]
+  /**
+   * The browser right a call needs (docs/plans/tool-api.md §2.6 "Rights"): `browser.read` to observe, `browser.act` to
+   * open, act or change tabs, read from the arguments. A Plan ceiling and a read-only child do not hold `browser.act`.
+   */
+  browserRight?(args: Record<string, unknown>): 'browser.read' | 'browser.act'
+  /**
+   * The call needs `person` (docs/plans/tool-api.md §1.3 "Provenance"): only a turn a person started holds it, and it
+   * never passes down to a subagent. `true` for every call, or the variants that need it, read from the arguments. A bot's
+   * turn is held to its grant instead.
+   */
+  needsPerson?: true | ((args: Record<string, unknown>) => boolean)
+  /**
+   * `in_process`: never callable over MCP (an older name kept for replayed transcripts). Whether it is listed is
+   * `listed`'s to say.
+   */
+  callable?: 'in_process'
+  /**
+   * Listed fully loaded (`_meta['anthropic/alwaysLoad']`): Claude Code then sends its whole
+   * definition on every turn instead of deferring it behind tool search. Only for a tool the model
+   * must reach without searching (the bot's `memory_save`); every other tool stays deferred.
+   */
+  alwaysLoad?: true
   /**
    * The call waits for the user: an approval (a quick action) or a question (`ask_user`). A run
    * whose approvals are `never` refuses it before the handler runs.
@@ -242,19 +343,17 @@ export interface MousseTool {
   /**
    * What a `readsOthers` or `managesOthers` call targets. Default: the thread `args.threadId` names
    * (the caller's own when absent). `undefined`: the caller's own thread. A target without a
-   * `threadId` is a listing: it needs the class's level and, with a `projectId`, that project.
+   * `threadId` is a listing.
    */
   target?(args: Record<string, unknown>, caller: McpCaller): { threadId?: string; projectId?: string } | undefined
-  /** The lowest agent access level that can use the tool; `tools/list` hides it from callers below. */
-  minLevel?: AgentAccessLevel
-  /** A `managesOthers` tool that also accepts a thread the caller launched, at any level. */
+  /** A `managesOthers` tool that keeps the `launched` scope for a thread the caller launched. */
   launchedOk?: true
   /**
-   * A tool that takes a thread id the central check does not cover (the check covers `threadId` of a
-   * `readsOthers`, `managesOthers` or `writesThreads` tool) says here, in a few words, where the handler
-   * checks it. Registration refuses such a tool without it.
+   * The tool's own check of arguments that name a thread, beyond the central one (which covers `threadId` of a
+   * `readsOthers`, `managesOthers`, `writesThreads` or `editsWorkspace` tool); `checkedInHandler` says where the
+   * handler checks it. Registration refuses a tool that takes such an argument without it.
    */
-  threadArgChecked?: string
+  authorize?: ToolAuthorize
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 
@@ -266,8 +365,14 @@ export type McpToolErrorCode =
   | 'mousse_conflict'
   | 'mousse_unknown_tool'
 
-/** A refusal the server reports as a JSON-RPC error, not as a tool result; `details` go into its `data`. */
+/**
+ * A refusal a tool throws. The registry and the MCP server turn it into an error result in the refusal shape
+ * (`legacyRefusal`), with `details` under its `data`; only the faults in `REFUSAL_FAULT_CODES` (the credential's turn
+ * is over, no such tool) stay JSON-RPC errors.
+ */
 export class McpToolError extends Error {
+  /** The message without the code in front. */
+  readonly reason: string
   constructor(
     readonly code: McpToolErrorCode,
     message: string,
@@ -275,7 +380,14 @@ export class McpToolError extends Error {
   ) {
     super(`${code}: ${message}`)
     this.name = 'McpToolError'
+    this.reason = message
   }
+}
+
+/** A thrown refusal as an error result, or undefined for a fault that stays a JSON-RPC error (and anything else). */
+export function refusalOutcome(error: unknown): ToolOutcome | undefined {
+  if (!(error instanceof McpToolError) || REFUSAL_FAULT_CODES.has(error.code)) return undefined
+  return legacyRefusal(error.code, error.reason, error.details)
 }
 
 export type ToolLedger = {

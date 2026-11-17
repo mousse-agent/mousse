@@ -14,6 +14,8 @@ import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
+import { adapterDriver } from '../../src/mms/run/testkit/harness'
+import type { DriverRuntime } from '../../src/mms/harness/driver'
 import { phase6Daemon, waitFor } from './phase6Fixture'
 
 type Script = (input: TurnInput, delegation: DelegationToolHost | undefined) => Promise<string>
@@ -61,7 +63,8 @@ describe('delegate_task by provider instance', () => {
   })
 
   /** One daemon whose pi parent sends `request` through `delegate_task` on its first turn. */
-  const daemon = (request: Omit<DelegateTaskInput, 'prompt' | 'workspace'>, stored?: Record<string, unknown>) => {
+  /** `claudeRuntime`: what the Claude entry lists and its sign-in, as the picker would read them. */
+  const daemon = (request: Omit<DelegateTaskInput, 'prompt' | 'workspace'>, stored?: Record<string, unknown>, claudeRuntime?: Partial<DriverRuntime>) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-delegation-instances-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -79,7 +82,9 @@ describe('delegate_task by provider instance', () => {
     const claude = new ScriptedAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async () => 'Reviewed by Claude.')
     let seedVersion: number | undefined
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } } })
-    const { orch, engine, store, stop } = phase6Daemon(home, [parent, claude], { instances })
+    const { orch, engine, store, stop } = claudeRuntime
+      ? phase6Daemon(home, [parent], { instances, drivers: [adapterDriver(claude, { runtime: claudeRuntime })] })
+      : phase6Daemon(home, [parent, claude], { instances })
     stops.push(stop)
     return { orch, engine, store, parent, claude, outcome }
   }
@@ -105,6 +110,33 @@ describe('delegate_task by provider instance', () => {
 
   it('maps an older provider name to the same instance', async () => {
     await routesToClaude({ provider: 'claude-subscription', model: 'sonnet' })
+  }, 30_000)
+
+  it('runs the child at the reasoning level asked for', async () => {
+    const d = daemon({ instanceId: 'claude', model: 'sonnet', effort: 'high' }, undefined, SIGNED_IN)
+    const thread = d.store.createThread('Parent')
+    expect((await d.orch.send('Review the module', false, { threadId: thread.id, clientRequestId: 'parent-send' })).message).toBe('Delegated.')
+    const delegation = d.engine.delegations.get(d.outcome.started!.delegationId)!
+    expect(d.store.getThread(delegation.childThreadId)?.modelOverride).toEqual({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet', effort: 'high' })
+    await waitFor(() => d.engine.getRun(delegation.childRunId)?.status === 'completed', 'the child run')
+    // The agent is given the level with the model, as for any selection with one.
+    expect(d.claude.turns[0]).toMatchObject({ instanceId: 'claude', model: 'sonnet:high' })
+  }, 30_000)
+
+  const SIGNED_IN: Partial<DriverRuntime> = { models: () => [{ id: 'sonnet', label: 'Claude Sonnet', efforts: ['low', 'high'] }], auth: async () => ({ state: 'signed_in' }) }
+  // What the agent can name wrong: a model the entry does not list, a level the model does not take, an entry that is signed out.
+  it.each([
+    [{ instanceId: 'claude', model: 'sonet' }, SIGNED_IN, 'model_not_offered', /does not offer the model "sonet" \(offered: sonnet\)/],
+    [{ instanceId: 'claude', model: 'sonnet', effort: 'turbo' }, SIGNED_IN, 'effort_not_offered', /takes reasoning levels low, high, not "turbo"/],
+    [{ instanceId: 'claude', model: 'sonnet' }, { ...SIGNED_IN, auth: async () => ({ state: 'signed_out' as const }) }, 'instance_unavailable', /cannot run now \(Not signed in/]
+  ] as const)('refuses %o in words and starts nothing', async (request, runtime, code, message) => {
+    const d = daemon(request, undefined, runtime as Partial<DriverRuntime>)
+    const thread = d.store.createThread('Parent')
+    expect((await d.orch.send('Review the module', false, { threadId: thread.id, clientRequestId: 'parent-send' })).message).toBe('Delegated.')
+    expect(d.outcome.started).toMatchObject({ started: false, code, message: expect.stringMatching(message) })
+    expect(d.engine.delegations.listForParentThread(thread.id)).toEqual([])
+    expect(d.store.listAllThreads().map((entry) => entry.id)).toEqual([thread.id])
+    expect(d.claude.turns).toEqual([])
   }, 30_000)
 
   it.each([

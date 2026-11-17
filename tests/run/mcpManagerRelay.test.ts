@@ -93,19 +93,34 @@ describe('McpManager for the MCP relay', () => {
     expect(clients).toHaveLength(2)
   })
 
-  it('a timed-out call restarts its stdio server only when no other call is running on it', async () => {
-    const { factory } = clientFactory({ callTool: async () => new Promise(() => {}) })
+  it('a timed-out call restarts its stdio server only when it no longer answers a ping, and no other call runs on it', async () => {
+    const { factory, clients } = clientFactory({ callTool: async () => new Promise(() => {}) })
     const mcp = manager(factory)
     const [tool] = await mcp.getEnabledTools()
-    // The injected client stands in for a stdio server Mousse owns.
+    // The injected client stands in for a stdio server Mousse owns, and it no longer answers a ping.
     for (const connection of (mcp as unknown as { connections: Map<string, { ownedStdio: boolean }> }).connections.values()) connection.ownedStdio = true
-    const restart = vi.spyOn(mcp, 'restartServer')
+    const close = vi.spyOn(clients[0]!, 'close')
     const short = mcp.callTool(tool!.providerName, {}, undefined, undefined, undefined, undefined, { timeoutMs: 20 })
     const long = mcp.callTool(tool!.providerName, {}, undefined, undefined, undefined, undefined, { timeoutMs: 120 })
     await expect(short).rejects.toThrow(/Timed out/)
-    expect(restart).not.toHaveBeenCalled()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(close).not.toHaveBeenCalled()
     await expect(long).rejects.toThrow(/Timed out/)
-    expect(restart).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1))
+  })
+
+  it('a timed-out call leaves a stdio server that still answers a ping running', async () => {
+    const { factory, clients } = clientFactory({ callTool: async () => new Promise(() => {}) })
+    const mcp = manager(factory)
+    const [tool] = await mcp.getEnabledTools()
+    for (const connection of (mcp as unknown as { connections: Map<string, { ownedStdio: boolean }> }).connections.values()) connection.ownedStdio = true
+    const ping = vi.fn(async () => ({}))
+    clients[0]!.ping = ping
+    const close = vi.spyOn(clients[0]!, 'close')
+    await expect(mcp.callTool(tool!.providerName, {}, undefined, undefined, undefined, undefined, { timeoutMs: 20 })).rejects.toThrow(/Timed out/)
+    await vi.waitFor(() => expect(ping).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(mcp.snapshotOwnedWork()['mcp-ping'] ?? 0).toBe(0))
+    expect(close).not.toHaveBeenCalled()
   })
 
   it('getEnabledToolsByServer lists each server on its own and reports a failing one', async () => {
@@ -138,4 +153,52 @@ describe('McpManager for the MCP relay', () => {
     mcp.invalidateDiscoveryCache()
     expect(listener).toHaveBeenCalledTimes(2)
   })
+})
+
+it('refuses a pinned schema that changed before dispatch', async () => {
+  const callTool = vi.fn(async () => ({ content: [] }))
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  await expect(mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    schemaDigest: 'a-different-schema'
+  })).rejects.toMatchObject({ code: 'stale_revision' })
+  expect(callTool).not.toHaveBeenCalled()
+  await mcp.shutdown()
+})
+
+it('checks the bot binding synchronously after the last asynchronous authorization read', async () => {
+  const callTool = vi.fn(async () => ({ content: [] }))
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  let stillGranted = true
+  const original = mcp.isToolCallAllowed.bind(mcp)
+  let reads = 0
+  vi.spyOn(mcp, 'isToolCallAllowed').mockImplementation(async (...args) => {
+    const allowed = await original(...args)
+    if (++reads === 2) stillGranted = false
+    return allowed
+  })
+  await expect(mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    assertDispatchActive: () => { if (!stillGranted) throw new Error('grant changed') }
+  })).rejects.toThrow('grant changed')
+  expect(callTool).not.toHaveBeenCalled()
+  await mcp.shutdown()
+})
+
+it.each([false, true])('tracks certainty at the actual transport boundary, dispatched=%s', async dispatched => {
+  const callTool = vi.fn(async () => { throw new Error('connection dropped') })
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  const error = await mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    assertDispatchActive: () => { if (!dispatched) throw new Error('binding changed') }
+  }, { trackDispatch: true }).catch(error => error as { mcpNotDispatched?: boolean })
+  expect(error.mcpNotDispatched).toBe(dispatched ? undefined : true)
+  expect(callTool).toHaveBeenCalledTimes(dispatched ? 1 : 0)
+  await mcp.shutdown()
 })

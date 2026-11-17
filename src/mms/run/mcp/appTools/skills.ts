@@ -1,3 +1,4 @@
+import { checkMessage } from '../../../../shared/bots/personal/walls'
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import type { SkillDescriptor } from '../../../../shared/integrations'
 import type { AppToolHost } from './host'
@@ -35,11 +36,11 @@ export function toSkillSummary(skill: SkillDescriptor): Record<string, unknown> 
 }
 
 /**
- * The skill tools are offered when skills are enabled for the turn, outside Build and read-only
- * modes, as the pi loop always offered them.
+ * The skill tools are offered when skills are enabled for the turn, outside Build (whose skill is its mode). Plan and
+ * reader turns load skills too (docs/plans/tool-api.md §1.5): reading a skill changes nothing.
  */
 function offeredInMode(host: AppToolHost, turn: AppToolTurn): boolean {
-  return Boolean(host.skills?.()) && turn.enabledSkills.length > 0 && turn.mode !== 'build' && !turn.modeFacts.readOnly
+  return Boolean(host.skills?.()) && turn.enabledSkills.length > 0 && turn.mode !== 'build'
 }
 
 /** `list_skills` and `load_skill` over the turn's enabled skills. */
@@ -57,13 +58,21 @@ export function skillTools(host: AppToolHost): MousseTool[] {
     describe: (args) => (tool.name === 'load_skill' ? `Load skill ${String(args.skill ?? '')}` : 'List skills'),
     handler: async (args, ctx) => {
       const available = ctx.turn.enabledSkills
-      if (tool.name === 'list_skills') return { text: JSON.stringify(available.map(toSkillSummary), null, 2) }
+      // A running turn's list is a snapshot. Check the bot's live permission before listing or reading a skill.
+      const check = (skill: SkillDescriptor) => {
+        const bot = ctx.turn.bot
+        const id = bot && !bot.skills.has(skill.id) && skill.installationId && bot.skills.has(skill.installationId) ? skill.installationId : skill.id
+        return bot?.check({ kind: 'skill', skill: id })
+      }
+      if (tool.name === 'list_skills') return { text: JSON.stringify(available.filter((skill) => check(skill)?.ok !== false).map(toSkillSummary), null, 2) }
       const requested = String(args.skill ?? '')
       const skill = available.find((candidate) =>
         candidate.id === requested ||
         candidate.name === requested ||
         normalizeSkillName(candidate.name) === normalizeSkillName(requested))
       if (!skill) return { text: `Skill not found: ${requested}`, isError: true }
+      const decided = check(skill)
+      if (decided && !decided.ok) return { text: checkMessage(decided), isError: true }
       if (skill['disable-model-invocation'])
         return { text: `Skill ${skill.name} can only be loaded by explicit user invocation.`, isError: true }
       const registry = host.skills?.()

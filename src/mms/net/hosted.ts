@@ -75,8 +75,10 @@ export interface HostedNetHost {
   createIdentity(name: string): Promise<void>
   /** Readies protected keys for joining; the fingerprint pins the invite to them. */
   prepareJoin(): Promise<{ transportFingerprint: string }>
-  /** `bridge.join` with an invite that arrived through Mousse ID. */
+  /** `bridge.join` with an invite that arrived through Mousse ID; queues itself. */
   joinWithInvite(invite: string, name: string): Promise<void>
+  /** Sets aside the keys of a join that never sent its request; queues itself. */
+  dropUnsentJoin(): Promise<void>
 }
 
 /** The module's side, called by NetService at the points where hosted behavior joins core. */
@@ -101,6 +103,12 @@ export interface HostedNet {
   request(method: NetLocalMethod, params: Record<string, unknown>): Promise<unknown>
   /** Before transports start: renews a stored lease so the relay listener comes up signed in. */
   recoverLease(): Promise<void>
+  /**
+   * The runtime this module signed in with was closed (a removed computer's identity was set
+   * aside): forget the session bound to it and stop its timers. The next call starts from the
+   * runtime NetService loads next.
+   */
+  identityReset(): void
   /** After transports start: keeps the lease and the phone-request mailbox current. */
   resumeRenewal(): void
   /** A peer joined a Space through this computer; remember its hosted route. */

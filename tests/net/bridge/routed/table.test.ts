@@ -3,6 +3,9 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  ROUTED_AGENT_KEY,
+  ROUTED_AGENT_METHODS,
+  ROUTED_DROPPABLE_KEYS,
   ROUTED_FORBIDDEN_KEYS,
   ROUTED_LOCAL_METHODS,
   ROUTED_METHODS,
@@ -257,6 +260,7 @@ describe('the routed method table', () => {
     const staging = Object.entries(ROUTED_METHODS).filter(([, row]) => row.stageable)
     expect(staging.map(([method]) => method).sort()).toEqual([
       'files.write',
+      'orchestrator.answerQuestions',
       'orchestrator.send',
       'orchestrator.steer',
       'queue.edit',
@@ -270,10 +274,34 @@ describe('the routed method table', () => {
       for (const key of row.stageable!) expect(row.keys, `${method} stages ${key}`).toContain(key)
       // Only content-like values are staged, never an id, a path or a mode.
       for (const key of row.stageable!)
-        expect(['content', 'images', 'text'], `${method} stages ${key}`).toContain(key)
+        expect(['attachments', 'content', 'images', 'text'], `${method} stages ${key}`).toContain(key)
     }
     for (const [method, row] of Object.entries(ROUTED_METHODS))
       if (!row.stageable) expect(row.keys, method).not.toContain(ROUTED_STAGED_KEY)
+  })
+
+  it('marks an agent\'s call on exactly seven rows, from a version an older owner refuses, never dropped', () => {
+    const marked = Object.entries(ROUTED_METHODS).filter(([, row]) => row.keys.includes(ROUTED_AGENT_KEY)).map(([method]) => method)
+    expect(marked.sort()).toEqual(Object.keys(ROUTED_AGENT_METHODS).sort())
+    expect(marked.sort()).toEqual([
+      'orchestrator.abort',
+      'orchestrator.send',
+      'orchestrator.steer',
+      'queue.enqueue',
+      'threads.create',
+      'threads.setModel',
+      'threads.setPermissionMode'
+    ])
+    for (const method of marked) {
+      const row = ROUTED_METHODS[method]
+      // The key arrived with a version of its own: an owner at the version before has not got it, so a caller refuses
+      // to send it there (`RoutedClient.unsupportedKey`) instead of delivering an agent's call as a person's.
+      const since = row.since?.[ROUTED_AGENT_KEY]
+      expect(since, method).toBeGreaterThan(1)
+      expect(ROUTED_AGENT_METHODS[method], method).toBe(since)
+      expect(routedKeysAt(row, since! - 1), method).not.toContain(ROUTED_AGENT_KEY)
+      expect(ROUTED_DROPPABLE_KEYS[method] ?? [], method).not.toContain(ROUTED_AGENT_KEY)
+    }
   })
 
   it('matches the versions on record, and a changed row needs a new version', () => {

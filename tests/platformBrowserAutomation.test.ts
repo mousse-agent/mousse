@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { copyFileSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +11,7 @@ import { BrowserSessionManager } from '../src/mms/browser/automation/BrowserSess
 import { BrowserToolDispatcher } from '../src/mms/browser/automation/BrowserToolDispatcher'
 import { certifiedInstallDir, certifiedMetadataPath, resolveCertifiedBrowser } from '../src/browser-worker/binary/resolver'
 import { ensureManagedChrome, MANAGED_BROWSER_ROOT, startFixtureSite } from './fixtures/browser/harness'
+import { copyBrowserTreeAsHardlinks } from './fixtures/agent-platform/managed-browser-drain/ownedTemp'
 
 const chrome = await ensureManagedChrome()
 const PROFILE_ID = '10000000-0000-4000-8000-000000000001'
@@ -26,29 +27,9 @@ async function createIsolatedBroker(): Promise<{ broker: BrowserBroker; roots: {
   const roots = { profileRoot: join(root, 'profiles'), browserRoot: join(root, 'browser-root'), artifactRoot: join(root, 'artifacts') }
   mkdirSync(roots.profileRoot, { recursive: true })
   mkdirSync(roots.artifactRoot, { recursive: true })
-  const sourceRoot = realpathSync.native(certifiedInstallDir(MANAGED_BROWSER_ROOT))
   const targetRoot = certifiedInstallDir(roots.browserRoot)
-  const copyImmutable = (source: string, target: string): void => {
-    const stat = lstatSync(source)
-    if (stat.isSymbolicLink()) throw new Error(`Certified browser contains an unexpected symlink: ${source}`)
-    if (stat.isDirectory()) {
-      mkdirSync(target, { recursive: true })
-      for (const entry of readdirSync(source)) copyImmutable(join(source, entry), join(target, entry))
-      return
-    }
-    mkdirSync(join(target, '..'), { recursive: true })
-    if (process.platform === 'win32') {
-      copyFileSync(source, target)
-      return
-    }
-    try {
-      linkSync(source, target)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
-      copyFileSync(source, target)
-    }
-  }
-  copyImmutable(sourceRoot, targetRoot)
+  // The macOS app bundle's framework links are recreated; a link that leaves the tree is refused.
+  copyBrowserTreeAsHardlinks(certifiedInstallDir(MANAGED_BROWSER_ROOT), targetRoot)
   mkdirSync(targetRoot, { recursive: true })
   writeFileSync(certifiedMetadataPath(roots.browserRoot), readFileSync(certifiedMetadataPath(MANAGED_BROWSER_ROOT)))
   const resolved = resolveCertifiedBrowser(roots.browserRoot)

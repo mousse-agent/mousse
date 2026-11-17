@@ -65,7 +65,7 @@ describe('memory entries', () => {
     expect(store.active('ada').map((entry) => [entry.id, entry.kind])).toEqual([['m1', 'owner'], ['m2', 'run_note']])
     expect(store.list('ada', true).entries[1]?.by).toBe('a run')
     expect(store.save('ada', { lane: 'run', kind: 'note', text: 'The owner eats meat.', replaces: 'm1' }))
-      .toEqual({ error: 'refused', reason: 'A run can only replace its own run notes. Ask the owner in the chat.' })
+      .toEqual({ error: 'refused', reason: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.' })
     expect(ok(store.save('ada', { lane: 'run', kind: 'note', text: 'The feed moved to /feed.xml.', replaces: 'm2' })).ref).toBe('m2v2')
   })
 
@@ -113,6 +113,7 @@ describe('the journal', () => {
     const fx = memoryFixture()
     const failing = new BotMemoryStore({
       db: {
+        database: fx.db.database,
         inTransaction: false,
         transaction: (work) => fx.db.transaction(work),
         statement: (sql) => {
@@ -323,4 +324,14 @@ describe('boundText', () => {
     expect(bounded.text).not.toContain('�')
     expect(Buffer.byteLength(bounded.text)).toBeLessThanOrEqual(1_000)
   })
+})
+
+it('forgetting a short owner message drops its turn’s unsent draft and keeps other drafts', () => {
+  const f = memoryFixture()
+  const seq = f.message({ botId: 'ada', id: 'm-owner', author: 'owner', text: 'hi', activationId: 'turn' })
+  f.store.setState('ada', 'draft:turn', { n: 1, text: 'Hi!', replyTo: 'm-owner' })
+  f.store.setState('ada', 'draft:other', { n: 1, text: 'Other' })
+  ok(f.store.forget('ada', { refs: [`j${seq}`] }))
+  expect(f.store.getState('ada', 'draft:turn')).toBeUndefined()
+  expect(f.store.getState('ada', 'draft:other')).toMatchObject({ text: 'Other' })
 })

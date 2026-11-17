@@ -4,7 +4,7 @@ GitHub records work intended for the shared codebase: meaningful tasks, ownershi
 
 ## Using the skills
 
-The repository contains three shared workflow skills under `.agents/skills/`: `work`, `check-related-work` and `end-session`. Simply describe what to implement or resume; `work` automatically handles coordination, checkpoints, verification, and PR preparation. Skill names are optional. `check-related-work` runs before a plan is presented as final or a substantial implementation starts, and reports open and merged work that overlaps it. Only an explicit request to end the session triggers `end-session`; normal task completion and casual goodbyes do not. `AGENTS.md` routes these requests to the same files even for clients that do not automatically discover this directory.
+The repository contains three shared workflow skills under `.agents/skills/`: `work`, `check-related-work` and `end-session`. Simply describe what to implement or resume; `work` automatically handles coordination, checkpoints, verification, and PR preparation. Skill names are optional. `check-related-work` runs before a plan is presented as final or a substantial implementation starts, and reports open and merged work that overlaps it. `test-the-claim` applies whenever tests are written, changed or reviewed: it decides what to test for a change and at which level. Only an explicit request to end the session triggers `end-session`; normal task completion and casual goodbyes do not. `AGENTS.md` routes these requests to the same files even for clients that do not automatically discover this directory. The work skill drives small scripts (see "Work helpers") instead of having agents read and list everything by hand.
 
 Clients must load this checkout's project instructions. OpenCode discovery has been verified; Grok's inspector suppresses project instructions and skills in an untrusted checkout, so its discovery must be checked after the user trusts the project through the normal client UI.
 
@@ -26,7 +26,7 @@ Discussion, planning, reviews, and diagnosis alone do not authorize code changes
 - Use small, descriptive commits; this repo uses Conventional Commits. Commit only task-owned changes. For shared work, push useful checkpoints during work and before going offline. WIP commits need not pass every test.
 - For shared work, open a draft PR when the diff is useful for review or handoff and its relevant tests pass, reusing the existing PR for the task. Keep material decisions and blockers attached to the issue/PR. Use the handoff format in `end-session` when pausing or transferring responsibility. A local experiment or backup alone does not warrant a PR.
 - Before resuming, inspect changes on the default branch, related issues, and teammate branches. Reconcile old work and discard duplicate implementation only after verifying what is already accepted; do not destroy unpublished work automatically.
-- Use `Closes #123` only when merging the PR completes the issue; otherwise use `Refs #123`. Keep WIP/review issues open. Status belongs in the handoff and draft/review state; no custom labels are required.
+- Use `Closes #123` only when merging the PR completes the issue; otherwise use `Refs #123`; a PR with no issue says `No issue`. A pull request check fails a PR body with none of the three, and a workflow closes the issues named by `Closes` after the merge. Keep WIP/review issues open. Status belongs in the handoff and draft/review state; no custom labels are required.
 
 ## Writing PRs and issues
 
@@ -43,7 +43,7 @@ Write for a teammate who has not seen the chat or the code. They should understa
 - **Change:** how the PR solves it, in short paragraphs or bullets. Describe the change directly ("Claude sessions now restart when the model changes"). Leave yourself out of most sentences; say "I" only where a decision or check needs an owner.
 - **How to review:** large PRs only. See below.
 - **Verification:** bullets listing what you checked, what you saw, and what you could not check. Name the focused commands. "Tests pass" alone is not evidence. UI changes need before/after screenshots, and a short recording when motion or timing matters. Upload them to the PR; never commit PR-only assets.
-- **Notes:** optional, one or two lines for stacking, rollout or install steps, and follow-ups. End with `Closes #123` or `Refs #123` when an issue exists.
+- **Notes:** optional, one or two lines for stacking, rollout or install steps, and follow-ups. End with `Closes #123`, `Refs #123` or `No issue`.
 
 ### Keep it current
 
@@ -79,9 +79,7 @@ Keep the issue body current like a PR description. Decisions, blockers, and hand
 
 The work skill's change tiers ("Size the change") set how much to search, test and show for each kind of change, from a copy fix to a core change. While working, default to focused tests for the changed behavior and directly affected areas. `npm run test:changed` runs the tests related to the working tree and `npm run test:plan` shows that selection without running it; see `docs/testing.md` for how related tests are chosen and which tests must stay. Choose checks that establish the requested behavior and relevant regressions, including a targeted app check when the change warrants it.
 
-Before a PR is opened, run only the named test files that cover the changed code, for example `npx vitest run tests/foo.test.ts tests/bar.test.ts` (find them with `rg -l <module> tests`), on the commit you will publish, and open the PR when they pass. `npm run test:branch` and `test:related` are not the pre-PR check: they follow imports, so a change to main, preload, CLI or build inputs selects most of the suite. Run the full suite (`npm test`) only for very large changes that affect multiple modules, such as shared infrastructure or cross-cutting refactors. If the tests fail, fix them or keep the work on its pushed task branch without a PR. A failure that looks unrelated or flaky still blocks the PR until it is shown to fail on the default branch too; the PR then names it. Rerun the relevant tests after later commits that change code, and state what ran and the result in the PR's Verification section.
-
-Once relevant checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern. Record the tested commit, commands and results once; checkpoints, the PR, the merge and session end reuse that record while the code is unchanged. Do not run typecheck, lint or build as a routine precaution beyond what the change's tier lists. Documentation-only changes normally need diff and consistency review, not application tests.
+The pre-PR test rule (which files to run, on which commit, and what a failure means) lives in one place: "Verify" in the work skill, run through `node scripts/verify.mjs`. It is not repeated here. Documentation-only changes normally need diff and consistency review, not application tests.
 
 Hosted CI runs basic checks on every PR and push to the default branch: the workflow tools test, typecheck and lint, a build, and the Windows-relevant tests. It does not run the full suite. The full suite can be started by hand from the CI workflow's `workflow_dispatch` trigger, and the nightly and stable release builds run it before publishing (`docs/releases.md`); do not start or wait for it as an extra completion or merge gate unless explicitly requested. Do not wait for the basic checks either unless GitHub requires them; actual GitHub-enforced checks still apply.
 
@@ -131,6 +129,16 @@ Skills are instructions, not access controls. Maintainers must configure GitHub 
 - Enable automatic deletion of merged PR head branches (needs repository admin). The cleanup helper covers this until it is enabled. Do not automatically delete unmerged branches.
 
 Adding workflow files does not enable these settings. Verify actual rules and permissions before reporting them as active. CI uses the repository's existing typecheck, lint, build and test commands.
+
+## Work helpers
+
+Each script has `--help`, prints a short result, and fails safe: an incomplete check says so and exits non-zero rather than reporting a clean result.
+
+- `node scripts/related-work.mjs --term <text> --path <planned path>`: searches open and closed issues and PRs by term, intersects the planned paths with the changed files of open PRs and of recent remote branches without a PR (cached by PR head and base commit under the git common directory) and prints only hits. `NOT CHECKED: <reason>` means the check did not complete.
+- `node scripts/work-claim.mjs claim|renew|release|list`: shared task claims in one file on the `agent-claims` branch, updated with fetch, commit and a non-forced push that is retried when another writer pushed first. A live claim on the same task by another session is refused; overlapping paths warn. Claims expire (two hours by default) and expired ones are ignored.
+- `node scripts/verify.mjs <test files> [--typecheck web|node|all]`: runs the named tests and typechecks quietly, prints pass/fail and the first failures, and records the commit, a fingerprint of the exact working-tree contents, the commands and the results; a record counts as current only while the fingerprint matches.
+- `node scripts/task-notes.mjs show|get|set`: the untracked `.task-notes.json` in the worktree root (tier, related-work verdict, claim, tested commit and results, PR number). Read it after a context reset instead of rerunning checks.
+- `node scripts/close-completed-issues.mjs`: closes open issues that a merged PR named with `Closes`, `Fixes` or `Resolves`, with a one-line comment linking the PR. It runs from `.github/workflows/issue-hygiene.yml` on pushes to the default branch and nightly, never closes on title or file matches, and `--report` only lists open issues that merged PRs mention, for human review. `node scripts/check-pr-body.mjs` is the same workflow's pull request check.
 
 ## Preflight helper
 

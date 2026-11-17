@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Fills the view</title>
+  <style>
+    html, body { margin: 0; height: 100%; font: 16px sans-serif; }
+    #top { position: absolute; top: 40px; left: 20px; width: 200px; height: 48px; }
+    /* Always 16 px above the bottom of the window, across its width. */
+    #bottom { position: fixed; left: 20px; right: 20px; bottom: 16px; height: 48px; }
+  </style>
+</head>
+<body>
+  <button id="top">Top</button>
+  <button id="bottom">Bottom</button>
+  <script>
+    const clicks = []
+    for (const id of ['top', 'bottom']) {
+      document.getElementById(id).addEventListener('click', () => {
+        clicks.push(id)
+        document.title = `clicked ${clicks.join(' ')}`
+      })
+    }
+  </script>
+</body>
+</html>

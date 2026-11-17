@@ -1,5 +1,5 @@
 import { mkdtemp } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -7,13 +7,14 @@ import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/bro
 import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { createInProcessBroker, ensureManagedChrome, startFixtureSite, workerRequest } from './fixtures/browser/harness'
-import { chromeLaunchArgs } from '../src/browser-worker/cdp/launch'
+import { chromeLaunchArgs, windowedChromeUserAgent } from '../src/browser-worker/cdp/launch'
 import { ManagedSession } from '../src/browser-worker/session/Session'
+import { processRecordPath, workspaceUserDataDir } from '../src/browser-worker/lifecycle/paths'
 
 const chrome = await ensureManagedChrome()
 
-describe('control changes on a session that is not available', () => {
-  const session = async (state: 'disconnected' | 'closed') => {
+describe('control changes that are refused', () => {
+  const session = async (state: 'disconnected' | 'closed' | 'human-controlled') => {
     const root = await mkdtemp(join(tmpdir(), 'mousse-browser-control-'))
     const value = new ManagedSession({ profileId: 'profile_control', browserRoot: join(root, 'browser'), artifactRoot: join(root, 'artifacts'), executablePath: 'chrome', browserVersion: '1' }, { persistent: false })
     // A started session whose Chromium went away (or that has closed) keeps its connection object.
@@ -35,6 +36,12 @@ describe('control changes on a session that is not available', () => {
     expect(() => value.handle('control.take', { owner: 'human' })).toThrow(expect.objectContaining({ code: 'session_closed' }))
     expect(value.lifecycle).toBe('closed')
   })
+
+  it('a release by a lease that is not the current one is refused at once', async () => {
+    const value = await session('human-controlled')
+    expect(() => value.handle('control.release', { controlLeaseId: 'lease_old' })).toThrow(expect.objectContaining({ code: 'stale_generation' }))
+    expect(value.lifecycle).toBe('human-controlled')
+  })
 })
 
 describe('managed browser setup_required', () => {
@@ -44,6 +51,27 @@ describe('managed browser setup_required', () => {
     expect(chromeLaunchArgs({ ...base, extraArgs: ['--host-resolver-rules=MAP foo.test 127.0.0.1'] }))
       .toContain('--host-resolver-rules=MAP foo.test 127.0.0.1')
     expect(() => chromeLaunchArgs({ ...base, extraArgs: ['--user-data-dir=C:\\shared-profile'] })).toThrow(/profile or debugging isolation/)
+  })
+
+  it('names a browser without a window as the Chrome it is, not HeadlessChrome', () => {
+    const base = { executablePath: 'chrome', userDataDir: '/isolated-browser-profile', browserVersion: '153.0.8010.36' }
+    const agent = chromeLaunchArgs(base).find((arg) => arg.startsWith('--user-agent='))
+    expect(agent).toBe(`--user-agent=${windowedChromeUserAgent('153.0.8010.36')}`)
+    expect(agent).toContain(' Chrome/153.0.0.0 ')
+    expect(agent).not.toContain('Headless')
+    // A browser with a window, or one whose version is unknown, keeps its own.
+    expect(chromeLaunchArgs({ ...base, headless: false }).some((arg) => arg.startsWith('--user-agent='))).toBe(false)
+    expect(chromeLaunchArgs({ ...base, browserVersion: undefined }).some((arg) => arg.startsWith('--user-agent='))).toBe(false)
+    expect(windowedChromeUserAgent('153.0.8010.36', 'darwin')).toBe('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36')
+    expect(windowedChromeUserAgent('153.0.8010.36', 'win32')).toBe('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36')
+    expect(windowedChromeUserAgent('153.0.8010.36', 'linux')).toBe('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36')
+    expect(windowedChromeUserAgent('1')).toBeUndefined()
+  })
+
+  it('starts without the automation mark only when the session marks each page itself', () => {
+    const base = { executablePath: 'chrome', userDataDir: '/isolated-browser-profile' }
+    expect(chromeLaunchArgs(base)).not.toContain('--disable-blink-features=AutomationControlled')
+    expect(chromeLaunchArgs({ ...base, automationMarkedPerPage: true })).toContain('--disable-blink-features=AutomationControlled')
   })
 
   it('fails closed with setup_required when no certified binary exists', async () => {
@@ -116,6 +144,24 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
     await broker.close()
   }, 120_000)
 
+  it('opens every tab in one window, so a tab behind is hidden and only the tab in front is painted', async () => {
+    const { broker } = await createInProcessBroker()
+    // Started and given its first tab at once: on Windows a tab made before Chromium's own window is up got a window of its own.
+    const opened = await broker.call(workerRequest('profile_window', 'session.open', { url: `${origin}/moving.html?tab=first` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+    const { session, observation } = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const second = await broker.call(workerRequest('profile_window', 'tabs.new', { sessionId: session.id, url: `${origin}/moving.html?tab=second` }))
+    expect(second.ok, JSON.stringify(second.error)).toBe(true)
+    const text = async (tabId: string) => {
+      const extracted = await broker.call(workerRequest('profile_window', 'extract', { sessionId: session.id, tabId }))
+      expect(extracted.ok, JSON.stringify(extracted.error)).toBe(true)
+      return (extracted.result as { text: string }).text
+    }
+    expect(await text((second.result as { id: string }).id)).toMatch(/StaticText visible/)
+    expect(await text(observation.tabId)).toMatch(/StaticText hidden/)
+    await broker.close()
+  }, 120_000)
+
   it('removes ephemeral user data only after owned Chrome exits and retains persistent workspace data for reopen', async () => {
     const ephemeral = await createInProcessBroker()
     const opened = await ephemeral.broker.call(workerRequest('profile_cleanup', 'session.open', { url: `${origin}/form.html` }))
@@ -161,8 +207,44 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
     const second = await createInProcessBroker()
     const conflict = await second.broker.call(workerRequest('profile_lock', 'session.open', { persistent: true, workspaceId: 'ws_shared', url: `${origin}/form.html` }))
     expect(conflict.ok).toBe(false)
-    expect(conflict.error?.code).toBe('policy_denied')
+    // The second browser can't start while the first holds the profile: that class, with the cause.
+    expect(conflict.error?.code).toBe('browser_cannot_start')
+    expect(conflict.error?.details?.problem).toMatchObject({ kind: 'cannot-start', cause: expect.stringMatching(/profile/) })
     await second.broker.close()
     await first.broker.close()
+  }, 120_000)
+
+  it('a browser whose process ends answers a watcher at once, and its profile opens again without a restart', async () => {
+    const { broker, roots } = await createInProcessBroker()
+    const workspaceId = `ws_ended_${Date.now().toString(36)}`
+    try {
+      const opened = await broker.call(workerRequest('profile_ended', 'session.open', { persistent: true, workspaceId, url: `${origin}/form.html` }))
+      expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+      const { session, observation } = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+      const watch = { sessionId: session.id, tabId: observation.tabId, watchKey: 'watch_ended', waitMs: 20_000 }
+      const first = await broker.call(workerRequest('profile_ended', 'frame.next', watch))
+      expect(first.ok, JSON.stringify(first.error)).toBe(true)
+      const seen = first.result as { frameSeq: number; stateSeq: number }
+      // A watcher waits for the next picture; the browser's process is ended under it (a crash, the system, a kill).
+      const waiting = broker.call(workerRequest('profile_ended', 'frame.next', { ...watch, afterFrame: seen.frameSeq, afterState: seen.stateSeq }))
+      const record = JSON.parse(readFileSync(processRecordPath(workspaceUserDataDir(roots.browserRoot, 'profile_ended', workspaceId)), 'utf8')) as { pid: number }
+      const endedAt = Date.now()
+      process.kill(record.pid, 'SIGKILL')
+      const answered = await waiting
+      expect(Date.now() - endedAt).toBeLessThan(5_000)
+      expect(answered.ok).toBe(false)
+      expect(answered.error?.code).toBe('worker_disconnected')
+      // Every later use hears the same, not a session that seems to be there.
+      const observed = await broker.call(workerRequest('profile_ended', 'observe', { sessionId: session.id, tabId: observation.tabId }))
+      expect(observed.error?.code).toBe('worker_disconnected')
+      // The next use starts the browser again on the same profile, in the same service.
+      const again = await broker.call(workerRequest('profile_ended', 'session.open', { persistent: true, workspaceId, url: `${origin}/form.html` }))
+      expect(again.ok, JSON.stringify(again.error)).toBe(true)
+      expect((again.result as { observation: BrowserObservation }).observation.url).toContain('/form.html')
+      const closedOld = await broker.call(workerRequest('profile_ended', 'session.close', { sessionId: session.id }))
+      expect(closedOld.ok, JSON.stringify(closedOld.error)).toBe(true)
+    } finally {
+      await broker.close()
+    }
   }, 120_000)
 })

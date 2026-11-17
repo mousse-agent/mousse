@@ -46,7 +46,7 @@ file; every other test uses made-up models, so adding a real model never touches
 | `routes` | Required, at least one | See below. |
 | `short` | Optional | The name beside a maker logo: `name` without the brand ("Opus 5.5"). Defaults to `name`. |
 | `family` | Optional | For example `opus`. Two models can share a release date, so a family tells them apart. |
-| `older` | Optional | `true` folds the model behind "Show more" on API routes. Agent routes ignore it: there, "older" means the agent does not list the model itself. |
+| `older` | Optional | `true` folds the model behind "Show more" on API routes. On the `claude` route it decides which models Claude Code does not list are folded, and folds a listed one once a current model of its `family` runs (see "Older Claude models"). |
 | `efforts` | Optional | Reasoning levels, with the same values as `LlmModelOption.efforts`. Used only when the route reports none for the model; in practice, older Claude Code models. |
 | `tier` | Optional | `frontier`, `standard` or `small`. Bots pick their hidden model by it: Fable and Opus are `frontier`, Sonnet `standard`, Haiku `small`. An unknown value is ignored. |
 
@@ -127,10 +127,19 @@ After a model refresh has saved that live list, Mousse checks the catalog's othe
    Claude Code program file (path, size, modification time), the account (`claudeAccountSubject`)
    and the candidate route ids. A changed key checks every candidate again, and stops a check still
    running for the old key; otherwise only unknown ones are checked. Partial results are saved.
-4. **Listing:** models that run follow the live ones, newest first, named by `short` and with the
-   catalog's `efforts` that Claude Code accepts. They carry `older: true`, and the model picker folds
-   them behind "Show more" at the end of the provider's list. Starred older models stay visible, the
-   section opens when the selected model is older, and nothing folds while searching.
+4. **Listing:** models that run are named by `short` and get the catalog's `efforts` that Claude
+   Code accepts (`claudeModelListing`).
+   - A **current** one (not `older` in the catalog, such as a new model Claude Code does not list
+     yet) is not folded. It goes just before the first live model of its `family`, else after the
+     live ones.
+   - An **older** one follows, newest first, with `older: true`.
+   - A **live** model the catalog marks `older` gets `older: true` once a current model of its
+     family is offered, live or found running. It stays listed, so a thread that uses it keeps it.
+     When the newer model does not run, nothing changes.
+
+   The model picker folds `older` models behind "Show more" at the end of the provider's list.
+   Starred older models stay visible, the section opens when the selected model is older, and
+   nothing folds while searching.
 
 The check runs after the live list is saved and the refresh returns without waiting for it, so it
 never delays or changes the live list. Each model it finds running updates open windows at once

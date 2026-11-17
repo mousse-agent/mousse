@@ -11,8 +11,11 @@ import {
   editQueuedMessage,
   dropSteerItems,
   enqueueMessage,
+  holdQueueAfterStop,
+  isQueueHeldByStop,
   listClaimedQueue,
   listPendingQueue,
+  markWaitingForLease,
   normalizeQueuedMessages,
   promoteQueuedMessageToSteer,
   QueueConflictError,
@@ -20,6 +23,7 @@ import {
   QueueValidationError,
   reclaimAbandonedClaims,
   releaseClaim,
+  releaseStopHold,
   removeQueuedMessage,
   reorderQueuedMessages
 } from '../src/mms/queue/ThreadMessageQueue'
@@ -34,6 +38,13 @@ describe('ThreadMessageQueue domain', () => {
     expect(listPendingQueue(items).map((i) => i.content)).toEqual(['first', 'second'])
     expect(a.item.id).not.toBe(b.item.id)
     expect(a.item.order).toBeLessThan(b.item.order)
+  })
+
+  it("keeps the sender's id for the send that queued a message, through a save", () => {
+    const { item, items } = enqueueMessage([], { threadId: 't1', content: 'sent while busy', clientRequestId: 'req-1' })
+    expect(item.clientRequestId).toBe('req-1')
+    expect(normalizeQueuedMessages(JSON.parse(JSON.stringify(items)), 't1')[0]?.clientRequestId).toBe('req-1')
+    expect(enqueueMessage([], { threadId: 't1', content: 'no id' }).item).not.toHaveProperty('clientRequestId')
   })
 
   it('keeps internal work durable but outside user queue mutations', () => {
@@ -57,6 +68,31 @@ describe('ThreadMessageQueue domain', () => {
     expect(() => promoteQueuedMessageToSteer(items, internal.id)).toThrow(/internal/i)
     expect(clearPendingQueue(items)).toEqual([expect.objectContaining({ id: internal.id })])
     expect(normalizeQueuedMessages(items, 't1').find((item) => item.id === internal.id)?.internal).toBe(true)
+  })
+
+  it('keeps the lease-wait mark on a pending message through a save, and drops it once claimed or held by a Stop', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'behind the lease', waitsForLease: true }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'queued later' }).items
+    const [behind, later] = listPendingQueue(items)
+    expect(behind?.waitsForLease).toBe(true)
+    expect(later).not.toHaveProperty('waitsForLease')
+    const saved = normalizeQueuedMessages(JSON.parse(JSON.stringify(items)), 't1')
+    expect(saved.map((item) => item.waitsForLease)).toEqual([true, undefined])
+    // A steer never waits for the lease, and a malformed mark is dropped.
+    expect(enqueueMessage([], { threadId: 't1', content: 'steer', intent: 'steer', waitsForLease: true }).item).not.toHaveProperty('waitsForLease')
+    expect(normalizeQueuedMessages([{ ...behind!, waitsForLease: 'yes' as unknown as true }], 't1')[0]).not.toHaveProperty('waitsForLease')
+
+    const claimed = claimNextNormal(saved, { ownerPid: 1, ownerToken: 'tok' })
+    expect(claimed.claimed?.content).toBe('behind the lease')
+    expect(claimed.claimed).not.toHaveProperty('waitsForLease')
+    expect(normalizeQueuedMessages([{ ...behind!, state: 'claimed', claim: { ownerPid: 1, ownerToken: 'tok', claimedAt: new Date().toISOString() } }], 't1')[0]).not.toHaveProperty('waitsForLease')
+
+    const held = holdQueueAfterStop(saved)
+    expect(held.map((item) => [item.heldAfterStop, item.waitsForLease])).toEqual([[true, undefined], [true, undefined]])
+    // Marking later: only a pending normal message the Stop did not hold.
+    const marked = markWaitingForLease(saved, new Set([later!.id]))
+    expect(marked.map((item) => item.waitsForLease)).toEqual([true, true])
+    expect(markWaitingForLease(held, new Set([later!.id]))).toBe(held)
   })
 
   it('validates reorder and remove', () => {
@@ -86,6 +122,16 @@ describe('ThreadMessageQueue domain', () => {
     const drained = drainNextNormal(items)
     expect(drained.next?.content).toBe('normal-2')
     expect(drainNextNormal(drained.items).next).toBeNull()
+  })
+
+  it('drops only the named steer items: an empty list drops none', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'steer-a' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'steer-b' }).items
+    const [a, b] = listPendingQueue(items).map((item) => item.id)
+    items = promoteQueuedMessageToSteer(items, a).items
+    items = promoteQueuedMessageToSteer(items, b).items
+    expect(dropSteerItems(items, [])).toEqual(items)
+    expect(dropSteerItems(items, [a]).map((item) => item.id)).toEqual([b])
   })
 
   it('recovers a late steer as next-turn guidance', () => {
@@ -266,6 +312,18 @@ describe('ThreadMessageQueue domain', () => {
     // A malformed selection is dropped, the origin itself survives.
     expect(normalizeQueuedMessages([{ ...base, origin: { kind: 'schedule', jobId: 'job-1', occurrenceKey: 'k', selection: { model: 4 } } }], 't1')[0].origin)
       .toEqual({ kind: 'schedule', jobId: 'job-1', occurrenceKey: 'k' })
+  })
+
+  it('keeps an agent origin with where its words are and its sender\'s title through a save and load, and drops malformed lengths', () => {
+    const origin = { kind: 'agent' as const, threadId: 'sender', runId: 'run-s', hops: 2, title: 'Fix flaky test', body: { head: 40, tail: 32 } }
+    const queued = enqueueMessage([], { threadId: 't1', content: 'x'.repeat(100), source: 'mcp', origin }).items
+    expect(normalizeQueuedMessages(JSON.parse(JSON.stringify(queued)), 't1')[0].origin).toEqual(origin)
+
+    const base = { id: 'a', threadId: 't1', content: 'x', enqueuedAt: '2020-01-01T00:00:00.000Z', order: 0, intent: 'normal', state: 'pending' }
+    // Lengths that are not whole numbers of characters are dropped: the message then shows whole, still the agent's.
+    for (const body of [{ head: -1, tail: 2 }, { head: 1.5, tail: 2 }, { head: 1 }, 'head', null])
+      expect(normalizeQueuedMessages([{ ...base, origin: { kind: 'agent', threadId: 'sender', runId: 'run-s', title: 7, body } }], 't1')[0].origin)
+        .toEqual({ kind: 'agent', threadId: 'sender', runId: 'run-s' })
   })
 
   it('reclaims only abandoned claims; protects live unaccepted owners', () => {
@@ -475,12 +533,53 @@ describe('editing, the queue revision and a promotion bound to a run', () => {
     })
   })
 
+  describe('the hold a Stop saves on the queue (#917)', () => {
+    it('marks what waits, steering items included, survives the queue file, and goes once the queue goes on', () => {
+      const { items, first } = seed()
+      const steering = promoteQueuedMessageToSteer(items, first.id, { steerRunId: 'run-a' }).items
+      const held = holdQueueAfterStop(steering)
+      expect(listPendingQueue(held).map((item) => item.heldAfterStop)).toEqual([true, true])
+      expect(isQueueHeldByStop(held)).toBe(true)
+      // Nothing else changes, so a client's revision still matches.
+      expect(queueRevision(held)).toBe(queueRevision(steering))
+      const loaded = normalizeQueuedMessages(JSON.parse(JSON.stringify(held)), 't1')
+      expect(isQueueHeldByStop(loaded)).toBe(true)
+      // A steer the Stop hands back stays held.
+      const demoted = demoteSteerItems(loaded, [first.id], { toFront: true }).find((item) => item.id === first.id)
+      expect(demoted).toMatchObject({ state: 'pending', heldAfterStop: true })
+      const released = releaseStopHold(loaded)
+      expect(isQueueHeldByStop(released)).toBe(false)
+      expect(released.some((item) => 'heldAfterStop' in item)).toBe(false)
+      expect(isQueueHeldByStop(normalizeQueuedMessages(JSON.parse(JSON.stringify(steering)), 't1'))).toBe(false)
+      // Unchanged queues are returned as they are.
+      expect(holdQueueAfterStop(held)).toBe(held)
+      expect(releaseStopHold(steering)).toBe(steering)
+    })
+  })
+
   describe('promotion and demotion', () => {
     it('binds the promotion to a run and keeps the narrowed mode on the item', () => {
       const { items, first } = seed()
       const promoted = promoteQueuedMessageToSteer(items, first.id, { steerRunId: 'run-a', permissionMode: 'ask' })
       expect(promoted.item).toMatchObject({ intent: 'steer', state: 'steering', steerRunId: 'run-a', permissionMode: 'ask' })
       expect(promoteQueuedMessageToSteer(items, first.id).item.steerRunId).toBeUndefined()
+    })
+
+    it('marks an item this build promotes, keeps the mark on disk, and reads an older file\'s item as unmarked', () => {
+      const { items, first } = seed()
+      // Every promotion of a pending item is marked, bound to a run or not: copies this build writes name the item.
+      const promoted = promoteQueuedMessageToSteer(items, first.id, { steerRunId: 'run-a' }).item
+      expect(promoted.promotedWithCopyId).toBe(true)
+      expect(promoteQueuedMessageToSteer(items, first.id).item.promotedWithCopyId).toBe(true)
+      expect(normalizeQueuedMessages(JSON.parse(JSON.stringify([promoted])), 't1')[0].promotedWithCopyId).toBe(true)
+      // An item an older build promoted has no mark, and promoting it again leaves it unmarked.
+      const { promotedWithCopyId: _mark, ...older } = promoted
+      const [loadedOlder] = normalizeQueuedMessages(JSON.parse(JSON.stringify([older])), 't1')
+      expect(loadedOlder.promotedWithCopyId).toBeUndefined()
+      expect(promoteQueuedMessageToSteer([loadedOlder], first.id, { steerRunId: 'run-a' }).item.promotedWithCopyId).toBeUndefined()
+      // Only a steering item carries the mark; a demoted one loses it with its run.
+      expect(normalizeQueuedMessages([{ ...promoted, state: 'pending', intent: 'normal' }], 't1')[0].promotedWithCopyId).toBeUndefined()
+      expect(demoteSteerItems([promoted])[0].promotedWithCopyId).toBeUndefined()
     })
 
     it('demotes the named items only, clears the bound run, and keeps origin and mode limit', () => {

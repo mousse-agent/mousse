@@ -5,9 +5,11 @@ import {
   IconFileCode as FileCode,
   IconFileTypeJs as FileJson,
   IconPhoto as ImageIcon,
+  TextFont,
 } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
 import { ImageLightbox } from "../image-lightbox";
+import { useImageGallery } from "../image-gallery";
 
 export type FileAttachmentProps = {
   id: string;
@@ -15,7 +17,15 @@ export type FileAttachmentProps = {
   size?: number;
   isImage?: boolean;
   url?: string;
+  /** The chip's tooltip; defaults to the file name. */
+  title?: string;
+  /** A file chip that opens the file: its name and icon become a button. */
+  onOpen?: () => void;
+  /** A pasted text kept as a file: a button puts it into the message box instead. */
+  onInsertText?: () => void;
   onRemove?: () => void;
+  /** Makes the chip draggable: dragged out of the window, it drops the file. */
+  onDragStart?: (event: React.DragEvent<HTMLDivElement>) => void;
   className?: string;
   display?: "chip" | "image-only";
   /**
@@ -115,12 +125,18 @@ export function FileAttachment({
   size,
   isImage,
   url,
+  title,
+  onOpen,
+  onInsertText,
   onRemove,
+  onDragStart,
   className,
   display = "chip",
   enableImagePreview = true,
 }: FileAttachmentProps) {
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+  // Among other attachments (the composer's), the preview steps through all of them.
+  const gallery = useImageGallery();
   const iconName = getFileIconName(filename, isImage);
   // Image attachments with a renderable preview (pasted screenshots, dragged
   // images) render as a bare thumbnail — the auto-generated filename
@@ -132,7 +148,8 @@ export function FileAttachment({
   const openLightbox = (event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    setIsLightboxOpen(true);
+    if (gallery && url) gallery.open({ id, url, filename });
+    else setIsLightboxOpen(true);
   };
 
   return (
@@ -145,6 +162,8 @@ export function FileAttachment({
         className,
       )}
       title={isImageOnly ? filename : undefined}
+      draggable={onDragStart ? true : undefined}
+      onDragStart={onDragStart}
     >
       {isImageOnly ? (
         <PreviewTarget
@@ -180,10 +199,10 @@ export function FileAttachment({
             </div>
           )}
 
-          <div className="flex flex-col min-w-0">
+          <div className="flex flex-col flex-1 min-w-0">
             <span
               className="text-sm font-medium text-an-foreground truncate"
-              title={filename}
+              title={title ?? filename}
             >
               {filename}
             </span>
@@ -193,9 +212,41 @@ export function FileAttachment({
               </span>
             )}
           </div>
+          {/* The whole chip opens the file; the button lies over it, below the remove button. */}
+          {onOpen && (
+            <button
+              type="button"
+              className="absolute inset-0 rounded-[inherit] cursor-pointer hover:bg-an-foreground/5"
+              aria-label={`Open ${filename}`}
+              title={title ?? filename}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onOpen();
+              }}
+            />
+          )}
         </>
       )}
 
+      {onInsertText && !isImageOnly && (
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onInsertText();
+          }}
+          className="shrink-0 size-5 rounded-full flex items-center justify-center z-10 text-an-foreground-muted hover:text-an-foreground hover:bg-an-background"
+          aria-label="Insert as text"
+          title="Insert as text"
+        >
+          <TextFont className="size-3.5" />
+        </button>
+      )}
+
+      {/* On a chip the × has its own slot after the name, so a long name ellipsizes before it;
+          a bare image thumbnail keeps it in the corner. */}
       {onRemove && (
         <button
           onMouseDown={(e) => {
@@ -206,7 +257,7 @@ export function FileAttachment({
             e.stopPropagation();
             onRemove();
           }}
-          className={`absolute top-1 right-1 size-5 rounded-full bg-an-background border border-an-border-color
+          className={`${isImageOnly ? "absolute top-1 right-1" : "shrink-0"} size-5 rounded-full bg-an-background border border-an-border-color
                      flex items-center justify-center transition-[opacity,transform] duration-150 ease-out active:scale-[0.97] z-10
                      text-an-foreground hover:bg-an-background-secondary opacity-100`}
           aria-label={`Remove ${filename}`}
@@ -216,7 +267,7 @@ export function FileAttachment({
         </button>
       )}
 
-      {canPreview && url && (
+      {canPreview && url && !gallery && (
         <ImageLightbox
           open={isLightboxOpen}
           onClose={() => setIsLightboxOpen(false)}

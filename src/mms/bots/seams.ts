@@ -1,6 +1,12 @@
+import type { BotChatContext, BotChatContextInput } from './memory/contextPack'
+import type { BotChatEpochEnd } from './memory/contextBudget'
 import type { BotChip } from '../../shared/bots/personal/chat'
-import type { BotLane, BotModelChoice, BotSchedule } from '../../shared/bots/personal/definition'
-import type { BotJournalKind, BotJournalWho, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
+import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
+import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
+import type { BotQuestionFollow, BotQuestionSpec } from '../../shared/bots/personal/questions'
+import type { BotCard } from '../../shared/bots/personal/cards'
+import type { BotWakeEvent } from '../../shared/bots/personal/wakes'
+import type { BotJournalKind, BotJournalWho, BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { Enforceability, ProviderSelection, RunPolicy } from '../../shared/harness/types'
 import type { BotStoreTx } from './store/BotStore'
 
@@ -25,15 +31,32 @@ export interface BotProcessSupervision {
   reconcile(): Promise<Array<{ dispatchId: string; exitAt?: string }>>
 }
 
-/** Why no model could be chosen. Never shown as such: it becomes a `BotError` in plain words. */
-export type BotModelProblem = 'no_provider' | 'named_unavailable' | 'all_limited'
+/**
+ * Why no model could be chosen. Never shown as such: it becomes a `BotError` in plain words. `pick_unavailable`: a model
+ * the owner picked on an entry can't run there (#673), and nothing else is tried; `all_limited` also covers a pick at
+ * its usage limit.
+ */
+export type BotModelProblem = 'no_provider' | 'named_unavailable' | 'all_limited' | 'pick_unavailable'
 
-/** The hidden model choice (§5.6). WP3 implements; WP2's engine calls at the first dispatch of each activation. */
+/** A pick that can't run (#673), and why: the chat says so once, to the owner only (`modelSlots.ts`). */
+export type { BotPickMiss, BotPickReason } from '../../shared/bots/personal/modelSlots'
+
+export type BotModelResolution =
+  | { selection: ProviderSelection }
+  | { problem: BotModelProblem; until?: string; instanceId?: string; missed?: BotPickMiss }
+
+/** The model choice (§5.6, #673). WP3 implements; WP2's engine calls at the first dispatch of each activation. */
 export interface BotModelResolver {
-  resolve(input: { botId: string; choice: BotModelChoice; override?: BotModelChoice; policy: RunPolicy }):
-    Promise<{ selection: ProviderSelection } | { problem: BotModelProblem; until?: string; instanceId?: string }>
+  /**
+   * A turn's model. A pick on an entry runs there, at its reasoning level, or not at all: at its usage limit
+   * `all_limited` with the reset, otherwise `pick_unavailable` with `missed`. A pick by name from an older bot, and a row
+   * on which Mousse chooses (null), resolve as before picks: by name across entries, else by usage at `depth`.
+   */
+  resolve(input: { botId: string; pick: BotModelPick | null; depth: BotDepth; policy: RunPolicy }): Promise<BotModelResolution>
   /** A bot turn on `instanceId` hit its usage limit; skip it until `until`. */
   markLimited(instanceId: string, until: string): void
+  /** The owner's Resume: forget `instanceId`'s limit, so the next turn tries it again. */
+  clearLimited?(instanceId: string): void
 }
 
 /**
@@ -48,46 +71,169 @@ export interface BotRuntimeHold {
 export interface BotToolHost {
   /**
    * The bot activation a thread's turn belongs to. Lane and bot always come from here, never from
-   * tool arguments; `role` is the calling thread's (a consult calls from a `context` thread).
+   * tool arguments; `memoryLane` is the activation's memory rights (missing means run notes only); `role` is the calling thread's (a consult calls from a `context` thread).
    */
-  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; role?: 'home' | 'activation' | 'context' } | undefined
+  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; memoryLane?: BotLane; role?: 'home' | 'activation' | 'context' | 'subagent' } | undefined
   schedules: {
-    add(botId: string, s: { when: BotSchedule['when']; prompt: string }): { scheduleId: string; label: string }
+    /** `from`: the turn that adds it; its next message shows the automation as a card (`card`). */
+    add(botId: string, s: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string }, from?: string): { scheduleId: string; label: string; card?: true }
     remove(botId: string, scheduleId: string): boolean
-    list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
+    /** The calling thread ends only the schedule on its own activation. */
+    done?(threadId: string, why: string): void
+    list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }>
   }
+  setTelling?(botId: string, activationId: string, change: import('../../shared/bots/personal/tellingSettings').TellingChange): string
   setProfile(botId: string, p: { name?: string; description?: string }): void
-  /** `now`: this activation only, by a reload; `always`: the definition's `main.model`, with no re-approval. */
-  setModel(botId: string, activationId: string, scope: 'now' | 'always', choice: Partial<BotModelChoice>): void
+  /**
+   * `set_depth` and `use_model` (#673). `now`: this activation only, by a reload; `always`: saved as a revision with no
+   * re-approval. A depth is the activation's level (`now`) or the bot's standing level (`always`); a pick is one of the
+   * Runs on choices, on this chat (`now`) or on `rows` (`always`). The answer says whether a depth changed what runs:
+   * a depth moves work between its rows, and changes nothing on a pick that keeps its model and reasoning level.
+   */
+  setModel(botId: string, activationId: string, scope: 'now' | 'always', change: BotModelChange): { changed: boolean }
+  /** The owner's own words in a chat activation: its owner messages, oldest first (`use_model` checks them). */
+  ownerWords(botId: string, activationId: string): string
+  /** The bot's rows as they are now (`use_model` keeps each on its entry when two entries offer the model). */
+  rows(botId: string): BotModelSlots
   /**
    * The chat's work (docs/plans/bot-always-free.md): runs beside the chat that report back. `from` is the chat
-   * activation that hands it off; `key` makes a repeated call start nothing new.
+   * activation that hands it off; `key` makes a repeated call start nothing new; `level` is how hard the job is (#673).
+   * `model`: the model the owner asked for this work alone, one of the Runs on choices, kept with the work as its own
+   * pick (`BotWorkModel`); the bot's rows stay as they are. `slot`: one of the owner's custom slots, which it runs on
+   * instead of its level's row; one the bot doesn't have is refused and nothing starts.
    */
   work: {
-    start(botId: string, from: string, input: { title: string; brief: string; key: string }): Promise<BotWorkStarted>
+    start(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel; slot?: string }): Promise<BotWorkStarted>
     list(botId: string): BotWorkList
     stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
     /** `from`: the chat activation that passes it on (its owner's message is the note's source). */
-    note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found'
+    /** `question`: the work waits for the owner's answer to its question and takes nothing else until then. */
+    note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval' | 'waiting'
+    /**
+     * When a note reaches the work: `now` (at its next step, while it runs), `after_compaction` (its runtime is making
+     * room in its context: once that ends, within minutes), `step_end` (when its current turn ends: its runtime takes no
+     * notes while it runs), or `start` (when it starts or goes on).
+     */
+    reach?(botId: string, workId: string): 'now' | 'after_compaction' | 'step_end' | 'start'
   }
-  /** One-off reminders: said at a time, or work started then. */
+  /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
+  mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>
+  /**
+   * `ask_owner` (issue #1123): a question to the owner with answers to tap, shown under a chat turn's reply, or at once
+   * from work, which then waits for the answer. `asked` is false, with why, when it was not kept (a cap, a permission
+   * asked first, a turn never offered it). Absent: no questions here.
+   */
+  questions?: {
+    /** `follow`: what happens if the owner doesn't answer (absent: nothing, as an earlier build kept it). */
+    ask(botId: string, activationId: string, spec: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string }
+    /**
+     * `question_answer`: a chat turn the owner's own message started passes on to work the answer they gave in the chat
+     * to the question it waits on; `title` is the work's.
+     */
+    relay(botId: string, activationId: string, questionId: string, answer: string): { ok: true; title: string } | { ok: false; text: string }
+  }
+  /**
+   * `show_card` (issue #1123): a small card, already checked for shape (`cardOf`), kept for the turn's next message. A
+   * gallery's pictures are checked here to be pictures in the bot's files folder. `shown` is false, with why, when it was
+   * not kept. Absent: no cards here.
+   */
+  cards?: {
+    show(botId: string, activationId: string, card: BotCard): { shown: boolean; text: string }
+  }
+  /**
+   * Messages to the owner's other bots (`bot_list`, `bot_send`). `from` is the turn that sends: a chat turn, or work the
+   * owner asked for. `send` throws, with why in words for the bot, when the message can't go. Absent: none here.
+   */
+  bots?: {
+    list(botId: string): Array<{ name: string; does: string; paused?: true }>
+    send(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string }>
+  }
+  /** One-off reminders: said at a time, or work started then. Wakes are listed and cancelled with them. */
   reminders: {
     add(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string }
-    list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; work?: string }>
+    /** `wake`: it is a wake, and what it waits for ("when acme/app#12 merges", "at its time"). */
+    list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; ownerSet?: boolean | null; work?: string; wake?: string }>
     cancel(botId: string, reminderId: string): boolean
   }
+  /**
+   * `wake`: the bot carries on by itself in its own chat, at a time (`dueAt`) or once `event` happens, giving up after
+   * `hours`. `from` is the chat turn that sets it. Throws, with why in words for the bot, when it can't be set. Absent: no
+   * wakes here.
+   */
+  wakes?: {
+    wait?(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
+    add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
+  }
+  /**
+   * The ledger (docs/plans/bot-context.md §16): a job the turn `from` handed to one of the owner's threads, by sending it
+   * `sent` (a first message, or a message to a thread it already had). Kept in `bots.db` with who asked and what; the bot
+   * is told in its chat when the thread finishes or waits for a person. A thread still working on an earlier job of the
+   * bot keeps that job. Absent: no ledger here.
+   */
+  jobs?: {
+    open(botId: string, from: string, input: { threadId: string; title: string; project?: string; sent: string }): { jobId: string }
+  }
+  /**
+   * Background commands (`watch_start`, `watch_list`, `watch_stop`): a command that runs beside the bot and wakes it in its
+   * chat when it exits, prints a line matching `match`, or reaches its time limit (`minutes`). `from` is the chat turn that
+   * starts it. Throws, with why in words for the bot, when it can't start. Absent: none here.
+   */
+  watchers?: {
+    start(botId: string, from: string, input: { command: string; brief: string; title?: string; match?: string; minutes?: number }): { watcherId: string; until: string }
+    list(botId: string): Array<{ id: string; title: string; command: string; match?: string; startedAt: string; until: string; lastLine?: string }>
+    stop(botId: string, watcherId: string): boolean
+    /** All of one command's kept output, while it runs and for a while after it ended (`watch_list` with its id). */
+    output?(botId: string, watcherId: string): import('./watchers').WatcherOutput | undefined
+  }
+}
+
+/**
+ * `mcp_servers`' answer: each server by its name (and id), a line of Mousse's own about it, whether the bot holds its
+ * tools, whether it is answering, and whether it is still starting (no tools listed yet). Nothing of the server's own
+ * text but its tools' names.
+ */
+export interface BotMcpListing {
+  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'some: it has new tools' | 'no: it changed since you were allowed it'; answering?: false; starting?: true }>
+  note: string
+}
+
+/**
+ * What `set_depth` (a depth) or `use_model` changes: a pick among the Runs on choices, on this chat (`now`), or with
+ * `always` on the rows given (`rows`, one pick on each), or one pick per row (`slots`: two entries offer the model, and
+ * each row stays on its own).
+ */
+export type BotModelChange =
+  | { depth: BotDepth }
+  | { pick: BotModelPick & { instanceId: string }; rows?: BotModelRows }
+  | { slots: Partial<Record<BotModelSlotKey, BotModelPick & { instanceId: string }>> }
+
+/**
+ * A model one piece of work was asked to run on: the pick (an entry, its model and a reasoning level, with the entry's
+ * sign-in now) and its names for the work line.
+ */
+export interface BotWorkModel {
+  pick: BotModelPick & { instanceId: string }
+  name: BotWorkModelName
 }
 
 /** `work_start`'s answer: the work's id, and whether it runs now or waits behind others (their titles). */
 export interface BotWorkStarted {
+  /** This request found existing work; no new activation was started. */
+  replayed?: true
   workId: string
   status: 'started' | 'queued' | 'ended'
   ahead: string[]
+  /** The model the work line names: one the owner asked for this work alone, when it is not the bot's usual one. */
+  model?: BotWorkModelName
 }
 
 /** `work_list`'s answer: what runs or waits now, and the last few that ended. */
 export interface BotWorkList {
-  now: Array<{ workId: string; title: string; status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'; startedAt: string; doing?: string; kind: 'work' | 'schedule' }>
+  /**
+   * `waitsFor: 'answer'`: held while it waits for the owner's answer to `question` (`question_answer` passes on an answer
+   * they gave in the chat).
+   */
+  now: Array<{ workId: string; title: string; status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'; startedAt: string; doing?: string; kind: 'work' | 'schedule'; wait?: { dueAt: string; event: BotWakeEvent | null }; waitsFor?: 'answer'; question?: { questionId: string; question: string } }>
   recent: Array<{ workId: string; title: string; status: 'done' | 'failed' | 'stopped'; endedAt: string; report?: string }>
 }
 
@@ -114,19 +260,33 @@ export type BotDispatchEnd = 'settled' | 'wall' | 'reload' | 'stopped' | 'failed
 /**
  * The context packs (bot-context.md §5). WP6 implements; WP2's engine calls at each main dispatch.
  * Each pack is built once per activation and frozen: later dispatches of the same activation get the
- * same text, until a forget drops the frozen packs.
+ * same text, until a memory save or forget drops the frozen packs.
  */
 export interface BotContextProvider {
   /** The chat pack, placed in `turnPreamble` right after `clearConversationContext(homeThreadId)`. */
   chatPreamble(input: { botId: string; activationId: string }): Promise<string>
+  /**
+   * With chat epochs on (docs/plans/bot-context.md §14): the chat turn's pack, the base of a new epoch (`fresh`: the
+   * engine clears the home context first) or the delta of the running one (the turn resumes the thread's conversation).
+   */
+  chatContext?(input: BotChatContextInput): Promise<BotChatContext>
+  /**
+   * The whole chat pack, built now and not frozen: what a turn on a running epoch is given again after its runtime
+   * compacted the conversation (its own pack holds only what was new).
+   */
+  chatPackNow?(input: { botId: string; activationId: string }): string
+  /** Ends the chat's epoch: its next turn starts from a cleared context (`/clear`, a runtime compaction). */
+  endChatEpoch?(botId: string, reason: BotChatEpochEnd): void
   /** The run brief. `scheduleId` absent: a manual run. */
   runPreamble(input: { botId: string; activationId: string; scheduleId?: string; input: string }): Promise<string>
   /**
    * After every dispatch, including one ended by a wall or a reload. It runs capture for the dispatch's
    * thread and moves the chat window and summary. If it throws `bot_journal_failed`, the engine fails
    * the activation and sets the stuck error "I can't save my work. Free some disk space."
+   * `consult`: the dispatch was a consult of the turn, not the turn itself.
+   * `memoryLane`: derived by the engine from the activation key; only chat rights allow the wish fallback.
    */
-  afterDispatch(e: { botId: string; activationId: string; dispatchId: string; lane: BotLane; threadId: string; endedBy: BotDispatchEnd }): Promise<void>
+  afterDispatch(e: { botId: string; activationId: string; dispatchId: string; lane: BotLane; memoryLane?: BotLane; threadId: string; endedBy: BotDispatchEnd; consult?: true }): Promise<void>
 }
 
 /** One journal row to write. `kind` follows bot-context.md §3. */
@@ -160,10 +320,26 @@ export interface BotJournal {
 
 /** Owner-side memory operations. WP6 implements; the `bots.memory.*` handlers and the engine's purge call it. */
 export interface BotMemoryAdmin {
+  /** Quiet upkeep; calls canTidy only after finding duplicates, before any write. */
+  tidyDuplicates?(botId: string, canTidy?: () => boolean): number
   list(botId: string, history?: boolean): BotMemoryListing
   forget(botId: string, id: string): BotMemoryForgetResult
+  /** The owner's new words for an entry (`bots.memory.edit`): its next version. */
+  edit(botId: string, id: string, text: string): BotMemoryEntry
   export(botId: string, dir: string): Promise<{ files: string[] }>
   reindex(botId?: string): Promise<void>
   /** Removes every memory row of the bot, and nothing of another bot (the 30-day purge). */
   purge(botId: string): Promise<void>
+  /** Forgets every current entry of the bot, each as Forget does one (`bots.memory.wipe`); how many were forgotten. */
+  forgetAll(botId: string): number
+  /**
+   * The bot's history goes (`bots.memory.wipe` with `keep: 'saved'`): its journal, chat summary, search rows and run
+   * notes; the owner's entries and the bot's notes stay. How many run notes went.
+   */
+  wipeHistory(botId: string): number
+  /**
+   * Every memory row of the bot goes (`bots.reset`), but the capture cursors of its threads, which stay so their old
+   * rows are never copied back in.
+   */
+  reset(botId: string): void
 }

@@ -43,7 +43,8 @@
        Switches are the exception: a 28x16 track centred in the row.
     9. Selection is a filled background only (--ui-selected-fill plus the
        shared specular top light). No side or edge bars, no outlines, no
-       gradients, no coloured glows.
+       gradients, no coloured glows. Keyboard focus is a fill too
+       (--ui-focus-layer), never an outline or ring.
    10. One readable column (--settings-content-w, 720px); left edges of text
        and right edges of controls line up down the page. Only Providers,
        a list beside an editor, takes --settings-content-wide-w.
@@ -97,10 +98,9 @@
   /* Providers pairs a list with an editor and needs the room. */
   --settings-content-wide-w: 950px;
   --settings-control-h: 28px;
-  /* Faint text and focus outlines must stay readable here (4.5:1 on the page
-     and on group surfaces), so they use the secondary text colour. */
+  /* Faint text must stay readable here (4.5:1 on the page and on group
+     surfaces), so it uses the secondary text colour. */
   --ui-faint: var(--text-secondary);
-  --settings-focus: var(--text-secondary);
 
   --settings-fs-title: 17px;
   --settings-fs-heading: 16px;
@@ -425,6 +425,18 @@ html[data-theme='high-contrast'] .settings-group-icon {
    the description stays muted. Text only, never a dot or a pill. */
 .settings-status-ok { color: var(--success); }
 .settings-status-warn { color: var(--warning); }
+
+/* Settings > Labs > Profiler > Memory: trends beside Report, and every process in a table below. */
+.memory-row-controls { display: inline-flex; align-items: center; gap: 12px; }
+.memory-trend { display: inline-flex; align-items: center; gap: 4px; color: var(--text-secondary); font-size: 11px; }
+.memory-sparkline { flex: none; }
+.memory-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.memory-table th, .memory-table td { padding: 3px 8px; text-align: right; font-weight: 400; white-space: nowrap; }
+.memory-table th:first-child { text-align: left; }
+.memory-table thead th { color: var(--text-secondary); }
+.memory-table tbody tr + tr { border-top: 1px solid color-mix(in srgb, var(--text-secondary) 14%, transparent); }
+.memory-table .memory-table-total th, .memory-table .memory-table-total td { font-weight: 600; }
+.memory-hints { margin: 6px 8px 0; color: var(--text-secondary); font-size: 11.5px; }
 .settings-status-bad { color: var(--danger); }
 
 .settings-group-desc {
@@ -588,8 +600,8 @@ html[data-theme='high-contrast'] .settings-group-icon {
 }
 
 .settings-title-icon-btn:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 html[data-theme='high-contrast'] .settings-title-icon-btn {
@@ -717,8 +729,8 @@ html[data-theme='high-contrast'] .settings-title-icon-btn {
 }
 
 .settings-icon-btn:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .settings-icon-btn:disabled {
@@ -826,8 +838,8 @@ html[data-theme='high-contrast'] .settings-icon-btn.primary {
 }
 
 .settings-seg button:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 html[data-theme='high-contrast'] .settings-seg button.on {
@@ -859,6 +871,30 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   color: var(--text-primary);
 }
 
+/* Agents → Context → Cache time: each entry's time, then Change where it has a switch. */
+.agents-cache-times .agent-access-cap {
+  align-items: center;
+}
+
+.agents-cache-time {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-12);
+  flex-shrink: 0;
+}
+
+/* A quiet tag after a row title, e.g. "Experimental". */
+.settings-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--space-8);
+  border-radius: 9px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--ui-hover);
+}
+
 /* MoreDetails: a quiet text toggle after a description, and the rules it folds away. */
 .settings-more-btn {
   padding: 0;
@@ -877,9 +913,9 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 }
 
 .settings-more-btn:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 2px;
+  outline: none;
   border-radius: 2px;
+  background-image: var(--ui-focus-layer);
 }
 
 .settings-more-body {
@@ -930,6 +966,64 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   padding-top: var(--space-16);
 }
 
+/* A fold: a heading that opens its rows (Skills & MCP). A sub fold is one step smaller and sits closer;
+   its count ("3 of 9 on") shows only while it is closed. */
+.settings-fold {
+  margin-top: var(--settings-section-gap);
+}
+
+.settings-fold.sub {
+  margin-top: var(--space-16);
+}
+
+.settings-fold > summary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  font-size: var(--settings-fs-heading);
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  list-style: none;
+}
+
+.settings-fold.sub > summary {
+  font-size: var(--settings-fs-row);
+}
+
+.settings-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-fold > summary .settings-advanced-chevron {
+  align-self: center;
+}
+
+.settings-fold[open] > summary .settings-advanced-chevron {
+  transform: rotate(90deg);
+  transition-duration: 160ms;
+  transition-timing-function: var(--ui-collapse-ease);
+}
+
+.settings-fold-count {
+  margin-left: var(--space-4);
+  font-size: var(--settings-fs-small);
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.settings-fold[open] > summary .settings-fold-count {
+  display: none;
+}
+
+.settings-fold-body > .settings-group:first-child {
+  padding-top: var(--space-12);
+}
+
+.settings-fold-body > .settings-fold.sub:first-child {
+  margin-top: var(--space-12);
+}
+
 /* All themes fit the column in one row; narrow windows wrap, never scroll. */
 .theme-carousel {
   display: grid;
@@ -959,8 +1053,8 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 }
 
 .theme-card:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .theme-preview {
@@ -1021,6 +1115,96 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 .theme-card.selected .theme-card-label {
   color: var(--text-primary);
   font-weight: 550;
+}
+
+/* "New": a card like the others, its thumbnail an empty frame with a plus. */
+button.theme-card {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+}
+
+button.theme-card:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.theme-preview-new {
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  color: var(--text-secondary);
+}
+
+/* A user theme's editor: swatches in one row, the CSS full width under its title, then Save and the file actions. */
+.user-theme-swatches {
+  display: flex;
+  gap: var(--space-8);
+}
+
+.user-theme-swatch {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.user-theme-swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.user-theme-swatch::-webkit-color-swatch {
+  border: none;
+  border-radius: 50%;
+}
+
+.user-theme-css {
+  display: block;
+  width: 100%;
+  min-height: 160px;
+  margin-top: var(--space-8);
+  padding: var(--space-8);
+  resize: vertical;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--settings-fs-small);
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.user-theme-css:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.user-theme-dropped {
+  color: var(--warning);
+}
+
+.user-theme-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding-block: var(--space-8);
+}
+
+.user-theme-wallpaper-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.user-theme-actions-spacer {
+  flex: 1;
 }
 
 .theme-restart-link {
@@ -1098,12 +1282,13 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   cursor: grab;
 }
 
+/* The thumb is a white dot, so keyboard focus grows it rather than ringing it. */
 .acrylic-intensity-dial:focus-visible::-webkit-slider-thumb {
-  outline: 2px solid var(--settings-focus);
+  transform: scale(1.25);
 }
 
 .acrylic-intensity-dial:focus-visible::-moz-range-thumb {
-  outline: 2px solid var(--settings-focus);
+  transform: scale(1.25);
 }
 
 .acrylic-intensity-dial:disabled {
@@ -1177,16 +1362,17 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 }
 
 .settings-select:focus-visible {
-  box-shadow: 0 0 0 1px var(--settings-focus);
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
-/* Switch: a light 28x16 track (Fluent 2 small, macOS mini scale). Off is a
-   neutral fill, on is a slightly muted accent; the white knob carries a soft
-   top light. No border, bevel or glow. */
+/* Switch, Fluent 2 outline (28x16): off is an outline with a small dot; on is an accent tint, an accent outline
+   and a light accent knob, never a full accent fill. Colours come from the text and accent tokens, so every theme
+   and accent works. Only the knob moves, briefly; no shadow, bevel or glow. */
 .toggle-switch {
   --switch-w: 28px;
   --switch-h: 16px;
-  --switch-pad: 2px;
+  --switch-pad: 3px;
   --switch-knob: calc(var(--switch-h) - 2 * var(--switch-pad));
   --switch-travel: calc(var(--switch-w) - var(--switch-knob) - 2 * var(--switch-pad));
   position: relative;
@@ -1196,9 +1382,9 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   padding: 0;
   border: 0;
   border-radius: 999px;
-  background: var(--ui-line-strong);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 34%, transparent);
   cursor: pointer;
-  transition: background-color 140ms ease-out;
 }
 
 /* Larger hit area without a larger switch. */
@@ -1216,40 +1402,36 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   width: var(--switch-knob);
   height: var(--switch-knob);
   border-radius: 999px;
-  background: #ffffff;
-  box-shadow: inset 0 -1px 0 rgba(20, 16, 30, 0.08), 0 1px 2px rgba(0, 0, 0, 0.28);
-  transition: transform var(--ui-dur-fast) ease-out, width var(--ui-dur-fast) ease-out;
+  background: color-mix(in srgb, var(--text-primary) 60%, transparent);
+  transition: transform 120ms ease-out;
 }
 
 .toggle-switch:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text-primary) 22%, transparent);
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 48%, transparent);
 }
 
-.toggle-switch.on {
-  background: color-mix(in srgb, var(--accent) 86%, #6b6b78);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
-}
-
+.toggle-switch.on,
 .toggle-switch.on:hover:not(:disabled) {
-  background: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 .toggle-switch.on::after {
+  background: color-mix(in srgb, var(--accent) 70%, #ffffff);
   transform: translateX(var(--switch-travel));
 }
 
-/* Pressing stretches the knob toward its travel, like the platform switches. */
-.toggle-switch:active:not(:disabled)::after {
-  width: calc(var(--switch-knob) + 3px);
-}
+/* On a light surface the light knob would fade into its tint: there it is the accent itself. */
+html[data-theme='light'] .toggle-switch.on::after { background: var(--accent); }
 
-.toggle-switch.on:active:not(:disabled)::after {
-  transform: translateX(calc(var(--switch-travel) - 3px));
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .toggle-switch.on::after { background: var(--accent); }
 }
 
 .toggle-switch:focus-visible {
-  outline: 2px solid var(--settings-focus);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .toggle-switch:disabled {
@@ -1496,8 +1678,8 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
 }
 
 .shortcut-recorder:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .shortcut-badge {
@@ -1612,8 +1794,8 @@ html[data-theme='high-contrast'] .notification-channel.on {
 }
 
 .notification-channel:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* The column labels, on the heading line, over their columns (the rows' inset is --space-16). */
@@ -1647,9 +1829,9 @@ html[data-theme='high-contrast'] .notification-channel.on {
 }
 
 .notification-try:focus-visible {
+  outline: none;
   opacity: 1;
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  background-image: var(--ui-focus-layer);
 }
 
 /* Agent access: the limits on automations agents add ("At most [10] active"). */
@@ -1673,4 +1855,26 @@ html[data-theme='high-contrast'] .notification-channel.on {
   margin: 0;
   font-size: 12px;
   color: var(--danger);
+}
+
+/* Settings → Labs: a profiler tool's switch sits one step under Agent access. Padding only, no bars. */
+.settings-group-rows > .settings-item.indent.indent-2 {
+  padding-left: calc(var(--settings-surface-x) + 2 * var(--space-24));
+}
+.settings-tool-name { font-size: 11px; color: var(--text-secondary); }
+
+/* Settings → Agents → Secrets: a secret's name, then what it is. */
+.secret-entry-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.secret-entry-label {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

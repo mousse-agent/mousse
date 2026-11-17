@@ -11,6 +11,9 @@ import {
 } from '../../../../src/shared/net'
 import { cleanup, profile } from '../discovery/profile'
 
+/** A delivery between two real profiles: vi.waitFor's default 1 s is too short for one on a busy machine. */
+const DELIVERY = { timeout: 10_000 }
+
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close()
 })
@@ -80,8 +83,10 @@ async function maliciousDelivery(
   // The malicious host bypasses its private append gate, but uses the real authenticated delivery.
   const position = f.host.spaces.store.appendAsAuthority(stream, { ...event, recvTs: Date.now() })
   await f.host.net.publish(stream, { ...event, ...position })
-  await vi.waitFor(() =>
-    expect(closed.length > 0 || !!f.recipient.spaces.store.getById(stream, event.id)).toBe(true)
+  await vi.waitFor(
+    () =>
+      expect(closed.length > 0 || !!f.recipient.spaces.store.getById(stream, event.id)).toBe(true),
+    DELIVERY
   )
   expect(f.recipient.spaces.store.getById(stream, event.id)).toBeUndefined()
   expect(f.recipient.spaces.store.cursor(stream)).toEqual(before)
@@ -96,8 +101,9 @@ it.each(['live', 'replay', 'snapshot'] as const)(
     f.participant.spaces.client.disconnect(f.space.space)
     const rotation = f.host.spaces.private.rotate(stream, f.audience.slice(0, 2))
     await f.host.spaces.flush(f.space.space)
-    await vi.waitFor(() =>
-      expect(f.recipient.spaces.private.state(stream)?.control.keyEpoch).toBe(2)
+    await vi.waitFor(
+      () => expect(f.recipient.spaces.private.state(stream)?.control.keyEpoch).toBe(2),
+      DELIVERY
     )
     expect(f.recipient.spaces.store.getById(stream, rotation.id)).toBeDefined()
     const attack = sealed(f.participant, stream, 'Fresh forbidden old-key message')
@@ -219,15 +225,17 @@ it.each(['nonce', 'node'] as const)(
         name: 'Unassigned private writer node',
         caps: [...DEFAULT_NODE_CAPABILITIES]
       })
-      await vi.waitFor(() =>
-        expect(
-          JSON.parse(
-            Buffer.from(
-              f.recipient.net.runtime().identity.roster(envelope.author.user)!.payload,
-              'base64url'
-            ).toString()
-          ).nodes
-        ).toHaveLength(2)
+      await vi.waitFor(
+        () =>
+          expect(
+            JSON.parse(
+              Buffer.from(
+                f.recipient.net.runtime().identity.roster(envelope.author.user)!.payload,
+                'base64url'
+              ).toString()
+            ).nodes
+          ).toHaveLength(2),
+        DELIVERY
       )
       envelope.author.node = node
       envelope.ts = Date.now()
@@ -288,11 +296,15 @@ it.each(['incremental', 'snapshot'] as const)(
         policy: { steer: { kind: 'everyone' }, visibility: 'private' }
       }
     })
-    await vi.waitFor(() => expect(f.recipient.spaces.meta.bot(f.space.space, bot)).toBeDefined())
+    await vi.waitFor(
+      () => expect(f.recipient.spaces.meta.bot(f.space.space, bot)).toBeDefined(),
+      DELIVERY
+    )
     f.host.spaces.private.rotate(stream, [...f.audience, bot])
     await f.host.spaces.flush(f.space.space)
-    await vi.waitFor(() =>
-      expect(f.recipient.spaces.private.state(stream)?.control.keyEpoch).toBe(2)
+    await vi.waitFor(
+      () => expect(f.recipient.spaces.private.state(stream)?.control.keyEpoch).toBe(2),
+      DELIVERY
     )
     function permission(p: ReturnType<typeof profile>, request?: Envelope['id'], asBot = false) {
       const envelope = decodeEnvelope(sealed(p, stream, 'Permission').envelope).envelope
@@ -317,8 +329,9 @@ it.each(['incremental', 'snapshot'] as const)(
         recvTs: Date.now()
       })
       await f.host.net.publish(stream, { ...event, ...position })
-      await vi.waitFor(() =>
-        expect(f.recipient.spaces.store.getById(stream, event.id)).toBeDefined()
+      await vi.waitFor(
+        () => expect(f.recipient.spaces.store.getById(stream, event.id)).toBeDefined(),
+        DELIVERY
       )
     }
     const request = permission(f.host, undefined, true),

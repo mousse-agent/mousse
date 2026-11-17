@@ -2,7 +2,8 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import type { BotLook } from '../../../shared/bots/personal/look'
-import { useBotsStore } from '../../stores/botsStore'
+import { useBotsStore, type BotConfirmCommand } from '../../stores/botsStore'
+import { runConfirmed } from './runBotCommand'
 import { useChatsStore } from '../../stores/chatsStore'
 import { BotLookPicker } from './face/BotLookPicker'
 
@@ -21,7 +22,10 @@ export function BotDialogFrame({ title, onClose, busy = false, keepOnBackdrop = 
   }, [])
   return <div className="chat-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy && !keepOnBackdrop) onClose() }}>
     <div ref={dialog} className="chat-dialog bot-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} style={width ? { width: `min(${width}px, calc(100vw - 40px))` } : undefined} onKeyDown={(event) => {
-      if (event.key === 'Escape' && !busy) onClose()
+      // Escape for an open menu (its button, or the menu itself in a portal) closes the menu, not the dialog.
+      const target = event.target as HTMLElement
+      const menu = !dialog.current?.contains(target) || Boolean(target.closest?.('[aria-expanded="true"]'))
+      if (event.key === 'Escape' && !busy && !menu) onClose()
       if (event.key === 'Tab') {
         const items = dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input, textarea')
         if (!items?.length) return
@@ -90,12 +94,32 @@ function DeleteDialog({ bot }: { bot: BotSummary }) {
   </BotDialogFrame>
 }
 
-/** Whichever of Rename, Change look or the Delete confirm is open. */
+/** What each confirming `/` command asks, and its button. */
+const COMMAND_CONFIRMS: Record<BotConfirmCommand, { title: (name: string) => string; text: string; action: string }> = {
+  forget: { title: (name) => `Wipe ${name}'s memory?`, text: 'Every saved memory entry is forgotten.', action: 'Wipe memory' },
+  'forget-history': { title: () => 'Wipe chat history?', text: 'The chat and run notes go; saved memory stays.', action: 'Wipe history' },
+  reset: { title: (name) => `Reset ${name}?`, text: 'Chat, memory, schedules and reminders go. Name, look, permissions and models stay.', action: 'Reset' }
+}
+
+/** The confirm before `/forget`, `/forget history` or `/reset` runs. */
+function CommandConfirmDialog({ bot, command }: { bot: BotSummary; command: BotConfirmCommand }) {
+  const copy = COMMAND_CONFIRMS[command]
+  return <BotDialogFrame title={copy.title(bot.name)} onClose={close}>
+    <p className="bot-dialog-text">{copy.text}</p>
+    <div className="bot-new-foot">
+      <button type="button" className="bot-ghost-button" onClick={close}>Cancel</button>
+      <button type="button" className="chat-primary-button bot-danger-button" onClick={() => { void runConfirmed(bot.id, command) }}>{copy.action}</button>
+    </div>
+  </BotDialogFrame>
+}
+
+/** Whichever of Rename, Change look, the Delete confirm or a command's confirm is open. */
 export function BotDialogs() {
   const dialog = useBotsStore((s) => s.dialog)
   const bots = useBotsStore((s) => s.bots)
   const bot = dialog && bots.find((entry) => entry.id === dialog.botId)
   if (!dialog || !bot) return null
+  if (dialog.kind === 'confirm') return <CommandConfirmDialog key={`${bot.id}:${dialog.command}`} bot={bot} command={dialog.command} />
   if (dialog.kind === 'rename') return <RenameDialog key={bot.id} bot={bot} />
   if (dialog.kind === 'look') return <LookDialog key={bot.id} bot={bot} others={bots.filter((entry) => entry.id !== bot.id).map((entry) => entry.look)} />
   return <DeleteDialog key={bot.id} bot={bot} />

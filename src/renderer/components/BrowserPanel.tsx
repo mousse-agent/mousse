@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { isRepeatClick } from '../lib/repeatClick'
 import {
   ArrowLeft,
   ArrowRight,
   BrowserTab,
+  Bot,
   Check,
   Clean,
   Code2,
@@ -13,17 +15,20 @@ import {
   MoreVertical,
   Plus,
   RefreshCw,
-  Smartphone
+  Smartphone,
+  User
 } from '../lib/icons'
 import { isTurnActivePhase, type BrowserElementAttachment, type BrowserTabState } from '../../shared/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
 import type { InAppBrowserState } from '../../shared/browser/inApp'
 import type { BrowserAgentCursor } from '../../shared/browser/agentCursor'
 import { AgentCursor } from './browser/AgentCursor'
+import { ThreadBrowserLayer, ThreadBrowserRow } from './browser/ThreadBrowserView'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
-import { useAppStore } from '../stores/appStore'
+import { browserTabsOpenedThisSession, useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
+import { NO_LOADED_BROWSER_TABS, nextLoadedBrowserTabs, type LoadedBrowserTabs } from '../lib/loadedBrowserTabs'
 import {
   BrowserAccessControl,
   BrowserDeviceToolbar,
@@ -242,9 +247,11 @@ interface BrowserWebviewProps {
   onReady: (id: string, webview: HTMLWebViewElement | null) => void
   onState: (id: string, patch: Partial<BrowserTabState>) => void
   onNavState: (id: string, nav: WebviewNavState) => void
+  /** The page started or stopped playing audio or video. */
+  onMedia: (id: string, playing: boolean) => void
 }
 
-function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, onReady, onState, onNavState }: BrowserWebviewProps) {
+function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, onReady, onState, onNavState, onMedia }: BrowserWebviewProps) {
   const ref = useRef<HTMLWebViewElement>(null)
   // src is the mount URL. Observed URLs (including redirects) must never be
   // written back to src: doing so starts a second, competing guest navigation.
@@ -255,10 +262,12 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
   const onReadyRef = useRef(onReady)
   const onStateRef = useRef(onState)
   const onNavStateRef = useRef(onNavState)
+  const onMediaRef = useRef(onMedia)
   zoomRef.current = tab.zoomFactor
   onReadyRef.current = onReady
   onStateRef.current = onState
   onNavStateRef.current = onNavState
+  onMediaRef.current = onMedia
 
   useEffect(() => {
     const webview = ref.current
@@ -304,12 +313,19 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
       onNavStateRef.current(tab.id, { ...readNav(), isLoading: false })
     }
 
+    const onMediaStarted = () => onMediaRef.current(tab.id, true)
+    const onMediaPaused = () => onMediaRef.current(tab.id, false)
+    // A new page in the tab has stopped whatever the last one played.
+    const onNavigate = () => { onMediaPaused(); update() }
+
     webview.addEventListener('dom-ready', onDomReady)
     webview.addEventListener('did-start-loading', onStartLoading)
     webview.addEventListener('did-stop-loading', onStopLoading)
-    webview.addEventListener('did-navigate', update)
+    webview.addEventListener('did-navigate', onNavigate)
     webview.addEventListener('did-navigate-in-page', update)
     webview.addEventListener('page-title-updated', update)
+    webview.addEventListener('media-started-playing', onMediaStarted)
+    webview.addEventListener('media-paused', onMediaPaused)
 
     // If the guest was already ready (effect re-bind / remount), re-register immediately.
     // dom-ready will not fire again for an already-loaded document.
@@ -321,12 +337,15 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
       readyRef.current = false
       onReadyRef.current(tab.id, null)
       onNavStateRef.current(tab.id, { canGoBack: false, canGoForward: false, isLoading: false })
+      onMediaPaused()
       webview.removeEventListener('dom-ready', onDomReady)
       webview.removeEventListener('did-start-loading', onStartLoading)
       webview.removeEventListener('did-stop-loading', onStopLoading)
-      webview.removeEventListener('did-navigate', update)
+      webview.removeEventListener('did-navigate', onNavigate)
       webview.removeEventListener('did-navigate-in-page', update)
       webview.removeEventListener('page-title-updated', update)
+      webview.removeEventListener('media-started-playing', onMediaStarted)
+      webview.removeEventListener('media-paused', onMediaPaused)
     }
   }, [tab.id])
 
@@ -354,9 +373,10 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
         src={initialUrl.current}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups={ALLOW_POPUPS_ATTRIBUTE}
+        data-agent-controlled={agentControlled ? '' : undefined}
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
-      {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control to interact" />}
+      {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control in the browser menu to interact" />}
       {!blank && <AgentCursor cursor={agentCursor} zoom={tab.zoomFactor || 1} />}
     </KeepMounted>
   )
@@ -385,6 +405,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const setActiveTab = useAppStore((s) => s.setActiveBrowserTab)
   const addElementAttachment = useAppStore((s) => s.addBrowserElementAttachment)
   const webviews = useRef(new Map<string, HTMLWebViewElement>())
+  const loadedTabs = useRef<LoadedBrowserTabs>(NO_LOADED_BROWSER_TABS)
+  const [mediaTabs, setMediaTabs] = useState<ReadonlySet<string>>(() => new Set())
   const registrations = useRef(new Map<string, Promise<unknown>>())
   const editingAddress = useRef(false)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
@@ -417,6 +439,12 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const picker = useRef<{ webview: HTMLWebViewElement } | null>(null)
   const manualActive = active && !agentControlled
   const pendingAccess = access.allowed ? undefined : access.pending[0]
+  // Turning agent access on from the toolbar asks first in the same bar as an agent's request, which pauses a theme,
+  // so no theme can turn a click elsewhere into a grant. Turning it off needs no question.
+  const [confirmingAccess, setConfirmingAccess] = useState(false)
+  // A change made elsewhere (another window, an agent's request answered) ends the question asked here.
+  useEffect(() => { setConfirmingAccess(false) }, [access.allowed])
+  const askingAccess = Boolean(pendingAccess) || (confirmingAccess && !access.allowed)
   useEffect(() => {
     let disposed = false
     let timer: ReturnType<typeof setTimeout>
@@ -547,14 +575,29 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
         })
         registrations.current.set(id, registration)
         void registration.catch((error) => {
+          // A tab that unloaded meanwhile has nothing to report.
+          if (registrations.current.get(id) !== registration) return
           registrations.current.delete(id)
           // A kept tab can outlive its thread; a failure there is not this view's to report.
           if (!threadId || threadId === useAppStore.getState().activeThreadId) setBrowserError(error)
         })
       }
     }
-    else webviews.current.delete(id)
+    else {
+      // An unloaded tab's page is gone with its registration; the page it loads when shown again registers anew.
+      webviews.current.delete(id)
+      registrations.current.delete(id)
+    }
   }, [setBrowserError])
+  const handleMedia = useCallback((id: string, playing: boolean) => {
+    setMediaTabs((previous) => {
+      if (previous.has(id) === playing) return previous
+      const next = new Set(previous)
+      if (playing) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }, [])
   const handleWebviewState = useCallback((id: string, patch: Partial<BrowserTabState>) => {
     updateTab(id, patch)
     if (id === activeTab?.id && !editingAddress.current && patch.url) {
@@ -585,6 +628,18 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const canGoBack = activeNav?.canGoBack ?? false
   const canGoForward = activeNav?.canGoForward ?? false
   const loading = activeNav?.isLoading ?? false
+
+  // A tab an agent works in (or a person took over from one) keeps its page, so the agent's session goes on.
+  const busyTabs = useMemo(() => {
+    const busy = new Set(mediaTabs)
+    for (const [id, state] of Object.entries(controlByTab)) if (state.owner === 'agent' || state.owner === 'human') busy.add(id)
+    return busy
+  }, [controlByTab, mediaTabs])
+  const tabIds = useMemo(() => tabs.map((tab) => tab.id), [tabs])
+  loadedTabs.current = nextLoadedBrowserTabs(loadedTabs.current, {
+    tabIds, activeTabId: activeTab?.id, shown: active, openedThisSession: browserTabsOpenedThisSession, busy: busyTabs
+  })
+  const loaded = loadedTabs.current.loaded
 
   const navigate = () => {
     const webview = getActiveWebview()
@@ -687,16 +742,13 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     >
       <KeepMountedStack>
       <KeepMounted active preserveLayout className="keep-mounted-pane browser-manual-surface">
-      {pendingAccess && <div className="browser-agent-controls" role="region" aria-label="Agent browser access request">
+      {askingAccess && <div className="browser-agent-controls" data-mousse-decision="" role="region" aria-label="Agent browser access request">
         <span>Allow access to all browser tabs?</span>
-        <button type="button" disabled={browserBusy} onClick={() => void changeAccess(true, pendingAccess.requestId)}>Allow</button>
-        <button type="button" disabled={browserBusy} onClick={() => void changeAccess(false, pendingAccess.requestId)}>Deny</button>
+        <button type="button" disabled={browserBusy} onClick={(event) => { if (isRepeatClick(event)) return; setConfirmingAccess(false); void changeAccess(true, pendingAccess?.requestId) }}>Allow</button>
+        <button type="button" disabled={browserBusy} onClick={() => { setConfirmingAccess(false); if (pendingAccess) void changeAccess(false, pendingAccess.requestId) }}>Deny</button>
       </div>}
-      {hasVisibleTabs && (agentControlled || activeControl?.owner === 'human') && <div className="browser-agent-controls" aria-label="Agent browser controls">
-        <span>{agentControlled ? 'Agent is using this tab' : 'You have control'}</span>
-        {agentControlled ? <button type="button" disabled={browserBusy} onClick={() => void browserControl('take')}>Take control</button>
-          : <button type="button" disabled={browserBusy || !access.allowed} onClick={() => void browserControl('resume')}>Resume agent</button>}
-      </div>}
+      {/* The thread agent's browser without a window, when it has one open: its line, and its view over the tabs. */}
+      {activeThreadId && <ThreadBrowserRow threadId={activeThreadId} active={active} />}
       {!hasVisibleTabs && noticeView}
       {hasVisibleTabs ? (
         <>
@@ -720,7 +772,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
               <Crosshair size={16} />
             </button>
             </div>
-            <BrowserAccessControl state={agentState} allowed={access.allowed} busy={browserBusy} onChange={(allowed) => void changeAccess(allowed)} />
+            <BrowserAccessControl state={agentState} allowed={access.allowed} busy={browserBusy} onChange={(allowed) => { if (allowed) setConfirmingAccess(true); else { setConfirmingAccess(false); void changeAccess(false) } }} />
             <div className="browser-menu-wrap">
               <button
                 ref={menuButtonRef}
@@ -741,6 +793,12 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
                     onPointerDown={() => setMenuOpen(false)}
                   />
                   <div className="browser-menu browser-menu-floating" ref={menuRef} style={menuStyle} role="menu" aria-label="Browser menu">
+                    {(agentControlled || activeControl?.owner === 'human') && <>
+                      <button type="button" role="menuitem" disabled={browserBusy || (!agentControlled && !access.allowed)} onClick={() => { setMenuOpen(false); void browserControl(agentControlled ? 'take' : 'resume') }}>
+                        <span className="browser-menu-label">{agentControlled ? <User size={14} /> : <Bot size={14} />}{agentControlled ? 'Take control' : 'Resume agent'}</span>
+                      </button>
+                      <div className="browser-menu-separator" />
+                    </>}
                     <div className="browser-menu-actions" style={{ display: 'contents' }} inert={agentControlled}>
                     <button type="button" role="menuitem" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
                       <span className="browser-menu-label"><RefreshCw size={14} />Hard reload</span>
@@ -785,9 +843,9 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
           </button>
         </div>
       )}
-      {/* All guests stay mounted so switching threads does not reload pages or lose DOM state. */}
+      {/* Loaded guests stay mounted across threads, so going back to a recent tab neither reloads it nor loses its page. */}
       <KeepMounted active={hasVisibleTabs} preserveLayout className="browser-content">
-        {tabs.map((tab) => (
+        {tabs.filter((tab) => loaded.has(tab.id)).map((tab) => (
           <BrowserWebview
             key={`${profileId}:${tab.id}`}
             tab={tab}
@@ -798,11 +856,13 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             onReady={registerWebview}
             onState={handleWebviewState}
             onNavState={handleNavState}
+            onMedia={handleMedia}
           />
         ))}
       </KeepMounted>
       </KeepMounted>
       </KeepMountedStack>
+      {activeThreadId && <ThreadBrowserLayer threadId={activeThreadId} />}
       {confirmClearCookies && (
         <FloatingPortal>
           <ClearCookiesDialog

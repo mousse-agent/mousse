@@ -47,21 +47,23 @@ describe('the experimental settings', () => {
     })))
     draw()
   }
-  const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Give each subagent its own worktree"]')!
-  const saved = () => new SettingsStore(MousseConfigStore.load(home)).get().experimental
+  const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Worktree per subagent"]')!
+  const saved = () => ({ subagentWorktrees: new SettingsStore(MousseConfigStore.load(home)).get().experimental.subagentWorktrees })
 
   it('give subagents their own worktree only when turned on, and only an explicit true does it', () => {
-    expect(getDefaultSettings().experimental).toEqual({ subagentWorktrees: false })
-    expect(store.get().experimental).toEqual({ subagentWorktrees: false })
+    expect(getDefaultSettings().experimental.subagentWorktrees).toBe(false)
+    expect(store.get().experimental.subagentWorktrees).toBe(false)
     for (const value of ['yes', 1, null, undefined]) expect(normalizeExperimentalSettings({ subagentWorktrees: value as never }).subagentWorktrees).toBe(false)
-    expect(normalizeExperimentalSettings({ subagentWorktrees: true })).toEqual({ subagentWorktrees: true })
+    expect(normalizeExperimentalSettings({ subagentWorktrees: true }).subagentWorktrees).toBe(true)
   })
 
-  it('show the row under Agents > Experimental, off by default, and save a change in mousse.conf', () => {
+  it('show the row under Agents > Subagents with an Experimental badge, off by default, and save a change in mousse.conf', () => {
     show()
-    const group = Array.from(host.querySelectorAll('h2, h3, [role="heading"]')).find((heading) => heading.textContent?.trim() === 'Experimental')
-    expect(group).toBeDefined()
-    expect(host.textContent).toContain('Give each subagent its own worktree')
+    const group = toggle().closest('section.settings-group')!
+    expect(group.querySelector('h3')?.textContent?.trim()).toBe('Subagents')
+    const row = toggle().closest('.settings-item')!
+    expect(row.querySelector('.settings-item-title')?.textContent).toBe('Worktree per subagent')
+    expect(row.querySelector('.settings-badge')?.textContent).toBe('Experimental')
     expect(toggle().getAttribute('aria-checked')).toBe('false')
     act(() => toggle().click())
     expect(toggle().getAttribute('aria-checked')).toBe('true')

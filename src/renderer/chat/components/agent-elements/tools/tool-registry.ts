@@ -1,18 +1,17 @@
 import type React from "react";
 import {
-  IconSearch as Search,
-  IconEye as Eye,
-  IconFolderSearch as FolderSearch,
   IconGitBranch as GitBranch,
   IconTerminal2 as Terminal,
   IconCircleX as XCircle,
-  IconFileCode as FileCode2,
+  Eye,
+  RowEdit,
+  RowSearch,
+  RowSubagent,
+  RowTodo,
+  RowWeb,
   ThinkingIcon,
   IconSparkles as Sparkles,
-  IconGlobe as Globe,
-  IconFilePlus as FilePlus,
-  IconChecklist as ListTodo,
-  IconLogout as LogOut,
+  Wrench,
 } from "../../../../lib/icons";
 import {
   isRefusedSubagentResult,
@@ -26,8 +25,28 @@ export type ToolMeta = {
   icon: React.ComponentType<{ className?: string; size?: number }>;
   title: (part: any) => string;
   subtitle?: (part: any) => string;
+  /** The full detail when the subtitle shortens it, for the tooltip. */
+  detailTitle?: (part: any) => string;
   variant: ToolVariant;
 };
+
+/** Claude Code's `ToolSearch` query: `select:A,B` loads those tools by name; anything else is a search. */
+function toolSearchQuery(part: any): string {
+  const query = part.input?.query;
+  return typeof query === "string" ? query.trim() : "";
+}
+
+/** The tools a `select:` query names, by their short names (`mcp__mousse__thread_list` is `thread_list`). */
+function toolSearchSubtitle(part: any): string {
+  const query = toolSearchQuery(part);
+  if (!query.startsWith("select:")) return query;
+  return query
+    .slice("select:".length)
+    .split(",")
+    .map((name) => name.trim().split("__").pop() ?? "")
+    .filter(Boolean)
+    .join(", ");
+}
 
 function getDisplayPath(filePath: string): string {
   if (!filePath) return "";
@@ -101,7 +120,7 @@ function isSubagentCallFailed(part: any): boolean {
 
 export const toolRegistry: Record<string, ToolMeta> = {
   "tool-Subagent": {
-    icon: Sparkles,
+    icon: RowSubagent,
     title: (part) => {
       const titles = SUBAGENT_TOOL_TITLES[part.subagentTool as SubagentToolName];
       if (!titles) return "Subagent";
@@ -120,7 +139,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Task": {
-    icon: Sparkles,
+    icon: RowSubagent,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -137,7 +156,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
   },
   // Agent tool — renamed from "Task" in claude-agent-sdk 0.2.63+
   "tool-Agent": {
-    icon: Sparkles,
+    icon: RowSubagent,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -159,7 +178,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Grep": {
-    icon: Search,
+    icon: RowSearch,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -179,7 +198,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Glob": {
-    icon: FolderSearch,
+    icon: RowSearch,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -208,7 +227,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Edit": {
-    icon: FileCode2,
+    icon: RowEdit,
     title: (part) => {
       const filePath = getFilePathInput(part.input);
       if (!filePath) return "Edit";
@@ -243,7 +262,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Write": {
-    icon: FilePlus,
+    icon: RowEdit,
     title: () => "Create",
     subtitle: (part) => {
       const filePath = getFilePathInput(part.input);
@@ -275,7 +294,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-WebFetch": {
-    icon: Globe,
+    icon: RowWeb,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -292,7 +311,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-WebSearch": {
-    icon: Search,
+    icon: RowWeb,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -305,7 +324,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "collapsible",
   },
   "tool-TodoWrite": {
-    icon: ListTodo,
+    icon: RowTodo,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -326,30 +345,13 @@ export const toolRegistry: Record<string, ToolMeta> = {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
       const action = part.input?.action || "create";
-      if (isPending) {
-        if (action === "create") return "Creating plan";
-        if (action === "approve") return "Approving plan";
-        return "Updating plan";
-      }
-      const status = part.input?.plan?.status;
-      if (status === "awaiting_approval") return "Plan ready for review";
-      if (status === "approved") return "Plan approved";
-      if (status === "completed") return "Plan completed";
+      if (isPending) return action === "create" ? "Creating plan" : "Updating plan";
       return action === "create" ? "Created plan" : "Updated plan";
     },
     variant: "simple",
   },
-  "tool-ExitPlanMode": {
-    icon: LogOut,
-    title: (part) => {
-      const isPending =
-        part.state !== "output-available" && part.state !== "output-error";
-      return isPending ? "Finishing plan" : "Plan complete";
-    },
-    variant: "simple",
-  },
   "tool-NotebookEdit": {
-    icon: FileCode2,
+    icon: RowEdit,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -383,6 +385,18 @@ export const toolRegistry: Record<string, ToolMeta> = {
         ? normalized.slice(0, 47) + "..."
         : normalized;
     },
+    variant: "simple",
+  },
+  "tool-ToolSearch": {
+    icon: Wrench,
+    title: (part) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      if (isPending) return "Loading tools";
+      return part.state === "output-error" ? "Couldn't load tools" : "Loaded tools";
+    },
+    subtitle: toolSearchSubtitle,
+    detailTitle: toolSearchQuery,
     variant: "simple",
   },
   "tool-KillShell": {

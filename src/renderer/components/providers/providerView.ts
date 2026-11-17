@@ -241,7 +241,7 @@ export function switchStateOf(snapshot: Pick<InstanceSnapshot, 'enabled'>, scope
   }
 }
 
-/** What a provider row says about its model list: when it was updated, or that it is a cached list. */
+/** How fresh a provider's model list is, for the editor's Models tooltip: when it was updated, or that it is a cached list. */
 export type ModelsFreshness = { kind: 'updated'; at: number } | { kind: 'cached' }
 
 /**

@@ -12,6 +12,7 @@ import {
 } from 'fs'
 import { basename, dirname, join } from 'path'
 import { quarantineUnreadableFileSync } from '../data/AtomicFs'
+import { trackFileWatcher } from '../diagnostics/liveCounts'
 import { upgradeSelection } from '../../shared/modelSelection'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
@@ -44,6 +45,7 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
   for (const key of Object.keys(partial) as Array<keyof T>) {
     const value = partial[key]
     if (key === '__proto__' || key === 'prototype' || key === 'constructor') continue
+    if (key === 'quietHours' && value === null) { delete result[key]; continue }
     if (value === undefined) continue
     const existing = base[key]
     if (
@@ -133,7 +135,8 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     createThread: job.createThread,
     selection: job.selection,
     ...(job.agent?.definitionId ? { agent: { definitionId: job.agent.definitionId } } : {}),
-    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.model ? { model: job.bot.model } : {}) } } : {}),
+    // An automation's model by hand keeps its entry beside its name (#673); a build that writes only the name drops it.
+    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.canWakeMe !== undefined ? { canWakeMe: job.bot.canWakeMe } : {}), ...(job.bot.ownerAsked !== undefined ? { ownerAsked: job.bot.ownerAsked } : {}), ...(job.bot.say !== undefined ? { say: job.bot.say } : {}), ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick ? { pick: job.bot.pick } : {}) } } : {}),
     mode: job.mode,
     workspace: job.workspace,
     permissionMode: job.permissionMode,
@@ -334,6 +337,9 @@ export class MousseConfigStore {
       mms: { ...base.mms, ...(raw.mms ?? {}) },
       features: { ...base.features, ...(raw.features ?? {}) }
     }
+    // What bots may do here (removed): a `settings.bots` an unreleased build wrote into a profile's file is dropped. The
+    // installation's top-level `bots` stays as stored, like other leftover keys, and nothing reads it.
+    delete (normalized.settings as unknown as Record<string, unknown>).bots
     validateFeatureFlags(normalized.features)
     return normalized
   }
@@ -431,6 +437,7 @@ export class MousseConfigStore {
     } else if (this.scope === 'profile') {
       delete payload.mms
       delete payload.features
+      delete payload.bots
     }
     atomicWriteJson(this.confPath, payload)
   }
@@ -665,9 +672,9 @@ export class MousseConfigStore {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true })
     }
-    this.watcher = watch(this.confPath, () => {
+    this.watcher = trackFileWatcher(watch(this.confPath, () => {
       this.reloadFromDisk()
-    })
+    }))
   }
 
   stopWatching(): void {

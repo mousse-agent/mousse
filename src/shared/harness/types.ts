@@ -21,6 +21,19 @@ export type HarnessDriverKind = ProviderDriverKind
 export interface HarnessCaps {
   /** How steer text reaches a live turn (`CommandPolicy.steerStrategy`). */
   steer: 'native' | 'interrupt_restart' | 'queue_only'
+  /**
+   * When the adapter reports a tool call, so a person's steer can wait for it (`CommandPolicy.steerDelivery`):
+   * `announce` before it runs, `start` when it starts, `none` when the adapter keeps the behaviour from before
+   * the hold (a steer cuts in at once). Caps from before the key existed read as `none`.
+   */
+  steerBoundary: 'announce' | 'start' | 'none'
+  /**
+   * The release window after a tool on a `start` provider (`CommandPolicy.steerReleaseWindow`): twice the largest
+   * gap measured between a tool's result and the next start of the same response, plus 100 ms. `null`: no window
+   * applies (`announce`, `none`), or the gap was never measured, and then a held steer waits for the provider's turn
+   * to end (strict release), whatever the instance's setting. Caps from before the key existed read as `null`.
+   */
+  steerSettleMs: number | null
   /** The live turn can be interrupted natively (`CommandPolicy.stopStrategy`). */
   interrupt: boolean
   rollback: 'native' | 'none'
@@ -78,11 +91,11 @@ export interface HarnessCaps {
  */
 export type RunCapabilities = Pick<
   HarnessCaps,
-  'steer' | 'interrupt' | 'rollback' | 'fork' | 'events' | 'containment' | 'historyInjection' | 'mcp' | 'childPolicy'
+  'steer' | 'steerBoundary' | 'steerSettleMs' | 'interrupt' | 'rollback' | 'fork' | 'events' | 'containment' | 'historyInjection' | 'mcp' | 'childPolicy'
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'autoPermissionMode', 'budgets', 'spendLimits'
+  'steer', 'steerBoundary', 'steerSettleMs', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'autoPermissionMode', 'budgets', 'spendLimits'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */
@@ -218,6 +231,22 @@ export const APPROVALS_REFUSED_MESSAGE = 'Tools that need approval are refused h
 
 /** What the model is told when it asks the user a question in a run nobody answers (`approvals: 'never'`). */
 export const QUESTIONS_REFUSED_MESSAGE = 'Nobody can answer questions here. Continue without asking.'
+
+/**
+ * The error code of a turn that reached its runtime's own cap on model turns (Claude Code's `maxTurns`, which only a
+ * bot's turn sets). The turn ended there, not the work: a bot carries it on in its next dispatch.
+ */
+export const PROVIDER_TURN_CAP = 'provider_turn_cap'
+
+/** How a provider's failure reads as its turn's error (the transcript line and the run's `outcome.error`): `[code] message`. */
+export function providerFailureText(error: { code: string; message: string }): string {
+  return `[${error.code}] ${error.message}`
+}
+
+/** Whether a run's error says its turn reached the runtime's cap on model turns (`providerFailureText` of `PROVIDER_TURN_CAP`). */
+export function isProviderTurnCap(error: unknown): boolean {
+  return typeof error === 'string' && error.startsWith(`[${PROVIDER_TURN_CAP}]`)
+}
 
 /** Why the gateway could not serve a request. Typed so callers never parse messages. */
 export const HARNESS_ERROR_CODES = [
@@ -368,6 +397,8 @@ export interface ModelCapabilities {
   effortDescriptions?: Record<string, string>
   /** `false`: the model cannot turn thinking off. */
   thinkingOff?: false
+  /** Speeds besides the standard one, chosen by a suffix on the model id (`opus:fast`). */
+  speeds?: Array<'fast' | 'slow'>
   images: boolean
   /** Context window in tokens, when known. */
   contextWindow?: number
@@ -428,6 +459,8 @@ export interface InstanceConfigPatch {
   displayName?: string | null
   /** The entry's agent telemetry; refused for an agent that documents no switch. */
   telemetry?: TelemetrySetting
+  /** Claude Code: keep the prompt cache for an hour (true) or not (false); null returns to the automatic default. */
+  promptCacheHour?: boolean | null
   /** `default` = the user's own vendor home; `private` = a Mousse-owned home for this instance. */
   home?: 'default' | 'private'
   /** Explicit executable. When it cannot run, the instance reports "Override not found" (no PATH fallback). */

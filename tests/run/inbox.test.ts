@@ -153,12 +153,15 @@ describe('Inbox (SPEC §14.1)', () => {
 
     it('names the subagent by title and thread and inlines a result that fits, once', () => {
       const planned = planWakeNotice([row('delegation:1', { runStatus: 'completed', text: 'All three modules are fine.' })], titles)
-      expect(planned.text).toBe('Subagent "API reviewer" (thread c) finished task delegation:1.\nAll three modules are fine.\nFull result above.')
+      expect(planned.text).toBe('<mousse_notice kind="subagent_result" ref="delegation:1">\nSubagent "API reviewer" (thread c) finished its task.\n\n<quoted from="subagent result">\nAll three modules are fine.\n</quoted>\n</mousse_notice>')
       expect(planned.items).toEqual([{ delegationId: 'delegation:1', childThreadId: 'c', title: 'API reviewer', runStatus: 'completed', fullyShown: true }])
     })
 
     it('falls back to the thread when the title is gone, and says when a task left no message', () => {
-      expect(formatInboxNotice(row('delegation:1', { runStatus: 'completed', text: '' }))).toBe('Subagent thread c finished task delegation:1.\nIt left no message.')
+      const text = formatInboxNotice(row('delegation:1', { runStatus: 'completed', text: '' }))
+      expect(text).toMatch(/^<mousse_notice kind="subagent_result" ref="delegation:1">\n/)
+      expect(text).toContain('Subagent thread c finished its task.\n\nIt left no message.')
+      expect(text).not.toContain('<quoted')
     })
 
     it('cuts a result at the per-task limit and points at task_status for the rest', () => {
@@ -166,7 +169,7 @@ describe('Inbox (SPEC §14.1)', () => {
       const planned = planWakeNotice([row('delegation:1', { runStatus: 'completed', text: long })], titles)
       expect(planned.text).toContain('x'.repeat(NOTICE_TASK_CHARS))
       expect(planned.text).not.toContain('x'.repeat(NOTICE_TASK_CHARS + 1))
-      expect(planned.text).toContain(`[Result cut at ${NOTICE_TASK_CHARS} of ${NOTICE_TASK_CHARS + 500} characters; call task_status with delegation:1 for the rest.]`)
+      expect(planned.text).toContain(`The result is cut at ${NOTICE_TASK_CHARS} of ${NOTICE_TASK_CHARS + 500} characters; call task_status with delegation:1 for the rest.`)
       expect(planned.items[0].fullyShown).toBe(false)
     })
 
@@ -181,9 +184,11 @@ describe('Inbox (SPEC §14.1)', () => {
 
     it('reports a failed task with its error, and joins other rows after a blank line', () => {
       const failed = row('delegation:2', { runStatus: 'interrupted', error: 'daemon restart' }, 'd')
-      expect(formatInboxNotice(failed, titles)).toBe('Subagent "Docs writer" (thread d) ended task delegation:2 (interrupted).\ndaemon restart\nFull result above.')
+      const text = formatInboxNotice(failed, titles)
+      expect(text).toMatch(/^<mousse_notice kind="subagent_result" ref="delegation:2">\n/)
+      expect(text).toContain('Subagent "Docs writer" (thread d) ended its task (interrupted).\n\n<quoted from="subagent result">\ndaemon restart\n</quoted>')
       const notice: InboxRecord = { ...failed, kind: 'reconcile_notice', payload: { text: 'Integration finished.' } }
-      expect(formatWakeNotice([failed, notice], titles).split('\n\n')).toHaveLength(2)
+      expect(formatWakeNotice([failed, notice], titles)).toBe(`${text}\n\nIntegration finished.`)
       expect(formatWakeNotice([notice])).toBe('Integration finished.')
     })
   })

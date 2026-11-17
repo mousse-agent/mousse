@@ -181,8 +181,10 @@ describe('OrchestratorService over the Run Engine', () => {
       'succeeded'
     ])
 
-    // Stop keeps queued work; draining it runs the queued run under its own id.
+    // Stop keeps queued work and holds it, even across a startup drain; Send now runs the queued run under its own id.
     orch.recoverAndDrainPendingQueues()
+    expect(engine.getRun(r2.runId!)!.status).toBe('queued')
+    expect(orch.promoteQueueItem(thread.id, r2.queueItem!.id)).toEqual({ ok: true })
     await waitFor(() => engine.getRun(r2.runId!)?.status === 'completed', 10_000, 'second run')
     expect(chatCalls).toBe(2)
     expect(engine.listRuns(thread.id).map((run) => [run.ordinal, run.status])).toEqual([
@@ -295,7 +297,7 @@ describe('OrchestratorService over the Run Engine', () => {
     const internals = orch as unknown as { setTurnPhase: (threadId: string, phase: string, ...rest: unknown[]) => void }
     const setTurnPhase = internals.setTurnPhase.bind(orch)
     internals.setTurnPhase = (threadId, phase, ...rest) => {
-      if (phase === 'finalizing') throw new Error('Workspace branch changed during execution; recovery is required.')
+      if (phase === 'completed') throw new Error('Workspace branch changed during execution; recovery is required.')
       setTurnPhase(threadId, phase, ...rest)
     }
     const first = await orch.send('push and open a PR', false, { threadId: thread.id, clientRequestId: 'failed-send' })

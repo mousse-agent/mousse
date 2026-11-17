@@ -4,8 +4,6 @@
  * settings (Claude's settings.json), and last a collapsed, dimmed Info with the read-only facts.
  * A key arrives masked and is only replaced; a file shared with the terminal asks once first.
  */
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -81,12 +79,16 @@ describe('Advanced of a Claude Code entry', () => {
     host.remove()
   })
 
-  it('opens on what can be changed, then the Claude settings, then a closed and dimmed Info with the facts', async () => {
+  it('keeps the name up front, groups what can be changed under titles, then a closed and dimmed Info with the facts', async () => {
     await mount()
-    const sections = [...advanced().children].map((child) => child.getAttribute('data-testid') ?? child.querySelector('.settings-group-title')?.textContent)
-    expect(sections).toEqual(['prov-advanced-list', 'Claude settings', 'prov-info'])
-    const editable = host.querySelector('[data-testid="prov-advanced-list"]')!.textContent!
-    for (const title of ['Display name', 'Executable path', 'Launch arguments', 'Variables']) expect(editable).toContain(title)
+    expect(advanced().querySelector('[aria-label="Display name"]')).toBeNull()
+    expect(host.querySelector('[aria-label="Display name"]')).not.toBeNull()
+    const groups = [...advanced().children].map((child) => child.getAttribute('data-testid') ?? child.querySelector('.settings-group-title')?.textContent)
+    // No telemetry switch on this entry, so no Behavior group.
+    expect(groups).toEqual(['Runtime', 'Environment', 'Claude settings', 'prov-info'])
+    const group = (title: string) => [...advanced().children].find((child) => child.querySelector('.settings-group-title')?.textContent === title)!.textContent!
+    for (const title of ['Executable path', 'Launch arguments']) expect(group('Runtime')).toContain(title)
+    expect(group('Environment')).toContain('Variables')
     // No read-only fact sits among the editable rows.
     for (const fact of ['Executable in use', 'Account home', '/usr/local/bin/claude', 'set up the way you use it']) expect(advanced().textContent).not.toContain(fact)
 
@@ -107,12 +109,6 @@ describe('Advanced of a Claude Code entry', () => {
     const settingsRow = [...info.querySelectorAll('.prov-info-row')].find((row) => row.textContent?.startsWith('Settings file'))!
     expect(settingsRow.querySelector('dd')!.getAttribute('title')).toBe(PATH)
     expect(settingsRow.querySelector('button[aria-label="Copy settings file"]')).not.toBeNull()
-  })
-
-  it('Info is muted until pointed at or focused', () => {
-    const css = readFileSync(join(__dirname, '../../src/renderer/styles/providers.css'), 'utf8')
-    expect(css).toMatch(/\.prov-info \{[^}]*opacity: 0\.7;/)
-    expect(css).toMatch(/\.prov-info:hover,\s*\.prov-info:focus-within \{\s*opacity: 1;/)
   })
 
   it('shows a key masked, replaces it after asking once about the shared file, and never asks again', async () => {

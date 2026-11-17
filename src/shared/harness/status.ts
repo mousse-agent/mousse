@@ -25,14 +25,25 @@ export interface InstanceBinary {
   version?: string
   source: BinarySource
   owner?: InstallOwner
+  /** Updating it needs rights this user lacks (a root-owned npm prefix); Mousse never runs sudo. */
+  needsElevation?: boolean
 }
 
+/** `untested`: `latestVersion` is newer than the versions Mousse was tested with. */
 export type UpdateAffordance =
-  | { kind: 'one_click'; owner: InstallOwner; latestVersion?: string }
-  /** Installed by its owner (npm, brew, the CLI's own installer): Update runs `command`, which can also be copied. */
-  | { kind: 'advisory'; command: string; latestVersion?: string }
+  | { kind: 'one_click'; owner: InstallOwner; latestVersion?: string; untested?: boolean }
+  /**
+   * Installed by its owner (npm, brew, the CLI's own installer): Update runs `command`, which can
+   * also be copied. `manual`: the command needs rights Mousse does not have, so it is only shown.
+   */
+  | { kind: 'advisory'; command: string; latestVersion?: string; untested?: boolean; manual?: boolean }
   /** A newer version is known, but Mousse cannot say how this copy was installed: no command, no action. */
-  | { kind: 'notice'; latestVersion: string }
+  | { kind: 'notice'; latestVersion: string; untested?: boolean }
+
+/** The status detail for a known newer version; the provider editor shows its own update chip instead. */
+export function updateAvailableDetail(latestVersion: string): string {
+  return `Update available: ${latestVersion}.`
+}
 
 export type NextStepAction =
   | 'enable'
@@ -105,6 +116,37 @@ export interface KnownProblem {
 export type CredentialKind = 'api_key' | 'subscription' | 'ambient' | 'unknown'
 
 /**
+ * Whether a Claude Code entry's turns keep the prompt cache for an hour (Claude Code's
+ * `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`) instead of five minutes, and what that rests on:
+ * - `subscription`: Mousse confirmed a subscription sign-in (Claude Code's own, or every seat a
+ *   local proxy lists is an OAuth seat). Writing the cache for an hour costs it nothing extra, so
+ *   it is always on and there is no choice to make: a stored choice is ignored.
+ * - `per_token`: the entry pays per token (a Mousse API-key entry, an API-key sign-in, a proxy
+ *   whose seats are all API keys, Bedrock, Vertex or Foundry), where hour-long cache writes can
+ *   cost more. Off unless the user turns it on.
+ * - `unconfirmed`: anything else (a gateway, a proxy Mousse cannot list, mixed seats). Off unless
+ *   the user turns it on.
+ */
+export interface PromptCacheHour {
+  basis: 'subscription' | 'per_token' | 'unconfirmed'
+  /** The user's own Claude Code settings or environment choose the cache lifetime: Mousse sets nothing. */
+  userSetting?: true
+  /** The user's choice in Settings → Providers, off a confirmed subscription; absent: none made (off). */
+  choice?: boolean
+  /** What the entry's next turn does (`promptCacheHourOn`). */
+  on: boolean
+}
+
+/**
+ * Whether an entry keeps the cache for an hour: always on a confirmed subscription, otherwise only
+ * when the user turned it on; never when their own Claude Code settings choose the lifetime.
+ */
+export function promptCacheHourOn(state: Pick<PromptCacheHour, 'basis' | 'userSetting'>, choice: boolean | undefined): boolean {
+  if (state.userSetting) return false
+  return state.basis === 'subscription' || choice === true
+}
+
+/**
  * The entry's agent telemetry (Settings → Providers). Mousse applies it only through what it adds to
  * the processes it starts; it never edits the agent's files.
  * - `off`: every process starts with the agent's documented switch (`variables`, `args`) set last;
@@ -174,6 +216,8 @@ export interface InstanceSnapshot {
    * settings forbid bypassing permissions). Read on every snapshot; absent when nothing does.
    */
   permissionLimits?: PermissionLimits
+  /** Claude Code: whether its turns may keep the prompt cache for an hour. Read on every snapshot. */
+  promptCacheHour?: PromptCacheHour
   /** The stored settings the editor shows; present on daemons with the harness gateway. */
   config?: InstanceConfigView
   models: {
@@ -267,7 +311,7 @@ function updateStep(snapshot: InstanceSnapshot): NextStep | null {
   if (!update) return null
   if (update.kind === 'one_click') return step(snapshot, 'update')
   if (update.kind === 'notice') return null
-  return { action: 'update', label: 'Update', command: update.command }
+  return { action: 'update', label: update.manual ? 'Update manually' : 'Update', command: update.command }
 }
 
 function withLabel(headline: string, label: string | undefined): string {
@@ -443,7 +487,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   const detail = allowed ?? (compatibility.state === 'newer_than_tested'
     ? `Newer than the versions Mousse was tested with${compatibility.testedRange ? ` (${compatibility.testedRange})` : ''}.`
     : snapshot.update?.latestVersion
-      ? `Update available: ${snapshot.update.latestVersion}.`
+      ? updateAvailableDetail(snapshot.update.latestVersion)
       : null)
   return {
     headline,

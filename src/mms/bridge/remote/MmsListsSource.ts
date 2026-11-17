@@ -1,15 +1,28 @@
 import type { ChatSummary } from '../../../shared/chats'
+import type { BotChip, BotSummary } from '../../../shared/bots/personal/chat'
 import type { Project, Thread, ThreadActivityState, TurnState } from '../../../shared/types'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { rollUpActivities, visibleThreads, isLocalOnlyThread } from '../../../shared/threadLineage'
-import { MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
 import { mmsJson } from './jsonOutput'
+import { remoteBotSummary } from './RemoteBots'
+import type { BotsSharingPort } from '../../protocol/botsSharingPort'
+import type { BotReachPort } from '../../protocol/botReachPort'
 
 /**
  * The reserved display "thread" that carries a computer's sidebar lists. Real thread ids never
  * contain a colon, so this id cannot name a real thread.
  */
 export const LISTS_STREAM_THREAD_ID = 'mousse:lists'
+/**
+ * The lists stream of one device (a phone), which only that device reads: `mousse:lists:<node>`. `bridge.lists.open`
+ * opens it for the caller, so the bots in it are the ones that device reaches. Its records carry
+ * `LISTS_STREAM_THREAD_ID` as their thread, as the shared stream's do.
+ */
+const READER_LISTS_PREFIX = `${LISTS_STREAM_THREAD_ID}:`
+export const readerListsKey = (node: string): string => `${READER_LISTS_PREFIX}${node}`
+/** The device whose own lists stream `key` is, if it is one. */
+export const readerOfListsKey = (key: string): string | undefined =>
+  key.startsWith(READER_LISTS_PREFIX) && key.length > READER_LISTS_PREFIX.length ? key.slice(READER_LISTS_PREFIX.length) : undefined
 const LISTS_VERSION = 1
 /** Coalesces bursts (a send renames, reorders and starts a turn) into one published snapshot. */
 const SETTLE_MS = 40
@@ -52,7 +65,14 @@ export interface ListsChat {
   run?: { id: string; state: string; startedAt: string; error?: string }
 }
 
-/** What a phone needs to draw the Projects, Threads and Chats tabs and their status icons. */
+/**
+ * One of the owner's personal bots: its summary as the desktop's Bots list has it (no instance id in its error), and
+ * `activity`, the live chip of the bot's working activation. Bots are the owner's, and so are the devices that read
+ * the lists, so the phone's lists and another computer's both carry them.
+ */
+export type ListsBot = BotSummary & { activity?: BotChip }
+
+/** What a phone needs to draw the Projects, Threads, Chats and Bots tabs and their status icons. */
 export interface ListsSnapshot {
   kind: 'mousse.lists'
   version: number
@@ -70,6 +90,8 @@ export interface ListsSnapshot {
       | 'settledAt'
       | 'startedAt'
       | 'worktreeEnabled'
+      | 'expiresAt'
+      | 'expiryStopsRun'
     > &
       /** Only in a private lists stream: the subagent rows' place in the tree, and what the thread runs with. */
       Partial<
@@ -79,6 +101,16 @@ export interface ListsSnapshot {
   /** Threads that are not idle, by id. */
   status: Record<string, ListsStatus>
   chats: ListsChat[]
+  /** Oldest first; empty when the profile's bots are unavailable or this computer does not share them. */
+  bots: ListsBot[]
+}
+
+/** What the lists read and watch of the profile's personal bots (`BotEngine`). */
+export interface ListsBotsPort {
+  service: { list(): { bots: BotSummary[] } }
+  liveActivity(botId: string): { chip?: BotChip } | undefined
+  /** `changed`, `message` and `activity`, as `bots.changed`, `bots.message` and `bots.activity`. */
+  events: Emitter
 }
 
 /** The profile services the lists read and watch. */
@@ -89,6 +121,11 @@ export type ListsServices = Pick<
   platform: {
     chats: { snapshot(): { chats: ChatSummary[] }; onChange(listener: () => void): () => void }
   }
+  personalBots?: ListsBotsPort | null
+  /** "Share bots with other devices": while it refuses, the lists carry no bots. */
+  botsSharing?: BotsSharingPort
+  /** Which devices reach which bot: the lists of one device carry only the bots it reaches. */
+  botReach?: BotReachPort
 }
 
 interface Emitter {
@@ -121,6 +158,16 @@ function statusOf(
       ...(clip(turn.error, ERROR_CHARS) ? { error: clip(turn.error, ERROR_CHARS) } : {})
     }
   return undefined
+}
+
+function botOf(bot: BotSummary, activity: { chip?: BotChip } | undefined): ListsBot {
+  const summary = remoteBotSummary(bot)
+  const last = summary.last ? { ...summary.last, text: clip(summary.last.text, PREVIEW_CHARS) ?? '' } : undefined
+  return {
+    ...summary,
+    ...(last ? { last } : {}),
+    ...(activity?.chip ? { activity: activity.chip } : {})
+  }
 }
 
 function chatOf(chat: ChatSummary): ListsChat {
@@ -184,11 +231,20 @@ export class MmsListsSource {
      * rows and each thread's `lineage`, say what each thread runs with and where it came from, and
      * report every state a row can show. The phone's lists stay as they were.
      */
-    private readonly options: { private?: boolean } = {}
+    private readonly options: {
+      private?: boolean
+      /**
+       * The one device that reads these lists (another computer's private lists, a phone's own lists): only the bots it
+       * reaches. Absent, lists any device may read (the phones' shared stream): only the bots every device reaches.
+       */
+      reader?: string
+    } = {}
   ) {}
 
   private chats: ListsChat[] | undefined
   private chatsStale = true
+  private bots: ListsBot[] | undefined
+  private botsStale = true
   private watchers = 0
 
   /**
@@ -208,11 +264,30 @@ export class MmsListsSource {
     return this.chats
   }
 
-  snapshot(): ListsSnapshot {
-    return this.compose(this.currentChats())
+  /** Read like the chats: once per bot signal or reconcile tick while a watcher runs, on every call otherwise. */
+  private currentBots(): ListsBot[] {
+    if (this.watchers === 0 || this.botsStale || !this.bots) {
+      const engine = this.services.personalBots
+      try {
+        // Off: "Share bots with other devices" is off on this computer.
+        const hidden = this.services.botReach?.hiddenFor(this.options.reader)
+        this.bots = engine && !this.services.botsSharing?.refusal()
+          ? engine.service.list().bots.filter((bot) => !hidden?.(bot.id)).map((bot) => botOf(bot, engine.liveActivity(bot.id)))
+          : []
+      } catch {
+        // A profile whose bots cannot be read still lists everything else.
+        this.bots = []
+      }
+      this.botsStale = false
+    }
+    return this.bots
   }
 
-  private compose(chats: ListsChat[]): ListsSnapshot {
+  snapshot(): ListsSnapshot {
+    return this.compose(this.currentChats(), this.currentBots())
+  }
+
+  private compose(chats: ListsChat[], bots: ListsBot[]): ListsSnapshot {
     const s = this.services
     const activity = s.threadRuntimes.getActivitySnapshot()
     const turns = s.orchestrator.getTurnSnapshot()
@@ -223,8 +298,12 @@ export class MmsListsSource {
     const own = this.options.private === true
     // A phone lists threads the way the CLI does: subagents sit under their parent, not beside it. Another
     // computer lists them all, with their lineage, and builds the tree itself like the desktop sidebar.
-    const threads = own ? inventory : visibleThreads(inventory)
-    const snapshot = this.build(s, inventory, threads, own, activity, turns, chats)
+    // A thread a bot keeps out of the sidebar (`Thread.hidden`) is left out of every device's list too, with the subagents
+    // below it; its bot's chat lists it.
+    const hidden = new Set(inventory.filter((thread) => thread.hidden).map((thread) => thread.id))
+    const listed = (thread: Thread) => !thread.hidden && !(thread.lineage && hidden.has(thread.lineage.rootThreadId))
+    const threads = (own ? inventory : visibleThreads(inventory)).filter(listed)
+    const snapshot = this.build(s, inventory, threads, own, activity, turns, chats, bots)
     return own ? this.trimmed(snapshot, inventory) : snapshot
   }
 
@@ -270,7 +349,8 @@ export class MmsListsSource {
     own: boolean,
     activity: Record<string, ThreadActivityState>,
     turns: Record<string, TurnState>,
-    chats: ListsChat[]
+    chats: ListsChat[],
+    bots: ListsBot[]
   ): ListsSnapshot {
     // A phone's parent row shows what its subagents are doing; another computer rolls the states up itself.
     const rolledUp = own ? {} : rollUpActivities(inventory, activity)
@@ -301,6 +381,9 @@ export class MmsListsSource {
           settledAt: thread.settledAt,
           startedAt: thread.startedAt,
           worktreeEnabled: thread.worktreeEnabled,
+          // When it deletes itself, for the menu's Delete after (a phone keeps "stop a running turn" when it changes the time).
+          ...(thread.expiresAt ? { expiresAt: thread.expiresAt } : {}),
+          ...(thread.expiresAt && thread.expiryStopsRun ? { expiryStopsRun: true } : {}),
           ...(own
             ? {
                 lineage: thread.lineage,
@@ -316,12 +399,9 @@ export class MmsListsSource {
             : {})
         })),
         status,
-        chats
-      },
-      undefined,
-      // The larger bound is for another computer of the user. A phone's parser is not known to take more than the
-      // wire's 16,384 nodes, so the lists it reads stay within them (as before).
-      own ? MAX_DISPLAY_JSON_NODES : undefined
+        chats,
+        bots
+      }
     ) as ListsSnapshot
   }
 
@@ -333,6 +413,7 @@ export class MmsListsSource {
     const s = this.services
     this.watchers++
     this.chatsStale = true
+    this.botsStale = true
     let last = JSON.stringify(this.snapshot())
     let pending: unknown
     let stopped = false
@@ -379,12 +460,34 @@ export class MmsListsSource {
       poke()
     }
     disposers.push(s.platform.chats.onChange(chatsChanged))
-    const reconcile = this.timers.setInterval(chatsChanged, RECONCILE_MS)
+    const botsChanged = (): void => {
+      this.botsStale = true
+      poke()
+    }
+    // A bot's state, its last message and its live chip.
+    const bots = s.personalBots?.events
+    if (bots)
+      for (const event of ['changed', 'message', 'activity']) {
+        bots.on(event, botsChanged)
+        disposers.push(() => bots.off(event, botsChanged))
+      }
+    const sharing = s.botsSharing
+    if (sharing) disposers.push(sharing.onChange(botsChanged))
+    // A bot's Devices choice, a device's switch for bots, or the devices on the account changed.
+    const reach = s.botReach
+    if (reach) disposers.push(reach.onChange(botsChanged))
+    const reconcile = this.timers.setInterval(() => {
+      this.botsStale = true
+      chatsChanged()
+    }, RECONCILE_MS)
     disposers.push(() => this.timers.clearInterval(reconcile))
     return () => {
       if (stopped) return
       stopped = true
-      if (--this.watchers === 0) this.chats = undefined
+      if (--this.watchers === 0) {
+        this.chats = undefined
+        this.bots = undefined
+      }
       if (pending !== undefined) this.timers.clearTimeout(pending)
       for (const dispose of disposers.splice(0)) dispose()
     }

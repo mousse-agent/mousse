@@ -297,8 +297,31 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
     await this.persist()
   }
 
+  /**
+   * Calls that must never start a sign-in (a bot's) hold this provider while they run: a session the SDK cannot renew
+   * then fails the call (`auth-required`) instead of opening a sign-in page. Returns the release. A person's call made
+   * at the same moment fails the same way, and Connect in Settings signs in as before.
+   */
+  holdSignIn(): () => void {
+    this.signInHeld += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.signInHeld -= 1
+    }
+  }
+
+  private signInHeld = 0
+
+  private refuseSignInWhileHeld(): void {
+    if (this.signInHeld > 0) throw Object.assign(new Error('This MCP server needs a new sign-in. Use "Connect" in Settings to sign in.'), { category: 'auth-required' })
+  }
+
   /** A new random value for each sign-in; the SDK puts it in the authorization URL and the callback must return it. */
   state(): string {
+    // The SDK asks for a state only when it starts a new sign-in.
+    this.refuseSignInWhileHeld()
     this.authorizationState = randomBytes(32).toString('base64url')
     return this.authorizationState
   }
@@ -310,6 +333,7 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
 
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
     if (this.closed || this.signal?.aborted) throw oauthCancelled()
+    this.refuseSignInWhileHeld()
     await this.openExternal(authorizationUrl.toString())
   }
 

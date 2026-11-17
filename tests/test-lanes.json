@@ -23,6 +23,7 @@
     "tests/gitServiceWrites.test.ts",
     "tests/guiMmsController.test.ts",
     "tests/harness/claudeLockedProcess.test.ts",
+    "tests/harness/claudeMcpCommandLine.test.ts",
     "tests/harness/agentLock.test.ts",
     "tests/harness/chatgpt/crossProcess.test.ts",
     "tests/harness/chatgpt/storeProcesses.test.ts",
@@ -93,6 +94,7 @@
     "tests/run/providerBranchRatchet.test.ts",
     "tests/run/restoreSafety.test.ts",
     "tests/run/threadFork.test.ts",
+    "tests/running/runningRegistry.test.ts",
     "tests/supportDaemon.test.ts",
     "tests/teamWorkflowScripts.test.ts",
     "tests/threadWorkspace.test.ts",
@@ -111,7 +113,8 @@
     "tests/net/chats/framed.test.ts",
     "tests/net/chats/joined.test.ts",
     "tests/net/chats/publication.test.ts",
-    "tests/net/chats/tasks.test.ts"
+    "tests/net/chats/tasks.test.ts",
+    "tests/net/transports/lan-offline.test.ts"
   ],
   "daemon": [
     "tests/net/bots/daemon/reader.test.ts",
@@ -131,6 +134,9 @@
     "tests/resourceLifecycleQualificationPurgeDaemon.test.ts"
   ],
   "browser": [
+    "tests/botBrowserClipboard.test.ts",
+    "tests/botBrowserInput.test.ts",
+    "tests/chatBrowserSnapshots.test.ts",
     "tests/chatUndoFullShell.test.ts",
     "tests/errorElectronBridge.test.ts",
     "tests/gitFoundationFullShell.test.ts",
@@ -142,8 +148,8 @@
     "tests/platformBrowserModelAdapters.test.ts",
     "tests/platformBrowserNetworkSandbox.test.ts",
     "tests/platformBrowserPackaging.test.ts",
-    "tests/platformBrowserViewer.test.ts",
     "tests/platformBrowserWorker.actions.test.ts",
+    "tests/platformBrowserWorker.automationMark.test.ts",
     "tests/platformBrowserWorker.lifecycle.test.ts",
     "tests/platformBrowserWorker.observation.test.ts",
     "tests/platformBrowserWorkerBinaryResolver.test.ts",
@@ -160,6 +166,7 @@
     "tests/renderer/profileReady-startup-electron.test.ts",
     "tests/renderer/storage-settings-electron.test.ts",
     "tests/renderer/turn-window-electron.test.ts",
-    "tests/resourceLifecycleFullShell.test.ts"
+    "tests/resourceLifecycleFullShell.test.ts",
+    "tests/threadBrowsers.test.ts"
   ]
 }

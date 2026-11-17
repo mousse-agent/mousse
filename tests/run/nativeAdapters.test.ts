@@ -207,21 +207,24 @@ describe('ClaudeSubscriptionAdapter', () => {
       'providerRef',
       'thinking',
       'thinking',
+      // The reply starts: the thought before it is done.
+      'thinking',
       'text',
       'text',
+      'text',
+      // The steer closes the reply row: the reply goes on below the steered message.
       'text',
       'steerAccepted',
-      'thinking',
-      'text',
       'tool',
       'thinking',
+      'thinking',
+      // The answer starts: the thought after the call is done too.
       'thinking',
       'text',
       'text',
       'lineEdits',
       'providerMetrics',
       'usage',
-      'thinking',
       'text'
     ])
     // The thought before the call closes when the call starts; the next one opens a row below it.
@@ -345,7 +348,6 @@ describe('CodexAdapter', () => {
         standaloneWorkspace: vi.fn((threadId: string) => `/standalone/${threadId}`),
         configured: () => true,
         interrupt: vi.fn(),
-        steer: vi.fn(),
         userSetup: vi.fn()
       }) as unknown as CodexClient
     const stopped = () => {

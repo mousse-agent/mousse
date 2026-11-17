@@ -138,23 +138,47 @@ describe('a thread whose agent starts background agents', () => {
 
   it('shows the agents as subagent cards, working while the thread has background work', async () => {
     const view = await show(launched, true)
-    expect(view.cards).toEqual(['a1', 'a2'])
-    expect(view.text).toContain('2 subagents')
+    expect(view.cards).toEqual([])
+    const group = host.querySelector<HTMLButtonElement>('button.subagent-group-head')!
+    expect(group.getAttribute('aria-expanded')).toBe('false')
+    expect(group.textContent).toContain('Map design language + 1')
+    await act(async () => group.click())
+    expect(group.getAttribute('aria-expanded')).toBe('true')
+    expect([...host.querySelectorAll('[data-native-subagent]')].map(node => node.getAttribute('data-native-subagent'))).toEqual(['a1', 'a2'])
+    expect(host.textContent).toContain('2 subagents')
     expect(view.text).toContain('2 working')
     expect(view.text).toContain('Map design language')
-    expect(view.text).toContain('Explore')
+    expect(host.textContent).toContain('Searching code')
+    expect(host.textContent).not.toContain('Explore')
     // The agents' own calls are inside their cards, not loose rows.
     expect(view.text).not.toContain('Agent completed')
   })
 
   it('opens a card on the calls its agent made', async () => {
-    // The group of cards is open while its agents work.
     await show(launched, true)
+    await act(async () => host.querySelector<HTMLButtonElement>('button.subagent-group-head')!.click())
     const card = host.querySelector<HTMLButtonElement>('[data-native-subagent="a1"] button.subagent-card')!
     expect(card.getAttribute('aria-expanded')).toBe('false')
     await act(async () => card.click())
     expect(card.getAttribute('aria-expanded')).toBe('true')
     expect(host.querySelector('[data-native-subagent="a1"] .subagent-card-calls')?.textContent).toContain('ls c1')
+  })
+
+  it('keeps the line breaks of a Markdown report: the row shows one plain line, the opened card a heading and a list', async () => {
+    const report = '## Progress kinds\n\n- tool_running\n- streaming\n- compacting\n\nThat is all.'
+    const done = [user('u1', 0, 'List the kinds'), backgroundAgent('a1', 13, 'List the progress kinds', { summary: report, durationMs: 9_000 })]
+    expect(collectNativeSubagentCards(mousseToUIMessages(done), false).get('a1')?.native?.result).toBe(report)
+    await show(done, false)
+    // A finished turn folds its work behind its Worked line.
+    const worked = host.querySelector<HTMLButtonElement>('.turn-work-toggle')
+    if (worked?.getAttribute('aria-expanded') === 'false') await act(async () => worked.click())
+    const node = host.querySelector('[data-native-subagent="a1"]')!
+    expect(node.querySelector('.subagent-card-result')?.textContent).toBe('Progress kinds tool_running streaming compacting That is all.')
+    await act(async () => node.querySelector<HTMLButtonElement>('button.subagent-card')!.click())
+    const full = node.querySelector('.subagent-card-full')!
+    expect(full.querySelector('h2')?.textContent).toBe('Progress kinds')
+    expect([...full.querySelectorAll('li')].map((item) => item.textContent)).toEqual(['tool_running', 'streaming', 'compacting'])
+    expect(full.querySelector('p')?.textContent).toBe('That is all.')
   })
 
   it('a finished agent\'s report continues the reply: no message from the user, no raw report, the card says done', async () => {
@@ -191,9 +215,9 @@ describe('a thread whose agent starts background agents', () => {
 
 describe('Lineage lists native subagents', () => {
   it('counts them, shows their kind, opens their card and offers no Stop of its own', () => {
-    const cards = nativeSubagentsOfMessages([backgroundAgent('a1', 13, 'Map design language'), backgroundAgent('a2', 20, 'Find hosting', { summary: 'Done', durationMs: 5000 })], true)
+    const cards = nativeSubagentsOfMessages([backgroundAgent('a1', 13, 'Map design language', { model: 'sonnet' } as never), backgroundAgent('a2', 20, 'Find hosting', { summary: 'Done', durationMs: 5000 })], true)
     const entries = cards.map(nativeLineageEntry)
-    expect(lineageTitle(entries)).toBe('Lineage · 1 running')
+    expect(lineageTitle(entries)).toBe('Nest · 1 running')
 
     const host = document.createElement('div')
     document.body.appendChild(host)
@@ -204,7 +228,9 @@ describe('Lineage lists native subagents', () => {
       root.render(createElement(LineageList, { subagents: entries, now: T0 + 60_000, open: { ...LINEAGE_CLOSED, finished: true }, onOpenPart: () => undefined, onOpen, onReveal, onStop: () => undefined }))
     })
     expect(host.textContent).toContain('Map design language')
-    expect(host.textContent).toContain('Explore')
+    // The kind of agent in plain words, with the model its call named.
+    expect(host.querySelector('.lineage-row.is-working .lineage-model')?.textContent).toBe('Searching code · Sonnet')
+    expect(host.textContent).not.toContain('Explore')
     expect(host.querySelector('.lineage-stop')).toBeNull()
     act(() => host.querySelector<HTMLButtonElement>('.lineage-row.is-working')!.click())
     expect(onReveal).toHaveBeenCalledWith('a1')

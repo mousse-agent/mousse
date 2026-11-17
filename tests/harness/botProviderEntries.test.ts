@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createBotModelResolver } from '../../src/mms/bots/model/BotModelResolver'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
+import { CODEX_BOT_CHECKED_VERSIONS } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { CODEX_BOT_RUNS_ON_TEXT } from '../../src/shared/harness/codexBotVersion'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { createHarnessGateway } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
@@ -111,7 +113,7 @@ describe('bots run on the owner\'s own provider entries', () => {
         models: (instanceId) => p.harness.catalog.models(instanceId, { kind: 'device' }),
         hold: { canHoldBot: (instanceId, policy, model) => p.harness.canHoldBot(instanceId, policy, model) }
       })
-      expect(await resolver.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, policy: botPolicy }), platform).toMatchObject({ selection: { instanceId: 'claude', model: 'sonnet' } })
+      expect(await resolver.resolve({ botId: 'b', pick: null, depth: 'normal', policy: botPolicy }), platform).toMatchObject({ selection: { instanceId: 'claude', model: 'sonnet' } })
       expect(Object.keys(p.stored()), platform).toEqual(['claude'])
     }
   })
@@ -124,7 +126,7 @@ describe('bots run on the owner\'s own provider entries', () => {
       models: (instanceId) => p.harness.catalog.models(instanceId, { kind: 'device' }),
       hold: { canHoldBot: (instanceId, policy, model) => p.harness.canHoldBot(instanceId, policy, model) }
     })
-    expect(await resolver.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, policy: botPolicy })).toEqual({ problem: 'no_provider', instanceId: 'claude' })
+    expect(await resolver.resolve({ botId: 'b', pick: null, depth: 'normal', policy: botPolicy })).toEqual({ problem: 'no_provider', instanceId: 'claude' })
   })
 
   it('the "Claude for bots" entry an earlier build added is removed; one the owner renamed stays', async () => {
@@ -144,6 +146,13 @@ describe('bots run on the owner\'s own provider entries', () => {
     expect(codex.botApprovals?.({})).toBe(true)
     for (const tool of NEUTRAL_TOOLS) expect(codex.nativeToolNames?.(tool, {}).length, tool).toBeGreaterThan(0)
   })
+
+  it('Codex says in Runs on when its installed version hasn\'t been checked for bots, and nothing on a checked or unknown one', () => {
+    const codex = codexDriver({ builtIn: () => { throw new Error('unused') } })
+    expect(codex.botRunsOnNote?.({}, '0.999.0')).toMatchObject({ text: CODEX_BOT_RUNS_ON_TEXT, title: expect.stringContaining('Codex 0.999.0 is installed here') })
+    for (const version of CODEX_BOT_CHECKED_VERSIONS) expect(codex.botRunsOnNote?.({}, version), version).toBeUndefined()
+    expect(codex.botRunsOnNote?.({}, undefined)).toBeUndefined()
+  })
 })
 
 describe('canHoldBot on a locked Claude Code entry with the recorded evidence (ยง5.9 item 5)', () => {
@@ -156,6 +165,17 @@ describe('canHoldBot on a locked Claude Code entry with the recorded evidence (ย
       else expect(held, platform).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'] } })
       // The owner's own entry holds it everywhere.
       expect(p.harness.canHoldBot('claude', botPolicy), platform).toEqual({ ok: true })
+    }
+  })
+
+  it('says a locked entry withholds commands without a proven sandbox, and the owner\'s entry withholds nothing', async () => {
+    for (const platform of ['linux', 'darwin'] as const) {
+      const p = profile({ platform, stored: withLocked })
+      await p.harness.instances.recheck(LOCKED)
+      // No sandbox evidence is recorded for any version yet, so a locked entry runs no commands (`claudeLockedTools`).
+      expect(p.harness.botWithheldTools(LOCKED), platform).toEqual(['shell'])
+      expect(p.harness.botWithheldTools('claude'), platform).toEqual([])
+      expect(p.harness.botWithheldTools('claude:unknown'), platform).toEqual([])
     }
   })
 
@@ -177,9 +197,9 @@ describe('canHoldBot on a locked Claude Code entry with the recorded evidence (ย
     }
     const hold = { canHoldBot: (instanceId: string, policy: RunPolicy, model?: string) => instanceId === 'pi:openai' ? { ok: true as const } : p.harness.canHoldBot(instanceId, policy, model) }
     const withPi = createBotModelResolver({ snapshots: async () => [locked, pi], models: (id) => models[id] ?? [], hold })
-    expect(await withPi.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, policy: botPolicy })).toMatchObject({ selection: { instanceId: 'pi:openai' } })
+    expect(await withPi.resolve({ botId: 'b', pick: null, depth: 'normal', policy: botPolicy })).toMatchObject({ selection: { instanceId: 'pi:openai' } })
     const alone = createBotModelResolver({ snapshots: async () => [locked], models: (id) => models[id] ?? [], hold })
-    expect(await alone.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, policy: botPolicy })).toEqual({ problem: 'no_provider' })
+    expect(await alone.resolve({ botId: 'b', pick: null, depth: 'normal', policy: botPolicy })).toEqual({ problem: 'no_provider' })
     // Back on a recorded version, it holds the bot again.
     p.claude.setVersion('2.1.291')
     await p.harness.instances.recheck(LOCKED)

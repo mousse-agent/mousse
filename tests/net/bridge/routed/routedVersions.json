@@ -315,14 +315,14 @@
     "security": "ceacd93869361a7a"
   },
   "orchestrator.abort": {
-    "version": 1,
-    "digest": "ca4448f42d042129",
+    "version": 2,
+    "digest": "e0085c761605c360",
     "security": "56bf730c16aa9cd1"
   },
   "orchestrator.answerQuestions": {
-    "version": 1,
-    "digest": "59854b7c16497a61",
-    "security": "074bdce0c6e26440"
+    "version": 2,
+    "digest": "73a28cf87aca039b",
+    "security": "f43da837f596fa92"
   },
   "orchestrator.contextUsage": {
     "version": 1,
@@ -350,14 +350,19 @@
     "security": "926c4af141d1208d"
   },
   "orchestrator.send": {
-    "version": 6,
-    "digest": "a8e36c8568d00b5d",
+    "version": 8,
+    "digest": "f0c64070d7cee134",
     "security": "1447c39a3cdfbf97"
   },
   "orchestrator.steer": {
-    "version": 2,
-    "digest": "2f736d5f6a66cf4a",
+    "version": 3,
+    "digest": "1a0db50919400888",
     "security": "da503b52b5c83a71"
+  },
+  "orchestrator.steerNow": {
+    "version": 1,
+    "digest": "17e18b3b34ebef49",
+    "security": "56bf730c16aa9cd1"
   },
   "projects.list": {
     "version": 1,
@@ -535,8 +540,8 @@
     "security": "b4dd46cdf246cfd1"
   },
   "queue.enqueue": {
-    "version": 2,
-    "digest": "298e9361e4548d6f",
+    "version": 3,
+    "digest": "28376f325cba7d57",
     "security": "1447c39a3cdfbf97"
   },
   "queue.list": {
@@ -613,6 +618,11 @@
     "version": 1,
     "digest": "09a87e17128c1172",
     "security": "56bf730c16aa9cd1"
+  },
+  "runs.wait": {
+    "version": 1,
+    "digest": "d5478cd8d044d8c0",
+    "security": "ade27276cc757950"
   },
   "scheduled.create": {
     "version": 1,
@@ -700,8 +710,8 @@
     "security": "04f7c680ffd36337"
   },
   "thread.messages": {
-    "version": 2,
-    "digest": "ca37845da10897d3",
+    "version": 3,
+    "digest": "e3300eb7696bc9fd",
     "security": "04f7c680ffd36337"
   },
   "thread.snapshot": {
@@ -735,8 +745,8 @@
     "security": "926c4af141d1208d"
   },
   "threads.create": {
-    "version": 1,
-    "digest": "8c29741dbc687abf",
+    "version": 2,
+    "digest": "b1ae8b79e2d13bc9",
     "security": "38223490f704a80a"
   },
   "threads.delete": {
@@ -758,6 +768,11 @@
     "version": 1,
     "digest": "0b514123a517746d",
     "security": "2455464eaace895f"
+  },
+  "threads.markSeen": {
+    "version": 1,
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
   },
   "threads.pin": {
     "version": 1,
@@ -785,13 +800,13 @@
     "security": "ceacd93869361a7a"
   },
   "threads.setModel": {
-    "version": 2,
-    "digest": "4403c6a7e66e0387",
+    "version": 3,
+    "digest": "5133a625fa703d05",
     "security": "926c4af141d1208d"
   },
   "threads.setPermissionMode": {
-    "version": 3,
-    "digest": "26518b30dd41da60",
+    "version": 4,
+    "digest": "e86636c06ff0315e",
     "security": "926c4af141d1208d"
   },
   "threads.settle": {

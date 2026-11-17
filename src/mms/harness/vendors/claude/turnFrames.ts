@@ -1,7 +1,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import {
-  ACTIVITY_DESCRIPTION_CHARS,
   INTERRUPTED_SUMMARY,
+  taskEndSummary,
   type ActivityInterruptedBy,
   type ActivityPatch,
   type ProviderToolEvent
@@ -17,11 +17,30 @@ import { observeRateLimit, RejectedWindows } from './usageLimit'
  */
 export const CLAUDE_TURN_EXTRA_ARGS: Readonly<Record<string, string>> = { 'thinking-display': 'summarized' }
 
+/** The result a steer's cut produced for the message being written, not the end of the turn. */
+function isAbortedResult(message: SDKMessage): boolean {
+  if (message.type !== 'result') return false
+  const reason = (message as { terminal_reason?: unknown }).terminal_reason
+  return reason === 'aborted_streaming' || reason === 'aborted_tools'
+}
+
 /** Where a turn's frames are reported; the slice of the chat input the stream needs. */
 export interface TurnFrameSink {
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: ProviderToolEvent) => void
+  /** What Claude is doing while it shows nothing: `waiting`, its first frame of the turn came; `reasoning`, a thinking block began. */
+  onStatus?: (status: 'waiting' | 'reasoning') => void
+  /**
+   * Claude Code tries a failed request of this turn again (`api_retry`). `noResponse`: the API sent no headers in
+   * time; that retry has its own small cap, so `maxAttempts` is left out.
+   */
+  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  /**
+   * Claude Code compacts the session inside the turn: `start` at its `compacting` status, `complete` at its compact
+   * boundary (the conversation before it is now a summary).
+   */
+  onCompaction?: (phase: 'start' | 'complete') => void
 }
 
 /**
@@ -29,6 +48,9 @@ export interface TurnFrameSink {
  * session id. Both ways of running a turn (a one-shot query and a live one) feed their frames here;
  * what a result means stays with the caller.
  */
+/** The model Claude Code names on a message it made up itself, with no request to the model. */
+const SYNTHETIC_MODEL = '<synthetic>'
+
 export class TurnFrames {
   text = ''
   thinking = ''
@@ -48,20 +70,139 @@ export class TurnFrames {
   private readonly handedOff = new Set<string>()
   /** A task's end that arrived before its call's placeholder result, kept until that result says whether it is the call's end. */
   private readonly earlyEnds = new Map<string, Record<string, unknown>>()
+  /** The task Claude Code runs an open call as (`task_started`): Send now stops it by this id. */
+  private readonly taskIds = new Map<string, string>()
+  /** Open subagent calls Claude Code moved to the background, or that could not be moved there. */
+  private readonly backgrounded = new Set<string>()
+  private readonly unmovable = new Set<string>()
+  /**
+   * Open root calls whose whole `assistant` message arrived: their input is complete, so Claude Code runs them. One
+   * that is still open without it when the next root message starts, or an aborted result comes, was dropped before it
+   * ran (an immediate message cut its input as it streamed, spike S1): no result will ever come for it.
+   */
+  private readonly inputComplete = new Set<string>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
+  /**
+   * What Claude Code wrote as the model's words without asking the model (`<synthetic>` assistant messages, such as the
+   * "No response requested." it writes on resuming an interrupted session). A result that only repeats one of them is
+   * not the model's answer (`resultText`).
+   */
+  private readonly syntheticTexts = new Set<string>()
+  /** The turn was stopped (the caller's cancel): a call a Stop's aborted result drops reads as stopped. */
+  stopped: () => boolean = () => false
   /** The plan windows Claude Code rejected during this turn (a one-shot query; a live run keeps its own). */
   readonly rateLimits = new RejectedWindows()
+  /** A frame of this turn arrived. */
+  private heard = false
 
   constructor(
     private readonly sink: TurnFrameSink,
     private readonly metrics: ClaudeMetricsCollector
   ) {}
 
+  /** What waits for the next assistant message to start: a steer's place in the reply (`atNextMessage`). */
+  private readonly nextMessage: Array<() => void> = []
+
+  /**
+   * Runs `run` once the message being written has ended: its aborted result arrives (after a steer's cut) or the next
+   * top-level assistant message starts. After a steer is pushed Claude Code still sends the rest of the
+   * message it was writing, until its cut lands; the steer's place in the reply is there. That place says nothing
+   * about whether Claude Code read the steer: an interrupt's message starts there too. What still waits when the turn
+   * ends is dropped with the turn.
+   */
+  atNextMessage(run: () => void): void {
+    this.nextMessage.push(run)
+  }
+
+  private flushNextMessage(): void {
+    for (const run of this.nextMessage.splice(0)) run()
+  }
+
+  /** Claude has the turn's prompt and has sent nothing back yet: said once, at the turn's first frame or when the prompt reached a ready process. */
+  waiting(): void {
+    if (this.heard) return
+    this.heard = true
+    this.sink.onStatus?.('waiting')
+  }
+
+  /**
+   * A retry frame names no agent. While a subagent of this turn runs it may be the subagent's request, so it is not
+   * shown as the turn's: the subagent's row already says it works.
+   */
+  private observeRetry(frame: Record<string, unknown>): void {
+    if (frame.parent_tool_use_id != null || this.subagentOpen()) return
+    const noResponse = frame.no_response !== undefined && frame.no_response !== null
+    this.sink.onRetry?.({
+      attempt: typeof frame.attempt === 'number' ? frame.attempt : 1,
+      ...(typeof frame.max_retries === 'number' && !noResponse ? { maxAttempts: frame.max_retries } : {}),
+      ...(typeof frame.retry_delay_ms === 'number' ? { delayMs: frame.retry_delay_ms } : {}),
+      ...(noResponse ? { noResponse: true } : {})
+    })
+  }
+
+  /** A subagent call of this turn is open, or a call a subagent made. */
+  private subagentOpen(): boolean {
+    for (const [callId, name] of this.tools) {
+      if (this.parents.get(callId) || this.contexts.get(callId)?.kind === 'subagent' || name === 'Agent' || name === 'Task') return true
+    }
+    return false
+  }
+
+  private isSubagent(callId: string): boolean {
+    const name = this.tools.get(callId)
+    return this.contexts.get(callId)?.kind === 'subagent' || name === 'Agent' || name === 'Task'
+  }
+
+  /**
+   * The turn's own subagent calls still in the foreground that Claude Code runs as a task (open, `task_started` seen,
+   * not handed off, not moved): a steer moves each to the background by its id before it is pushed. One that could not
+   * be moved is waited for instead. A subagent call with no task yet is left out: Claude Code cannot move it
+   * (`backgroundTasks` answers false), and the push drops it while its input still streams (spike S1).
+   */
+  foregroundSubagents(): string[] {
+    return [...this.tools.keys()].filter((callId) =>
+      !this.parents.get(callId) && this.isSubagent(callId) && this.taskIds.has(callId) && !this.handedOff.has(callId) && !this.backgrounded.has(callId) && !this.unmovable.has(callId))
+  }
+
+  /** Claude Code moved the subagent call `callId` to the background: a later steer does not move it again. */
+  markBackgrounded(callId: string): void {
+    if (this.tools.has(callId)) this.backgrounded.add(callId)
+  }
+
+  /**
+   * The turn's own calls a person's steer stops: open root calls that are not subagents, or subagents that could not be
+   * moved, with the task each runs as when Claude Code named one. A call whose input still streams is left out: the
+   * steer's push alone drops it before it runs (spike S1), and an interrupt would also stop background work.
+   */
+  foregroundCalls(): Array<{ callId: string; taskId?: string; toolName: string }> {
+    return [...this.tools.keys()]
+      .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)) &&
+        (this.inputComplete.has(callId) || this.taskIds.has(callId)))
+      .map((callId) => {
+        const taskId = this.taskIds.get(callId)
+        const toolName = this.tools.get(callId)!
+        return taskId ? { callId, taskId, toolName } : { callId, toolName }
+      })
+  }
+
+  /** Claude Code could not move the subagent call `callId` to the background: the turn waits for it. */
+  markNotMovable(callId: string): void {
+    if (this.tools.has(callId)) this.unmovable.add(callId)
+  }
+
   /** A steer cut the turn here: what follows is a new paragraph. */
   breakParagraph(): void {
     if (this.text) this.text += '\n\n'
     this.segmentStart = this.text.length
+  }
+
+  /**
+   * A result's text when it may fill in a segment that streamed nothing: never one that only repeats a message Claude
+   * Code made up itself, which would reach the reader as the model's answer.
+   */
+  resultText(result: string): string {
+    return this.syntheticTexts.has(result.trim()) ? '' : result
   }
 
   /** The turn streamed no text of its own since the last break. */
@@ -73,6 +214,21 @@ export class TurnFrames {
     this.metrics.observe(message)
     observeRateLimit(message, this.rateLimits)
     this.sessionId = message.session_id || this.sessionId
+    // The message being written ended (an aborted result, after a steer's cut) or the next one starts. A result that ends
+    // the turn places nothing: what follows it, if anything, is a later turn's, which starts with a message of its own
+    // (or the steer's read places it). A break placed there would end the reply with an empty paragraph, which the
+    // turn's result text then fills in again (issue #919).
+    if ((message.type === 'stream_event' && message.event.type === 'message_start' && !message.parent_tool_use_id) || isAbortedResult(message)) {
+      this.closeDropped(message.type === 'result')
+      this.flushNextMessage()
+    }
+    this.waiting()
+    if (message.type === 'system' && (message as { subtype?: unknown }).subtype === 'api_retry') this.observeRetry(message as unknown as Record<string, unknown>)
+    if (message.type === 'system') {
+      const subtype = (message as { subtype?: unknown }).subtype
+      if (subtype === 'status' && (message as { status?: unknown }).status === 'compacting') this.sink.onCompaction?.('start')
+      else if (subtype === 'compact_boundary') this.sink.onCompaction?.('complete')
+    }
     if (message.type === 'stream_event') {
       const event = message.event
       if (event.type === 'content_block_delta' && !message.parent_tool_use_id) {
@@ -87,8 +243,11 @@ export class TurnFrames {
         }
       }
       // Each thinking block is a paragraph of its own, and so is each text block (a note before a tool call, then the answer).
-      if (event.type === 'content_block_start' && event.content_block.type === 'thinking' && !message.parent_tool_use_id && this.thinking)
-        this.thinking += '\n\n'
+      if (event.type === 'content_block_start' && event.content_block.type === 'thinking' && !message.parent_tool_use_id) {
+        if (this.thinking) this.thinking += '\n\n'
+        // Its text may come late, or not at all: the model is reasoning meanwhile.
+        this.sink.onStatus?.('reasoning')
+      }
       if (event.type === 'content_block_start' && event.content_block.type === 'text' && !message.parent_tool_use_id && /\S$/.test(this.text))
         this.text += '\n\n'
       if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
@@ -110,6 +269,10 @@ export class TurnFrames {
         })
       }
     }
+    if (message.type === 'assistant' && (message.message as { model?: unknown }).model === SYNTHETIC_MODEL && Array.isArray(message.message.content)) {
+      const said = message.message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('').trim()
+      if (said) this.syntheticTexts.add(said)
+    }
     // A tool_use block's arguments are complete only in the assistant message that holds it.
     if (message.type === 'assistant' && Array.isArray(message.message.content))
       for (const block of message.message.content) {
@@ -122,6 +285,7 @@ export class TurnFrames {
         const name = this.tools.get(block.id)!
         const input = record(block.input) ?? {}
         const isRoot = !this.parents.get(block.id)
+        if (isRoot) this.inputComplete.add(block.id)
         // The arguments are known now: a subagent call's row names its subagent before the call returns,
         // and every other call gets the typed fields its arguments carry.
         const subagentRecord = recordSubagentCall(block.name, block.input, {})
@@ -191,6 +355,32 @@ export class TurnFrames {
     this.parents.delete(callId)
     this.handedOff.delete(callId)
     this.earlyEnds.delete(callId)
+    this.taskIds.delete(callId)
+    this.backgrounded.delete(callId)
+    this.unmovable.delete(callId)
+    this.inputComplete.delete(callId)
+  }
+
+  /**
+   * Root calls the message being written announced that never got their whole `assistant` message: the message ended
+   * (the next root message starts, or an aborted result came) with their input cut off, so Claude Code never ran them
+   * and no result will come. They close as without a result; left open, a held steer would wait for them until the
+   * turn ends.
+   */
+  private closeDropped(atAbortedResult: boolean): void {
+    // A Stop's aborted result dropped it: it reads as stopped, like every other call the Stop ended.
+    const reason: Extract<ActivityInterruptedBy, 'stop' | 'no_result'> = atAbortedResult && this.stopped() ? 'stop' : 'no_result'
+    for (const [callId, title] of [...this.tools]) {
+      if (this.parents.get(callId) || this.inputComplete.has(callId) || this.handedOff.has(callId) || this.taskIds.has(callId)) continue
+      this.sink.onTool?.({
+        phase: 'complete',
+        callId,
+        title,
+        toolName: title,
+        activity: { status: 'interrupted', interruptedBy: reason, summary: INTERRUPTED_SUMMARY[reason] }
+      })
+      this.forget(callId)
+    }
   }
 
   /**
@@ -208,6 +398,10 @@ export class TurnFrames {
     if (frame.subtype === 'task_started') {
       const taskId = typeof frame.task_id === 'string' ? frame.task_id : undefined
       const background = frame.is_backgrounded === true && kind === 'subagent'
+      if (taskId) this.taskIds.set(callId, taskId)
+      if (background) this.backgrounded.add(callId)
+      // A task now: Claude Code can move it, so a steer tries again rather than wait for it.
+      if (this.unmovable.delete(callId)) this.sink.onTool?.({ phase: 'update', callId, title, toolName: title, activity: { notMovable: false } as ActivityPatch })
       if ((kind !== 'subagent' && kind !== 'command') || (!taskId && !background)) return
       this.sink.onTool?.({
         phase: 'update',
@@ -229,7 +423,7 @@ export class TurnFrames {
     const title = this.tools.get(callId)
     if (title === undefined) return
     const kind = this.contexts.get(callId)?.kind
-    const summary = typeof frame.summary === 'string' && frame.summary.trim() ? clipSummary(frame.summary) : undefined
+    const summary = taskEndSummary(frame.summary, kind)
     const usage = record(frame.usage)
     const duration = typeof usage?.duration_ms === 'number' && (kind === 'subagent' || kind === 'command') ? usage.duration_ms : undefined
     const outcome =
@@ -266,11 +460,6 @@ export class TurnFrames {
       this.forget(callId)
     }
   }
-}
-
-function clipSummary(text: string): string {
-  const clean = text.replace(/\s+/g, ' ').trim()
-  return clean.length > ACTIVITY_DESCRIPTION_CHARS ? `${clean.slice(0, ACTIVITY_DESCRIPTION_CHARS - 1)}…` : clean
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

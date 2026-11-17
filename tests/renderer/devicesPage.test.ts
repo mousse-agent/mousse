@@ -6,17 +6,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { NetDevicesSection } = await import('../../src/renderer/components/NetDevicesSection')
+const { MousseIdAccount } = await import('../../src/renderer/components/MousseIdAccount')
+const { useMousseIdStore } = await import('../../src/renderer/stores/mousseIdStore')
 
 const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false }
 /** A set-up computer that manages its devices, with one other computer and a phone. */
-const daemon = { error: undefined as string | undefined }
+const daemon = { error: undefined as string | undefined, removed: false, plus: undefined as Record<string, unknown> | undefined }
 const request = vi.fn(async (method: string) => {
   switch (method) {
     case 'net.status':
       return {
         enabled: true, keystore: 'unlocked', protected: true, rosterState: 'ok', routes: [], transports: [],
-        self: { node: 'nod_self', user: 'usr_a', isAuthority: true }, peers: [], workOnThreads: true, error: daemon.error
+        self: { node: 'nod_self', user: 'usr_a', isAuthority: true, removed: daemon.removed }, peers: [], workOnThreads: true, error: daemon.error
       }
+    case 'net.plus.status': return daemon.plus
     case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
     case 'net.ssh.list': return { records: [] }
     case 'bridge.nodes': return { nodes: [
@@ -33,6 +36,9 @@ let root: Root
 let host: HTMLElement
 beforeEach(() => {
   daemon.error = undefined
+  daemon.removed = false
+  daemon.plus = undefined
+  useMousseIdStore.setState({ runtimeOrigin: '' })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -86,7 +92,7 @@ describe('Settings → Devices', () => {
     const advanced = host.querySelector('details.settings-advanced')!
     expect(advanced.querySelector('[data-settings-anchor="devices-networking"]')).not.toBeNull()
     await act(async () => toggle('agibook').click())
-    expect(list().textContent).toContain('Let other computers work here')
+    expect(list().textContent).toContain('Let my other devices work here')
   })
 
   it('reads a lapsed device pass as Reconnecting, never as the raw code', async () => {
@@ -96,5 +102,17 @@ describe('Settings → Devices', () => {
     expect(host.textContent).toContain('Open Mousse on Agigo')
     expect(rowText('nod_self')).toContain('Reconnecting')
     expect(host.textContent).not.toMatch(/bad.delegation|delegation invalid/)
+  })
+
+  it('a computer removed from your devices is told signing in adds it back, not that it is reconnecting', async () => {
+    daemon.error = 'bad_delegation'
+    daemon.removed = true
+    daemon.plus = { configured: true, connected: false, email: 'me@example.com' }
+    useMousseIdStore.setState({ runtimeOrigin: 'https://id.example' })
+    await act(async () => root.render(createElement(MousseIdAccount, { onSetUp: () => undefined, lapsed: true })))
+    await flush()
+    expect(host.textContent).toContain('This computer was removed from your devices. Sign in to add it back.')
+    expect(host.textContent).not.toContain('Reconnecting')
+    expect([...host.querySelectorAll('button')].map((button) => button.textContent)).toContain('Sign in')
   })
 })

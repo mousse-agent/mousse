@@ -12,6 +12,7 @@ import type {
 import { normalizeChatMode } from '../../shared/chatMode'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
+import { readSettleNotice, type SettleNoticeItem } from '../../shared/settleNotice'
 
 export interface EnqueueMessageInput {
   /**
@@ -30,14 +31,21 @@ export interface EnqueueMessageInput {
   images?: ChatImageAttachment[]
   intent?: QueuedMessageIntent
   source?: string
+  /** The sender's id for the send that queued it (`QueuedMessage.clientRequestId`). */
+  clientRequestId?: string
   internal?: boolean
   runId?: string
   inboxIds?: string[]
   subagentNotice?: QueuedMessage['subagentNotice']
+  settleNotice?: SettleNoticeItem[]
+  settleHops?: number
+  heldNotice?: boolean
   stopGeneration?: number
   permissionMode?: PermissionMode
   origin?: QueuedMessage['origin']
   sentFrom?: QueuedMessage['sentFrom']
+  /** Queued because the thread's lease was held (`QueuedMessage.waitsForLease`). */
+  waitsForLease?: boolean
 }
 
 export interface ClaimOwnerInput {
@@ -106,7 +114,7 @@ export function queueRevision(items: QueuedMessage[]): string {
       item.state,
       item.mode ?? null,
       item.permissionMode ?? null,
-      item.origin?.kind === 'agent' ? `agent:${item.origin.threadId}` : item.origin?.kind ?? null,
+      item.origin?.kind === 'agent' ? `agent:${item.origin.from ? `${item.origin.from.node}:${item.origin.from.thread}` : item.origin.threadId}` : item.origin?.kind ?? null,
       createHash('sha256').update(item.content).digest('hex')
     ])
   return createHash('sha256').update(JSON.stringify(rows)).digest('hex').slice(0, 16)
@@ -159,8 +167,29 @@ function normalizeOrigin(raw: unknown): QueuedMessage['origin'] {
   const kind = (raw as { kind?: unknown }).kind
   if (kind === 'agent') {
     const agent = raw as Partial<AgentOrigin>
+    const hops = typeof agent.hops === 'number' && Number.isSafeInteger(agent.hops) && agent.hops >= 0 ? { hops: agent.hops } : {}
+    const body = agent.body
+    const validBody = typeof body === 'object' && body !== null && [body.head, body.tail].every((length) => Number.isSafeInteger(length) && length >= 0)
+    const words = validBody ? { body: { head: body.head, tail: body.tail } } : {}
+    // A sender on another computer: its computer, its ids there and its title, kept as they were written.
+    const from = agent.from as Partial<NonNullable<AgentOrigin['from']>> | undefined
+    if (from && typeof from === 'object') {
+      const fields = [from.node, from.thread, from.run] as unknown[]
+      if (!fields.every((value) => typeof value === 'string' && value) || typeof from.title !== 'string') return undefined
+      return { kind: 'agent', from: { node: from.node!, thread: from.thread!, run: from.run!, title: from.title }, ...hops, ...words }
+    }
     if (typeof agent.threadId !== 'string' || !agent.threadId || typeof agent.runId !== 'string' || !agent.runId) return undefined
-    return { kind: 'agent', threadId: agent.threadId, runId: agent.runId, ...(typeof agent.hops === 'number' && Number.isSafeInteger(agent.hops) && agent.hops >= 0 ? { hops: agent.hops } : {}) }
+    return {
+      kind: 'agent',
+      threadId: agent.threadId,
+      runId: agent.runId,
+      ...hops,
+      ...words,
+      ...(typeof agent.title === 'string' && agent.title ? { title: agent.title } : {}),
+      ...(agent.bot && typeof agent.bot === 'object' && typeof agent.bot.id === 'string' && agent.bot.id && typeof agent.bot.name === 'string'
+        ? { bot: { id: agent.bot.id, name: agent.bot.name } }
+        : {})
+    }
   }
   const origin = raw as Partial<Extract<NonNullable<QueuedMessage['origin']>, { kind: 'schedule' }>>
   if (origin.kind !== 'schedule') return undefined
@@ -222,20 +251,69 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       state,
       claim,
       source: typeof item.source === 'string' ? item.source : undefined,
+      ...(typeof item.clientRequestId === 'string' && item.clientRequestId ? { clientRequestId: item.clientRequestId } : {}),
       internal: item.internal === true ? true : undefined,
       ...(typeof item.runId === 'string' && item.runId ? { runId: item.runId } : {}),
       ...(typeof item.continuationOfRunId === 'string' && item.continuationOfRunId ? { continuationOfRunId: item.continuationOfRunId } : {}),
       ...(Array.isArray(item.inboxIds) && item.inboxIds.length && item.inboxIds.every((id) => typeof id === 'string') ? { inboxIds: item.inboxIds } : {}),
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
+      ...(readSettleNotice(item.settleNotice) ? { settleNotice: readSettleNotice(item.settleNotice) } : {}),
+      ...(typeof item.settleHops === 'number' && Number.isSafeInteger(item.settleHops) && item.settleHops >= 0 ? { settleHops: item.settleHops } : {}),
+      ...(item.heldNotice === true && state === 'pending' ? { heldNotice: true as const } : {}),
       ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
+      ...(item.heldAfterStop === true ? { heldAfterStop: true as const } : {}),
+      ...(item.waitsForLease === true && state === 'pending' && intent === 'normal' ? { waitsForLease: true as const } : {}),
       ...(isPermissionMode(item.permissionMode) ? { permissionMode: item.permissionMode } : {}),
       ...(typeof item.sentFrom?.node === 'string' && item.sentFrom.node ? { sentFrom: { node: item.sentFrom.node } } : {}),
       // Only a steering item is bound to a run.
       ...(state === 'steering' && typeof item.steerRunId === 'string' && item.steerRunId ? { steerRunId: item.steerRunId } : {}),
+      // Absent (an older build's file) reads as promoted by an older build.
+      ...(state === 'steering' && item.promotedWithCopyId === true ? { promotedWithCopyId: true as const } : {}),
+      // Only a steering item can be sent now (Send now on its hold).
+      ...(state === 'steering' && isSteerNow(item.steerNow) ? { steerNow: { runId: item.steerNow.runId, holdGeneration: item.steerNow.holdGeneration, requestId: item.steerNow.requestId } } : {}),
       ...(origin ? { origin } : {})
     })
   }
   return sortQueue(out)
+}
+
+function isSteerNow(value: unknown): value is NonNullable<QueuedMessage['steerNow']> {
+  const field = value as Partial<NonNullable<QueuedMessage['steerNow']>> | null | undefined
+  return Boolean(field) && typeof field!.runId === 'string' && Boolean(field!.runId) &&
+    typeof field!.requestId === 'string' && Boolean(field!.requestId) &&
+    typeof field!.holdGeneration === 'number' && Number.isSafeInteger(field!.holdGeneration)
+}
+
+/** The item without its Send now request (`QueuedMessage.steerNow`). */
+export function withoutSteerNow(item: QueuedMessage): QueuedMessage {
+  if (!item.steerNow) return item
+  const { steerNow: _steerNow, ...rest } = item
+  return rest
+}
+
+/**
+ * Send now on held steers (docs/design/steer-and-interruptions.md §2.9): sets `steerNow` on each named item that is
+ * still `steering` and bound to `runId` (its `steerRunId`, or none while `runId` is the thread's active run).
+ * Idempotent: an item that already carries this request is left alone. `applied`: the ids that carry it now.
+ */
+export function markSteerNow(
+  items: QueuedMessage[],
+  request: { runId: string; holdGeneration: number; requestId: string; itemIds: readonly string[] },
+  activeRunId: string | null
+): { items: QueuedMessage[]; applied: string[] } {
+  const named = new Set(request.itemIds)
+  const applied: string[] = []
+  const next = items.map((item) => {
+    if (!named.has(item.id) || item.intent !== 'steer' || item.state !== 'steering') return item
+    const bound = item.steerRunId ? item.steerRunId === request.runId : activeRunId === request.runId
+    if (!bound) return item
+    applied.push(item.id)
+    // This request, or another click for the same hold: already asked for, nothing to change.
+    if (item.steerNow?.requestId === request.requestId) return item
+    if (item.steerNow?.runId === request.runId && item.steerNow.holdGeneration === request.holdGeneration) return item
+    return { ...item, steerNow: { runId: request.runId, holdGeneration: request.holdGeneration, requestId: request.requestId } }
+  })
+  return { items: applied.length ? next : items, applied }
 }
 
 export function sortQueue(items: QueuedMessage[]): QueuedMessage[] {
@@ -293,15 +371,19 @@ export function enqueueMessage(
     intent: input.intent ?? 'normal',
     state: 'pending',
     source: input.source,
+    ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}),
     internal: input.internal === true ? true : undefined,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.continuationOfRunId ? { continuationOfRunId: input.continuationOfRunId } : {}),
     ...(input.inboxIds?.length ? { inboxIds: input.inboxIds } : {}),
     ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {}),
+    ...(input.settleNotice?.length ? { settleNotice: input.settleNotice, settleHops: input.settleHops ?? 0 } : {}),
+    ...(input.settleNotice?.length && input.heldNotice ? { heldNotice: true as const } : {}),
     ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {}),
     ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}),
     ...(input.sentFrom ? { sentFrom: input.sentFrom } : {}),
-    ...(input.origin ? { origin: input.origin } : {})
+    ...(input.origin ? { origin: input.origin } : {}),
+    ...(input.waitsForLease && (input.intent ?? 'normal') === 'normal' ? { waitsForLease: true as const } : {})
   }
 
   return { items: sortQueue([...items, item]), item }
@@ -428,6 +510,8 @@ export function editQueuedMessage(
 /**
  * Promote a pending normal queue item to steer intent for the active turn. `steerRunId` binds the promotion
  * to the run it was checked against; `permissionMode` is the (narrowed) mode the item keeps from here on.
+ * A pending item promoted here is marked `promotedWithCopyId`, whether or not a copy is ever written for it; an
+ * item that is already steering keeps what it had, so one an older build promoted stays unmarked.
  */
 export function promoteQueuedMessageToSteer(
   items: QueuedMessage[],
@@ -451,6 +535,7 @@ export function promoteQueuedMessageToSteer(
     intent: 'steer',
     state: 'steering',
     claim: undefined,
+    ...(current.state === 'pending' ? { promotedWithCopyId: true as const } : {}),
     ...(bind?.steerRunId ? { steerRunId: bind.steerRunId } : {}),
     ...(bind?.permissionMode ? { permissionMode: bind.permissionMode } : {})
   }
@@ -486,8 +571,9 @@ export function claimNextNormal(
   owner: ClaimOwnerInput
 ): { items: QueuedMessage[]; claimed: QueuedMessage | null } {
   const pending = listPendingQueue(items)
+  // A held settle notice never starts a turn by itself (`QueuedMessage.heldNotice`).
   const next =
-    pending.find((item) => item.intent === 'normal' && item.state === 'pending') ?? null
+    pending.find((item) => item.intent === 'normal' && item.state === 'pending' && !item.heldNotice) ?? null
   if (!next) return { items: sortQueue(items), claimed: null }
 
   const claim: QueuedMessageClaim = {
@@ -496,8 +582,10 @@ export function claimNextNormal(
     claimedAt: owner.claimedAt ?? new Date().toISOString(),
     source: owner.source
   }
+  // Claimed, it waits for the lease no longer.
+  const { waitsForLease: _waits, ...rest } = next
   const claimed: QueuedMessage = {
-    ...next,
+    ...rest,
     state: 'claimed',
     claim
   }
@@ -629,11 +717,12 @@ export function drainNextNormal(
   }
 }
 
-/** Drop all steer-intent items after they have been injected into the active turn. */
-export function dropSteerItems(items: QueuedMessage[], ids?: string[]): QueuedMessage[] {
-  if (!ids || ids.length === 0) {
-    return items.filter((item) => item.intent !== 'steer')
-  }
+/**
+ * Drop the named steer items once the model has them (their text and ids are saved). Only the named ones go: an empty
+ * list drops nothing, so a steer no turn has read yet is never dropped by a caller that had none to name.
+ */
+export function dropSteerItems(items: QueuedMessage[], ids: readonly string[]): QueuedMessage[] {
+  if (ids.length === 0) return items
   const drop = new Set(ids)
   return items.filter((item) => !(item.intent === 'steer' && drop.has(item.id)))
 }
@@ -653,7 +742,8 @@ export function demoteSteerItems(items: QueuedMessage[], ids?: readonly string[]
   const demoted = sortQueue(
     items.map((item) => {
       if (item.intent !== 'steer' || item.state === 'claimed' || (only && !only.has(item.id))) return item
-      const { steerRunId: _steerRunId, ...rest } = item
+      // A Send now request belongs to the run the steer was held in: it never follows the item out of `steering`.
+      const { steerRunId: _steerRunId, promotedWithCopyId: _promotedWithCopyId, steerNow: _steerNow, ...rest } = item
       demotedIds.add(item.id)
       return { ...rest, intent: 'normal' as const, state: 'pending' as const, claim: undefined }
     })
@@ -673,6 +763,122 @@ export function demoteSteerItems(items: QueuedMessage[], ids?: readonly string[]
   const slots = pending.map((item) => item.order)
   const placed = new Map(sequence.map((item, index) => [item.id, { ...item, order: slots[index]! }]))
   return sortQueue(demoted.map((item) => placed.get(item.id) ?? item))
+}
+
+/**
+ * A Stop holds the queue: every item still waiting (pending, or steering into the stopped turn and about to be
+ * handed back) is marked `heldAfterStop`, so a restart leaves them for the person too.
+ */
+export function holdQueueAfterStop(items: QueuedMessage[]): QueuedMessage[] {
+  if (!items.some((item) => (item.state === 'pending' || item.state === 'steering') && (!item.heldAfterStop || item.waitsForLease))) return items
+  return items.map((item) => {
+    if (item.state !== 'pending' && item.state !== 'steering') return item
+    if (item.heldAfterStop && !item.waitsForLease) return item
+    // Held, it waits for the person, not for the lease.
+    const { waitsForLease: _waits, ...rest } = item
+    return { ...rest, heldAfterStop: true as const }
+  })
+}
+
+/** Marks the pending items `ids` as queued behind the thread's lease (`QueuedMessage.waitsForLease`). */
+export function markWaitingForLease(items: QueuedMessage[], ids: ReadonlySet<string>): QueuedMessage[] {
+  if (!items.some((item) => ids.has(item.id) && item.state === 'pending' && item.intent === 'normal' && !item.heldAfterStop && !item.waitsForLease)) return items
+  return items.map((item) =>
+    ids.has(item.id) && item.state === 'pending' && item.intent === 'normal' && !item.heldAfterStop && !item.waitsForLease ? { ...item, waitsForLease: true as const } : item
+  )
+}
+
+/** The queue goes on (a turn of the thread starts): no item is held by a Stop any more. */
+export function releaseStopHold(items: QueuedMessage[]): QueuedMessage[] {
+  if (!items.some((item) => item.heldAfterStop)) return items
+  return items.map((item) => {
+    if (!item.heldAfterStop) return item
+    const { heldAfterStop: _held, ...rest } = item
+    return rest
+  })
+}
+
+/** A settle notice to deliver through a thread's queue (`mergeSettleNotice`). */
+export interface SettleNoticeInput {
+  threadId: string
+  item: SettleNoticeItem
+  /** What the model reads for this notice. */
+  text: string
+  /** The watched run's count of agent messages in a row. */
+  hops: number
+  mode?: ChatMode
+  /** It must not start a turn by itself (`QueuedMessage.heldNotice`). */
+  held: boolean
+}
+
+/** The key of a notice: one watch writes each event once. */
+function settleKey(item: Pick<SettleNoticeItem, 'watchId' | 'event'>): string {
+  return `${item.watchId}:${item.event}`
+}
+
+/** Whether the queue already carries the notice (a delivery repeated after a restart). */
+export function queueHasSettleNotice(items: readonly QueuedMessage[], item: Pick<SettleNoticeItem, 'watchId' | 'event'>): boolean {
+  const key = settleKey(item)
+  return items.some((entry) => entry.settleNotice?.some((notice) => settleKey(notice) === key))
+}
+
+/**
+ * Puts a settle notice in a thread's queue. Notices that arrive while one waits are delivered as one: a notice joins the
+ * waiting notice item (pending, not yet claimed), whose turn then carries the larger count of agent messages in a row,
+ * and which is held only while every notice in it is. Otherwise the notice is an item of its own at the back of the
+ * queue. A notice the queue already carries changes nothing. `merged` is the item that carries it.
+ */
+export function mergeSettleNotice(items: QueuedMessage[], input: SettleNoticeInput): { items: QueuedMessage[]; item: QueuedMessage; changed: boolean } {
+  const key = settleKey(input.item)
+  const carrying = items.find((entry) => entry.settleNotice?.some((notice) => settleKey(notice) === key))
+  if (carrying) return { items, item: carrying, changed: false }
+  const waiting = items.find((entry) => entry.settleNotice?.length && entry.state === 'pending' && entry.intent === 'normal')
+  if (!waiting) {
+    const made = enqueueMessage(items, {
+      threadId: input.threadId,
+      content: input.text,
+      mode: input.mode,
+      source: SETTLE_NOTICE_SOURCE,
+      settleNotice: [input.item],
+      settleHops: input.hops,
+      heldNotice: input.held
+    })
+    return { ...made, changed: true }
+  }
+  const { heldNotice: _held, ...rest } = waiting
+  const joined: QueuedMessage = {
+    ...rest,
+    content: `${waiting.content}\n\n${input.text}`,
+    settleNotice: [...(waiting.settleNotice ?? []), input.item],
+    settleHops: Math.max(waiting.settleHops ?? 0, input.hops),
+    ...(waiting.heldNotice && input.held ? { heldNotice: true as const } : {})
+  }
+  return { items: items.map((entry) => (entry.id === waiting.id ? joined : entry)), item: joined, changed: true }
+}
+
+/** The source of a queue item, and of the turn it starts, that delivers settle notices. */
+export const SETTLE_NOTICE_SOURCE = 'thread-notice'
+
+/** Held settle notices go on: each runs after the turn that is starting, as a turn of its own. */
+export function releaseHeldNotices(items: QueuedMessage[]): QueuedMessage[] {
+  if (!items.some((item) => item.heldNotice)) return items
+  return items.map((item) => {
+    if (!item.heldNotice) return item
+    const { heldNotice: _held, ...rest } = item
+    return rest
+  })
+}
+
+/** Takes the held settle notices out of the queue: their texts and what is left (`continue_subagent` carries them). */
+export function takeHeldNotices(items: QueuedMessage[]): { items: QueuedMessage[]; taken: QueuedMessage[] } {
+  const taken = items.filter((item) => item.heldNotice && item.state === 'pending')
+  if (taken.length === 0) return { items, taken }
+  return { items: items.filter((item) => !taken.includes(item)), taken }
+}
+
+/** Whether a Stop holds the queue: some waiting item is still marked `heldAfterStop`. */
+export function isQueueHeldByStop(items: QueuedMessage[]): boolean {
+  return listPendingQueue(items).some((item) => item.heldAfterStop === true)
 }
 
 /**

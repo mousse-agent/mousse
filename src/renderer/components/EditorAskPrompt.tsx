@@ -34,7 +34,7 @@ export function EditorAskPrompt({
       onClose={onClose}
       footer={
         <>
-          <button type="button" className="settings-btn" data-action="decline-editor-ask" disabled={busy} onClick={() => onDecide(false)}>
+          <button type="button" className="settings-btn" data-action="decline-editor-ask" disabled={busy} data-mousse-decision="" onClick={() => onDecide(false)}>
             Not now
           </button>
           <button type="button" className="settings-btn" data-action="allow-editor-ask" disabled={busy || !armed} onClick={() => onDecide(true)}>

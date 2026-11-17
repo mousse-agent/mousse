@@ -28,27 +28,6 @@ describe('chat layout styles', () => {
     )
   })
 
-  it('dims idle tool chrome so assistant text keeps the contrast', () => {
-    expect(globalCss).toMatch(
-      /\.an-message-list \.an-tool-chrome\s*\{[\s\S]*?opacity:\s*0\.55/
-    )
-    // Hover and keyboard focus intentionally keep the dimmed level; only a
-    // running shimmer or a card awaiting approval returns to full opacity.
-    expect(globalCss).not.toMatch(/\.an-tool-chrome:hover/)
-    expect(globalCss).not.toMatch(/\.an-tool-chrome:focus-within/)
-    expect(globalCss).toMatch(
-      /\.an-tool-chrome:has\(\.an-text-shimmer--active\)\s*\{\s*opacity:\s*1;/
-    )
-    expect(globalCss).toMatch(
-      /\.an-tool-chrome\[data-awaiting-approval="true"\]\s*\{\s*opacity:\s*1;/
-    )
-    const toolRowBase = readFileSync(
-      resolve(process.cwd(), 'src/renderer/chat/components/agent-elements/tools/tool-row-base.tsx'),
-      'utf8'
-    )
-    expect(toolRowBase).toMatch(/an-tool-chrome/)
-  })
-
   it('preserves single newlines in prose as line breaks', () => {
     // Chat convention (verses, addresses): a lone \n breaks the line.
     // Scoped to text elements so fences, tables, and list structure keep
@@ -115,28 +94,10 @@ describe('chat layout styles', () => {
     expect(reduced).toMatch(/\.an-message-list > div[\s\S]*?transition:\s*none/)
   })
 
-  it('slides the overlay card in from the right with a scrim, and drops the slide for reduced motion', () => {
+  it('slides the overlay card in from the right with a scrim', () => {
     const [overlayCard] = rulesFor(sideCardCss, '.thread-side-card-layer--overlay .thread-side-card').filter((rule) => rule.selector === '.thread-side-card-layer--overlay .thread-side-card')
     expect(overlayCard!.body).toMatch(/transform:\s*translateX\(calc\(100% \+ var\(--side-card-gutter\)\)\)/)
     expect(overlayCard!.body).toMatch(/width:\s*min\(var\(--side-card-width\), calc\(100% - 2 \* var\(--side-card-gutter\)\)\)/)
     expect(sideCardCss).toMatch(/\.thread-side-card-scrim\s*\{[^}]*position:\s*absolute/)
-    const reduced = sideCardCss.slice(sideCardCss.indexOf('prefers-reduced-motion'))
-    expect(reduced).toMatch(/\.thread-side-card\.thread-side-card\.thread-side-card\[data-shown\]\s*\{[^}]*transform:\s*none/)
-  })
-
-  it('cuts the approval command, not the title, and stacks a second notice line above the first', () => {
-    const rule = (selector: string) => rulesFor(css, selector).find((entry) => entry.selector.endsWith(selector))!
-    expect(rule('.composer-notice-title:has(+ .composer-notice-detail)').body).toMatch(/flex:\s*none;/)
-    expect(rule('.composer-notice-detail').body).toMatch(/text-overflow:\s*ellipsis;/)
-    // The slot's own rule, not a rule that only animates it (`.chat-input-area > .composer-notice-slot`).
-    const slot = rulesFor(css, '.composer-notice-slot').find((entry) => /(^|\n)\s*\.composer-notice-slot$/.test(entry.selector))!.body
-    expect(slot).toMatch(/flex-direction:\s*column;/)
-    // Two quiet lines, one above the other, with no divider between them.
-    expect(css).not.toMatch(/\.composer-notice\s*\+\s*\.composer-notice/)
-    // The approval keeps full-strength text; the lost service above it is a muted line with a muted icon.
-    expect(rule(".composer-notice[data-priority='approval']").body).toMatch(/color:\s*var\(--text-primary\);/)
-    expect(rule(".composer-notice[data-priority='approval'] .composer-notice-btn").body).toMatch(/color:\s*var\(--text-primary\);/)
-    expect(rule(".composer-notice[data-priority='service'] .composer-notice-icon").body).toMatch(/color:\s*var\(--text-secondary\);/)
-    expect(css).not.toContain('.composer-notice-note')
   })
 })

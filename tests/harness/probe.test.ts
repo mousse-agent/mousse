@@ -78,7 +78,7 @@ describe('the update on offer', () => {
     updateAffordance(base, binary, compatibilityOf(base, binary?.version), latest)
 
   it('a newer published version is an advisory with the owner\'s command and the version', () => {
-    expect(offer(at('/x/node_modules/.bin/fakecli', '2.1.0', 'npm'), '2.2.0')).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest', latestVersion: '2.2.0' })
+    expect(offer(at('/x/node_modules/.bin/fakecli', '2.1.0', 'npm'), '2.2.0')).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest', latestVersion: '2.2.0', untested: true })
   })
 
   it('offers nothing for a tested version when no newer one is known, or the installed one is current', () => {
@@ -95,15 +95,15 @@ describe('the update on offer', () => {
   })
 
   it('an install whose owner is not proven gets the version and no command', () => {
-    expect(offer(at('/usr/local/bin/fakecli', '2.1.0', 'unknown'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0' })
-    expect(offer(at('/usr/local/bin/fakecli', '2.1.0'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0' })
+    expect(offer(at('/usr/local/bin/fakecli', '2.1.0', 'unknown'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0', untested: true })
+    expect(offer(at('/usr/local/bin/fakecli', '2.1.0'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0', untested: true })
     // Nothing newer, nothing to say.
     expect(offer(at('/usr/local/bin/fakecli', '2.1.0', 'unknown'), '2.1.0')).toBeUndefined()
     expect(offer(at('/usr/local/bin/fakecli', '2.1.0', 'unknown'))).toBeUndefined()
   })
 
   it('a standalone install never gets an npm command', () => {
-    expect(offer(at('/home/me/.local/bin/fakecli', '2.1.0', 'standalone'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0' })
+    expect(offer(at('/home/me/.local/bin/fakecli', '2.1.0', 'standalone'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0', untested: true })
     // The real drivers: Claude updates itself, Codex has no standalone command, `/usr/local/bin` is not brew.
     expect(claudeCodeDriver().updateCommand?.('standalone')).toBe('claude update')
     expect(codexDriver({ builtIn: () => ({}) as never }).updateCommand?.('standalone')).toBeUndefined()
@@ -115,14 +115,14 @@ describe('the update on offer', () => {
   it('a too-old version keeps its update, and carries the latest version when one is known', () => {
     const binary = at('/x/node_modules/.bin/fakecli', '1.0.0', 'npm')
     expect(offer(binary)).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest' })
-    expect(offer(binary, '2.2.0')).toMatchObject({ kind: 'advisory', latestVersion: '2.2.0' })
+    expect(offer(binary, '2.2.0')).toMatchObject({ kind: 'advisory', latestVersion: '2.2.0', untested: true })
   })
 
   it('one click only for an install Mousse owns', () => {
     const installable: HarnessDriver = { ...driver, canInstall: true }
-    expect(offer({ path: '/m/fakecli', version: '2.1.0', source: 'managed', owner: 'managed' }, '2.2.0', installable)).toEqual({ kind: 'one_click', owner: 'managed', latestVersion: '2.2.0' })
+    expect(offer({ path: '/m/fakecli', version: '2.1.0', source: 'managed', owner: 'managed' }, '2.2.0', installable)).toEqual({ kind: 'one_click', owner: 'managed', latestVersion: '2.2.0', untested: true })
     // The driver cannot install and has no command for the managed owner: the version is all there is.
-    expect(offer({ path: '/m/fakecli', version: '2.1.0', source: 'managed', owner: 'managed' }, '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0' })
+    expect(offer({ path: '/m/fakecli', version: '2.1.0', source: 'managed', owner: 'managed' }, '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0', untested: true })
   })
 })
 

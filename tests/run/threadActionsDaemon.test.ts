@@ -13,13 +13,15 @@ import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
+import { AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
+import { AGENT_REPEAT_WINDOW_MS } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import { BOUNDARY_NOTICE_HEADER, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
-import type { AgentAccessLevel } from '../../src/shared/settings'
 import type { ChatMessage } from '../../src/shared/types'
+import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import type { PermissionMode } from '../../src/shared/permissionMode'
+import { refusalOfResponse } from './appToolsFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
@@ -108,7 +110,6 @@ const parse = (response: Awaited<ReturnType<typeof rpc>>): Record<string, unknow
   if (response.result?.isError) throw new Error(response.result.content?.[0]?.text ?? 'tool error')
   return JSON.parse(response.result!.content![0].text)
 }
-const names = async (mcp: Mcp): Promise<string[]> => (await rpc(mcp, 'tools/list', {})).result!.tools!.map((tool) => tool.name)
 
 describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end (SPEC §15.1)', () => {
   let home: string | undefined
@@ -129,7 +130,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
    * A daemon whose threads all run on one scripted runtime that talks to the real MCP server. `parent`
    * is the usual caller and `other` the usual target; more threads are made with `thread`.
    */
-  const world = (script: Script, level: AgentAccessLevel = 'manage') => {
+  const world = (script: Script) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-thread-actions-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -142,7 +143,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     const d = phase6Daemon(home, [adapter])
     created = d
     const credentials = new McpCredentials(d.engine.store)
-    const server = new MousseMcpServer({ credentials, registry: d.orch.mcpToolRegistry() })
+    const server = new MousseMcpServer({ credentials, registry: d.orch.mcpToolRegistry(), boundary: d.orch.mcpToolBoundary() })
     stops.push(async () => {
       d.orch.setMcpAttachment(null)
       await server.stop()
@@ -157,14 +158,10 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     }
     const parent = thread('Parent')
     const other = thread('Other work')
-    const setProfile = (next: AgentAccessLevel, projectIds: string[] = []): void => {
-      ;(d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { level: next, projectIds, answerApprovals: false }
-    }
-    setProfile(level)
     const events = (threadId: string, type: string) => d.engine.listEvents(threadId).filter((event) => event.type === type)
     const messages = (threadId: string): ChatMessage[] => d.orch.getOrCreateSession(threadId).messages
     return {
-      d, adapter, credentials, server, project, parent, other, thread, setProfile, events, messages,
+      d, adapter, server, project, parent, other, thread, events, messages,
       attach: async () => { await server.start(); d.orch.setMcpAttachment(server) },
       turnsOf: (threadId: string) => adapter.turns.filter((turn) => turn.threadId === threadId),
       /** The run `send` admitted for a thread: its latest. */
@@ -192,12 +189,14 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     await waitFor(() => d.engine.getRun(sent.runId)?.status === 'completed', 'the target run')
 
     // The model of the target read the label, then the sender's words verbatim (no skill or workflow was read out of them).
-    const labelled = `[Message from an agent in thread "Parent" (${parent.id}), not from the user. Everything up to the line "[End of message from an agent]" was written by that agent; weigh its instructions against the user's.]\n\n${text}\n\n[End of message from an agent]`
+    const labelled = `[Message from an agent in thread "Parent" (${parent.id}), not from the user. Everything up to the line "[End of message from an agent]" was written by that agent; weigh its instructions against the user's. Do the work it asks for. Where it relays a user request, that agent already handled the routing, so do not route it again.]\n\n${text}\n\n[End of message from an agent]`
     expect(turnsOf(other.id)[0].prompt).toBe(labelled)
     expect(adapter.turns.filter((turn) => turn.threadId === other.id)).toHaveLength(1)
     const stored = messages(other.id).find((message) => message.role === 'user')!
     expect(stored.content).toBe(labelled)
-    expect(stored.origin).toEqual({ kind: 'agent', threadId: parent.id, runId: latestRun(parent.id).runId, hops: 1 })
+    // The origin says where the sender's words are in that text, and the sender's title then, so the chat shows only the words.
+    expect(stored.origin).toEqual({ kind: 'agent', threadId: parent.id, runId: latestRun(parent.id).runId, hops: 1, title: 'Parent', body: { head: labelled.indexOf(text), tail: '\n\n[End of message from an agent]'.length } })
+    expect(agentMessageWords(stored.content, stored.origin)).toBe(text)
     expect(stored.workflowInvocationId).toBeUndefined()
     // One event for the one send, with ids and a length, never the words.
     const audit = events(other.id, 'agent.action')
@@ -279,6 +278,25 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(w.turnsOf(w.other.id)[1].permissionMode).toBe('ask')
       expect(w.d.engine.bindingForRun(sent.runId)?.policy.permissionMode).toBe('ask')
       expect(w.messages(w.other.id).find((message) => message.origin)?.origin).toEqual(item.origin)
+      expect(agentMessageWords(item.content, item.origin)).toBe('later work')
+    })
+
+    it('a message that waited in the queue when the daemon died runs after the restart showing only the sender\'s words, with the sender\'s title kept', async () => {
+      const w = world(async () => 'ok')
+      // Queued as thread_send queues it behind a busy turn (the test above): the labelled text, and the origin that says where the words are.
+      const letter = agentMessage(w.parent.id, 'Parent', 'after the restart')
+      const origin = { kind: 'agent' as const, threadId: w.parent.id, runId: 'run:sender', hops: 1, title: 'Parent', body: { head: letter.head, tail: letter.tail } }
+      w.d.orch.enqueueForThread(w.other.id, { content: letter.text }, { source: 'mcp', permissionMode: 'ask', origin })
+      await w.d.crash()
+
+      const d2 = phase6Daemon(home!, [w.adapter], { pid: 2, orchestratorBoot: true })
+      stops.push(async () => { await d2.stop() })
+      ;(d2.orch as unknown as { scheduleQueueDrain(session: unknown): void }).scheduleQueueDrain(d2.orch.getOrCreateSession(w.other.id))
+      await waitFor(() => w.turnsOf(w.other.id).length === 1 && d2.engine.listRuns(w.other.id).every((run) => run.status === 'completed'), 'the queued message after the restart', 30_000)
+      expect(w.turnsOf(w.other.id)[0]).toMatchObject({ prompt: letter.text, permissionMode: 'ask', fromAgent: true })
+      const stored = d2.orch.getOrCreateSession(w.other.id).messages.find((message) => message.role === 'user' && message.origin)!
+      expect(stored.origin).toEqual(origin)
+      expect(agentMessageWords(stored.content, stored.origin)).toBe('after the restart')
     })
   })
 
@@ -318,7 +336,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
 
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go-1' })
       const refused = seen.refused as Awaited<ReturnType<typeof rpc>>
-      expect(refused.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { reason: 'mousse_conflict', conflict: 'ceiling_exceeded', callerMode: 'ask', targetMode: 'full' } })
+      expect(refusalOfResponse(refused)).toMatchObject({ code: 'mousse_conflict', details: { reason: 'mousse_conflict', conflict: 'ceiling_exceeded', callerMode: 'ask', targetMode: 'full' } })
       // Nothing reached the running turn: no steer row, no audit row.
       expect(w.messages(fullTarget.id).filter((message) => message.origin)).toEqual([])
       expect(w.events(fullTarget.id, 'agent.action')).toEqual([])
@@ -402,9 +420,9 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
 
       for (const key of ['stale', 'staleSteer'] as const)
-        expect((seen[key] as Awaited<ReturnType<typeof rpc>>).error, key).toMatchObject({
-          code: MCP_ERROR_CODES.mousse_conflict,
-          data: { conflict: 'run_not_active', expectedRunId: a.runId, activeRunId: seen.bRunId }
+        expect(refusalOfResponse(seen[key] as Awaited<ReturnType<typeof rpc>>), key).toMatchObject({
+          code: 'mousse_conflict',
+          details: { conflict: 'run_not_active', expectedRunId: a.runId, activeRunId: seen.bRunId }
         })
       // B was neither stopped nor steered, and nothing was audited as an agent's change.
       expect(w.d.engine.getRun(seen.bRunId as string)?.outcome?.stopRequested).toBeUndefined()
@@ -427,7 +445,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const asked = question.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], w.other.id, {})
       expect(question.listPendingForThread(w.other.id)).toHaveLength(1)
       await w.d.orch.send('first', false, { threadId: w.parent.id, clientRequestId: 'go-1' })
-      expect(seen.first.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'questions_pending' } })
+      expect(refusalOfResponse(seen.first)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'questions_pending' } })
       // Nothing was admitted, nothing was answered for the user, and the thread has no run.
       expect(question.listPendingForThread(w.other.id)).toHaveLength(1)
       expect(w.d.engine.listRuns(w.other.id)).toEqual([])
@@ -492,8 +510,8 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       w.d.engine.pauseRun({ runId: sent.runId, pause: { reason: 'usage_limit', until: '2026-10-12T05:00:00.000Z', estimated: true, count: 1, autoResume: false } })
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
 
-      expect(seen.send.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'thread_paused' } })
-      expect(seen.steer.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'run_paused', expectedRunId: sent.runId } })
+      expect(refusalOfResponse(seen.send)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'thread_paused' }, refused: { retry: 'later' } })
+      expect(refusalOfResponse(seen.steer)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'run_paused', expectedRunId: sent.runId } })
       expect(parse(seen.wait)).toMatchObject({ status: 'paused', run: { runId: sent.runId, status: 'paused' } })
       expect(parse(seen.stop)).toMatchObject({ runId: sent.runId, replayed: false })
       expect(w.d.engine.getRun(sent.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'agent', pause: { endedBy: 'stop' } } })
@@ -512,25 +530,12 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       await w.attach()
       w.d.store.setThreadSettled(w.other.id, true)
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen.map((response) => response.error?.data)).toEqual([
+      expect(seen.map((response) => refusalOfResponse(response)?.details)).toEqual([
         expect.objectContaining({ conflict: 'thread_archived' }),
         expect.objectContaining({ conflict: 'thread_archived' }),
         // The Stop is not refused for the thread's state; there is simply no such run.
         expect.objectContaining({ conflict: 'run_not_found' })
       ])
-      expect(w.d.engine.listRuns(w.other.id)).toEqual([])
-    })
-
-    it('a thread in a project outside the list is refused like an unknown one', async () => {
-      const seen: Array<Awaited<ReturnType<typeof rpc>>> = []
-      const w = world(async (_input, mcp) => {
-        seen.push(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'x' }))
-        return 'ok'
-      })
-      await w.attach()
-      w.setProfile('manage', ['some-other-project'])
-      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen[0].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
       expect(w.d.engine.listRuns(w.other.id)).toEqual([])
     })
   })
@@ -613,7 +618,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const reply = seen.reply as { runId: string; queued: boolean }
       expect(reply.queued).toBe(true)
       expect(seen.waited).toMatchObject({ status: 'finished', resultText: 'B replied.' })
-      expect(seen.queuedWhileRunning).toEqual([{ source: 'mcp', origin: { kind: 'agent', threadId: w.other.id, runId: w.latestRun(w.other.id).runId, hops: 2 } }])
+      expect(seen.queuedWhileRunning).toMatchObject([{ source: 'mcp', origin: { kind: 'agent', threadId: w.other.id, runId: w.latestRun(w.other.id).runId, hops: 2 } }])
       expect(seen.steeredWhileRunning).toBe(0)
       await waitFor(() => w.d.engine.getRun(reply.runId)?.status === 'completed', 'A\'s second run')
       // A's second turn read B's message with B's label; B's first turn read A's.
@@ -631,8 +636,9 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const sent: string[] = []
       const w = world(async (input, mcp, d) => {
         const target = input.threadId === w.parent.id ? w.other.id : w.parent.id
-        const reply = await call(mcp!, 'thread_send', { threadId: target, content: `hop from ${input.threadId === w.parent.id ? 'A' : 'B'}` })
-        if (reply.error) refusal.first ??= reply
+        // Each hop says something new: the same words again would be refused as a repeat, before the hop limit.
+        const reply = await call(mcp!, 'thread_send', { threadId: target, content: `hop from ${input.threadId === w.parent.id ? 'A' : 'B'} in ${input.runId}` })
+        if (refusalOfResponse(reply)) refusal.first ??= reply
         else sent.push((parse(reply) as { runId: string }).runId)
         // The run the message started carries how many agent messages led to it.
         return `${d.engine.getRun(input.runId)?.outcome?.agentHops ?? 0}`
@@ -642,7 +648,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
       await waitFor(() => refusal.first !== undefined, 'the chain to stop', 30_000)
       expect(sent).toHaveLength(3)
-      expect(refusal.first!.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_hops_exceeded' } })
+      expect(refusalOfResponse(refusal.first!)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' } })
       expect(sent.map((runId) => w.d.engine.getRun(runId)?.outcome?.agentHops)).toEqual([1, 2, 3])
       const hopsOf = (runId: string) => w.d.engine.getRun(runId)?.outcome?.agentHops
       expect(w.d.engine.listRuns(w.parent.id).map((run) => hopsOf(run.runId)).reverse()).toEqual([undefined, 2])
@@ -652,26 +658,37 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(first.outcome?.agentHops).toBeUndefined()
     })
 
-    it('a thread holds only a few messages from agents in its queue: the next is refused, and a person\'s Stop clears them, leaving what a person queued', async () => {
+    it('a thread holds only a few messages from each sending thread in its queue: the next is refused, another sender still gets in, and a person\'s Stop clears them, leaving what a person queued', async () => {
       const release = deferred()
       const results: Array<Awaited<ReturnType<typeof rpc>>> = []
+      const fromThird: Array<Awaited<ReturnType<typeof rpc>>> = []
+      let third = ''
       const w = world(async (input, mcp, _d, adapter) => {
         if (input.threadId === w.other.id) {
           await adapter.hold(input, release.promise)
           return 'held'
         }
+        if (input.threadId === third) {
+          fromThird.push(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'note from the third thread' }))
+          return 'Sent.'
+        }
         for (let index = 0; index < 4; index += 1) results.push(await call(mcp!, 'thread_send', { threadId: w.other.id, content: `note ${index}` }))
         return 'Sent.'
       })
+      third = w.thread('Third').id
       await w.attach()
       await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
       await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(results.slice(0, 3).every((response) => !response.error && !response.result?.isError)).toBe(true)
-      expect(results[3].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full' } })
-      const queuedRuns = results.slice(0, 3).map((response) => (parse(response) as { runId: string }).runId)
+      expect(results.slice(0, 3).map((response) => parse(response).delivery)).toEqual(['queued', 'queued', 'queued'])
+      expect(refusalOfResponse(results[3])).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_queue_full_per_sender' } })
+      // One chatty sender does not shut the others out: the third thread's message still joins the queue.
+      await w.d.orch.send(GO, false, { threadId: third, clientRequestId: 'go-third' })
+      expect(parse(fromThird[0])).toMatchObject({ queued: true, delivery: 'queued' })
+      const queuedRuns = [...results.slice(0, 3), fromThird[0]].map((response) => (parse(response) as { runId: string }).runId)
       const person = w.d.orch.enqueueForThread(w.other.id, { content: 'a note I typed' }, { source: 'gui' })
-      expect(readDurableQueue(w.d.store, w.other.id).map((item) => item.origin?.kind)).toEqual(['agent', 'agent', 'agent', undefined])
+      expect(readDurableQueue(w.d.store, w.other.id).map((item) => item.origin?.kind === 'agent' ? item.origin.threadId : 'person'))
+        .toEqual([w.parent.id, w.parent.id, w.parent.id, third, 'person'])
 
       // The person presses Stop: the running turn ends and the agents' queued messages go with it.
       await w.d.orch.stopThread(w.other.id, 'user')
@@ -679,6 +696,39 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(readDurableQueue(w.d.store, w.other.id).map((item) => item.id)).toEqual([person.id])
       expect(w.messages(w.other.id).filter((message) => message.origin)).toEqual([])
       release.resolve()
+    })
+
+    it('the same text from the same thread again within the window is refused as a repeat and runs once; a retry with the first key returns the first result; another thread may send the same words', async () => {
+      const seen: Record<string, Awaited<ReturnType<typeof rpc>>> = {}
+      let third = ''
+      const w = world(async (input, mcp) => {
+        if (input.threadId === w.parent.id && input.prompt === GO) {
+          seen.first = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.', clientRequestId: 'first' })
+          seen.repeat = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.', clientRequestId: 'second' })
+          seen.retry = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.', clientRequestId: 'first' })
+          seen.reworded = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks again, please.', clientRequestId: 'third' })
+        }
+        if (input.threadId === third) seen.otherSender = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.' })
+        return 'ok'
+      })
+      third = w.thread('Third').id
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      const first = parse(seen.first) as { runId: string; delivery: string }
+      expect(first.delivery).toBe('started')
+      const repeat = refusalOfResponse(seen.repeat)
+      expect(repeat).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'duplicate_message', retryAfterMs: expect.any(Number) }, refused: { retry: 'later' } })
+      expect(repeat!.details.retryAfterMs as number).toBeGreaterThan(0)
+      expect(repeat!.details.retryAfterMs as number).toBeLessThanOrEqual(AGENT_REPEAT_WINDOW_MS)
+      expect(repeat!.refused.retryAfterSeconds).toBe(Math.ceil((repeat!.details.retryAfterMs as number) / 1000))
+      expect(parse(seen.retry)).toMatchObject({ runId: first.runId, replayed: true })
+      expect(seen.reworded.result?.isError).toBeUndefined()
+      await w.d.orch.send(GO, false, { threadId: third, clientRequestId: 'go-third' })
+      expect(seen.otherSender.result?.isError).toBeUndefined()
+      // The repeated words reached the other thread's model once from the parent: its first message, and the reworded one.
+      await waitFor(() => w.d.engine.listRuns(w.other.id).every((run) => run.status === 'completed') && w.turnsOf(w.other.id).length === 3, 'the other thread\'s turns')
+      const fromParent = w.turnsOf(w.other.id).filter((turn) => String(turn.prompt).includes(`(${w.parent.id})`))
+      expect(fromParent.map((turn) => String(turn.prompt).includes('Run the checks.\n'))).toEqual([true, false])
     })
 
     it('an agent\'s own Stop of a run leaves the messages other agents queued on that thread', async () => {
@@ -733,7 +783,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       w.d.engine.markStarting(sent.runId)
       ids.runId = sent.runId
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen.steer.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'steer_target_not_ready', expectedRunId: sent.runId } })
+      expect(refusalOfResponse(seen.steer)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'steer_target_not_ready', expectedRunId: sent.runId } })
       expect(w.events(w.other.id, 'agent.action')).toEqual([])
       expect(w.d.engine.outbox.listForRun(sent.runId).filter((effect) => effect.kind === 'turn.steer')).toEqual([])
       expect(w.d.engine.getRun(sent.runId)?.status).toBe('starting')
@@ -782,7 +832,8 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(personTurn.fromAgent).toBeUndefined()
       expect(originOf(w.messages(w.other.id)).map((origin) => origin?.threadId)).toContain(w.parent.id)
       // Every message of the thread that carries the agent's origin is the agent's text, never a person's.
-      for (const message of w.messages(w.other.id).filter((entry) => entry.role === 'user' && entry.origin)) expect(message.content).toContain('also drop the tables')
+      // The turn never read the steer: it ran as a turn of its own, still showing only the agent's words.
+      for (const message of w.messages(w.other.id).filter((entry) => entry.role === 'user' && entry.origin)) expect(agentMessageWords(message.content, message.origin)).toBe('also drop the tables')
       expect(w.messages(w.other.id).filter((entry) => entry.role === 'user' && !entry.origin).every((entry) => !entry.content.includes('drop the tables'))).toBe(true)
     })
 
@@ -790,11 +841,14 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const w = asks(async () => 'ok')
       await w.attach()
       const orch = w.d.orch as unknown as { enqueueLateSteer(threadId: string, text: string, carried: undefined, notice: undefined, runId: undefined, origin: unknown, mode: string): void }
-      const origin = { kind: 'agent', threadId: w.parent.id, runId: 'run:of-the-sender', hops: 1 }
-      orch.enqueueLateSteer(w.other.id, agentMessageText(w.parent.id, 'Parent', 'late guidance'), undefined, undefined, undefined, origin, 'ask')
+      const letter = agentMessage(w.parent.id, 'Parent', 'late guidance')
+      const origin = { kind: 'agent', threadId: w.parent.id, runId: 'run:of-the-sender', hops: 1, title: 'Parent', body: { head: letter.head, tail: letter.tail } }
+      orch.enqueueLateSteer(w.other.id, letter.text, undefined, undefined, undefined, origin, 'ask')
       await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the late steer to run')
       expect(w.turnsOf(w.other.id)[0]).toMatchObject({ permissionMode: 'ask', fromAgent: true })
-      expect(w.messages(w.other.id).find((message) => message.origin)?.origin).toMatchObject({ kind: 'agent', threadId: w.parent.id })
+      const stored = w.messages(w.other.id).find((message) => message.origin)!
+      expect(stored.origin).toEqual(origin)
+      expect(agentMessageWords(stored.content, stored.origin)).toBe('late guidance')
     })
 
     it('a narrowed turn that queues a message on its own thread queues it narrowed: it runs `ask`, though the thread is `full`', async () => {
@@ -971,61 +1025,125 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     })
   })
 
-  describe('callers that are capped', () => {
-    it('a thread a remote send drives is held at lineage: send and steer are not listed; they and wait are refused for an unrelated thread, and nothing reaches the target', async () => {
-      const seen: Record<string, unknown> = {}
+  describe('a plan turn', () => {
+    it('cannot start an agent turn on another thread, and may wait for one', async () => {
+      const seen: Record<string, Awaited<ReturnType<typeof rpc>>> = {}
       const w = world(async (_input, mcp) => {
-        seen.listed = await names(mcp!)
         seen.send = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'x' })
-        seen.steer = await call(mcp!, 'thread_steer', { threadId: w.other.id, runId: 'run:any', text: 'x' })
-        seen.wait = await call(mcp!, 'thread_wait', { threadId: w.other.id })
-        return 'ok'
-      })
-      await w.attach()
-      // What the first remote turn of a thread stores (`Thread.accessCeiling`), whatever the profile says.
-      w.d.store.updateThreadMeta(w.parent.id, { accessCeiling: 'lineage' })
-      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(w.credentials.listForThread(w.parent.id).map((row) => row.accessLevel)).toEqual(['lineage'])
-      for (const name of ['thread_send', 'thread_steer', 'thread_create']) expect(seen.listed as string[], name).not.toContain(name)
-      // Waiting is listed at every level (a thread the caller launched or one below it needs no level); an unrelated thread is still refused.
-      expect(seen.listed as string[]).toContain('thread_wait')
-      for (const key of ['send', 'steer', 'wait']) expect((seen[key] as Awaited<ReturnType<typeof rpc>>).error, key).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(w.d.engine.listRuns(w.other.id)).toEqual([])
-      expect(w.d.engine.tools.listForRun(w.latestRun(w.parent.id).runId).filter((entry) => /^thread_(send|steer|wait)$/.test(entry.tool))).toEqual([])
-    })
-
-    it('a plan turn is held at read: it may wait for a thread, never send to it, steer it or stop it', async () => {
-      const seen: Record<string, unknown> = {}
-      const w = world(async (_input, mcp) => {
-        seen.listed = await names(mcp!)
-        seen.send = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'x' })
-        seen.interrupt = await call(mcp!, 'thread_interrupt', { threadId: w.other.id, runId: 'run:any' })
         seen.wait = await call(mcp!, 'thread_wait', { threadId: w.other.id })
         return 'planned'
       })
       await w.attach()
       await w.d.orch.send({ content: 'Plan it', mode: 'plan' }, false, { threadId: w.parent.id, clientRequestId: 'plan' })
-      expect(seen.listed).toEqual(expect.arrayContaining(['thread_wait']))
-      expect(seen.listed).not.toEqual(expect.arrayContaining(['thread_send']))
-      expect((seen.send as Awaited<ReturnType<typeof rpc>>).error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect((seen.interrupt as Awaited<ReturnType<typeof rpc>>).error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(parse(seen.wait as Awaited<ReturnType<typeof rpc>>)).toMatchObject({ status: 'idle' })
+      expect(refusalOfResponse(seen.send!)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'ceiling_exceeded', retry: 'never' } })
+      expect(parse(seen.wait!)).toMatchObject({ status: 'idle' })
       expect(w.d.engine.listRuns(w.other.id)).toEqual([])
     })
+  })
 
-    it('the profile lowered mid-turn refuses the next call of a running manage turn', async () => {
+  describe('a parent and its own subagent', () => {
+    const isChild = (w: { parent: { id: string }; other: { id: string } }, threadId: string) => threadId !== w.parent.id && threadId !== w.other.id
+
+    it('thread_send to your own subagent is a tracked follow-up that shares continue_subagent\'s retry key; search finds the subagent; another thread may not send to it', async () => {
       const seen: Record<string, unknown> = {}
-      const w = world(async (_input, mcp) => {
-        seen.first = parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'one' }))
-        w.setProfile('read')
-        seen.second = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'two' })
-        return 'ok'
+      const w = world(async (input, mcp, d) => {
+        if (isChild(w, input.threadId)) return `helper did: ${input.prompt.includes('second job') ? 'second' : 'first'}`
+        if (input.threadId === w.other.id) {
+          seen.foreign = await call(mcp!, 'thread_send', { threadId: (seen.child as { childThreadId: string }).childThreadId, content: 'do my job instead' })
+          return 'tried'
+        }
+        const child = parse(await call(mcp!, 'delegate_task', { prompt: 'first job', title: 'Helper', workspace: 'shared', role: 'research', instanceId: 'claude' })) as { childRunId: string; childThreadId: string }
+        seen.child = child
+        await waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed', 'the first task')
+        seen.send = parse(await call(mcp!, 'thread_send', { threadId: child.childThreadId, content: 'second job', clientRequestId: 'next-1' }))
+        // The same request under the other name starts nothing new.
+        seen.retry = parse(await call(mcp!, 'continue_subagent', { subagent: 'Helper', prompt: 'second job', clientRequestId: 'next-1' }))
+        seen.search = parse(await call(mcp!, 'thread_search', { query: 'Helper' }))
+        return 'sent'
       })
       await w.attach()
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen.first).toMatchObject({ replayed: false })
-      expect((seen.second as Awaited<ReturnType<typeof rpc>>).error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(w.d.engine.listRuns(w.other.id)).toHaveLength(1)
+      const child = seen.child as { childThreadId: string }
+      const send = seen.send as { runId: string; subagent: boolean; delegationId: string; title: string }
+      expect(send).toMatchObject({ threadId: child.childThreadId, subagent: true, title: 'Helper' })
+      expect(seen.retry).toMatchObject({ childRunId: send.runId, delegationId: send.delegationId, replayed: true })
+      await waitFor(() => w.d.engine.getRun(send.runId)?.status === 'completed', 'the follow-up')
+      // One follow-up turn, tracked as a task of the parent: two tasks in all.
+      expect(w.turnsOf(child.childThreadId).filter((turn) => turn.prompt.includes('second job'))).toHaveLength(1)
+      expect(w.d.engine.delegations.listForParentThread(w.parent.id)).toHaveLength(2)
+      expect(w.d.engine.getRun(send.runId)).toMatchObject({ source: 'delegation' })
+      const hits = (seen.search as { results: Array<{ threadId: string; subagent?: boolean; parentThreadId?: string }> }).results
+      expect(hits.find((hit) => hit.threadId === child.childThreadId)).toMatchObject({ subagent: true, parentThreadId: w.parent.id })
+
+      await w.d.orch.send('poke', false, { threadId: w.other.id, clientRequestId: 'poke' })
+      expect(refusalOfResponse(seen.foreign as Awaited<ReturnType<typeof rpc>>)).toMatchObject({ code: 'mousse_scope_denied', message: expect.stringContaining('only its parent') })
+      expect(w.turnsOf(child.childThreadId)).toHaveLength(2)
+    })
+
+    it('a parent waiting on its subagent hears the subagent\'s question at once, answers it, and then gets the result (#657)', async () => {
+      const seen: Record<string, unknown> = {}
+      const w = world(async (input, mcp) => {
+        if (isChild(w, input.threadId)) {
+          const answer = JSON.parse((await call(mcp!, 'ask_user', { questions: [{ id: 'which', prompt: 'A or B?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] })).result!.content![0].text) as Record<string, unknown>
+          return `picked ${String(answer.which)}`
+        }
+        const child = parse(await call(mcp!, 'delegate_task', { prompt: 'Pick one', title: 'Asker', workspace: 'shared', role: 'research', instanceId: 'claude' })) as { childRunId: string; childThreadId: string }
+        const started = Date.now()
+        const asked = await call(mcp!, 'thread_wait', { threadId: child.childThreadId, runId: child.childRunId, timeoutMs: 60_000 })
+        seen.waitedMs = Date.now() - started
+        seen.asked = parse(asked)
+        seen.status = parse(await call(mcp!, 'task_status', { subagent: 'Asker' }))
+        const requestId = (seen.asked as { pendingRequests: Array<{ requestId: string }> }).pendingRequests[0].requestId
+        seen.answer = parse(await call(mcp!, 'answer_subagent', { subagent: 'Asker', requestId, answers: { which: 'b' }, clientRequestId: 'answer-1' }))
+        const done = await call(mcp!, 'thread_wait', { threadId: child.childThreadId, runId: child.childRunId, timeoutMs: 60_000 })
+        seen.done = parse(done)
+        seen.doneBlocks = done.result!.content!.length
+        return 'answered'
+      })
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      expect(seen.waitedMs).toBeLessThan(30_000)
+      expect(seen.asked).toMatchObject({
+        status: 'needs_input',
+        needsInput: true,
+        pendingRequests: [{ questions: [expect.objectContaining({ id: 'which', prompt: 'A or B?' })] }],
+        hint: expect.stringContaining('answer_subagent')
+      })
+      expect(seen.status).toMatchObject({ needsInput: true, pendingQuestion: expect.anything() })
+      expect(seen.done).toMatchObject({ status: 'finished', resultText: 'picked b' })
+      // The result read by the wait is acknowledged: the same response carries no notice repeating it, and no wake turn follows.
+      expect(seen.doneBlocks).toBe(1)
+      const childResults = w.d.engine.inbox.listForThread(w.parent.id).filter((row) => row.kind === 'child_result')
+      expect(childResults.map((row) => row.status)).toEqual(['acknowledged'])
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(w.turnsOf(w.parent.id)).toHaveLength(1)
+    })
+
+    it('a busy parent on a runtime that steers by restarting gets its subagent\'s result with its next Mousse tool call, as a separate block, once', async () => {
+      const seen: Record<string, Awaited<ReturnType<typeof rpc>>> = {}
+      const w = world(async (input, mcp, d) => {
+        if (isChild(w, input.threadId)) return 'the zebra report'
+        if (input.prompt !== GO) return 'woken'
+        const child = parse(await call(mcp!, 'delegate_task', { prompt: 'Report', title: 'Reporter', workspace: 'shared', role: 'research', instanceId: 'claude', wake: 'always' })) as { childRunId: string }
+        await waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed' && d.engine.inbox.listPending(w.parent.id).length === 1, 'the result row')
+        seen.first = await call(mcp!, 'list_subagents')
+        seen.second = await call(mcp!, 'list_subagents')
+        return 'busy work done'
+      })
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      // The tool's own result stays the first block and parses as before; the notice follows it.
+      expect(parse(seen.first)).toMatchObject([expect.objectContaining({ title: 'Reporter' })])
+      expect(seen.first.result!.content).toHaveLength(2)
+      expect(seen.first.result!.content![1].text.startsWith(BOUNDARY_NOTICE_HEADER)).toBe(true)
+      expect(seen.first.result!.content![1].text).toContain('the zebra report')
+      expect(seen.second.result!.content).toHaveLength(1)
+      // The parent's run read it: acknowledged when the run completed, and no wake turn follows.
+      const parentRun = w.latestRun(w.parent.id)
+      expect(w.d.engine.getRun(parentRun.runId)?.status).toBe('completed')
+      expect(w.d.engine.inbox.listForThread(w.parent.id).map((row) => row.status)).toEqual(['acknowledged'])
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(w.turnsOf(w.parent.id)).toHaveLength(1)
     })
   })
 })

@@ -157,15 +157,31 @@ describe('Git mutations through the daemon', () => {
       await expect(client.request('git.pull', { ...scope, strategy: 'sideways' })).rejects.toMatchObject({ code: 'invalid_params' })
     })
 
-    it('initialises a project folder that is not a repository yet, and refuses a thread', async () => {
+    it('initialises a project folder that is not a repository yet', async () => {
       const folder = mkdtempSync(join(tmpdir(), 'mousse-daemon-init-'))
       try {
         const project = mms.projects.openProject(folder)
         const result = await client.request<Status>('git.init', { projectId: project.id })
         expect(result.status.isRepo).toBe(true)
         await expect(client.request('git.init', { projectId: project.id })).rejects.toMatchObject({ code: 'git_already_repo' })
-        await expect(client.request('git.init', { threadId: 'any' })).rejects.toMatchObject({ code: 'invalid_params' })
       } finally { rmSync(folder, { recursive: true, force: true }) }
+    })
+
+    it('starts Git in a thread\'s own folder after its worktree was removed, and leaves the project alone', async () => {
+      const { threadId, path } = await threadScope()
+      const projectHead = git(f.repo, 'rev-parse', 'HEAD')
+      const branches = () => git(f.repo, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads')
+      const projectBranches = branches()
+      await expect(client.request('git.init', { threadId })).rejects.toMatchObject({ code: 'git_already_repo' })
+      // What the agent did: removed its worktree.
+      git(f.repo, 'worktree', 'remove', '--force', path)
+      expect((await client.request<Status>('git.status', { threadId })).status).toMatchObject({ isRepo: false, missing: true })
+      const result = await client.request<Status>('git.init', { threadId })
+      expect(result.status.isRepo).toBe(true)
+      expect(existsSync(join(path, '.git'))).toBe(true)
+      expect((await client.request<Status>('git.status', { threadId })).status.isRepo).toBe(true)
+      expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(projectHead)
+      expect(branches()).toBe(projectBranches)
     })
 
     it('commits only what is staged and leaves the other file unstaged', async () => {
@@ -723,7 +739,8 @@ describe('Git mutations through the daemon', () => {
         const mine = listen(me)
         write(f.repo, 'cancel.txt'); git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'cancel me')
         const pushing = me.request('git.push', { ...scope, operationId: 'daemon-push-2' }).then(() => null, (error: unknown) => error)
-        await wait(() => mine.some((event) => event.phase === 'hook'))
+        // The hook has started its grandchild (its pids are written), not only been reported: a cancel before that stops nothing to check.
+        await wait(() => mine.some((event) => event.phase === 'hook') && existsSync(pidFile))
         await expect(other.client.request('git.cancelOperation', { operationId: 'daemon-push-2' })).resolves.toEqual({ cancelled: false })
         await expect(me.request('git.cancelOperation', { operationId: 'unknown' })).resolves.toEqual({ cancelled: false })
         await expect(me.request('git.cancelOperation', {})).rejects.toMatchObject({ code: 'invalid_params' })
@@ -747,7 +764,7 @@ describe('Git mutations through the daemon', () => {
         const before = git(t.path, 'rev-parse', 'HEAD'), state = porcelain(t.path)
         const mine = listen(me)
         const committing = me.request('git.commit', { threadId: t.threadId, message: 'cancelled', operationId: 'daemon-commit-1' }).then(() => null, (error: unknown) => error)
-        await wait(() => mine.some((event) => event.phase === 'hook'))
+        await wait(() => mine.some((event) => event.phase === 'hook') && existsSync(pidFile))
         await me.request('git.cancelOperation', { operationId: 'daemon-commit-1' })
         expect(await committing).toMatchObject({ code: 'git_cancelled' })
         await allDead(pidFile)

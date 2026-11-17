@@ -4,9 +4,11 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueuedMessages, queuedContentWithText, splitQueuedContent } from '../../src/renderer/components/QueuedMessages'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
-import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
+import { QUEUE_DRAFT_MOVED_NOTICE, SENT_NOW_HIDE_MS, STARTING_ITEM_HOLD_MS, startingItem, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
 import { useAppStore } from '../../src/renderer/stores/appStore'
+import { withSteersOnTheWay } from '../../src/renderer/lib/steersOnTheWay'
 import type { QueuedMessage, Thread } from '../../src/shared/types'
+import { agentMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -24,15 +26,23 @@ let api: { list: ReturnType<typeof vi.fn>; edit: ReturnType<typeof vi.fn>; reord
 let toComposer: ReturnType<typeof vi.fn>
 
 /** The queue as the chat renders it: in the conversation, with its errors and notes in the composer's notice slot. */
-function Chat({ hold = null }: { hold?: QueueHold | null }) {
-  const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer })
+function Chat({ hold = null, lastPromptId = null, lastPromptQueueItemId = null }: { hold?: QueueHold | null; lastPromptId?: string | null; lastPromptQueueItemId?: string | null }) {
+  const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer, lastPromptId, lastPromptQueueItemId })
+  // The reply's steered messages, as the conversation shows them: the transcript with the steers on their way.
+  const transcript = useAppStore((state) => state.messages)
+  const steered = withSteersOnTheWay(transcript, thread.steersOnTheWay, 't1').filter((message) => message.role === 'user' && message.steered)
   return createElement(Fragment, null,
+    createElement('ol', { className: 'reply' }, steered.map((message) => createElement('li', { key: message.id }, message.content))),
     createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
     createElement(ComposerNoticeSource, { notice: thread.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, onDismiss: thread.dismissDraftMoved } : null }),
     createElement(ComposerNoticeSource, { notice: thread.notice ? { tone: 'info', title: thread.notice, onDismiss: thread.clearNotice } : null }),
     createElement(ComposerNoticeSlot),
     createElement(QueuedMessages, { queue: thread }))
 }
+
+beforeEach(async () => {
+  ;(await import('../../src/renderer/lib/steerKey')).forgetSteerKey()
+})
 
 beforeEach(() => {
   host = document.createElement('div')
@@ -42,7 +52,7 @@ beforeEach(() => {
   listed = []
   toComposer = vi.fn()
   // Open edits and their notices live in the app store, by thread.
-  useAppStore.setState({ queueEditDrafts: {}, queueDraftNotices: {} })
+  useAppStore.setState({ queueEditDrafts: {}, queueDraftNotices: {}, messages: [] })
   api = {
     list: vi.fn(async () => listed),
     edit: vi.fn(async (_thread: string, itemId: string, content: string) => ({ item: queued(itemId, content) })),
@@ -66,6 +76,8 @@ const show = async (items: QueuedMessage[], hold: QueueHold | null = null) => {
   await act(async () => { push!({ threadId: 't1', items }) })
 }
 const rows = () => [...host.querySelectorAll<HTMLElement>('.queued-message')]
+/** The steered messages the reply shows, by their words. */
+const reply = () => [...host.querySelectorAll<HTMLElement>('.reply li')].map((item) => item.textContent)
 const row = (id: string) => host.querySelector<HTMLElement>(`[data-queued-id="${id}"]`)!
 const button = (id: string, label: string) => row(id).querySelector<HTMLButtonElement>(`button[aria-label^="${label}"]`)
 const click = async (element: HTMLElement | null) => { await act(async () => { element!.click() }) }
@@ -95,12 +107,54 @@ describe('queued messages in the conversation', () => {
     expect(row('a').querySelector('.chat-user-bubble p')?.textContent).toBe('Look at this')
   })
 
+  it('labels a message another thread\'s agent queued before it runs, showing only its words; its editor starts from them and saves the person\'s own text', async () => {
+    useAppStore.setState({ threads: [{ id: 'sender', name: 'Fix flaky test' } as Thread] })
+    const letter = agentMessage('sender', 'Fix flaky test', 'Also rerun the integration suite')
+    const origin = { kind: 'agent' as const, threadId: 'sender', runId: 'run-s', hops: 1, title: 'Fix flaky test', body: { head: letter.head, tail: letter.tail } }
+    await show([queued('a', letter.text, { source: 'mcp', origin }), queued('b', 'typed by the person')])
+    expect(row('a').querySelector('.chat-agent-sender')?.textContent).toBe('Agent·Fix flaky test')
+    expect(row('a').querySelector('.chat-user-bubble p')?.textContent).toBe('Also rerun the integration suite')
+    expect(row('b').querySelector('.chat-agent-sender')).toBeNull()
+
+    await click(button('a', 'Edit'))
+    const area = row('a').querySelector('textarea')!
+    expect(area.value).toBe('Also rerun the integration suite')
+    await type(area, 'Rerun only the flaky test')
+    await key(area, { key: 'Enter' })
+    // The saved text carries no label: the daemon then stores it as the person's (it drops the agent origin on a person's edit).
+    expect(api.edit).toHaveBeenCalledWith('t1', 'a', 'Rerun only the flaky test', letter.text)
+  })
+
+  it('shows text in angle brackets as written, from the person or from another thread\'s agent', async () => {
+    const text = 'Do the <work of first task>, then <b>this</b> and <thinking>\nplan\n</thinking> <!-- note'
+    useAppStore.setState({ threads: [{ id: 'sender', name: 'Planner' } as Thread] })
+    const letter = agentMessage('sender', 'Planner', text)
+    const origin = { kind: 'agent' as const, threadId: 'sender', runId: 'run-s', hops: 1, title: 'Planner', body: { head: letter.head, tail: letter.tail } }
+    await show([queued('a', text), queued('b', letter.text, { source: 'mcp', origin })])
+    expect(rows().map((entry) => entry.querySelector('.chat-user-bubble p')?.textContent)).toEqual([text, text])
+    expect(host.querySelector('.chat-user-bubble b, .chat-user-bubble thinking')).toBeNull()
+  })
+
+  it('shows when each message was queued on its line: the time today, the date on an earlier day', async () => {
+    await show([queued('a', 'today', { enqueuedAt: new Date().toISOString() }), queued('b', 'earlier', { enqueuedAt: '2026-11-09T12:00:00Z' })])
+    const time = (id: string) => row(id).querySelector('.queued-message-line')?.textContent
+    expect(time('a')).toMatch(/^\d{1,2}:\d{2}\s[AP]M/)
+    expect(time('b')).toMatch(/^Nov 9/)
+  })
+
   it('says "Queued" once, on the last line', async () => {
     await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
     const labels = [...host.querySelectorAll('.queued-message-state')]
     expect(labels.map((label) => label.textContent)).toEqual(['Queued'])
     expect(row('c').contains(labels[0]!)).toBe(true)
     expect(labels[0]!.getAttribute('title')).toBe('Sends when the current reply ends')
+  })
+
+  it('says a Stop holds the queue, and what sends it, instead of "Queued"', async () => {
+    await show([queued('a', 'one', { heldAfterStop: true }), queued('b', 'two', { heldAfterStop: true })])
+    const labels = [...host.querySelectorAll('.queued-message-state')]
+    expect(labels.map((label) => label.textContent)).toEqual(['Held after Stop'])
+    expect(labels[0]!.getAttribute('title')).toBe('Sends after the reply to your next message, or send it now')
   })
 
   it('edits in place: Enter saves the new text and the message keeps its place', async () => {
@@ -371,11 +425,125 @@ describe('queued messages in the conversation', () => {
     await act(async () => { send.click(); send.click() })
     expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
     expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'c')
+    // C leaves the queue at the click: the transcript shows it as sent, in the reply it joins.
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
     await act(async () => { answer() })
-    // The daemon's list is what shows: C is steering, A and B wait in order.
+    // The daemon lists C as steering until the reply reads it; it stays out of the queue, A and B wait in order.
     await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('b', 'two'), queued('c', 'three', { intent: 'steer', state: 'steering' })] }) })
-    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b', 'c'])
-    expect(button('c', 'Sending')!.disabled).toBe(true)
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+  })
+
+  it('a double click on Send now sends only the clicked message, not the one that moves under the pointer', async () => {
+    await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+    await click(button('c', 'Send'))
+    // C left the list; the second click of the double click lands on B's button, which moved under the pointer.
+    await act(async () => { button('b', 'Send')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 2 })) })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'c')
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+  })
+
+  it('shows a message sent now again at once when a Stop puts it back first in the queue', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('b', 'two', { intent: 'steer', state: 'steering' })] }) })
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+    // The turn was stopped before it read B: the daemon lists it pending, first.
+    await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('a', 'one')] }) })
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['b', 'a'])
+  })
+
+  it('shows a message sent now in the reply from the click, and once when its copy in the turn arrives', async () => {
+    let answer!: () => void
+    api.promoteToSteer.mockImplementation(() => new Promise((resolve) => { answer = () => resolve({ ok: true }) }))
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+    expect(reply()).toEqual(['two'])
+    await act(async () => { answer() })
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('b', 'two', { intent: 'steer', state: 'steering' })] }) })
+    await act(async () => {
+      useAppStore.getState().addMessage({ id: 'echo-b', role: 'user', content: 'two', timestamp: '2026-11-09T10:01:00Z', steered: true, steerItemId: 'b' } as never)
+    })
+    expect(reply()).toEqual(['two'])
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+  })
+
+  it('shows a message sent now while its turn is being set up in the reply, and back in the queue if the turn never takes it', async () => {
+    vi.useFakeTimers()
+    try {
+      await show([queued('a', 'one'), queued('b', 'two')])
+      await click(button('b', 'Send'))
+      // The turn is still being set up: the daemon lists B as waiting, first.
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('a', 'one')] }) })
+      expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+      expect(reply()).toEqual(['two'])
+      await act(async () => { vi.advanceTimersByTime(SENT_NOW_HIDE_MS) })
+      expect(rows().map((item) => item.dataset.queuedId)).toEqual(['b', 'a'])
+      expect(reply()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes a refused message out of the reply as it comes back to the queue', async () => {
+    api.promoteToSteer.mockResolvedValueOnce({ ok: false })
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+    expect(reply()).toEqual([])
+  })
+
+  it('offers no Send now on a steer another process takes, and says why', async () => {
+    await show([queued('a', 'one'), queued('s', 'steer elsewhere', { intent: 'steer' })])
+    const send = row('s').querySelector<HTMLButtonElement>('.queued-message-send')!
+    expect(send.disabled).toBe(true)
+    expect(send.title).toBe('Sent into the running reply')
+    expect(host.textContent).not.toContain('Sending now')
+  })
+
+  it('a second steer key press right after the first does not send the next queued message too', async () => {
+    await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+    const row = rows().find((item) => item.dataset.queuedId === 'a')!
+    row.focus()
+    await key(row, { key: 'Enter', ctrlKey: true })
+    // Focus moved on to B; the same chord pressed again a moment later lands there.
+    const next = document.activeElement as HTMLElement
+    expect(next.dataset.queuedId).toBe('b')
+    await key(next, { key: 'Enter', ctrlKey: true })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'a')
+  })
+
+  it('puts a message back in the queue when Send now is refused', async () => {
+    api.promoteToSteer.mockRejectedValueOnce(new Error('No active turn to steer on this thread.'))
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+  })
+
+  it('sends a focused queued message now with the steer key, once', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')])
+    const row = rows().find((item) => item.dataset.queuedId === 'b')!
+    row.focus()
+    await key(row, { key: 'Enter', ctrlKey: true })
+    await key(row, { key: 'Enter', ctrlKey: true })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'b')
+    // Focus moves on to the next queued message (here the first, as B was last), not to the page, where the same
+    // chord would answer an approval; and that is held off for a moment too.
+    expect(document.activeElement).toBe(rows().find((item) => item.dataset.queuedId === 'a'))
+    const { steerKeyRecently } = await import('../../src/renderer/lib/steerKey')
+    expect(steerKeyRecently()).toBe(true)
+    // Enter alone, or with another modifier, does nothing here.
+    await key(rows()[0]!, { key: 'Enter' })
+    await key(rows()[0]!, { key: 'Enter', ctrlKey: true, shiftKey: true })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+  })
+
+  it('names the steer key in the Send now tooltip', async () => {
+    await show([queued('a', 'one')])
+    expect(button('a', 'Send')!.title).toBe('Steer: send now (Ctrl+Enter)')
   })
 
   it('shows a queued subagent result by what it reports, never by the text the model reads, and offers no edit', async () => {
@@ -386,9 +554,85 @@ describe('queued messages in the conversation', () => {
     expect(button('n', 'Edit')).toBeNull()
   })
 
+  it('shows a queued settle notice by the thread it is about, never by the text the model reads, and offers no edit', async () => {
+    const notice = [{ watchId: 'w1', threadId: 't2', title: 'Fix build', event: 'ended' as const, status: 'completed' }]
+    await show([queued('s', '[Mousse notice, not from the user or any agent]\nSECRET RESULT', { source: 'thread-notice', settleNotice: notice })])
+    expect(row('s').textContent).toContain('Fix build')
+    expect(row('s').textContent).toContain('finished')
+    expect(row('s').textContent).not.toContain('SECRET RESULT')
+    expect(button('s', 'Edit')).toBeNull()
+  })
+
   it('leaves internal items out', async () => {
     await show([queued('a', 'one'), queued('i', 'wake up', { internal: true })])
     expect(rows().map((entry) => entry.dataset.queuedId)).toEqual(['a'])
+  })
+})
+
+describe('the first queued message when its turn starts', () => {
+  /** The chat with the transcript's last prompt: `p1` until the next turn's prompt shows. */
+  const render = (prompt: { id: string; queueItemId?: string }) =>
+    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Chat, { lastPromptId: prompt.id, lastPromptQueueItemId: prompt.queueItemId ?? null }))))
+  const start = async (items: QueuedMessage[]) => {
+    listed = items
+    render({ id: 'p1' })
+    await act(async () => { push!({ threadId: 't1', items }) })
+  }
+  const ids = () => rows().map((item) => item.dataset.queuedId)
+
+  it('stays first in the queue after the daemon takes it, and leaves as its prompt shows', async () => {
+    await start([queued('a', 'one'), queued('b', 'two')])
+    // The daemon took A for its turn; its prompt is not in the transcript yet.
+    await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+    expect(ids()).toEqual(['a', 'b'])
+    // It takes no change on its way.
+    expect(button('a', 'Send')!.disabled).toBe(true)
+    // Its prompt shows: it leaves the queue in the same render.
+    render({ id: 'p2', queueItemId: 'a' })
+    expect(ids()).toEqual(['b'])
+  })
+
+  it('leaves when another prompt shows, or after a while when none does', async () => {
+    vi.useFakeTimers()
+    try {
+      await start([queued('a', 'one'), queued('b', 'two')])
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+      render({ id: 'p2' })
+      expect(ids()).toEqual(['b'])
+      await act(async () => { push!({ threadId: 't1', items: [] }) })
+      expect(ids()).toEqual(['b'])
+      await act(async () => { vi.advanceTimersByTime(STARTING_ITEM_HOLD_MS) })
+      expect(ids()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves at once when it is removed here, or when the whole queue is cleared', async () => {
+    await start([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+    // The list without it arrives after the remove answered.
+    await click(button('a', 'Remove'))
+    await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('c', 'three')] }) })
+    expect(ids()).toEqual(['b', 'c'])
+    await act(async () => { push!({ threadId: 't1', items: [] }) })
+    expect(ids()).toEqual([])
+  })
+
+  it('shows a message whose prompt is already in the transcript only there', async () => {
+    listed = [queued('a', 'one'), queued('b', 'two')]
+    render({ id: 'p2', queueItemId: 'a' })
+    await act(async () => { push!({ threadId: 't1', items: listed }) })
+    expect(ids()).toEqual(['b'])
+  })
+
+  it('names the message taken: the first waiting one, only when it alone left', () => {
+    const a = queued('a', 'one'), b = queued('b', 'two')
+    expect(startingItem([a, b], [b], () => false)).toBe(a)
+    expect(startingItem([a, b], [], () => false)).toBeNull()
+    expect(startingItem([a, b], [a], () => false)).toBeNull()
+    expect(startingItem([a, b], [b], (id) => id === 'a')).toBeNull()
+    const steering = queued('s', 'steer', { state: 'steering', intent: 'steer' })
+    expect(startingItem([steering, a, b], [steering, b], () => false)).toBe(a)
   })
 })
 
@@ -399,6 +643,39 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
+
+describe('a message shown while its send is on its way', () => {
+  function SendingChat({ optimistic, hidden, onReconciled }: { optimistic: QueuedMessage[]; hidden?: ReadonlySet<string>; onReconciled?: (id: string) => void }) {
+    const thread = useThreadQueue({ threadId: 't1', optimisticItems: optimistic, hiddenRequestIds: hidden, onOptimisticItemReconciled: onReconciled })
+    return createElement(QueuedMessages, { queue: thread })
+  }
+  const ids = () => rows().map((item) => item.dataset.queuedId)
+
+  it('shows once when the queue lists it before the send answers', async () => {
+    const reconciled = vi.fn()
+    const copy = queued('optimistic:x', 'two', { clientRequestId: 'req-2' })
+    act(() => root.render(createElement(SendingChat, { optimistic: [copy], onReconciled: reconciled })))
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one')] }) })
+    expect(ids()).toEqual(['a', 'optimistic:x'])
+    // The daemon lists the item its send queued; the send has not answered yet.
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('srv-2', 'two', { clientRequestId: 'req-2' })] }) })
+    expect(ids()).toEqual(['a', 'srv-2'])
+    expect(reconciled).toHaveBeenCalledWith('optimistic:x')
+  })
+
+  it('keeps an identical message sent earlier apart from it', async () => {
+    const copy = queued('optimistic:x', 'two', { clientRequestId: 'req-2' })
+    act(() => root.render(createElement(SendingChat, { optimistic: [copy] })))
+    await act(async () => { push!({ threadId: 't1', items: [queued('srv-1', 'two', { clientRequestId: 'req-1' })] }) })
+    expect(ids()).toEqual(['srv-1', 'optimistic:x'])
+  })
+
+  it('does not show a steer the running turn could not take yet, which is sent now as soon as its send answers', async () => {
+    act(() => root.render(createElement(SendingChat, { optimistic: [], hidden: new Set(['req-3']) })))
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('srv-3', 'steer this', { clientRequestId: 'req-3' })] }) })
+    expect(ids()).toEqual(['a'])
+  })
+})
 
 describe('a change that answers after the thread changed', () => {
   /** The chat with a thread switch: the hook stays, the conversation (and its queue) is drawn per thread. */
@@ -593,7 +870,7 @@ describe('queued messages while a compaction runs', () => {
     expect(host.querySelectorAll('.queued-message-state')).toHaveLength(1)
     expect(state().textContent).toBe('Queued')
     expect(state().title).toBe('Sends after compacting')
-    expect(state().querySelector('svg.animate-spin')).not.toBeNull()
+    expect(state().querySelector('.animate-spin svg')).not.toBeNull()
   })
 
   it('has no spinner once nothing holds the queue', async () => {
@@ -608,7 +885,7 @@ describe('queued messages while a compaction runs', () => {
     expect(skip.title).toBe('Send now: skip compacting and keep the full 182K history')
     expect(skip.getAttribute('aria-label')).toBe(skip.title)
     // The others keep their usual actions.
-    expect(button('b', 'Send the queued message now')?.title).toBe('Send now')
+    expect(button('b', 'Send the queued message now')?.title).toBe('Steer: send now (Ctrl+Enter)')
     expect(button('b', 'Edit')).not.toBeNull()
     expect(button('b', 'Remove')).not.toBeNull()
     await click(skip)

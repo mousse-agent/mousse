@@ -1,11 +1,17 @@
+import { APP_PRESENCE_CAPABILITY } from '../notifications/OwnerQuietHours'
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
+import { requestWorkScope } from '../execution/workScope'
+import { agentMessageWords } from '../../shared/agentMessageWords'
 import { expiryRefusal, isThreadExpired } from '../../shared/threadExpiry'
+import { MAX_GOAL_TEXT } from '../../shared/threadGoal'
 import { assertWorktreeFolderConnected, chosenFolderHolding, WorktreeFolderRefused } from '../worktree/worktreeLayout'
 import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
 import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
 import { projectIconFor, readIconFile, resolveStoredIconPath } from '../data/projectIcon'
+import { WALLPAPER_PIECE_MAX_BYTES, WallpaperRefused } from '../appearance/WallpaperStore'
+import { isWallpaperBucket, WALLPAPER_MAX_BYTES, WALLPAPER_UPLOAD_MAX_BASE64, WALLPAPER_UPLOAD_MAX_BYTES } from '../../shared/themes/wallpaperImage'
 import type { ProjectIconChoice } from '../../shared/projectIcon'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
@@ -20,7 +26,7 @@ import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
 import { describePermissionMode, isPermissionMode, isStricter, narrowPermissionMode, normalizePermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
-import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
+import { assertLifecyclePath, isLifecycleIdentity } from '../lifecycle/ResourceLifecycleStore'
 import { ARCHIVE_BEFORE_DELETE } from '../lifecycle/threadDelete'
 /**
  * Method handlers against daemon-owned MousseMainService.
@@ -52,7 +58,9 @@ import { AppError, createErrorProvider, knownAppError } from '../../shared/error
 import type { DiscardedCopy, GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue, listPendingQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
 import { describeQuestionAnswers, formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
+import { answerMessageImages, answersWithImagePaths, attachmentsForQuestions, removeAnswerImages, saveAnswerImages } from '../orchestrator/questionAttachments'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
+import { GoalError } from '../orchestrator/threadGoals'
 import type { ModelOverride } from '../../shared/providerInstances'
 import { projectRememberingPick, rememberedChoiceFor } from '../data/newThreadChoice'
 import {
@@ -70,6 +78,7 @@ import {
   asAddInstanceInput,
   asAfterSequence,
   asAnswersMap,
+  asOptionalAnswerAttachments,
   asEnabledForScope,
   asInstanceConfigPatch,
   asInstanceId,
@@ -97,7 +106,10 @@ import {
 import { FIRST_SEND_BINDING_CAPABILITY, PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
 import { imageAt, messagesAfter, messagesBefore, newestPage, withoutImageBytes } from './transcriptPaging'
 import { isOpenActivityRow } from '../run/restartNote'
-import { ROUTED_MESSAGES_PAGE_BYTES, ROUTED_SEND_WINDOW_KEY, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
+import { ROUTED_AGENT_READ, ROUTED_MESSAGES_PAGE_BYTES, ROUTED_RUN_WAIT_MAX_MS, ROUTED_SEND_WINDOW_KEY, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
+import { waitOnRun } from '../run/runWait'
+import { messageRows, textOffsetProblem } from '../run/mcp/appTools/messageRows'
+import { THREAD_RESULT_MAX_CHARS } from '../run/mcp/appTools/thread'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
@@ -148,7 +160,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
 import { access, realpath as realpathNative } from 'node:fs/promises'
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { clearMarker, type SelectionPlace } from '../git/gitSelection'
 import { FolderNotAnsweringError, waitForFolderAccess } from '../files/folderAccess'
 import { listFilesPlaces } from '../files/drives'
@@ -164,6 +176,8 @@ import { parseChatReference } from '../../shared/chatReferences'
 import type { ReviewFilesResult, ReviewRange, ReviewScope } from '../../shared/review'
 import { repoRelativePaths } from '../git/repoPaths'
 import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } from '../git/reviewDiff'
+import { locateTurnFile, threadWroteFile, turnFilePath } from '../git/turnFile'
+import { writtenFilePaths } from '../../shared/turnFiles'
 import { resolveReviewScope } from '../actions/reviewRange'
 
 /** The Claude subscription's id on the usage page. */
@@ -393,6 +407,35 @@ function questionAnswerer(ctx: HandlerContext): Answerer {
 
 /** Messages `thread.messages` returns when the caller names no limit, and the most it will. */
 const MESSAGES_PAGE_DEFAULT = 100
+/** `thread.messages` with `index`: at most this many messages in one page (an agent's `thread_read` asks for up to 200). */
+const AGENT_MESSAGES_PAGE_MAX = 200
+
+/**
+ * `thread.messages` with `index` (issue #1160): the page an agent's `thread_read` on another computer shows, built here
+ * as for this computer's own agents (`messageRows`). Each message's text is cut to `textMax` characters (the first from
+ * `textOffset`) and the rows stop once they pass the page's bytes, so only what the tool can return crosses. The text
+ * goes as `content`, so the router names the references in it the way the reader's computer does.
+ */
+async function agentMessagesPage(ctx: HandlerContext, threadId: string, p: Record<string, unknown>): Promise<unknown> {
+  if (p.before !== undefined || p.after !== undefined) throw new DomainRpcError('invalid_params', 'index pages without before or after.')
+  const index = asBoundedInt(p.index, 'index', { min: 0, max: Number.MAX_SAFE_INTEGER })
+  const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: AGENT_MESSAGES_PAGE_MAX }) ?? 50
+  const textOffset = asOptionalBoundedInt(p.textOffset, 'textOffset', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0
+  const textMax = asOptionalBoundedInt(p.textMax, 'textMax', { min: 1, max: ROUTED_AGENT_READ.textMax }) ?? ROUTED_AGENT_READ.textMax
+  if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+  const all = ctx.mms.orchestrator.visibleMessagesWithoutLoading(threadId)
+  const problem = textOffsetProblem(all, index, textOffset)
+  if (problem) throw new DomainRpcError('invalid_params', problem)
+  const messages: Array<Record<string, unknown>> = []
+  let bytes = 0
+  for (const { text, ...row } of messageRows(all, { afterIndex: index, limit, textOffset, maxChars: textMax })) {
+    const shown = { ...row, content: text }
+    bytes += Buffer.byteLength(JSON.stringify(shown), 'utf8')
+    if (messages.length > 0 && bytes > ROUTED_AGENT_READ.pageBytes) break
+    messages.push(shown)
+  }
+  return { messages, total: all.length }
+}
 const MESSAGES_PAGE_MAX = 500
 /** The most messages a `thread.snapshot` with `newest` returns. */
 const SNAPSHOT_NEWEST_MAX = 2000
@@ -758,6 +801,53 @@ function isLocalWindow(ctx: HandlerContext): boolean {
 }
 
 /**
+ * A theme's wallpaper images (`WallpaperStore`), for a Mousse window on this computer only: the import takes a path the
+ * window's main process got from the file dialog (a network share is allowed there, never for an agent), or the bytes
+ * of a theme file's wallpaper; read and saveCopy carry the display copies windows make. A call made for one profile
+ * is refused once the window is bound to another (`expectedProfileId`).
+ */
+async function wallpaperCall(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  if (!isLocalWindow(ctx)) throw new DomainRpcError('forbidden', 'Only a Mousse window on this computer reads or sets wallpapers')
+  const p = isObject(params) ? params : {}
+  const expectedProfileId = asOptionalString(p.expectedProfileId, 256)
+  if (expectedProfileId && expectedProfileId !== ctx.mms.profileId) throw new DomainRpcError('profile_mismatch', 'Profile changed; the wallpaper call was not made')
+  const store = ctx.mms.wallpapers
+  const bytes = (field: string): Buffer => {
+    const text = p[field]
+    if (typeof text !== 'string' || !text || text.length > WALLPAPER_UPLOAD_MAX_BASE64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(text))
+      throw new DomainRpcError('invalid_params', `${field} must be base64 of at most ${WALLPAPER_UPLOAD_MAX_BYTES} bytes`)
+    return Buffer.from(text, 'base64')
+  }
+  const refused = (error: unknown): never => {
+    if (error instanceof WallpaperRefused) throw new DomainRpcError('invalid_params', error.message)
+    throw error
+  }
+  switch (method) {
+    case 'appearance.wallpaperImport': {
+      const path = asString(p.path, 'path', 4096)
+      return { wallpaper: await store.importFile(path, { network: true }).catch(refused) }
+    }
+    case 'appearance.wallpaperImportBytes':
+      return { wallpaper: await store.importBytes(bytes('dataBase64')).catch(refused) }
+    case 'appearance.wallpaperRead': {
+      const id = asString(p.id, 'id', 64)
+      const bucket = p.bucket === undefined || p.bucket === null ? undefined : p.bucket
+      if (bucket !== undefined && !isWallpaperBucket(bucket)) throw new DomainRpcError('invalid_params', 'bucket must be 1920, 2560 or 3840')
+      const offset = asOptionalBoundedInt(p.offset, 'offset', { min: 0, max: WALLPAPER_MAX_BYTES }) ?? 0
+      const length = asOptionalBoundedInt(p.length, 'length', { min: 1, max: WALLPAPER_PIECE_MAX_BYTES }) ?? WALLPAPER_PIECE_MAX_BYTES
+      const piece = await store.read(id, bucket, offset, length)
+      return piece ? { type: piece.type, size: piece.size, offset: piece.offset, data: piece.data.toString('base64') } : { missing: true }
+    }
+    case 'appearance.wallpaperSaveCopy': {
+      const id = asString(p.id, 'id', 64)
+      if (!isWallpaperBucket(p.bucket)) throw new DomainRpcError('invalid_params', 'bucket must be 1920, 2560 or 3840')
+      return { saved: await store.saveCopy(id, p.bucket, bytes('dataBase64'), { replace: p.replace === true }) }
+    }
+  }
+  throw new DomainRpcError('method_not_allowed', method)
+}
+
+/**
  * Runs a file call for a caller. The Files panel shows the reason a file cannot be opened or saved (too large,
  * no preview for its type, outside the folder, no longer there), so a window of this computer, and the same
  * panel on another of the user's computers, get the call's own message; any other caller keeps the daemon's
@@ -942,9 +1032,9 @@ async function readPullRequestDetail(ctx: HandlerContext, root: string, number: 
  * Writes a thread's link. The same pull request keeps its watch; a different one ends the old watch (with its line), since
  * a watch belongs to the pull request it began on and must not resume later with an old cutoff and a backlog.
  */
-function writeThreadLink(ctx: HandlerContext, threadId: string, next: ThreadPullRequestLink, keepWatch: boolean): Thread {
+function writeThreadLink(ctx: HandlerContext, threadId: string, next: ThreadPullRequestLink, keepWatch: boolean, info: Pick<GitPullRequestInfo, 'title' | 'state' | 'isDraft'>): Thread {
   const previous = ctx.mms.threads.getThread(threadId)?.pullRequest
-  const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: keepWatch ? relinked(previous, next) : next })
+  const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: keepWatch ? relinked(previous, next) : next }, { pullRequestInfo: info })
   if (previous && !sameLinkedPullRequest(previous, next)) ctx.mms.pullRequestWatch.onEnded(threadId, 'unlinked')
   return thread
 }
@@ -958,10 +1048,22 @@ async function linkOriginThread(ctx: HandlerContext, threadId: string | null, ro
   if (!threadId) return
   try {
     const identity = await ctx.mms.gitService.codeHost.repositoryIdentity(root)
-    writeThreadLink(ctx, threadId, threadPullRequestLink(identity, pullRequest), true)
+    writeThreadLink(ctx, threadId, threadPullRequestLink(identity, pullRequest), true, pullRequest)
     ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
   } catch {
     // Left unlinked; see above.
+  }
+}
+
+/**
+ * Keeps what the host just said about pull requests on the threads linked to them, for the sidebar's count and its
+ * tooltip. A thread list push follows only when a thread changed (the store announces it). Never fails the read.
+ */
+function notePullRequestStates(ctx: HandlerContext, infos: ReadonlyArray<Pick<GitPullRequestInfo, 'url' | 'title' | 'state' | 'isDraft'>>): void {
+  try {
+    ctx.mms.threads.notePullRequestStates(infos)
+  } catch {
+    // The state shown stays as it was until the next read.
   }
 }
 
@@ -1080,8 +1182,9 @@ async function asDomainError<T>(run: () => Promise<T>): Promise<T> {
 
 /** What a thread's worktree branch is named from when one is made here: its first message, else its name. */
 function branchNameSource(ctx: HandlerContext, threadId: string): string | undefined {
-  const first = ctx.mms.orchestrator.getMessages(threadId).find((message) => message.role === 'user' && message.content.trim())
-  return first?.content ?? ctx.mms.threads.getThread(threadId)?.name
+  // An agent's message is named from its words, never from the header Mousse wrote around them.
+  const first = ctx.mms.orchestrator.getMessages(threadId).map((message) => message.role === 'user' ? agentMessageWords(message.content, message.origin) : '').find((words) => words.trim())
+  return first ?? ctx.mms.threads.getThread(threadId)?.name
 }
 
 /**
@@ -1626,12 +1729,24 @@ export async function dispatchMethod(
   return result
 }
 
-function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  // Deleting an archived thread stops what still runs in it first, once nothing that would refuse the delete is found:
+  // the send waiting for its turn is a request the delete's admission would otherwise wait for, and refuse. Another
+  // computer's delete is refused anyway. A thread of another computer (a qualified id) is routed to its owner, which
+  // stops it there.
+  if (method === 'threads.delete' && isObject(params) && isLifecycleIdentity(params.threadId) && ctx.connection?.clientType !== 'bridge')
+    await ctx.mms.stopThreadBeforeDelete?.(params.threadId, { human: ctx.connection?.clientType === 'gui', discard: params.discard === true })
   // Installation lifecycle commands must not wait on themselves in a personal
   // request barrier. Every actual personal service has this ownership method;
   // the fallback preserves legacy isolated handler test doubles.
   if (!isInstallationMethod(method) && ctx.mms.runOwnedRequest) {
-    return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params))
+    // A request that names only threads of this computer is counted under them, so a delete of another thread does
+    // not wait for it. One that names anything else (a project terminal's `__unbound__`, a chat's task id) is the profile's.
+    // Read only: a listed thread, or one with a lifecycle record (live, in the trash, a subagent's, a bot's). An id found
+    // in neither is counted as the profile's; nothing is scanned, migrated or registered for it before admission. An id
+    // no lifecycle record can have (another computer's qualified thread id) is never a thread here.
+    const isThread = (id: string): boolean => isLifecycleIdentity(id) && Boolean(ctx.mms.threads?.peekThread?.(id) || ctx.mms.threads?.lifecycleStore?.get(id))
+    return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params), requestWorkScope(params, isThread))
   }
   return dispatchOwnedMethod(ctx, method, params)
 }
@@ -1821,6 +1936,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
   }
   if (isObject(params) && typeof params.threadId === 'string' &&
       !['threads.delete', 'threads.inventory', 'threads.focus',
+        // Answers "not found" for a thread being deleted, so a window that shows it knows to leave it.
+        'threads.get',
         // These name the thread only so a router can find its computer; they worked for a thread being trashed before.
         'orchestrator.answerQuestions', 'orchestrator.dismissQuestions', 'runs.get', 'runs.resumeNow', 'runs.cancelPause',
         'git.cancelOperation', 'pty.isAlive', 'pty.lookup', 'pty.write', 'pty.resize', 'pty.kill'].includes(method) &&
@@ -1847,6 +1964,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       return ctx.mms.threadRouter?.focus(ctx, threadId, focused) ?? { routed: false, focused: false }
     }
+    case 'threads.markSeen': {
+      // A window opened the thread or showed it in focus: it is no longer Done (finished and unseen).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) return { seen: false }
+      return { seen: ctx.mms.threadRuntimes.markSeen(threadId) }
+    }
     case 'applets.get':
     case 'applets.state.get':
     case 'applets.state.save':
@@ -1871,6 +1996,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (params.format === 'html') return {content:ctx.mms.applets.exportHtml(threadId, appletId, revisionId, params.appearance===undefined?undefined:validateAppletAppearance(params.appearance))}
       if (params.format === 'source') return {content:ctx.mms.applets.exportSource(threadId, appletId, revisionId)}
       throw new Error('Unsupported applet export format.')
+    }
+    case 'app.presence': {
+      if (ctx.connection?.clientType !== 'gui' || !ctx.connection.capabilities.has(APP_PRESENCE_CAPABILITY)) throw new DomainRpcError('method_not_allowed', 'App presence requires a capable local window.')
+      const p = params as { activeAt?: unknown; timeZone?: unknown }
+      if (!p || typeof p.activeAt !== 'number' || !Number.isFinite(p.activeAt) || typeof p.timeZone !== 'string') throw new DomainRpcError('invalid_params', 'Presence needs activeAt and timeZone.')
+      // Validate before changing activity or the zone.
+      new Intl.DateTimeFormat('en', { timeZone: p.timeZone }).format()
+      ctx.mms.ownerQuietHours.reportPresence(ctx.connection.id, p.activeAt, p.timeZone)
+      ctx.mms.personalBots?.quietHoursChanged()
+      return { ok: true }
     }
     case 'health':
       return {
@@ -1991,6 +2126,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('projects.updated', { projects })
       return { project, projects: listedProjectsFor(ctx, projects) }
     }
+    case 'appearance.wallpaperImport':
+    case 'appearance.wallpaperImportBytes':
+    case 'appearance.wallpaperRead':
+    case 'appearance.wallpaperSaveCopy':
+      return await wallpaperCall(ctx, method, params)
     case 'projects.reorder': {
       const p = isObject(params) ? params : {}
       // A window sends the whole list, the other computers' projects included; those follow this
@@ -2013,6 +2153,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.get': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
+      // A thread being deleted is not found; until its delete is done (purged), that delete may still put it back (`deleting`).
+      const state = ctx.mms.threads.lifecycleStore.get(threadId)?.state
+      if (state && state !== 'active') throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId, ...(state !== 'purged' ? { deleting: true } : {}) })
       const thread = ctx.mms.threads.getThread(threadId)
       if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       return { thread }
@@ -2136,6 +2279,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const focus = asOptionalString(p.focus, 2000)?.trim() || undefined
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      // Never beside work in progress: a running turn, or subagents whose results come back to this conversation.
+      const refusal = ctx.mms.orchestrator.compactionRefusal(threadId)
+      if (refusal) throw new DomainRpcError('thread_busy', refusal, { threadId })
       let started = false
       try {
         const ran = await localActionRun(ctx, threadId, 'compact', () => {
@@ -2165,19 +2311,28 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
+    case 'threads.setHidden': {
+      // Show in sidebar, and hiding again: a thread one of the owner's bots started (`Thread.hidden`). The bot's chat lists
+      // it either way, so only such a thread can be hidden.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'hidden'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const hidden = asOptionalBoolean(p.hidden, 'hidden') === true
+      const current = ctx.mms.threads.getThread(threadId)
+      if (!current) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      if (hidden && !current.startedByBot) throw new DomainRpcError('invalid_params', 'Only a thread a bot started can be hidden: its bot\'s chat lists it.', { threadId })
+      const thread = ctx.mms.threads.setThreadHidden(threadId, hidden)
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
+    }
     case 'threads.settle': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const settled = asOptionalBoolean(p.settled, 'settled') === true
-      const thread = ctx.mms.threads.setThreadSettled(threadId, settled)
-      // Settling a thread (the sidebar's archive) is a Stop: what it still runs ends with it.
-      if (settled) {
-        // The watch ends as archived, not as stopped.
-        ctx.mms.pullRequestWatch.onEnded(threadId, 'settled')
-        await ctx.mms.orchestrator.stopThread(threadId, 'settled').catch((error: unknown) => {
-          console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
-        })
-      }
+      // Settling a thread (the sidebar's archive) is a Stop: what it still runs ends with it (`settleThread`, which a
+      // bot's `thread_archive` uses too).
+      const thread = await ctx.mms.orchestrator.settleThread(threadId, settled)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
@@ -2244,7 +2399,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const turnRunning = ctx.mms.orchestrator.isActiveTurnRunning(threadId)
       // A person on another computer is offered "Always" only for what that computer's permission limit allows.
       const limit = deviceLimit(ctx)
-      const pendingQuestions = limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listPendingForThread(threadId)
+      const pendingQuestions = limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listShownForThread(threadId)
       const common = {
         thread,
         agents: rt.agents.list(),
@@ -2300,8 +2455,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'thread.messages': {
       // A page of the messages before (or after) one, for a reader that was given only part of a long transcript.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'before', 'after', 'limit'])
+      rejectUnknownKeys(p, ['threadId', 'before', 'after', 'limit', 'index', 'textOffset', 'textMax'])
       const threadId = asString(p.threadId, 'threadId', 256)
+      if (p.index !== undefined) return agentMessagesPage(ctx, threadId, p)
+      if (p.textOffset !== undefined || p.textMax !== undefined) throw new DomainRpcError('invalid_params', 'textOffset and textMax go with index.')
       const before = asOptionalString(p.before, 256)
       const after = asOptionalString(p.after, 256)
       if ((before === undefined) === (after === undefined)) throw new DomainRpcError('invalid_params', 'Name a message to page before or after.')
@@ -2453,6 +2610,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         expiryStopsRun: expiresAt !== null && asOptionalBoolean(p.stopsRun, 'stopsRun') === true ? true : undefined
       }, { touch: false })
       ctx.mms.threadExpiry?.reschedule()
+      // Its subagents on other computers expire with it there too (issue #685).
+      ctx.mms.orchestrator.threadExpiryChanged(threadId)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread: updated, threads: listedThreadsFor(ctx, threads), version }
@@ -2596,6 +2755,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       noteSentFrom(ctx, threadId)
       return { ok: result.steered || result.queued, steered: result.steered, queued: result.queued }
     }
+    case 'orchestrator.steerNow': {
+      // Send now on a held steer (docs/design/steer-and-interruptions.md §2.9): the hold the click was shown for. Only a
+      // person sends it: a window on this computer, or one on another of the user's computers (a routed call). The CLI
+      // and agents have no Send now: it ends a command another caller's turn runs.
+      if (!isPerson(ctx.connection)) throw new DomainRpcError('forbidden', 'Send now is only for a person at a Mousse window')
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'runId', 'holdGeneration', 'itemIds', 'clientRequestId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const runId = asString(p.runId, 'runId', 256)
+      const holdGeneration = asOptionalBoundedInt(p.holdGeneration, 'holdGeneration', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      if (holdGeneration === undefined) throw new DomainRpcError('invalid_params', 'holdGeneration is required')
+      if (!Array.isArray(p.itemIds) || p.itemIds.length > 100) throw new DomainRpcError('invalid_params', 'itemIds must be a list of at most 100 ids')
+      const itemIds = p.itemIds.map((id, index) => asString(id, `itemIds[${index}]`, 256))
+      const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+      const result = await ctx.mms.orchestrator.steerNow({ threadId, runId, holdGeneration, itemIds, clientRequestId })
+      return { ...runCommandResponse(result, runId), clientRequestId }
+    }
     case 'orchestrator.retry': {
       const p = isObject(params) ? params : {}
       const threadId = asOptionalString(p.threadId, 256)
@@ -2630,6 +2806,22 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         events: ctx.mms.runEngine.listEvents(threadId, { afterSeq, limit }),
         maxSeq: ctx.mms.runEngine.maxSeq(threadId)
       }
+    }
+    case 'runs.wait': {
+      // An agent on another computer waits on a run of this thread (`thread_wait`, issue #1160): answered from the run
+      // events here, at most `ROUTED_RUN_WAIT_MAX_MS` later.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'runId', 'timeoutMs'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const runId = asOptionalString(p.runId, 256)
+      const timeoutMs = asOptionalBoundedInt(p.timeoutMs, 'timeoutMs', { min: 0, max: ROUTED_RUN_WAIT_MAX_MS }) ?? ROUTED_RUN_WAIT_MAX_MS
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      if (runId !== undefined && ctx.mms.runEngine.getRun(runId)?.threadId !== threadId) throw new DomainRpcError('run_not_found', 'Run not found', { runId })
+      return waitOnRun({
+        engine: ctx.mms.runEngine,
+        waitingOnPerson: (id) => ctx.mms.questions.listPendingForThread(id).length,
+        queued: (id) => ctx.mms.orchestrator.queuedCount(id)
+      }, { threadId, ...(runId ? { runId } : {}), timeoutMs, resultMaxChars: THREAD_RESULT_MAX_CHARS, ...(ctx.connection?.lifetime ? { signal: ctx.connection.lifetime } : {}) })
     }
     case 'runs.effects': {
       // The newest effects of the thread (at most EFFECT_PAGE_MAX), oldest first; `before` pages back.
@@ -2668,6 +2860,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
       return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId))
+    }
+    case 'threads.goal': {
+      // The thread's goal (`/goal`, issue #1207): show it, set it (and queue its first turn), adopt it for the first message
+      // a new chat just sent, clear it, continue a goal that is not working, or stop it (and the turn running for it).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'action', 'text'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const action = asString(p.action, 'action', 16)
+      if (action !== 'show' && action !== 'set' && action !== 'adopt' && action !== 'clear' && action !== 'continue' && action !== 'stop')
+        throw new DomainRpcError('invalid_params', 'action must be show, set, adopt, clear, continue or stop')
+      const text = action === 'set' || action === 'adopt' ? asString(p.text, 'text', MAX_GOAL_TEXT) : undefined
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      try {
+        return ctx.mms.orchestrator.threadGoal(threadId, action, text)
+      } catch (error) {
+        if (error instanceof GoalError) throw new DomainRpcError(error.code === 'not_found' ? 'thread_not_found' : error.code === 'invalid' ? 'invalid_params' : 'conflict', error.message, { threadId })
+        throw error
+      }
     }
     case 'runs.cancelPause': {
       // End a pause without continuing: the run is cancelled and the thread's held messages go on.
@@ -2820,14 +3030,34 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const requestId = asString(p.requestId, 'requestId', 256)
       const answers = asAnswersMap(p.answers)
       const pending = ctx.mms.questions.getPending(requestId)
-      const settled = ctx.mms.questions.settle(requestId, answers, questionAnswerer(ctx))
+      // Images sent with a plain question's answers (an approval takes none): saved in the thread's folder, and
+      // each named in the answer of the question it answers, which is how every question tool carries them.
+      const attachments = pending && !pending.approval
+        ? attachmentsForQuestions(pending.questions, asOptionalAnswerAttachments(p.attachments))
+        : {}
+      let sent = answers
+      let savedFolder: string | null = null
+      if (pending && Object.keys(attachments).length) {
+        const threadDir = ctx.mms.threads.getThreadDir(pending.threadId)
+        const paths = saveAnswerImages(threadDir, requestId, pending.questions, attachments)
+        savedFolder = dirname(Object.values(paths)[0]![0]!)
+        sent = answersWithImagePaths(pending.questions, answers, paths)
+      }
+      const settled = savedFolder
+        ? ctx.mms.questions.settle(requestId, sent, questionAnswerer(ctx), { attachments })
+        : ctx.mms.questions.settle(requestId, sent, questionAnswerer(ctx))
+      if (!settled.ok && savedFolder) removeAnswerImages(savedFolder)
+      // A question asked without waiting is recorded the same way, at once: its answer reaches the agent later, through
+      // the thread's inbox, and the message that delivers it shows nothing more.
       if (settled.ok && pending) {
         // Answers reach the model through the tool result; the transcript records them too, shown
-        // as a step of the agent's turn (`questionAnswers`).
+        // as a step of the agent's turn (`questionAnswers`), with the images under the answers they came with.
+        const { images, indexes } = answerMessageImages(pending.questions, attachments)
         ctx.mms.orchestrator.recordQuestionResponseMessage(
           pending.threadId,
-          formatQuestionAnswersMessage(pending.questions, answers),
-          describeQuestionAnswers(pending.questions, answers)
+          formatQuestionAnswersMessage(pending.questions, sent),
+          describeQuestionAnswers(pending.questions, answers, indexes),
+          images
         )
       }
       // The loser of a race learns who won and what they decided (SPEC §17.4).
@@ -2863,7 +3093,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (threadId) {
         // A person on another computer is offered "Always" only for what that computer's permission limit allows.
         const limit = deviceLimit(ctx)
-        return { pending: limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listPendingForThread(threadId).map(shown) }
+        return { pending: limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listShownForThread(threadId).map(shown) }
       }
       return { pending: ctx.mms.questions.listAllPending().map(shown) }
     }
@@ -2975,6 +3205,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (routed && threadId === '__unbound__') throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       let cwd = (routed ? undefined : asOptionalString(p.cwd, 4096)) ?? process.cwd()
       const command = asOptionalString(p.command, 4096)
+      // The quick action that opened it, by name (`RunningRegistry` tells agents what runs in it).
+      const label = routed ? undefined : asOptionalString(p.label, 60)?.trim() || undefined
       const env = asOptionalStringEnvMap(p.env, 'env')
       const shellArgs =
         p.shellArgs === undefined
@@ -3043,7 +3275,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           mkdirSync(cwd, { recursive: true })
           cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
         }
-        ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
+        ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs, ...(label ? { label } : {}),
           ownership: member ? { assert: () => assertHeldThreadLease(directory!, member.lease), heartbeat: () => { heartbeatExecutionLease(member.lease) },
             settled: () => member.leave() } : undefined
         })
@@ -3133,7 +3365,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const activity = withoutLocalOnlyKeys(ctx, bots.size ? Object.fromEntries(Object.entries(all).filter(([threadId]) => !bots.has(threadId))) : all)
       // A window also gets what the threads of the other computers are doing.
       const remote = ctx.connection?.clientType === 'gui' ? ctx.mms.remoteLists?.activity() : undefined
-      return { activity: remote ? { ...activity, ...remote } : activity }
+      // The event number when the statuses were read: a status update numbered after it is newer than this answer,
+      // even when it reaches the reader first (#1042).
+      return { activity: remote ? { ...activity, ...remote } : activity, revision: ctx.globalSequence() }
     }
     case 'stats.usage':
       return ctx.mms.lineEditStats.getUsageSnapshot()
@@ -3281,10 +3515,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
       refuseOtherComputersJob(id)
-      const watched = ctx.mms.scheduled.getJob(id)?.trigger?.threadEvent?.threadId
-      const ok = ctx.mms.scheduled.deleteJob(id)
-      // The pull request's watch stops with the last automation that needed it, unless it is a Notify watch.
-      if (ok && watched) ctx.mms.syncThreadEventWatch(watched)
+      const ok = ctx.mms.deleteScheduledJob(id)
       return { ok, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.pause': {
@@ -4021,6 +4252,29 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const path = requiredContainedPath(ctx, target.root, p.path, 'inspect')
       const oldPath = p.oldPath === undefined ? undefined : requiredContainedPath(ctx, target.root, p.oldPath, 'inspect')
       return await readReview(target, () => readFileVersions(target.root, target.range, path, oldPath))
+    }
+    case 'review.turnFile': {
+      // A file the thread's agent wrote, wherever it is on this computer: the changed-files summary under a turn opens
+      // it as a diff against its own repository, or as a file. Read-only, from a window of this computer, and only
+      // for a path the thread's own Edit and Write calls name.
+      const p = isObject(params) ? params : {}
+      if (!isLocalWindow(ctx) || ctx.connection?.bridgeCaller)
+        throw new DomainRpcError('forbidden', 'Only a Mousse window on this computer opens the files a thread wrote')
+      const lookup = threadLookupContext(ctx, p)
+      const requested = asString(p.path, 'path', 4096)
+      if (requested.includes('\0')) throw new DomainRpcError('invalid_params', 'That is not a file path.')
+      let folder: string | null = null
+      try {
+        folder = projectRootContext(ctx, { threadId: lookup.threadId })
+      } catch {
+        // A thread without a folder of its own: only an absolute path can name its file.
+      }
+      const path = turnFilePath(requested, folder)
+      if (!path) throw new DomainRpcError('invalid_params', 'Enter the full path of the file.')
+      const written = writtenFilePaths(ctx.mms.orchestrator.getMessagesForPersistence(lookup.threadId))
+      if (!threadWroteFile(written, path, folder))
+        throw new DomainRpcError('forbidden', 'Only a file this thread’s agent wrote opens here')
+      return await locateTurnFile(path)
     }
     case 'actions.undoLatest': {
       const p = isObject(params) ? params : {}
@@ -4770,7 +5024,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'git.init': {
       const p = isObject(params) ? params : {}
-      if (p.threadId !== undefined) throw new DomainRpcError('invalid_params', 'git.init takes a projectId, not a threadId')
+      // The folder the side card shows: a project's, or a thread's own worktree folder after the repository there went
+      // away. A worktree a storage rule retired is brought back first, so it is never made into a new repository.
+      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       await ctx.mms.gitService.init(root, gitUserAction(ctx, 'Initialize Git'))
       return gitStatusResult(ctx, root)
@@ -4817,6 +5073,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         asOptionalString(p.branch, 512),
         { force: asOptionalBoolean(p.force, 'force') === true }
       )
+      if (lookup.state === 'found') notePullRequestStates(ctx, [lookup.pullRequest, ...(lookup.others ?? [])])
       return { lookup }
     }
     case 'pullRequests.detail': {
@@ -4825,6 +5082,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       await materializeRequestedWorkspace(ctx, p)
       const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, p), number, asOptionalBoolean(p.force, 'force') === true)
+      notePullRequestStates(ctx, [detail])
       return { detail }
     }
     case 'pullRequests.draft': {
@@ -4907,6 +5165,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const method = isMergeMethod(p.method) ? p.method : await codeHost.defaultMergeMethod(root) ?? 'squash'
       try {
         const pullRequest = await codeHost.mergePullRequest(root, number, { method, ...(headSha ? { headSha } : {}) }, gitUserAction(ctx, 'Merge pull request'))
+        notePullRequestStates(ctx, [pullRequest])
         return { pullRequest, method }
       } catch (error) {
         throw new DomainRpcError('pull_request_merge_failed', error instanceof Error ? error.message : String(error), { number })
@@ -4918,7 +5177,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       await materializeRequestedWorkspace(ctx, p)
       try {
-        return { pullRequest: await ctx.mms.gitService.codeHost.closePullRequest(pullRequestFolder(ctx, p), number, gitUserAction(ctx, 'Close pull request')) }
+        const pullRequest = await ctx.mms.gitService.codeHost.closePullRequest(pullRequestFolder(ctx, p), number, gitUserAction(ctx, 'Close pull request'))
+        notePullRequestStates(ctx, [pullRequest])
+        return { pullRequest }
       } catch (error) {
         throw new DomainRpcError('pull_request_close_failed', error instanceof Error ? error.message : String(error), { number })
       }
@@ -4954,7 +5215,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError('pull_request_link_changed', "The thread's pull request link changed while it was being read; try again", { threadId, number })
       }
       // The same pull request keeps its watch; another one starts unwatched (a watch belongs to the pull request it began on).
-      const thread = writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), true)
+      const thread = writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), true, detail)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
@@ -5043,7 +5304,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // No link to this pull request yet: link it first, from the host's full read, as `pullRequests.link` does.
         await ensureWorkspaceMaterialized(ctx, threadId)
         const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, { threadId }), number, true)
-        writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), false)
+        writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), false, detail)
       }
       let status
       try {

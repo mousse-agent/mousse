@@ -183,7 +183,8 @@ it.each(['after admission', 'synchronously in handler'])(
       release()
     }
   },
-  15000
+  // Two real Net profiles and a held RPC: about 6 s alone, past 15 s in a loaded full run.
+  60_000
 )
 
 it('keeps a Host-committed original unknown after archive cancellation, ahead of the next FIFO entry', async () => {

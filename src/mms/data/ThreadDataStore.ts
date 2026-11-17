@@ -2,7 +2,7 @@ import type { ModelOverride } from '../../shared/providerInstances'
 import { upgradeSelection } from '../../shared/modelSelection'
 import type { PermissionMode } from '../../shared/permissionMode'
 import { createErrorProvider } from '../../shared/errors'
-import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
+import type { AgentAccessLevel } from '../../shared/settings'
 import {
   copyFileSync,
   existsSync,
@@ -33,6 +33,7 @@ import type {
   ThreadLineage,
   ThreadListVersion,
   ThreadRunsOn,
+  ThreadNativeHelper,
   ThreadSentFrom,
   ThreadStartedFrom
 } from '../../shared/types'
@@ -51,7 +52,8 @@ import { ThreadStorageMigration } from './ThreadStorageMigration'
 import { ThreadTrashService, type LegacyTrashDiagnostic } from './ThreadTrashService'
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
-import type { ThreadPullRequestLink } from '../../shared/pullRequests'
+import { pullRequestSummaryFields, summaryOfLink, threadPullRequestsOf, withThreadPullRequest, type GitPullRequestInfo, type ThreadPullRequestLink } from '../../shared/pullRequests'
+import type { ThreadGoal } from '../../shared/threadGoal'
 import { registerThreadLifecycleGate, withThreadLifecyclePath, withThreadLifecyclePaths } from '../queue/ThreadLifecycleAdmission'
 import { FileLockBusyError, withFileLock } from '../scheduled/fileLock'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -67,7 +69,8 @@ import {
   validateArray,
   type FileStamp
 } from './legacyThreadData'
-import { sharedThreadDbClient } from './threadDb/threadDbClient'
+import { sharedThreadDbClient, WORKER_BACKOFF_CODE } from './threadDb/threadDbClient'
+import type { MessageEstimate } from '../orchestrator/contextEstimate'
 import { ThreadDbStore, type ThreadDataChange } from './threadDb/threadDbStore'
 import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
 import { publishStagedBlobs } from './threadDb/threadBlobs'
@@ -89,11 +92,17 @@ interface ThreadMeta {
   lineage?: ThreadLineage
   /** The thread whose agent launched this one with `thread_create`; not a subagent relation. */
   createdByThreadId?: string
+  /** See `Thread.startedByBot`. */
+  startedByBot?: { botId: string; name: string }
+  /** See `Thread.hidden`. */
+  hidden?: true
   startedFrom?: ThreadStartedFrom
   /** See `Thread.sentFrom`. */
   sentFrom?: ThreadSentFrom
   /** See `Thread.runsOn`. */
   runsOn?: ThreadRunsOn
+  /** See `Thread.native`: a native helper's mirror. */
+  native?: ThreadNativeHelper
   /** See `Thread.localOnly`. Written only with the first `meta.json`. */
   localOnly?: true
   /** See `Thread.botOwned`. */
@@ -113,6 +122,8 @@ interface ThreadMeta {
   worktreeStartSha?: string
   worktreeBaseBranch?: string
   pullRequest?: ThreadPullRequestLink
+  /** See `Thread.goal`. */
+  goal?: ThreadGoal
   order: number
   pinnedAt?: string
   settledAt?: string
@@ -236,6 +247,21 @@ function retryOnceWhenListBusy<T>(write: () => T): T {
     if (!(error instanceof ThreadListBusyError)) throw error
     return write()
   }
+}
+
+/** What the host said about a pull request a link is made for. */
+type PullRequestInfo = Partial<Pick<GitPullRequestInfo, 'title' | 'state' | 'isDraft'>>
+
+/**
+ * The thread's pull request list after its link is written: a new link joins it (or updates its entry), an unlink takes
+ * the unlinked pull request out. A thread linked before the list was kept starts it from its old link.
+ */
+function linkedPullRequests(base: Thread, link: ThreadPullRequestLink | undefined, info: PullRequestInfo | undefined): Pick<Thread, 'pullRequests'> {
+  const list = threadPullRequestsOf(base)
+  if (link) return { pullRequests: withThreadPullRequest(list, { ...summaryOfLink(link), ...pullRequestSummaryFields(info ?? {}) }) }
+  const unlinked = base.pullRequest?.url.toLowerCase()
+  const kept = unlinked ? list.filter((entry) => entry.url.toLowerCase() !== unlinked) : list
+  return { pullRequests: kept.length ? kept : undefined }
 }
 
 /** Refuses a conditional change of a thread's model or mode when its settings revision is no longer `ifRevision`. */
@@ -376,16 +402,24 @@ export class ThreadDataStore extends EventEmitter {
   /** Thread folders loaded whole, by the thread that owns them, for `setThreadsInUse`. */
   private readonly loadedDirs = new Map<string, string>()
   private threadsInUse?: (threadId: string) => boolean
+  private threadDataClock?: () => number
 
   private threadDb(): ThreadDbStore {
     if (!this.threadDbStore) {
       this.threadDbStore = new ThreadDbStore(sharedThreadDbClient())
+      if (this.threadDataClock) this.threadDbStore.now = this.threadDataClock
       this.threadDbStore.pinned = (dir) => {
         const id = this.loadedDirs.get(dir)
         return id !== undefined && Boolean(this.threadsInUse?.(id))
       }
     }
     return this.threadDbStore
+  }
+
+  /** The clock uses of cached threads are timed on (the idle sweep's), for `releaseIdleThreadData`. */
+  setThreadDataClock(now: () => number): void {
+    this.threadDataClock = now
+    if (this.threadDbStore) this.threadDbStore.now = now
   }
 
   /** Says which threads a loaded session holds; the thread database cache keeps them past its byte cap. */
@@ -417,6 +451,34 @@ export class ThreadDataStore extends EventEmitter {
     if (ThreadDbStore.usesDb(threadDir)) this.threadDb().forget(threadDir)
   }
 
+  /** True when this process holds a thread kept in thread.db in memory (its next read needs no load). */
+  isThreadDataWarm(id: string): boolean {
+    const threadDir = this.getThreadDir(id)
+    return Boolean(this.threadDbStore?.isWarm(threadDir))
+  }
+
+  /** Drops threads kept in thread.db that no session holds and nothing used for `idleMs` before `now`; returns how many. */
+  releaseIdleThreadData(idleMs: number, now?: number): number {
+    const store = this.threadDbStore
+    if (!store) return 0
+    const dropped = store.dropIdle(idleMs, now)
+    for (const dir of dropped) this.loadedDirs.delete(dir)
+    return dropped.length
+  }
+
+  /**
+   * Each thread the thread database cache holds: its id when this store loaded it, the serialized size of its rows and
+   * state (measured), and how long ago it was last used. For the profiler's per-thread breakdown.
+   */
+  threadDbCacheEntries(now = Date.now()): Array<{ threadId?: string; bytes: number; idleMs: number }> {
+    const store = this.threadDbStore
+    if (!store) return []
+    return store.cacheEntries().map((entry) => {
+      const threadId = this.loadedDirs.get(entry.dir)
+      return { ...(threadId ? { threadId } : {}), bytes: entry.bytes, idleMs: Math.max(0, now - entry.usedAt) }
+    })
+  }
+
   /** Thread database cache size, for diagnostics and tests. */
   threadDbCacheStats(): { threads: number; bytes: number; coldLoads: number; stateReads: number } {
     const store = this.threadDbStore
@@ -433,7 +495,7 @@ export class ThreadDataStore extends EventEmitter {
    * just before or after a message. `undefined` when the cursor message is not in the thread. `seq`/`epoch` are
    * where `changesSince` continues from.
    */
-  async readMessagePage(id: string, request: { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean }): Promise<MessagePageResult | undefined> {
+  async readMessagePage(id: string, request: { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean; imageBudget?: number }): Promise<MessagePageResult | undefined> {
     const page = await this.threadDb().client.call('page', this.getThreadDir(id), request)
     if (page.missing) return undefined
     return {
@@ -464,6 +526,23 @@ export class ThreadDataStore extends EventEmitter {
   async readMessage(id: string, messageId: string): Promise<ChatMessage | undefined> {
     const payload = await this.threadDb().client.call('messageById', this.getThreadDir(id), messageId)
     return payload === undefined ? undefined : (JSON.parse(payload) as ChatMessage)
+  }
+
+  /**
+   * What the context gauge measures, read in the read worker without loading the thread or keeping it: the model
+   * context's header with no messages, the estimate of each of its active messages (`estimates`, made in the worker
+   * so this loop only sums them), and as `messages` only the newest message that reports the tokens its turn used.
+   * Undefined for a JSON thread or one with no model context, which the gauge estimates from the whole transcript
+   * instead.
+   */
+  async readGaugeData(id: string): Promise<{ messages: ChatMessage[]; llmContext: NonNullable<ThreadData['llmContext']>; estimates: MessageEstimate[] } | undefined> {
+    const threadDir = this.getThreadDir(id)
+    if (!ThreadDbStore.usesDb(threadDir)) return undefined
+    const gauge = await this.threadDb().client.call('gauge', threadDir)
+    if (gauge.context === undefined) return undefined
+    const { $retired: _retired, ...header } = JSON.parse(gauge.context) as Record<string, unknown>
+    const llmContext = { ...header, messages: [], activeStartIndex: 0 } as unknown as NonNullable<ThreadData['llmContext']>
+    return { messages: gauge.latest === undefined ? [] : [JSON.parse(gauge.latest) as ChatMessage], llmContext, estimates: gauge.estimates }
   }
 
   /** The thread database's change sequence and epoch, or undefined for a JSON thread. */
@@ -1150,11 +1229,15 @@ export class ThreadDataStore extends EventEmitter {
       ownerThreadId?: string
       /** Never `ownerThreadId`: a launched thread is neither nested under nor deleted with its creator. */
       createdByThreadId?: string
-      /** See `Thread.accessCeiling`. */
-      accessCeiling?: AgentAccessLevel
+      /** See `Thread.startedByBot`. */
+      startedByBot?: { botId: string; name: string }
+      /** See `Thread.hidden`. */
+      hidden?: boolean
       scheduledJobId?: string
       /** See `Thread.runsOn`: a remote subagent's stand-in. */
       runsOn?: ThreadRunsOn
+      /** See `Thread.native`: a native helper's watch-only mirror. */
+      native?: ThreadNativeHelper
       /** See `Thread.localOnly`. */
       localOnly?: boolean
       /** See `Thread.expiresAt`; checked by the caller. */
@@ -1182,13 +1265,15 @@ export class ThreadDataStore extends EventEmitter {
     if (typeof opts?.worktreeEnabled === 'boolean') meta.worktreeEnabled = opts.worktreeEnabled
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
     if (opts?.createdByThreadId) meta.createdByThreadId = opts.createdByThreadId
-    if (isAgentAccessLevel(opts?.accessCeiling)) meta.accessCeiling = opts.accessCeiling
+    if (opts?.startedByBot) meta.startedByBot = { botId: opts.startedByBot.botId, name: opts.startedByBot.name }
+    if (opts?.hidden === true) meta.hidden = true
     if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode
     meta.settingsRevision = 0
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
     if (opts?.scheduledJobId) meta.scheduledJobId = opts.scheduledJobId
     if (opts?.runsOn) meta.runsOn = structuredClone(opts.runsOn)
+    if (opts?.native) meta.native = structuredClone(opts.native)
     if (opts?.localOnly === true) meta.localOnly = true
     if (opts?.expiresAt) meta.expiresAt = opts.expiresAt
     if (opts?.expiresAt && opts.expiryStopsRun === true) meta.expiryStopsRun = true
@@ -1504,9 +1589,12 @@ export class ThreadDataStore extends EventEmitter {
     return true
   }
 
-  getThread(id: string): Thread | undefined {
-    if (!this.isLifecycleVisible(id)) return undefined
-    // Prefer warm list cache (common after list/setModel/pin paths).
+  /**
+   * A thread from the warm list caches only, or undefined. Nothing is read from disk, scanned, migrated or registered,
+   * and its lifecycle state is not checked: a thread in the trash may still be returned until the next listing. For
+   * lookups that must have no side effects, such as working out which threads a request or a delete touches.
+   */
+  peekThread(id: string): Thread | undefined {
     if (this.listCache && this.listCacheProjectsKey === this.projectsCacheKey()) {
       const hit = this.listCache.find((t) => t.id === id)
       if (hit) return hit
@@ -1519,6 +1607,14 @@ export class ThreadDataStore extends EventEmitter {
       const hit = threads.find((t) => t.id === id)
       if (hit) return hit
     }
+    return undefined
+  }
+
+  getThread(id: string): Thread | undefined {
+    if (!this.isLifecycleVisible(id)) return undefined
+    // Prefer warm list cache (common after list/setModel/pin paths).
+    const cached = this.peekThread(id)
+    if (cached) return cached
 
     const standalone = this.readStandaloneIndex().find((t) => t.id === id)
     if (standalone) return standalone
@@ -1545,23 +1641,11 @@ export class ThreadDataStore extends EventEmitter {
 
   private nameGuard: ((thread: Thread, name: string) => void) | null = null
 
-  /**
-   * Narrows the thread's access ceiling to `level` (never widens it; see `Thread.accessCeiling`), without
-   * touching `updatedAt`. Returns the ceiling now in force.
-   */
-  capAccessCeiling(id: string, level: AgentAccessLevel): AgentAccessLevel {
-    const thread = this.getThread(id)
-    if (!thread) throw new Error(`Thread not found: ${id}`)
-    const next = narrowAgentAccess(isAgentAccessLevel(thread.accessCeiling) ? thread.accessCeiling : undefined, level) ?? level
-    if (thread.accessCeiling !== next) this.updateThreadMeta(id, { accessCeiling: next }, { touch: false })
-    return next
-  }
-
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest' | 'expiresAt' | 'expiryStopsRun'>>,
-    opts: { touch?: boolean; ifRevision?: number } = {}
+    partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'native' | 'workspaceBinding' | 'pullRequest' | 'goal' | 'expiresAt' | 'expiryStopsRun'>>,
+    opts: { touch?: boolean; ifRevision?: number; pullRequestInfo?: PullRequestInfo } = {}
   ): Thread {
     const thread = this.getThread(id)
     if (!thread) {
@@ -1577,6 +1661,7 @@ export class ThreadDataStore extends EventEmitter {
       return {
         ...base,
         ...partial,
+        ...('pullRequest' in partial ? linkedPullRequests(base, partial.pullRequest, opts.pullRequestInfo) : {}),
         // Every write of the model or the permission mode, by any route, moves the revision on (`ifRevision`).
         ...('modelOverride' in partial || 'permissionMode' in partial ? { settingsRevision: (base.settingsRevision ?? 0) + 1 } : {}),
         updatedAt: opts.touch === false ? base.updatedAt : now
@@ -1590,6 +1675,54 @@ export class ThreadDataStore extends EventEmitter {
     this.patchListCache(updated)
     this.emit('updated', updated)
     return updated
+  }
+
+  /**
+   * Keeps the preview of the thread's latest reply (`Thread.lastReply`) for its sidebar row. Not activity: `updatedAt`
+   * stays. Writes and announces the list only when the preview changed; a missing thread is left alone.
+   */
+  setThreadLastReply(id: string, lastReply: string | undefined): boolean {
+    const thread = this.getThread(id)
+    if (!thread || thread.lastReply === lastReply) return false
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base }
+      if (lastReply) next.lastReply = lastReply
+      else delete next.lastReply
+      return next
+    })
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
+    this.emit('list-changed', { id })
+    return true
+  }
+
+  /**
+   * What the host just said about pull requests, kept on every thread whose list holds one of them (matched by URL), so
+   * the sidebar's count shows their state. Threads whose entries already say so are not written. Returns the threads written.
+   */
+  notePullRequestStates(infos: ReadonlyArray<Pick<GitPullRequestInfo, 'url' | 'title' | 'state' | 'isDraft'>>): string[] {
+    const byUrl = new Map(infos.filter((info) => info.url).map((info) => [info.url.toLowerCase(), info]))
+    if (!byUrl.size) return []
+    const written: string[] = []
+    for (const thread of this.listAllThreads()) {
+      const list = threadPullRequestsOf(thread)
+      let next = list
+      for (const entry of list) {
+        const info = byUrl.get(entry.url.toLowerCase())
+        if (info) next = withThreadPullRequest(next, { ...summaryOfLink(entry), ...pullRequestSummaryFields(info) })
+      }
+      if (next === list || JSON.stringify(next) === JSON.stringify(list)) continue
+      try {
+        const updated = this.writeThreadMeta(thread, (base) => ({ ...base, pullRequests: next }))
+        if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+        this.patchListCache(updated)
+        written.push(thread.id)
+      } catch {
+        // A thread that cannot be written now keeps its older state until the next read.
+      }
+    }
+    if (written.length) this.emit('list-changed', written.length === 1 ? { id: written[0] } : {})
+    return written
   }
 
   /**
@@ -1671,6 +1804,28 @@ export class ThreadDataStore extends EventEmitter {
       this.updateStandaloneIndexEntry(updated)
     }
 
+    this.patchListCache(updated)
+    this.emit('list-changed', { id })
+    return updated
+  }
+
+  /**
+   * Hides the thread from the owner's sidebar or shows it there again (`Thread.hidden`). `updatedAt` is kept: hiding is
+   * not activity, so the bot chat's list and the sidebar keep their order. Unchanged when it already is so.
+   */
+  setThreadHidden(id: string, hidden: boolean): Thread {
+    const thread = this.getThread(id)
+    if (!thread) {
+      throw new Error(`Thread not found: ${id}`)
+    }
+    if (Boolean(thread.hidden) === hidden) return thread
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base }
+      if (hidden) next.hidden = true
+      else delete next.hidden
+      return next
+    })
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
     this.emit('list-changed', { id })
     return updated
@@ -2634,9 +2789,20 @@ export class ThreadDataStore extends EventEmitter {
     if (!this.indexDirty.size || !this.threadDbStore) return
     const targets = [...this.indexDirty].map(([threadId, dir]) => ({ threadId, dir }))
     this.indexDirty.clear()
-    this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).catch((error: unknown) => {
+    this.indexUpdate = this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).then(() => undefined, (error: unknown) => {
+      // Skipped while the index worker backs off after crashing; the client has logged that once.
+      if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
       console.warn('thread search index update failed; the next sweep catches up', { error: error instanceof Error ? error.message : String(error) })
     })
+  }
+
+  /** The last index update sent; it settles after every earlier one, since the worker applies them in order. */
+  private indexUpdate?: Promise<void>
+
+  /** Sends the pending index notices now and waits until the index has them (or they failed and were logged). */
+  async flushSearchIndex(): Promise<void> {
+    this.flushIndexNotices()
+    await this.indexUpdate
   }
 
   /** Threads kept in `thread.db`, with their folders. */
@@ -2664,6 +2830,7 @@ export class ThreadDataStore extends EventEmitter {
       const live = this.databaseThreads()
       if (!live.length && !this.threadDbStore) return
       this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
         console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
       })
     }

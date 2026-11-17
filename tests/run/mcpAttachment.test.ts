@@ -1,7 +1,7 @@
 /**
- * Phase 5 attachment per adapter (docs/run-engine/SPEC.md §15.2): Claude's SDK `mcpServers`, the
- * ACP `session/new|resume` `mcpServers` (HTTP or the stdio bridge). Nothing is attached without
- * `AdapterHost.mcp`.
+ * Phase 5 attachment per adapter (docs/run-engine/SPEC.md §15.2): Claude's servers, registered over
+ * its input (`setMcpServers`, #358), the ACP `session/new|resume` `mcpServers` (HTTP or the stdio
+ * bridge). Nothing is attached without `AdapterHost.mcp`.
  */
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -87,7 +87,7 @@ describe('Claude subscription attachment', () => {
       standaloneWorkspace: () => '/standalone',
       configured: () => true
     }
-    const integrations = { mcpServers: { files: { type: 'stdio' as const, command: 'files-mcp' } }, proxiedServers: {}, env: {}, toolRules: {}, pluginPath: '/plugin', warnings: [] }
+    const integrations = { mcpServers: { files: { type: 'stdio' as const, command: 'files-mcp' } }, proxiedServers: {}, toolRules: {}, pluginPath: '/plugin', warnings: [] }
     const resolve = vi.fn(async (_projectPath?: string) => integrations)
     const adapter = new ClaudeSubscriptionAdapter(() => client, () => ({ resolve }))
     await adapter.startTurn(input({ cwd: '/project' }), sink(), control, host(MCP))
@@ -113,7 +113,18 @@ describe('Claude subscription attachment', () => {
     writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
     const questions = new UserQuestionService()
     const runAuth = vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
-    return { home, questions, service: new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, launchConfig: () => ({ binaryPath: binary }) }) }
+    // The servers each query was given over its input (`setMcpServers`), by the query's index; none for a query given none.
+    const registered: Array<Record<string, unknown> | undefined> = []
+    const registering = (input: { options: Options; prompt: unknown }): Query => {
+      const index = registered.push(undefined) - 1
+      return Object.assign(query(input), {
+        setMcpServers: vi.fn(async (servers: Record<string, unknown>) => {
+          registered[index] = servers
+          return { added: Object.keys(servers), removed: [], errors: {} }
+        })
+      })
+    }
+    return { home, questions, registered, service: new ClaudeSubscriptionProviderService(home, questions, { query: registering, runAuth, launchConfig: () => ({ binaryPath: binary }) }) }
   }
   /** A query that asks for a Mousse tool permission mid-turn, then finishes. */
   const decisions: unknown[] = []
@@ -122,16 +133,19 @@ describe('Claude subscription attachment', () => {
     yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: 's' }
   })(), { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
 
-  it('the service builds mcpServers.mousse with the bearer header, the system prompt, and allows Mousse tools without a prompt', async () => {
+  it('the service registers the mousse server with the bearer header over Claude Code\'s input, adds the system prompt, and allows Mousse tools without a prompt', async () => {
     const options: Options[] = []
-    const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
+    const { home, questions, registered, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
     const ask = vi.spyOn(questions, 'requestAnswers')
     questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
     await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, systemPromptAppend: 'GUIDE' })
     await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })
-    expect(options[0].mcpServers).toEqual({
+    expect(registered[0]).toEqual({
       mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
     })
+    // Never as the option the SDK writes on Claude Code's command line.
+    expect(options[0].mcpServers).toEqual({})
+    expect(JSON.stringify(options[0])).not.toContain('tok-secret')
     expect(options[0].systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'GUIDE' })
     expect(options[0]).not.toHaveProperty('settingSources')
     expect(options[0].extraArgs?.['strict-mcp-config']).toBeUndefined()
@@ -141,6 +155,7 @@ describe('Claude subscription attachment', () => {
     expect(ask.mock.calls[0][0][0].prompt).toMatch(/mcp__mousse__delegate_task/)
     expect(decisions[1]).toMatchObject({ behavior: 'deny' })
     expect(options[1].mcpServers).toEqual({})
+    expect(registered[1]).toBeUndefined()
     expect(options[1].systemPrompt).toEqual({ type: 'preset', preset: 'claude_code' })
     expect(claudeMcpServers(null)).toEqual({})
   })
@@ -152,13 +167,14 @@ describe('Claude subscription attachment', () => {
       relayed.push(await o.canUseTool?.('mcp__mousse-relay__github__create_issue', { title: 'x' }, { signal: new AbortController().signal } as never))
       yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: 's' }
     })(), { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
-    const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return relayQuery(o) })
+    const { home, questions, registered, service: claude } = service(({ options: o }) => { options.push(o); return relayQuery(o) })
     const ask = vi.spyOn(questions, 'requestAnswers')
     questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
     const relay = { url: 'http://127.0.0.1:4567/mcp/relay', revision: 'rev-1' }
     await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: { ...MCP, relay } })
     await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: { ...MCP, relay }, mode: 'plan' })
-    expect(options[0].mcpServers).toEqual({
+    expect(options[0].mcpServers).toEqual({})
+    expect(registered[0]).toEqual({
       mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 },
       'mousse-relay': { type: 'http', url: relay.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
     })
@@ -170,31 +186,46 @@ describe('Claude subscription attachment', () => {
     expect(relayed[1]).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/planning only/) })
   })
 
-  it('the service launches Claude with the user\'s MCP servers, their secrets, the skills plugin and tool limits', async () => {
+  it('the service gives the user\'s MCP servers with their secrets through the startup pipe and registers Mousse\'s own over Claude Code\'s input, and adds the skills plugin and tool limits', async () => {
     const options: Options[] = []
-    const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
+    const { home, questions, registered, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
     questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
     await claude.chat({
       threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP,
       integrations: {
         mcpServers: {
-          files: { type: 'stdio', command: 'files-mcp', env: { API_KEY: '${MOUSSE_MCP_VALUE_0}' } },
+          files: { type: 'stdio', command: 'files-mcp', env: { API_KEY: 'resolved-key' } },
           mousse: { type: 'stdio', command: 'impostor' }
         },
         proxiedServers: { linear: { tools: [{ name: 'get' }], call: vi.fn() }, mousse: { tools: [], call: vi.fn() } },
-        env: { MOUSSE_MCP_VALUE_0: 'resolved-key' },
         toolRules: { mcp__files__: { enabled: ['read'] } },
         pluginPath: '/generated/plugin',
         warnings: []
       }
     })
     await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })
-    expect(options[0].mcpServers).toEqual({
-      files: { type: 'stdio', command: 'files-mcp', env: { API_KEY: '${MOUSSE_MCP_VALUE_0}' } },
+    // Mousse's server keeps its name: registered over the input with the one Mousse runs in process; the user's other
+    // server, its secret with it, goes through the pipe (over the input too on Windows, which has none), and an impostor
+    // of Mousse's name goes nowhere.
+    const files = { type: 'stdio', command: 'files-mcp', env: { API_KEY: 'resolved-key' } }
+    const channel = process.platform !== 'win32'
+    expect(registered[0]).toEqual({
       linear: { type: 'sdk', name: 'linear', instance: expect.anything() },
-      mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
+      mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 },
+      ...(channel ? {} : { files })
     })
-    expect(options[0].env).toMatchObject({ MOUSSE_MCP_VALUE_0: 'resolved-key' })
+    // macOS: the process's fourth stream; Linux: a named pipe in a folder of its own. Read by that path, as Claude Code does.
+    const startup = options[0].extraArgs?.['mcp-config']
+    if (channel) {
+      expect(startup).toMatch(process.platform === 'darwin' ? /^\/dev\/fd\/3$/ : /\/mousse-mcp-[^/]+\/servers$/)
+      const reader = options[0].spawnClaudeCodeProcess!({ command: process.execPath, args: ['-e', `process.stdout.write(require("fs").readFileSync(${JSON.stringify(startup)}))`], env: { PATH: process.env.PATH }, signal: new AbortController().signal }) as unknown as { stdout: NodeJS.ReadableStream }
+      let piped = ''
+      for await (const chunk of reader.stdout) piped += String(chunk)
+      expect(JSON.parse(piped)).toEqual({ mcpServers: { files } })
+    } else expect(startup).toBeUndefined()
+    expect(options[0].mcpServers).toEqual({})
+    expect(JSON.stringify(options[0].env)).not.toMatch(/resolved-key|tok-secret|MOUSSE_MCP_VALUE/)
+    expect(JSON.stringify(options[0].extraArgs)).not.toMatch(/resolved-key|tok-secret/)
     expect(options[0].plugins).toEqual([{ type: 'local', path: '/generated/plugin' }])
     expect(options[0]).not.toHaveProperty('settingSources')
     expect(options[0].extraArgs?.['strict-mcp-config']).toBeUndefined()
@@ -205,8 +236,8 @@ describe('Claude subscription attachment', () => {
     expect(await call('mcp__files__write')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
     expect(await call('mcp__files__read')).toEqual({})
     expect(options[1].mcpServers).toEqual({})
+    expect(registered[1]).toBeUndefined()
     expect(options[1].plugins).toBeUndefined()
-    expect(options[1].env).not.toHaveProperty('MOUSSE_MCP_VALUE_0')
   })
 
   it('Mousse\'s PreToolUse hook stamps each Mousse call with the turn token (per_call), and nothing else', async () => {
@@ -364,6 +395,32 @@ describe('Antigravity attachment', () => {
     sent.length = 0
     await antigravity.chat({ ...chat, prompt: 'third', history: 'history-2', mcp: { ...MCP, token: 'tok-2' }, orchestrationInstructions: 'GUIDE 2' })
     expect(prompts(sent)).toEqual(['third'])
+    await antigravity.stop()
+  })
+
+  it("a bot's session given other instructions (its owner edited its prompt) is replaced: a new session gets them and the history", async () => {
+    const sent: Sent[] = []
+    const launch = vi.fn(fakeAcp(true, sent))
+    const { antigravity, workspace } = service(true, sent, launch)
+    const chat = { threadId: 't', cwd: workspace, model: 'm1', onText: vi.fn(), mcp: MCP, bot: true as const }
+    await antigravity.chat({ ...chat, prompt: 'first', orchestrationInstructions: 'OLD WORDS' })
+    antigravity.commitConversation('t', 'history-1')
+    // Same instructions: the live session goes on, nothing is sent again.
+    await antigravity.chat({ ...chat, prompt: 'second', history: 'history-1', orchestrationInstructions: 'OLD WORDS' })
+    antigravity.commitConversation('t', 'history-2')
+    expect(launch).toHaveBeenCalledTimes(1)
+    sent.length = 0
+    await antigravity.chat({ ...chat, prompt: 'third', history: 'history-2', orchestrationInstructions: 'NEW WORDS' })
+    expect(launch).toHaveBeenCalledTimes(2)
+    expect(sent.map((frame) => frame.method)).toContain('session/new')
+    expect(sent.some((frame) => frame.method === 'session/resume' || frame.method === 'session/load')).toBe(false)
+    expect(prompts(sent)).toEqual(['<mousse_orchestration_instructions>\nNEW WORDS\n</mousse_orchestration_instructions>\n\nPrevious conversation (context only; do not repeat earlier actions):\nhistory-2\n\nCurrent request:\nthird'])
+    // The new session holds the new words: the next turn goes on in it.
+    antigravity.commitConversation('t', 'history-3')
+    sent.length = 0
+    await antigravity.chat({ ...chat, prompt: 'fourth', history: 'history-3', orchestrationInstructions: 'NEW WORDS' })
+    expect(launch).toHaveBeenCalledTimes(2)
+    expect(prompts(sent)).toEqual(['fourth'])
     await antigravity.stop()
   })
 

@@ -128,4 +128,9 @@ export interface MousseConf {
   scheduled: ScheduledConfigSection
   mms: MmsConfigSection
   features: MousseFeatureFlags
+  /**
+   * Leftover of the removed "What bots may do here" switches (an installation's file only): kept as stored so an older
+   * build still reads it, and read by nothing here. Each bot's own permissions are the only gate.
+   */
+  bots?: unknown
 }

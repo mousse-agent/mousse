@@ -1,12 +1,22 @@
-import { useEffect, useState } from 'react'
-import { Clock, Shield, X } from '../../lib/icons'
-import type { BotSummary } from '../../../shared/bots/personal/chat'
-import type { BotComputerChoice, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Bell, Brain, ChevronRight, Clock, Gauge, Shield, X } from '../../lib/icons'
+import type { BotReminderItem, BotSummary, BotTurnUsageSummary } from '../../../shared/bots/personal/chat'
+import type { BotModelPick } from '../../../shared/bots/personal/definition'
+import type { BotShownRows, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
+import { Switch } from '../settings/SettingsRow'
 import { useAppStore } from '../../stores/appStore'
 import { errorText } from '../../services/personalBotsClient'
-import { Select, type SelectOption } from '../ui/Select'
+import { BotComputerSelect, BotModelRows, BotModelSelect } from './BotRunsOn'
 import { BotFace } from './face/BotFace'
+import { BotDevicesRow } from './BotDevices'
+import { memorySplitText } from './BotMemoryDialog'
+import { tellingLine } from '../../../shared/bots/personal/tellingSettings'
+import { botGroupTime } from './messageGroups'
+import { BotPrompt } from './BotPrompt'
+
+/** About's Runs on section, which a bot's Pick a model scrolls to. */
+export const RUNS_ON_ID = 'bot-about-runs-on'
 
 /** "Mon 09:00" for a run's next time; today's runs show the time alone. */
 export function nextRunText(at: string, now = new Date()): string {
@@ -16,54 +26,120 @@ export function nextRunText(at: string, now = new Date()): string {
   return date.toDateString() === now.toDateString() ? time : `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`
 }
 
-/**
- * The Computer picker's options for a bot: this computer, then the person's other computers, which a bot cannot be
- * picked onto (it runs on the computer that holds it) and are greyed with the reason; an offline one says it is offline.
- */
-export function botComputerOptions(computers: readonly BotComputerChoice[]): SelectOption[] {
-  return computers.map((computer) => ({
-    value: computer.id,
-    label: computer.offline ? `${computer.name} · offline` : computer.name,
-    ...(computer.unavailable ? { disabled: true, description: computer.unavailable } : {})
-  }))
+/** A reminder's line in About → Runs: "Reminds: 18:42", "Starts: …", a wake's "Follows up: 18:42" or "Follows up when acme/app#12 merges". */
+export function reminderWhenLine(reminder: BotReminderItem, now = new Date()): string {
+  if (reminder.wake) return `Follows up ${reminder.wake}`
+  return `${reminder.work ? 'Starts' : reminder.wake === '' ? 'Follows up' : 'Reminds'}: ${reminderWhenText(reminder.dueAt, now)}`
+}
+
+/** When a reminder fires: like a run's next time within the week, else "14 Nov 09:00". */
+export function reminderWhenText(at: string, now = new Date()): string {
+  const date = new Date(at)
+  if (Number.isNaN(date.getTime())) return ''
+  if (date.getTime() - now.getTime() < 6 * 24 * 60 * 60_000) return nextRunText(at, now)
+  return `${date.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
 }
 
 /**
- * What a bot runs on, by hand (#673): By usage (the default) or a model, and the computer it runs on (the one that
- * holds it; the person's other computers are listed, greyed, once there are two or more).
+ * What a bot runs on, by hand (#673): its model rows (Talk and Work, and with Advanced each kind of work), each an
+ * entry's model at a reasoning level picked in the app's model picker, and the computer it runs on (the one that holds
+ * it; the person's other computers are listed, greyed, once there are two or more). A pick saves only its own rows,
+ * over the rows as they are then, so a change the bot made meanwhile stays; the rows are read again when the bot posts a
+ * message (a `use_model` turn ends with one) or its stuck line changes. An older service has no rows: one Model picker,
+ * as before.
  */
-function RunsOn({ botId, name }: { botId: string; name: string }) {
+function RunsOn({ botId, name, refresh }: { botId: string; name: string; refresh: string }) {
   const [choices, setChoices] = useState<BotsPersonalV2Result<'bots.model.get'> | null>(null)
   const [error, setError] = useState<string | null>(null)
   const client = botsClient()
-  useEffect(() => {
+  // Saves in flight: a read that answers meanwhile is older than what the owner sees.
+  const saving = useRef(0)
+  const read = useCallback(() => {
     let live = true
-    client.model(botId).then((next) => { if (live) setChoices(next) }, (cause) => { if (live) setError(errorText(cause)) })
+    client.model(botId).then((next) => { if (live && !saving.current) setChoices(next) }, (cause) => { if (live) setError(errorText(cause)) })
     return () => { live = false }
     // The client is a thin wrapper over the window's transport; the bot decides what to read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [botId])
+  // Read when About opens, and again after the bot's next message or a new stuck line (`use_model`, a pick that can't
+  // run); each read checks every entry, so not on every status change.
+  useEffect(read, [read, refresh])
   if (!choices) return error ? <p className="bot-about-empty" role="alert">{error}</p> : null
-  const pick = async (model: string) => {
+  const pick = async (model: string | null) => {
     setError(null)
     try {
-      await client.setModel(botId, model || null)
-      setChoices({ ...choices, model: model || null })
+      await client.setModel(botId, model)
+      setChoices({ ...choices, model })
     } catch (cause) {
       setError(errorText(cause))
     }
   }
-  const models = [{ value: '', label: 'By usage' }, ...choices.models.map((choice) => ({ value: choice.model, label: choice.label }))]
-  if (choices.model && !choices.models.some((choice) => choice.model === choices.model)) models.push({ value: choices.model, label: `${choices.model} (not available now)` })
+  const save = async (shown: BotShownRows, change: Parameters<typeof client.setSlots>[1]) => {
+    const before = choices
+    setError(null)
+    setChoices({ ...choices, slots: shown, model: shown.talk?.model ?? null })
+    saving.current += 1
+    try {
+      await client.setSlots(botId, change)
+    } catch (cause) {
+      setChoices(before)
+      setError(errorText(cause))
+    } finally {
+      saving.current -= 1
+    }
+    read()
+  }
+  // The Images row (#1088): a model to make pictures with, or None.
+  const saveImage = async (image: BotModelPick | null) => {
+    const before = choices
+    setError(null)
+    setChoices({ ...choices, image })
+    saving.current += 1
+    try {
+      await client.setImage(botId, image)
+    } catch (cause) {
+      setChoices(before)
+      setError(errorText(cause))
+    } finally {
+      saving.current -= 1
+    }
+    read()
+  }
+  const slots = choices.slots
   return <>
-    <div className="bot-about-row" data-testid="bot-about-model">
-      <span>Model</span>
-      <Select ariaLabel={`${name}'s model`} size="small" value={choices.model ?? ''} options={models} title="By usage picks a ready model each run" onChange={(model) => void pick(model)} />
-    </div>
+    {slots && choices.providers
+      ? <div id={RUNS_ON_ID}>
+        <BotModelRows
+          name={name}
+          providers={choices.providers}
+          slots={slots}
+          borrows
+          {...(choices.named ? { named: choices.named } : {})}
+          {...(choices.notes ? { notes: choices.notes } : {})}
+          {...(choices.imageProviders ? {
+            image: {
+              providers: choices.imageProviders,
+              pick: choices.image ?? null,
+              ...(choices.imagesMissing ? { missing: choices.imagesMissing } : {}),
+              ...(choices.images ? { usage: choices.images } : {}),
+              onPick: (image) => void saveImage(image)
+            }
+          } : {})}
+          onPick={(rows, picked) => {
+            const changed = Object.fromEntries(rows.map((row) => [row, picked])) as Partial<BotShownRows>
+            void save({ ...slots, ...changed }, { slots: changed })
+          }}
+          onOneWork={() => void save({ ...slots, light: slots.medium, hard: slots.medium }, { oneWork: true })}
+        />
+      </div>
+      : <div className="bot-about-row" data-testid="bot-about-model">
+        <span>Model</span>
+        <BotModelSelect ariaLabel={`${name}'s model`} models={choices.models} value={choices.model} onChange={(model) => void pick(model)} />
+      </div>}
     {choices.computers.length > 1 ? (
       <div className="bot-about-row" data-testid="bot-about-computer">
         <span>Computer</span>
-        <Select ariaLabel={`${name}'s computer`} size="small" value={choices.computer} options={botComputerOptions(choices.computers)} title={`${name} runs on the computer that holds it`} onChange={() => undefined} />
+        <BotComputerSelect ariaLabel={`${name}'s computer`} title={`${name} runs on the computer that holds it`} choices={choices} />
       </div>
     ) : null}
     {error ? <p className="bot-about-empty" role="alert">{error}</p> : null}
@@ -71,43 +147,94 @@ function RunsOn({ botId, name }: { botId: string; name: string }) {
 }
 
 /**
- * About this bot (bot-ui §4.8): the whole mouse, the name and the description; what it can use and
- * when it runs, each with Remove; what it runs on, by hand or by usage (#673); Pause and Delete.
+ * What the bot remembers, as one row: how many entries every turn carries, the owner's wishes and its own notes. It
+ * opens the Memory dialog. Read again whenever the bot's detail reloads (after each of its turns), so an entry it just
+ * saved is counted.
+ */
+function Memory({ botId, detail }: { botId: string; detail: unknown }) {
+  const entries = useBotsStore((s) => s.memory[botId])
+  const error = useBotsStore((s) => s.memoryError[botId])
+  useEffect(() => { void useBotsStore.getState().loadMemory(botId) }, [botId, detail])
+  return <button type="button" className="bot-about-row bot-about-memory" data-testid="bot-about-memory" onClick={() => useBotsStore.getState().openMemory(botId)}>
+    <Brain size={14} aria-hidden />
+    <span>{entries ? `Memory · ${entries.length}` : 'Memory'}<small className="bot-about-next">{entries ? memorySplitText(entries) : error ?? 'Loading…'}</small></span>
+    <ChevronRight size={14} aria-hidden />
+  </button>
+}
+
+/** A token count as About shows it: `850`, `12k`, `1.2M`. */
+function tokensText(tokens: number): string {
+  if (tokens < 1000) return String(Math.round(tokens))
+  if (tokens < 1_000_000) return `${tokens < 10_000 ? (tokens / 1000).toFixed(1).replace(/\.0$/, '') : Math.round(tokens / 1000)}k`
+  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+}
+
+/** What a chat turn costs, as one quiet line: input a turn and the share read from the cache; the rest in its tooltip. */
+export function usageLine(usage: BotTurnUsageSummary): { text: string; title: string } {
+  return {
+    text: `${tokensText(usage.inputPerTurn)} tokens a turn · ${Math.round(usage.cachedShare * 100)}% from cache`,
+    title: `Chat turns in the last 7 days: ${usage.turns}. Input a turn includes cache reads and writes; output a turn: ${tokensText(usage.outputPerTurn)}.`
+  }
+}
+
+/**
+ * About this bot (bot-ui §4.8): the whole mouse and the name, then its prompt (the description, which the owner edits
+ * here); what it can use and when it runs, each with Remove; how much it remembers, which opens Memory; what it runs on, by hand or by usage (#673), and
+ * which of the owner's devices reach it; Pause and Delete.
  */
 export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const detail = useBotsStore((s) => s.details[bot.id])
+  const telling = detail?.tellingSettings ? tellingLine(detail.tellingSettings, detail.tellingSettings.quietHours, time => {
+    const [hour, minute] = time.split(':').map(Number)
+    return botGroupTime(new Date(2000, 0, 1, hour, minute).toISOString())
+  }) : detail?.telling
   const happy = useBotsStore((s) => s.happy[bot.id])
   useEffect(() => { void useBotsStore.getState().loadDetail(bot.id) }, [bot.id])
   const store = useBotsStore.getState
   const paused = bot.state === 'paused'
-  return <aside className="bot-about" aria-label={`About ${bot.name}`}>
+  // What the bot may use and which devices reach it are changed here: the panel pauses a theme while it is open.
+  return <aside className="bot-about" data-mousse-decision="" aria-label={`About ${bot.name}`}>
     <div className="bot-about-close"><button type="button" className="bot-close" aria-label="Close About" onClick={() => useBotsStore.setState({ aboutOpen: false })}><X size={14} /></button></div>
     <div className="bot-about-head">
       <BotFace look={bot.look} state={botFaceState(bot, happy)} size={88} view="full" />
       <h2>{bot.name}</h2>
-      <p>{bot.description}</p>
     </div>
+    <BotPrompt bot={bot} />
+    {telling && <p className="bot-about-row"><Bell size={14} aria-hidden /><span>{telling}</span></p>}
     <h3>CAN USE</h3>
     {detail?.permissions.length
-      ? detail.permissions.map((item) => <div className="bot-about-row" key={item.id}>
-        <Shield size={14} aria-hidden /><span title={item.note || undefined}>{item.title.charAt(0).toUpperCase() + item.title.slice(1)}</span>
+      ? detail.permissions.map((item) => <div className="bot-about-row bot-about-permission" key={item.id}>
+        <Shield size={14} aria-hidden /><span title={item.note || undefined}>{item.title.charAt(0).toUpperCase() + item.title.slice(1)}{(item.mark || item.gone) && <small className="bot-about-next" data-testid="bot-about-gone">{item.mark ?? 'Gone from Mousse'}</small>}</span>
+        {item.enabled !== undefined && <div title={item.note}><Switch label={item.title} checked={item.enabled} onChange={(enabled) => void store().setPermission(bot.id, item.id, enabled)} /></div>}
         <button type="button" aria-label={`Remove ${item.title}`} onClick={() => void store().revokePermission(bot.id, item.id)}>Remove</button>
       </div>)
       : <p className="bot-about-empty">{detail ? 'Nothing yet. It asks in the chat the first time it needs something.' : 'Loading…'}</p>}
     <h3>RUNS</h3>
+    {detail?.reminders?.map((reminder) => <div className="bot-about-row" key={reminder.id} data-testid="bot-about-reminder">
+      <Bell size={14} aria-hidden /><span title={reminder.text}><span className="bot-about-clamp">{reminder.text}</span><small className="bot-about-next" title={reminder.wake ? `Gives up: ${reminderWhenText(reminder.dueAt)}` : undefined}>{reminderWhenLine(reminder)}</small></span>
+      <button type="button" aria-label={`Cancel reminder: ${reminder.text}`} onClick={() => void store().cancelReminder(bot.id, reminder.id)}>Cancel</button>
+    </div>)}
     {detail?.runs.length
       ? detail.runs.map((run) => <div className="bot-about-row" key={run.id}>
         <Clock size={14} aria-hidden /><span>{run.label.charAt(0).toUpperCase() + run.label.slice(1)}{run.nextAt && <small className="bot-about-next">Next: {nextRunText(run.nextAt)}</small>}</span>
         <button type="button" aria-label={`Remove ${run.label}`} onClick={() => void store().removeSchedule(bot.id, run.id)}>Remove</button>
       </div>)
-      : detail && <p className="bot-about-empty">Only when you message it. Ask it to run on a schedule.</p>}
+      : null}
+    {detail && !detail.runs.length && !detail.reminders?.length
+      ? <p className="bot-about-empty">Only when you message it. Ask it to run on a schedule.</p>
+      : null}
     {detail?.runs.length
       ? <button type="button" className="bot-ghost-button bot-about-automations" data-testid="bot-about-automations" title="Open them in Automations" onClick={() => useAppStore.getState().setScheduledOpen(true)}>
         {`Runs ${detail.runs.length} ${detail.runs.length === 1 ? 'automation' : 'automations'}`}
       </button>
       : null}
+    <Memory botId={bot.id} detail={detail} />
+    {detail?.usage && ((line) => <p className="bot-about-row bot-about-usage" data-testid="bot-about-usage" title={line.title}>
+      <Gauge size={14} aria-hidden /><span className="bot-about-next">{line.text}</span>
+    </p>)(usageLine(detail.usage))}
     <h3>RUNS ON</h3>
-    <RunsOn botId={bot.id} name={bot.name} />
+    <RunsOn botId={bot.id} name={bot.name} refresh={`${bot.last?.at ?? ''}|${bot.error?.text ?? ''}`} />
+    <BotDevicesRow botId={bot.id} name={bot.name} reach={bot.reach} />
     <div className="bot-about-foot">
       <button type="button" className="bot-ghost-button" onClick={() => void (paused ? store().resume(bot.id) : store().pause(bot.id))}>{paused ? 'Resume' : 'Pause'}</button>
       <button type="button" className="bot-ghost-button is-danger" onClick={() => useBotsStore.setState({ dialog: { kind: 'delete', botId: bot.id }, error: null })}>Delete</button>

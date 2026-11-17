@@ -12,6 +12,7 @@ import { RunEngine } from '../src/mms/run/RunEngine'
 import { RunStore } from '../src/mms/run/RunStore'
 import { readUsageLimit } from '../src/mms/orchestrator/providerErrors'
 import { parseModelCatalog, type ModelCatalog } from '../src/shared/modelCatalog'
+import { EMPTY_PREFS, modelsWithPrefs } from '../src/mms/harness/catalog'
 
 /** No catalog models: a test that checks older models passes its own made-up catalog. */
 const NO_CATALOG: ModelCatalog = { format: 1, revision: 0, models: [] }
@@ -80,6 +81,8 @@ function fakeQuery(events: unknown[] = []) {
   return Object.assign(generator, {
     close: vi.fn(),
     interrupt: vi.fn(async () => {}),
+    // A turn's MCP servers go over Claude Code's input (#358).
+    setMcpServers: vi.fn(async (servers: Record<string, unknown>) => ({ added: Object.keys(servers), removed: [], errors: {} })),
     supportedModels: vi.fn(async () => [
       { value: 'sonnet', displayName: 'Sonnet', description: 'model' }
     ])
@@ -587,7 +590,9 @@ describe('Claude Subscription native provider', () => {
     await service.chat({ ...chatInput(home), mode: 'plan' })
     expect(decision).toMatchObject({ behavior: 'allow' })
     expect(asked).toHaveBeenCalledOnce()
-    expect(inputs[2].permissionMode).toBe('plan')
+    // Read-only by Mousse's own checks, not Claude Code's plan mode, whose tools never reach the model.
+    expect(inputs[2].permissionMode).toBe('default')
+    expect(inputs[2].disallowedTools).toEqual(expect.arrayContaining(['EnterPlanMode', 'ExitPlanMode']))
     expect(inputs[2].allowDangerouslySkipPermissions).toBeUndefined()
   })
   describe('permission modes', () => {
@@ -1063,6 +1068,21 @@ describe('Claude reasoning levels', () => {
     expect(captured[0].effort).toBeUndefined()
   })
 
+  it('offers Fast on the models Claude Code marks supportsFastMode, through to the instance\'s model list', () => {
+    const listed = claudeModelOptions([{ ...opus, supportedEffortLevels: [...opus.supportedEffortLevels], supportsFastMode: true }, { ...haiku, supportedEffortLevels: [...haiku.supportedEffortLevels] }])
+    expect(modelsWithPrefs(listed, EMPTY_PREFS).map((model) => [model.id, model.capabilities.speeds])).toEqual([['opus', ['fast']], ['haiku', undefined]])
+  })
+
+  it('runs a Fast selection with Claude Code\'s fastMode setting on the model and level chosen', async () => {
+    const captured: Options[] = []
+    const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) }, true, undefined, [{ id: 'opus', label: 'Opus 5.5', efforts: ['low', 'high'], speeds: ['fast'] }])
+    await service.chat({ ...chatInput(home), model: 'opus:fast:high' })
+    await service.chat({ ...chatInput(home), threadId: 'other-thread', model: 'opus:high' })
+    expect(captured[0]).toMatchObject({ model: 'opus', effort: 'high', settings: { fastMode: true } })
+    expect(captured[1]).toMatchObject({ model: 'opus', effort: 'high' })
+    expect(captured[1].settings?.fastMode).toBeUndefined()
+  })
+
   it('runs a saved level the model does not list at the model\'s default', async () => {
     const captured: Options[] = []
     const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) }, true, undefined, [{ id: 'haiku', label: 'Haiku 5.5', efforts: ['low', 'medium', 'high'] }])
@@ -1092,7 +1112,7 @@ describe('older Claude models', () => {
     ]
   })
   const live = { value: 'ember', resolvedModel: 'ember-live[1m]', displayName: 'Ember', description: 'Ember 9 · test model' }
-  type Behaviour = { refuse?: true; fail?: true; applied?: string | null; effort?: string; hang?: true }
+  type Behaviour = { refuse?: true; fail?: true; applied?: string | null; effort?: string; hang?: true; ultracode?: true }
   /** An idle query whose `setModel` and `get_settings` act per model as `behaviour` says. */
   function olderQuery(behaviour: Record<string, Behaviour>, listed: unknown[] = [live]) {
     let current = 'ember'
@@ -1105,7 +1125,7 @@ describe('older Claude models', () => {
       const acting = behaviour[current]
       if (acting?.hang) return new Promise(() => {})
       const model = acting?.applied === undefined ? current : acting.applied
-      return { applied: { ...(model === null ? {} : { model }), ...(acting?.effort ? { effort: acting.effort } : {}) } }
+      return { applied: { ...(model === null ? {} : { model }), ...(acting?.effort ? { effort: acting.effort } : {}), ...(acting?.ultracode ? { ultracodeAvailable: true } : {}) } }
     })
     const query = Object.assign(fakeQuery(), { supportedModels: vi.fn(async () => listed), setModel, getSettings }) as unknown as Query
     return { query, setModel, close: (query as unknown as { close: ReturnType<typeof vi.fn> }).close }
@@ -1136,6 +1156,17 @@ describe('older Claude models', () => {
       'ember-old-20290101': { outcome: 'runs' }
     })
     expect(first.close).toHaveBeenCalledOnce()
+  })
+
+  it('offers Ultracode on a model the check found when Claude Code says the model can run it', async () => {
+    const check = olderQuery({ ...standard, 'ember-runs': { effort: 'high', ultracode: true } })
+    const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => catalog })
+    await service.refreshModels(home)
+    await service.olderCheck
+    const runs = service.llmProvider()?.models.find((model) => model.id === 'ember-runs')
+    expect(runs?.efforts).toEqual(['low', 'high', 'ultracode'])
+    expect(runs?.effortDescriptions?.ultracode).toBeTruthy()
+    expect(service.llmProvider()?.models.find((model) => model.id === 'ember-old-20290101')?.efforts).toBeUndefined()
   })
 
   it('checks again only the models left unknown, until Claude Code or the account changes', async () => {
@@ -1278,6 +1309,59 @@ describe('older Claude models', () => {
       'ember-refused': { outcome: 'refused' },
       'ember-remapped': { outcome: 'remapped', to: 'ember-live' },
       'ember-old-20290101': { outcome: 'runs' }
+    })
+  })
+
+  describe('a newer catalog model Claude Code does not list yet', () => {
+    // Claude Code still lists Ember 9 (now older in the catalog); the catalog's current Ember is 10.
+    const newer = parseModelCatalog({
+      format: 1,
+      revision: 2,
+      models: [
+        entry('ember-new', '2031-06-01'),
+        entry('ember-live', '2031-01-01', { older: true }),
+        entry('other-live', '2031-02-01', { family: 'other' }),
+        entry('ember-runs', '2030-04-01', { older: true })
+      ]
+    })
+    const other = { value: 'other', resolvedModel: 'other-live', displayName: 'Other', description: 'Other 1 · test model' }
+
+    it('shows it in place of the older one, which folds behind Show more but stays listed', async () => {
+      const check = olderQuery({ 'ember-runs': {} }, [live, other])
+      const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => newer })
+      await service.refreshModels(home)
+      await service.olderCheck
+      // The listed Ember 9 stays offered, so a thread that uses it keeps it selected.
+      expect(service.models().map((model) => [model.id, model.older ?? false])).toEqual([
+        ['ember-new', false],
+        ['ember', true],
+        ['other', false],
+        ['ember-runs', true]
+      ])
+    })
+
+    it('folds the older one when Claude Code lists both', async () => {
+      const listedNew = { value: 'ember-new', displayName: 'Ember', description: 'Ember 10 · test model' }
+      const check = olderQuery({ 'ember-runs': { refuse: true }, 'other-live': { refuse: true } }, [listedNew, live])
+      const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => newer })
+      await service.refreshModels(home)
+      await service.olderCheck
+      expect(service.models().map((model) => [model.id, model.older ?? false])).toEqual([
+        ['ember-new', false],
+        ['ember', true]
+      ])
+    })
+
+    it('leaves the listed model in the main list when the account cannot run the newer one', async () => {
+      const check = olderQuery({ 'ember-new': { refuse: true }, 'ember-runs': {} }, [live, other])
+      const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => newer })
+      await service.refreshModels(home)
+      await service.olderCheck
+      expect(service.models().map((model) => [model.id, model.older ?? false])).toEqual([
+        ['ember', false],
+        ['other', false],
+        ['ember-runs', true]
+      ])
     })
   })
 
@@ -1446,21 +1530,50 @@ it('records successful official file edits only once without asking', async () =
   expect(onLineEdits).toHaveBeenCalledExactlyOnceWith(2)
 })
 
+// #595: Claude Code keeps its own tools' results in its session file. Mousse's hook hands back each result with the
+// thread's secrets hidden (`updatedToolOutput`), read at that moment (a secret given mid-turn included), so neither
+// the model nor that file gets the value. tests/live/claudeSecretSessionFile.test.ts checks the real file.
+it("hides the thread's secrets in its own tools' results before Claude Code keeps them", async () => {
+  const SECRET = 'ghp_UnitCheckSecretValue0123456789'
+  let given = false
+  const outputs: unknown[] = []
+  const { service, home } = fixture(({ options }) => {
+    const q = fakeQuery()
+    q[Symbol.asyncIterator] = async function* () {
+      const post = options.hooks!.PostToolUse![0].hooks[0]
+      const fire = async (id: string, tool: string, response: unknown) => {
+        outputs.push(await post({ hook_event_name: 'PostToolUse', tool_use_id: id, tool_name: tool, tool_input: {}, tool_response: response } as never, id, { signal: new AbortController().signal }))
+      }
+      // Before the secret is given, nothing is rewritten.
+      await fire('before', 'Read', { type: 'text', file: { filePath: 'GH_TOKEN', content: `     1\t${SECRET}\n` } })
+      given = true
+      await fire('read', 'Read', { type: 'text', file: { filePath: 'GH_TOKEN', content: `     1\t${SECRET}\n` } })
+      await fire('bash', 'Bash', { stdout: `token: ${SECRET}`, stderr: '', interrupted: false })
+      await fire('plain', 'Bash', 'nothing secret here')
+      yield result as never
+    }
+    return q
+  })
+  const masker = (text: string) => text.split(SECRET).join('[secret GH_TOKEN hidden]')
+  await service.chat({ ...chatInput(home), secretMasker: () => (given ? masker : undefined) })
+  expect(outputs[0]).toEqual({})
+  expect(outputs[1]).toEqual({ hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput: { type: 'text', file: { filePath: 'GH_TOKEN', content: '     1\t[secret GH_TOKEN hidden]\n' } } } })
+  expect(outputs[2]).toMatchObject({ hookSpecificOutput: { updatedToolOutput: { stdout: 'token: [secret GH_TOKEN hidden]' } } })
+  expect(outputs[3]).toEqual({})
+})
 
-it('starts a fresh Claude session with canonical history when the model changes', async () => {
+
+it('resumes the same Claude session, with no replayed history, when the model changes', async () => {
   const inputs: Array<{ options: Options; prompt: unknown }> = []
   const { service, home } = fixture((input) => { inputs.push(input); return fakeQuery([result]) })
   await service.chat(chatInput(home))
   service.commitConversation('thread', 'full canonical history')
   await service.chat({ ...chatInput(home), model: 'opus:medium', history: 'full canonical history' })
-  expect(inputs[1].options.resume).toBeUndefined()
+  expect(inputs[1].options).toMatchObject({ model: 'opus', effort: 'medium', resume: 'vendor-session' })
   const prompt: unknown[] = []
   for await (const message of inputs[1].prompt as AsyncIterable<unknown>) prompt.push(message)
-  expect(JSON.stringify(prompt)).toContain('full canonical history')
-  expect(inputs[1].options.model).toBe('opus')
-  service.commitConversation('thread', 'next history')
-  await service.chat({ ...chatInput(home), model: 'opus:high', history: 'next history' })
-  expect(inputs[2].options.resume).toBe('vendor-session')
+  expect(JSON.stringify(prompt)).not.toContain('full canonical history')
+  expect(JSON.stringify(prompt)).not.toContain('Previous conversation')
 })
 
 it('reports the vendor OAuth refresh lock as recoverable without committing a session', async () => {
@@ -1607,6 +1720,12 @@ describe('a plan usage limit (one-shot query)', () => {
     service.commitFailed('thread', 'H1 + request')
     await service.chat({ ...chatInput(home), history: 'H1 + request' })
     expect(inputs[1].options.resume).toBe('vendor-session')
+  })
+
+  it('a provider refusal fails the turn with the provider\'s status and message', async () => {
+    const { service, home } = fixture(() => fakeQuery([init, failure({ api_error_status: 400, errors: ['API Error: 400 messages.3.content.0: tool_use ids were found without tool_result blocks'] })]))
+    const error = await service.chat(chatInput(home)).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_api_error', message: '400 · messages.3.content.0: tool_use ids were found without tool_result blocks', details: { provider: 'claude', status: 400 } })
   })
 
   it('a failure that is not a limit saves no session, even when a rejected window was seen earlier', async () => {

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Just a moment...</title>
+  <style>body { margin: 0; font: 16px sans-serif; } .main { margin: 100px auto; width: 600px; }</style>
+</head>
+<body>
+  <!--
+    A challenge page as one arrives (served by /challenge with an error status, 403 or 503): almost
+    nothing on it, its check built by its script a moment after it loads, inside a closed shadow root
+    the page's own reading can't enter. With ?after=ms it passes by itself after that long: it keeps
+    a cookie and reloads the same address, which the site then answers with its own page.
+  -->
+  <div class="main">
+    <h1>shop.example.com</h1>
+    <h2>Performing security verification</h2>
+    <p>This website uses a security service to protect against malicious bots. This page is displayed while the website verifies you are not a bot.</p>
+    <div id="slot"></div>
+    <p>Ray ID: 0000fixture · <a href="/nav-a.html">Performance and Security</a> · <a href="/nav-b.html">Privacy</a></p>
+  </div>
+  <script>
+    setTimeout(() => {
+      const host = document.createElement('div')
+      document.getElementById('slot').appendChild(host)
+      const root = host.attachShadow({ mode: 'closed' })
+      const frame = document.createElement('iframe')
+      // The provider's address is in the path: the fixture site answers it, nothing leaves this computer.
+      frame.src = '/challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile/fixture'
+      frame.title = 'Widget containing a security challenge'
+      frame.width = '300'
+      frame.height = '65'
+      frame.style.border = '0'
+      root.appendChild(frame)
+    }, 800)
+    const after = Number(new URLSearchParams(location.search).get('after') || 0)
+    if (after > 0) setTimeout(() => { document.cookie = 'mousse_check_passed=1; path=/'; location.reload() }, after)
+  </script>
+</body>
+</html>

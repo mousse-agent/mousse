@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type { ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -23,7 +24,7 @@ import { killTree } from '../../spawn'
 import { withEnforced } from '../../env'
 import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
-import { codexMcpConfigOverrides } from '../../../run/mcp/attachment'
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME, codexMcpConfigOverrides } from '../../../run/mcp/attachment'
 import type { McpAttachment } from '../../../run/mcp/MousseMcpServer'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
@@ -73,7 +74,8 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from './childPolicy'
+import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotSandbox, codexBotSandboxConfig, codexBotWebOff, codexPackageOf, codexTurnPolicy } from './childPolicy'
+import { CODEX_BOT_SETUP_UNREADABLE_TEXT, codexBotMcpCollisionText, codexBotSettingText, codexBotVersionRefusal, codexVersionOf } from '../../../../shared/harness/codexBotVersion'
 import { STOP_GRACE_MS, listProcesses, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
@@ -90,10 +92,11 @@ import {
 } from './codexActivity'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
+import { isMousseTempEntry } from '../../../data/closedPlaces'
 import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig, codexOneShotRunsOn } from './oneShot'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
-import type { ChildTurnPolicy } from '../../adapter'
+import type { ChildTurnPolicy, PlanWindowUse } from '../../adapter'
 import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
 import { harnessAppError } from '../../../../shared/harness/types'
 import { QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
@@ -174,6 +177,8 @@ type SavedThread = {
   instanceId?: string
   /** Fingerprint of the canonical history the thread holds; set after the turn commits, or after a stopped turn is fingerprinted. */
   historyKey?: string
+  /** A bot's thread: a fingerprint of the system text (developer instructions) it was opened with. */
+  instructionsHash?: string
 }
 type Settings = {
   /**
@@ -196,7 +201,7 @@ type AccountProbe = CodexAccountReading
 
 /** A one-way key of the account a limits snapshot belongs to: the account itself is never written. */
 function limitsOwner(subject: string | undefined): string | undefined {
-  return subject ? createHash('sha256').update(`codex-limits ${subject}`).digest('hex') : undefined
+  return subject ? createHash('sha256').update(`codex-limits\u0000${subject}`).digest('hex') : undefined
 }
 
 /** A window as it is saved: its three numbers only, whatever else Codex sent with it. */
@@ -371,6 +376,17 @@ function defaultKillTree(process: CodexProcess): void {
 
 export type CodexToolEvent = ProviderToolEvent
 
+/** A rate-limit snapshot's windows as `ProviderMetrics.quota` names them; undefined when it has none. */
+export function quotaOf(snapshot: RateLimitSnapshot | undefined): PlanWindowUse[] | undefined {
+  if (!snapshot) return undefined
+  const windows = (['primary', 'secondary'] as const).flatMap((kind) => {
+    const window = snapshot[kind]
+    if (!window || typeof window.usedPercent !== 'number' || !Number.isFinite(window.usedPercent)) return []
+    return [{ kind, usedPercent: window.usedPercent, ...(typeof window.resetsAt === 'number' ? { resetsAt: window.resetsAt } : {}) }]
+  })
+  return windows.length ? windows : undefined
+}
+
 export interface CodexTurnUsage {
   input: number
   output: number
@@ -381,6 +397,8 @@ export interface CodexTurnUsage {
   reasoning: number
   /** Prompt side of the last model call (the thread's context size) and the model's window. */
   context?: { input: number; cacheRead: number; cacheWrite: number; contextWindow?: number }
+  /** The plan's usage windows of the latest rate-limit snapshot the server reported while the run was open. */
+  quota?: PlanWindowUse[]
 }
 
 export type CodexChatInput = {
@@ -428,7 +446,7 @@ export type CodexChatInput = {
    * raises is answered by this authority (`botApprovals.ts`). Questions to the user are refused.
    * Its `tools` and `workspace` set the sandbox: a bot with "run commands" writes in its own folders.
    */
-  bot?: Pick<BotAuthority, 'check'> & Partial<Pick<BotAuthority, 'tools' | 'workspace'>>
+  bot?: Pick<BotAuthority, 'check'> & Partial<Pick<BotAuthority, 'tools' | 'workspace' | 'appTools'>>
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: CodexToolEvent) => void
@@ -444,14 +462,69 @@ export type CodexChatInput = {
   /** The Codex thread (and, once known, turn) serving this chat. */
   onSession?: (session: { codexThreadId: string; turnId?: string }) => void
   drainSteer?: () => string | undefined
-  onSteer?: (text: string) => void
+  /**
+   * `drainSteer` that also says whether the text is a person's (`cut`): see `TurnControl.drainSteerEntry`. With
+   * `expect`, it takes only when the decision now is one of those deliveries.
+   */
+  drainSteerEntry?: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => { text: string; token?: string; cut?: boolean; images?: ChatImageAttachment[] } | undefined
+  /**
+   * The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. With it, the turn drains
+   * only what it can deliver now: a cut, or a native steer (`turn/steer`, or the next turn at a boundary).
+   */
+  peekSteer?: () => { delivery: 'cut' | 'native' | 'hold' } | undefined
+  /** The check right before `turn/interrupt` for a drained cut (`TurnControl.mayCut`): false hands it back. */
+  mayCut?: (token: string) => boolean
+  /** The server turn ended inside the run (`turn/completed`), and no command of it runs (`TurnSink.boundary`). */
+  onBoundary?: () => void
+  /** The server accepted another turn of the run (`TurnSink.providerTurn`). */
+  onProviderTurn?: () => void
+  /** A person is asked about the call `callId` (an approval or a question); false once it is answered. */
+  onToolAwaiting?: (callId: string, waiting: boolean) => void
+  /** The drain `token` names was taken by a turn the server accepted; it will not be handed back. */
+  steerTaken?: (token?: string) => void
+  /** Hands back a drained steer no turn took (a Stop, a failed turn, a refused `turn/start`): it is not lost. */
+  returnSteer?: (text: string, token?: string) => void
+  /**
+   * A drained steer is read: Codex has it (`turn/steer` answered, or the `turn/start` that carries it accepted).
+   * `token` names its drain (`drainSteerEntry`), when it had one. If this throws, a drain with a token is handed back.
+   */
+  onSteer?: (text: string, token?: string) => void
   /** Liveness while the turn only waits for the native helpers it started. */
   onHeartbeat?: () => void
+}
+
+/** A steer `chat` drained, with the images sent with it; `token` names its drain (`drainSteerEntry`), when it had one. */
+interface DrainedSteer {
+  text: string
+  token?: string
+  images?: ChatImageAttachment[]
+}
+
+/** The images Codex takes: JPEG, PNG, GIF or WebP up to 10 MiB. */
+function codexTakesImage(image: ChatImageAttachment): boolean {
+  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) && Buffer.byteLength(image.data, 'base64') <= 10 * 1024 * 1024
+}
+
+function codexImageInput(image: ChatImageAttachment): UserInput {
+  return { type: 'image', url: `data:${image.mimeType};base64,${image.data}` }
+}
+
+/**
+ * Steers as Codex input: their text, one per line, then their images. An image Codex does not take is left out with a
+ * warning: the text still goes in now, and the transcript keeps the image.
+ */
+function steerInput(entries: readonly DrainedSteer[]): UserInput[] {
+  const images = entries.flatMap((entry) => entry.images ?? [])
+  const taken = images.filter(codexTakesImage)
+  if (taken.length < images.length) console.warn('[codex] a steer image Codex does not take was left out', { left: images.length - taken.length })
+  return [textInput(entries.map((entry) => entry.text).join('\n')), ...taken.map(codexImageInput)]
 }
 
 export interface CodexChatResult {
   text: string
   codexThreadId: string
+  /** The saved thread could not be resumed and the turn ran in a new one (`ProviderMetrics.resumeLost`). */
+  resumeLost?: true
   turnId: string
   /** The model Codex ran (resolves `default`). */
   model: string
@@ -500,6 +573,10 @@ export function findCodexBinary(env: NodeJS.ProcessEnv = process.env): string | 
 }
 
 const historyKey = (history: string): string => createHash('sha256').update(history).digest('hex')
+
+/** A bot thread's saved fingerprint of the system text it was opened with (`SavedThread.instructionsHash`). */
+const botInstructionsKey = (input: Pick<CodexChatInput, 'bot' | 'developerInstructions'>): { instructionsHash?: string } =>
+  input.bot && input.developerInstructions ? { instructionsHash: historyKey(input.developerInstructions).slice(0, 32) } : {}
 
 /**
  * What the account check says. `ownSignIn` is the instruction for an instance with a home of its own
@@ -607,6 +684,8 @@ class TurnRun {
   private adoptedFailureWaiters: Array<() => void> = []
   /** The run has interrupted its own thread (Stop, a cap or a failure sweep): an `interrupted` turn is then expected. */
   selfInterrupted = false
+  /** Turns a person's steer cut (`turn/interrupt` for a steer): their `interrupted` end is expected, never a failure. */
+  readonly cutTurns = new Set<string>()
   /** The chat returned; late events only settle the turn and reach nobody. */
   private muted = false
   private readonly questionsDone = new AbortController()
@@ -619,6 +698,11 @@ class TurnRun {
   readonly finished: Promise<void>
   /** Codex's own subagents this turn started; they outlive the parent's turn unless Mousse waits for them. */
   readonly helpers: NativeHelpers
+  /**
+   * Runs `fn` in the async context of the chat that made this run. The process serves every thread, and its output
+   * arrives in the context of the chat that started it: this run's events must not run as that other chat's.
+   */
+  readonly inScope = AsyncLocalStorage.snapshot()
   private finish!: () => void
 
   constructor(
@@ -636,6 +720,11 @@ class TurnRun {
 
   cancelQuestions(): void {
     this.questionsDone.abort(new Error('The Codex turn ended'))
+  }
+
+  /** A person is asked about the call `callId`, or no longer (`CodexChatInput.onToolAwaiting`). */
+  toolAwaiting(callId: string, waiting: boolean): void {
+    this.input.onToolAwaiting?.(callId, waiting)
   }
 
   /** The directory this turn runs in. */
@@ -780,7 +869,8 @@ class TurnRun {
       output: turn.outputTokens ?? 0,
       reasoning: turn.reasoningOutputTokens ?? 0,
       totalTokens: turn.totalTokens ?? 0,
-      context: { ...context, ...(this.usageEnd.window ? { contextWindow: this.usageEnd.window } : {}) }
+      context: { ...context, ...(this.usageEnd.window ? { contextWindow: this.usageEnd.window } : {}) },
+      ...(quotaOf(this.rateLimits) ? { quota: quotaOf(this.rateLimits)! } : {})
     }
   }
 
@@ -954,6 +1044,8 @@ class TurnRun {
         this.turnId = started.turn.id
         this.adoptedTurn = started.turn.id
         this.turnOpen = true
+        // A turn of the run, as one Mousse starts: a held steer now waits for its commands, and for its end.
+        this.input.onProviderTurn?.()
       } else this.turnId ??= started.turn.id
       return
     }
@@ -968,8 +1060,12 @@ class TurnRun {
         // Mousse's own turn may be running by now; it keeps its turn open, and this one's end is not its news.
         const current = this.turnId === completed.turn.id
         if (current) this.turnOpen = false
-        // An interruption this run asked for itself (a cap or a Stop sweep) is how the run ends, not a failure.
-        const failed = completed.turn.status === 'failed' || (completed.turn.status === 'interrupted' && !this.selfInterrupted)
+        // An interruption this run asked for itself (a cap or a Stop sweep) is how the run ends, not a failure. A person's
+        // steer that cut the adopted turn is not a failure either: the steer goes in as the next turn of the run.
+        const failed = completed.turn.status === 'failed' || (completed.turn.status === 'interrupted' && !this.selfInterrupted && !this.cutTurns.has(completed.turn.id))
+        // The adopted turn is over and none of its commands runs: a steer held for it (strict release) goes in now, as
+        // the next turn of the run, rather than waiting for the helpers.
+        if (current && !failed) this.input.onBoundary?.()
         if (current && failed) {
           this.adoptedFailure = completed.turn
           for (const waiter of this.adoptedFailureWaiters.splice(0)) waiter()
@@ -1123,6 +1219,10 @@ export class CodexProviderService {
   private readonly pendingSweeps = new Map<string, Promise<void>>()
   /** Helpers of finished chats that were told to stop before their turn id was known. */
   private readonly orphans = new Set<NativeHelpers>()
+  /** The Codex package each app-server process runs (`codexPackageOf`), for a bot's profile. */
+  private readonly packages = new WeakMap<CodexConnection, string | undefined>()
+  /** The Codex version each process reported at `initialize` (`codexVersionOf`): a bot's turn runs only on a checked one. */
+  private readonly versions = new WeakMap<CodexConnection, string | undefined>()
   private readonly loaded = new Map<string, { mcpToken: string | null; relayKey: string | null; cwd: string; childKey: string; instructionsHash?: string }>()
   private readonly activeThreads = new Set<string>()
   /**
@@ -1476,7 +1576,7 @@ export class CodexProviderService {
     try {
       return await readCodexUserSetup(await this.connection(), cwd ? resolve(cwd) : null)
     } catch {
-      return { mcpServers: null }
+      return { mcpServers: null, features: null }
     } finally {
       this.listing -= 1
       this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
@@ -2052,6 +2152,8 @@ export class CodexProviderService {
       return Promise.reject(error)
     }
     const conn = new CodexAppServerClient(process, { defaultTimeoutMs: this.dependencies.requestTimeoutMs, secrets: () => this.secrets })
+    // The Codex package this process runs: a bot's commands must be able to read it (`codexPackageOf`).
+    this.packages.set(conn, codexPackageOf(target.path))
     // A spawn `error` with no pid means the process never started; otherwise only `exit` counts.
     const exited = new Promise<void>((done) => {
       if (process.exitCode !== null || process.signalCode !== null) return done()
@@ -2085,7 +2187,8 @@ export class CodexProviderService {
         // notifications and keeps extra fields on approval requests; Mousse ignores both.
         capabilities: { experimentalApi: true, requestAttestation: false }
       })
-      .then(() => {
+      .then((result) => {
+        this.versions.set(conn, codexVersionOf(result?.userAgent))
         conn.notify('initialized')
         return conn
       })
@@ -2209,14 +2312,14 @@ export class CodexProviderService {
       if (compaction.turnId !== undefined && (turnOf?.turnId === compaction.turnId || turnOf?.turn?.id === compaction.turnId)) return
     }
     const run = this.turns.get(threadId)
-    if (run) return run.handle(notification)
+    if (run) return run.inScope(() => run.handle(notification))
     // A native helper's own thread: its turn belongs to the run that started it.
     const owner = [...this.turns.values()].find((candidate) => candidate.helpers.has(threadId))
     const tracker = owner?.helpers ?? [...this.orphans].find((helpers) => helpers.has(threadId))
     if (tracker) {
       tracker.handle(notification)
       // A helper's own helpers keep the run open and are stopped with it, but get no rows of their own.
-      if (!tracker.isNested(threadId)) owner?.helperNotification(threadId, notification)
+      if (owner && !tracker.isNested(threadId)) owner.inScope(() => owner.helperNotification(threadId, notification))
       // A stopped tracker is kept only while a helper still lacks its turn id, whichever path resolved it.
       if (!tracker.awaitingTurn()) this.orphans.delete(tracker)
       return
@@ -2226,7 +2329,19 @@ export class CodexProviderService {
 
   private async serve(request: CodexServerRequest): Promise<unknown> {
     const params = (request.params ?? {}) as { threadId?: string; itemId?: string }
-    const run = params.threadId ? this.turns.get(params.threadId) : undefined
+    // A native helper's request is the run that started it's own (docs/plans/tool-api.md §2.7): it is asked in that run's
+    // thread, under that run's policy (bot, reader, Plan, approvals), and its item is read from the helper's own thread.
+    const own = params.threadId ? this.turns.get(params.threadId) : undefined
+    // Only the command and file-change approvals are a helper's that Mousse asks about; anything else a helper asks is
+    // refused as before.
+    const asksApproval = request.method === 'item/commandExecution/requestApproval' || request.method === 'item/fileChange/requestApproval'
+    const host = !own && asksApproval && params.threadId ? [...this.turns.values()].find((candidate) => candidate.helpers.has(params.threadId!)) : undefined
+    const run = own ?? host
+    const helper = host ? params.threadId : undefined
+    // Item ids are unique per thread only: a helper's item is never looked up among its parent's.
+    const itemOf = (itemId: string | undefined): unknown => (itemId === undefined ? undefined : helper ? run!.helpers.item(helper, itemId) : run!.item(itemId))
+    // The row a helper's call has in the run (`helperNotification`), so the steer hold sees it waiting on the person.
+    const callOf = (itemId: string | undefined): string | undefined => (itemId === undefined ? undefined : helper ? `${helper}:${itemId}` : itemId)
     type Result<M extends keyof CodexServerRequestMap> = CodexServerRequestMap[M]['result']
     switch (request.method) {
       case 'item/commandExecution/requestApproval': {
@@ -2234,14 +2349,14 @@ export class CodexProviderService {
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
         // A bot's turn: its authority answers, never a person.
         if (run.bot) {
-          const asked = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command
+          const asked = approval.command ?? (itemOf(approval.itemId) as { command?: string } | undefined)?.command
           const answer = codexBotCommand(run.bot, { command: typeof asked === 'string' ? asked : undefined, cwd: approval.cwd ? resolve(run.cwd, approval.cwd) : run.cwd, reason: approval.reason ?? null })
           return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/commandExecution/requestApproval'>
         }
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         // Full access never asks (Codex's own profile does not either; this is the backstop).
         if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
-        const known = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command
+        const known = approval.command ?? (itemOf(approval.itemId) as { command?: string } | undefined)?.command
         const command = typeof known === 'string' && known.trim() ? known : undefined
         // Where the command runs: the directory Codex names (a relative one is under the turn's), else the turn's own.
         // The accept carries only a decision, so Codex starts the command where it proposed: that exact path is hashed,
@@ -2259,7 +2374,9 @@ export class CodexProviderService {
             input: command === undefined || where === undefined ? undefined : { command, cwd: where, params: requestDetails(approval, ['command', 'cwd']) },
             ...(where !== undefined ? { cwd: where } : {})
           },
-          approval.reason
+          approval.reason,
+          callOf(approval.itemId),
+          helper
         )
         return { decision } satisfies Result<'item/commandExecution/requestApproval'>
       }
@@ -2267,7 +2384,7 @@ export class CodexProviderService {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
         if (run.bot) {
-          const listed = (run.item(approval.itemId) as { changes?: Array<{ path: string; kind?: { type?: string; move_path?: string | null } }> } | undefined)?.changes ?? []
+          const listed = (itemOf(approval.itemId) as { changes?: Array<{ path: string; kind?: { type?: string; move_path?: string | null } }> } | undefined)?.changes ?? []
           const answer = codexBotFileChange(run.bot, {
             changes: listed.map((change) => ({ path: change.path, kind: change.kind?.type ?? 'update', ...(change.kind?.move_path ? { movePath: change.kind.move_path } : {}) })),
             cwd: run.cwd,
@@ -2278,7 +2395,7 @@ export class CodexProviderService {
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         // Edits go ahead under Auto-accept edits and Full access.
         if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
-        const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string; diff?: string; kind?: unknown }> } | undefined)?.changes ?? []
+        const changes = (itemOf(approval.itemId) as { changes?: Array<{ path: string; diff?: string; kind?: unknown }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
           `Allow Codex to edit ${changes.length ? changes.map((change) => change.path).join(', ') : 'files'}?${approval.reason ? `\n${approval.reason}` : ''}`,
@@ -2292,7 +2409,9 @@ export class CodexProviderService {
               : undefined,
             cwd: run.cwd
           },
-          approval.reason
+          approval.reason,
+          callOf(approval.itemId),
+          helper
         )
         return { decision } satisfies Result<'item/fileChange/requestApproval'>
       }
@@ -2301,6 +2420,8 @@ export class CodexProviderService {
         if (!run || run.questionSignal.aborted) throw new Error('No Mousse turn is waiting for this answer')
         // Nobody answers a run whose approvals are `never`, or a bot's turn.
         if (run.refusesApprovals || run.bot) throw new Error(QUESTIONS_REFUSED_MESSAGE)
+        // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
+        run.toolAwaiting(input.itemId, true)
         const answers = await this.questions.requestAnswers(
           input.questions.map((question) => ({
             id: question.id,
@@ -2309,7 +2430,7 @@ export class CodexProviderService {
           })),
           run.mousseThreadId,
           { signal: run.questionSignal }
-        )
+        ).finally(() => run.toolAwaiting(input.itemId, false))
         return {
           answers: Object.fromEntries(
             input.questions.map((question) => {
@@ -2339,8 +2460,13 @@ export class CodexProviderService {
     prompt: string,
     kind: 'command' | 'edit',
     tool: { name: string; input: unknown; cwd?: string },
-    reason?: string | null
+    reason?: string | null,
+    itemId?: string,
+    /** The native helper's thread when the request is a helper's: shown on its mirror thread too, never answered by a rule. */
+    helper?: string
   ): Promise<'accept' | 'decline' | 'cancel'> {
+    // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
+    if (itemId) run.toolAwaiting(itemId, true)
     try {
       const answer = await this.questions.requestAnswers(
         [
@@ -2366,7 +2492,8 @@ export class CodexProviderService {
             tool,
             // A request that says why it asks (a retry outside the sandbox, a network or path escalation) is more
             // than the plain one: never "always", never answered by a rule.
-            ...(reason && reason.trim() ? { reason: reason.trim() } : {})
+            ...(reason && reason.trim() ? { reason: reason.trim() } : {}),
+            ...(helper ? { helper: { agentId: helper } } : {})
           }
         }
       )
@@ -2374,6 +2501,8 @@ export class CodexProviderService {
       return answer.permission === 'allow' ? 'accept' : 'decline'
     } catch {
       return run.questionSignal.aborted ? 'cancel' : 'decline'
+    } finally {
+      if (itemId) run.toolAwaiting(itemId, false)
     }
   }
 
@@ -2448,6 +2577,23 @@ export class CodexProviderService {
     return 'stopped'
   }
 
+  /**
+   * Stop of a native helper's mirror thread (docs/plans/tool-api.md §2.7): interrupts that helper's own turn, and only
+   * it; the run that started it goes on. `hostThreadId` is the Mousse thread of that run: a helper of another thread's
+   * run is never stopped from here. `not_active` when the run no longer tracks the helper as running.
+   */
+  stopHelper(hostThreadId: string, helperThreadId: string): 'stopped' | 'not_active' {
+    const run = [...this.turns.values()].find((candidate) => candidate.mousseThreadId === hostThreadId && candidate.helpers.has(helperThreadId))
+    const conn = run?.conn
+    if (!run || !conn || conn.signal.aborted) return 'not_active'
+    const stopped = run.helpers.stopOne(helperThreadId, (threadId, turnId) => {
+      void conn.request('turn/interrupt', { threadId, turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
+        /* the helper ended meanwhile, or the process is gone */
+      })
+    })
+    return stopped ? 'stopped' : 'not_active'
+  }
+
   /** Records a command Codex started for a thread Mousse runs, and forgets one that ended. */
   private noteCommand(notification: CodexNotification): void {
     if (notification.method !== 'item/started' && notification.method !== 'item/completed') return
@@ -2489,18 +2635,6 @@ export class CodexProviderService {
     })
   }
 
-  /** Adds `text` to the running turn on `codexThreadId` (`turn/steer`). */
-  async steer(codexThreadId: string | undefined, text: string): Promise<'delivered' | 'not_active'> {
-    const run = codexThreadId ? this.turns.get(codexThreadId) : undefined
-    const conn = this.app?.conn
-    if (!run?.turnId || !conn || run.signal.aborted) return 'not_active'
-    try {
-      await conn.request('turn/steer', { threadId: run.codexThreadId, expectedTurnId: run.turnId, input: [textInput(text)] })
-      return 'delivered'
-    } catch {
-      return 'not_active'
-    }
-  }
 
   /** Remembers the turn of a thread no run owns yet: a helper's first events can beat the item that names it. */
   private noteStray(notification: CodexNotification, threadId: string): void {
@@ -2746,7 +2880,7 @@ export class CodexProviderService {
     conn: CodexConnection,
     input: CodexChatInput,
     signal: AbortSignal
-  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean }> {
+  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean; botSandbox?: CodexBotSandbox; resumeLost?: true }> {
     const cwd = resolve(input.cwd)
     const instructionsHash = input.developerInstructions ? historyKey(input.developerInstructions).slice(0, 32) : undefined
     const saved = this.settings.threads?.[input.threadId]
@@ -2757,29 +2891,55 @@ export class CodexProviderService {
       ? Math.round(input.autoCompactTokens) : undefined
     // A bot's turn gets none of the user's own MCP servers: Codex would run their tools without asking.
     let botOverrides: Record<string, boolean> | undefined
+    const botSandbox = input.bot ? codexBotSandbox(input.bot, { codexPackage: this.packages.get(conn) }) : undefined
     if (input.bot) {
-      botOverrides = codexBotMcpOverrides((await readCodexUserSetup(conn, cwd)).mcpServers)
+      const refuse = (message: string): AppError => new AppError({ code: 'policy_unenforceable', message, errorInfo: { category: 'unavailable', retryable: false } })
+      // Only a Codex whose tools were accounted for runs a bot (`CODEX_BOT_CHECKED_VERSIONS`): it ignores a feature name it
+      // doesn't know, so a tool a newer one added would reach the bot. The owner's own threads run on any version.
+      const unchecked = codexBotVersionRefusal(this.versions.get(conn), CODEX_BOT_CHECKED_VERSIONS)
+      if (unchecked) throw refuse(unchecked)
+      const setup = await readCodexUserSetup(conn, cwd)
       signal.throwIfAborted()
-      if (!botOverrides) throw new AppError({ code: 'policy_unenforceable', message: CODEX_BOT_USER_MCP_UNREADABLE, errorInfo: { category: 'unavailable', retryable: false } })
+      // The owner's own Codex config can't be read: neither its MCP servers nor its process-wide features can be checked.
+      if (setup.mcpServers === null || setup.features === null) throw refuse(CODEX_BOT_SETUP_UNREADABLE_TEXT)
+      // Even a disabled owner entry leaves keys behind when Codex merges the attachment's table.
+      const collisions = [MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME].filter((name) =>
+        setup.reservedMcpServers?.includes(name) &&
+        ((name === MOUSSE_MCP_SERVER_NAME && Boolean(input.mcp)) || (name === MOUSSE_RELAY_SERVER_NAME && Boolean(input.mcp?.relay))))
+      if (collisions.length) {
+        const files = [...new Set(collisions.flatMap((name) => setup.reservedMcpFiles?.[name] ?? ["Codex's config.toml"]))]
+        throw refuse(codexBotMcpCollisionText(collisions, files))
+      }
+      botOverrides = codexBotMcpOverrides(setup.mcpServers)
+      if (!botOverrides) throw refuse(CODEX_BOT_USER_MCP_UNREADABLE)
+      // A feature a thread's config can't switch off, on in the owner's config: the bot's turn doesn't run.
+      const features = setup.features
+      const processWide = CODEX_BOT_FEATURES_REFUSED.filter((name) => features[name] === true)
+      if (processWide.length) throw refuse(codexBotSettingText(processWide))
     }
-    const botSandbox = input.bot ? codexBotSandbox(input.bot) : undefined
     const overrides = {
       ...botOverrides,
       ...(botSandbox ? codexBotSandboxConfig(botSandbox) : {}),
       ...codexMcpConfigOverrides(input.mcp),
       ...(compactLimit !== undefined ? { model_auto_compact_token_limit: compactLimit } : {})
     } as ThreadConfig
+    // A bot's turn without the web has Codex's hosted web search off too, whatever the owner's Codex config says.
+    const webOff = input.bot !== undefined && codexBotWebOff(input.bot)
+    if (webOff) overrides.web_search = 'disabled'
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
     const permissionMode = input.bot ? 'ask' : normalizePermissionMode(input.permissionMode)
     const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, permissionMode, botSandbox)
+    // Mousse's short-lived folders in the temporary folder are left out of it: one that comes and goes doesn't reopen the
+    // thread, and one made after the thread opened stays open to its commands until it reopens (docs/bots.md).
     // The policy a loaded thread was opened with: a change of child policy, permission mode, compaction
     // threshold or a bot's writable folders reopens it (Codex applies thread overrides when it loads a thread
     // and ignores them on a loaded one).
-    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}`
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.permissions ?? policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}${botSandbox?.profile ? `|${botSandbox.profile.base}|read:${botSandbox.profile.readable.join('\u0000')}|deny:${botSandbox.profile.closed.filter((place) => !isMousseTempEntry(place)).join('\u0000')}` : ''}${webOff ? '|web:off' : ''}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,
-      sandbox: policy.sandbox,
+      // A bot's profile, or a sandbox mode: Codex takes one or the other.
+      ...(policy.permissions ? { permissions: policy.permissions } : { sandbox: policy.sandbox }),
       ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
       // Pinned twice: the request field and the config layer above user and workspace config.
       modelProvider: this.modelProvider,
@@ -2798,11 +2958,25 @@ export class CodexProviderService {
         if (this.turns.has(saved.codexThreadId)) throw new Error('The previous Codex turn on this thread is still running')
       }
       const loaded = this.loaded.get(saved.codexThreadId)
+      // A bot's system text states what its owner allows now. A thread opened with other text keeps it (a loaded thread
+      // keeps its developer instructions, and they are what survives Codex's own compaction), so the dispatch starts a
+      // new Codex thread under the new text, with the history given in its prompt.
+      const opened = loaded?.instructionsHash ?? saved.instructionsHash
+      if (input.bot && instructionsHash !== undefined && opened !== undefined && opened !== instructionsHash) {
+        if (loaded) {
+          this.loaded.delete(saved.codexThreadId)
+          await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
+          signal.throwIfAborted()
+        }
+        const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
+        this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
+        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
+      }
       if (loaded && loaded.mcpToken === mcpToken && loaded.relayKey === relayKey && loaded.cwd === cwd && loaded.childKey === childKey) {
         // A loaded thread keeps the developer instructions it was opened with: changed ones go into the prompt.
         const instructionsStale = instructionsHash !== undefined && loaded.instructionsHash !== instructionsHash
         loaded.instructionsHash = instructionsHash
-        return { codexThreadId: saved.codexThreadId, model: undefined, continued: true, instructionsStale }
+        return { codexThreadId: saved.codexThreadId, model: undefined, continued: true, instructionsStale, botSandbox }
       }
       if (loaded) {
         // The attachment, cwd or child policy changed while the thread is loaded. A resume would
@@ -2813,24 +2987,29 @@ export class CodexProviderService {
         this.loaded.set(forked.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
         signal.throwIfAborted()
-        return { codexThreadId: forked.thread.id, model: forked.model, continued: true }
+        return { codexThreadId: forked.thread.id, model: forked.model, continued: true, botSandbox }
       }
       try {
         const resumed = pinnedProvider(this.modelProvider, await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.set(resumed.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
-        return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true }
+        // A resume answered with another thread holds none of the conversation: the history goes in the prompt.
+        if (resumed.thread.id !== saved.codexThreadId) {
+          console.warn('[codex] Codex was asked to resume a thread and opened another one', { threadId: input.threadId })
+          return { codexThreadId: resumed.thread.id, model: resumed.model, continued: false, botSandbox, resumeLost: true }
+        }
+        return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true, botSandbox }
       } catch (error) {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
         if (!(error instanceof CodexRpcError)) throw error
         const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
         this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
-        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
+        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox, resumeLost: true }
       }
     }
     const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
     this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
-    return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
+    return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
   }
 
   async chat(input: CodexChatInput): Promise<CodexChatResult> {
@@ -2846,6 +3025,8 @@ export class CodexProviderService {
     const scope = this.scope
     let run: TurnRun | undefined
     let steerTimer: ReturnType<typeof setInterval> | undefined
+    // Hands back drained steers and cut messages Codex does not have (set once the turn's steer handling exists).
+    let handBack: () => void = () => {}
     const onAbort = (): void => {
       this.questions.dismissAllForThread(input.threadId)
       if (run) this.requestInterrupt(run)
@@ -2866,9 +3047,8 @@ export class CodexProviderService {
           errorInfo: { category: 'unavailable', retryable: false }
         })
       const images = (input.images ?? []).map((image): UserInput => {
-        if (!['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) || Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024)
-          throw new Error(`Codex cannot send image ${image.name}; use JPEG, PNG, GIF or WebP under 10 MiB`)
-        return { type: 'image', url: `data:${image.mimeType};base64,${image.data}` }
+        if (!codexTakesImage(image)) throw new Error(`Codex cannot send image ${image.name}; use JPEG, PNG, GIF or WebP under 10 MiB`)
+        return codexImageInput(image)
       })
       const conn = await this.verifiedConnection(signal)
       await abortable(this.ensureTreeMode(conn), signal)
@@ -2876,7 +3056,7 @@ export class CodexProviderService {
       signal.throwIfAborted()
       const codexThreadId = thread.codexThreadId
       // The thread is not resumable until the turn commits its history.
-      this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
+      this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
       this.save()
       input.onSession?.({ codexThreadId })
       const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input, (id) => this.strays.get(id))
@@ -2886,50 +3066,150 @@ export class CodexProviderService {
       const { baseId } = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
       const effort = supportedEffortOf(input.model, this.settings.models ?? [], EFFORTS)
-      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode, input.bot ? codexBotSandbox(input.bot) : undefined)
+      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode, thread.botSandbox)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,
-        sandboxPolicy: policy.sandboxPolicy,
+        ...(policy.permissions ? { permissions: policy.permissions } : { sandboxPolicy: policy.sandboxPolicy }),
         ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
         ...(effort ? { effort } : {}),
         // Without it the server streams no reasoning summaries, and thought rows would stay empty.
         summary: 'auto' as const
       }
 
+      // A drained steer counts as read only once Codex has it: `turn/steer` answered, or the `turn/start` that
+      // carries it accepted. Then it is saved as read, by its drain's token when it has one
+      // (`TurnSink.steerAccepted`). If that call throws, the drain is handed back by its token as well. The sink
+      // decides what that means: the orchestrator's sink settles the token, and appends the text to the model
+      // context, before it saves, so when its own save fails it ignores the hand-back and the next save keeps the
+      // text. A sink that throws before settling the drain gets it back, and it runs as the next turn.
+      const accept = (entry: DrainedSteer): void => {
+        input.steerTaken?.(entry.token)
+        try {
+          if (entry.token) input.onSteer?.(entry.text, entry.token)
+          else input.onSteer?.(entry.text)
+        } catch (error) {
+          // Without a token the sink cannot tell a saved drain from one it lost: nothing is handed back.
+          if (entry.token) input.returnSteer?.(entry.text, entry.token)
+          throw error
+        }
+      }
       // Steers join the running turn (`turn/steer`); one that arrives after the turn ended
-      // starts the next turn instead.
-      const undelivered: string[] = []
+      // starts the next turn instead. Steers that wait for the next turn (`hold`) and cut messages (`cut`) share this
+      // one list, in the order the steering chain settled them, which is the order they were drained: the next turn
+      // carries them in that order, whichever way each went.
+      const waiting: DrainedSteer[] = []
       let steering: Promise<void> = Promise.resolve()
+      // Steers and cut messages handed to the `steering` chain that it has not settled yet: one whose `turn/steer`
+      // Codex has not answered, and every one queued behind it. They join the chain when drained, so a Stop or a
+      // dead process that ends the chat mid-request still hands each back (`handBack`).
+      const inFlight: DrainedSteer[] = []
+      // Takes an entry off `inFlight` when its step settles it. False when `handBack` already returned it: a late
+      // answer then neither accepts nor holds it, so it runs once, from the queue.
+      const land = (entry: DrainedSteer): boolean => {
+        const at = inFlight.indexOf(entry)
+        if (at < 0) return false
+        inFlight.splice(at, 1)
+        return true
+      }
       // Wakes the wait for native helpers when a steer has to start a turn of its own.
       let steerWake: (() => void) | undefined
-      const hold = (text: string): void => {
-        undelivered.push(text)
+      const hold = (entry: DrainedSteer): void => {
+        if (!land(entry)) return
+        waiting.push(entry)
         steerWake?.()
       }
-      const deliver = (text: string): void => {
+      const deliver = (entry: DrainedSteer): void => {
+        inFlight.push(entry)
         steering = steering.then(async () => {
           if (!current.turnOpen || !current.turnId || signal.aborted) {
-            hold(text)
+            hold(entry)
             return
           }
           try {
-            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: [textInput(text)] }, { signal })
+            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: steerInput([entry]) }, { signal })
           } catch (error) {
+            // A Stop or a dead process: the entry stays in flight, and the chat's end hands it back.
             if (!(error instanceof CodexRpcError)) throw error
-            hold(text)
+            hold(entry)
+            return
           }
+          if (land(entry)) accept(entry)
         })
         steering.catch(() => controller.abort(new Error('Codex steer delivery failed')))
       }
+      // A person's message is read now: `turn/steer` would wait for the reply or command in progress to end, so the
+      // server turn is interrupted and the next one starts with the message. What the turn wrote and the results of
+      // its finished tools stay; Codex's own helpers keep running (an interrupt of the parent leaves them), and their
+      // results join later. Subagent results and an agent's steer still join natively.
+      // A cut message is taken only once the `turn/start` that carries it is accepted. Until then it is held here,
+      // and handed back on any failure (a Stop, a failed turn, a refused start), so it never goes missing.
+      // What the next `turn/start` carries, in the order they were drained.
+      let nextSteers: DrainedSteer[] = []
+      // Oldest first: what the chain already settled comes before what is still on it.
+      handBack = (): void => {
+        for (const entry of [...nextSteers.splice(0), ...waiting.splice(0), ...inFlight.splice(0)])
+          input.returnSteer?.(entry.text, entry.token)
+      }
+      const cutTurns = current.cutTurns
+      let cutWaiting = false
+      const cutTurn = (): void => {
+        const turnId = current.turnId
+        if (!current.turnOpen || !turnId || cutTurns.has(turnId) || signal.aborted) return
+        cutTurns.add(turnId)
+        cutWaiting = false
+        void conn.request('turn/interrupt', { threadId: codexThreadId, turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
+          /* the turn ended meanwhile: the held text starts the next turn all the same */
+        })
+      }
+      const cut = (entry: DrainedSteer): void => {
+        inFlight.push(entry)
+        // In order behind native steers already on their way.
+        steering = steering.then(() => {
+          if (!land(entry)) return
+          // The check at dispatch (docs/design/steer-and-interruptions.md §2.3): a command that started while the cut
+          // waited behind earlier steers is not ended for it. The drain goes back, and the hold resumes.
+          if (entry.token && input.mayCut && !input.mayCut(entry.token)) {
+            input.returnSteer?.(entry.text, entry.token)
+            return
+          }
+          waiting.push(entry)
+          cutWaiting = true
+          steerWake?.()
+          // The person answered with a message: approvals and questions the turn asks are settled as theirs, so no
+          // card is left waiting for a turn that is being cut.
+          this.questions.autoRejectPendingForThread(input.threadId)
+          cutTurn()
+        })
+        steering.catch(() => controller.abort(new Error('Codex steer delivery failed')))
+      }
+      // The hold (docs/design/steer-and-interruptions.md §2.5): a person's steer waits while a command, MCP call or web
+      // search runs, and through the release window after it. Each poll asks first and takes only what can go in now.
+      const holds = Boolean(input.peekSteer && input.drainSteerEntry)
       const collectSteer = (): void => {
         if (signal.aborted) return
-        const steer = input.drainSteer?.()?.trim()
+        let entry: { text: string; token?: string; cut?: boolean; images?: ChatImageAttachment[] } | undefined
+        let asCut: boolean
+        if (holds) {
+          const delivery = input.peekSteer!()?.delivery
+          if (!delivery || delivery === 'hold') return
+          entry = input.drainSteerEntry!({ expect: [delivery] })
+          // `native`: an agent's steer, or a held steer at the server turn's end, joins without a cut (`turn/steer`
+          // while a turn is open, else the next turn of the run). A person's steer never goes in by `turn/steer`
+          // (§2.5: Codex may drop a steer it has not read yet): at the boundary it goes through the cut, which carries it
+          // in the next `turn/start`, and cuts a turn that opened meanwhile.
+          asCut = delivery === 'cut' || entry?.cut === true
+        } else {
+          entry = input.drainSteerEntry ? input.drainSteerEntry() : undefined
+          asCut = entry?.cut === true
+        }
+        const steer = (entry ? entry.text : holds ? undefined : input.drainSteer?.())?.trim()
         if (!steer) return
-        input.onSteer?.(steer)
-        deliver(steer)
+        const drainedSteer: DrainedSteer = { text: steer, ...(entry?.token ? { token: entry.token } : {}), ...(entry?.images?.length ? { images: entry.images } : {}) }
+        if (asCut) return cut(drainedSteer)
+        deliver(drainedSteer)
       }
-      if (input.drainSteer) {
+      if (input.drainSteer || input.drainSteerEntry) {
         steerTimer = setInterval(() => {
           try {
             collectSteer()
@@ -2987,11 +3267,29 @@ export class CodexProviderService {
         starting.catch(() => undefined)
         await Promise.race([starting, aborted])
         current.turnOpen = true
+        // A boundary the previous turn's end reported is over: a steer now waits for this turn's commands, or cuts.
+        input.onProviderTurn?.()
+        // The server took the turn that carries the held steers and cut messages: they are read now, and the reply
+        // goes on below them. Each is saved or handed back on its own, so one failed save loses none of the others.
+        let unsaved: { error: unknown } | undefined
+        for (const entry of nextSteers.splice(0)) {
+          try {
+            accept(entry)
+          } catch (error) {
+            unsaved ??= { error }
+          }
+        }
+        if (unsaved) throw unsaved.error
         input.onSession?.({ codexThreadId, turnId: current.turnId })
-        // Steers drained before the turn existed go in now.
-        for (const steer of undelivered.splice(0)) deliver(steer)
+        // A person's message drained before the turn existed cuts it at once; it goes next with everything held.
+        // Otherwise steers drained before the turn existed go in now.
+        if (cutWaiting) cutTurn()
+        else for (const steer of waiting.splice(0)) deliver(steer)
         lastTurn = await Promise.race([completion, aborted])
         current.turnOpen = false
+        // The server turn is over and none of its commands runs: a held steer goes in as the next turn, with no
+        // interrupt (strict release waits for this).
+        if (lastTurn.status !== 'failed') input.onBoundary?.()
         // Stop must not wait for a steer the server has not answered yet.
         await Promise.race([steering, aborted])
         collectSteer()
@@ -2999,15 +3297,19 @@ export class CodexProviderService {
         if (lastTurn.status === 'failed') throw await this.limitOrFailure(this.turnFailure(lastTurn.error, current.lastError), current, conn, signal)
         if (lastTurn.status === 'interrupted') {
           signal.throwIfAborted()
-          throw new Error('Codex interrupted the turn')
+          // Cut for a person's message: the run goes on with it.
+          if (!(cutTurns.has(lastTurn.id) && waiting.length)) throw new Error('Codex interrupted the turn')
         }
-        if (!undelivered.length) {
+        cutWaiting = false
+        if (!waiting.length) {
           // Codex completes the parent's turn while the helpers it started keep running, so this chat
           // (the child's run) stays open until they settle: the thread's whole helper tree when the
           // process lists it, the helpers seen in the items of the thread and its helpers otherwise. Stop interrupts
           // them and ends the wait; a steer that arrives meanwhile starts a turn; helpers silent for
           // too long are abandoned.
-          const treeMode = this.app?.conn === conn && this.app.tree === 'on'
+          // A bot's turn runs with Codex's subagents off (`CODEX_BOT_FEATURES_OFF`): it has no helper tree to wait for, and
+          // its reply is not held for the tree's quiet check (two reads a quarter of a second apart).
+          const treeMode = this.app?.conn === conn && this.app.tree === 'on' && !input.bot
           if ((treeMode || current.helpers.running().length) && !abandoned) {
             pinnedSince ??= Date.now()
             const held = await this.holdChat(current, input, conn, aborted, new Promise<void>((wake) => (steerWake = wake)), pinnedSince)
@@ -3021,10 +3323,14 @@ export class CodexProviderService {
               abandoned = held
             }
           }
-          if (!undelivered.length) break
+          if (!waiting.length) break
         }
         if (abandoned) afterCap = true
-        nextInput = [textInput(undelivered.splice(0).join('\n'))]
+        nextSteers = waiting.splice(0)
+        // A cut taken while no turn was open (the run waited for its helpers) is carried by this next turn: there is
+        // nothing left to cut, and cutting would end the very turn that carries it.
+        cutWaiting = false
+        nextInput = steerInput(nextSteers)
       }
       // A turn that ran after the cap (a held steer) does not wait for helpers; its own are interrupted
       // before the run ends.
@@ -3034,7 +3340,7 @@ export class CodexProviderService {
       this.release(current)
       current.closeTools('no_result')
       if (scope === this.scope) {
-        this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
+        this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
         this.save()
         this.readyToCommit.add(input.threadId)
       }
@@ -3043,9 +3349,11 @@ export class CodexProviderService {
         codexThreadId,
         turnId: lastTurn.id,
         model: thread.model ?? baseId,
-        usage: current.usage()
+        usage: current.usage(),
+        ...(thread.resumeLost ? { resumeLost: true as const } : {})
       }
     } catch (error) {
+      handBack()
       // A failed or stopped chat leaves nothing of its own running: the thread's turn and every helper
       // under it are interrupted until they are at rest (or the sweep's deadline), after the chat has
       // already been rejected. The run is released when that ends.
@@ -3066,6 +3374,7 @@ export class CodexProviderService {
       // A stopped turn stays registered (for routing) until its sweep ends or the process dies.
       run?.mute()
       run?.cancelQuestions()
+
     }
   }
 

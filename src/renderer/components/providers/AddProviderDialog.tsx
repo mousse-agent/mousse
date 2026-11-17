@@ -6,6 +6,7 @@ import { Check } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { llmProviderOf } from '../../lib/providerSnapshots'
 import { Modal } from '../ui/Modal'
+import { WizardSteps } from '../ui/WizardSteps'
 import { Segmented, SettingsGroup, SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, useAsyncAction } from './parts'
 import { commandLabel, DRIVER_INFO, isApiInstance, nextInstanceLabel, parseArgs, parseEnvLines, registrySourceOf } from './providerView'
@@ -144,43 +145,6 @@ function choiceHint(choice: AddChoice): string | undefined {
 function matches(query: string, ...fields: Array<string | undefined>): boolean {
   const q = query.trim().toLowerCase()
   return !q || fields.some((field) => field?.toLowerCase().includes(q))
-}
-
-/** A numbered step bar; finished steps show a check and can be revisited. */
-function WizardSteps({
-  steps,
-  current,
-  summaries,
-  disabled,
-  onStep
-}: {
-  steps: readonly string[]
-  current: number
-  summaries: ReadonlyArray<string | null>
-  disabled: boolean
-  onStep: (step: number) => void
-}) {
-  return (
-    <ol className="prov-steps" aria-label="Steps">
-      {steps.map((step, index) => (
-        <li key={step}>
-          <button
-            type="button"
-            className={`prov-step${index === current ? ' is-current' : ''}${index < current ? ' is-done' : ''}`}
-            aria-current={index === current ? 'step' : undefined}
-            disabled={disabled || index > current}
-            onClick={() => onStep(index)}
-          >
-            <span className="prov-step-num">{index < current ? <Check size={13} /> : index + 1}</span>
-            <span className="prov-step-label">
-              {step}
-              {index < current && summaries[index] ? `: ${summaries[index]}` : ''}
-            </span>
-          </button>
-        </li>
-      ))}
-    </ol>
-  )
 }
 
 export interface AddProviderHandlers {

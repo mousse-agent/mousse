@@ -1,6 +1,7 @@
 import { forwardRef, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
 import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/react'
 import '../styles/thinking-icon.css'
+import { turnable } from './turning'
 import Activity01Icon from '@hugeicons/core-free-icons/Activity01Icon'
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AddSquareIcon from '@hugeicons/core-free-icons/AddSquareIcon'
@@ -28,7 +29,13 @@ import AtIcon from '@hugeicons/core-free-icons/AtIcon'
 import Attachment01Icon from '@hugeicons/core-free-icons/Attachment01Icon'
 import BookOpen01Icon from '@hugeicons/core-free-icons/BookOpen01Icon'
 import Brain01Icon from '@hugeicons/core-free-icons/Brain01Icon'
-import Atom01Icon from '@hugeicons/core-free-icons/Atom01Icon'
+import Brain03Icon from '@hugeicons/core-free-icons/Brain03Icon'
+import BotIcon from '@hugeicons/core-free-icons/BotIcon'
+import CheckListIcon from '@hugeicons/core-free-icons/CheckListIcon'
+import GlobalSearchIcon from '@hugeicons/core-free-icons/GlobalSearchIcon'
+import PencilEdit01Icon from '@hugeicons/core-free-icons/PencilEdit01Icon'
+import Search02Icon from '@hugeicons/core-free-icons/Search02Icon'
+import ToolsIcon from '@hugeicons/core-free-icons/ToolsIcon'
 import BrowserIcon from '@hugeicons/core-free-icons/BrowserIcon'
 import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
 import BubbleChatIcon from '@hugeicons/core-free-icons/BubbleChatIcon'
@@ -39,6 +46,8 @@ import CancelSquareIcon from '@hugeicons/core-free-icons/CancelSquareIcon'
 import CheckmarkCircle02Icon from '@hugeicons/core-free-icons/CheckmarkCircle02Icon'
 import CheckmarkSquare01Icon from '@hugeicons/core-free-icons/CheckmarkSquare01Icon'
 import CircleDotDashedIcon from '@hugeicons/core-free-icons/CircleDotDashedIcon'
+import CircleIcon from '@hugeicons/core-free-icons/CircleIcon'
+import MinusSignCircleIcon from '@hugeicons/core-free-icons/MinusSignCircleIcon'
 import CircleGaugeIcon from '@hugeicons/core-free-icons/CircleGaugeIcon'
 import CleanIcon from '@hugeicons/core-free-icons/CleanIcon'
 import ClipboardIcon from '@hugeicons/core-free-icons/ClipboardIcon'
@@ -95,6 +104,7 @@ import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
 import LaptopIcon from '@hugeicons/core-free-icons/LaptopIcon'
 import Layers01Icon from '@hugeicons/core-free-icons/Layers01Icon'
 import Link01Icon from '@hugeicons/core-free-icons/Link01Icon'
+import Unlink01Icon from '@hugeicons/core-free-icons/Unlink01Icon'
 import LinkSquare02Icon from '@hugeicons/core-free-icons/LinkSquare02Icon'
 import Loading03Icon from '@hugeicons/core-free-icons/Loading03Icon'
 import Logout01Icon from '@hugeicons/core-free-icons/Logout01Icon'
@@ -106,6 +116,9 @@ import MoreVerticalIcon from '@hugeicons/core-free-icons/MoreVerticalIcon'
 import NetworkIcon from '@hugeicons/core-free-icons/NetworkIcon'
 import Notification02Icon from '@hugeicons/core-free-icons/Notification02Icon'
 import PaletteIcon from '@hugeicons/core-free-icons/PaletteIcon'
+import TextFontIcon from '@hugeicons/core-free-icons/TextFontIcon'
+import TextWrapIcon from '@hugeicons/core-free-icons/TextWrapIcon'
+import AppWindowIcon from '@hugeicons/core-free-icons/AppWindowIcon'
 import PanelLeftIcon from '@hugeicons/core-free-icons/PanelLeftIcon'
 import PanelRightCloseIcon from '@hugeicons/core-free-icons/PanelRightCloseIcon'
 import PanelRightOpenIcon from '@hugeicons/core-free-icons/PanelRightOpenIcon'
@@ -134,6 +147,8 @@ import SidebarRight01Icon from '@hugeicons/core-free-icons/SidebarRight01Icon'
 import SmartPhone01Icon from '@hugeicons/core-free-icons/SmartPhone01Icon'
 import SourceCodeIcon from '@hugeicons/core-free-icons/SourceCodeIcon'
 import SparklesIcon from '@hugeicons/core-free-icons/SparklesIcon'
+import SmileIcon from '@hugeicons/core-free-icons/SmileIcon'
+import Moon02Icon from '@hugeicons/core-free-icons/Moon02Icon'
 import FlaskConicalIcon from '@hugeicons/core-free-icons/FlaskConicalIcon'
 import SquareIcon from '@hugeicons/core-free-icons/SquareIcon'
 import SquareLock01Icon from '@hugeicons/core-free-icons/SquareLock01Icon'
@@ -171,7 +186,8 @@ export type LucideIcon = IconComponent
 
 function createIcon(name: string, icon: IconSvgElement): IconComponent {
   const Component = forwardRef<SVGSVGElement, IconProps>(function AppIcon({ size = 16, stroke, strokeWidth, className = '', ...props }, ref) {
-    return <HugeiconsIcon
+    // A spinner class (icon-spin, spin, animate-spin…) turns a wrapper span instead of the svg (lib/turning.tsx).
+    return turnable(className, (svgClass) => <HugeiconsIcon
       ref={ref}
       icon={icon}
       size={size}
@@ -179,9 +195,9 @@ function createIcon(name: string, icon: IconSvgElement): IconComponent {
       {...(typeof stroke === 'string' ? { stroke } : {})}
       aria-hidden={props['aria-label'] ? undefined : true}
       data-icon-library="hugeicons"
-      className={`mousse-icon ${className}`.trim()}
+      className={`mousse-icon ${svgClass}`.trim()}
       {...props}
-    />
+    />)
   })
   Component.displayName = name
   return Component
@@ -212,6 +228,8 @@ export const ChevronUp = /* @__PURE__ */ createIcon('ChevronUp', ArrowUp01Icon)
 export const CircleAlert = /* @__PURE__ */ createIcon('CircleAlert', AlertCircleIcon)
 export const CircleCheck = /* @__PURE__ */ createIcon('CircleCheck', CheckmarkCircle02Icon)
 export const CircleDotDashed = /* @__PURE__ */ createIcon('CircleDotDashed', CircleDotDashedIcon)
+export const Circle = /* @__PURE__ */ createIcon('Circle', CircleIcon)
+export const CircleMinus = /* @__PURE__ */ createIcon('CircleMinus', MinusSignCircleIcon)
 export const CircleGauge = /* @__PURE__ */ createIcon('CircleGauge', CircleGaugeIcon)
 export const Clipboard = /* @__PURE__ */ createIcon('Clipboard', ClipboardIcon)
 export const ClipboardList = /* @__PURE__ */ createIcon('ClipboardList', Task01Icon)
@@ -259,6 +277,7 @@ export const Laptop = /* @__PURE__ */ createIcon('Laptop', LaptopIcon)
 export const Layers = /* @__PURE__ */ createIcon('Layers', Layers01Icon)
 export const LayoutGrid = /* @__PURE__ */ createIcon('LayoutGrid', GridViewIcon)
 export const Link2 = /* @__PURE__ */ createIcon('Link2', Link01Icon)
+export const Unlink = /* @__PURE__ */ createIcon('Unlink', Unlink01Icon)
 export const ListTree = /* @__PURE__ */ createIcon('ListTree', Structure01Icon)
 export const Loader2 = /* @__PURE__ */ createIcon('Loader2', Loading03Icon)
 export const Lock = /* @__PURE__ */ createIcon('Lock', SquareLock01Icon)
@@ -275,6 +294,9 @@ export const MoreVertical = /* @__PURE__ */ createIcon('MoreVertical', MoreVerti
 export const MousePointer2 = /* @__PURE__ */ createIcon('MousePointer2', Cursor01Icon)
 export const Network = /* @__PURE__ */ createIcon('Network', NetworkIcon)
 export const Palette = /* @__PURE__ */ createIcon('Palette', PaletteIcon)
+export const TextFont = /* @__PURE__ */ createIcon('TextFont', TextFontIcon)
+export const WrapText = /* @__PURE__ */ createIcon('WrapText', TextWrapIcon)
+export const AppWindow = /* @__PURE__ */ createIcon('AppWindow', AppWindowIcon)
 export const PanelLeft = /* @__PURE__ */ createIcon('PanelLeft', PanelLeftIcon)
 export const PanelRightClose = /* @__PURE__ */ createIcon('PanelRightClose', PanelRightCloseIcon)
 export const PanelRightOpen = /* @__PURE__ */ createIcon('PanelRightOpen', PanelRightOpenIcon)
@@ -310,6 +332,8 @@ export const ShieldOff = /* @__PURE__ */ createIcon('ShieldOff', ShieldOffIcon)
 export const Brain = /* @__PURE__ */ createIcon('Brain', Brain01Icon)
 export const SidebarRight = /* @__PURE__ */ createIcon('SidebarRight', SidebarRight01Icon)
 export const Sparkles = /* @__PURE__ */ createIcon('Sparkles', SparklesIcon)
+export const Smile = /* @__PURE__ */ createIcon('Smile', SmileIcon)
+export const Moon = /* @__PURE__ */ createIcon('Moon', Moon02Icon)
 export const FlaskConical = /* @__PURE__ */ createIcon('FlaskConical', FlaskConicalIcon)
 export const Square = /* @__PURE__ */ createIcon('Square', SquareIcon)
 export const Smartphone = /* @__PURE__ */ createIcon('Smartphone', SmartPhone01Icon)
@@ -354,22 +378,27 @@ export const Cookie = /* @__PURE__ */ createIcon('Cookie', CookieIcon)
 export const BrowserTab = /* @__PURE__ */ createIcon('BrowserTab', BrowserIcon)
 export const PinOff = /* @__PURE__ */ createIcon('PinOff', PinOffIcon)
 
+// The chat's work rows: one icon per kind of step (tools/tool-icon.tsx).
+export const RowEdit = /* @__PURE__ */ createIcon('RowEdit', PencilEdit01Icon)
+export const RowSearch = /* @__PURE__ */ createIcon('RowSearch', Search02Icon)
+export const RowWeb = /* @__PURE__ */ createIcon('RowWeb', GlobalSearchIcon)
+export const RowSubagent = /* @__PURE__ */ createIcon('RowSubagent', BotIcon)
+export const RowTools = /* @__PURE__ */ createIcon('RowTools', ToolsIcon)
+export const RowTodo = /* @__PURE__ */ createIcon('RowTodo', CheckListIcon)
+
 export interface ThinkingIconProps extends IconProps {
-  /** While the model thinks: the orbits turn around the still centre (thinking-icon.css). */
+  /** While the model thinks: the icon pulses gently (thinking-icon.css). */
   active?: boolean
 }
 
-/**
- * The chat's thinking icon (Hugeicons Atom 01). Its own SVG so the centre circle and the orbits
- * (arcs and dots) are separate: only the orbit group rotates while `active`.
- */
+/** The chat's thinking icon (Hugeicons Brain 03). It pulses while `active` (thinking-icon.css). */
 export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIconProps>(function ThinkingIcon(
   { size = 16, stroke, strokeWidth, active = false, className = '', ...props },
   ref,
 ) {
   const width = strokeWidth === undefined ? (typeof stroke === 'number' ? stroke : 1.5) : Number(strokeWidth)
   const color = typeof stroke === 'string' ? stroke : 'currentColor'
-  const [centre, ...orbits] = Atom01Icon as unknown as Array<[string, Record<string, string>]>
+  const shapes = Brain03Icon as unknown as Array<[string, Record<string, string>]>
   const draw = ([tag, { key, ...attrs }]: [string, Record<string, string>]) => {
     const shape = { ...attrs, stroke: color, strokeWidth: width }
     return tag === 'circle' ? <circle key={key} {...shape} /> : <path key={key} {...shape} />
@@ -388,8 +417,7 @@ export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIc
       className={`mousse-icon thinking-icon${active ? ' is-thinking' : ''} ${className}`.trim()}
       {...props}
     >
-      {draw(centre!)}
-      <g className="thinking-icon-orbit">{orbits.map(draw)}</g>
+      {shapes.map(draw)}
     </svg>
   )
 })

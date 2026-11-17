@@ -43,7 +43,7 @@
 .wf-root .btn-danger { color: var(--danger, #e07a8a); }
 
 /* "Fix N issues to publish" moves focus to the first error in Validation. */
-.wf-diagnostics li:focus { outline: 1px solid var(--ui-line-strong); outline-offset: 2px; border-radius: 4px; }
+.wf-diagnostics li:focus { outline: none; border-radius: 4px; background-image: var(--ui-focus-layer); }
 
 /* Library filters: the shared Select at the toolbar's height. */
 .automation-filter { flex: 0 1 auto; min-width: 0; }

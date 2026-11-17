@@ -114,11 +114,16 @@ export interface WorkspaceExecutionContext {
    * uncommitted changes the worktree (cut from HEAD) does not have. The turn's record keeps it as `startNote`.
    */
   startNote?: string
+  /**
+   * Set only when the thread's worktree is gone or no longer a Git repository and the turn runs in the project folder:
+   * the line the agent is told, with the first such turn's message.
+   */
+  workspaceNote?: string
 }
 
 /**
  * What a thread is waiting on; `workspace.getStatus` returns it until it is settled.
- * - `paused`: an operation other than Publish did not finish, or Git cannot read the worktree. Every turn, Undo and
+ * - `paused`: an operation other than Publish did not finish, or one left the worktree unreadable. Every turn, Undo and
  *   Publish are refused until `operations.recover` settles it.
  * - `merge`: a merge an earlier version of Mousse started is still in progress in `folder`. Nothing is refused;
  *   `operations.abort` with `operationId` aborts it.

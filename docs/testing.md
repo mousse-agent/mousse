@@ -1,6 +1,6 @@
 # Testing
 
-How the suite is organised, which command to run while working, and what must stay.
+How the suite is organised, which command to run while working, and what must stay. What to test for a change, and at which level, is in the [test-the-claim skill](../.agents/skills/test-the-claim/SKILL.md).
 
 ## Commands
 
@@ -62,6 +62,8 @@ Some tests are the only place a real boundary is exercised. Shrink their fixture
 - **Named in the Windows CI job** (`.github/workflows/ci.yml`): moving or deleting one of those files silently removes it from that job.
 
 ## Adding tests for a feature
+
+Follow the [test-the-claim skill](../.agents/skills/test-the-claim/SKILL.md) first: it picks the level from what the PR claims. The rules below are about where the tests then go.
 
 - Put the decision table at the module that decides it. A new option or branch usually adds rows there, not a new daemon-booting file.
 - Above that module, add at most one happy path and one failure per tier the feature actually crosses (daemon in process, spawned process). Each `it.each` row counts. Most features add no spawned-process test.

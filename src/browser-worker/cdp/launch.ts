@@ -12,6 +12,9 @@ import {
 } from '../lifecycle/ownedTree'
 import { fail } from '../errors'
 
+/** How long a browser asked to close has to end by itself before its processes are stopped. */
+const GRACEFUL_EXIT_MS = 3_000
+
 export interface LaunchedChrome {
   pid: number
   process: ChildProcess
@@ -31,6 +34,28 @@ export interface LaunchChromeOptions {
   extraArgs?: string[]
   env?: NodeJS.ProcessEnv
   signal?: AbortSignal
+  /** The browser's version (`153.0.8010.36`): without a window it still reports the user agent it has with one. */
+  browserVersion?: string
+  /**
+   * The session sets `navigator.webdriver` on each page and frame itself (`Emulation.setAutomationOverride`),
+   * so it can be false while a person holds the browser. Chromium marks every page of a pipe-driven
+   * browser as automated and that mark cannot be lifted per page, so the process starts without it.
+   */
+  automationMarkedPerPage?: boolean
+}
+
+/**
+ * The user agent this Chrome reports when it has a window: Chrome's reduced user agent, whose
+ * platform and minor version are frozen. Without a window Chrome says `HeadlessChrome`, which sites
+ * read as a robot even when a person is the one clicking.
+ */
+export function windowedChromeUserAgent(browserVersion: string | undefined, platform: NodeJS.Platform = process.platform): string | undefined {
+  const major = /^(\d+)\.\d/.exec(browserVersion ?? '')?.[1]
+  if (!major) return undefined
+  const system = platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7'
+    : platform === 'win32' ? 'Windows NT 10.0; Win64; x64'
+    : 'X11; Linux x86_64'
+  return `Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`
 }
 
 export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
@@ -62,13 +87,20 @@ export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
     '--enable-features=NetworkService,NetworkServiceInProcess',
     '--disable-features=Translate,MediaRouter,OptimizationHints,PaintHolding,BackForwardCache',
     `--window-size=${size.width},${size.height}`,
-    '--hide-scrollbars',
     '--mute-audio'
   ]
-  if (options.headless !== false) args.unshift('--headless=new', '--disable-gpu')
+  if (options.headless !== false) {
+    // A person never sees this browser's pages directly: its pictures have no scrollbars. A window keeps them.
+    args.push('--hide-scrollbars')
+    args.unshift('--headless=new', '--disable-gpu')
+    const userAgent = windowedChromeUserAgent(options.browserVersion)
+    if (userAgent) args.push(`--user-agent=${userAgent}`)
+  }
+  if (options.automationMarkedPerPage) args.push('--disable-blink-features=AutomationControlled')
   if (options.deviceScaleFactor && options.deviceScaleFactor !== 1) args.push(`--force-device-scale-factor=${options.deviceScaleFactor}`)
   if (options.extraArgs) args.push(...options.extraArgs)
-  if (args.some((arg) => arg.startsWith('--remote-debugging-port'))) fail('invalid_action', 'Public remote-debugging TCP is not permitted')
+  // The browser is driven over its private pipe alone, with a window or without: no port a page or another program could reach.
+  if (args.some((arg) => arg.startsWith('--remote-debugging-port') || arg.startsWith('--remote-allow-origins'))) fail('invalid_action', 'Public remote-debugging TCP is not permitted')
   if ((options.extraArgs ?? []).some((arg) => arg.startsWith('--user-data-dir') || arg.startsWith('--profile-directory') || arg.startsWith('--remote-debugging'))) {
     fail('invalid_action', 'Extra Chromium arguments may not override profile or debugging isolation')
   }
@@ -169,14 +201,18 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
         tree = rootOnlyTree(pid, { parentHandleAlive: child.exitCode === null, executablePath: options.executablePath })
         writeOwnedProcessRecord(options.userDataDir, tree, options.executablePath)
         try { await cdp.send('Browser.close', {}, { timeoutMs: 3_000 }) } catch { /* ignore */ }
-        if (child.exitCode === null) {
+        // Ended by a signal (killed), a process has no exit code but is gone all the same.
+        const exited = () => child.exitCode !== null || child.signalCode !== null
+        // A browser asked to close writes what it holds (its newest cookies among it) as it goes: it has a moment to.
+        if (!exited()) await Promise.race([exitPromise, new Promise((resolve) => setTimeout(resolve, GRACEFUL_EXIT_MS))])
+        if (!exited()) {
           await stopOwnedProcessTree(tree)
         }
         await Promise.race([
           Promise.all([exitPromise, closePromise]),
           new Promise((_, reject) => setTimeout(() => reject(new Error(`Chromium child handle did not exit (pid ${pid}; exit=${child.exitCode}; signal=${child.signalCode})`)), 8_000))
         ])
-        if (child.exitCode === null || exitCode === undefined) {
+        if (!exited() || exitCode === undefined) {
           throw new Error(`Chromium child handle did not publish exit (pid ${pid})`)
         }
         await cdp.close()

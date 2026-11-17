@@ -3,6 +3,7 @@ import type { PermissionMode } from '../../../shared/permissionMode'
 import { subagentAncestorsOf, subagentParentsOfEvent } from '../../run/delegation/subagentEvents'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { mmsJson } from './jsonOutput'
+import { withHiddenBots } from './botReach'
 import { MmsRemoteBackend, remoteThreadEventData } from './MmsBackend'
 import type {
   ThreadDeltaEvent,
@@ -18,7 +19,11 @@ export interface MmsThreadSourceOptions {
    * window of this computer would be told about the thread: its subagents, agents, tasks, pull
    * request and saved files and workspace.
    */
-  private?: { limit(): PermissionMode }
+  private?: {
+    limit(): PermissionMode
+    /** The computer that reads the stream: a thread a bot started names that bot only if it reaches it. */
+    reader?: string
+  }
 }
 
 /** Actual thread events/snapshots from the already-owned profile, never the old global event ring. */
@@ -34,11 +39,13 @@ export class MmsThreadSource implements ThreadSourcePort {
   snapshot(threadId: string): unknown {
     return this.backend.snapshot(
       threadId,
-      32 * 1024 * 1024,
       this.options.private
-        ? { newestOnly: true, deviceLimit: this.options.private.limit() }
+        ? { newestOnly: true, deviceLimit: this.options.private.limit(), ...(this.options.private.reader ? { reader: this.options.private.reader } : {}) }
         : undefined
     )
+  }
+  warm(threadId: string): Promise<void> {
+    return this.backend.warm(threadId, this.options.private ? { newestOnly: true } : {})
   }
   onThread(
     threadId: string,
@@ -99,7 +106,8 @@ export class MmsThreadSource implements ThreadSourcePort {
     let lastMetadata: string | undefined
     const metadata = (thread: { id: string }): void => {
       if (thread.id !== threadId) return
-      const data = { thread },
+      // A shared stream (any device may read it) names a bot that started the thread only if every device reaches it.
+      const data = { thread: withHiddenBots(thread, this.services.botReach?.hiddenFor(this.options.private?.reader)) },
         fingerprint = JSON.stringify(data)
       if (fingerprint === lastMetadata) return
       lastMetadata = fingerprint
@@ -165,6 +173,10 @@ export class MmsThreadSource implements ThreadSourcePort {
     })
     on(s.orchestrator, 'thread-title-generation-failed', (payload: { threadId?: string }) => {
       if (payload?.threadId === threadId) deliver('thread.title-generation-failed', payload, true)
+    })
+    // A Send now click's outcome, for the window on another computer that clicked it (`orchestrator.steerNow`).
+    on(s.orchestrator, 'steer-now', (payload: { threadId?: string; requestId?: string; outcome?: string }) => {
+      if (payload?.threadId === threadId) deliver('steer.now', { requestId: payload.requestId, outcome: payload.outcome }, true)
     })
     // Saves, Undo and workspace changes raise these through the protocol server, whichever window or computer asked.
     on(s.events, 'thread:event', (event: { type?: string; data?: unknown; threadId?: string }) => {

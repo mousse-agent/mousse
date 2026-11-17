@@ -14,6 +14,7 @@ vi.mock('electron', () => ({
   dialog: {},
   clipboard: {},
   nativeTheme: { on: () => undefined },
+  screen: { on: () => undefined, getAllDisplays: () => [] },
   session: {},
   webContents: {}
 }))
@@ -154,8 +155,10 @@ describe('a terminal on another computer', () => {
 describe('selecting a thread on another computer', () => {
   it('holds it open before reading it, and lets go of it when the selection moves on', async () => {
     await invoke('threads:select', REMOTE)
-    expect(calls.map((call) => call.method)).toEqual(['threads.focus', 'snapshot'])
+    // Opening it clears its Done on the computer that owns it.
+    expect(calls.map((call) => call.method)).toEqual(['threads.focus', 'threads.markSeen', 'snapshot'])
     expect(calls[0].params).toEqual({ threadId: REMOTE, focused: true })
+    expect(calls[1].params).toEqual({ threadId: REMOTE })
     calls.length = 0
     await invoke('threads:select', OTHER_REMOTE)
     expect(sent('threads.focus').map((call) => call.params)).toEqual([
@@ -165,7 +168,7 @@ describe('selecting a thread on another computer', () => {
     calls.length = 0
     await invoke('threads:select', 'local-thread')
     // A thread of this computer is marked shown (it stays loaded in the daemon); nothing waits for that.
-    expect(calls.map((call) => call.params)).toEqual([{ threadId: OTHER_REMOTE, focused: false }, { threadId: 'local-thread', focused: true }, { threadId: 'local-thread' }])
+    expect(calls.map((call) => call.params)).toEqual([{ threadId: OTHER_REMOTE, focused: false }, { threadId: 'local-thread', focused: true }, { threadId: 'local-thread' }, { threadId: 'local-thread' }])
   })
 
   it('marks a thread of this computer shown, and the one it leaves not shown, without waiting', async () => {
@@ -176,7 +179,8 @@ describe('selecting a thread on another computer', () => {
       { threadId: 'local-a', focused: false },
       { threadId: 'local-b', focused: true }
     ])
-    expect(calls.map((call) => call.method)).toEqual(['threads.focus', 'snapshot', 'threads.focus', 'threads.focus', 'snapshot'])
+    expect(calls.map((call) => call.method)).toEqual(['threads.focus', 'threads.markSeen', 'snapshot', 'threads.focus', 'threads.focus', 'threads.markSeen', 'snapshot'])
+    expect(sent('threads.markSeen').map((call) => call.params)).toEqual([{ threadId: 'local-a' }, { threadId: 'local-b' }])
   })
 
   it('names the thread its waiting questions belong to, so a window showing another thread drops them', async () => {
@@ -355,6 +359,56 @@ describe('a call to another computer that was not confirmed', () => {
     expect(sent('orchestrator.send')[0].params).toMatchObject({ requestId: 'req-9', clientRequestId: 'req-9' })
   })
 
+  it('answers a send cut off by the app quitting as a lost connection, so the window does not give its prompt back', async () => {
+    presentation.setActiveThreadId('local-thread')
+    // Quitting closes this client while the send still waits for its turn; the service goes on running it.
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      throw new Error('Client closed')
+    })
+    const answer = (await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Write the report', requestId: 'req-q' })) as { requestAcknowledged?: boolean; error?: { code?: string } }
+    expect(answer).not.toHaveProperty('requestAcknowledged')
+    expect(answer.error).toMatchObject({ code: 'workspace_connection_lost' })
+  })
+
+  it('answers a send that was still waiting for a free slot when the app quit as not taken, so the window gives its prompt back', async () => {
+    presentation.setActiveThreadId('local-thread')
+    // The client fails requests it never wrote with `Not connected`.
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      throw new Error('Not connected')
+    })
+    const answer = (await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Write the report', requestId: 'req-w' })) as { requestAcknowledged?: boolean; error?: { code?: string } }
+    expect(answer.requestAcknowledged).toBe(false)
+    expect(answer.error?.code).not.toBe('workspace_connection_lost')
+  })
+
+  it('sends the continuation of a run a restart left uncertain as continue:<runId>, acknowledged, with its own short request id', async () => {
+    presentation.setActiveThreadId('local-thread')
+    const runId = 'run:thread:3f9c1a7e-5b2d-4c8e-9a10-6d4e2b7f8c01:ordinal:12'
+    await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Continue where you left off.', requestId: 'req-c', continuationOfRunId: runId, acknowledgeUncertain: true })
+    const params = sent('orchestrator.send')[0].params as Record<string, unknown>
+    expect(params).toMatchObject({ requestId: 'req-c', clientRequestId: `continue:${runId}`, continuationOfRunId: runId, acknowledgeUncertain: true })
+    // The service takes a request id of at most 64 characters; the receipt key is the one that names the run.
+    expect(String(params.requestId).length).toBeLessThanOrEqual(64)
+  })
+
+  it('asks the service for an ack-only answer only when the window opts in, and returns its run as soon as it is committed', async () => {
+    presentation.setActiveThreadId('local-thread')
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      return { message: '', actions: [], runId: 'run:thread:manager:ordinal:3', sequence: 7, accepted: true }
+    })
+    const answer = (await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Every weekday at 9', await: 'ack' })) as { runId?: string; accepted?: boolean }
+    expect(answer).toMatchObject({ runId: 'run:thread:manager:ordinal:3', accepted: true })
+    expect(sent('orchestrator.send')[0].params).toMatchObject({ threadId: 'local-thread', content: 'Every weekday at 9', await: 'ack' })
+    // Every other send still waits for its turn, as it always has.
+    await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Hello' })
+    expect(sent('orchestrator.send')[1].params).not.toHaveProperty('await')
+    await invoke('orchestrator:sendToThread', 'local-thread', 'Plain text')
+    expect(sent('orchestrator.send')[2].params).not.toHaveProperty('await')
+  })
+
   it('leaves a thread of another computer, or of this one, that is not in view alone', async () => {
     presentation.setActiveThreadId('local-thread')
     request.mockImplementationOnce(async (method: string, params?: unknown) => {
@@ -472,5 +526,28 @@ describe("a new chat's settings on another computer (threads:applySettings)", ()
     expect(await invoke('threads:applySettings', REMOTE, { model, permissionMode: 'ask' }, 0)).toMatchObject({ ok: false, code: 'computer_outdated' })
     // The mode was never sent after the answer without a revision.
     expect(sent('threads.setPermissionMode')).toHaveLength(1)
+  })
+})
+
+describe('a window leaving a deleted thread', () => {
+  it('reads a thread the service no longer has as null, and one whose delete is under way as an error', async () => {
+    request.mockImplementationOnce(async () => { throw new MmsProtocolError('thread_not_found', 'Thread not found', { threadId: 'gone' }) })
+    await expect(invoke('threads:get', 'gone')).resolves.toBeNull()
+    request.mockImplementationOnce(async () => { throw new MmsProtocolError('thread_not_found', 'Thread not found', { threadId: 'trashed', deleting: true }) })
+    await expect(invoke('threads:get', 'trashed')).rejects.toThrow('Thread not found')
+    request.mockImplementationOnce(async () => { throw new Error('MMS client not connected') })
+    await expect(invoke('threads:get', 'unknown')).rejects.toThrow('not connected')
+  })
+
+  it('gives every window that asks at once the same new chat', async () => {
+    let made = 0
+    request.mockImplementation(async (method: string) => {
+      if (method === 'threads.create') return { thread: { id: `new-${++made}`, name: 'New Chat' } }
+      return {}
+    })
+    const [first, second] = await Promise.all([invoke('threads:newChatAfterDelete'), invoke('threads:newChatAfterDelete')])
+    expect(first).toEqual({ id: 'new-1', name: 'New Chat' })
+    expect(second).toBe(first)
+    expect(made).toBe(1)
   })
 })

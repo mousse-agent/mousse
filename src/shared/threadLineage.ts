@@ -16,9 +16,18 @@ export function isLocalOnlyThread(
   return Boolean(rootId && inventory?.some((candidate) => candidate.id === rootId && candidate.localOnly === true))
 }
 
-/** True for a thread a parent thread started as a subagent. */
+/**
+ * True for a thread shown under a parent: a subagent the parent started, or a mirror of a helper its runtime started
+ * (`isNativeHelperThread`). Lists fold both under the parent, and both take the root's visibility. Delegation rules
+ * read the run store's lineage, which never holds a mirror.
+ */
 export function isSubagentThread(thread: Pick<Thread, 'lineage'>): boolean {
-  return thread.lineage?.relationship === 'subagent'
+  return thread.lineage?.relationship === 'subagent' || thread.lineage?.relationship === 'native'
+}
+
+/** True for a watch-only mirror of a helper a provider runtime started on its own (`Thread.native`). */
+export function isNativeHelperThread(thread: Pick<Thread, 'lineage'>): boolean {
+  return thread.lineage?.relationship === 'native'
 }
 
 function indexById<T extends LineageThread>(threads: readonly T[]): Map<string, T> {
@@ -95,6 +104,15 @@ function descendantsIn(childrenOf: ReadonlyMap<string, readonly string[]>, threa
     queue = next
   }
   return found
+}
+
+/**
+ * `subagentDescendants` for many threads of one inventory: indexes `threads` once and returns the lookup, so a list
+ * asks for each of its rows without walking the whole inventory every time.
+ */
+export function subagentDescendantsIn(threads: readonly LineageThread[]): (threadId: string) => string[] {
+  const childrenOf = childrenByParent(threads)
+  return (threadId) => descendantsIn(childrenOf, threadId)
 }
 
 /** Ids of every subagent thread below `threadId` (children, their children, …), nearest first. */

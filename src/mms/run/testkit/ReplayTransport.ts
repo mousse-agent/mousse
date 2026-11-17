@@ -159,6 +159,8 @@ export class ReplayTransport {
   private failure: ReplayMismatchError | undefined
   private readonly waiters = new Set<() => void>()
   private readers = 0
+  /** An `exclusive` cue's action is running: no other reader reads past it until it settles. */
+  private exclusive: Promise<void> | undefined
   private readonly normalize: (frame: unknown) => unknown
   private readonly stallMs: number
 
@@ -209,14 +211,17 @@ export class ReplayTransport {
   }
 
   /**
-   * The next inbound frame. Cue frames run `onCue` on the way. An outbound frame for which
-   * `isBoundary` holds ends this exchange (undefined); any other outbound frame belongs to another
-   * caller, so the reader waits until it is sent. Undefined at the end of the transcript.
+   * The next inbound frame. Cue frames run `onCue` on the way. Another reader may deliver the frames
+   * after a cue while its action settles (a Stop waits for the cancel's reply), except after a cue
+   * marked `exclusive: true`, whose action settles before any later frame is read. An outbound frame
+   * for which `isBoundary` holds ends this exchange (undefined); any other outbound frame belongs to
+   * another caller, so the reader waits until it is sent. Undefined at the end of the transcript.
    */
   async receive(isBoundary?: (frame: unknown) => boolean): Promise<unknown> {
     this.readers += 1
     try {
       for (;;) {
+        while (this.exclusive) await this.exclusive
         if (this.failure) throw this.failure
         const next = this.transcript.frames[this.cursor]
         if (!next) return undefined
@@ -226,10 +231,17 @@ export class ReplayTransport {
         }
         if (next.dir === 'cue') {
           this.advance()
+          let settled: (() => void) | undefined
+          if ((next.frame as { exclusive?: unknown } | null)?.exclusive === true) this.exclusive = new Promise<void>((resolve) => { settled = resolve })
           try {
             await this.options.onCue?.(next.frame)
           } catch (error) {
             this.fail(`Cue ${pretty(next.frame)} failed: ${error instanceof Error ? error.message : String(error)}`)
+          } finally {
+            if (settled) {
+              this.exclusive = undefined
+              settled()
+            }
           }
           continue
         }

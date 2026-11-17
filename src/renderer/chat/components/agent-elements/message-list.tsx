@@ -1,4 +1,5 @@
 import React, {
+  Fragment,
   memo,
   useId,
   useRef,
@@ -15,49 +16,69 @@ import { ProviderIcon } from "../../../lib/providerIcons";
 import { inferModelBrand } from "../../../../shared/modelVariants";
 import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
 import { resolveModelChoice } from "../../../lib/modelChoice";
-import { modelLabel } from "../../../../shared/modelChoice";
+import { modelLabel, reasoningChange } from "../../../../shared/modelChoice";
+import type { TurnEnd } from "../../../../shared/types";
 
-import { UserMessage } from "./user-message";
+import { agentOriginOfMessage, UserMessage } from "./user-message";
+import { CopyButton } from "./copy-button";
+import { AfterTurnsLayoutProvider, type AfterTurnsLayout } from "./after-turns";
+import { ImageGalleryProvider } from "./image-gallery";
+import { collectThreadImages } from "./image-sources";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
-import { Markdown } from "./markdown";
+import { holdReplyPacing } from "../../../lib/replyPacingSetting";
+import { LiveMarkdown } from "./live-markdown";
+import { THREAD_IMAGES, threadImageUrl } from "./thread-images";
 import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
+import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, MessageSquare, RowTools, Square } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
   formatTokensPerSecond,
 } from "../../../utils/assistantMessageActions";
+import { createToolOpenStore, ToolOpenContext } from "./tools/tool-open-state";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
-import { LiveThinkingRow } from "./tools/thinking-tool";
+import { callTitle, TurnProgressRow, useTurnProgressState, type LiveRun } from "./turn-progress";
+import { ToolIcon } from "./tools/tool-icon";
 import {
   PermissionRequestRow,
   isPermissionRequestPart,
   isWaitingPermissionRequest,
 } from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
-import { BackgroundNotice, SubagentNotice } from "./tools/SubagentNotice";
+import { SecretRequestInline, isSecretRequestPart, isWaitingSecretRequest } from "../../../components/secrets/secretRequestPart";
+import { BackgroundNotice, SettleNotice, SubagentNotice } from "./tools/SubagentNotice";
+import { SteerGroup } from "./steer-group";
 import { isRunningSubagent } from "../../../../shared/subagents";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
+import { readSettleNoticeMeta } from "../../adapters/settleNotice";
 import { readBackgroundNotice } from "../../adapters/nativeSubagents";
 import { openThread } from "../../../lib/openThread";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import { getToolStatus } from "./utils/format-tool";
 import {
-  activityGroupLabel,
   analyzeAssistantMessage,
+  foldTurnWork,
+  isStandaloneToolType,
+  pendingFailures,
+  settleEarlierThoughts,
+  workGroupIconType,
+  workGroupHeading,
+  type FoldRow,
   isErrorPart,
   isRecord,
   isTextPart,
   isV5ToolPart,
   partitionTurnSegments,
+  SUBAGENT_BURST_GAP_MS,
   isCompactionRow,
   settleFinishedTurn,
   turnAnswerText,
+  type AssistantToolItem,
   type ToolPartBase,
 } from "./utils/assistant-blocks";
 import { PromptEditButton, PromptUndoButton, PromptVersionSwitcher } from "../../../components/PromptUndoControls";
@@ -86,6 +107,7 @@ import {
   type RowItem,
 } from "./virtual/turn-window";
 import { useTurnWindow } from "./virtual/use-turn-window";
+import { createEndFollower, type EndFollower } from "./virtual/end-follower";
 import { TurnIdContext } from "./turn-context";
 import { countRender } from "./render-counts";
 import { FindInThreadBar } from "./find/FindInThreadBar";
@@ -93,6 +115,7 @@ import { findBarHost, placeFindBar } from "./find/find-bar-host";
 import { useThreadFind } from "./find/use-thread-find";
 import { FindRailButton } from "./find/FindRailButton";
 import { cappedWords, markdownPreviewText } from "./utils/preview-text";
+import { formatMessageTime } from "./utils/message-time";
 import { flashLocated, revealMessage } from "./reveal-message";
 import { isStale, useChatNavigationStore } from "../../../stores/chatNavigationStore";
 import "../../../styles/prompt-visibility.css";
@@ -154,15 +177,6 @@ const SCROLL_THRESHOLD = 80;
 const REPLY_GAP_CLASS = "h-[44px]";
 const TURN_TOOLBAR_CLASS = "h-[48px] flex items-start w-full";
 const LAST_TURN_TOOLBAR_CLASS = `${TURN_TOOLBAR_CLASS} -mb-1`;
-const timeFormatter = new Intl.DateTimeFormat("en-US", {
-  hour: "numeric",
-  minute: "2-digit",
-  hour12: true,
-});
-const dateFormatter = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-});
 type ToolRendererProps = {
   part: ToolPartBase;
   nestedTools?: ToolPartBase[];
@@ -194,7 +208,7 @@ function getLastAssistantHasContent(messages: UIMessage[]) {
     return (msg.parts ?? []).some((part) => {
       if (isTextPart(part)) return part.text.trim().length > 0;
       if (isRecord(part) && part.type === "data-applet-pending") return true;
-      if (isPermissionRequestPart(part)) return true;
+      if (isPermissionRequestPart(part) || isSecretRequestPart(part)) return true;
       return isV5ToolPart(part) || isAppletPart(part);
     });
   }
@@ -220,9 +234,22 @@ function ThreadNotice({ text }: { text: string }) {
   </div>;
 }
 
+/** When a reply stopped streaming (`completedAt`), or when it started for one saved without it. */
+function readEndedAt(message: UIMessage): number | null {
+  const raw = (message as { completedAt?: string }).completedAt;
+  const ms = raw ? Date.parse(raw) : NaN;
+  return Number.isFinite(ms) ? ms : readCreatedAt(message);
+}
+
+/**
+ * A finished turn's time, from saved timestamps: its prompt to where the last of its messages ended. A message's
+ * timestamp is when it started; a reply also saves when it ended (`completedAt`), older ones do not. A turn a Stop cut
+ * off runs to its Stop line too (`end.endedAt`), written as the turn stopped.
+ */
 function turnDurationMs(
   user: UIMessage | undefined,
   assistants: UIMessage[],
+  turnEnd?: TurnEndMark,
 ): number | null {
   const start = readCreatedAt(user);
   if (start == null) return null;
@@ -230,10 +257,28 @@ function turnDurationMs(
   for (const message of assistants) {
     // A compaction started after the turn (Compact now, hours later) is no part of its work.
     if (isThreadNotice(message) || isCompactionRow(message)) continue;
-    const at = readCreatedAt(message);
+    const at = readEndedAt(message);
     if (at != null && at > end) end = at;
   }
+  if (turnEnd?.endedAt != null && turnEnd.endedAt > end) end = turnEnd.endedAt;
   return Math.max(0, end - start);
+}
+
+/**
+ * When a finished turn's work really ended, from what its messages saved: the newest end among them, once its newest
+ * message has saved one (`completedAt`). Null while that message has none yet (still streaming, or not saved).
+ */
+function savedWorkEndedAt(assistants: UIMessage[]): number | null {
+  const work = assistants.filter((message) => !isThreadNotice(message) && !isCompactionRow(message));
+  const newest = work.at(-1);
+  const raw = newest ? (newest as { completedAt?: string }).completedAt : undefined;
+  if (!raw || !Number.isFinite(Date.parse(raw))) return null;
+  let end: number | null = null;
+  for (const message of work) {
+    const at = readEndedAt(message);
+    if (at != null && (end == null || at > end)) end = at;
+  }
+  return end;
 }
 
 function TurnWorkStatus({
@@ -241,12 +286,27 @@ function TurnWorkStatus({
   startedAt,
   durationMs,
   waitingLabel,
+  end,
+  endYieldsToNotice = false,
+  fold,
+  foldedReplies = 0,
 }: {
   active: boolean;
   startedAt?: number | null;
   durationMs: number | null;
   /** Said instead of the time while the reply waits for the user (an approval). */
   waitingLabel?: string;
+  /** A finished turn that a Stop, a restart or a crash cut off. */
+  end?: TurnEndMark;
+  /** The last turn's mark gives way while the "Run interrupted" notice shows for the same turn. */
+  endYieldsToNotice?: boolean;
+  /**
+   * A finished turn whose work folds behind this line: the line is the control that opens it ("Worked for 32s ›"),
+   * and `open` says whether the work shows.
+   */
+  fold?: { open: boolean; onToggle: () => void };
+  /** How many replies with text the fold hides, said on a finished turn's line so an earlier answer is not missed. */
+  foldedReplies?: number;
 }) {
   const fallbackStartRef = useRef<number | null>(null);
   if (!active) fallbackStartRef.current = null;
@@ -274,17 +334,98 @@ function TurnWorkStatus({
         : active
           ? formatWorkingFor(elapsedMs)
           : formatWorkedFor(elapsedMs);
-  if (!label) return null;
+  const mark = !active && end
+    ? endYieldsToNotice ? <LastTurnEndMark end={end} separate={Boolean(label)} /> : <TurnEndLabel end={end} separate={Boolean(label)} />
+    : null;
+  // A turn with work to open always has its line, even when it has no time to show.
+  const shown = label ?? (fold && !active ? "Worked" : null);
+  if (!shown && !mark) return null;
   const longLabel =
     elapsedMs == null || (active && waitingLabel)
       ? undefined
       : `${active ? "Working for" : "Worked for"} ${formatDurationLong(elapsedMs)}`;
   return (
     <div className="turn-work" data-find-ignore>
-      <div className="turn-work-label" title={longLabel}>{label}</div>
+      {active && !waitingLabel ? (
+        <LiveWorkLabel working={label!} title={longLabel} />
+      ) : fold ? (
+        <button
+          type="button"
+          className="turn-work-label turn-work-toggle"
+          aria-expanded={fold.open}
+          title={longLabel}
+          onClick={fold.onToggle}
+        >
+          {shown}{mark}
+          {foldedReplies > 0 ? <FoldedRepliesCount count={foldedReplies} /> : null}
+          <IconChevronRight className="turn-work-chevron" data-open={fold.open || undefined} aria-hidden="true" />
+        </button>
+      ) : (
+        <div className="turn-work-label" title={longLabel}>{shown}{mark}</div>
+      )}
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
   );
+}
+
+/**
+ * " · (message icon) 3" after a finished turn's time: how many replies its fold hides. Only the icon and number show;
+ * the tooltip and screen readers get "3 replies inside".
+ */
+function FoldedRepliesCount({ count }: { count: number }) {
+  const label = `${count} ${count === 1 ? "reply" : "replies"} inside`;
+  return (
+    <span className="turn-work-replies" title={label}>
+      <span aria-hidden="true">·</span>
+      <MessageSquare className="turn-work-replies-icon" aria-hidden="true" />
+      <span aria-hidden="true">{count}</span>
+      <span className="sr-only">, {label}</span>
+    </span>
+  );
+}
+
+const TURN_END_WORDS: Record<TurnEnd["cause"], { word: string; detail: string }> = {
+  user: { word: "Stopped", detail: "You stopped this turn before it finished." },
+  agent: { word: "Stopped", detail: "An agent in another thread stopped this turn." },
+  daemon_restart: { word: "Interrupted", detail: "Mousse restarted during this turn." },
+  crash: { word: "Interrupted", detail: "Mousse quit during this turn." },
+};
+
+/**
+ * " · Stopped" after a cut-off turn's time: one muted word, with why in its tooltip. The mark takes no focus, so
+ * screen readers get why as hidden text too; find in thread skips it with the rest of the header (`data-find-ignore`).
+ */
+function TurnEndLabel({ end, separate }: { end: TurnEndMark; separate: boolean }) {
+  const { word, detail } = TURN_END_WORDS[end.cause] ?? TURN_END_WORDS.user;
+  const title = end.tools?.length ? `${detail} May have run: ${end.tools.join(", ")}` : detail;
+  return (
+    <>
+      {separate ? " · " : null}
+      <span className="turn-work-end" data-turn-end={end.cause} title={title}>
+        {word}
+        <span className="sr-only">: {title}</span>
+      </span>
+    </>
+  );
+}
+
+/**
+ * The last turn's mark, hidden while the thread's turn is stopped: the "Run interrupted" notice under its prompt says
+ * the same. Only the last turn reads the thread's turn, so earlier turns do not render again as it changes.
+ */
+function LastTurnEndMark(props: { end: TurnEndMark; separate: boolean }) {
+  if (useTurnProgressState()?.phase === "stopped") return null;
+  return <TurnEndLabel {...props} />;
+}
+
+/**
+ * A running turn's header: Working, or what the run waits for when it is the person (an answer to its question).
+ * Only a running turn reads the thread's turn, so a finished one does not render again as it changes.
+ */
+function LiveWorkLabel({ working, title }: { working: string; title?: string }) {
+  // The tooltip goes with the label: a run waiting for an answer is not "Working for …".
+  if (useTurnProgressState()?.phase === "awaiting_input") return <div className="turn-work-label">Waiting for your answer</div>;
+  return <div className="turn-work-label" title={title}>{working}</div>;
 }
 
 function getTextFromParts(parts: unknown[], joiner: string): string {
@@ -292,18 +433,6 @@ function getTextFromParts(parts: unknown[], joiner: string): string {
     .filter(isTextPart)
     .map((part) => part.text)
     .join(joiner);
-}
-
-function formatTimestamp(date: Date): string {
-  const now = new Date();
-  const isSameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (isSameDay) {
-    return timeFormatter.format(date);
-  }
-  return dateFormatter.format(date);
 }
 
 /**
@@ -381,66 +510,6 @@ function ForkFromTurnButton({ turnId }: { turnId: string }) {
     >
       <GitFork className="w-3.5 h-3.5 text-an-foreground-muted" />
     </button>
-  );
-}
-
-function CopyButton({
-  text,
-  onCopied,
-}: {
-  text: string;
-  onCopied?: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const copiedTimerRef = useRef<number | null>(null);
-
-  const handleCopy = () => {
-    void navigator.clipboard.writeText(text);
-    setCopied(true);
-    if (copiedTimerRef.current) {
-      window.clearTimeout(copiedTimerRef.current);
-    }
-    copiedTimerRef.current = window.setTimeout(() => {
-      setCopied(false);
-      copiedTimerRef.current = null;
-    }, 2000);
-    onCopied?.();
-  };
-  return (
-    <>
-      <button
-        type="button"
-        onClick={handleCopy}
-        onPointerDown={(event) => {
-          event.stopPropagation();
-        }}
-        onMouseDown={(event) => event.stopPropagation()}
-        title="Copy"
-        aria-label="Copy"
-        className={cn(
-          "size-6 flex items-center justify-center rounded-md active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
-          "opacity-50 bg-transparent hover:opacity-100 hover:bg-an-foreground/10",
-        )}
-      >
-        <div className="relative w-3.5 h-3.5">
-          <IconCopy
-            className={cn(
-              "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
-              copied ? "opacity-0 scale-50" : "opacity-100 scale-100",
-            )}
-          />
-          <IconCheck
-            className={cn(
-              "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
-              copied ? "opacity-100 scale-100" : "opacity-0 scale-50",
-            )}
-          />
-        </div>
-      </button>
-      <span className="sr-only" role="status" aria-live="polite">
-        {copied ? "Copied" : ""}
-      </span>
-    </>
   );
 }
 
@@ -677,21 +746,111 @@ function MessageToolbar({
  * user wrote: they join the reply in progress, in place, with only their
  * structured notice kept (their text is what the model reads).
  */
-type Turn = { userMsg?: UIMessage; assistantMsgs: UIMessage[] };
+export type Turn = { userMsg?: UIMessage; assistantMsgs: UIMessage[]; end?: TurnEndMark };
+
+/** Why a turn was cut off before it finished (a Stop, a restart, a crash), read from Mousse's line for it. */
+export type TurnEndMark = {
+  messageId: string;
+  cause: TurnEnd["cause"];
+  tools?: string[];
+  /**
+   * When a Stop ended the turn: its line is written as the turn stops. A restart's or a crash's line can be written at
+   * the next boot, long after the turn, so it gives no end time.
+   */
+  endedAt?: number;
+};
+
+function readTurnEnd(message: UIMessage): TurnEnd | undefined {
+  if ((message.role as string) !== "system") return undefined;
+  const end = (message.metadata as { turnEnd?: TurnEnd } | undefined)?.turnEnd;
+  return end && typeof end.cause === "string" ? end : undefined;
+}
+
+/** One mark per marker message, so a turn's `end` keeps its identity while its marker does (memoised rows). */
+const turnEndMarks = new WeakMap<UIMessage, TurnEndMark>();
+
+function turnEndMark(marker: UIMessage, end: TurnEnd): TurnEndMark {
+  let mark = turnEndMarks.get(marker);
+  if (!mark) {
+    const stoppedAt = end.cause === "user" || end.cause === "agent" ? readCreatedAt(marker) : null;
+    mark = {
+      messageId: marker.id,
+      cause: end.cause,
+      ...(end.tools?.length ? { tools: end.tools } : {}),
+      ...(stoppedAt != null ? { endedAt: stoppedAt } : {}),
+    };
+    turnEndMarks.set(marker, mark);
+  }
+  return mark;
+}
+
+function messageTurnId(message: UIMessage | undefined): string | undefined {
+  return (message as { turnId?: string } | undefined)?.turnId;
+}
 
 /** A message that reports results (a subagent's, or the runtime's own background tasks): not something the user wrote. */
 function isResultNotice(msg: UIMessage | undefined): boolean {
-  return Boolean(readSubagentNotice(msg) || readBackgroundNotice(msg));
+  return Boolean(readSubagentNotice(msg) || readBackgroundNotice(msg) || readSettleNoticeMeta(msg));
 }
 
 /** The empty-parts copy of a subagent-results message that joins a reply, one per message. */
 const noticeCopies = new WeakMap<UIMessage, UIMessage>();
 
-function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
+/** A user message sent into a reply already in progress (Steer): it joins that reply, not a turn of its own. */
+function isSteeredMessage(message: UIMessage): boolean {
+  return (message.metadata as { steered?: unknown } | undefined)?.steered === true;
+}
+
+/** The messages a steer group row stands for, or undefined when the row is not one. */
+export function readSteerGroup(message: UIMessage): UIMessage[] | undefined {
+  const group = (message.metadata as { steerGroup?: unknown } | undefined)?.steerGroup;
+  return Array.isArray(group) ? (group as UIMessage[]) : undefined;
+}
+
+/** Steer group rows by their first message, kept while their messages are the same objects (memoised rows). */
+const steerGroups = new WeakMap<UIMessage, UIMessage>();
+
+function steerGroupRow(members: UIMessage[]): UIMessage {
+  const first = members[0]!;
+  const cached = steerGroups.get(first);
+  const same = cached && readSteerGroup(cached)?.length === members.length &&
+    readSteerGroup(cached)!.every((message, index) => message === members[index]);
+  if (cached && same) return cached;
+  const row = {
+    id: `steer-group:${first.id}`,
+    role: "user",
+    parts: [],
+    metadata: { steerGroup: members },
+  } as unknown as UIMessage;
+  steerGroups.set(first, row);
+  return row;
+}
+
+export function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
   const turns: Turn[] = [];
   let current: Turn | null = null;
+  // Messages steered into the reply one after another, with nothing of the reply between them: one block.
+  let steered: UIMessage[] = [];
+  const flushSteered = () => {
+    if (!steered.length || !current) return;
+    current.assistantMsgs.push(steerGroupRow(steered));
+    steered = [];
+  };
+  // A cut-off turn's marker goes to the turn its run opened (the user message with its `turnId`), wherever it sits:
+  // a boot writes it after newer turns. One with no such turn (an older line) goes to the turn it falls inside.
+  const endMarkers: Array<{ marker: UIMessage; end: TurnEnd; inside: Turn | null }> = [];
 
   for (const msg of messages) {
+    if (msg.role === "user" && current && isSteeredMessage(msg) && !isResultNotice(msg)) {
+      steered.push(msg);
+      continue;
+    }
+    flushSteered();
+    const end = readTurnEnd(msg);
+    if (end) {
+      endMarkers.push({ marker: msg, end, inside: current });
+      continue;
+    }
     if (msg.role === "user") {
       if (current && isResultNotice(msg)) {
         let copy = noticeCopies.get(msg);
@@ -709,12 +868,26 @@ function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
       current.assistantMsgs.push(msg);
     }
   }
+  flushSteered();
   if (current) turns.push(current);
+  if (endMarkers.length) {
+    const byRun = new Map<string, Turn>();
+    for (const turn of turns) {
+      const runId = messageTurnId(turn.userMsg);
+      if (runId && !byRun.has(runId)) byRun.set(runId, turn);
+    }
+    for (const { marker, end, inside } of endMarkers) {
+      const runId = messageTurnId(marker);
+      const turn = (runId ? byRun.get(runId) : undefined) ?? inside;
+      if (turn) turn.end = turnEndMark(marker, end);
+    }
+  }
   return turns;
 }
 
 function sameTurn(a: Turn, b: Turn): boolean {
   if (a.userMsg !== b.userMsg) return false;
+  if (a.end !== b.end) return false;
   if (a.assistantMsgs.length !== b.assistantMsgs.length) return false;
   return a.assistantMsgs.every((message, index) => message === b.assistantMsgs[index]);
 }
@@ -1174,10 +1347,14 @@ export const MessageList = memo(function MessageList({
   classNames,
   toolRenderers,
 }: MessageListProps) {
+  countRender("MessageList");
+  // The rows and groups the person opened, kept for the list's life (tools/tool-open-state.ts).
+  const [toolOpenStore] = useState(createToolOpenStore);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const contentWrapperRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
-  const chatContainerObserverRef = useRef<ResizeObserver | null>(null);
+  // What is drawn after the turns (the queued messages): the next turn starts from it.
+  const afterTurnsRef = useRef<HTMLDivElement>(null);
   // Follow the end of the thread, or leave it alone. Changed only by what the
   // user does (see `virtual/follow-mode.ts`), never by a scroll position.
   const followModeRef = useRef<FollowMode>(
@@ -1218,6 +1395,27 @@ export const MessageList = memo(function MessageList({
     () => new Set(subagentCards.keys()),
     [subagentCards],
   );
+  // Cards still starting: not drawn yet, the turn's progress line stands for them.
+  const spawningCardIds = useMemo(
+    () => new Set([...subagentCards.values()].filter((card) => card.spawning).map((card) => card.toolCallId)),
+    [subagentCards],
+  );
+  // Finished turns whose work is open, by turn key: kept while the thread is open (the list mounts per thread).
+  const [openWork, setOpenWork] = useState<ReadonlySet<string>>(() => new Set());
+  const openWorkRef = useRef(openWork);
+  openWorkRef.current = openWork;
+  const dispatchFollowRef = useRef<((event: FollowEvent) => void) | null>(null);
+  const toggleWork = useCallback((turnKey: string) => {
+    // Opening grows the turn under the line that was clicked: the view stays where it is instead of following
+    // the end, so the line does not move away from the pointer.
+    if (!openWorkRef.current.has(turnKey)) dispatchFollowRef.current?.({ type: "navigate" });
+    setOpenWork((current) => {
+      const next = new Set(current);
+      if (next.has(turnKey)) next.delete(turnKey);
+      else next.add(turnKey);
+      return next;
+    });
+  }, []);
   // Subagents (by task and by thread) whose state a card in the thread shows.
   const cardedSubagents = useMemo(() => {
     const ids = new Set<string>();
@@ -1269,6 +1467,7 @@ export const MessageList = memo(function MessageList({
       onComposerCompactChangeRef.current?.(compact);
     }
   }, []);
+  dispatchFollowRef.current = dispatchFollow;
 
   // What the user just did to the scroll position. Assigned on every render so
   // the listeners attached once with the element always see current callbacks.
@@ -1282,19 +1481,7 @@ export const MessageList = memo(function MessageList({
 
     containerCleanupRef.current?.();
     containerCleanupRef.current = null;
-    if (chatContainerObserverRef.current) {
-      chatContainerObserverRef.current.disconnect();
-      chatContainerObserverRef.current = null;
-    }
     if (el) {
-      el.style.setProperty("--chat-container-height", `${el.clientHeight}px`);
-      const observer = new ResizeObserver((entries) => {
-        const height = entries[0]?.contentRect.height ?? 0;
-        el.style.setProperty("--chat-container-height", `${height}px`);
-      });
-      observer.observe(el);
-      chatContainerObserverRef.current = observer;
-
       // Attached when the element mounts: no timers, no retries.
       const overflowing = () => el.scrollHeight > el.clientHeight;
       const onWheel = (event: WheelEvent) =>
@@ -1373,13 +1560,6 @@ export const MessageList = memo(function MessageList({
     }
   }, []);
 
-  useEffect(() => {
-    return () => {
-      if (chatContainerObserverRef.current)
-        chatContainerObserverRef.current.disconnect();
-    };
-  }, []);
-
   // Timestamp of the last programmatic scrollTop write (streaming follow,
   // mount pin, marker glide). Scroll events within the window after one are
   // auto-scroll noise — only human scrolling should reveal the markers.
@@ -1387,6 +1567,22 @@ export const MessageList = memo(function MessageList({
   const markProgrammaticScroll = useCallback(() => {
     programmaticScrollAtRef.current = performance.now();
   }, []);
+  // Lands on the end as the reply grows, holding it while something near it is replaced (virtual/end-follower.ts).
+  const followerRef = useRef<EndFollower | null>(null);
+  followerRef.current ??= createEndFollower({
+    container: () => chatContainerRef.current,
+    after: () => afterTurnsRef.current,
+    mode: () => followModeRef.current,
+    onProgrammaticScroll: () => {
+      programmaticScrollAtRef.current = performance.now();
+    },
+  });
+  const follower = followerRef.current;
+  useEffect(() => () => followerRef.current?.dispose(), []);
+  const afterTurnsLayout = useMemo<AfterTurnsLayout>(() => ({
+    resized: () => followerRef.current?.follow(),
+    closing: () => followerRef.current?.closeNext(),
+  }), []);
 
   const isAtBottom = useCallback(() => {
     const container = chatContainerRef.current;
@@ -1446,7 +1642,9 @@ export const MessageList = memo(function MessageList({
     // Any user motion ends a landing in progress, whatever the follow mode.
     virtualizationRef.current?.cancelNavigation();
     cancelPromptScroll();
+    follower.cancel();
     dispatchFollow({ type: "intent", intent });
+    follower.settle();
   };
 
   const handleScroll = useCallback(() => {
@@ -1455,6 +1653,7 @@ export const MessageList = memo(function MessageList({
 
     const programmatic = isProgrammaticScroll();
     dispatchFollow({ type: "scroll", atBottom: isAtBottom(), programmatic });
+    followerRef.current?.settle();
     // Skip auto-scroll noise (streaming follow, mount pin, marker glide) —
     // only a human moving the scrollbar reveals the markers.
     if (!programmatic) flashScrollbarActive();
@@ -1495,24 +1694,19 @@ export const MessageList = memo(function MessageList({
     container.toggleAttribute("data-following-end", followModeRef.current === "following-end");
 
     // The one writer that follows the end: the transcript grew (a streamed
-    // delta, an image, a tool card opening, the reply gap) and the observer
-    // runs after layout and before paint, so no frame shows the growth
-    // without the follow. It writes only when the end moved; in a windowed
-    // list `useTurnWindow` may have written the same value already.
+    // delta, an image, a tool card opening, the reply gap) or the viewport
+    // changed, and the observer runs after layout and before paint. The
+    // follower resizes any held space under the content, then lands on the end
+    // in the same frame (virtual/end-follower.ts).
     // When reading history (free) nothing is written: streamed text appends
     // below the viewport, and growth above it is held by native scroll
     // anchoring (or by `useTurnWindow` in a windowed list).
-    const resizeObserver = new ResizeObserver(() => {
-      if (followModeRef.current !== "following-end") return;
-      const end = container.scrollHeight - container.clientHeight;
-      if (Math.abs(container.scrollTop - end) < 1) return;
-      programmaticScrollAtRef.current = performance.now();
-      container.scrollTop = end;
-    });
+    const resizeObserver = new ResizeObserver(() => followerRef.current?.follow());
 
     // The border box: the content's end padding is the composer's height, and the composer
     // unfolding grows only the padding.
     resizeObserver.observe(contentWrapper, { box: "border-box" });
+    resizeObserver.observe(container);
     return () => {
       resizeObserver.disconnect();
     };
@@ -1552,7 +1746,11 @@ export const MessageList = memo(function MessageList({
     if (!turnId) return;
     if (replyActive) {
       const clock = workClockRef.current;
-      if (clock?.turnId !== turnId) {
+      if (clock && clock.turnId !== turnId && clock.endedAt == null) {
+        // The same reply, still running, under a new prompt id: the service's saved copy of the prompt took the place of
+        // the one shown on send (a later time, another id), or a steer joined the reply. Its time keeps its start.
+        clock.turnId = turnId;
+      } else if (clock?.turnId !== turnId) {
         const user = normalizedMessages.find((message) => message.id === turnId);
         workClockRef.current = {
           turnId,
@@ -1568,7 +1766,11 @@ export const MessageList = memo(function MessageList({
     }
     const clock = workClockRef.current;
     if (clock && clock.turnId === turnId && clock.endedAt == null) {
-      const endedAt = Date.now();
+      // A window that learns of the end late (it caught up with the service, #1042) shows when the work really ended,
+      // which the reply saved, not when the window heard of it.
+      const saved = savedWorkEndedAt(turns[turns.length - 1]?.assistantMsgs ?? []);
+      const now = Date.now();
+      const endedAt = saved != null && saved >= clock.startedAt && saved <= now ? saved : now;
       clock.endedAt = endedAt;
       const durationMs = Math.max(0, endedAt - clock.startedAt);
       setSettledWork((current) =>
@@ -1577,16 +1779,28 @@ export const MessageList = memo(function MessageList({
           : { ...current, [turnId]: durationMs },
       );
     }
-  }, [replyActive, lastUserMessageId, normalizedMessages]);
+  }, [replyActive, lastUserMessageId, normalizedMessages, turns]);
 
   const lastUserMessageIdRef = useRef(lastUserMessageId);
+  // The last turn ended with messages still queued: the next prompt to arrive is the queue's next turn.
+  const queuedTurnNextRef = useRef(false);
   useLayoutEffect(() => {
     if (
       lastUserMessageId &&
       lastUserMessageId !== lastUserMessageIdRef.current
     ) {
-      dispatchFollow({ type: "new-turn" });
-      void virtualizationRef.current?.settleToEnd();
+      queuedTurnNextRef.current = false;
+      // A prompt the person just sent here takes them to the end. A turn the queue started (a queued
+      // message's turn) leaves a reader of earlier messages where they are; at the end, the end is followed.
+      const sentHere =
+        lastUserMessageId.startsWith("optimistic:") ||
+        turnKeyAliasRef.current.has(lastUserMessageId);
+      if (sentHere || followModeRef.current === "following-end") {
+        dispatchFollow({ type: "new-turn" });
+        // The prompt shows at the end and the reply grows from there, the view on the end.
+        followerRef.current?.turnStarted();
+        void virtualizationRef.current?.settleToEnd();
+      }
       lastUserMessageIdRef.current = lastUserMessageId;
     }
   }, [lastUserMessageId, dispatchFollow]);
@@ -1597,10 +1811,18 @@ export const MessageList = memo(function MessageList({
   const trailingOptimistic = Boolean(
     trailingUser?.id.startsWith("optimistic:"),
   );
+  // The queue's next turn: its prompt arrives a moment before its run's status does. It is starting
+  // already, so it waits for its reply from this render on, as a prompt sent here does: its header
+  // renders with the row (no hop of the queue a frame later).
+  const queuedTurnArrived =
+    queuedTurnNextRef.current &&
+    lastUserMessageId !== lastUserMessageIdRef.current &&
+    !trailingHasAssistant;
   if (!trailingUser || trailingHasAssistant) {
     replyHoldRef.current = null;
   } else if (
     trailingOptimistic ||
+    queuedTurnArrived ||
     isStreaming ||
     replyHoldRef.current
   ) {
@@ -1616,6 +1838,21 @@ export const MessageList = memo(function MessageList({
   const showAwaitingReply = Boolean(
     trailingUser && !trailingHasAssistant && replyHoldRef.current,
   );
+  follower.setLive(replyActive);
+  const turnLive = replyActive || showAwaitingReply;
+  // The last turn whose reply was seen running. A queued turn waiting for its run is not ended
+  // until its reply has run and ended.
+  const liveTurnRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (turnLive) {
+      liveTurnRef.current = lastUserMessageId;
+      return;
+    }
+    // With messages still queued the next turn starts from them: the end is held for it.
+    const nextQueued = (afterTurnsRef.current?.childElementCount ?? 0) > 0;
+    queuedTurnNextRef.current = nextQueued;
+    if (liveTurnRef.current === lastUserMessageId || trailingHasAssistant) followerRef.current?.turnEnded(nextQueued);
+  }, [turnLive, lastUserMessageId, trailingHasAssistant]);
   if (trailingOptimistic && trailingUser) {
     liveOptimisticKeyRef.current = trailingUser.id;
     turnKeyAliasRef.current.set(trailingUser.id, trailingUser.id);
@@ -1648,6 +1885,7 @@ export const MessageList = memo(function MessageList({
     enabled: windowed,
     modeRef: followModeRef,
     onProgrammaticScroll: markProgrammaticScroll,
+    followEnd: () => followerRef.current?.follow(),
   });
   virtualizationRef.current = virtualization;
   // Find reads the message data, so it covers the turns that are not mounted.
@@ -1656,7 +1894,8 @@ export const MessageList = memo(function MessageList({
       turns.map((turn, index) => ({
         key: resolveTurnKey(turn, index, turnKeyAliasRef.current),
         userMsg: turn.userMsg,
-        assistantMsgs: turn.assistantMsgs,
+        // A Steer block's messages are found as themselves, in the order they were sent.
+        assistantMsgs: turn.assistantMsgs.flatMap((message) => readSteerGroup(message) ?? [message]),
       })),
     [turns],
   );
@@ -1670,6 +1909,8 @@ export const MessageList = memo(function MessageList({
     onNavigate: () => dispatchFollow({ type: "navigate" }),
     onProgrammaticScroll: markProgrammaticScroll,
   });
+  // Find searches the reply's whole text, so while its bar is open nothing is held back.
+  useEffect(() => (find.open ? holdReplyPacing() : undefined), [find.open]);
   const rowItems: RowItem[] = windowed
     ? windowRowItems(turns.length, virtualization.window)
     : turns.map((_, index) => ({ kind: "row", index }));
@@ -1705,7 +1946,11 @@ export const MessageList = memo(function MessageList({
     }
     const { messageId } = messageRequest;
     const index = turns.findIndex(
-      (turn) => turn.userMsg?.id === messageId || turn.assistantMsgs.some((message) => message.id === messageId),
+      (turn) =>
+        turn.userMsg?.id === messageId ||
+        turn.assistantMsgs.some(
+          (message) => message.id === messageId || Boolean(readSteerGroup(message)?.some((steered) => steered.id === messageId)),
+        ),
     );
     const container = chatContainerRef.current;
     const rows = rowsRef.current;
@@ -1727,6 +1972,55 @@ export const MessageList = memo(function MessageList({
       if (element) flashLocated(element);
     });
   }, [messageRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
+
+  // `revealSubagent` from Nest: a runtime's own subagent has no thread, so its card is what opens. The request
+  // waits in the store while its turn lands, so the folded group and the card open themselves as they mount.
+  const subagentRequest = useChatNavigationStore((state) => state.subagent);
+  const takenSubagentRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!subagentRequest || takenSubagentRef.current === subagentRequest.seq) return;
+    const { settleSubagent } = useChatNavigationStore.getState();
+    if (isStale(subagentRequest)) {
+      settleSubagent(subagentRequest.seq);
+      return;
+    }
+    const { toolCallId, seq } = subagentRequest;
+    let messageId: string | null = null;
+    const index = turns.findIndex((turn) =>
+      turn.assistantMsgs.some((message) => {
+        const found = (message.parts as Array<{ toolCallId?: unknown }> | undefined)?.some((part) => part?.toolCallId === toolCallId);
+        if (found) messageId = message.id;
+        return Boolean(found);
+      }),
+    );
+    const container = chatContainerRef.current;
+    const rows = rowsRef.current;
+    const virtualization = virtualizationRef.current;
+    if (index < 0 || !messageId || !container || !rows || !virtualization) return;
+    takenSubagentRef.current = seq;
+    dispatchFollow({ type: "navigate" });
+    const navigation = virtualization.beginNavigation();
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(toolCallId) : toolCallId.replace(/["\\]/g, "\\$&");
+    void revealMessage(
+      {
+        turnKey: resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current),
+        messageId,
+        element: (root) => root.querySelector<HTMLElement>(`[data-native-subagent="${escaped}"]`),
+      },
+      navigation,
+      {
+        container,
+        rows,
+        scrollToKey: windowed ? (key, target) => virtualization.scrollToKey(key, target, navigation) : undefined,
+        onProgrammaticScroll: markProgrammaticScroll,
+      },
+    ).then((element) => {
+      settleSubagent(seq);
+      if (!element) return;
+      flashLocated(element);
+      element.querySelector<HTMLButtonElement>("button.subagent-card")?.focus({ preventScroll: true });
+    });
+  }, [subagentRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
 
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
@@ -1757,17 +2051,27 @@ export const MessageList = memo(function MessageList({
   }, [dispatchFollow]);
 
   const showJumpButton = !isPinned && normalizedMessages.length > 0;
-  // When the reply in progress started, as the work clock saw it (the clock is set in an effect).
+  // When the reply in progress started, as the work clock saw it (the clock is set in an effect). A clock still running
+  // is the reply's even before the effect moves it to a new prompt id (see above), so the time never jumps back.
+  const workClock = workClockRef.current;
   const liveStartedAt =
-    lastUserMessageId != null && workClockRef.current?.turnId === lastUserMessageId
-      ? workClockRef.current.startedAt
+    lastUserMessageId != null && workClock && (workClock.turnId === lastUserMessageId || (workClock.endedAt == null && replyActive))
+      ? workClock.startedAt
       : null;
   // Tick position and active-turn state live in PromptMarkersOverlay so
   // scrolling never re-renders the conversation to update the rail.
 
+  // An image opened anywhere in the thread steps through all of the thread's images (subagent results joined
+  // to a reply show none of their own).
+  const threadImages = () =>
+    collectThreadImages(normalizedMessages.filter((message) => !isResultNotice(message)), threadImageUrl);
+
   return (
+    <ToolOpenContext.Provider value={toolOpenStore}>
+    <ImageGalleryProvider images={threadImages}>
     <div
       className="an-message-list-wrap relative flex-1 min-h-0 flex flex-col"
+      data-quote-source
       onMouseMove={handleGutterHover}
     >
     <div
@@ -1777,6 +2081,7 @@ export const MessageList = memo(function MessageList({
       onTouchMove={cancelPromptScroll}
       onPointerDown={cancelPromptScroll}
       data-windowed={windowed || undefined}
+      data-mousse="transcript"
       className={cn(
         "an-message-list flex-1 min-h-0 overflow-y-auto overscroll-contain",
         className,
@@ -1837,20 +2142,25 @@ export const MessageList = memo(function MessageList({
                 suppressQuestionTool={suppressQuestionTool}
                 cardedSubagents={cardedSubagents}
                 subagentCardIds={subagentCardIds}
+                spawningCardIds={spawningCardIds}
+                workOpen={openWork.has(turnKey)}
+                onToggleWork={toggleWork}
               />
             );
           })}
         </div>
         {afterTurns != null && (
           // Clear of the last turn's toolbar, which reaches into the space below the rows.
-          <div data-after-turns className="[&:not(:empty)]:mt-5">
-            {afterTurns}
+          <div ref={afterTurnsRef} data-after-turns className="[&:not(:empty)]:mt-5">
+            <AfterTurnsLayoutProvider value={afterTurnsLayout}>{afterTurns}</AfterTurnsLayoutProvider>
           </div>
         )}
         {showReplyGap && (
           <div aria-hidden="true" data-reply-gap className={cn(REPLY_GAP_CLASS, "w-full")} />
         )}
       </div>
+      {/* The space that holds the end while something near it is replaced; sized by the follower, 0 otherwise. */}
+      <div ref={follower.reserveRef} aria-hidden="true" data-end-reserve />
     </div>
     <PromptMarkersOverlay
       turns={turns}
@@ -1883,6 +2193,8 @@ export const MessageList = memo(function MessageList({
       </button>
     )}
     </div>
+    </ImageGalleryProvider>
+    </ToolOpenContext.Provider>
   );
 });
 
@@ -1917,7 +2229,54 @@ type TurnRowProps = {
   suppressQuestionTool: boolean;
   cardedSubagents: Set<string>;
   subagentCardIds: Set<string>;
+  spawningCardIds: Set<string>;
+  /** Whether this finished turn's work is open under its "Worked for" line. */
+  workOpen: boolean;
+  /** Opens or closes a finished turn's work, by turn key. */
+  onToggleWork: (turnKey: string) => void;
 };
+
+/** A failed call the agent did not get past: it stays in view when the turn's work folds. */
+function isUnrecoveredFailure(part: unknown): boolean {
+  return isV5ToolPart(part) && getToolStatus(part).isError && !(part as { failureRecovered?: boolean }).failureRecovered;
+}
+
+const NO_FAILURES: ReadonlySet<string> = new Set();
+
+/**
+ * What folding needs to know of one message of a finished turn: whether it is work (calls, thoughts), narration or
+ * an answer (text), a person's steered message, or something that stays in view whatever the fold (an error, a
+ * question or an approval, a notice, Mousse's own markers, an applet).
+ */
+function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boolean): FoldRow {
+  if (readSteerGroup(msg)) return { kind: "message", steer: true };
+  if (toolsOnly) return { kind: "message", toolsOnly: true, keep: (msg.parts ?? []).some(isUnrecoveredFailure) };
+  const metadata = (msg.metadata ?? {}) as Record<string, unknown>;
+  if (
+    readSubagentNotice(msg) || readBackgroundNotice(msg) || readSettleNoticeMeta(msg) || isThreadNotice(msg) || isCompactionRow(msg) ||
+    metadata.contextHandoff != null || metadata.contextCleared || metadata.scheduledRun != null
+  ) {
+    return { kind: "message", keep: true };
+  }
+  let text = false;
+  let work = false;
+  for (const part of normalizeAssistantToolParts(msg.parts ?? []) as unknown[]) {
+    if (isTextPart(part)) {
+      if (part.text.trim()) text = true;
+      continue;
+    }
+    if (isErrorPart(part) || isPermissionRequestPart(part) || isSecretRequestPart(part) || isAppletPart(part)) return { kind: "message", keep: true };
+    if (isRecord(part) && part.type === "data-applet-pending") return { kind: "message", keep: true };
+    if (isV5ToolPart(part)) {
+      if (suppressQuestionTool && part.type === "tool-Question") continue;
+      if (isStandaloneToolType(part.type)) return { kind: "message", keep: true };
+      work = true;
+    }
+  }
+  // Text written beside calls in one message is part of the work.
+  if (work) return { kind: "message", toolsOnly: true, text };
+  return { kind: "message", text };
+}
 
 /**
  * One turn of the transcript. Memoised: a streamed delta changes only the last turn's messages, so
@@ -1949,6 +2308,9 @@ const TurnRow = memo(function TurnRow({
   suppressQuestionTool,
   cardedSubagents,
   subagentCardIds,
+  spawningCardIds,
+  workOpen,
+  onToggleWork,
 }: TurnRowProps) {
   countRender("TurnRow");
   const turnActionsForEdit = useTurnActions();
@@ -1977,6 +2339,15 @@ const TurnRow = memo(function TurnRow({
               </div>
             );
           }
+          // What Mousse told the agent about work it asked to hear about (`notify`).
+          const settled = readSettleNoticeMeta(turn.userMsg);
+          if (settled) {
+            return (
+              <div data-notice-id={turn.userMsg.id}>
+                <SettleNotice items={settled} />
+              </div>
+            );
+          }
           const text = getTextFromParts(
             turn.userMsg!.parts ?? [],
             "",
@@ -1989,14 +2360,14 @@ const TurnRow = memo(function TurnRow({
           const userCopyKey = `user-${turn.userMsg.id}`;
           const userCopyVisible = copyActive === userCopyKey;
           const userTimestamp =
-            isMounted && userCreatedAt
-              ? formatTimestamp(new Date(userCreatedAt))
-              : undefined;
+            isMounted ? formatMessageTime(userCreatedAt) : undefined;
           // Keep unavailable Undo visible with an explanation for this prompt.
           const showUserToolbar = true;
           // Edit and versions act on the prompt's turn; a fork's copies of its source name none.
           const promptTurnId = (turn.userMsg as { turnId?: string }).turnId;
-          const editPrompt = turnActionsForEdit?.editPrompt;
+          // An agent's or a bot's message is not the person's to edit or repeat: it offers Copy of its words.
+          const fromAgent = agentOriginOfMessage(turn.userMsg) !== undefined;
+          const editPrompt = fromAgent ? undefined : turnActionsForEdit?.editPrompt;
           return (
             <div
               className="group/user-message"
@@ -2035,7 +2406,7 @@ const TurnRow = memo(function TurnRow({
                   promptTurnId={promptTurnId}
                   onEdit={promptTurnId && editPrompt ? () => setEditingPromptId(turn.userMsg!.id) : undefined}
                   speechKey={userCopyKey}
-                  repeatText={text}
+                  repeatText={fromAgent ? undefined : text}
                 />
               )}
             </div>
@@ -2044,9 +2415,30 @@ const TurnRow = memo(function TurnRow({
 
       {turn.userMsg && lastTurnNotice}
 
-      {turn.assistantMsgs.length > 0 &&
-        !(isLastTurn && showPlanning) &&
-        (() => {
+      {(() => {
+          // Sent, with no output yet: the live row alone, under Working. It is laid out like the turn's answer below,
+          // the same elements in the same places, so when the first output arrives the live row stays the same
+          // element and only rows above it are added.
+          const liveBeforeOutput = isLastTurn && (showAwaitingReply || showPlanning);
+          const hasOutput = turn.assistantMsgs.length > 0 && !(isLastTurn && showPlanning);
+          if (!hasOutput) {
+            if (!liveBeforeOutput) return null;
+            return (
+              <div className="group/assistant-turn">
+                <TurnWorkStatus
+                  active
+                  startedAt={liveStartedAt ?? readCreatedAt(turn.userMsg)}
+                  durationMs={null}
+                />
+                <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
+                  <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
+                    {null}
+                  </TurnIdContext.Provider>
+                  <TurnProgressRow messages={turn.assistantMsgs} standalone />
+                </div>
+              </div>
+            );
+          }
           const assistantText = getTextFromParts(
             turn.assistantMsgs.flatMap((msg) => msg.parts ?? []),
             "\n\n",
@@ -2078,8 +2470,244 @@ const TurnRow = memo(function TurnRow({
 
           const workedMs = isTurnStreaming
             ? null
-            : settledMs ?? turnDurationMs(turn.userMsg, turn.assistantMsgs);
+            : settledMs ?? turnDurationMs(turn.userMsg, turn.assistantMsgs, turn.end);
           const liveStart = liveStartedAt ?? readCreatedAt(turn.userMsg);
+
+          // Subagent results whose subagents have a card in the thread show there, as the card's state: the
+          // results add no line of their own. A thought with anything after it in the turn is done (the
+          // provider closes it only later).
+          const turnMsgs = settleEarlierThoughts(turn.assistantMsgs.flatMap((msg) => {
+            const background = readBackgroundNotice(msg);
+            if (background) {
+              const rest = background.filter((item) => !cardedSubagents.has(item.taskId));
+              if (rest.length === 0) return [];
+              return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), backgroundNotice: rest } }];
+            }
+            const notice = readSubagentNotice(msg);
+            if (!notice) return [msg];
+            const rest = notice.filter(
+              (item) => !cardedSubagents.has(item.delegationId) && !cardedSubagents.has(item.childThreadId),
+            );
+            if (rest.length === 0) return [];
+            return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
+          }));
+          const turnAnalyses = turnMsgs.map((msg) =>
+            analyzeAssistantMessage(
+              msg.parts ?? [],
+              suppressQuestionTool,
+              subagentCardIds,
+            ),
+          );
+          const turnFailures = isTurnStreaming ? pendingFailures(turnMsgs) : NO_FAILURES;
+          // A finished turn ends on its answer: the work that led to it comes above it. A cut-off turn keeps
+          // the order it ran in when work followed its last text.
+          const settled = isTurnStreaming
+            ? { order: turnMsgs.map((_, index) => index), analyses: turnAnalyses }
+            : settleFinishedTurn(turnMsgs, turnAnalyses, Boolean(turn.end));
+          const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
+          const analyses = settled.order.map((index) => settled.analyses[index]!);
+          // Consecutive calls and thoughts become one line that says what they did; narration between them
+          // splits them. While the turn runs, every run with a call is such a line, even a run of one: a row never turns
+          // into a group (or back). The run at the very end is the live row's, below, until text closes it, so a group
+          // line is only drawn for a run that cannot grow, and keeps its title.
+          const segments = partitionTurnSegments(
+            analyses.map((a) => a.toolsOnly),
+            analyses.map((a) => a.cardsOnly),
+            analyses.map((a) => a.toolItems.length),
+            isTurnStreaming
+              ? (run) => run.some((msgIndex) => analyses[msgIndex]!.toolItems.some((item) => item.part.type !== "tool-Thinking"))
+              : undefined,
+            // Subagents started in quick succession share one card: only thinking between them, and each started
+            // within a short gap of the one before.
+            {
+              quiet: (msgIndex) => {
+                const items = analyses[msgIndex]!.toolItems;
+                return items.length > 0 && items.every((item) => item.part.type === "tool-Thinking");
+              },
+              join: (last, next) => {
+                const before = readCreatedAt(answerMsgs[last]);
+                const after = readCreatedAt(answerMsgs[next]);
+                return before == null || after == null || Math.abs(after - before) <= SUBAGENT_BURST_GAP_MS;
+              },
+            },
+          );
+          const chatStreamingStatus = isLastTurn && isStreaming ? "streaming" : undefined;
+          const renderTool = (part: ToolPartBase, nestedTools: ToolPartBase[] | undefined, key: string) => (
+            <CustomToolRenderer
+              key={key}
+              part={part}
+              nestedTools={nestedTools}
+              chatStatus={chatStreamingStatus}
+              toolRenderers={toolRenderers}
+            />
+          );
+          // Only failures the agent did not get past are named on a group line; while the turn runs, a failure nothing
+          // has followed yet counts too, as it will if the turn ends there.
+          const failedNow = (item: AssistantToolItem) =>
+            isUnrecoveredFailure(item.part) || (isTurnStreaming && Boolean(item.part.toolCallId && turnFailures.has(item.part.toolCallId)));
+          // The turn's current run of work: its last segment while it streams, when that is calls and thoughts (a
+          // run of calls, or thoughts alone). The live row is that run: it has no group line while it runs, and takes
+          // one, titled once, when text starts or the turn ends.
+          const liveTurn = isLastTurn && isStreaming;
+          const lastSegment = segments[segments.length - 1];
+          const liveRunMsgs = !liveTurn || !lastSegment || lastSegment.kind === "cards"
+            ? []
+            : lastSegment.kind === "tools" ? lastSegment.msgIndices : [lastSegment.msgIndex];
+          const liveRunItems = liveRunMsgs.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+          const liveRunIndex = liveRunItems.length > 0 ? segments.length - 1 : -1;
+          // The latest thought of the current run, for the live row's first line.
+          const runThought = liveRunItems.filter((item) => item.part.type === "tool-Thinking").at(-1)?.part;
+          const runKeyOf = (firstId: string) => (item: AssistantToolItem, k: number) => item.part.toolCallId ?? `${firstId}-tool-${k}`;
+          const liveRun: LiveRun | undefined = (() => {
+            if (liveRunIndex < 0) return undefined;
+            const firstId = answerMsgs[liveRunMsgs[0]!]!.id;
+            const keyOf = runKeyOf(firstId);
+            return {
+              openKey: `${firstId}-toolcalls`,
+              count: liveRunItems.length,
+              failed: liveRunItems.filter(failedNow).length,
+              rows: liveRunItems.map((item, k) => renderTool(item.part, item.nestedTools, keyOf(item, k))),
+            };
+          })();
+          const rows = segments.map((segment, segmentIndex): { node: React.ReactNode; fold: FoldRow } => {
+            if (segment.kind === "cards") {
+              // A card still starting is not drawn: the progress line says "Starting subagent…".
+              const cardParts = segment.msgIndices.flatMap(
+                (msgIndex) => analyses[msgIndex]!.cardParts,
+              ).filter((part) => !spawningCardIds.has(part.toolCallId!));
+              if (cardParts.length === 0) return { node: null, fold: { kind: "cards" } };
+              const cardNested = new Map(
+                segment.msgIndices.flatMap((msgIndex) => [
+                  ...(analyses[msgIndex]!.cardNestedTools ?? new Map()),
+                ]),
+              );
+              return {
+                fold: { kind: "cards" },
+                node: (
+                  <SubagentCardGroup
+                    key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
+                    toolCallIds={cardParts.map((part) => part.toolCallId!)}
+                  >
+                    {cardParts.map((part) => renderTool(part, cardNested.get(part.toolCallId!), part.toolCallId!))}
+                  </SubagentCardGroup>
+                ),
+              };
+            }
+            if (segment.kind === "message") {
+              const msg = answerMsgs[segment.msgIndex]!;
+              const fold = foldRowOf(msg, analyses[segment.msgIndex]!.toolsOnly, suppressQuestionTool);
+              const steeredGroup = readSteerGroup(msg);
+              if (steeredGroup) {
+                return {
+                  fold,
+                  node: (
+                    <SteerGroup
+                      key={msg.id}
+                      messages={steeredGroup}
+                      UserMessageComponent={CustomUserMessage}
+                      className={userMessageClassName}
+                      enableImagePreview={enableImagePreview}
+                    />
+                  ),
+                };
+              }
+              const notice = readSubagentNotice(msg);
+              if (notice) {
+                return {
+                  fold,
+                  node: (
+                    <div key={msg.id} data-notice-id={msg.id}>
+                      <SubagentNotice items={notice} />
+                    </div>
+                  ),
+                };
+              }
+              const background = readBackgroundNotice(msg);
+              if (background) {
+                return {
+                  fold,
+                  node: (
+                    <div key={msg.id} data-notice-id={msg.id}>
+                      <BackgroundNotice items={background} />
+                    </div>
+                  ),
+                };
+              }
+              const settled = readSettleNoticeMeta(msg);
+              if (settled) {
+                return {
+                  fold,
+                  node: (
+                    <div key={msg.id} data-notice-id={msg.id}>
+                      <SettleNotice items={settled} />
+                    </div>
+                  ),
+                };
+              }
+              const isLastMsg = isLastTurn && segment.msgIndex === answerMsgs.length - 1;
+              // Thoughts alone at the end of a running turn are its current run: the live row shows them.
+              if (segmentIndex === liveRunIndex) return { fold, node: null };
+              return {
+                fold,
+                node: (
+                  <AssistantParts
+                    key={msg.id}
+                    msg={msg}
+                    isLast={isLastMsg}
+                    isStreaming={isLastMsg && isStreaming}
+                    retryPromptId={isLastTurn && !isStreaming ? turn.userMsg?.id : undefined}
+                    suppressQuestionTool={suppressQuestionTool}
+                    ToolRendererComponent={CustomToolRenderer}
+                    toolRenderers={toolRenderers}
+                  />
+                ),
+              };
+            }
+            const grouped = segment.msgIndices.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+            const unrecovered = grouped.filter(failedNow).length;
+            // The current run is the live row, not a group line.
+            if (segmentIndex === liveRunIndex) return { fold: { kind: "tools", keep: unrecovered > 0 }, node: null };
+            const firstId = answerMsgs[segment.msgIndices[0]!]!.id;
+            const itemKey = runKeyOf(firstId);
+            const iconType = workGroupIconType(grouped);
+            // A group titled by a thought shows the thinking icon: the line is the agent's words, not a tool's.
+            const heading = workGroupHeading(grouped);
+            const calls = grouped.filter((item) => item.part.type !== "tool-Thinking");
+            // A run of one call says what that call does, as its own row would.
+            const title = !heading.thought && calls.length === 1 && isV5ToolPart(calls[0]!.part)
+              ? callTitle(calls[0]!.part)
+              : heading.title;
+            // Keyed by the run's first message, so the line stays one element while the run grows.
+            const group = grouped.length === 0 ? null : (
+              <ToolCallsGroup
+                key={`${firstId}-toolcalls`}
+                openKey={`${firstId}-toolcalls`}
+                rowKeys={grouped.map((item, k) => itemKey(item, k))}
+                count={grouped.length}
+                icon={
+                  heading.thought || iconType === "tool-Thinking" ? (
+                    <ThinkingIcon size={18} />
+                  ) : iconType ? (
+                    <ToolIcon type={iconType} state="done" />
+                  ) : (
+                    <RowTools size={18} />
+                  )
+                }
+                title={title}
+                summary={heading.summary}
+                failed={unrecovered}
+                live={isLastTurn && isStreaming}
+              >
+                {grouped.map((item, k) => renderTool(item.part, item.nestedTools, itemKey(item, k)))}
+              </ToolCallsGroup>
+            );
+            return { fold: { kind: "tools", keep: unrecovered > 0 }, node: group };
+          });
+          // A finished turn folds its work behind its "Worked for" line; the line opens it in place.
+          const folded = isTurnStreaming ? rows.map(() => false) : foldTurnWork(rows.map((row) => row.fold));
+          const hasFold = folded.some((value, index) => value && rows[index]!.node != null);
+          // Replies the fold hides, narration as well as answers that closed an earlier run, so none is missed.
+          const foldedReplies = folded.filter((value, index) => value && rows[index]!.fold.text && rows[index]!.node != null).length;
 
           return (
             <div className="group/assistant-turn">
@@ -2091,183 +2719,28 @@ const TurnRow = memo(function TurnRow({
                   isTurnStreaming &&
                   turn.assistantMsgs.some(isWaitingPermissionRequest)
                     ? "Waiting for approval"
-                    : undefined
+                    : isTurnStreaming && turn.assistantMsgs.some(isWaitingSecretRequest)
+                      ? "Waiting for a secret"
+                      : undefined
                 }
+                end={turn.end}
+                endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
+                fold={hasFold ? { open: workOpen, onToggle: () => onToggleWork(turnKey) } : undefined}
+                foldedReplies={foldedReplies}
               />
-              <div className="turn-answer flex flex-col gap-3">
+              <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
                 <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
-                {(() => {
-                  // Consecutive thoughts and tool calls collapse into one
-                  // group titled with the latest thought. A run with
-                  // no thought falls back to "Tool calls N".
-                  // Subagent results whose subagents have a card in
-                  // the thread show there, as the card's state: the
-                  // results add no line of their own.
-                  const turnMsgs = turn.assistantMsgs.flatMap((msg) => {
-                    const background = readBackgroundNotice(msg);
-                    if (background) {
-                      const rest = background.filter((item) => !cardedSubagents.has(item.taskId));
-                      if (rest.length === 0) return [];
-                      return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), backgroundNotice: rest } }];
-                    }
-                    const notice = readSubagentNotice(msg);
-                    if (!notice) return [msg];
-                    const rest = notice.filter(
-                      (item) => !cardedSubagents.has(item.delegationId) && !cardedSubagents.has(item.childThreadId),
-                    );
-                    if (rest.length === 0) return [];
-                    return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
-                  });
-                  const turnAnalyses = turnMsgs.map((msg) =>
-                    analyzeAssistantMessage(
-                      msg.parts ?? [],
-                      suppressQuestionTool,
-                      subagentCardIds,
-                    ),
-                  );
-                  // A finished turn ends on its answer: the notes and
-                  // activity that led to it collapse above it.
-                  const settled = isTurnStreaming
-                    ? { order: turnMsgs.map((_, index) => index), analyses: turnAnalyses }
-                    : settleFinishedTurn(turnMsgs, turnAnalyses);
-                  const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
-                  const analyses = settled.order.map((index) => settled.analyses[index]!);
-                  const segments = partitionTurnSegments(
-                    analyses.map((a) => a.toolsOnly),
-                    analyses.map((a) => a.cardsOnly),
-                  );
-                  return segments.map((segment) => {
-                    if (segment.kind === "cards") {
-                      const cardParts = segment.msgIndices.flatMap(
-                        (msgIndex) => analyses[msgIndex]!.cardParts,
-                      );
-                      const cardNested = new Map(
-                        segment.msgIndices.flatMap((msgIndex) => [
-                          ...(analyses[msgIndex]!.cardNestedTools ?? new Map()),
-                        ]),
-                      );
-                      const chatStreamingStatus = isLastTurn && isStreaming
-                        ? "streaming"
-                        : undefined;
-                      return (
-                        <SubagentCardGroup
-                          key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
-                          toolCallIds={cardParts.map(
-                            (part) => part.toolCallId!,
-                          )}
-                        >
-                          {cardParts.map((part) => (
-                            <CustomToolRenderer
-                              key={part.toolCallId}
-                              part={part}
-                              nestedTools={cardNested.get(part.toolCallId!)}
-                              chatStatus={chatStreamingStatus}
-                              toolRenderers={toolRenderers}
-                            />
-                          ))}
-                        </SubagentCardGroup>
-                      );
-                    }
-                    if (segment.kind === "message") {
-                      const msg =
-                        answerMsgs[segment.msgIndex]!;
-                      const notice = readSubagentNotice(msg);
-                      if (notice) {
-                        return (
-                          <div key={msg.id} data-notice-id={msg.id}>
-                            <SubagentNotice items={notice} />
-                          </div>
-                        );
-                      }
-                      const background = readBackgroundNotice(msg);
-                      if (background) {
-                        return (
-                          <div key={msg.id} data-notice-id={msg.id}>
-                            <BackgroundNotice items={background} />
-                          </div>
-                        );
-                      }
-                      const isLastMsg =
-                        isLastTurn &&
-                        segment.msgIndex ===
-                          answerMsgs.length - 1;
-                      return (
-                        <AssistantParts
-                          key={msg.id}
-                          msg={msg}
-                          isLast={isLastMsg}
-                          isStreaming={isLastMsg && isStreaming}
-                          retryPromptId={
-                            isLastTurn && !isStreaming
-                              ? turn.userMsg?.id
-                              : undefined
-                          }
-                          suppressQuestionTool={suppressQuestionTool}
-                          ToolRendererComponent={CustomToolRenderer}
-                          toolRenderers={toolRenderers}
-                        />
-                      );
-                    }
-                    const items = segment.msgIndices.flatMap(
-                      (msgIndex) =>
-                        analyses[msgIndex]!.toolItems,
-                    );
-                    const groupLabel = activityGroupLabel(items);
-                    const firstId =
-                      answerMsgs[
-                        segment.msgIndices[0]!
-                      ]!.id;
-                    const chatStreamingStatus = isLastTurn && isStreaming
-                      ? "streaming"
-                      : undefined;
-                    // Only shimmer the group header while a child
-                    // tool is still running — not for the whole
-                    // remaining turn stream (text after tools).
-                    const anyToolPending = items.some((item) => {
-                      const state = item.part.state;
-                      return (
-                        state !== "output-available" &&
-                        state !== "output-error"
-                      );
-                    });
-                    return (
-                      <ToolCallsGroup
-                        key={`${firstId}-toolcalls`}
-                        count={items.length}
-                        icon={
-                          groupLabel ? (
-                            <ThinkingIcon size={18} active={anyToolPending && isLastTurn && isStreaming} />
-                          ) : (
-                            <Wrench size={18} />
-                          )
-                        }
-                        label={groupLabel}
-                        autoOpen={anyToolPending}
-                        failed={
-                          items.filter(
-                            (item) =>
-                              getToolStatus(item.part).isError,
-                          ).length
-                        }
-                        live={isLastTurn && isStreaming}
-                      >
-                        {items.map((item, k) => (
-                          <CustomToolRenderer
-                            key={
-                              item.part.toolCallId ??
-                              `${firstId}-tool-${k}`
-                            }
-                            part={item.part}
-                            nestedTools={item.nestedTools}
-                            chatStatus={chatStreamingStatus}
-                            toolRenderers={toolRenderers}
-                          />
-                        ))}
-                      </ToolCallsGroup>
-                    );
-                  });
-                })()}
+                  {rows.map((row, index) => (folded[index] && !workOpen ? null : row.node))}
                 </TurnIdContext.Provider>
+                {(isTurnStreaming || liveBeforeOutput) && (
+                  <TurnProgressRow
+                    messages={turn.assistantMsgs}
+                    awaitingSubagents={isTurnStreaming && !isStreaming}
+                    standalone={!isTurnStreaming}
+                    thought={runThought}
+                    run={liveRun}
+                  />
+                )}
               </div>
               {!isTurnStreaming && (
                 <TurnEditSummary messages={turn.assistantMsgs} turnId={(turn.userMsg as { turnId?: string } | undefined)?.turnId} />
@@ -2303,25 +2776,11 @@ const TurnRow = memo(function TurnRow({
           );
         })()}
 
-      {isLastTurn && (showAwaitingReply || showPlanning) && (
-        // Laid out like the turn's answer below, so its first row
-        // takes the live row's place without moving.
-        <div className="group/assistant-turn">
-          <TurnWorkStatus
-            active
-            startedAt={liveStartedAt ?? readCreatedAt(turn.userMsg)}
-            durationMs={null}
-          />
-          <div className="turn-answer flex flex-col gap-3">
-            <LiveThinkingRow />
-          </div>
-        </div>
-      )}
     </div>
   );
 });
 
-type HandoffSelection = { provider: string; model: string };
+type HandoffSelection = { provider: string; model: string; effort?: string };
 type HandoffMarker = {
   from: HandoffSelection;
   to: HandoffSelection;
@@ -2339,10 +2798,6 @@ function handoffStatus(handoff: HandoffMarker, text: string): string {
   return handoff.strategy && handoff.strategy !== "native_resume" ? "Context handoff" : "Model changed";
 }
 
-/**
- * "Model changed / Claude Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names
- * the instances list, under a line saying what happened.
- */
 /** Where `/clear` started the model context again: a quiet rule across the thread with its label. */
 function ContextClearedDivider({ text }: { text: string }) {
   return <div role="separator" aria-label={text} className="context-cleared">
@@ -2352,9 +2807,25 @@ function ContextClearedDivider({ text }: { text: string }) {
   </div>;
 }
 
+/**
+ * "Model changed / Claude Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names
+ * the instances list, under a line saying what happened. A turn that changed only the reasoning
+ * level of its model says that on one line ("Reasoning: Medium → High"); a model change names each
+ * side's level in its label, so both changing at once is still one marker.
+ */
 function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text: string }) {
   // Names come from the provider snapshots: show them once those arrive.
   useProviderSnapshotsStore((state) => state.scopes);
+  const reasoning = handoff.transfer ? undefined : reasoningChange(handoff.from, handoff.to);
+  if (reasoning) {
+    return <div role="status" aria-label={`Reasoning changed: ${reasoning.from} to ${reasoning.to}`}
+      className="flex w-full items-center justify-center gap-2 py-1.5 text-xs text-muted-foreground">
+      <span className="text-[11px] opacity-70">Reasoning:</span>
+      <span>{reasoning.from}</span>
+      <span aria-hidden="true">→</span>
+      <span>{reasoning.to}</span>
+    </div>;
+  }
   const iconId = (selection: HandoffSelection) => {
     const brand = inferModelBrand(selection.model, undefined, selection.provider).brandId;
     // An unknown model falls back to its provider's id, which ProviderIcon maps to the vendor logo.
@@ -2481,6 +2952,11 @@ const AssistantParts = memo(function AssistantParts({
         i++;
         continue;
       }
+      if (isSecretRequestPart(part)) {
+        elems.push(<SecretRequestInline key={`${msg.id}-secret`} request={part.data} />);
+        i++;
+        continue;
+      }
 
       if (isTextPart(part)) {
         const text = part.text;
@@ -2493,10 +2969,14 @@ const AssistantParts = memo(function AssistantParts({
               data-message-id={msg.id}
               data-part-index={i}
             >
-              <Markdown
+              <LiveMarkdown
+                messageId={msg.id}
+                images={THREAD_IMAGES}
                 content={text}
                 className="leading-relaxed [&_p]:leading-relaxed"
                 streaming={isLast && isStreaming}
+                // Text followed by a tool call or more text is finished: it shows whole.
+                paced={isLast && isStreaming && !parts.slice(i + 1).some((later) => isTextPart(later) || isV5ToolPart(later))}
               />
             </div>,
           );

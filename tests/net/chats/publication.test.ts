@@ -150,8 +150,9 @@ it('projects the exact foreign human event identity from real authenticated TLS 
   owner.services.spaces.host.postMeta(binding.space, 'member.removed', { user: self.user })
   expect(owner.services.spaces.host.canRead(binding.channel, peer)).toBe(false)
   // A removed member may retain its old display projection. The current Host
-  // ACL still denies an actual request over its authenticated TLS session.
-  await expect(member.services.spaces.session(binding.space)!.metaHead(owner.services.spaces.host.metaStream(binding.space))).rejects.toMatchObject({ code: 'route_unreachable' })
+  // ACL still denies an actual request over its authenticated TLS session: that stream is refused with `forbidden`, as
+  // for a block, and the connection stays up.
+  await expect(member.services.spaces.session(binding.space)!.metaHead(owner.services.spaces.host.metaStream(binding.space))).rejects.toMatchObject({ code: 'forbidden' })
   const denied = member.services.spaces.client.post(binding.channel, 'revoked member')
   await member.services.spaces.flush(binding.space)
   expect(rt.outbox.get(denied)?.state).not.toBe('sent')

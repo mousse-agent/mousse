@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Automation page</title>
+  <!-- What this page's first script reads, reported to the site that served it (`/report`). -->
+  <script>
+    window.firstMark = String(navigator.webdriver)
+    window.pageName = new URLSearchParams(location.search).get('name') || 'page'
+    fetch('/report?k=' + encodeURIComponent(window.pageName) + '&v=' + window.firstMark)
+  </script>
+</head>
+<body>
+  <p id="first"></p>
+  <p id="now"></p>
+  <p id="mouse">mouse:</p>
+  <script>
+    const params = new URLSearchParams(location.search)
+    const name = window.pageName
+    const report = (key, value) => fetch('/report?k=' + encodeURIComponent(key) + '&v=' + encodeURIComponent(String(value)))
+    document.getElementById('first').textContent = name + '-first:' + window.firstMark
+    // Shown at once, so the page's layout never moves under an action.
+    const showNow = () => { document.getElementById('now').textContent = name + '-now:' + navigator.webdriver }
+    showNow()
+    setInterval(showNow, 50)
+    // `frame`: a frame on that URL (another site's page nests further frames the same way).
+    if (params.get('frame')) {
+      const frame = document.createElement('iframe')
+      frame.title = name + ' frame'
+      frame.style.cssText = 'display:block;width:640px;height:220px'
+      frame.src = params.get('frame')
+      document.body.appendChild(frame)
+    }
+    // `sameSite`: that many frames of this page's own site, which run in the page's own process.
+    for (let index = 0; index < Number(params.get('sameSite') || 0); index += 1) {
+      const frame = document.createElement('iframe')
+      frame.title = name + ' same-site frame ' + index
+      frame.style.cssText = 'display:block;width:300px;height:60px'
+      frame.srcdoc = '<p>same-site frame ' + index + '</p>'
+      document.body.appendChild(frame)
+    }
+    // `popup`: buttons and a link that open that URL as a site would.
+    if (params.get('popup')) {
+      const target = params.get('popup')
+      const button = (label, onClick) => {
+        const element = document.createElement('button')
+        element.type = 'button'
+        element.textContent = label
+        element.style.cssText = 'display:block;margin:8px'
+        element.addEventListener('click', onClick)
+        document.body.appendChild(element)
+      }
+      button('Open popup', () => { window.open(target, '_blank') })
+      button('Open without opener', () => { window.open(target, '_blank', 'noopener') })
+      button('Open blank', () => {
+        const opened = window.open('')
+        report(name + '-blank-at-once', opened.navigator.webdriver)
+        opened.close()
+      })
+      const link = document.createElement('a')
+      link.href = target
+      link.target = '_blank'
+      link.rel = 'noopener'
+      link.textContent = 'Open link'
+      link.style.cssText = 'display:block;margin:8px'
+      document.body.appendChild(link)
+    }
+    // `mouse`: the `buttons` each mouse event carries on a button, as a page reads them.
+    if (params.get('mouse')) {
+      const press = document.createElement('button')
+      press.type = 'button'
+      press.textContent = 'Press'
+      press.style.cssText = 'display:block;margin:8px;width:160px;height:48px'
+      const seen = []
+      for (const type of ['mousemove', 'mousedown', 'mouseup', 'click']) {
+        press.addEventListener(type, (event) => {
+          seen.push(type + '=' + event.buttons)
+          document.getElementById('mouse').textContent = 'mouse:' + seen.join(',')
+        })
+      }
+      document.body.appendChild(press)
+    }
+    // `beacon`: what the page reads now, reported again and again (for a page no one can observe).
+    if (params.get('beacon')) setInterval(() => report(name + '-now', navigator.webdriver), 200)
+    // `alert`: a dialog left open; what the page reads once it closes.
+    if (params.get('alert')) setTimeout(() => { alert('Left open'); report(name + '-after-alert', navigator.webdriver) }, 200)
+    // `hints`: what the page's script reads of the browser's identity.
+    if (params.get('hints') && navigator.userAgentData) {
+      const data = navigator.userAgentData
+      report(name + '-hints', JSON.stringify({ brands: data.brands, platform: data.platform, mobile: data.mobile, userAgent: navigator.userAgent }))
+    }
+  </script>
+</body>
+</html>

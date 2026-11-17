@@ -1,20 +1,21 @@
 import { isAbsolute } from 'node:path'
-import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
+import { MAX_BOT_MEMORY_TEXT_CHARS, type BotMemoryEntry, type BotMemoryForgetResult, type BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { DomainRpcError, domainObject } from '../../protocol/domainRegistry'
 import { isBotId } from '../definitions/BotDefinitionStore'
 import type { BotMemoryAdmin } from '../seams'
 
 /**
- * The handlers of the three client `bots.memory.*` methods (Bot Phase 1 §5.11). WP2 registers
+ * The handlers of the four client `bots.memory.*` methods (Bot Phase 1 §5.11). WP2 registers
  * them in `registerMethods.ts`; `bots.memory.reindex` stays an engine function until Phase 2.
  * Each takes the request's params (with `profileId`) and the profile's `BotMemoryAdmin`.
  */
 
-export type BotMemoryMethod = 'bots.memory.list' | 'bots.memory.forget' | 'bots.memory.export'
+export type BotMemoryMethod = 'bots.memory.list' | 'bots.memory.forget' | 'bots.memory.edit' | 'bots.memory.export'
 
 export interface BotMemoryMethodResults {
   'bots.memory.list': BotMemoryListing
   'bots.memory.forget': BotMemoryForgetResult
+  'bots.memory.edit': { entry: BotMemoryEntry }
   'bots.memory.export': { files: string[] }
 }
 
@@ -23,6 +24,7 @@ type Handlers = { [M in BotMemoryMethod]: (params: unknown) => Promise<BotMemory
 const KEYS: Record<BotMemoryMethod, readonly string[]> = {
   'bots.memory.list': ['botId', 'history'],
   'bots.memory.forget': ['botId', 'id'],
+  'bots.memory.edit': ['botId', 'id', 'text'],
   'bots.memory.export': ['botId', 'dir']
 }
 
@@ -54,6 +56,17 @@ export function botMemoryMethods(admin: BotMemoryAdmin): Handlers {
       if (typeof p.id !== 'string' || !/^m\d{1,9}(?:v\d{1,9})?$/.test(p.id)) throw new DomainRpcError('invalid_params', 'A memory id like m12 is required')
       try {
         return admin.forget(p.botId as string, p.id)
+      } catch (error) {
+        return rpcError(error)
+      }
+    },
+    'bots.memory.edit': async (value) => {
+      const p = params('bots.memory.edit', value)
+      if (typeof p.id !== 'string' || !/^m\d{1,9}(?:v\d{1,9})?$/.test(p.id)) throw new DomainRpcError('invalid_params', 'A memory id like m12 is required')
+      // The store says when it is too long; this only keeps a huge payload out.
+      if (typeof p.text !== 'string' || !p.text.trim() || p.text.length > MAX_BOT_MEMORY_TEXT_CHARS * 4) throw new DomainRpcError('invalid_params', 'Write what it should remember.')
+      try {
+        return { entry: admin.edit(p.botId as string, p.id, p.text) }
       } catch (error) {
         return rpcError(error)
       }

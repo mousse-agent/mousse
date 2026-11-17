@@ -18,7 +18,7 @@ import { TranscriptAssembler, type TranscriptStreamState } from '../src/mms/run/
 import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
 import type { AgentActivityItem, ProviderToolEvent } from '../src/shared/agentActivity'
 import type { ChatMessage } from '../src/shared/types'
-import { FakeClaudeCli, SESSION, resultFrame, type Frame } from './run/fakeClaudeCli'
+import { FakeClaudeCli, SESSION, messageStart, resultFrame, toolStart, type Frame } from './run/fakeClaudeCli'
 
 const FIXTURE = join(__dirname, 'run', 'fixtures', 'activity', 'claude-subscription.ndjson')
 
@@ -93,11 +93,13 @@ describe('claudeActivityStart and claudeActivityComplete', () => {
     expect(claudeActivityStart('Bash', { cmd: 'ls' }, true)).toMatchObject({ kind: 'generic' })
     expect(claudeActivityStart('Glob', { pattern: '*.ts' }, true)).toEqual({ kind: 'search', scope: 'files', query: '*.ts' })
     expect(claudeActivityStart('WebFetch', { url: 'https://a.test' }, true)).toEqual({ kind: 'web_search', query: 'https://a.test' })
-    expect(claudeActivityStart('ExitPlanMode', { plan: '# Plan' }, true)).toEqual({ kind: 'plan', text: '# Plan' })
     expect(claudeActivityStart('mcp__srv__tool', { a: 1 }, true)).toEqual({ kind: 'generic', server: 'srv', input: { a: 1 } })
     // Nothing is typed before the arguments are in, except a subagent call.
     expect(claudeActivityStart('Bash', undefined, true)).toBeUndefined()
     expect(claudeActivityStart('Agent', undefined, true)).toEqual({ kind: 'subagent' })
+    // The model a subagent call names is kept, for the subagent's row.
+    expect(claudeActivityStart('Agent', { description: 'Look', subagent_type: 'Explore', model: 'sonnet', prompt: 'p' }, true))
+      .toEqual({ kind: 'subagent', agentType: 'Explore', model: 'sonnet', description: 'Look' })
     // A Mousse delegation keeps its bounded record, not typed fields.
     expect(claudeActivityStart('mcp__mousse__delegate_task', { title: 'x', prompt: 'p' }, true)).toBeUndefined()
     expect(claudeActivityComplete(claudeCallContext('mcp__mousse__delegate_task', {}, true), undefined, 'x', false)).toEqual({ handedOff: false })
@@ -251,6 +253,14 @@ describe('background agents, plans and stopped turns', () => {
     expect(saved(events).byCall('bg')).toMatchObject({ kind: 'subagent', status: 'done', background: true, nativeId: 't9', durationMs: 7000, summary: 'Agent "Background" completed' })
   })
 
+  it("an agent's Markdown report keeps its line breaks on the row", () => {
+    const report = '## Findings\r\n\r\n- tool_running  \n- streaming\n\n\n\n- compacting\n'
+    const events = readFrames([...launch, { ...notify('completed'), summary: report }])
+    const summary = '## Findings\n\n- tool_running\n- streaming\n\n- compacting'
+    expect(completeOf(events, 'bg')?.activity).toMatchObject({ summary })
+    expect(saved(events).byCall('bg')).toMatchObject({ summary })
+  })
+
   it('a failed or stopped notification closes the row failed or interrupted', () => {
     expect(saved(readFrames([...launch, notify('failed')])).byCall('bg')).toMatchObject({ status: 'failed' })
     expect(saved(readFrames([...launch, notify('stopped')])).byCall('bg')).toMatchObject({ status: 'interrupted', interruptedBy: 'stop' })
@@ -268,12 +278,10 @@ describe('background agents, plans and stopped turns', () => {
     expect(saved(reader).byCall('bg')).toMatchObject({ kind: 'subagent', status: 'done', background: true, summary: 'Running in the background' })
   })
 
-  it('stopping the turn interrupts a backgrounded agent and an open plan, and a running child with its parent', () => {
+  it('stopping the turn interrupts a backgrounded agent, and a running child with its parent', () => {
     const events = readFrames(
       [
         ...launch,
-        stream('plan', 'ExitPlanMode'),
-        assistant('plan', 'ExitPlanMode', { plan: '# The plan' }),
         stream('parent', 'Agent'),
         assistant('parent', 'Agent', { description: 'Parent', prompt: 'p' }),
         stream('child', 'Bash', 'parent'),
@@ -282,15 +290,10 @@ describe('background agents, plans and stopped turns', () => {
       'stop'
     )
     const { byCall } = saved(events)
-    for (const callId of ['bg', 'plan', 'parent', 'child']) {
+    for (const callId of ['bg', 'parent', 'child']) {
       expect(byCall(callId)).toMatchObject({ status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' })
     }
     expect(byCall('child').parentId).toBe(byCall('parent').id)
-  })
-
-  it('an open plan on a settled turn is done', () => {
-    const events = readFrames([stream('plan', 'ExitPlanMode'), assistant('plan', 'ExitPlanMode', { plan: '# The plan' })], 'no_result')
-    expect(saved(events).byCall('plan')).toMatchObject({ kind: 'plan', status: 'done' })
   })
 })
 
@@ -457,6 +460,26 @@ describe('what the frame reader keeps of a call', () => {
     expect(saved(events).byCall('long')).toMatchObject({ kind: 'command', status: 'done', output: 'all green\n', nativeId: 'b1' })
   })
 
+  it('a tool search and a Mousse app tool keep their names on the saved row', () => {
+    const events = readFrames([
+      stream('ts', 'ToolSearch'),
+      assistant('ts', 'ToolSearch', { query: 'select:mcp__mousse__profiler_overview', max_results: 5 }),
+      answer('ts', [{ type: 'tool_reference', tool_name: 'mcp__mousse__profiler_overview' }]),
+      stream('po', 'mcp__mousse__profiler_overview'),
+      assistant('po', 'mcp__mousse__profiler_overview', {}),
+      answer('po', '{"cpu":3}')
+    ])
+    for (const [callId, name] of [['ts', 'ToolSearch'], ['po', 'mcp__mousse__profiler_overview']] as const) {
+      expect(of(events, callId).filter((event) => event.phase === 'start').every((event) => event.toolName === name)).toBe(true)
+      expect(completeOf(events, callId)?.toolName).toBe(name)
+    }
+    expect(lastStartOf(events, 'po')?.activity).toMatchObject({ kind: 'generic', server: 'mousse' })
+    const { rows } = saved(events)
+    // The row's own name, not only the item's: the chat names the row from it.
+    expect(rows.map((row) => row.toolCall?.toolName)).toEqual(['ToolSearch', 'mcp__mousse__profiler_overview'])
+    expect(rows.map((row) => row.toolCall?.details)).toEqual([[], []])
+  })
+
   it('a failed foreground command is failed by its result, not by the task end', () => {
     const events = readFrames([
       stream('long', 'Bash'),
@@ -516,12 +539,10 @@ describe('what the frame reader keeps of a call', () => {
     expect(JSON.stringify(failed)).not.toContain('"diff"')
   })
 
-  it('a long command and a long plan keep their kind through completion, and a Mousse delegation keeps its record', () => {
+  it('a long command keeps its kind through completion, and a Mousse delegation keeps its record', () => {
     const command = `cat > f <<'EOF'\n${big}EOF`
     const bash = saved(readFrames([stream('c', 'Bash'), assistant('c', 'Bash', { command }), answer('c', 'ok', { stdout: 'ok', stderr: '', interrupted: false })]))
     expect(bash.byCall('c')).toMatchObject({ kind: 'command', status: 'done', output: 'ok' })
-    const plan = saved(readFrames([stream('p', 'ExitPlanMode'), assistant('p', 'ExitPlanMode', { plan: big }), answer('p', 'approved')]))
-    expect(plan.byCall('p')).toMatchObject({ kind: 'plan', status: 'done' })
     const events = readFrames([
       stream('d', 'mcp__mousse__delegate_task'),
       assistant('d', 'mcp__mousse__delegate_task', { title: 'Reviewer', prompt: big + big }),
@@ -593,5 +614,27 @@ describe('Claude text blocks', () => {
       reader.observe(frame)
     expect(reader.text).toBe('Checking the logs.\n\nThe logs are clean.')
     expect(texts.at(-1)).toBe('Checking the logs.\n\nThe logs are clean.')
+  })
+})
+
+describe('a call dropped before it ran (its input cut off) closes without a result', () => {
+  const dropped = (end: Frame, stopped: boolean) => {
+    const events: ProviderToolEvent[] = []
+    const reader = frameReader(events)
+    reader.stopped = () => stopped
+    reader.observe(toolStart('late', 'Bash', 'prompt') as unknown as SDKMessage)
+    reader.observe(end as unknown as SDKMessage)
+    return events.find((event) => event.phase === 'complete' && event.callId === 'late')?.activity
+  }
+
+  it('at the next message or a steer\'s aborted result: no result reported', () => {
+    expect(dropped(messageStart('steer'), false)).toMatchObject({ status: 'interrupted', interruptedBy: 'no_result' })
+    expect(dropped(resultFrame({ terminalReason: 'aborted_streaming' }), false)).toMatchObject({ status: 'interrupted', interruptedBy: 'no_result' })
+  })
+
+  it('at a Stop\'s aborted result: stopped, like every other call the Stop ended', () => {
+    expect(dropped(resultFrame({ terminalReason: 'aborted_streaming' }), true)).toMatchObject({ status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' })
+    // A Stop says nothing about the next message: a call dropped there was cut off by a steer.
+    expect(dropped(messageStart('steer'), true)).toMatchObject({ interruptedBy: 'no_result' })
   })
 })

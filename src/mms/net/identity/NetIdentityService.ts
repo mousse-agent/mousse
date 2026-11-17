@@ -213,6 +213,64 @@ export class NetIdentityService implements IdentityService {
         this.localNodeMatches(current, self.node)
     }
   }
+  /**
+   * This computer was removed from its user's devices: the roster it holds revokes it through its
+   * newest key epoch, so it can never reconnect with these keys. A delegation that only lapsed is
+   * not a removal, and the authority (which cannot be revoked) is never removed.
+   */
+  selfRemoved(): boolean {
+    const state = this.load(),
+      self = state.self
+    if (!self || state.writer === 'authority') return false
+    const user = state.users[self.user]
+    if (!user?.current || user.state !== 'ok') return false
+    let roster: Roster
+    try {
+      roster = this.rosterDocument(user.current, user.root)
+    } catch (cause) {
+      if (cause instanceof NetError) return false
+      throw cause
+    }
+    if (roster.authorityNode === self.node) return false
+    const through = roster.revoked.find((row) => row.subject === self.node)?.throughKeyEpoch
+    if (through === undefined) return false
+    // Revoking prunes the delegation; one that is still listed counts only from a newer key epoch.
+    return !this.delegations(roster).some(
+      (row) => row.kind === 'node' && row.subject === self.node && row.keyEpoch > through
+    )
+  }
+  /**
+   * Whether this computer may leave its devices for a new identity, and why. `removed`: see
+   * `selfRemoved`. `alone`: no other device holds an unexpired pass in the list this computer
+   * holds. `lapsed`: its own pass lapsed longer ago than the keeper can renew. Otherwise `live`
+   * names the devices that still rely on this list, and whether this computer keeps it.
+   */
+  startOver():
+    | { allowed: 'removed' | 'alone' | 'lapsed'; keeper: boolean }
+    | { allowed?: undefined; keeper: boolean; live: string[] }
+    | undefined {
+    const state = this.load(),
+      self = state.self
+    if (!self) return undefined
+    const keeper = state.writer === 'authority'
+    if (this.selfRemoved()) return { allowed: 'removed', keeper }
+    const user = state.users[self.user]
+    if (!user?.current) return { allowed: 'alone', keeper }
+    const now = this.clock.now(),
+      latest = new Map<NodeId, NodeDelegation>()
+    for (const row of this.delegations(this.rosterDocument(user.current, user.root)))
+      if (row.kind === 'node') {
+        const held = latest.get(row.subject)
+        if (!held || row.keyEpoch > held.keyEpoch || (row.keyEpoch === held.keyEpoch && row.issuedAt > held.issuedAt))
+          latest.set(row.subject, row)
+      }
+    const own = latest.get(self.node)
+    if (!keeper && (!own || now - own.expiresAt >= RENEW_LAPSED_MAX_MS)) return { allowed: 'lapsed', keeper }
+    const live = [...latest.values()]
+      .filter((row) => row.subject !== self.node && now < row.expiresAt)
+      .map((row) => row.name)
+    return live.length ? { keeper, live } : { allowed: 'alone', keeper }
+  }
   rosterState(user: UserId): RosterState {
     return this.load().users[user]?.state ?? 'ok'
   }

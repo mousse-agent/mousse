@@ -1,6 +1,11 @@
+import { useEffect } from 'react'
+import type { MousseSettingsUpdate } from '../../shared/settings'
 import { applySideCardToggle, deriveSideCardState, nextSideCardToggleState } from '../components/sideCard/sideCardLogic'
 import { openThreadRenameDialog } from '../components/ThreadRenameDialog'
+import { showToast } from '../components/ui/Toast'
 import { openRailPage } from '../lib/railPages'
+import { mainAreaAvailable } from '../lib/mainAreaAvailable'
+import { reloadWindow } from '../services/reloadWindow'
 import { SURFACE_CHOICES, openSurface } from '../lib/surfaces'
 import {
   addProjectAndStartThread,
@@ -11,14 +16,19 @@ import {
   selectAdjacentThread,
   togglePinOpenThread
 } from '../lib/threadActions'
+import { attachMouseHistory, canOpenFromHistory, stepHistory, stepTarget, trackThreadHistory, useThreadHistoryStore } from '../lib/threadHistory'
 import { useAppStore } from '../stores/appStore'
-import { useCommand, useCommands } from './commandRegistry'
+import { runCommand, useCommand, useCommands } from './commandRegistry'
 import { openPalette, togglePalette } from './paletteActions'
 
 const logFailure = (what: string) => (error: unknown) => console.error(`${what} failed`, error)
 
 /** Every surface, for the palette and the menu. The letters stay with the empty panel's picker, which registers its own. */
 const SURFACE_COMMANDS = SURFACE_CHOICES.map((choice) => ({ id: choice.commandId, run: () => openSurface(choice.id) }))
+
+/** Back and forward work wherever the workspace shows; the settings page makes it inert. */
+const canStep = (direction: 1 | -1): boolean =>
+  !useAppStore.getState().settingsOpen && stepTarget(useThreadHistoryStore.getState(), direction, canOpenFromHistory) !== null
 
 /**
  * Registers the commands that act on app-wide state. Commands that belong to one component
@@ -31,6 +41,11 @@ export function useAppCommands(): void {
   useCommand('thread.newPrivate', () => void createAndSelectPrivateThread())
   useCommand('thread.next', () => void selectAdjacentThread(1))
   useCommand('thread.previous', () => void selectAdjacentThread(-1))
+  useCommand('thread.back', () => void stepHistory(-1).catch(logFailure('Going back')), () => canStep(-1))
+  useCommand('thread.forward', () => void stepHistory(1).catch(logFailure('Going forward')), () => canStep(1))
+  useEffect(() => trackThreadHistory(), [])
+  // The mouse's back and forward buttons run the same commands, so an open dialog or the Shortcuts recorder stops them too.
+  useEffect(() => attachMouseHistory(window, (direction) => void runCommand(direction === -1 ? 'thread.back' : 'thread.forward', 'menu')), [])
   useCommand('threads.search', () => openPalette('messages'))
   useCommand('thread.rename', () => {
     const thread = openStartedThread()
@@ -55,10 +70,17 @@ export function useAppCommands(): void {
     state.setThreadsSidebarOpen(!state.threadsSidebarOpen)
   })
   useCommand('mainArea.toggle', () => {
+    // Chats has no app panel; toggling there would only flip it unseen for the Projects view.
+    if (!mainAreaAvailable()) return
     const state = useAppStore.getState()
     state.setMainAreaOpen(!state.mainAreaOpen)
   })
   useCommand('terminal.open', () => openSurface('terminal'))
+  // The built-in theme under the user theme stays on; only the user theme's colors and CSS go.
+  useCommand('theme.builtIn', () => void window.mousse.settings.set({ appearance: { userTheme: '' } } as MousseSettingsUpdate).catch(logFailure('Turning off the custom theme')))
+  useCommand('window.reload', () => void reloadWindow().then((outcome) => {
+    if (outcome === 'unsaved') showToast({ message: 'Save or close unsaved files first', tone: 'attention', key: 'window.reload' })
+  }))
   useCommand('settings.open', () => void openRailPage('settings'))
   useCommand('automations.open', () => void openRailPage('automations'))
   useCommand('usage.open', () => void openRailPage('usage'))

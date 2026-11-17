@@ -1,0 +1,59 @@
+/* What a bot started (an automation): the subagent card's row, with one action beside it. */
+.bot-started-card {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.bot-started-card > .subagent-card {
+  flex: 1 1 auto;
+}
+
+/* A row with nothing to open (a background command): no hover tint. */
+.bot-started-card > .subagent-card.bot-started-static:hover {
+  background: transparent;
+}
+
+.bot-started-card .subagent-avatar.is-chip {
+  width: 24px;
+  height: 24px;
+  color: var(--text-secondary);
+}
+
+.bot-started-action {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  /* As wide for Pause as for Resume, so the row's arrow never moves; its label sits at the row's end. */
+  min-width: 76px;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.bot-started-action:hover:not(:disabled) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.bot-started-action:active:not(:disabled) {
+  background: var(--ui-pressed);
+}
+
+.bot-started-action:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.bot-started-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

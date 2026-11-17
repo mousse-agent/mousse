@@ -1,10 +1,14 @@
-import { memo } from "react";
+import { memo, useContext, useLayoutEffect, useRef } from "react";
+import { LiveRunBodyContext } from "./tool-open-state";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { ToolRowBase } from "./tool-row-base";
 import { Markdown } from "../markdown";
 import { ThinkingIcon } from "../../../../lib/icons";
-import { latestThoughtHeading, thoughtHeading } from "../utils/format-tool";
+import { useLiveThought } from "../../../../stores/liveTextStore";
+import { thoughtSourceOf } from "../utils/assistant-blocks";
+import { countRender } from "../render-counts";
+import { liveThoughtText, thoughtHeadline } from "../utils/format-tool";
 import {
   mapPartStateToInvocationState,
   mapToolInvocationToStep,
@@ -30,45 +34,49 @@ export function ThinkingCollapsed({
 }: ThinkingCollapsedProps) {
   useToolComplete(state === "animating", step.duration, onComplete);
 
-  const heading = thoughtHeading(step.thoughtContent);
+  // One still line: the thought's headline, the same line the live row and a group show.
+  const heading = thoughtHeadline(step.thoughtContent);
   const isAnimating = state === "animating";
+  // In an opened live row the thought being written shows open, so it can be read in full as it grows.
+  const inLiveRun = useContext(LiveRunBodyContext);
+  const startsOpen = defaultOpen ?? (inLiveRun && isAnimating);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const atEndRef = useRef(true);
+  // While it is written, its box keeps its newest words in view, unless the person scrolled up in it.
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (box && isAnimating && atEndRef.current) box.scrollTop = box.scrollHeight;
+  }, [isAnimating, step.thoughtContent]);
 
   return (
     <ToolRowBase
       icon={<ThinkingIcon size={18} active={isAnimating} />}
-      shimmerLabel="Thinking"
       completeLabel={heading || "Thinking"}
-      // While it streams, the newest line of the thought follows the label.
-      detail={isAnimating ? latestThoughtHeading(step.thoughtContent) || undefined : undefined}
+      labelTitle={liveThoughtText(step.thoughtContent) || undefined}
+      // The icon turns; a shimmering label would paint every frame.
+      shimmer={false}
       isAnimating={isAnimating}
       expandable={!!step.thoughtContent}
-      defaultOpen={defaultOpen}
+      defaultOpen={startsOpen}
       expanded={expanded}
       onToggleExpand={onToggleExpand}
     >
-      <div className="max-h-[175px] overflow-y-auto">
+      <div
+        ref={boxRef}
+        className="max-h-[175px] overflow-y-auto"
+        onScroll={(event) => {
+          const box = event.currentTarget;
+          atEndRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
+        }}
+      >
         <Markdown
           content={step.thoughtContent ?? ""}
+          // A thought still being written changes on every update: its splits are not kept.
+          streaming={isAnimating}
           className="text-base text-muted-foreground leading-relaxed [&_p]:leading-relaxed"
         />
       </div>
     </ToolRowBase>
-  );
-}
-
-/**
- * The row a turn shows from the moment it is sent until its first output: the
- * same row a thought takes, so the thought (or a tool call) that follows
- * replaces it in place.
- */
-export function LiveThinkingRow() {
-  return (
-    <ToolRowBase
-      icon={<ThinkingIcon size={18} active />}
-      shimmerLabel="Thinking"
-      completeLabel="Thinking"
-      isAnimating
-    />
   );
 }
 
@@ -91,6 +99,10 @@ export const ThinkingTool = memo(function ThinkingTool({
   expanded,
   onToggleExpand,
 }: ThinkingToolProps) {
+  countRender("ThinkingTool");
+  // The thought as it is written (see liveTextStore): a streamed delta renders this row alone.
+  const source = part && !externalStep ? thoughtSourceOf(part) : undefined;
+  const thought = useLiveThought(source);
   let step: Extract<TimelineStep, { type: "tool-call" }>;
   let stepState: StepState;
   let onComplete: () => void;
@@ -100,9 +112,10 @@ export const ThinkingTool = memo(function ThinkingTool({
     stepState = externalState;
     onComplete = externalOnComplete;
   } else if (part) {
+    const args = part.input ?? part.args ?? {};
     step = mapToolInvocationToStep(part.toolCallId ?? part.id ?? "thinking", {
       toolName: "Thinking",
-      args: part.input ?? part.args ?? {},
+      args: source && thought !== source.thought ? { ...args, thought } : args,
       state: mapPartStateToInvocationState(part.state),
       result: part.output ?? part.result,
     });

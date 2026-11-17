@@ -9,7 +9,7 @@ import { approvalTooLongReason, assertRuntimeSettingsSupported } from '../agentD
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import type { AgentRuntimeHostWithBrowser } from '../orchestrator/browser'
 import type { MmsProfileServices } from '../MmsProfileServices'
-import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
+import { OwnedWorkBarrier, type OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { assertOwnedPath } from '../profiles/pathSafety'
 import type { ResolvedAgentDefinition } from '../../shared/agents/types'
@@ -55,6 +55,8 @@ export class MmsAgentExecutionService {
 
   beginShutdown(): void { this.lifecycle.beginShutdown() }
   getActiveCount(): number { return this.lifecycle.count }
+  /** The work `getActiveCount` counts, each with the threads it belongs to. */
+  getActiveWork(): OwnedWorkEntry[] { return this.lifecycle.entries() }
   async dispose(): Promise<void> { this.beginShutdown(); await this.lifecycle.waitForIdle() }
 
   /** Host-injected dispatcher. Root adapts platform.browser to BrowserRuntimePort. */

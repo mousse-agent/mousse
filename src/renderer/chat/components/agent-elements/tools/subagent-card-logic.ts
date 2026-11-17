@@ -4,7 +4,7 @@ import type { SubagentCardModel } from "../../../adapters/subagentCards";
 import { lineageModelLabel, lineageSubagentName, waitingLabel } from "../../../../components/sideCard/lineageLogic";
 import { subagentBadgeTone, type SubagentBadgeTone } from "../../../../components/subagentStatus";
 
-/** Longest result a card quotes; the card clamps it to two lines. */
+/** Longest result a card quotes; the row shows one line of it and its tooltip the rest. */
 export const SUBAGENT_RESULT_CHARS = 280;
 
 const STATE_LABELS: Partial<Record<SubagentState, string>> = {
@@ -55,9 +55,10 @@ export function cardTitle(card: Pick<SubagentCardModel, "title">): string {
   return lineageSubagentName(card);
 }
 
-/** "provider · model", or null when the subagent inherited its parent's. */
-export function cardModelLabel(card: Pick<SubagentCardModel, "provider" | "model">): string | null {
-  return lineageModelLabel(card);
+/** "provider · model", then "on <computer>" for a remote subagent; null when it inherited its parent's model here. */
+export function cardModelLabel(card: Pick<SubagentCardModel, "provider" | "model" | "computer">): string | null {
+  const label = [lineageModelLabel(card), card.computer ? `on ${card.computer}` : null].filter(Boolean).join(" · ");
+  return label || null;
 }
 
 /**
@@ -75,6 +76,25 @@ export function cardStateNote(card: Pick<SubagentCardModel, "state" | "pending" 
         : null;
   if (!card.continued || isCardRunning(card)) return base;
   return base ? `${base} · continued` : "Continued";
+}
+
+/** The second line of a row: a state worth reading (tinted), then the result, or else the state in words. */
+export interface CardLine {
+  note: { text: string; tone: SubagentBadgeTone } | null;
+  text: string | null;
+}
+
+export function cardLine(
+  card: Pick<SubagentCardModel, "state" | "pending" | "waitingOn" | "continued">,
+  result: string | null | undefined,
+): CardLine {
+  const noteText = cardStateNote(card);
+  const note = noteText ? { text: noteText, tone: subagentBadgeTone(card) } : null;
+  const plain = result ? plainResultText(result) : "";
+  if (plain) return { note, text: plain };
+  if (note) return { note, text: null };
+  const status = cardStatusLabel(card);
+  return { note: null, text: card.state === "working" || card.state === "starting" || card.pending ? `${status}…` : status };
 }
 
 type CardCounted = Pick<SubagentCardModel, "state" | "pending">;
@@ -106,6 +126,11 @@ export function cardGroupSummary(cards: readonly CardCounted[]): { title: string
   return { title: `${cards.length} ${cards.length === 1 ? "subagent" : "subagents"}`, parts };
 }
 
+/** A folded group's title: the first subagent's name, then how many more ("+ 2"), kept apart so the name alone truncates. */
+export function cardGroupFoldedTitle(cards: readonly Pick<SubagentCardModel, "title">[]): { name: string; rest: string } {
+  return { name: cards[0] ? cardTitle(cards[0]) : "", rest: `+ ${Math.max(0, cards.length - 1)}` };
+}
+
 /** The group's summary in one line, for its accessible name: "5 subagents · 2 working · 3 done". */
 export function cardGroupLabel(cards: readonly CardCounted[]): string {
   const { title, parts } = cardGroupSummary(cards);
@@ -132,9 +157,62 @@ export function cardIconStack<T>(cards: readonly T[], limit = GROUP_ICON_LIMIT):
   return { shown: cards.slice(0, limit), extra: Math.max(0, cards.length - limit) };
 }
 
+/** Inline Markdown reduced to its words: links and images to their text, emphasis and code marks dropped. */
+function plainInline(text: string): string {
+  // Code spans and escaped characters first, so the other rules never take them as marks.
+  const spans: string[] = [];
+  const hold = (value: string) => {
+    spans.push(value);
+    return `\u0000${spans.length - 1}\u0000`;
+  };
+  const held = text
+    .replace(/`{3,}[\w+-]*/g, " ")
+    .replace(/(`+)([^`]*?)\1/g, (_, _ticks: string, code: string) => hold(code.trim()))
+    .replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, (_, char: string) => hold(char));
+  return held
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/<(https?:\/\/[^>\s]+)>/g, "$1")
+    .replace(/(^|\s)#{1,6}\s+/g, "$1")
+    .replace(/(\*\*|__)(?=\S)(.+?)\1/g, "$2")
+    .replace(/(^|[^\w*])\*(?=\S)([^*]+?)\*(?!\w)/g, "$1$2")
+    .replace(/(^|[^\w])_(?=\S)([^_]+?)_(?!\w)/g, "$1$2")
+    .replace(/~~(.+?)~~/g, "$1")
+    .replace(/`/g, "")
+    .replace(/\u0000(\d+)\u0000/g, (_, index: string) => spans[Number(index)] ?? "");
+}
+
 /**
- * The last thing a subagent said: the text of its latest finished assistant reply, clipped to one
- * short paragraph. Null while it has said nothing.
+ * Markdown as the words a reader sees, on one line: headings, quotes, list and table marks, fences and
+ * rules dropped, inline marks removed, whitespace collapsed. For a one-line result on a card.
+ */
+export function plainResultText(markdown: string): string {
+  const words: string[] = [];
+  for (const raw of markdown.replace(/\r\n?/g, "\n").split("\n")) {
+    let line = raw.trim();
+    // Fences, rules and a table's divider row carry no words.
+    if (/^(`{3,}|~{3,})/.test(line) || /^([-*_]\s*){3,}$/.test(line) || /^\|?(\s*:?-+:?\s*\|)+\s*(:?-+:?\s*)?$/.test(line)) continue;
+    line = line
+      .replace(/^(>\s?)+/, "")
+      .replace(/^#{1,6}\s+/, "")
+      .replace(/^([-*+]|\d+[.)])\s+(\[[ xX]\]\s+)?/, "");
+    if (line.startsWith("|")) {
+      line = line
+        .replace(/^\||\|$/g, "")
+        .split("|")
+        .map((cell) => cell.trim())
+        .filter(Boolean)
+        .join(" · ");
+    }
+    line = plainInline(line).trim();
+    if (line) words.push(line);
+  }
+  return words.join(" ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The last thing a subagent said: the text of its latest finished assistant reply in plain words,
+ * clipped to one short paragraph. Null while it has said nothing.
  */
 export function lastResultText(
   messages: ReadonlyArray<{ role: string; kind?: string; content?: string; hidden?: boolean; streaming?: boolean }>,
@@ -143,7 +221,7 @@ export function lastResultText(
     const message = messages[index]!;
     if (message.role !== "assistant" || message.hidden || message.streaming) continue;
     if (message.kind !== undefined && message.kind !== "message") continue;
-    const text = (message.content ?? "").replace(/\s+/g, " ").trim();
+    const text = plainResultText(message.content ?? "");
     if (!text) continue;
     return text.length > SUBAGENT_RESULT_CHARS ? `${text.slice(0, SUBAGENT_RESULT_CHARS - 1)}…` : text;
   }

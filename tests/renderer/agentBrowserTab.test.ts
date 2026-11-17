@@ -126,3 +126,90 @@ describe('the browser tab without tabs', () => {
     expect(host.querySelector('.browser-empty-logo svg')).toBe(art)
   })
 })
+
+describe('restored browser tabs', () => {
+  const restoredTab = (id: string, ownerThreadId: string) =>
+    ({ id, ownerThreadId, url: 'https://example.test/', title: id, zoomFactor: 1, deviceToolbarOpen: false, devicePreset: 'responsive' as const })
+  const loadedTabIds = () => [...host.querySelectorAll('webview')].map((webview) => webview.getAttribute('data-browser-tab-id'))
+
+  it('start no page while hidden and load the first time they are shown', async () => {
+    useAppStore.setState({ browserTabs: [restoredTab('restored_a', 'thread_a'), restoredTab('restored_b', 'thread_b')] })
+    const show = async (active: boolean) => { act(() => root.render(createElement(BrowserPanel, { active }))); await settle() }
+    await show(false)
+    expect(loadedTabIds()).toEqual([])
+    await show(true)
+    expect(loadedTabIds()).toEqual(['restored_a'])
+    // Another thread's restored tab stays unloaded; a shown one stays loaded when the browser hides.
+    await show(false)
+    expect(loadedTabIds()).toEqual(['restored_a'])
+  })
+
+  it('load at once for a tab opened in this session or one an agent drives', async () => {
+    useAppStore.setState({ browserTabs: [restoredTab('restored_b', 'thread_b')] })
+    const opened = useAppStore.getState().addBrowserTab('thread_b')
+    await render(() => createElement(BrowserPanel, { active: false }))
+    expect(loadedTabIds()).toEqual([opened])
+    act(() => emit(agentState('restored_b', 'thread_b')))
+    await settle()
+    expect(loadedTabIds()).toEqual(['restored_b', opened])
+    expect(host.querySelector('webview[data-browser-tab-id="restored_b"]')?.hasAttribute('data-agent-controlled')).toBe(true)
+  })
+})
+
+describe('browser tabs out of use', () => {
+  const tab = (id: string, ownerThreadId: string) =>
+    ({ id, ownerThreadId, url: `https://example.test/${id}`, title: id, zoomFactor: 1, deviceToolbarOpen: false, devicePreset: 'responsive' as const })
+  const loadedTabIds = () => [...host.querySelectorAll('webview')].map((webview) => webview.getAttribute('data-browser-tab-id')).sort()
+  const show = async (threadId: string, tabId: string) => {
+    act(() => {
+      useAppStore.setState({ activeThreadId: threadId })
+      useAppStore.getState().setActiveBrowserTab(threadId, tabId)
+    })
+    await settle()
+  }
+  const webviewOf = (id: string) => host.querySelector(`webview[data-browser-tab-id="${id}"]`)!
+
+  it('unload past the three used before the one on screen, across threads, and reload their saved page when shown', async () => {
+    useAppStore.setState({ browserTabs: [tab('a1', 'thread_a'), tab('a2', 'thread_a'), tab('b1', 'thread_b'), tab('b2', 'thread_b'), tab('c1', 'thread_c')] })
+    await render(() => createElement(BrowserPanel, { active: true }))
+    for (const [thread, id] of [['thread_a', 'a1'], ['thread_a', 'a2'], ['thread_b', 'b1'], ['thread_b', 'b2'], ['thread_c', 'c1']]) await show(thread, id)
+    expect(loadedTabIds()).toEqual(['a2', 'b1', 'b2', 'c1'])
+    // The unloaded tab kept the address its page was last on.
+    act(() => useAppStore.getState().updateBrowserTab('a1', { url: 'https://example.test/a1/later' }))
+    await show('thread_a', 'a1')
+    expect(loadedTabIds()).toEqual(['a1', 'b1', 'b2', 'c1'])
+    expect(webviewOf('a1').getAttribute('src')).toBe('https://example.test/a1/later')
+  })
+
+  it('stay loaded while they play media or an agent drives them', async () => {
+    useAppStore.setState({ browserTabs: ['p1', 'p2', 'p3', 'p4', 'p5', 'p6'].map((id) => tab(id, 'thread_a')) })
+    await render(() => createElement(BrowserPanel, { active: true }))
+    await show('thread_a', 'p1')
+    act(() => { webviewOf('p1').dispatchEvent(new Event('media-started-playing')) })
+    await show('thread_a', 'p2')
+    act(() => emit(agentState('p2', 'thread_a')))
+    for (const id of ['p3', 'p4', 'p5', 'p6']) await show('thread_a', id)
+    expect(loadedTabIds()).toEqual(['p1', 'p2', 'p3', 'p4', 'p5', 'p6'])
+    // Once the media stops and the agent's session ends, they unload like any other tab.
+    act(() => { webviewOf('p1').dispatchEvent(new Event('media-paused')) })
+    act(() => emit({ ...agentState('p2', 'thread_a'), owner: 'disconnected' }))
+    await settle()
+    expect(loadedTabIds()).toEqual(['p3', 'p4', 'p5', 'p6'])
+  })
+
+  it('close with their thread when it is archived or deleted', async () => {
+    const thread = (id: string, settledAt?: string) => ({ id, name: id, order: 0, ...(settledAt ? { settledAt } : {}) })
+    useAppStore.setState({
+      threads: [thread('thread_a'), thread('thread_b'), thread('thread_c')] as never,
+      browserTabs: [tab('a1', 'thread_a'), tab('b1', 'thread_b'), tab('c1', 'thread_c')]
+    })
+    await render(() => createElement(BrowserPanel, { active: true }))
+    for (const [threadId, id] of [['thread_a', 'a1'], ['thread_b', 'b1'], ['thread_c', 'c1']]) await show(threadId, id)
+    expect(loadedTabIds()).toEqual(['a1', 'b1', 'c1'])
+    act(() => useAppStore.setState({ threads: [thread('thread_a', '2026-11-15T00:00:00Z'), thread('thread_b'), thread('thread_c')] as never }))
+    act(() => useAppStore.setState({ threads: [thread('thread_a', '2026-11-15T00:00:00Z'), thread('thread_c')] as never }))
+    await settle()
+    expect(useAppStore.getState().browserTabs.map((entry) => entry.id)).toEqual(['c1'])
+    expect(loadedTabIds()).toEqual(['c1'])
+  })
+})

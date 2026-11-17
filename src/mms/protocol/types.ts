@@ -1,3 +1,6 @@
+import { APP_PRESENCE_CAPABILITY } from '../notifications/OwnerQuietHours'
+import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
+import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 /**
  * Versioned MMS local protocol envelopes (transport-independent).
  * No Electron imports.
@@ -22,7 +25,21 @@ export const MMS_PROTOCOL_LOGIN_TIMEOUT_MS = 15 * 60_000
 export const MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS = 30 * 60_000
 /** Git mutations can wait on hooks, credential helpers or a slow remote; Git itself decides when they are stuck. */
 export const MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS = 30 * 60_000
+/** How long `/compact` waits for a runtime's own compaction; after it the compaction stops and the full history stays. */
+export const CONTEXT_COMPACTION_TIME_LIMIT_MS = 5 * 60_000
+/**
+ * `threads.compact` answers once the compaction ended, which the service limits to `CONTEXT_COMPACTION_TIME_LIMIT_MS`
+ * plus Mousse's own cut when the runtime's failed. The caller waits that long and a little more, so it never gives up
+ * on a compaction that is still running.
+ */
+export const MMS_PROTOCOL_COMPACT_TIMEOUT_MS = CONTEXT_COMPACTION_TIME_LIMIT_MS + 2 * 60_000
 export const MMS_PROTOCOL_REPLAY_RING_SIZE = 512
+/**
+ * The most a profile's replay ring holds, by its size estimate. Past it the oldest events leave, and a client that
+ * needed them sees a gap and takes a fresh snapshot. A subscribe replays at most 1 MiB anyway (half the outbound
+ * backlog), so this only bounds what a client that fell a little behind can catch up on.
+ */
+export const MMS_PROTOCOL_REPLAY_RING_BYTES = 8 * 1024 * 1024
 export const MMS_PROTOCOL_MAX_PENDING_REQUESTS = 64
 /** Per-connection outbound write backlog before disconnecting a slow client. */
 export const MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES = 2 * 1024 * 1024 // 2 MiB
@@ -120,8 +137,12 @@ export interface ProtocolEvent {
   ts: string
 }
 
-/** What a connection event can carry: bridge display, MCP sign-in, and the live output of the Git action this socket started. */
-export type ProtocolConnectionEventType = 'bridge.hub.thread' | 'mcp.auth-url' | 'git.operation'
+/**
+ * What a connection event can carry: bridge display, MCP sign-in, the live output of the Git action this socket started,
+ * and the pictures of a bot's browser, or of a thread's browser without a window, this socket watches.
+ */
+export type ProtocolConnectionEventType = 'bridge.hub.thread' | 'mcp.auth-url' | 'git.operation' | 'bots.browser.frame' | 'browser.view.frame'
+export const PROTOCOL_CONNECTION_EVENT_TYPES: readonly ProtocolConnectionEventType[] = ['bridge.hub.thread', 'mcp.auth-url', 'git.operation', 'bots.browser.frame', 'browser.view.frame']
 
 /** Granted to every session: it may receive `git.operation` events for the Git actions it starts. */
 export const GIT_OPERATIONS_CAPABILITY = 'git.operations.v1'
@@ -142,6 +163,12 @@ export interface ProtocolConnectionEvent {
   data: unknown
 }
 export const MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES = 64 * 1024
+/** A watched browser's picture (a bot's, or a thread's) is a JPEG of up to 960 px (a sharp one included), in base64. */
+export const MMS_PROTOCOL_MAX_FRAME_EVENT_BYTES = 1024 * 1024
+/** The largest connection event of a type. */
+export function maxConnectionEventBytes(type: ProtocolConnectionEventType): number {
+  return type === 'bots.browser.frame' || type === 'browser.view.frame' ? MMS_PROTOCOL_MAX_FRAME_EVENT_BYTES : MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES
+}
 
 export interface ProtocolTransportError {
   kind: 'error'
@@ -215,6 +242,7 @@ export type ProtocolEnvelope =
  */
 export const PROTOCOL_METHODS = [
   'applets.get', 'applets.state.get', 'applets.state.save', 'applets.export',
+  'app.presence',
   'health',
   'capabilities',
   'projects.list',
@@ -228,14 +256,20 @@ export const PROTOCOL_METHODS = [
   'projects.trustGitSettings',
   'projects.icon',
   'projects.setIcon',
+  'appearance.wallpaperImport',
+  'appearance.wallpaperImportBytes',
+  'appearance.wallpaperRead',
+  'appearance.wallpaperSaveCopy',
   'threads.list',
   'threads.get',
   'threads.create',
   'threads.delete',
   'threads.rename',
   'threads.pin',
+  'threads.setHidden',
   'threads.settle',
   'threads.focus',
+  'threads.markSeen',
   'threads.reorder',
   'threads.search',
   'threads.regenerateTitle',
@@ -256,18 +290,21 @@ export const PROTOCOL_METHODS = [
   'orchestrator.send',
   'orchestrator.abort',
   'orchestrator.steer',
+  'orchestrator.steerNow',
   'orchestrator.retry',
   'orchestrator.isTurnActive',
   'orchestrator.contextUsage',
   'runs.list',
   'runs.get',
   'runs.events',
+  'runs.wait',
   'runs.effects',
   'runs.credentials',
   'runs.transfers',
   'runs.handoffs',
   'runs.resumeNow',
   'runs.cancelPause',
+  'threads.goal',
   'thread.fork',
   'thread.mergeBack',
   'orchestrator.answerQuestions',
@@ -432,6 +469,7 @@ export const PROTOCOL_METHODS = [
   'git.diff',
   'review.files',
   'review.file',
+  'review.turnFile',
   'git.log',
   'git.branches',
   'git.diffStats',
@@ -488,6 +526,9 @@ export const PROTOCOL_METHODS = [
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
+  APP_PRESENCE_CAPABILITY,
+  KEEP_AWAKE_CAPABILITY,
+  BOT_TELLING_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   'errors.v1',
   'health',
@@ -537,6 +578,7 @@ export type ProtocolEventType =
   | 'turn.aborted'
   | 'turn.paused'
   | 'turn.steered'
+  | 'steer.now'
   | 'connection.failed'
   | 'activity'
   | 'activity.snapshot'
@@ -546,6 +588,8 @@ export type ProtocolEventType =
   | 'terminal.activated'
   | 'questions.pending'
   | 'questions.cleared'
+  | 'secrets.requests.changed'
+  | 'secrets.changed'
   | 'pty.data'
   | 'pty.exit'
   | 'pty.created'
@@ -570,6 +614,8 @@ export type ProtocolEventType =
   | 'terminal.activated'
   | 'questions.pending'
   | 'questions.cleared'
+  | 'secrets.requests.changed'
+  | 'secrets.changed'
   | 'pty.data'
   | 'pty.exit'
   | 'pty.created'
@@ -578,7 +624,6 @@ export type ProtocolEventType =
   | 'settings.changed'
   | 'mcp.changed'
   | 'ui.focus-intent'
-  | 'ui.document-open'
   | 'ui.quick-action-created'
   | 'ui.open-path'
   | 'ui.notify'

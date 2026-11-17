@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { act, createElement } from 'react'
+import { act, createElement, Fragment, StrictMode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useFileWorkspaceStore } from '../../src/renderer/stores/filesStore'
+import { useAppStore } from '../../src/renderer/stores/appStore'
+import { fileWorkspaceScope, useFileWorkspaceStore } from '../../src/renderer/stores/filesStore'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -22,14 +23,17 @@ vi.mock('../../src/renderer/components/FileTree', () => ({
     createElement('button', { type: 'button', className: 'file-tree-row', 'data-path': 'README.md' }, 'README.md'))
 }))
 
+const { MainViewTabs } = await import('../../src/renderer/components/MainViewTabs')
 const { FilesPanel } = await import('../../src/renderer/components/FilesPanel')
 
 let root: Root
 let host: HTMLElement
 let writeFile: ReturnType<typeof vi.fn>
+const initialApp = useAppStore.getState()
 const initialFiles = useFileWorkspaceStore.getState()
 
 beforeEach(() => {
+  useAppStore.setState({ openedSurfaceKinds: ['files'], mainView: 'files' })
   tree.showRow = true
   host = document.createElement('div')
   document.body.append(host)
@@ -46,39 +50,40 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
+  useAppStore.setState(initialApp, true)
   useFileWorkspaceStore.setState(initialFiles, true)
 })
 
 const flush = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
-const tab = () => host.querySelector<HTMLButtonElement>('[role="tab"]')
+const tab = () => host.querySelector<HTMLButtonElement>('.main-view-tab-select[title="/repo/notes.txt"], .main-view-tab-select[title^="notes.txt"]')
 
 async function openNotes() {
-  await act(async () => root.render(createElement(FilesPanel)))
+  await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
   await act(async () => host.querySelector<HTMLButtonElement>('.tree-open')?.click())
   await flush()
   expect(tab()?.textContent).toBe('notes.txt')
 }
 
 describe('closing the last open file', () => {
-  it('with Delete, puts focus on the file’s row in the tree once the tab strip is gone', async () => {
+  it('with Delete, returns focus to Files', async () => {
     await openNotes()
     tab()!.focus()
     await act(async () => { tab()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true })) })
     await flush()
-    expect(host.querySelector('[role="tablist"]')).toBeNull()
-    expect(document.activeElement).toBe(host.querySelector('.file-tree-row'))
+    expect(tab()).toBeNull()
+    expect(document.activeElement).toBe(host.querySelector('.main-view-tab-select[title="Files"]'))
   })
 
-  it('with the close button, puts focus on the tree’s first row when the file’s row is not shown', async () => {
+  it('with the close button, returns focus to Files even when the tree row was not shown', async () => {
     tree.showRow = false
     await openNotes()
-    const close = host.querySelector<HTMLButtonElement>('.ui-tab-close')!
+    const close = host.querySelector<HTMLButtonElement>('[aria-label="Close notes.txt"]')!
     close.focus()
     await act(async () => close.click())
     await flush()
-    expect(host.querySelector('[role="tablist"]')).toBeNull()
+    expect(tab()).toBeNull()
     expect(host.querySelector('.files-editor')).toBeNull()
-    expect(document.activeElement).toBe(host.querySelector('.file-tree-row[data-path="README.md"]'))
+    expect(document.activeElement).toBe(host.querySelector('.main-view-tab-select[title="Files"]'))
   })
 
   it('keeps the tab, and focus on it, when unsaved edits cannot be saved', async () => {
@@ -96,6 +101,38 @@ describe('closing the last open file', () => {
     expect(writeFile).toHaveBeenCalled()
     expect(tab()?.textContent).toBe('notes.txt •')
     expect(document.activeElement).toBe(tab())
+  })
+})
+
+describe('closing tabs', () => {
+  it('keeps the panel while another tab is open, and closes it with the last tab', async () => {
+    useAppStore.setState({ mainAreaOpen: true })
+    await openNotes()
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close notes.txt"]')!.click())
+    await flush()
+    expect(useAppStore.getState().mainAreaOpen).toBe(true)
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close Files"]')!.click())
+    await flush()
+    expect(useAppStore.getState().mainAreaOpen).toBe(false)
+  })
+})
+
+describe('an open file', () => {
+  it('fills the panel alone, without the tree', async () => {
+    await openNotes()
+    expect(host.querySelector('.files-editor')).not.toBeNull()
+    expect(host.querySelector('.tree-open')).toBeNull()
+  })
+
+  it('that was open before a restart loads, even through the development double mount', async () => {
+    let finishRead!: (text: string) => void
+    ;(window as unknown as { mousse: { fs: { readFile: () => Promise<string> } } }).mousse.fs.readFile = () => new Promise((resolve) => { finishRead = resolve })
+    useFileWorkspaceStore.getState().openFile(fileWorkspaceScope(useAppStore.getState().profileId, useAppStore.getState().activeThreadId, null), 'notes.txt')
+    await act(async () => root.render(createElement(StrictMode, null, createElement(FilesPanel))))
+    await act(async () => finishRead('restored text'))
+    await flush()
+    expect(host.querySelector('.panel-error')).toBeNull()
+    expect(host.querySelector<HTMLTextAreaElement>('.editor-stub')?.value).toBe('restored text')
   })
 })
 

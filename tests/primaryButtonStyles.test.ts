@@ -69,7 +69,6 @@ const PRIMARY_CLASSES = [
   '.btn-primary',
   '.chat-primary-button',
   '.an-approve-fill',
-  '.composer-implement-btn',
   '.composer-question-btn.is-primary',
   '.chat-workspace-recovery-btn-primary',
   '.devices-dialog-btn.primary',

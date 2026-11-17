@@ -33,7 +33,9 @@ function api(path: string[] = []): unknown {
     },
     apply(_target, _this, args) {
       const method = path.join('.')
-      if (path.at(-1)?.startsWith('on')) {
+      // A subscription (`onX(listener)`) or a provider main reads on demand (`diagnostics.provideCounters(read)`)
+      // hands over a function and gets back the function that removes it, as the preload does.
+      if (path.at(-1)?.startsWith('on') || typeof args[0] === 'function') {
         const subscriptions = listeners.get(method) ?? new Set()
         listeners.set(method, subscriptions)
         subscriptions.add(args[0])

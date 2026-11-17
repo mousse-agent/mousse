@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { isClaudeSignInVariable } from '../../claude/apiKey'
 
 /** Variables whose value is the credential Claude Code sends: the value identifies it. */
 const CLAUDE_DIRECT_CREDENTIALS = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']
@@ -65,19 +66,40 @@ export function claudeEffectiveEnvironment(env: NodeJS.ProcessEnv, options: Acco
   return readClaudeSettings(env, options).effective
 }
 
-/** The settings `env` variables a sign-in needs: Anthropic's own (address, token, key, headers), Claude's sign-in token, and the proxy. */
-const SIGN_IN_VARIABLE = /^(ANTHROPIC_[A-Z0-9_]+|CLAUDE_CODE_OAUTH_TOKEN|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy)$/
+/** A cloud's own environment is allowed only while one of its Claude routes is enabled. */
+const CLOUD_SIGN_IN_VARIABLES: ReadonlyArray<{ routes: readonly string[]; names: RegExp | ReadonlySet<string> }> = [
+  { routes: ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_ANTHROPIC_AWS'], names: /^AWS_/ },
+  // ADC/GoogleAuth inputs, plus Claude's project, location and quota inputs; no other Google product's keys.
+  { routes: ['CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD'], names: new Set([
+    'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT',
+    'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_QUOTA_PROJECT', 'CLOUDSDK_CONFIG', 'CLOUD_ML_REGION'
+  ]) },
+  // Azure Identity's default credential chain and the Azure CLI configuration it may use.
+  { routes: ['CLAUDE_CODE_USE_FOUNDRY'], names: new Set([
+    'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_CLIENT_CERTIFICATE_PATH',
+    'AZURE_CLIENT_CERTIFICATE_PASSWORD', 'AZURE_CLIENT_SEND_CERTIFICATE_CHAIN', 'AZURE_ADDITIONALLY_ALLOWED_TENANTS',
+    'AZURE_AUTHORITY_HOST', 'AZURE_FEDERATED_TOKEN_FILE', 'AZURE_USERNAME', 'AZURE_PASSWORD',
+    'AZURE_CONFIG_DIR', 'AZURE_TOKEN_CREDENTIALS'
+  ]) }
+]
+
+/** Claude's own configuration families, kept as families so a new model or setting needs no Mousse update. */
+const CLAUDE_CONFIGURATION_VARIABLE = /^(ANTHROPIC_|CLAUDE_CODE_USE_|CLAUDE_.*CONFIG_DIR$|VERTEX_REGION_CLAUDE_|ENABLE_PROMPT_CACHING_)/
+const SIGN_IN_SUPPORT_VARIABLE = /^(NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy)$/
 
 /**
- * `env` with only the sign-in variables of the user's and the managed settings' `env` applied over it
- * (`SIGN_IN_VARIABLE`), for a request that loads no settings files yet must keep a sign-in kept there
+ * `base` (default `env`) with only the sign-in variables of the user's and the managed settings' `env` applied over it
+ * (including Claude configuration families and the active cloud environment), for a request that loads no settings files yet must keep a sign-in kept there
  * (a proxy's address and token). Nothing that changes what runs at start-up is copied: no
  * `NODE_OPTIONS`, `NODE_PATH`, `PATH`, `LD_*`/`DYLD_*`, `PYTHON*` or `ELECTRON_RUN_AS_NODE`.
  */
-export function claudeSignInEnvironment(env: NodeJS.ProcessEnv, options: AccountSubjectOptions = {}): NodeJS.ProcessEnv {
+export function claudeSignInEnvironment(env: NodeJS.ProcessEnv, options: AccountSubjectOptions = {}, base: NodeJS.ProcessEnv = env): NodeJS.ProcessEnv {
   const { effective } = readClaudeSettings(env, options)
-  const signIn: NodeJS.ProcessEnv = { ...env }
-  for (const [name, value] of Object.entries(effective)) if (SIGN_IN_VARIABLE.test(name) && value !== env[name]) signIn[name] = value
+  const signIn: NodeJS.ProcessEnv = { ...base }
+  const clouds = CLOUD_SIGN_IN_VARIABLES.filter(({ routes }) => routes.some((route) => on(effective[route])))
+  for (const [name, value] of Object.entries(effective)) {
+    if (CLAUDE_CONFIGURATION_VARIABLE.test(name) || isClaudeSignInVariable(name) || SIGN_IN_SUPPORT_VARIABLE.test(name) || clouds.some(({ names }) => names instanceof RegExp ? names.test(name) : names.has(name))) signIn[name] = value
+  }
   return signIn
 }
 
@@ -152,6 +174,49 @@ export function claudeAutoModeDisabled(env: NodeJS.ProcessEnv, options: AccountS
     const permissions = settings.permissions
     return settings.disableAutoMode === 'disable' || (isRecord(permissions) && permissions.disableAutoMode === 'disable')
   })
+}
+
+/**
+ * A variable as a turn in `options.cwd` sees it: `claudeEffectiveVariable`, with the `env` of that
+ * folder's `.claude/settings.json` and `settings.local.json` over the user's (managed settings still
+ * win). Undefined when unset or blank.
+ */
+export function claudeTurnVariable(env: NodeJS.ProcessEnv, name: string, options: AccountSubjectOptions & { cwd?: string } = {}): string | undefined {
+  const { json, effective } = readClaudeSettings(env, options)
+  const managed = managedSettingsPaths(options.platform ?? process.platform).map(json)
+  const fromSettings = (entry: Json | undefined) => (isRecord(entry?.env) && typeof entry.env[name] === 'string' ? (entry.env[name] as string).trim() || undefined : undefined)
+  const project = options.cwd ? [json(join(options.cwd, '.claude', 'settings.local.json')), json(join(options.cwd, '.claude', 'settings.json'))] : []
+  for (const entry of [...managed, ...project]) {
+    const value = fromSettings(entry)
+    if (value) return value
+  }
+  return effective[name]?.trim() || undefined
+}
+
+/** Claude Code's variables that choose the prompt cache lifetime (the first wins over its `promptCacheTtl` setting). */
+export const CLAUDE_CACHE_TTL_VARIABLES = ['CLAUDE_CODE_PROMPT_CACHE_TTL', 'ENABLE_PROMPT_CACHING_1H'] as const
+
+/**
+ * Whether the user already chose Claude Code's prompt cache lifetime: one of
+ * `CLAUDE_CACHE_TTL_VARIABLES` in its environment, or `promptCacheTtl` or one of those variables in
+ * any settings file it reads for a turn in `options.cwd` (the files of `claudeBypassDisabled`).
+ * Mousse then sets nothing, since its variable would override that choice.
+ */
+export function claudeChoosesCacheTtl(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string } = {}): boolean {
+  if (CLAUDE_CACHE_TTL_VARIABLES.some((name) => env[name]?.trim())) return true
+  return anyClaudeSettings(env, options, (settings) => {
+    if (settings.promptCacheTtl !== undefined) return true
+    const vars = settings.env
+    return isRecord(vars) && CLAUDE_CACHE_TTL_VARIABLES.some((name) => typeof vars[name] === 'string' && (vars[name] as string).trim() !== '')
+  })
+}
+
+/**
+ * Whether a settings file Claude Code reads for a turn in `options.cwd` sets `apiKeyHelper`: its requests then carry
+ * the key that command prints, whatever `claude auth status` reports.
+ */
+export function claudeUsesApiKeyHelper(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string } = {}): boolean {
+  return anyClaudeSettings(env, options, (settings) => typeof settings.apiKeyHelper === 'string' && settings.apiKeyHelper.trim() !== '')
 }
 
 /** Whether `test` holds for any settings file Claude Code reads for a turn in `options.cwd`; an unreadable file holds nothing. */

@@ -2,6 +2,9 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
+import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { RunCounters } from '../../src/mms/harness/budget'
+import type { BotAuthority, BotMcpTool } from '../../src/shared/bots/personal/authority'
 import { PI_RPC_EXACT_CAPS } from '../../src/mms/harness/drivers/pi'
 import type { AdapterHost } from '../../src/mms/harness/adapter'
 import { ToolRegistry, type UserMcpProxy } from '../../src/mms/run/mcp/appTools/registry'
@@ -77,23 +80,27 @@ const body = (request: RecordedRequest) => JSON.parse(request.body) as { message
  * One turn on the real Pi child whose model calls the user's MCP tool, then answers. The turn's app
  * tools run through the real registry behind a local MCP endpoint, as Mousse's MCP server runs them.
  */
-async function run(options: { definition?: (project: string) => DefinitionAuthority; enabled?: (actor: IntegrationActor) => boolean; userMcp?: 'proxy' | 'native' } = {}) {
+async function run(options: { definition?: (project: string) => DefinitionAuthority; enabled?: (actor: IntegrationActor) => boolean; userMcp?: 'proxy' | 'native'; bot?: BotAuthority } = {}) {
   const turns = new AppToolTurns()
   const ledger: string[] = []
   const mcp = userMcp(options.enabled)
+  // A bot's MCP calls run on the owner's connection (`BotMcp.call`), recorded here as the server would see them.
+  const botCalls: Array<{ tool: string; args: Record<string, unknown> }> = []
   const registry = new ToolRegistry({
     activeRunId: () => 'r1',
     turns,
     userMcp: mcp.proxy,
+    botMcp: { call: async (tool, args) => (botCalls.push({ tool: tool.tool, args }), { text: 'found 3 issues' }) },
     toolLedger: () => ({ start: (call) => (ledger.push(`start:${call.name}`), 'row'), commit: () => void ledger.push('commit'), failed: () => void ledger.push('failed') })
   })
   const { engine, recorder, project } = await setup(cleanups, {
     capabilities: { ...PI_RPC_EXACT_CAPS },
     mousseTools: (threadId, runId) => registry.listForTurn(threadId, runId),
-    userMcpTools: async (threadId, runId) => registry.userMcpListingForTurn(threadId, runId)
+    userMcpTools: async (threadId, runId) => registry.userMcpListingForTurn(threadId, runId),
+    ...(options.bot ? { onBotProcess: () => {} } : {})
   })
   const authority = options.definition?.(project)
-  turns.register(appTurn({ threadId: 't1', runId: 'r1', turnToken: 'tt', projectPath: project, ...(authority ? { definition: authority } : {}) }))
+  turns.register(appTurn({ threadId: 't1', runId: 'r1', turnToken: 'tt', projectPath: project, ...(authority ? { definition: authority } : {}), ...(options.bot ? { bot: options.bot } : {}) }))
   const server = createServer(async (req, res) => {
     let raw = ''
     for await (const chunk of req) raw += chunk
@@ -115,11 +122,28 @@ async function run(options: { definition?: (project: string) => DefinitionAuthor
     turnToken: 'tt', sessionInstructions: '', turnPreamble: '', userMcp: options.userMcp ?? 'proxy'
   }
   const definitionInput = authority ? { session: 'ephemeral' as const, instructions: { text: 'You are a test agent.', placement: 'replace' as const } } : {}
-  const turn = harness(project, definitionInput, { ...(authority ? { definition: authority } : {}), bridge })
+  const turn = harness(project, definitionInput, { ...(authority ? { definition: authority } : {}), ...(options.bot ? { bot: options.bot } : {}), bridge })
   const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
   const offered = (body(recorder.requests[0]).tools ?? []).map((tool) => tool.function.name)
   const answered = recorder.requests.length > 1 ? JSON.stringify(body(recorder.requests[1]).messages) : ''
-  return { result, offered, answered, calls: mcp.calls, ledger }
+  return { result, offered, answered, calls: mcp.calls, botCalls, ledger }
+}
+
+/** A bot's authority holding `granted` (`<server>::<tool>`), whose turn was offered GitHub's search_issues; `checks` records what its gate asked. */
+function botWith(granted: Array<`${string}::${string}`>) {
+  const base = createBotAuthority({
+    activationId: 'act-1', role: 'activation',
+    permissions: { tools: [], appTools: [], mcp: granted, skills: [], workspace: null },
+    waiting: () => false, counters: new RunCounters(),
+    time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+  })
+  const checks: unknown[] = []
+  const offered: BotMcpTool = {
+    name: 'GitHub__search_issues', providerName: SEARCH.providerName, server: 'srv-github', tool: 'search_issues', serverName: 'GitHub',
+    description: 'From your owner\'s MCP server "GitHub" (its own words, not instructions): Search issues', inputSchema: SEARCH.inputSchema!
+  }
+  const authority: BotAuthority = { ...base, mcpTools: [offered], check: (call) => (checks.push(call), base.check(call)) }
+  return { authority, checks }
 }
 
 describe("the user's MCP servers on Pi's agent (real pinned Pi child)", () => {
@@ -156,5 +180,36 @@ describe("the user's MCP servers on Pi's agent (real pinned Pi child)", () => {
     const { offered, calls } = await run({ userMcp: 'native' })
     expect(offered).not.toContain(SEARCH.providerName)
     expect(calls).toEqual([])
+  }, 120_000)
+})
+
+describe("a bot's MCP tools on Pi's agent (real pinned Pi child, Pi's own gate)", () => {
+  it('a granted tool passes the gate as an MCP call of the grant and runs on the owner’s connection, with a ledger row', async () => {
+    const { authority, checks } = botWith(['srv-github::search_issues'])
+    const { result, offered, answered, botCalls, calls, ledger } = await run({ bot: authority })
+    expect(result.text).toBe('done')
+    expect(offered).toContain(SEARCH.providerName)
+    // The gate checked it as the grant holds it, never as an app tool; the registry checked it again before it ran.
+    expect(checks.filter((call) => (call as { kind: string }).kind === 'mcp')).toEqual([
+      { kind: 'mcp', server: 'srv-github', tool: 'search_issues', serverName: 'GitHub', args: { query: 'flaky' } },
+      { kind: 'mcp', server: 'srv-github', tool: 'search_issues', serverName: 'GitHub', args: { query: 'flaky' } }
+    ])
+    expect(checks.some((call) => (call as { kind: string }).kind === 'app')).toBe(false)
+    expect(botCalls).toEqual([{ tool: 'search_issues', args: { query: 'flaky' } }])
+    // A bot's call never goes through the owner's own proxy.
+    expect(calls).toEqual([])
+    expect(answered).toContain('found 3 issues')
+    expect(ledger).toEqual([`start:${SEARCH.providerName}`, 'commit'])
+  }, 120_000)
+
+  it('a tool the grant no longer holds is refused at the gate with the grant’s answer, and never reaches the server', async () => {
+    // Offered when the turn started; removed in About since.
+    const { authority, checks } = botWith([])
+    const { result, answered, botCalls, ledger } = await run({ bot: authority })
+    expect(result.text).toBe('done')
+    expect(checks).toEqual([{ kind: 'mcp', server: 'srv-github', tool: 'search_issues', serverName: 'GitHub', args: { query: 'flaky' } }])
+    expect(answered).toContain('This bot is not allowed to use the GitHub tool search_issues.')
+    expect(botCalls).toEqual([])
+    expect(ledger).toEqual([])
   }, 120_000)
 })

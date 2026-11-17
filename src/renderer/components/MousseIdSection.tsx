@@ -93,7 +93,7 @@ export function EnrollmentRequestRow({ row, busy, onDecide }: {
       control={
         <>
           <button type="button" className="settings-btn" disabled={busy} onClick={() => onDecide(false)}><X size={14} />Deny</button>
-          <button type="button" className="settings-btn" disabled={busy} onClick={() => onDecide(true)}>
+          <button type="button" className="settings-btn" disabled={busy} data-mousse-decision="" onClick={() => onDecide(true)}>
             <Check size={14} className="settings-status-ok" />Approve
           </button>
         </>

@@ -69,7 +69,9 @@ export function classifyProviderFailure(error: unknown): AgentFallbackRetryCateg
   if (
     /unknown model|not connected|not configured|does not support|unavailable|econnreset|socket hang up|network|enotfound|eai_again|provider/.test(
       text
-    )
+    ) ||
+    // A provider's refusal shown in its own words (`400 · …`) is still a provider failure.
+    (error instanceof AppError && error.code.startsWith('provider_'))
   ) {
     return 'unavailable'
   }

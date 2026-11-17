@@ -130,7 +130,8 @@ describe('eligibleCommands', () => {
     const registered = new Set<CommandId>(['thread.new', 'run.stop', 'composer.focus'])
     const ids = (context: CommandContext) =>
       eligibleCommands(context, (id) => registered.has(id)).map((item) => (item.kind === 'command' ? item.id : null))
-    expect(ids(ctx())).toEqual(['thread.new', 'run.stop', 'composer.focus'])
+    // Listed by group: Threads, then Composer (Focus composer leads it).
+    expect(ids(ctx())).toEqual(['thread.new', 'composer.focus', 'run.stop'])
     expect(ids(ctx({ runActive: false }))).toEqual(['thread.new', 'composer.focus'])
     expect(ids(ctx({ threadOpen: false, runActive: false }))).toEqual(['thread.new'])
   })

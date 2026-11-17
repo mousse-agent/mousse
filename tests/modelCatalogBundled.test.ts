@@ -59,6 +59,17 @@ describe('bundled model catalog', () => {
     for (const model of raw.models) expect(model.tier, String(model.id)).toBe(byFamily[model.family as string])
   })
 
+  it('lists reasoning levels for a current model whose family\x27s previous model has them', () => {
+    // Claude Code may not list a new model yet; the picker then shows the catalog's levels, so a new
+    // entry without them reads "None for this model" (Fable 5.2 did).
+    for (const model of raw.models.filter((entry) => !entry.older)) {
+      const previous = raw.models
+        .filter((entry) => entry.family === model.family && (entry.released as string) < (model.released as string))
+        .sort((a, b) => (b.released as string).localeCompare(a.released as string))[0]
+      if (previous?.efforts) expect(model.efforts, String(model.id)).toEqual(previous.efforts)
+    }
+  })
+
   it('has valid release dates', () => {
     for (const model of raw.models) expect(validCatalogDate(model.released as string), `${model.id}: ${model.released}`).toBe(true)
   })

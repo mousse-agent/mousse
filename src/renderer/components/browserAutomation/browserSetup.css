@@ -27,9 +27,8 @@
 
 .browser-setup-panel button:hover:not(:disabled),
 .browser-setup-panel button:focus-visible {
-  border-color: var(--accent, #8faef5);
-  outline: 2px solid color-mix(in srgb, var(--accent, #8faef5) 45%, transparent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .browser-setup-panel button:disabled {

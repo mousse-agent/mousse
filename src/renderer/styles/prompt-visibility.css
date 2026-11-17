@@ -35,9 +35,9 @@
 }
 
 .an-message-list-wrap .chat-prompt-tick:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
   border-radius: 2px;
+  background-image: var(--ui-focus-layer);
 }
 
 .an-message-list-wrap .chat-prompt-preview {
@@ -114,9 +114,9 @@
 }
 
 .an-message-list-wrap .chat-prompt-rail .chat-prompt-find:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
   opacity: 1;
+  background-image: var(--ui-focus-layer);
 }
 
 @media (prefers-reduced-motion: reduce) {

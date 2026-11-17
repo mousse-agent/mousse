@@ -20,7 +20,7 @@ describe('isIdempotentTool', () => {
     for (const name of ['bash', 'run_command', 'write_file', 'edit_file', 'browser_act',
       'browser_open', 'create_task', 'update_task', 'create_subagent', 'create_subagents',
       'recall_subagent', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel',
-      'present_plan', 'ask_user'])
+      'ask_user'])
       expect(isIdempotentTool(name), name).toBe(false)
   })
 

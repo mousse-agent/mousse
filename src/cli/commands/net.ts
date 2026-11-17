@@ -18,6 +18,7 @@ import { NODE_CAPABILITIES, type NodeCapability } from '../../shared/net/capabil
 import { NET_ERRORS, isNetErrorCode, type NetErrorCode } from '../../shared/net/errors'
 import { isId } from '../../shared/net/ids'
 import { isJoinVia } from '../../shared/net/via'
+import { isAgentReach } from '../../shared/net/local'
 import { isPermissionMode } from '../../shared/permissionMode'
 
 export const NET_HELP = `Usage:
@@ -96,11 +97,14 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge rename <node-id> <name>
   mousse-cli bridge block <node-id>
   mousse-cli bridge unblock <node-id>
+  mousse-cli bridge connect <node-id>
+  mousse-cli bridge disconnect <node-id>
   mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|auto|full] [--terminal on|off]
-    [--editor on|off]
+    [--editor on|off] [--bots on|off] [--agent-reach none|launched|all] [--work on|off]
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
   mousse-cli bridge threads [on|off]
+  mousse-cli bridge bots [on|off]
   mousse-cli bridge editor-server [system|mousse]
 
 editor-server chooses which SSH server answers editor connections from your other computers:
@@ -109,9 +113,18 @@ computer's own SSH server (it needs one running, and a key it accepts). Without 
 shows the setting. A Windows computer always uses its own SSH server for now, and a device that had its editor switch on before the endpoint existed keeps using it until that switch is turned off.
 threads turns on (or off) whether your other computers may work on this computer's threads;
 without an argument it shows the setting. It is on by default and only changes this computer.
+bots turns on (or off) "Share bots with other devices": whether your phones and other computers
+list and use this computer's personal bots; without an argument it shows the setting. It is on by
+default and only changes this computer.
 Only the current authority can invite, revoke or rename nodes, change capabilities or set a
 device's kind. block, unblock and limits act on this computer only, on any computer: a blocked
-device is refused every Bridge call and stream here until unblocked.
+device is refused every Bridge call and stream here until unblocked. limits --bots off keeps
+one device from every personal bot on this computer. limits --work off lets one device view
+threads and chat with bots only: it can't start, send to, change or stop threads, or make or
+change bots, here.
+connect and disconnect also act on this computer only: a device of your list that is not
+connected here gets nothing from it, and two computers open no session until each connected the
+other. Disconnect ends the device's streams and editor connections here; what it started runs on.
 caps settings is "works on threads"; it is refused for a device not known to be a computer.
 revoke and rename require the nod_ identifier shown by bridge nodes.
 An invite without --caps is for another computer: read, chat, write and settings
@@ -163,11 +176,15 @@ type NetMethod =
   | 'bridge.setCaps'
   | 'bridge.setKind'
   | 'bridge.policy'
+  | 'bridge.connect'
+  | 'bridge.disconnect'
   | 'bridge.workOnThreads'
+  | 'bridge.shareBots'
   | 'bridge.editorServer'
 /** CLI subcommands that are one daemon method with fixed arguments. */
 const BRIDGE_ALIASES: Record<string, NetMethod> = {
   threads: 'bridge.workOnThreads',
+  bots: 'bridge.shareBots',
   'editor-server': 'bridge.editorServer',
   block: 'bridge.policy',
   unblock: 'bridge.policy',
@@ -347,8 +364,11 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'bridge.rename': [],
     'bridge.setCaps': ['caps'],
     'bridge.setKind': [],
-    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor'] : [],
+    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor', 'bots', 'agent-reach', 'work'] : [],
+    'bridge.connect': [],
+    'bridge.disconnect': [],
     'bridge.workOnThreads': [],
+    'bridge.shareBots': [],
     'bridge.editorServer': []
   }
   const permitted = options[method]
@@ -386,11 +406,14 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
           : method === 'bridge.rename' || method === 'bridge.setKind'
             ? 2
             : method === 'bridge.revoke' ||
+                method === 'bridge.connect' ||
+                method === 'bridge.disconnect' ||
                 method === 'bridge.setCaps' ||
                 method === 'bridge.policy'
               ? 1
               : method === 'bridge.join' ||
                   method === 'bridge.workOnThreads' ||
+                  method === 'bridge.shareBots' ||
                   method === 'bridge.editorServer'
                 ? undefined
                 : 0
@@ -563,10 +586,17 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       ...(promptPassphrase ? { promptPassphrase: true } : {})
     }
   }
-  if (method === 'bridge.revoke' || method === 'bridge.rename') {
+  if (
+    method === 'bridge.revoke' ||
+    method === 'bridge.rename' ||
+    method === 'bridge.connect' ||
+    method === 'bridge.disconnect'
+  ) {
     const node = args.positional[0]
     if (!isId('node', node))
-      invalid('bridge revoke and rename require a valid nod_ node identifier from bridge nodes.')
+      invalid(
+        `bridge ${args.subcommand} requires a valid nod_ node identifier from bridge nodes.`
+      )
     params.node = node
     if (method === 'bridge.rename') params.name = name(args.positional[1])
   }
@@ -574,6 +604,12 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     const [setting, extra] = args.positional
     if (extra !== undefined || (setting !== undefined && setting !== 'on' && setting !== 'off'))
       invalid('bridge threads takes on or off, or nothing to show the setting.')
+    if (setting !== undefined) params.enabled = setting === 'on'
+  }
+  if (method === 'bridge.shareBots') {
+    const [setting, extra] = args.positional
+    if (extra !== undefined || (setting !== undefined && setting !== 'on' && setting !== 'off'))
+      invalid('bridge bots takes on or off, or nothing to show the setting.')
     if (setting !== undefined) params.enabled = setting === 'on'
   }
   if (method === 'bridge.editorServer') {
@@ -609,10 +645,20 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     else {
       const mode = stringFlag(args, 'max-mode'),
         terminal = stringFlag(args, 'terminal'),
-        editor = stringFlag(args, 'editor')
-      if (mode === undefined && terminal === undefined && editor === undefined)
+        editor = stringFlag(args, 'editor'),
+        bots = stringFlag(args, 'bots'),
+        reach = stringFlag(args, 'agent-reach'),
+        work = stringFlag(args, 'work')
+      if (
+        mode === undefined &&
+        terminal === undefined &&
+        editor === undefined &&
+        bots === undefined &&
+        reach === undefined &&
+        work === undefined
+      )
         invalid(
-          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off and/or --editor on|off.'
+          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off, --editor on|off, --bots on|off, --agent-reach none|launched|all and/or --work on|off.'
         )
       if (mode !== undefined) {
         if (!isPermissionMode(mode)) invalid('--max-mode requires ask, accept_edits, auto or full.')
@@ -625,6 +671,18 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       if (editor !== undefined) {
         if (editor !== 'on' && editor !== 'off') invalid('--editor requires on or off.')
         params.editor = editor === 'on'
+      }
+      if (bots !== undefined) {
+        if (bots !== 'on' && bots !== 'off') invalid('--bots requires on or off.')
+        params.bots = bots === 'on'
+      }
+      if (reach !== undefined) {
+        if (!isAgentReach(reach)) invalid('--agent-reach requires none, launched or all.')
+        params.agentReach = reach
+      }
+      if (work !== undefined) {
+        if (work !== 'on' && work !== 'off') invalid('--work requires on or off.')
+        params.work = work === 'on'
       }
     }
   }

@@ -65,7 +65,7 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
   }
 
   return (
-    <nav className="navigation-rail" aria-label="Mousse navigation"
+    <nav data-mousse="rail" className="navigation-rail" aria-label="Mousse navigation"
       onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onPointerDown={onPointerDown}>
       {/* The workspace: active while no rail page is open; a click there leaves the open page. */}
       <button type="button" className={`navigation-rail-button${activePage === null ? ' active' : ''}`}

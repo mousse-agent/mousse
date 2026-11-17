@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { ANIMATION_SPEED_SCALE, isAnimationSpeed, type AnimationSpeed } from '../../shared/settings'
 
 // Mirrors Settings > Appearance > Advanced > Animation speed. useTheme feeds it from the open
@@ -75,42 +75,28 @@ export function useMotionScale(): number {
   return useSyncExternalStore(subscribe, motionScale, motionScale)
 }
 
-/** A view swap's fade-out and fade-in, before the speed scale (sidebar tabs, the workspace beside them). */
-export const VIEW_SWAP_OUT_MS = 140
+/** How long a view swap's settle runs, before the speed scale (sidebar tabs, the workspace beside them). */
 export const VIEW_SWAP_IN_MS = 180
 
-export type ViewSwapPhase = 'out' | 'in' | null
+export type ViewSwapPhase = 'in' | null
 
 /**
- * A view that trails `target` by a fade-out: while `phase` is 'out' the old view stays laid out (and should be
- * inert) as it fades, then `shown` takes the latest target and `phase` is 'in' while the new view fades in.
- * Changes during the fade-out restart nothing: the target chosen last comes in. With motion off (the setting,
- * the OS, or no renderer) `shown` follows `target` at once and `phase` stays null.
+ * A view that follows `target` at once: the new view shows in the same update as the change, fully drawn, and
+ * `phase` is 'in' while it settles into place (a short lift, sidebar-view-motion.css). Nothing waits for the old
+ * view to fade out first, and the new one never starts transparent, so a swap shows no empty frames. With motion
+ * off (the setting, the OS, or no renderer) `phase` stays null.
  */
 export function useViewSwap<T>(target: T): { shown: T; phase: ViewSwapPhase } {
   const instant = useMotionScale() === 0 || typeof globalThis.matchMedia !== 'function'
-  const [shown, setShown] = useState(target)
-  const [entering, setEntering] = useState(0)
-  const latest = useRef(target)
-  latest.current = target
-  const current = instant ? target : shown
-  const leaving = !Object.is(current, target)
-  useEffect(() => {
-    if (instant) { setShown(target); setEntering(0) }
-  }, [instant, target])
-  useEffect(() => {
-    if (!leaving) return
-    const timer = setTimeout(() => {
-      setShown(latest.current)
-      setEntering((count) => Math.abs(count) + 1)
-    }, scaleMotionMs(VIEW_SWAP_OUT_MS))
-    return () => clearTimeout(timer)
-  }, [leaving])
+  const [swap, setSwap] = useState({ target, entering: 0 })
+  // Set while rendering, so the change and its settle reach the screen in the same commit.
+  if (!Object.is(swap.target, target)) setSwap({ target, entering: instant ? 0 : Math.abs(swap.entering) + 1 })
+  const entering = Object.is(swap.target, target) ? swap.entering : 0
   useEffect(() => {
     if (entering <= 0) return
-    // A little past the fade-in, so its transitions finish before the swap's rules go.
-    const timer = setTimeout(() => setEntering((count) => -count), scaleMotionMs(VIEW_SWAP_IN_MS) + 40)
+    // A little past the settle, so its transitions finish before the swap's rules go.
+    const timer = setTimeout(() => setSwap((current) => (current.entering === entering ? { ...current, entering: -entering } : current)), scaleMotionMs(VIEW_SWAP_IN_MS) + 40)
     return () => clearTimeout(timer)
   }, [entering])
-  return { shown: current, phase: leaving ? 'out' : !instant && entering > 0 ? 'in' : null }
+  return { shown: target, phase: !instant && entering > 0 ? 'in' : null }
 }

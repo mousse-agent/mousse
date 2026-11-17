@@ -11,8 +11,8 @@ import {
   useCommandRegistry
 } from './commandRegistry'
 
-/** Holding the chord keeps moving through threads; every other command runs once per press. */
-const REPEATABLE: ReadonlySet<CommandId> = new Set(['thread.next', 'thread.previous'])
+/** Holding the chord keeps moving through threads or history; every other command runs once per press. */
+const REPEATABLE: ReadonlySet<CommandId> = new Set(['thread.next', 'thread.previous', 'thread.back', 'thread.forward'])
 
 /**
  * The one keyboard dispatcher, on `window` in the capture phase. It only takes over a key press that

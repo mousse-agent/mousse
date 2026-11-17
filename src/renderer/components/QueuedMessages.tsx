@@ -1,21 +1,69 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type DragEvent, type FocusEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { answerText } from '../chat/components/agent-elements/question/answered-questions-tool'
+import { flushSync } from 'react-dom'
 import type { QueuedMessage } from '../../shared/types'
-import { ArrowTurnForward, Check, GripVertical, Loader2, Pencil, Trash2, X } from '../lib/icons'
+import { ArrowTurnForward, Check, ChevronDown, ChevronUp, GripVertical, Loader2, Pencil, Trash2, X } from '../lib/icons'
+import { queueFoldCount, queueFoldLimit } from '../lib/queueFold'
+import { COMPOSER_STACK_VAR } from '../chat/components/agent-elements/composer-stack-height'
+import { useAfterTurnsLayout } from '../chat/components/agent-elements/after-turns'
 import { shortTokens } from '../lib/promptCache'
 import { mousseToUIMessages } from '../chat/adapters/mousseToUI'
 import { UserMessage } from '../chat/components/agent-elements/user-message'
-import { SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
+import { SettleNotice, SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
 import { isOptimisticQueueItem, type ThreadQueue } from '../hooks/useThreadQueue'
-import { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
+import { canEditQueued, queuedContentWithText, queuedWords, splitQueuedContent } from '../lib/queuedContent'
+import { formatBinding } from '../../shared/commands'
+import { useAppStore } from '../stores/appStore'
+import { formatMessageTime } from '../chat/components/agent-elements/utils/message-time'
+import { isSteerKey, markSteerKey, STEER_BINDING, steerKeyRecently } from '../lib/steerKey'
 import '../styles/queued-messages.css'
 
 export { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
 
-const isSteering = (item: QueuedMessage) => item.intent === 'steer' || item.state === 'steering'
 
 /** Send now on the first message a compaction holds: it stops the compaction and sends with the full history. */
 export function skipCompactionLabel(historyTokens?: number): string {
   return historyTokens ? `Send now: skip compacting and keep the full ${shortTokens(historyTokens)} history` : 'Send now: skip compacting and keep the full history'
+}
+
+/** Threads whose long queue is shown in full. A thread is forgotten when its queue empties. */
+/** What sends a message a Stop held: the reply to the person's next message ends, or they send it now. */
+export const HELD_AFTER_STOP_TITLE = 'Sends after the reply to your next message, or send it now'
+
+const openQueueFolds = new Set<string>()
+
+/** The queue as last measured: how many messages show from the top, and where the last of them ends. */
+interface QueueMeasure {
+  count: number
+  height: number
+}
+
+/**
+ * Measures the queue's messages against the transcript it sits in (see `queueFold.ts`). The composer
+ * floats over the end of the transcript, so what is under it does not count as visible. Outside a
+ * transcript nothing folds. While a drag reorders the list, `keepCount` holds how many show.
+ */
+function measureQueue(list: HTMLElement, keepCount: number | null): QueueMeasure {
+  const items = Array.from(list.children)
+  const top = list.getBoundingClientRect().top
+  const bottoms = items.map((item) => item.getBoundingClientRect().bottom - top)
+  let count = items.length
+  const transcript = list.closest<HTMLElement>('.an-message-list')
+  if (keepCount !== null) {
+    count = Math.min(keepCount, items.length)
+  } else if (transcript) {
+    const heights = bottoms.map((bottom, index) => bottom - (index > 0 ? bottoms[index - 1]! : 0))
+    const composer = Number.parseFloat(getComputedStyle(transcript).getPropertyValue(COMPOSER_STACK_VAR)) || 0
+    count = queueFoldCount(heights, queueFoldLimit(transcript.clientHeight - composer))
+  }
+  return { count, height: count > 0 ? bottoms[count - 1]! : 0 }
+}
+
+/** Where in the list the message holding the focus is; -1 when the focus is elsewhere. */
+function focusedIndex(list: HTMLElement): number {
+  const active = document.activeElement
+  const item = active && list.contains(active) ? active.closest('.queued-message') : null
+  return item ? Array.prototype.indexOf.call(list.children, item) : -1
 }
 
 function moveId(ids: string[], id: string, to: number): string[] {
@@ -26,11 +74,18 @@ function moveId(ids: string[], id: string, to: number): string[] {
 
 /** A queued message drawn as the prompt it will be, so it reads the same once it is sent. */
 const QueuedBubble = memo(function QueuedBubble({ item }: { item: QueuedMessage }) {
+  // Answers to the agent's open questions that missed the reply they were sent into: shown as the answers, not the
+  // text the agent reads.
+  const answers = useMemo(() => item.subagentNotice?.filter((entry) => entry.event === 'answer').flatMap((entry) => entry.answers ?? []) ?? [], [item.subagentNotice])
+  const notice = item.subagentNotice?.filter((entry) => entry.event !== 'answer') ?? []
+  const content = answers.length && !notice.length ? answers.map((answer) => `${answer.prompt}\n${answerText(answer)}`).join('\n\n') : item.content
   const message = useMemo(
-    () => mousseToUIMessages([{ id: `queued:${item.id}`, role: 'user', content: item.content, timestamp: item.enqueuedAt, images: item.images }])[0],
-    [item.id, item.content, item.enqueuedAt, item.images]
+    // A message another thread's agent queued is labelled as that agent's before it runs, as it will be once it has.
+    () => mousseToUIMessages([{ id: `queued:${item.id}`, role: 'user', content, timestamp: item.enqueuedAt, images: item.images, ...(item.origin?.kind === 'agent' ? { origin: item.origin } : {}) }])[0],
+    [item.id, content, item.enqueuedAt, item.images, item.origin]
   )
-  if (item.subagentNotice?.length) return <SubagentNotice items={item.subagentNotice} />
+  if (notice.length) return <SubagentNotice items={notice} />
+  if (item.settleNotice?.length) return <SettleNotice items={item.settleNotice} />
   return message ? <UserMessage message={message} /> : null
 })
 
@@ -129,13 +184,19 @@ function QueuedEditor({ draft, width, saving, canBeEmpty, changed, label, onDraf
  * The thread's queued messages at the end of the conversation, after the last turn: each one dimmed in
  * the place it will land, with its full text. Under each bubble, like under a sent prompt, a line whose
  * buttons show on hover: reorder (drag the grip, or Alt+Up/Down on it), send now, edit in place, remove.
- * One quiet "Queued" on the last line speaks for the group.
+ * One quiet "Queued" on the last line shown speaks for the group.
+ *
+ * A long queue folds: past a share of the transcript's visible height it shows only the whole messages that fit
+ * from the top, and "Show all N queued" under them (see `queueFold.ts`). Each thread remembers whether it was
+ * opened until its queue empties. A hidden message that takes focus, or is being edited, opens it.
  *
  * While a compaction holds the queue, "Queued" has a small spinner, and Send now on the first message skips
  * the compaction: it stops (nothing is cut) and that message goes with the full history.
  */
 export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
   const { items, busyIds, hold } = queue
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  const steerKey = formatBinding(STEER_BINDING, platform)
   // The open edit lives in the queue (by thread), so a switch to another thread and back keeps it.
   const editing = queue.editDraft
   // Drag to reorder starts only from the grip (`armedId`), so the text stays selectable. While dragging
@@ -174,6 +235,93 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
     window.addEventListener('pointerup', disarm)
     return () => window.removeEventListener('pointerup', disarm)
   }, [armedId, dragId])
+
+  // The fold. Sizes are read only in the resize observer's callback, never while React commits (see
+  // `useTallEnoughToFold` in user-message.tsx), and the fold is applied in that same frame, before paint.
+  const threadId = queue.threadId
+  const listId = useId()
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const observerRef = useRef<ResizeObserver | null>(null)
+  const [measure, setMeasure] = useState<QueueMeasure | null>(null)
+  const measureRef = useRef<QueueMeasure | null>(null)
+  const draggingRef = useRef(false)
+  draggingRef.current = dragId !== null
+  const [, rerender] = useReducer((count: number) => count + 1, 0)
+  const showAll = Boolean(threadId && openQueueFolds.has(threadId))
+  const setShowAll = useCallback((open: boolean) => {
+    if (!threadId) return
+    if (open) openQueueFolds.add(threadId)
+    else openQueueFolds.delete(threadId)
+    rerender()
+  }, [threadId])
+  const afterTurns = useAfterTurnsLayout()
+  const showAllRef = useRef(showAll)
+  showAllRef.current = showAll
+  const setShowAllRef = useRef(setShowAll)
+  setShowAllRef.current = setShowAll
+
+  const remeasure = useCallback(() => {
+    const list = listRef.current
+    if (!list) return
+    const previous = measureRef.current
+    // While a drag reorders the list, as many messages show as before it started.
+    const next = measureQueue(list, draggingRef.current && previous ? previous.count : null)
+    // Focus that stays on a message moving past the fold (Alt+Down) gets no focus event: it opens the fold here.
+    const focusHidden = !showAllRef.current && focusedIndex(list) >= next.count
+    if (!focusHidden && previous && previous.count === next.count && Math.abs(previous.height - next.height) < 0.5) return
+    measureRef.current = next
+    flushSync(() => {
+      setMeasure(next)
+      if (focusHidden) setShowAllRef.current(true)
+    })
+    // The end follower may have run for this frame already: land on the new end before paint.
+    afterTurns.resized()
+  }, [afterTurns])
+
+  // Remeasured when the list or a message in it changes size, when the transcript does (the window, the
+  // composer over its end), and after every commit (a message added, removed, edited or moved).
+  const listRefCallback = useCallback((list: HTMLDivElement | null) => {
+    observerRef.current?.disconnect()
+    observerRef.current = null
+    listRef.current = list
+    if (!list || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(remeasure)
+    observer.observe(list)
+    const transcript = list.closest('.an-message-list')
+    if (transcript) {
+      observer.observe(transcript)
+      // Its padding is the composer's height.
+      if (transcript.firstElementChild) observer.observe(transcript.firstElementChild)
+    }
+    observerRef.current = observer
+  }, [remeasure])
+  useLayoutEffect(() => {
+    const list = listRef.current
+    const observer = observerRef.current
+    if (!list || !observer) return
+    // Observing again reports the list in this frame even when its size did not change (a reorder).
+    observer.unobserve(list)
+    observer.observe(list)
+  })
+
+  // A thread's open fold is forgotten when its queue empties. Right after a switch the list can still be the
+  // previous thread's, so only a list of this thread's own messages counts as one that emptied.
+  const ownItems = items.some((item) => item.threadId === threadId)
+  const hadOwnItems = useRef<{ threadId: string | null; had: boolean }>({ threadId, had: ownItems })
+  useEffect(() => {
+    const previous = hadOwnItems.current
+    if (threadId && previous.threadId === threadId && previous.had && items.length === 0) openQueueFolds.delete(threadId)
+    hadOwnItems.current = { threadId, had: ownItems }
+  }, [threadId, ownItems, items.length])
+
+  // An edit of a message the fold hides (a thread opened with its edit in progress) opens the fold.
+  const shownCount = measure?.count ?? null
+  const editIndex = editing ? shown.findIndex((item) => item.id === editing.itemId) : -1
+  useEffect(() => {
+    if (shownCount !== null && editIndex >= shownCount) setShowAll(true)
+    // Only when the edit, the thread or the fold changes, so Show less still folds afterwards.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing?.itemId, threadId, shownCount])
 
   if (items.length === 0) return null
   const firstHeldId = shown.find((item) => !isOptimisticQueueItem(item) && item.state === 'pending')?.id
@@ -228,34 +376,54 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
     queue.startEdit(item, width ? Math.ceil(width) + 8 : null)
   }
   const saveEdit = (item: QueuedMessage, base: string, text: string) => {
-    const content = queuedContentWithText(item.content, text)
+    // An agent's message is edited as its words: the person's saved text is their own, with no header.
+    const content = queuedContentWithText(queuedWords(item.content, item.origin), text)
     if (content === item.content) { queue.closeEdit(); return }
     // Saved only if the message still has the text this edit started from; otherwise the line says it changed.
     // A save closes the edit; anything else keeps it open with the draft.
     void queue.edit(item.id, content, base)
   }
 
+  // Folds when the messages that fit are fewer than all of them. Until the observer measures a commit the
+  // list keeps the height it was measured at, so a message just added shows only once it is known to fit.
+  const fitCount = measure?.count ?? shown.length
+  const folds = fitCount < shown.length
+  const folded = folds && !showAll
+  const pinnedHeight = measure && !showAll && (folds || !dragId) ? measure.height : null
+  const lastShown = folded ? fitCount - 1 : shown.length - 1
+  const onListFocus = (event: FocusEvent<HTMLDivElement>) => {
+    if (folded && focusedIndex(event.currentTarget) >= fitCount) setShowAll(true)
+  }
+
   return (
     <div
       ref={groupRef}
       className="queued-messages"
-      role="list"
-      aria-label="Queued messages"
       data-find-ignore
       onDragOver={(event) => { if (dragId) event.preventDefault() }}
       onDrop={(event) => { if (!dragId) return; event.preventDefault(); dropDrag() }}
     >
+      <div className={pinnedHeight !== null ? 'queued-messages-fold is-pinned' : 'queued-messages-fold'} style={pinnedHeight !== null ? { height: pinnedHeight } : undefined}>
+      <div ref={listRefCallback} id={listId} className="queued-messages-list" role="list" aria-label="Queued messages" onFocus={onListFocus}>
       {shown.map((item, index) => {
         const optimistic = isOptimisticQueueItem(item)
         const busy = optimistic || Boolean(busyIds[item.id])
-        const steering = isSteering(item)
-        const last = index === shown.length - 1
+        const last = index === lastShown
         const canDrag = ids.length > 1 && !optimistic && !busy
         const edit = editing?.itemId === item.id ? editing : null
         // While a compaction holds the queue, the first message's Send now skips it.
         const skipsCompaction = hold !== null && item.id === firstHeldId
-        const sendLabel = steering ? 'Sending now…' : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : 'Send now'
-        const label = !last ? null : hold
+        // A pending steer item cannot be sent now: a subagent result that missed its turn runs as a turn of its own, and a
+        // steer sent into another process's reply is that process's to take.
+        const fixed = item.intent === 'steer'
+        const queuedAt = formatMessageTime(item.enqueuedAt)
+        const sendLabel = fixed
+          ? item.subagentNotice?.length || item.inboxIds?.length ? 'Runs as a turn of its own' : 'Sent into the running reply'
+          : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : `Steer: send now (${steerKey})`
+        // After a Stop nothing drains the queue: the next turn the person starts lifts the hold, and it sends after that.
+        const label = !last ? null : item.heldAfterStop
+          ? <span className="queued-message-state" title={HELD_AFTER_STOP_TITLE}>Held after Stop</span>
+          : hold
           ? <span className="queued-message-state is-held" title="Sends after compacting"><Loader2 size={12} className="animate-spin" aria-hidden="true" />Queued</span>
           : <span className="queued-message-state" title="Sends when the current reply ends">Queued</span>
         return (
@@ -264,6 +432,24 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
             role="listitem"
             className={['queued-message', dragId === item.id ? 'is-dragging' : '', edit ? 'is-editing' : ''].filter(Boolean).join(' ')}
             data-queued-id={item.id}
+            // Focusable, so the steer chord can send it now (from the item or one of its buttons).
+            tabIndex={edit ? undefined : 0}
+            aria-label={edit ? undefined : `Queued message. ${steerKey} sends it now.`}
+            onKeyDown={(event) => {
+              if (edit || busy || fixed || !isSteerKey(event, platform)) return
+              event.preventDefault()
+              event.stopPropagation()
+              // The chord pressed again a moment after a steer lands on the next message (focus moved there): it sends
+              // nothing, as the second click of a double click does not.
+              if (steerKeyRecently()) return
+              markSteerKey()
+              // This message leaves the list: focus moves on to the next queued one (or the one before, or the
+              // composer), never to the page, where the same chord would answer an approval.
+              const here = event.currentTarget
+              const next = [here.nextElementSibling, here.previousElementSibling].find((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains('queued-message'))
+              ;(next ?? document.querySelector<HTMLElement>('textarea.composer-input'))?.focus()
+              void queue.steer(item.id)
+            }}
             draggable={armedId === item.id}
             onDragStart={(event) => onDragStart(event, item.id)}
             onDragOver={(event) => onDragOverItem(event, item.id)}
@@ -274,11 +460,11 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
                 draft={edit.draft}
                 width={edit.width}
                 saving={Boolean(edit.saving)}
-                canBeEmpty={Boolean(item.images?.length || splitQueuedContent(item.content).markers)}
-                changed={!edit.saving && item.content !== edit.base && edit.draft !== splitQueuedContent(edit.base).text}
+                canBeEmpty={Boolean(item.images?.length || splitQueuedContent(queuedWords(item.content, item.origin)).markers)}
+                changed={!edit.saving && item.content !== edit.base && edit.draft !== splitQueuedContent(queuedWords(edit.base, item.origin)).text}
                 label={label}
                 onDraftChange={(draft) => queue.updateEdit({ draft })}
-                onLoadChanged={() => queue.updateEdit({ base: item.content, draft: splitQueuedContent(item.content).text, images: item.images })}
+                onLoadChanged={() => queue.updateEdit({ base: item.content, draft: splitQueuedContent(queuedWords(item.content, item.origin)).text, images: item.images })}
                 onKeepDraft={() => queue.updateEdit({ base: item.content, images: item.images })}
                 onSave={(text) => saveEdit(item, edit.base, text)}
                 onCancel={queue.closeEdit}
@@ -288,6 +474,8 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
                 <div className="queued-message-bubble"><QueuedBubble item={item} /></div>
                 <div className="queued-message-line">
                   <span className="queued-message-actions">
+                    {/* When it was queued, where a sent prompt shows when it was sent. */}
+                    {queuedAt && <span className="queued-message-time">{queuedAt}</span>}
                     {canDrag && (
                       <button
                         type="button"
@@ -304,9 +492,11 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
                       type="button"
                       className="queued-message-btn queued-message-send"
                       title={sendLabel}
-                      aria-label={steering ? 'Sending the queued message now' : skipsCompaction ? sendLabel : 'Send the queued message now'}
-                      disabled={busy || steering}
-                      onClick={() => void queue.steer(item.id)}
+                      aria-label={fixed || skipsCompaction ? sendLabel : 'Send the queued message now'}
+                      disabled={busy || fixed}
+                      // A message sent now leaves the list at the click, so the next one moves under the pointer:
+                      // the second click of a double click must not send that one too.
+                      onClick={(event) => { if (event.detail <= 1) void queue.steer(item.id) }}
                     >
                       <ArrowTurnForward size={14} strokeWidth={1.8} />
                     </button>
@@ -340,6 +530,20 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
           </div>
         )
       })}
+      </div>
+      </div>
+      {folds && (
+        <button
+          type="button"
+          className="queued-messages-toggle"
+          aria-expanded={showAll}
+          aria-controls={listId}
+          onClick={() => { if (showAll) afterTurns.closing(); setShowAll(!showAll) }}
+        >
+          {showAll ? 'Show less' : `Show all ${shown.length} queued`}
+          {showAll ? <ChevronUp size={12} strokeWidth={2} aria-hidden="true" /> : <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />}
+        </button>
+      )}
     </div>
   )
 }

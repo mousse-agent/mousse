@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 import {
-  accountActive, accountHue, formatCountdown, remainingNow, resetTooltip, summarizeAccounts, type UsageLimitSummary, type UsageResetGain
+  accountActive, accountHue, formatCountdown, remainingNow, resetTooltip, summarizeAccounts, usageLevel, type UsageLimitSummary, type UsageResetGain
 } from '../lib/subscriptionUsage'
 import type { UsageAccount } from '../../shared/providerAuth'
 import { UsageBar } from './UsageBar'
@@ -43,7 +43,7 @@ function SummaryColumn({ summary, now }: { summary: UsageLimitSummary; now: numb
   return <div className="usage-summary-col" data-testid="usage-summary-col" data-remaining={summary.remaining ?? 'unknown'} title={gain ? gainTooltip(gain) : undefined}>
     <span className="usage-summary-label settings-muted">{summary.label}</span>
     <span className="usage-summary-value">
-      {summary.remaining === undefined ? <span className="settings-muted">Unknown</span> : <>{summary.remaining}% <span className="settings-muted">left</span></>}
+      {summary.remaining === undefined ? <span className="settings-muted">Unknown</span> : <><span className="usage-level-text" data-usage-level={usageLevel(summary.remaining)}>{summary.remaining}%</span> <span className="settings-muted">left</span></>}
     </span>
     <UsageBar remaining={summary.remaining} label={summary.heading} size="summary" />
     {gain && minutes !== undefined
@@ -71,7 +71,7 @@ function LimitCell({ account, summary, now }: { account: UsageAccount; summary: 
   const minutes = remaining === 100 ? undefined : minutesUntil(window.resetsAt, now)
   return <div className="usage-table-cell" role="cell" data-label={summary.heading} data-testid="usage-table-cell" data-remaining={remaining ?? 'unknown'} title={resetTooltip(window.resetsAt, now)}>
     <span className="usage-table-cell-top">
-      <span className="usage-table-cell-value">{remaining === undefined ? '—' : `${remaining}%`}</span>
+      <span className="usage-table-cell-value usage-level-text" {...(remaining === undefined ? {} : { 'data-usage-level': usageLevel(remaining) })}>{remaining === undefined ? '—' : `${remaining}%`}</span>
       {minutes !== undefined && <span className="usage-table-cell-reset settings-muted">{formatCountdown(minutes)}</span>}
     </span>
     <UsageBar remaining={remaining} label={`${account.label} ${summary.heading}`} size="cell" />

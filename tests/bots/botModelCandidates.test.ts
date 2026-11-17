@@ -115,31 +115,30 @@ describe('BotModelResolver', () => {
 
   it('resolves auto per depth, and a limit moves to the next candidate until its reset', async () => {
     const chooser = resolver()
-    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'medium' } })
-    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, override: { mode: 'auto', depth: 'deep' }, policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-big-2', effort: 'high' } })
+    const normal = { botId: 'b1', pick: null, depth: 'normal' as const, policy }
+    expect(await chooser.resolve(normal)).toEqual({ selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'medium' } })
+    expect(await chooser.resolve({ ...normal, depth: 'deep' })).toEqual({ selection: { instanceId: 'claude', model: 'acme-big-2', effort: 'high' } })
     chooser.markLimited('claude', '2030-06-01T14:00:00.000Z')
     // The next subscription wins over an API key: Codex, on its own default.
-    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toEqual({ selection: { instanceId: 'codex', model: 'default', effort: 'medium' } })
+    expect(await chooser.resolve(normal)).toEqual({ selection: { instanceId: 'codex', model: 'default', effort: 'medium' } })
     chooser.markLimited('codex', '2030-06-01T13:00:00.000Z')
-    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1', effort: 'medium' } })
+    expect(await chooser.resolve(normal)).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1', effort: 'medium' } })
     chooser.markLimited('pi:openai', '2030-06-01T12:00:00.000Z')
-    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toEqual({ problem: 'all_limited', until: '2030-06-01T12:00:00.000Z', instanceId: 'pi:openai' })
+    expect(await chooser.resolve(normal)).toEqual({ problem: 'all_limited', until: '2030-06-01T12:00:00.000Z', instanceId: 'pi:openai' })
     clock = new Date('2030-06-01T15:00:00.000Z')
-    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toMatchObject({ selection: { instanceId: 'claude' } })
+    expect(await chooser.resolve(normal)).toMatchObject({ selection: { instanceId: 'claude' } })
   })
 
-  it('a named model that is not there leaves the bot on auto; use_model can ask first', async () => {
+  it('a model by name from an older bot: matched across entries; one that is not there runs by usage, as before picks', async () => {
     const chooser = resolver()
-    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'named', model: 'grok', depth: 'normal' }, policy })).toMatchObject({ selection: { model: 'acme-mid-2' } })
-    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'named', model: 'Big 2', depth: 'quick' }, policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-big-2', effort: 'low' } })
-    expect(await chooser.namedAvailable('big')).toBe(true)
-    expect(await chooser.namedAvailable('grok')).toBe(false)
+    expect(await chooser.resolve({ botId: 'b1', pick: { model: 'grok' }, depth: 'normal', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'medium' } })
+    expect(await chooser.resolve({ botId: 'b1', pick: { model: 'Big 2' }, depth: 'quick', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-big-2', effort: 'low' } })
   })
 
   it('with no candidate, no_provider names an instance to sign in to when there is one', async () => {
     const out = [snapshot('claude', { driver: 'claude', auth: { state: 'signed_out', canSignIn: true } })]
-    expect(await resolver(out).resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toEqual({ problem: 'no_provider', instanceId: 'claude' })
-    expect(await resolver([]).resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toEqual({ problem: 'no_provider' })
+    expect(await resolver(out).resolve({ botId: 'b1', pick: null, depth: 'normal', policy })).toEqual({ problem: 'no_provider', instanceId: 'claude' })
+    expect(await resolver([]).resolve({ botId: 'b1', pick: null, depth: 'normal', policy })).toEqual({ problem: 'no_provider' })
   })
 
   it('reads the enabled instances\' policy facts again before the hold checks', async () => {
@@ -155,7 +154,7 @@ describe('BotModelResolver', () => {
       catalog: () => catalog,
       now: () => clock
     })
-    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toMatchObject({ selection: { instanceId: 'claude' } })
+    expect(await chooser.resolve({ botId: 'b1', pick: null, depth: 'normal', policy })).toMatchObject({ selection: { instanceId: 'claude' } })
     expect(refreshed).toEqual(['claude'])
   })
 })

@@ -2,6 +2,7 @@ import type { QuickAction } from './quickActions'
 import { useAppStore } from '../stores/appStore'
 import { composerThreadActions } from './composerThreadActions'
 import { prepareComposerThread } from './createComposerThread'
+import { holdNewChat } from './pendingThreadRows'
 import { normalizePermissionMode } from '../../shared/permissionMode'
 import type { SendExpectation, Thread } from '../../shared/types'
 import { composerCreatesThread } from './createComposerThread'
@@ -79,8 +80,11 @@ async function preparedThreadForSend(profileId: string, beforeSwitch?: (threadId
     }
     return { threadId: startId }
   }
-  // One preparation at a time: a composer send or another action already owns this thread.
+  // One preparation at a time: a composer send or another action already owns this thread. A Send holds it from its
+  // click (`holdNewChat`), before its composer lock renders.
   if (isWorkspacePending(store)) throw new WorkspaceBusyError()
+  const releaseHold = holdNewChat(profileId, startId)
+  if (!releaseHold) throw new WorkspaceBusyError()
   let targetId = startId
   // Marked before the first await, so the composer and the side card see it at once.
   store.setWorkspacePending(profileId, startId, true)
@@ -124,6 +128,7 @@ async function preparedThreadForSend(profileId: string, beforeSwitch?: (threadId
     const expect = bind && basis ? expectationOf(basis, defaultMode) : undefined
     return { threadId, ...(expect ? { expect } : {}) }
   } finally {
+    releaseHold()
     const current = useAppStore.getState()
     current.setWorkspacePending(profileId, startId, false)
     current.setWorkspacePending(profileId, targetId, false)
@@ -229,7 +234,7 @@ export async function executeBashInNewTerminal(action: QuickAction, profileId: s
   if (!command) throw new Error('Empty command.')
   const store = requireActiveProfile(profileId)
   const tabId = store.addProjectTerminalTab(store.activeThreadId)
-  store.updateProjectTerminalTab(tabId, { title: action.label.slice(0, 40) || 'Terminal' })
+  store.updateProjectTerminalTab(tabId, { title: action.label.slice(0, 40) || 'Terminal', ...(action.label.trim() ? { quickAction: action.label.trim().slice(0, 60) } : {}) })
   store.openSurfaceKind('terminal')
 
   const deadline = Date.now() + TERMINAL_SPAWN_TIMEOUT_MS

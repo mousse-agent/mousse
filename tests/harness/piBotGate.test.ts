@@ -185,6 +185,45 @@ describe('the built-ins a bot\'s turn offers', () => {
   }, 120_000)
 })
 
+describe('a permission the owner switched off for the bot, at Pi\'s gate (real child)', () => {
+  it('Run commands switched off while the turn runs: a command is refused at the gate, nothing runs, its own folder still works', async () => {
+    const { engine, recorder, project } = await setup(cleanups, supervised)
+    const root = realpathSync(project)
+    const scratch = join(root, '..', 'scratch')
+    const files = join(root, '..', 'files')
+    for (const dir of [scratch, files]) mkdirSync(dir, { recursive: true })
+    writeFileSync(join(files, 'own.txt'), 'own-file')
+    let commandsOff = false
+    const authority = createBotAuthority({
+      activationId: 'act-1',
+      role: 'activation',
+      permissions: { tools: ['read', 'shell'], appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read', scratch, files } },
+      waiting: () => false,
+      counters: new RunCounters(),
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal },
+      spend: null,
+      // As the engine answers for a permission switched off in About (`permissionOff`), read at each call.
+      disabled: (call) => (commandsOff && call.kind === 'builtin' && call.tool === 'shell' ? 'Your owner has switched that off for now.' : undefined)
+    })
+    // The turn was offered bash and read; the owner switches commands off before its calls.
+    commandsOff = true
+    recorder.respond(script([
+      { tool: { name: 'bash', args: { command: 'echo made > made.txt' } } },
+      { tool: { name: 'read', args: { path: join(files, 'own.txt') } } },
+      { text: 'done' }
+    ]))
+    const turn = harness(root, {}, { bot: authority, tools: { toolLedger: { start: () => 'row', commit: () => {}, failed: () => {} } } })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(results.map(refused)).toEqual([true, false])
+    expect(String(results[0]!.response)).toMatch(/Your owner has switched that off/)
+    expect(String(results[1]!.response)).toContain('own-file')
+    expect(existsSync(join(files, 'made.txt'))).toBe(false)
+    expect(existsSync(join(root, 'made.txt'))).toBe(false)
+  }, 120_000)
+})
+
 describe('a refused call (an unattended run\'s missing permission, Bot Phase 1 §5.1.1)', () => {
   it('reaches the model as the tool\'s error, and the turn carries on', async () => {
     const { engine, recorder, project } = await setup(cleanups, supervised)

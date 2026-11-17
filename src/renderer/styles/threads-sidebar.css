@@ -12,12 +12,12 @@
   max-width: 480px;
   min-height: 0;
   --threads-sidebar-row-height: 32px;
+  /* The extra height of a row that shows its latest reply under the title. */
+  --threads-sidebar-preview-line: 16px;
   container-type: inline-size;
   /* pill-tabs: the tab bar's width rules (components/ui/PillTabs.tsx) read this container. */
   container-name: threads-sidebar pill-tabs;
   background: var(--vscode-sideBar-background, rgba(var(--surface-strong-rgb), 0.72));
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   animation: threads-sidebar-slide-in var(--ui-dur-slow) ease-out;
 }
 
@@ -146,8 +146,8 @@
 .threads-sidebar-thread:focus-visible,
 .threads-sidebar-project-toggle:focus-visible,
 .threads-sidebar-inline-action:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 @keyframes threads-sidebar-slide-in {
@@ -356,6 +356,11 @@
   opacity: 0.5;
 }
 
+/* A thread a bot keeps out of the sidebar, listed while the eye shows hidden threads: quieter title. */
+.threads-sidebar-thread.hidden-thread :is(.threads-sidebar-thread-name, .threads-sidebar-card-title) {
+  opacity: 0.55;
+}
+
 /* No bottom margin: it sits inside the Collapse, so it would add to the project's own 8px instead of
    merging with it (polish.css and compact-shell.css follow the same rule). */
 .threads-sidebar-children {
@@ -410,7 +415,7 @@
   transition: opacity 0.15s;
 }
 
-.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :focus-within) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
+.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :has(:focus-visible)) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
 .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread > .threads-sidebar-thread-trailing {
   opacity: 0;
 }
@@ -435,8 +440,9 @@
   transition: opacity 0.15s;
 }
 
+/* Mouse clicks retain focus after pointer leave; only keyboard focus should keep actions visible. */
 .threads-sidebar-thread-container:hover .threads-sidebar-thread-actions,
-.threads-sidebar-thread-container:focus-within .threads-sidebar-thread-actions,
+.threads-sidebar-thread-container:has(:focus-visible) .threads-sidebar-thread-actions,
 .threads-sidebar-thread-actions:has([aria-expanded="true"]) {
   opacity: 1;
   pointer-events: auto;
@@ -470,13 +476,13 @@
 }
 
 .threads-sidebar-thread-list {
-  max-height: calc(var(--threads-sidebar-row-height) * 5);
+  max-height: calc(var(--threads-sidebar-row-height) * 5 + var(--threads-sidebar-preview-line) * var(--project-preview-shown, 0));
   overflow: hidden;
   transition: max-height calc(350ms * var(--ui-motion-scale)) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .threads-sidebar-thread-list.expanded {
-  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5));
+  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5) + var(--threads-sidebar-preview-line) * var(--project-preview-count, 0));
 }
 
 .threads-sidebar-thread-root {
@@ -530,6 +536,15 @@ html[data-theme='light'] .threads-sidebar-thread.threads-sidebar-card.project-ti
   border-radius: inherit;
   background: color-mix(in srgb, var(--project-tint) var(--project-tint-strength), transparent);
   pointer-events: none;
+}
+
+.threads-sidebar-thread.threads-sidebar-card.project-color-outline::after {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--project-tint) 35%, transparent);
+}
+
+.threads-sidebar-thread.threads-sidebar-card.project-color-gradient::after {
+  background: linear-gradient(to left, color-mix(in srgb, var(--project-tint) var(--project-tint-strength), transparent), transparent);
 }
 
 /* The selected row keeps its plain raised look, so the selection reads first; its mark still shows the hue. */
@@ -625,7 +640,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 .threads-sidebar-project-status--working .threads-sidebar-status-dot {
-  animation: threads-sidebar-dot-pulse 1.6s ease-in-out infinite;
+  animation: threads-sidebar-dot-pulse 1.6s steps(12, jump-none) infinite;
 }
 
 @keyframes threads-sidebar-dot-pulse {
@@ -912,8 +927,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   border: 1px solid var(--ui-line-strong);
   border-radius: var(--ui-menu-radius);
   background: rgba(var(--surface-strong-rgb), 0.98);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
@@ -1001,8 +1014,9 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 .threads-sidebar-rename-input:focus {
+  outline: none;
   border-color: rgba(var(--accent-rgb), 0.6);
-  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.15);
+  background-image: var(--ui-focus-layer);
 }
 
 .threads-sidebar-project-rename {
@@ -1196,10 +1210,34 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 /* More rows below the fold: the last rows fade out and the scrollbar stays drawn, so the list reads as one
-   that scrolls even with overlay scrollbars. */
-.threads-sidebar-scroll[data-more-below] {
+   that scrolls even with overlay scrollbars. Over the solid pane the fade is a band in the pane's colour laid
+   over the list's last 28px, scrollbar included (anchored to the list's box, outside its scrolled content); a
+   mask would make the GPU keep a list-sized copy of the list, its mask and their tiles (about 16 MB). In a
+   see-through (acrylic) window the mask stays. */
+html[data-acrylic='true'] .threads-sidebar-scroll[data-more-below] {
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
   mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+}
+
+html:not([data-acrylic='true']) .threads-sidebar {
+  anchor-scope: --threads-list;
+}
+
+html:not([data-acrylic='true']) .threads-sidebar-scroll[data-more-below] {
+  anchor-name: --threads-list;
+}
+
+html:not([data-acrylic='true']) .threads-sidebar:has(> .threads-sidebar-scroll[data-more-below])::after {
+  content: '';
+  position: absolute;
+  position-anchor: --threads-list;
+  left: anchor(left);
+  right: anchor(right);
+  bottom: anchor(bottom);
+  z-index: 1;
+  height: 28px;
+  background: linear-gradient(to bottom, transparent, var(--pane-backdrop));
+  pointer-events: none;
 }
 
 .threads-sidebar-scroll[data-more-below]::-webkit-scrollbar { width: 6px; }
@@ -1314,6 +1352,24 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   --sidebar-icon-fade: var(--sidebar-row-dim);
 }
 
+/* A row whose spinner turns (Turning, lib/turning.tsx) fades its parts instead of itself. An opacity on the row
+   groups the turning spinner with the rest of the row, so the compositor would draw the whole row offscreen on every
+   frame of the turn: about four times the GPU work of the turn itself (measured on an M4). The parts do not overlap,
+   so it looks the same; filter: opacity() keeps each part's own opacity, and the spinner takes the fade as its own
+   opacity, which needs no offscreen pass. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:not(:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input))) > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) {
+  opacity: 1;
+}
+
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > :not(.threads-sidebar-thread-trailing),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > .threads-sidebar-thread-trailing > :not(.turning) {
+  filter: opacity(var(--sidebar-row-dim));
+}
+
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > .threads-sidebar-thread-trailing > .turning {
+  opacity: var(--sidebar-row-dim);
+}
+
 /* A row that needs the person fades everything but its status. */
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input)) :is(
   .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing),
@@ -1324,4 +1380,58 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 ),
 :where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:has(.threads-sidebar-project-status--needs-me) > .threads-sidebar-project-toggle > :not(.threads-sidebar-project-status--needs-me, .project-icon) {
   filter: opacity(var(--sidebar-row-dim));
+}
+
+/* A thread's latest reply under its title, and its pull requests as a count (Settings > Appearance > Reply previews).
+   A row with a preview is one line taller; its title and count share the first line. */
+.threads-sidebar-thread.has-preview:not(.threads-sidebar-card) {
+  height: calc(var(--threads-sidebar-row-height) + var(--threads-sidebar-preview-line));
+}
+
+/* The marks and hover actions stay on the title line, so the preview runs the row's full width under them. */
+.threads-sidebar-thread-container > .threads-sidebar-thread.has-preview:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing,
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread.has-preview:not(.threads-sidebar-card)) > .threads-sidebar-thread-actions {
+  top: calc(var(--threads-sidebar-row-height) / 2);
+}
+
+.threads-sidebar-thread.has-preview:not(.threads-sidebar-card) .threads-sidebar-reply-preview {
+  margin-right: calc(var(--ui-row-x, 9px) - var(--thread-actions-room));
+}
+
+.threads-sidebar-thread-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.threads-sidebar-thread-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.threads-sidebar-reply-preview {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: var(--threads-sidebar-preview-line);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.threads-sidebar-pr-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }

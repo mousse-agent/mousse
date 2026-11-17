@@ -322,7 +322,9 @@ describe.skipIf(!chrome.ok)('managed Chromium drain', () => {
       persistent: true, workspaceId: 'ws_stop_fail', url: `${origin}/form.html`
     }))
     expect(blocked.ok).toBe(false)
-    expect(blocked.error?.code).toBe('policy_denied')
+    // The browser can't start while its profile is held: that class, with the cause.
+    expect(blocked.error?.code).toBe('browser_cannot_start')
+    expect(blocked.error?.details?.problem).toMatchObject({ kind: 'cannot-start', cause: expect.stringMatching(/profile/) })
     injectOwnedStopFailureForTests(null)
     const retried = await broker.call(workerRequest('profile_lock_fail', 'session.close', { sessionId: session.id }))
     expect(retried.ok, JSON.stringify(retried)).toBe(true)

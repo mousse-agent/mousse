@@ -19,6 +19,7 @@ import { createAllowHttpPolicy } from './defaultPorts'
 import { BrowserAutomationError, BrowserSessionManager } from './automation/BrowserSessionManager'
 import { BrowserToolDispatcher } from './automation/BrowserToolDispatcher'
 import { ManagedBrowserWorkflowAdapter } from './automation/BrowserWorkflowAdapter'
+import { ThreadBrowsers, type ThreadBrowsersOptions } from './viewer/ThreadBrowsers'
 import {
   AttachedBrowserConnectionBackend,
   type AttachedCommandDispatchPort
@@ -65,6 +66,8 @@ export interface MmsBrowserServiceOptions {
   commandRouter?: AttachedCommandDispatchPort
   createManagedBackend?: () => BrowserBackendPort
   admitManagedLaunch?: () => Promise<{ release(): void }>
+  /** The thread browsers' view clock and hold lease (tests). */
+  views?: Pick<ThreadBrowsersOptions, 'holdLeaseMs' | 'leaseTimer' | 'now' | 'computerName'>
 }
 
 function requireUuid(value: string, label: string): string {
@@ -109,6 +112,8 @@ export class MmsBrowserService {
   readonly workerArtifactRoot: string
   readonly attached: AttachedBrowserConnectionBackend
   readonly router: BrowserBackendRouter
+  /** The person's view of each thread agent's browser without a window (`browser.view.*`). */
+  readonly views: ThreadBrowsers
   private readonly live = new Map<string, LiveAttachment>()
   private readonly byUiTab = new Map<string, string>()
   private readonly byConnection = new Map<string, Set<string>>()
@@ -143,6 +148,7 @@ export class MmsBrowserService {
     })
     this.tools = new BrowserToolDispatcher({ sessions: this.sessions,
       requestHuman: ({ context, request }) => this.sessions.requestHuman(context, request) })
+    this.views = new ThreadBrowsers({ ...options.views, profileId: options.profileId, browser: () => (this.disposed ? undefined : this), threadExists: options.threadExists })
     // Workflow calls must pass through the same trusted target resolver as
     // native/GUI tool calls; direct dispatcher use could silently choose managed.
     this.workflow = new ManagedBrowserWorkflowAdapter({
@@ -176,6 +182,7 @@ export class MmsBrowserService {
 
   async dispose(): Promise<void> {
     this.beginShutdown()
+    this.views.dispose()
     await this.sessions.closeAll()
     const results = await Promise.allSettled([
       this.router.shutdown(),
@@ -201,7 +208,9 @@ export class MmsBrowserService {
       const signal = context.execution.source === 'gui'
         ? AbortSignal.any([this.access.signal, ...(context.signal ? [context.signal] : [])])
         : context.signal
-      const operation = this.tools.invoke(name, args, { ...context, target, signal })
+      const invoke = (held?: AbortSignal): Promise<BrowserToolResult> => this.tools.invoke(name, args, { ...context, target, signal: held ? (signal ? AbortSignal.any([signal, held]) : held) : signal })
+      // A thread agent's browser without a window: the person's view of it follows the call, and a hold refuses what acts.
+      const operation = target.backend === 'managed-chromium' ? this.views.agentCall({ ...context, target }, name, args, invoke) : invoke()
       if (context.execution.source === 'gui') this.guiDispatches.add(operation)
       try { return await operation }
       finally { this.guiDispatches.delete(operation) }
@@ -222,12 +231,16 @@ export class MmsBrowserService {
     if (context.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
     if (context.source !== 'gui') return 'already-allowed'
     const response = await this.access.request(context.threadId, signal)
-    await this.waitForAttachedTab(context.threadId, signal)
+    await this.waitForAttachedTab(context, signal)
     return response
   }
 
-  private async waitForAttachedTab(threadId: string, signal?: AbortSignal): Promise<void> {
-    if (this.selectedTarget(threadId)) return
+  private async waitForAttachedTab(context: ExecutionContext, signal?: AbortSignal): Promise<void> {
+    const threadId = context.threadId
+    if (this.targetFor(context)) return
+    // An agent that only reads pages holds no tab lease, so it gets no tab of its own (docs/plans/tool-api.md §2.6 "Tabs").
+    if (context.browserGrant && !context.browserGrant.lease && !mayTakeFreeTab(context))
+      throw new BrowserAutomationError({ code: 'setup_required', message: 'This agent only reads pages and has no browser tab of its own. Its parent can open pages.' })
     const request = this.tabRequests.get(threadId) ?? { requestId: randomUUID(), waiters: 0 }
     request.waiters++
     this.tabRequests.set(threadId, request)
@@ -238,7 +251,7 @@ export class MmsBrowserService {
         this.assertActive()
         if (signal?.aborted) throw new BrowserAutomationError({ code: 'cancelled', message: 'Opening the in-app browser was cancelled' })
         if (grantSignal.aborted || !this.access.status().allowed) throw new BrowserAutomationError({ code: 'policy_denied', message: 'The user disabled agents browser access.', details: { userResponse: 'deny' } })
-        if (this.selectedTarget(threadId)) return
+        if (this.targetFor(context)) return
         if (Date.now() >= deadline) throw new BrowserAutomationError({ code: 'setup_required', message: 'The in-app browser did not connect in time. Keep the Mousse window open and retry.' })
         await new Promise<void>((resolve) => setTimeout(resolve, 100))
       }
@@ -289,7 +302,7 @@ export class MmsBrowserService {
     }
     if (context.target) {
       if (context.execution.source === 'gui' && context.target.backend === 'electron-attached') {
-        const selected = this.selectedTarget(context.execution.threadId)
+        const selected = this.targetFor(context.execution)
         if (!selected || selected.uiTabId !== context.target.uiTabId) {
           throw new BrowserAutomationError({ code: 'setup_required', message: 'Host attached target does not match the selected in-app tab' })
         }
@@ -297,19 +310,27 @@ export class MmsBrowserService {
       return context.target
     }
     if (context.execution.source === 'gui') {
-      const selected = this.selectedTarget(context.execution.threadId)
+      const selected = this.targetFor(context.execution)
       if (!selected) throw new BrowserAutomationError({ code: 'setup_required', message: 'Select an in-app browser tab or an explicit managed session before running browser tools' })
       return selected
     }
     return { backend: 'managed-chromium' }
   }
 
-  selectedTarget(threadId: string): BrowserSelectedTarget | undefined {
+  /**
+   * The in-app tab a run drives: its thread's own, or, for the agent at the root of its tree only, a free tab. A subagent
+   * never takes a free tab (docs/plans/tool-api.md §2.6 "Tabs"): it waits for one opened for its own thread.
+   */
+  targetFor(execution: ExecutionContext): BrowserSelectedTarget | undefined {
+    return this.selectedTarget(execution.threadId, { borrow: mayTakeFreeTab(execution) })
+  }
+
+  selectedTarget(threadId: string, options: { borrow?: boolean } = {}): BrowserSelectedTarget | undefined {
     let uiTabId = this.selectedByThread.get(threadId)
     if (!uiTabId && this.access.status().allowed) {
       // The thread's own tab wins over a tab shared by every thread.
       const free = [...this.live.values()].filter((tab) => (!tab.selectedThreadId || tab.selectedThreadId === threadId) && (!tab.threadId || tab.threadId === threadId))
-      const available = free.find((tab) => tab.threadId === threadId) ?? free[0]
+      const available = free.find((tab) => tab.threadId === threadId) ?? (options.borrow === false ? undefined : free[0])
       if (available) {
         available.selectedThreadId = threadId
         this.selectedByThread.set(threadId, available.uiTabId)
@@ -592,6 +613,11 @@ class LazyManagedBrowserBackend implements BrowserBackendPort {
     try { await operation }
     finally { if (this.closeOperation === operation) this.closeOperation = undefined }
   }
+}
+
+/** Only a run outside any tree grant, or the agent at its tree's root, may take a free in-app tab. */
+function mayTakeFreeTab(execution: ExecutionContext): boolean {
+  return !execution.browserGrant || execution.browserGrant.rootThreadId === execution.threadId
 }
 
 function tokenHash(token: string): Buffer {

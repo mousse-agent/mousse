@@ -231,6 +231,18 @@ describe('composer model picker', () => {
     expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'fast-model:high', undefined)
   })
 
+  it('keeps the footer while another listed model has speeds, so hovering one without never resizes the picker', async () => {
+    render({ models: [opus, standardSpeed, fastSpeed], modelId: 'opus:high' })
+    // Opus has one speed: the bar is there, empty.
+    expect(footer()).not.toBeNull()
+    expect(speeds()).toHaveLength(0)
+    await hover('Fast 1')
+    expect(speeds()).toHaveLength(2)
+    await hover('Opus 5.5')
+    expect(footer()).not.toBeNull()
+    expect(speeds()).toHaveLength(0)
+  })
+
   it('adds a faster tier to the Speed toggle only when the model lists it', () => {
     const standard: LlmModelOption = { id: 'gpt', label: 'GPT 9', efforts: ['low', 'high'], thinkingOff: false }
     const fast: LlmModelOption = { id: 'gpt-fast', label: 'GPT 9 (fast)', efforts: ['low', 'high'], speed: 'fast', thinkingOff: false }
@@ -312,15 +324,11 @@ describe('composer model picker', () => {
     expect(document.querySelector('.model-picker-shell')).toBeNull()
   })
 
-  it('keeps a long model name to one line, with the full name in the tooltip', () => {
+  it('keeps a long model name\'s full name in the tooltip', () => {
     const long: LlmModelOption = { id: 'long', label: 'Opus 5.5 Extended Thinking Research Preview Edition' }
     render({ models: [opus, long] })
     const longRow = row('Opus 5.5 Extended Thinking Research Preview Edition')
     expect(longRow.querySelector('.model-picker-row-main')!.getAttribute('title')).toContain('Opus 5.5 Extended Thinking Research Preview Edition')
-    const css = readFileSync('src/renderer/styles/app.css', 'utf8')
-    const title = css.slice(css.indexOf('.model-picker-row-title {'), css.indexOf('}', css.indexOf('.model-picker-row-title {')))
-    expect(title).toContain('text-overflow: ellipsis')
-    expect(title).toContain('white-space: nowrap')
   })
 
   it('shows only the model list when no listed model has run settings', async () => {
@@ -336,6 +344,22 @@ describe('composer model picker', () => {
     expect(columnModel()).toBe('Plain 1')
     expect(column()!.querySelector('.model-picker-run-empty')!.textContent).toBe('None for this model')
     expect(levelItems()).toHaveLength(0)
+  })
+
+  it('keeps room for the longest level list, so hovering a model with fewer never resizes the picker', async () => {
+    render({ permission: false })
+    const run = () => document.querySelector<HTMLElement>('.model-picker-run')!
+    // Opus lists six levels; the column holds room for six whichever model is hovered.
+    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
+    await hover('Plain 1')
+    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
+    await hover('Sonnet 5')
+    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
+    // The column's own content does not size the picker; the reserved rows do.
+    const css = readFileSync('src/renderer/styles/composer-run-controls.css', 'utf8')
+    const rule = css.slice(css.indexOf('.model-picker-run {'), css.indexOf('}', css.indexOf('.model-picker-run {')))
+    expect(rule).toContain('contain: size;')
+    expect(rule).toContain('var(--model-picker-run-rows, 0) * 28px')
   })
 
   it('has no footer for a model without speeds, and never a permission control inside the picker', () => {
@@ -570,6 +594,13 @@ describe('composer send slot', () => {
     expect(actions()).toEqual(['Attach files', 'Stop run', 'Send message'])
   })
 
+  it('keeps dictation beside Stop when the caller asks (a bot, which takes messages while it works)', () => {
+    const { onStartRecording } = slot({ loading: true, dictateWhileStoppable: true })
+    expect(actions()).toEqual(['Attach files', 'Dictate', 'Stop run'])
+    act(() => button('Dictate').click())
+    expect(onStartRecording).toHaveBeenCalledTimes(1)
+  })
+
   it('uses the macOS symbols in the Stop tooltip on a Mac', () => {
     useAppStore.setState({ appInfo: { platform: 'darwin' } as never })
     slot({ loading: true })
@@ -585,37 +616,25 @@ describe('composer send slot', () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
-  it('shows only Stop recording in the slot while recording', () => {
-    const { onStopRecording } = slot({ isRecording: true })
-    expect(actions()).toEqual(['Attach files', 'Stop recording'])
-    act(() => button('Stop recording').click())
+  it('while recording, the footer holds only Cancel and Done', () => {
+    const onCancelRecording = vi.fn()
+    const { onStopRecording } = slot({ isRecording: true, onCancelRecording, recordingDuration: 75 })
+    expect(actions()).toEqual(['Cancel recording', 'Finish recording'])
+    // The run controls make way for the time and the wave.
+    expect(host.querySelector('.composer-model-btn')).toBeNull()
+    expect(host.querySelector('[role="group"][aria-label="Recording"]')?.textContent).toBe('1:15')
+    act(() => button('Cancel recording').click())
+    expect(onCancelRecording).toHaveBeenCalledTimes(1)
+    expect(onStopRecording).not.toHaveBeenCalled()
+    act(() => button('Finish recording').click())
     expect(onStopRecording).toHaveBeenCalledTimes(1)
   })
 
-  it('draws Send, Queue, Stop, Stop recording and the mic as circles, and nothing else in the footer', () => {
-    const css = readFileSync('src/renderer/styles/polish.css', 'utf8').replace(/\r\n/g, '\n')
-    const match = /\.app \.chat-input-area :is\(([^)]*)\) \{\n {2}border-radius: 50%;\n\}/.exec(css)
-    expect(match).not.toBeNull()
-    const round = match![1].split(',').map((selector) => selector.trim().replace(/^\./, ''))
-    // The rule beats the shared 9px square (one more class) and keeps its 30px size.
-    expect(css.indexOf(match![0])).toBeGreaterThan(css.indexOf('.app .chat-input-area .composer-action-btn {\n  width: 30px;\n  height: 30px;\n  border-radius: 9px;'))
-    const isRound = (label: string) => round.some((name) => button(label).classList.contains(name))
-    const states: Array<[Partial<ComposerFooterProps>, string[]]> = [
-      [{ canSend: true }, ['Dictate', 'Send message']],
-      [{ loading: true }, ['Stop run']],
-      [{ loading: true, canSend: true }, ['Stop run', 'Queue message']],
-      [{ isRecording: true }, ['Stop recording']]
-    ]
-    for (const [footer, labels] of states) {
-      slot(footer)
-      for (const label of labels) expect(isRound(label), label).toBe(true)
-      expect(isRound('Attach files')).toBe(false)
-      expect(round.some((name) => permissionButton().classList.contains(name))).toBe(false)
-      act(() => root.unmount())
-      root = createRoot(host)
-    }
-    // The focus ring is a shadow on the same box, so it follows the circle.
-    expect(css).toContain(`.app .chat-input-area :is(${match![1]}):focus-visible {\n  outline: none;\n  box-shadow: var(--ui-focus-ring);\n}`)
+  it('while the recording turns into text, says so and waits', () => {
+    slot({ transcribing: true, onCancelRecording: vi.fn() })
+    expect(host.querySelector('[role="status"]')?.textContent).toBe('Transcribing…')
+    expect(button('Cancel recording').disabled).toBe(true)
+    expect(button('Finish recording').disabled).toBe(true)
   })
 })
 

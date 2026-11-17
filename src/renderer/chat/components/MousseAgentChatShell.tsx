@@ -1,4 +1,4 @@
-import { createContext, useContext, useLayoutEffect, useMemo, useRef } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { UIMessage, ChatStatus } from 'ai'
 import { useAppStore } from '../../stores/appStore'
@@ -17,6 +17,8 @@ import {
 } from './agent-elements/tools/quick-action-approval'
 import { PermissionRequestContext, type PermissionRequestControls } from './agent-elements/tools/permission-request'
 import { TurnActionsContext, type TurnActions } from './agent-elements/turn-actions'
+import { TurnProgressContext, type TurnProgressState } from './agent-elements/turn-progress'
+import { HeldSteerContext, newestSteerMessageId, type HeldSteerState } from './agent-elements/steer-hold'
 import { QueuedMessages } from '../../components/QueuedMessages'
 import type { ThreadQueue } from '../../hooks/useThreadQueue'
 import './agent-elements/agent-ui.css'
@@ -51,15 +53,77 @@ function MousseInputBarSlot() {
   return <div ref={ref} className="chat-composer-stack shrink-0">{composer}</div>
 }
 
-/** The last turn of a stopped run; Continue picks the work up again. */
-export function RunInterruptedNotice({ onContinue }: { onContinue?: () => void }) {
+/**
+ * The last turn of a stopped run; Continue picks the work up again. A run a restart left `uncertain` (SPEC §16.4) may
+ * have run tools without a recorded result: Continue names them first, and only a confirm continues the run.
+ */
+export function RunInterruptedNotice({ onContinue, uncertain, onContinueUncertain }: {
+  onContinue?: () => void
+  uncertain?: { runId: string; tools: string[] }
+  onContinueUncertain?: (runId: string) => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  // Focus follows the row: Continue anyway when it opens, Continue… again when it is cancelled.
+  const confirmRef = useRef<HTMLButtonElement>(null)
+  const askRef = useRef<HTMLButtonElement>(null)
+  const opened = useRef(false)
+  useEffect(() => {
+    if (confirming) {
+      opened.current = true
+      confirmRef.current?.focus()
+    } else if (opened.current) askRef.current?.focus()
+  }, [confirming])
+  const tools = uncertain?.tools.length ? uncertain.tools.join(', ') : 'unknown tools'
+  const detail = `May have run without a result: ${tools}. Check before continuing.`
   return <div className="chat-run-interrupted" role="status">
     <span className="chat-run-interrupted-label">
       <X size={12} strokeWidth={1.8} aria-hidden="true" />
-      <span>Run interrupted</span>
-      {onContinue && <button type="button" className="chat-run-interrupted-action" onClick={onContinue}>Continue</button>}
+      {uncertain && confirming
+        ? <>
+            <span title={detail}>May have run: {tools}</span>
+            {onContinueUncertain && <button ref={confirmRef} type="button" className="chat-run-interrupted-action" onClick={() => { opened.current = false; setConfirming(false); onContinueUncertain(uncertain.runId) }}>Continue anyway</button>}
+            <button type="button" className="chat-run-interrupted-action" onClick={() => setConfirming(false)}>Cancel</button>
+          </>
+        : <>
+            <span>Run interrupted</span>
+            {uncertain
+              ? onContinueUncertain && <button ref={askRef} type="button" className="chat-run-interrupted-action" title={detail} onClick={() => setConfirming(true)}>Continue…</button>
+              : onContinue && <button type="button" className="chat-run-interrupted-action" onClick={onContinue}>Continue</button>}
+          </>}
     </span>
   </div>
+}
+
+/**
+ * What the line under a running turn's Working reads: the turn's phase and step, and a Stop on its way. They change
+ * all through a reply, so only this provider follows them: the chat it wraps stays as it is, and only what reads the
+ * context (the progress line, the turn's end mark) renders.
+ */
+function TurnProgressProvider({ threadId, children }: { threadId?: string | null; children: ReactNode }) {
+  const turnPhase = useAppStore(state => (threadId ? state.turnStates[threadId]?.phase : undefined))
+  const turnStep = useAppStore(state => (threadId ? state.turnStates[threadId]?.step : undefined))
+  const stopping = useAppStore(state => Boolean(threadId && state.stopRequests[threadId]))
+  const turnUpdatedAt = useAppStore(state => (threadId ? state.turnStates[threadId]?.updatedAt : undefined))
+  // A steer waits for the running tool, or (strict release, nothing of the turn running) for the turn's end: the line's
+  // tooltip says when it goes in.
+  const steerHeld = useAppStore((state): boolean | 'turn_end' => {
+    const held = threadId ? state.turnStates[threadId]?.heldSteer : undefined
+    return held?.untilTurnEnd ? 'turn_end' : Boolean(held)
+  })
+  const turnProgress = useMemo<TurnProgressState>(
+    () => ({ phase: turnPhase, step: turnStep, stopping, threadId, updatedAt: turnUpdatedAt, steerHeld }),
+    [turnPhase, turnStep, stopping, threadId, turnUpdatedAt, steerHeld]
+  )
+  return <TurnProgressContext.Provider value={turnProgress}>{children}</TurnProgressContext.Provider>
+}
+
+/** The Steer block's wait line and Send now (`SteerHoldLine`): only what reads it renders when the hold changes. */
+function HeldSteerProvider({ threadId, messages, children }: { threadId?: string | null; messages: UIMessage[]; children: ReactNode }) {
+  const held = useAppStore(state => (threadId ? state.turnStates[threadId]?.heldSteer : undefined))
+  // A held steer with no queue item (a device's limited steer, a run-bound steer) is shown on the newest Steer block.
+  const newestSteerId = useMemo(() => (held && held.itemIds.length === 0 ? newestSteerMessageId(messages) : undefined), [held, messages])
+  const value = useMemo<HeldSteerState>(() => ({ threadId, held, ...(newestSteerId ? { newestSteerId } : {}) }), [threadId, held, newestSteerId])
+  return <HeldSteerContext.Provider value={value}>{children}</HeldSteerContext.Provider>
 }
 
 interface MousseAgentChatShellProps {
@@ -100,6 +164,7 @@ export function MousseAgentChatShell({
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
+  const uncertain = useAppStore(state => (threadId ? state.turnStates[threadId]?.uncertain : undefined))
   const slots = useMemo(
     () => ({ InputBar: MousseInputBarSlot as never }),
     []
@@ -109,10 +174,11 @@ export function MousseAgentChatShell({
   const queued = useMemo(() => (queue ? <QueuedMessages queue={queue} /> : null), [queue])
   // The same element while nothing in it changes, so the last turn does not render again with every delta.
   const continueRun = turnActions && !busy ? turnActions.continueRun : undefined
+  const continueUncertain = turnActions && !busy ? turnActions.continueUncertain : undefined
   const lastTurnNotice = useMemo(() => <>
     <WorkspaceRecoveryBanner threadId={threadId} />
-    {interrupted ? <RunInterruptedNotice onContinue={continueRun} /> : undefined}
-  </>, [threadId, interrupted, continueRun])
+    {interrupted ? <RunInterruptedNotice onContinue={continueRun} uncertain={uncertain} onContinueUncertain={continueUncertain} /> : undefined}
+  </>, [threadId, interrupted, continueRun, uncertain, continueUncertain])
   return (
     <MousseComposerContext.Provider value={composer}>
       <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
@@ -121,6 +187,8 @@ export function MousseAgentChatShell({
       <SubagentCardsContext.Provider value={subagentCards}>
       <SubagentInheritedProviderContext.Provider value={threadProvider}>
       <TurnActionsContext.Provider value={turnActions ?? null}>
+      <TurnProgressProvider threadId={threadId}>
+      <HeldSteerProvider threadId={threadId} messages={messages}>
         <AgentChat
           className="mousse-chat-shell"
           messages={messages}
@@ -136,6 +204,8 @@ export function MousseAgentChatShell({
           enableImagePreview
           enableFind
         />
+      </HeldSteerProvider>
+      </TurnProgressProvider>
       </TurnActionsContext.Provider>
       </SubagentInheritedProviderContext.Provider>
       </SubagentCardsContext.Provider>

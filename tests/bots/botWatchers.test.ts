@@ -1,0 +1,242 @@
+/**
+ * A bot's background commands (`watch_start`), over a real engine, a real `bots.db` and real processes (a small Node
+ * script run through the shell, as a bot's command is). Each ends one way and wakes the bot once in its chat with what
+ * happened; one stopped, or whose bot is paused, wakes nothing and leaves no process behind; a restart wakes the bot to
+ * say it stopped it. Any chat turn of a bot holding "run commands" starts one, whatever started the turn.
+ *
+ * Ends: exit (code and output), a matching line, the time limit, Stop by the bot, Stop by the owner, the bot paused,
+ * a restart. Refusals: no "run commands", work instead of the chat, a match that could run long, too many at once.
+ */
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BotWatchers, watcherMatchProblem } from '../../src/mms/bots/watchers'
+import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
+
+let f: BotFixture
+let botId: string
+let dir: string
+let script: string
+
+beforeAll(() => {
+  dir = mkdtempSync(join(tmpdir(), 'mousse-watch-'))
+  script = join(dir, 'watch.js')
+  // The command a watcher runs: it writes its own pid, then exits, prints a line to match, or runs until stopped.
+  writeFileSync(script, `
+const [mode, pidFile] = process.argv.slice(2)
+require('fs').writeFileSync(pidFile, String(process.pid))
+if (mode === 'exit') { console.log('compiling'); console.error('warning: slow disk'); console.log('done'); process.exit(3) }
+if (mode === 'long') { console.log('FATAL: config file missing'); for (let i = 1; i <= 400; i++) console.log('step ' + i + ' of 400'); process.exit(2) }
+if (mode === 'match') { console.log('step 1'); setTimeout(() => console.log('build passed in 12s'), 50) }
+setInterval(() => {}, 1000)
+`)
+})
+afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+beforeEach(async () => {
+  f = botFixture()
+  await f.bots.reconcileOnStartup()
+  botId = (await createBot(f, { name: 'Pip', reply: 'Hello.' })).botId
+})
+
+afterEach(() => f.close())
+
+/** The owner writes; the chat turn that answers it starts. */
+async function chat(text: string, id: string) {
+  await f.bots.service.chatSend({ botId, text, clientRequestId: id })
+  const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+  return { activation, ...(await start(f, activation.id)) }
+}
+
+/** The owner allows "run commands", as they would on the bot's ask. */
+async function allowCommands() {
+  const activation = await f.bots.activate({ botId, input: 'Run', clientRequestId: 'grant-commands' })
+  const turn = await start(f, activation.id)
+  turn.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To watch builds.' })
+  await finish(f, turn.payload, 'completed', { text: 'Asked.' })
+  for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+  await flush()
+  expect(f.store.activeGrant(botId)!.manifest.tools).toContain('shell')
+}
+
+const command = (mode: string, pidFile: string) => `"${process.execPath}" "${script}" ${mode} "${pidFile}"`
+const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+async function until(check: () => boolean, ms = 10_000): Promise<void> {
+  const end = Date.now() + ms
+  while (!check()) {
+    if (Date.now() > end) throw new Error('timed out')
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+const pidOf = async (file: string) => { await until(() => existsSync(file) && readFileSync(file, 'utf8').length > 0); return Number(readFileSync(file, 'utf8')) }
+const wakeTurn = (id: string) => f.store.listActivations(botId).find((row) => row.idempotencyKey === `wake:${id}`)
+
+/** A chat turn starts a watcher; its reply is posted. */
+async function watch(mode: string, extra: { match?: string; minutes?: number } = {}) {
+  const pidFile = join(dir, `${mode}-${Math.random().toString(16).slice(2)}.pid`)
+  const turn = await chat(`Watch the ${mode} build`, `m-${pidFile}`)
+  const started = f.bots.tools.watchers!.start(botId, turn.activation.id, { command: command(mode, pidFile), brief: 'Tell them how the build went.', title: 'Nightly build', ...extra })
+  await finish(f, turn.payload, 'completed', { text: "I'll tell you when the build is done." })
+  return { ...started, pidFile, turn }
+}
+
+/** The wake a watcher fired, delivered: its chat turn's input. */
+async function woken(watcherId: string): Promise<string> {
+  await until(() => f.store.reminder(watcherId)?.fired !== null)
+  await f.bots.deliverDueReminders()
+  const row = wakeTurn(watcherId)!
+  return (await start(f, row.id)).prepared.prompt
+}
+
+describe('a watcher ends and wakes the bot once', () => {
+  beforeEach(allowCommands)
+
+  it('when its command exits: with the exit code and the end of its output, framed as data; its card shows on the reply', async () => {
+    const { watcherId, turn } = await watch('exit')
+    const reply = chatOf(f, botId).filter((message) => message.activationId === turn.activation.id && message.author === 'bot').at(-1)!
+    expect(reply.cards).toEqual([{ type: 'watcher', watcherId, title: 'Nightly build', command: expect.stringContaining('watch.js') }])
+    const prompt = await woken(watcherId)
+    expect(prompt).toContain('Your background command "Nightly build"')
+    expect(prompt).toContain('exited with code 3')
+    // stdout and stderr can arrive in either order; all lines stay inside the quoted output.
+    const output = /<quoted from="the end of its output">\n([\s\S]*?)\n<\/quoted>/.exec(prompt)?.[1]
+    expect(output).toContain('warning: slow disk')
+    expect(output).toMatch(/compiling[\s\S]*done/)
+    expect(prompt).toContain('Tell them how the build went.')
+    expect(chatOf(f, botId).find((message) => message.id === `bm_wake_${watcherId}`)?.text).toBe('Following up · "Nightly build" exited with code 3')
+    expect(f.bots.tools.watchers!.list(botId)).toEqual([])
+  })
+
+  it('when its output is longer than the wake carries: the bot reads all of it by the command\'s id, after it ended', async () => {
+    const { watcherId } = await watch('long')
+    const prompt = await woken(watcherId)
+    // The wake carries the end only; the first line is not in it, and the prompt says how to read the rest.
+    expect(prompt).not.toContain('FATAL: config file missing')
+    expect(prompt).toContain(`call watch_list with watcherId "${watcherId}"`)
+    const kept = f.bots.tools.watchers!.output!(botId, watcherId)!
+    expect(kept.end).toEqual({ kind: 'exit', code: 2 })
+    expect(kept.output).toContain('FATAL: config file missing')
+    expect(kept.output).toContain('step 400 of 400')
+    // Another bot's id reads nothing.
+    expect(f.bots.tools.watchers!.output!('bot_other', watcherId)).toBeUndefined()
+  })
+
+  it('when a line matches: with that line, and the command is stopped', async () => {
+    const { watcherId, pidFile } = await watch('match', { match: 'build (passed|failed)' })
+    const pid = await pidOf(pidFile)
+    const prompt = await woken(watcherId)
+    expect(prompt).toContain('printed a line that matched')
+    expect(prompt).toContain('<quoted from="the line that matched">\nbuild passed in 12s\n</quoted>')
+    await until(() => !alive(pid))
+  })
+
+  it('at its time limit: it is stopped, and the bot is told so', async () => {
+    const { watcherId, pidFile } = await watch('sleep', { minutes: 5 })
+    const pid = await pidOf(pidFile)
+    // The time limit is the engine's timer: it fires as the clock would.
+    const timer = f.timers.find((entry) => entry.ms === 5 * 60_000)!
+    timer.fn()
+    const prompt = await woken(watcherId)
+    expect(prompt).toContain('reached its time limit and was stopped')
+    await until(() => !alive(pid))
+  })
+
+  it('a restart stops it, and at the next start the bot wakes to say so', async () => {
+    const { watcherId, pidFile } = await watch('sleep')
+    const pid = await pidOf(pidFile)
+    f.bots.close()
+    await until(() => !alive(pid))
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    await f.bots.maintain(new Date(f.clock.now))
+    const row = wakeTurn(watcherId)!
+    const { prepared } = await start(f, row.id)
+    expect(prepared.prompt).toContain('ended without it: Mousse restarted, which stopped your background command.')
+  })
+})
+
+describe('a watcher stopped wakes nothing and leaves no process', () => {
+  beforeEach(allowCommands)
+
+  it.each([
+    ['by the bot (watch_stop)', () => (id: string) => f.bots.tools.watchers!.stop(botId, id)],
+    ['by the owner (Stop in the chat)', () => (id: string) => void f.bots.stopWork(botId, id)],
+    ['by pausing the bot', () => () => f.bots.pauseBot(botId)]
+  ])('%s', async (_name, how) => {
+    const { watcherId, pidFile } = await watch('sleep')
+    const pid = await pidOf(pidFile)
+    expect(f.bots.service.list().bots.find((bot) => bot.id === botId)?.watchers).toEqual([expect.objectContaining({ id: watcherId, title: 'Nightly build' })])
+    how()(watcherId)
+    await until(() => !alive(pid))
+    await f.bots.maintain(new Date(f.clock.now + 10 * 60_000))
+    expect(f.store.reminder(watcherId)).toMatchObject({ status: 'cancelled' })
+    expect(wakeTurn(watcherId)).toBeUndefined()
+    expect(f.bots.service.list().bots.find((bot) => bot.id === botId)?.watchers).toBeUndefined()
+  })
+})
+
+describe('who may start one', () => {
+  // The owner's message is covered by the real-command cases above. Every other chat start may start one too, with
+  // the same tools as the owner's own turn (#1360).
+  it.each(['wake:w1', 'create:c1', 'question:q1:default', 'answer:a1', 'botmsg:other:m1'])(
+    '%s can start a background command', async (idempotencyKey) => {
+      await allowCommands()
+      const owner = await chat('Watch the build', 'owner')
+      await finish(f, owner.payload, 'completed', { text: 'OK.' })
+      const ownerTools = [...owner.prepared.policy.tools!.allow!].sort()
+      if (idempotencyKey.startsWith('wake:')) f.store.insertReminder({ id: 'w1', botId, dueAt: f.store.now(), text: 'Follow up.', work: null, replyTo: null, createdAt: f.store.now(), wake: true, chain: 1 })
+      // The id names the activation's scratch folder: no `:` in it, which Windows refuses in a folder name.
+      const id = `test-${idempotencyKey.replaceAll(':', '-')}`
+      f.store.insertActivation({ ...owner.activation, id, idempotencyKey, status: 'queued' }, {})
+      await f.bots.pump(botId)
+      const turn = await start(f, id)
+      const spawn = vi.spyOn(BotWatchers.prototype, 'start').mockImplementation(() => {})
+      try {
+        expect(f.bots.tools.watchers!.start(botId, id, { command: 'make test', brief: 'Report results.' })).toMatchObject({ watcherId: expect.any(String) })
+        expect(spawn).toHaveBeenCalledOnce()
+        expect([...turn.prepared.policy.tools!.allow!].sort()).toEqual(ownerTools)
+      } finally {
+        spawn.mockRestore()
+      }
+    }
+  )
+
+  it('a bot without "run commands" is refused, and nothing runs', async () => {
+    const turn = await chat('Watch the build', 'm1')
+    expect(() => f.bots.tools.watchers!.start(botId, turn.activation.id, { command: command('sleep', join(dir, 'never.pid')), brief: 'x' })).toThrow('run commands')
+    expect(f.store.waitingReminders(botId)).toEqual([])
+  })
+
+  it('work is refused; no count of how many run at once', async () => {
+    await allowCommands()
+    const turn = await chat('Research and watch', 'm1')
+    const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Research', brief: 'Look it up.', key: 'k1' })
+    expect(() => f.bots.tools.watchers!.start(botId, workId, { command: command('sleep', join(dir, 'w.pid')), brief: 'x' })).toThrow('Only your chat')
+    // Past the old cap of three.
+    const files = Array.from({ length: 5 }, (_, n) => join(dir, `n${n}-${Date.now()}.pid`))
+    for (const file of files) f.bots.tools.watchers!.start(botId, turn.activation.id, { command: command('sleep', file), brief: 'x' })
+    expect(f.bots.tools.watchers!.list(botId)).toHaveLength(files.length)
+    const pids = await Promise.all(files.map(pidOf))
+    for (const view of f.bots.tools.watchers!.list(botId)) f.bots.tools.watchers!.stop(botId, view.id)
+    // Stop ends each tree; none is left holding the bot's folder.
+    await until(() => pids.every((pid) => !alive(pid)))
+  })
+})
+
+describe('what a match may be', () => {
+  it.each([
+    ['build (passed|failed)', undefined],
+    ['^PASS\\b', undefined],
+    ['(a+)+$', /repeat a group/],
+    ['(\\d{2,})*', /repeat a group/],
+    ['(x)\\1', /back-references/],
+    ['([', /not a regular expression/],
+    ['a'.repeat(201), /200 characters/]
+  ])('%s', (pattern, problem) => {
+    const found = watcherMatchProblem(pattern)
+    if (problem) expect(found).toMatch(problem)
+    else expect(found).toBeUndefined()
+  })
+})

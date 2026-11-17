@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { ClaudeSubscriptionAdapter } from '../../src/mms/harness/drivers/claudeCode/adapter'
-import { FakeClaudeCli, resultFrame, roster, textDelta } from './fakeClaudeCli'
+import { FakeClaudeCli, resultFrame, roster, taskStarted, textDelta, toolStart } from './fakeClaudeCli'
 import { CLAUDE, phase6Daemon, waitFor } from './phase6Fixture'
 
 describe('stopping a Claude turn and continuing the thread (issue #142)', () => {
@@ -214,7 +214,8 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     second.catch(() => undefined)
     await waitFor(() => cli.last.inputs.length === 2, 'the second run to start')
     const claude = cli.last
-    claude.emit(textDelta('working', claude.uuid(1)))
+    // A foreground subagent: a steer moves it to the background (by its id) before it is pushed.
+    claude.emit(toolStart('agent-1', 'Agent', claude.uuid(1)), taskStarted('agent-1', 'task-agent-1'), textDelta('working', claude.uuid(1)))
     const run = d.engine.listRuns(thread.id).find((candidate) => candidate.status === 'running')!
     const row = d.engine.inbox.append({ threadId: thread.id, kind: 'reconcile_notice', payload: { text: 'A helper finished.' } })
     const effect = d.engine.outbox.enqueue({ threadId: thread.id, runId: run.runId, kind: 'turn.steer', availableAt: new Date(Date.now() + 3_600_000).toISOString(), payload: { runId: run.runId, threadId: thread.id, text: 'notice', inboxIds: [row.inboxId] } })
@@ -245,7 +246,8 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     second.catch(() => undefined)
     await waitFor(() => cli.last.inputs.length === 2, 'the second run to start')
     const claude = cli.last
-    claude.emit(textDelta('working', claude.uuid(1)))
+    // A foreground subagent: a steer moves it to the background (by its id) before it is pushed.
+    claude.emit(toolStart('agent-1', 'Agent', claude.uuid(1)), taskStarted('agent-1', 'task-agent-1'), textDelta('working', claude.uuid(1)))
     const run = d.engine.listRuns(thread.id).find((candidate) => candidate.status === 'running')!
     const carry = (label: string) => {
       const row = d.engine.inbox.append({ threadId: thread.id, kind: 'reconcile_notice', payload: { text: `Helper ${label} finished.` } })
@@ -279,7 +281,11 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     cli.reply = undefined
     const session = d.orch.getOrCreateSession(thread.id)
     let external: string | undefined
+    // A turn the service runs has a run of its own; without one it would start with no Mousse context, and
+    // the live process would refuse the change of instructions while its helper runs.
+    const { runId } = d.engine.store.createRun({ threadId: thread.id, source: 'steer-followup' })
     const turn = (d.orch as any).runTurnOnSession(session, { content: 'two', mode: 'agent' }, false, true, {
+      runId,
       externalDrainSteer: () => {
         const text = external
         external = undefined
@@ -289,7 +295,8 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     turn.catch(() => undefined)
     await waitFor(() => cli.last.inputs.length === 2, 'the second turn to start')
     const claude = cli.last
-    claude.emit(textDelta('working', claude.uuid(1)))
+    // A foreground subagent: a steer moves it to the background (by its id) before it is pushed.
+    claude.emit(toolStart('agent-1', 'Agent', claude.uuid(1)), taskStarted('agent-1', 'task-agent-1'), textDelta('working', claude.uuid(1)))
     let open!: () => void
     claude.backgroundGate = new Promise<void>((resolve) => { open = resolve })
     // One drain takes both: the external text "please inspect" and the owned steer "inspect".
@@ -306,22 +313,21 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     expect(claude.text(2)).not.toContain('please \\n')
   }, 30_000)
 
-  it('a refused model change leaves the process usable: the next plain message runs on it', async () => {
-    const { cli, d, thread } = await threadWithHelper()
+  it('a model change while a helper runs switches the same process: the helper keeps running, nothing is replayed, and the switch marker shows', async () => {
+    const { cli, d, thread, service } = await threadWithHelper()
     d.orch.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'opus' })
-    await d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' }).catch(() => undefined)
-    await waitFor(() => d.engine.listRuns(thread.id).some((run) => run.status === 'failed'), 'the refused run to fail')
-    expect(cli.processes).toHaveLength(1)
-    // The user goes back to the model the process runs, and sends a plain message.
-    d.orch.setThreadModelOverride(thread.id, CLAUDE)
-    cli.reply = (message, claude) => claude.answer(String(message.uuid), 'back on sonnet')
-    await d.orch.send('three', false, { threadId: thread.id, clientRequestId: 'turn-3' })
+    cli.reply = (message, claude) => claude.answer(String(message.uuid), 'on opus')
+    await d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' })
     expect(cli.processes).toHaveLength(1)
     expect(cli.last.closed).toBe(false)
+    expect(cli.last.flagSettings).toEqual([{ model: 'opus', effortLevel: null }])
+    expect(service.hasBackgroundWork(thread.id)).toBe(true)
     expect(d.engine.listRuns(thread.id).filter((run) => run.status === 'completed')).toHaveLength(2)
-    // The refused message was never sent to Claude, and nothing was replayed.
     expect(cli.last.inputs).toHaveLength(2)
     expect(cli.last.text(1)).not.toContain('Previous conversation')
+    const markers = d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.kind === 'context_handoff')
+    expect(markers).toHaveLength(1)
+    expect(markers[0].contextHandoff).toMatchObject({ to: { model: 'opus' } })
   }, 30_000)
 
   it('replaying an old Stop does not close the process, and the helper, that a newer run started', async () => {

@@ -19,7 +19,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../../adapter'
-import { readUsageLimit } from '../../../orchestrator/providerErrors'
+import { providerStatusError, readProviderStatus, readUsageLimit } from '../../../orchestrator/providerErrors'
 import { isMousseServerTool } from '../../../run/mcp/attachment'
 import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptRuntime'
 import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOverflow'
@@ -27,8 +27,8 @@ import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOv
 /** The slice of the provider service a turn drives. */
 export type CodexClient = Pick<
   CodexProviderService,
-  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'userSetup'
-> & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'stopThread'>>
+  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'userSetup'
+> & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'stopThread' | 'stopHelper'>>
 
 /** How Codex 0.162.1 begins the message of a turn its `auth.command` failed (wire test). */
 const TOKEN_COMMAND_FAILED = 'provider auth command '
@@ -65,13 +65,28 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
   if (kind === 'unauthorized' || status === 401)
     return fail('auth_expired', 'ChatGPT did not accept this sign-in. Sign in again in Settings → Providers.')
   if (kind === 'usageLimitExceeded' || status === 429) return codexUsageLimitHarnessError(instanceId)
-  if (status === 403)
-    return fail('not_eligible', "ChatGPT refused this request for this account or plan. Check the plan, or sign in with another account.")
-  if (kind === 'serverOverloaded' || status === 503)
+  // Any other refusal with a status (a plan that cannot use this, a bad request, an outage): the provider's status
+  // and message. A busy server stays one to try again.
+  const refused = codexProviderError(error)
+  if (refused) return refused
+  if (kind === 'serverOverloaded')
     return fail('service_unavailable', 'ChatGPT is unavailable or busy right now. Try again in a moment.')
-  if (kind === 'badRequest' || status === 400)
-    return fail('unsupported', 'ChatGPT did not accept this request.')
+  if (kind === 'badRequest') return fail('unsupported', 'ChatGPT did not accept this request.')
   return fail('protocol', `Codex ended the turn with an error: ${error.message}`)
+}
+
+/**
+ * A turn Codex ended on the provider's HTTP error (`unexpected status 400 Bad Request: …, url: …`, or a status in
+ * `codexErrorInfo`) as the provider's status and message, for the transcript. Undefined for a failure with no error
+ * status, and for a context overflow, which the overflow recovery reads as it is. The message is already redacted.
+ */
+export function codexProviderError(error: CodexTurnFailure): AppError | undefined {
+  if (codexErrorKind(error.codexErrorInfo) === 'contextWindowExceeded') return undefined
+  const read = readProviderStatus(error.message)
+  const status = error.httpStatus ?? read?.status
+  if (status === undefined || status < 400) return undefined
+  const busy = status === 503 || codexErrorKind(error.codexErrorInfo) === 'serverOverloaded'
+  return providerStatusError(status, read?.body ?? error.message, { provider: 'codex', cause: error, ...(busy ? { errorInfo: { category: 'unavailable', retryable: true } } : {}) })
 }
 
 /**
@@ -79,9 +94,17 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
  * codex-cli 0.162: a steer sent while a shell command ran returned the running turn's id, the
  * command finished normally (exit 0), and the same turn went on to answer with the steer applied.
  * Nothing is cancelled, so reconciler rule 4 may deliver delegation notices into a live run.
+ * A person's message is not left to wait for the reply: the service cuts the server turn and starts
+ * the next one with it (`drainSteerEntry`'s `cut`). While a command, MCP call or web search runs it
+ * waits instead (the hold, docs/design/steer-and-interruptions.md §2.5): Codex reports a tool only
+ * when it starts, so the steer also waits out the release window after the last result.
  */
 export const CODEX_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'native',
+  steerBoundary: 'start',
+  // Spike S4 (codex app-server 0.167.0): at most 65.7 ms from a result to the next start of the same response,
+  // over 216 pairs; 2 × 65.7 + 100.
+  steerSettleMs: 232,
   interrupt: true,
   rollback: 'none',
   fork: 'portable',
@@ -128,18 +151,18 @@ export class CodexAdapter implements ProviderAdapter {
   /**
    * What the user's own Codex setup allows for a child; nothing is changed. Mousse cannot deny a
    * Codex MCP tool call (it answers command, file and permission approvals and elicitations, but a
-   * tool the user's server offers runs under Codex's own rules), so a `shared` child is refused
+   * tool the user's server offers runs under Codex's own rules), so a read-only child is refused
    * while the config has any enabled MCP server, a Mousse-managed one included, or cannot be read;
-   * `isolated` still works. Codex's own subagents are left on: see `NativeHelpers`.
+   * any other child still works. Codex's own subagents are left on: see `NativeHelpers`.
    */
   async childPreflight(context: ChildPreflightContext): Promise<SubagentRefusal | null> {
     const service = this.service()
-    if (!service || context.workspace !== 'shared') return null
+    if (!service || !context.readOnly) return null
     const { mcpServers } = await service.userSetup(context.cwd)
     if (mcpServers === null)
-      return { code: 'shared_unsupported_for_provider', message: 'A read-only (shared) Codex subagent needs Mousse to read your Codex config, and it could not. Use workspace "isolated", or choose another provider or model.' }
+      return { code: 'shared_unsupported_for_provider', message: 'A read-only Codex subagent needs Mousse to read your Codex config, and it could not. Leave readOnly out, or choose another provider or model.' }
     return mcpServers.length
-      ? { code: 'shared_unsupported_for_provider', message: `A read-only (shared) Codex subagent is not possible while your Codex config has MCP servers (${mcpServers.join(', ')}): Mousse cannot stop one of their tools from writing and does not change your Codex config. Use workspace "isolated", or choose another provider or model.` }
+      ? { code: 'shared_unsupported_for_provider', message: `A read-only Codex subagent is not possible while your Codex config has MCP servers (${mcpServers.join(', ')}): Mousse cannot stop one of their tools from writing and does not change your Codex config. Leave readOnly out, or choose another provider or model.` }
       : null
   }
 
@@ -186,16 +209,34 @@ export class CodexAdapter implements ProviderAdapter {
       autoCompactTokens: host.context.compactionTokens,
       ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       drainSteer: () => ctl.drainSteer(),
-      onSteer: (text) => {
+      ...(ctl.drainSteerEntry ? { drainSteerEntry: (opts) => ctl.drainSteerEntry!(opts) } : {}),
+      // The hold (docs/design/steer-and-interruptions.md §2.5): offered only for a turn on it.
+      ...(ctl.peekSteer ? { peekSteer: () => ctl.peekSteer!() } : {}),
+      ...(ctl.mayCut ? { mayCut: (token: string) => ctl.mayCut!(token) } : {}),
+      onBoundary: () => sink.boundary?.(),
+      onProviderTurn: () => sink.providerTurn?.(),
+      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
+      steerTaken: (token) => ctl.steerTaken?.(token),
+      returnSteer: (text, token) => ctl.returnSteer?.(text, token),
+      // Called once Codex has the text: its `turn/steer` was answered, or, for a cut, the server accepted the turn
+      // that carries it, so the reply row splits where the interrupt landed.
+      onSteer: (text, token) => {
         progress()
-        sink.steerAccepted(text)
+        // The reply goes on below the steered message: what it wrote before keeps its row, above it.
+        streams.thinking.break()
+        streams.text.break()
+        sink.steerAccepted(text, token)
       },
       onText: (text) => {
         progress()
+        // The reply began: the thought before it is done, and one that resumes after it is a new row.
+        streams.thinking.break()
         streams.text.update(text)
       },
       onThinking: (text) => {
         progress()
+        // A thought after text keeps the text above it, as a tool call does.
+        streams.text.break()
         streams.thinking.update(text)
       },
       onTool: (event) => {
@@ -220,6 +261,8 @@ export class CodexAdapter implements ProviderAdapter {
       },
       onSession: ({ codexThreadId, turnId }) => {
         ctl.heartbeat()
+        // Codex answered turn/start (the session is named again with its turn): the model is next.
+        if (turnId) sink.status?.('waiting')
         providerRef = { ...providerRef, sessionId: codexThreadId, ...(turnId ? { nativeTurnId: turnId } : {}) }
         sink.providerRef(providerRef)
       }
@@ -252,6 +295,8 @@ export class CodexAdapter implements ProviderAdapter {
         }
         throw codexHarnessError(error, input.instanceId)
       }
+      // The provider refused the request: the transcript shows its status and message.
+      if (error instanceof CodexTurnFailure && !input.signal.aborted) throw codexProviderError(error) ?? error
       throw error
     }
     const totalResponseTimeMs = Date.now() - startedAt
@@ -277,10 +322,12 @@ export class CodexAdapter implements ProviderAdapter {
           totalTokens: result.usage.totalTokens,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
         },
-        context: result.usage.context ? { ...result.usage.context, modelName: result.model } : undefined
+        context: result.usage.context ? { ...result.usage.context, modelName: result.model } : undefined,
+        ...(result.usage.quota?.length ? { quota: result.usage.quota } : {}),
+        ...(result.resumeLost ? { resumeLost: true } : {})
       })
       sink.usage(usage)
-    } else sink.providerMetrics({ realModelName, totalResponseTimeMs })
+    } else sink.providerMetrics({ realModelName, totalResponseTimeMs, ...(result.resumeLost ? { resumeLost: true } : {}) })
     streams.thinking.complete()
     service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(result.text))
     streams.text.complete(result.text)
@@ -314,9 +361,9 @@ export class CodexAdapter implements ProviderAdapter {
     return (await this.service()?.stopThread?.(threadId)) ?? 'not_active'
   }
 
-  /** Adds `text` to the live Codex turn of `ref` without cancelling it (`turn/steer`). */
-  async steer(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'> {
-    return (await this.service()?.steer(ref.sessionId, text)) ?? 'not_active'
+  /** Stop of a native helper's mirror thread: Codex interrupts that helper's own turn (CodexProviderService.stopHelper). */
+  async stopNativeHelper(hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active'> {
+    return this.service()?.stopHelper?.(hostThreadId, agentId) ?? 'not_active'
   }
 
   /**

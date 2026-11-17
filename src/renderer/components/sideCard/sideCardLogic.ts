@@ -2,17 +2,23 @@ import { useAppStore } from '../../stores/appStore'
 
 /**
  * Narrowest thread area (px) that still docks the side card beside the
- * conversation. Below this the card would crowd the 680px conversation column,
+ * conversation. Below this the card would crowd the conversation column,
  * so it opens as an overlay instead.
  */
 export const SIDE_CARD_MIN_THREAD_WIDTH = 1000
 
+/** The docked card's width plus a 12px gutter on each side. */
+const SIDE_CARD_SPACE = 272 + 2 * 12
+
+/** The conversation column at the default Chat width (736px of text plus its gutters). */
+const NORMAL_COLUMN_WIDTH = 784
+
 /**
- * Thread area width (px) at which the centered 680px column leaves the docked
- * card its own gutter on both sides (the card is 272px with 12px gutters); the
- * column makes room for the card only below this.
+ * Thread area width (px) at which the centered column of the default Chat width
+ * leaves the docked card its own gutter on both sides; the column makes room for
+ * the card only below this.
  */
-export const SIDE_CARD_CLEARANCE_WIDTH = 680 + 2 * (272 + 2 * 12)
+export const SIDE_CARD_CLEARANCE_WIDTH = NORMAL_COLUMN_WIDTH + 2 * SIDE_CARD_SPACE
 
 export interface SideCardVisibilityInput {
   sideCardOn: boolean
@@ -70,11 +76,12 @@ export function sideCardFitsThreadWidth(width: number): boolean {
 
 /**
  * Width (px) the conversation column gives up on the right for the docked card:
- * none once the thread area leaves the card its own gutter, growing as the area
- * narrows. The overlay reserves nothing.
+ * none while the centered column (`columnWidth`, Infinity when it fills the pane)
+ * clears the card, growing as the area narrows, and never more than the card and
+ * its gutters. The overlay reserves nothing.
  */
-export function sideCardReservedWidth(threadWidth: number): number {
-  return Math.max(0, SIDE_CARD_CLEARANCE_WIDTH - threadWidth)
+export function sideCardReservedWidth(threadWidth: number, columnWidth = NORMAL_COLUMN_WIDTH): number {
+  return Math.max(0, Math.min(columnWidth + 2 * SIDE_CARD_SPACE - threadWidth, SIDE_CARD_SPACE))
 }
 
 /** The threads sidebar's 1px resizer sits inside its reserved width. */

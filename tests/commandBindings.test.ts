@@ -456,7 +456,7 @@ describe('the command table', () => {
     expect(new Set(COMMANDS.map((command) => command.id)).size).toBe(COMMANDS.length)
     const unbound = COMMANDS.filter((command) => command.defaultBinding === null).map((command) => command.id)
     // Palette-only commands and Deny (a slip of the hand must not deny) ship without a key.
-    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'automations.open', 'usage.open'])
+    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'theme.builtIn', 'window.reload', 'automations.open', 'usage.open'])
     for (const command of COMMANDS) {
       for (const platform of ['win32', 'darwin']) {
         const binding = defaultBindingFor(command.id, platform)
@@ -515,7 +515,7 @@ describe('the command table', () => {
   })
 
   it('binds Find in thread to Mod+F, apart from the palette (Mod+K) and thread search (Mod+Shift+O)', () => {
-    expect(COMMANDS.find((command) => command.id === 'chat.findInThread')).toMatchObject({ title: 'Find in thread', category: 'Thread' })
+    expect(COMMANDS.find((command) => command.id === 'chat.findInThread')).toMatchObject({ title: 'Find in thread', category: 'Threads' })
     expect(defaultBindingFor('chat.findInThread', 'win32')).toBe('CommandOrControl+F')
     const win = resolveBindings({}, 'win32')
     expect(win.get(resolveBinding('CommandOrControl+F', 'win32')!)).toEqual(['chat.findInThread'])
@@ -555,11 +555,36 @@ describe('the command table', () => {
 
   it('has no default key for Deny, and keeps one the user sets', () => {
     expect(defaultBindingFor('approval.deny', 'win32')).toBeNull()
-    expect(resolve('Ctrl+Shift+Enter')).toBeNull()
-    expect(resolve('Ctrl+Shift+Enter', context(), { 'approval.deny': 'CommandOrControl+Shift+Enter' })).toBe('approval.deny')
+    expect(resolve('Ctrl+Alt+Enter')).toBeNull()
+    expect(resolve('Ctrl+Alt+Enter', context(), { 'approval.deny': 'CommandOrControl+Alt+Enter' })).toBe('approval.deny')
     // Unbound is its default already: nothing is stored.
     expect(normalizeShortcuts({ 'approval.deny': null }, 'win32')).toEqual({})
-    expect(normalizeShortcuts({ 'approval.deny': 'Ctrl+Shift+Enter' }, 'win32')).toEqual({ 'approval.deny': 'Ctrl+Shift+Enter' })
+    expect(normalizeShortcuts({ 'approval.deny': 'Ctrl+Alt+Enter' }, 'win32')).toEqual({ 'approval.deny': 'Ctrl+Alt+Enter' })
+  })
+
+  it('starts and finishes dictation with Ctrl+Shift+Space (Cmd+Shift+Space on a Mac), from the composer too', () => {
+    const space = (mods: Partial<KeyInput>): KeyInput => ({ key: ' ', code: 'Space', ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, ...mods })
+    expect(defaultBindingFor('composer.dictate', 'win32')).toBe('CommandOrControl+Shift+Space')
+    expect(getCommand('composer.dictate').category).toBe('Composer')
+    expect(resolveCommand(space({ ctrlKey: true }), {}, context({ inTextInput: true, inComposer: true }), everythingRegistered)).toBe('composer.dictate')
+    expect(resolveCommand(space({ metaKey: true }), {}, context({ platform: 'darwin' }), everythingRegistered)).toBe('composer.dictate')
+    // A terminal and the browser page keep the chord.
+    expect(resolveCommand(space({ ctrlKey: true }), {}, context({ inTerminal: true }), everythingRegistered)).toBeNull()
+    expect(getCommand('composer.dictate').guest).toBe('deny')
+    // Rebindable from Settings → Shortcuts.
+    expect(resolve('Ctrl+Alt+D', context(), { 'composer.dictate': 'CommandOrControl+Alt+D' })).toBe('composer.dictate')
+    expect(findConflicts({}, 'win32')).toEqual([])
+    expect(findConflicts({}, 'darwin')).toEqual([])
+  })
+
+  it('switches the send mode with Ctrl+Shift+Enter (Cmd+Shift+Enter on a Mac), a key no other command has', () => {
+    expect(defaultBindingFor('composer.switchSendMode', 'win32')).toBe('CommandOrControl+Shift+Enter')
+    expect(resolve('Ctrl+Shift+Enter')).toBe('composer.switchSendMode')
+    expect(resolve('Meta+Shift+Enter', context({ platform: 'darwin' }))).toBe('composer.switchSendMode')
+    expect(findConflicts({}, 'win32')).toEqual([])
+    expect(findConflicts({}, 'darwin')).toEqual([])
+    // A key the person gave Deny before wins over the new default.
+    expect(resolve('Ctrl+Shift+Enter', context(), { 'approval.deny': 'CommandOrControl+Shift+Enter' })).toBe('approval.deny')
   })
 })
 

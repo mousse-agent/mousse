@@ -135,6 +135,74 @@ export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> 
 })
 
 /**
+ * On the seven rows below, set only by the calling computer's daemon for an agent's call (a remote subagent today):
+ * `{ thread, run, title, hops, mode }`, the sending thread and run by their ids there, its title, the count of agent
+ * messages in a row this one is, and the mode the sender runs in. The owner handles a marked call as an agent's, never
+ * as a person's: run source `mcp`, the narrowest mode, its own limits, an envelope it builds, and an audit row with actor
+ * `agent` (`bridge/routed/remoteAgent.ts`). A window never sets it (`ThreadRouter` refuses it), nor does a phone.
+ *
+ * It is never droppable: a caller whose owner's row predates it is refused (`RoutedClient.unsupportedKey`), so an
+ * agent's message is never delivered as a person's. The field names avoid `…Id`, so the id rewriting leaves them alone.
+ *
+ * Any change to the key's shape or meaning raises the version of all seven rows.
+ */
+export const ROUTED_AGENT_KEY = 'agent'
+
+/** The rows that take `agent`, and the version of each that added it. */
+export const ROUTED_AGENT_METHODS: Readonly<Record<string, number>> = Object.freeze({
+  'threads.create': 2,
+  'threads.setModel': 3,
+  'threads.setPermissionMode': 4,
+  'orchestrator.send': 7,
+  'orchestrator.steer': 3,
+  'queue.enqueue': 3,
+  'orchestrator.abort': 2
+})
+
+/**
+ * On an agent's `orchestrator.send` (with `agent`), set only by the calling computer's daemon: the minutes of running
+ * time the run it starts may use (a remote subagent's `maxMinutes`, issue #685), a whole number of at least 1. The owner
+ * counts the time the run works, not the time it waits on a person, stops the run when it is used up, and answers with
+ * the same key when it took the limit. A caller sends it only to an owner whose row is at `ROUTED_DEADLINE_SINCE`;
+ * an older owner is stopped by the caller after that many minutes instead.
+ */
+export const ROUTED_DEADLINE_KEY = 'deadlineMinutes'
+/** The version of `orchestrator.send` that added `deadlineMinutes`. */
+export const ROUTED_DEADLINE_SINCE = 8
+
+/** What the `agent` key carries. */
+export interface RoutedAgentMark {
+  /** The sending thread, by its id on the calling computer. */
+  thread: string
+  /** The sending run, by its id on the calling computer. */
+  run: string
+  /** The sending thread's title; the owner cleans and cuts it (`ROUTED_AGENT_TITLE_MAX`). */
+  title: string
+  /** How many agent messages in a row this call is (the sender's own count plus one). The owner takes the larger of it and its own. */
+  hops: number
+  /** The mode the sender runs in. The owner narrows it further and never widens anything by it. */
+  mode: string
+}
+
+/**
+ * `runs.wait`: the longest one call waits on the owner, and the deadline the caller gives the call. The deadline is above
+ * the wait (the owner answers at its end) and below the minute an MCP client waits on a tool call.
+ */
+export const ROUTED_RUN_WAIT_MAX_MS = 40_000
+export const ROUTED_RUN_WAIT_DEADLINE_MS = 50_000
+
+/**
+ * What an agent's read of a thread on another computer asks for (`thread.messages` with `index`): the most characters of
+ * one message, and the bytes of rows the owner sends for one page. The caller's tool cuts its own response to the same.
+ */
+export const ROUTED_AGENT_READ = Object.freeze({ textMax: 16_384, pageBytes: 64 * 1024 })
+
+/** The longest sender title an envelope carries. */
+export const ROUTED_AGENT_TITLE_MAX = 80
+/** The longest message an agent on another computer may send (an agent on the same computer may send 100,000). */
+export const ROUTED_AGENT_BODY_MAX = 16_000
+
+/**
  * Keys no routed call may ever carry, whatever a row says: they would name a folder, a command or
  * an identity of the caller instead of a thread of the owner.
  */
@@ -154,6 +222,9 @@ export const ROUTED_FORBIDDEN_KEYS = [
 export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze({
   // ---------------------------------------------------------------- thread reads
   'threads.get': read('thread', ['threadId']),
+  // A window of the caller opened the thread: its Done clears on the owner, and so in every window. Anyone who may
+  // read the thread may see it.
+  'threads.markSeen': read('thread', ['threadId']),
   // `transcript: false` leaves out what a computer that reads the thread's stream already has (the
   // messages and the queue), so a snapshot of a long thread is not sent a second time.
   'thread.snapshot': read('thread', ['threadId', 'transcript'], {
@@ -161,7 +232,13 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     since: { transcript: 2 }
   }),
   // Older messages of a long thread, a page at a time, newest first from `before` (a message id).
-  'thread.messages': read('thread', ['threadId', 'before', 'after', 'limit'], { version: 2, since: { after: 2 } }),
+  // Version 3: `index`, `textOffset` and `textMax`, the page an agent's `thread_read` reads on another computer: from
+  // the message at `index`, each message's text cut to `textMax` characters (the first one from `textOffset`), so only
+  // what the tool returns crosses (`ROUTED_AGENT_READ`).
+  'thread.messages': read('thread', ['threadId', 'before', 'after', 'limit', 'index', 'textOffset', 'textMax'], {
+    version: 3,
+    since: { after: 2, index: 3, textOffset: 3, textMax: 3 }
+  }),
   'thread.changesSince': read('thread', ['threadId', 'seq', 'epoch']),
   // The image of one message or queued message, by its place in it (the stream carries only the newest images' data).
   'thread.messageImage': read('thread', ['threadId', 'messageId', 'queueItemId', 'index'], {
@@ -177,6 +254,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'runs.events': read('thread', ['threadId', 'afterSeq', 'limit']),
+  // Waits up to `timeoutMs` (at most `ROUTED_RUN_WAIT_MAX_MS`) for a run of the thread to end or to wait on a person,
+  // answered from the owner's run events: `thread_wait` on a thread of another computer (issue #1160). Without `runId`,
+  // the run that is active or paused now; a thread with a run that is preparing or a message waiting in its queue is
+  // never answered idle.
+  'runs.wait': read('thread', ['threadId', 'runId', 'timeoutMs'], { owned: { runId: 'run' } }),
   'activity.get': read('thread', ['threadId']),
   'subagents.list': read('thread', ['threadId']),
   'agents.list': read('thread', ['threadId']),
@@ -301,42 +383,60 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       'refuseWhilePaused',
       'conversationBranchId',
       'expect',
-      ROUTED_SEND_WINDOW_KEY
+      ROUTED_SEND_WINDOW_KEY,
+      ROUTED_AGENT_KEY,
+      ROUTED_DEADLINE_KEY
     ],
     // Version 3: `refuseWhilePaused`, a parent's follow-up to a subagent, which a thread paused by a usage limit refuses.
     // Version 4: `conversationBranchId`, the branch an edited prompt must land on.
     // Version 5: `expect`, the model, mode and settings revision the sender saw; the owner runs nothing on other ones.
     // Version 6: `window`, set by the calling computer: a window sent this (`ROUTED_SEND_WINDOW_KEY`).
-    { required: ['content'], ...staging(['content', 'images']), version: 6, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5, [ROUTED_SEND_WINDOW_KEY]: 6 } }
+    // Version 7: `agent`, an agent's message (`ROUTED_AGENT_KEY`).
+    // Version 8: `deadlineMinutes`, the running time an agent's task may use there (`ROUTED_DEADLINE_KEY`).
+    { required: ['content'], ...staging(['content', 'images']), version: 8, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5, [ROUTED_SEND_WINDOW_KEY]: 6, [ROUTED_AGENT_KEY]: 7, [ROUTED_DEADLINE_KEY]: ROUTED_DEADLINE_SINCE } }
   ),
+  // Version 3 (both): `agent`, an agent's steer or Stop (`ROUTED_AGENT_KEY`).
   'orchestrator.steer': chat(
     'thread',
-    ['threadId', 'text', 'runId', 'clientRequestId', ROUTED_STAGED_KEY],
+    ['threadId', 'text', 'runId', 'clientRequestId', ROUTED_STAGED_KEY, ROUTED_AGENT_KEY],
     {
       required: ['text'],
       owned: { runId: 'run' },
-      ...staging(['text'])
+      ...staging(['text']),
+      version: 3,
+      since: { [ROUTED_STAGED_KEY]: 2, [ROUTED_AGENT_KEY]: 3 }
     }
   ),
-  'orchestrator.abort': chat('thread', ['threadId', 'clearQueue', 'runId', 'clientRequestId'], {
+  'orchestrator.abort': chat('thread', ['threadId', 'clearQueue', 'runId', 'clientRequestId', ROUTED_AGENT_KEY], {
+    owned: { runId: 'run' },
+    version: 2,
+    since: { [ROUTED_AGENT_KEY]: 2 }
+  }),
+  // Send now on a held steer: the run and hold the click was shown for, and the held queue items.
+  'orchestrator.steerNow': chat('thread', ['threadId', 'runId', 'holdGeneration', 'itemIds', 'clientRequestId'], {
+    required: ['runId', 'holdGeneration', 'itemIds'],
     owned: { runId: 'run' }
   }),
   'orchestrator.retry': chat('thread', ['threadId']),
   'threads.clearContext': chat('thread', ['threadId']),
   'threads.compact': chat('thread', ['threadId', 'focus']),
   'threads.stopCompaction': chat('thread', ['threadId']),
-  'orchestrator.answerQuestions': chat('thread', ['threadId', 'requestId', 'answers'], {
+  // Version 2: `attachments`, images sent with the answers by question id, which may be staged.
+  'orchestrator.answerQuestions': chat('thread', ['threadId', 'requestId', 'answers', 'attachments', ROUTED_STAGED_KEY], {
     required: ['requestId', 'answers'],
-    owned: { requestId: 'question' }
+    owned: { requestId: 'question' },
+    ...staging(['attachments']),
+    since: { attachments: 2, [ROUTED_STAGED_KEY]: 2 }
   }),
   'orchestrator.dismissQuestions': chat('thread', ['threadId', 'requestId'], {
     required: ['requestId'],
     owned: { requestId: 'question' }
   }),
+  // Version 3: `agent`, a message an agent queues (`ROUTED_AGENT_KEY`).
   'queue.enqueue': chat(
     'thread',
-    ['threadId', 'content', 'mode', 'images', 'requestId', ROUTED_STAGED_KEY],
-    { required: ['content'], ...staging(['content', 'images']) }
+    ['threadId', 'content', 'mode', 'images', 'requestId', ROUTED_STAGED_KEY, ROUTED_AGENT_KEY],
+    { required: ['content'], ...staging(['content', 'images']), version: 3, since: { [ROUTED_STAGED_KEY]: 2, [ROUTED_AGENT_KEY]: 3 } }
   ),
   'queue.edit': chat(
     'thread',
@@ -358,10 +458,12 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   ),
   // `ifRevision` (version 2): applied only while the thread's settings revision is that one. An owner from before it is
   // never sent the call without it: the caller refuses it as outdated (`RoutedClient.unsupportedKey`).
-  'threads.setModel': chat('thread', ['threadId', 'model', 'ifRevision'], { version: 2, since: { ifRevision: 2 } }),
+  // Version 3: `agent` (`ROUTED_AGENT_KEY`).
+  'threads.setModel': chat('thread', ['threadId', 'model', 'ifRevision', ROUTED_AGENT_KEY], { version: 3, since: { ifRevision: 2, [ROUTED_AGENT_KEY]: 3 } }),
   // Version 2 accepts `mode: 'auto'` (issue #419); a caller sends an older owner `accept_edits` instead
   // (`routedParamsForOwner`).
-  'threads.setPermissionMode': chat('thread', ['threadId', 'mode', 'ifRevision'], { required: ['mode'], version: 3, since: { ifRevision: 3 } }),
+  // Version 4: `agent` (`ROUTED_AGENT_KEY`); a marked call never sets a mode above the one the thread was held to.
+  'threads.setPermissionMode': chat('thread', ['threadId', 'mode', 'ifRevision', ROUTED_AGENT_KEY], { required: ['mode'], version: 4, since: { ifRevision: 3, [ROUTED_AGENT_KEY]: 4 } }),
   'threads.clearApprovalRules': chat('thread', ['threadId', 'ruleId']),
   'runs.resumeNow': chat('thread', ['threadId', 'runId'], {
     required: ['runId'],
@@ -569,12 +671,15 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
 
   // ---------------------------------------------------------------- projects and the computer
   // A new thread records the computer that asked (`startedFrom`), as for a phone.
+  // Version 2: `agent` (`ROUTED_AGENT_KEY`), accepted from another computer's daemon only, never from a phone.
   'threads.create': write(
     'computer',
-    ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId'],
+    ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', ROUTED_AGENT_KEY],
     {
       via: 'backend',
-      required: ['name']
+      required: ['name'],
+      version: 2,
+      since: { [ROUTED_AGENT_KEY]: 2 }
     }
   ),
   'projects.rename': write('project', ['projectId', 'name'], { required: ['name'] }),
@@ -716,6 +821,16 @@ export const ROUTED_PTY_MAX_ROWS = 256
 /** Newest part of a transcript a snapshot carries, and the most a page of older messages carries. */
 export const ROUTED_SNAPSHOT_MESSAGE_BYTES = 16 * 1024 * 1024
 export const ROUTED_MESSAGES_PAGE_BYTES = 8 * 1024 * 1024
+/**
+ * Newest part of a transcript a phone's snapshot carries. A phone holds 8-10 times a snapshot's size while it
+ * assembles it, and keeps a saved copy of up to 8 MiB; `earlier` counts the older messages left on the computer.
+ */
+export const PHONE_SNAPSHOT_MESSAGE_BYTES = 8 * 1024 * 1024
+/**
+ * Most a phone's page of older messages (`thread.messages`) carries, images included; the newest message before the
+ * cursor always comes, whatever its size. A page larger than one RPC reply comes as a paged reply (`reply.page`).
+ */
+export const PHONE_MESSAGES_PAGE_BYTES = 512 * 1024
 
 /**
  * A reply too large for one RPC reply. The owner keeps the whole `RoutedReply` for a minute; the
@@ -868,11 +983,20 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'health',
       'capabilities',
       'events.subscribe',
+      'app.presence',
       'daemon.shutdown',
       'gui.devtoolsPoll',
       'gui.devtoolsRespond'
     ],
     reason: 'They describe or control the daemon a window is connected to, not a thread.'
+  },
+  {
+    methods: ['threads.goal'],
+    reason: 'A goal is set and changed from the desktop composer of the computer that runs the thread (issue #1207).'
+  },
+  {
+    methods: ['threads.setHidden'],
+    reason: "A hidden thread is one a bot of the computer that runs it started; that bot's chat lists it, and Show in sidebar is offered there (issue #1217)."
   },
   {
     methods: ['threads.focus'],
@@ -893,9 +1017,18 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'A project icon is an image file on the computer itself; a project of another computer shows the folder glyph.'
   },
   {
+    methods: ['appearance.wallpaperImport', 'appearance.wallpaperImportBytes', 'appearance.wallpaperRead', 'appearance.wallpaperSaveCopy'],
+    reason: 'A theme wallpaper is an image kept in the profile of the computer itself; a window of another computer shows the theme without it.'
+  },
+  {
     methods: ['files.root', 'files.writeDirect'],
     reason:
       'They are the Files panel of a window on the computer itself: a routed call names the thread and gets the daemon search, listing and Undo-able save instead.'
+  },
+  {
+    methods: ['review.turnFile'],
+    reason:
+      'A file a thread’s agent wrote outside its folder is read from a window on that computer only; another computer reviews the thread’s own changes.'
   },
   {
     methods: ['files.drives'],
@@ -935,11 +1068,15 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'An agent’s ask and Keep are answered on the computer that holds them.'
   },
   {
+    methods: ['secrets.requests.list', 'secrets.requests.answer', 'secrets.requests.useSaved', 'secrets.requests.decline', 'secrets.list', 'secrets.delete'],
+    reason: 'A secret is typed and kept on the computer that runs the thread; it never travels to another computer.'
+  },
+  {
     methods: ['automations.request.resend', 'automations.keys.list', 'automations.keys.set'],
     reason: 'A request’s stored payload and the saved keys stay on the computer that runs the automation.'
   },
   {
-    methods: ['automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.drafts.setWho', 'automations.drafts.nextWho', 'automations.manager.thread'],
+    methods: ['automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.drafts.setWho', 'automations.drafts.nextWho', 'automations.manager.thread', 'automations.manager.turn'],
     reason: 'Drafts and the Automation manager’s thread belong to the computer whose manager wrote them; Turn on happens there.'
   },
   {

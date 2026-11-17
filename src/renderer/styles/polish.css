@@ -51,6 +51,8 @@
   --ui-menu-drop: 0 16px 44px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.2);
 
   --ui-hover: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  /* The selected main-area tab: a quiet neutral fill. */
+  --main-tab-selected: color-mix(in srgb, var(--text-primary) 9%, transparent);
   --ui-pressed: color-mix(in srgb, var(--text-primary) 10%, transparent);
   --ui-selected: rgba(var(--accent-rgb), 0.15);
   /* Opaque selection fill (selected settings page, selected theme): the
@@ -69,7 +71,11 @@
   --ui-sheen: radial-gradient(125% 78% at 50% -8%, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.035) 34%, transparent 64%);
   --ui-sheen-accent: linear-gradient(180deg, rgba(255, 255, 255, 0.4) 0%, rgba(255, 255, 255, 0.08) 24%, transparent 52%);
   --ui-raised-shadow: var(--ui-specular), 0 10px 32px rgba(0, 0, 0, 0.32);
-  --ui-focus-ring: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+  /* Keyboard focus is a fill, never a ring or border: a step firmer than hover,
+     laid over whatever background the control already has (rest, hover or
+     selected), so a focused selected row reads a little stronger still. */
+  --ui-focus-fill: var(--ui-pressed);
+  --ui-focus-layer: linear-gradient(var(--ui-focus-fill), var(--ui-focus-fill));
   --ui-aura-strength: 0.12;
   --ui-on-accent: #15121b;
 
@@ -252,7 +258,8 @@ html[data-theme='high-contrast'] {
 
 /* ---------- Sidebar ---------- */
 .app .threads-sidebar {
-  --threads-sidebar-row-height: var(--ui-row-height);
+  /* Sidebar rows sit 1px taller than other rows, and their text 1px larger. */
+  --threads-sidebar-row-height: calc(var(--ui-row-height) + 1px);
 }
 
 .app .threads-sidebar-toolbar-button {
@@ -288,7 +295,7 @@ html[data-theme='high-contrast'] {
 
 .app .threads-sidebar-tab.active {
   background: var(--ui-raised);
-  box-shadow: inset 0 0 0 1px var(--ui-line-strong), 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .app .threads-sidebar-tab.active svg {
@@ -365,10 +372,10 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-project-toggle {
-  min-height: var(--ui-row-height);
+  min-height: var(--threads-sidebar-row-height);
   gap: 8px;
   padding: 0 var(--ui-row-x);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 550;
   color: var(--text-primary);
 }
@@ -396,7 +403,7 @@ html[data-theme='high-contrast'] {
   gap: 8px;
   padding: 0 var(--ui-row-x);
   border-radius: var(--ui-row-radius);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .app .threads-sidebar-thread-root {
@@ -461,10 +468,10 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-show-more {
-  min-height: 26px;
+  min-height: 27px;
   padding: 0 var(--ui-row-x);
   border-radius: var(--ui-row-radius);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--ui-faint);
   opacity: 1;
 }
@@ -510,34 +517,6 @@ html .chat-avatar.group[class*='chat-color-'] {
   border: 1px solid color-mix(in srgb, var(--chat-hue) 34%, transparent);
   background: color-mix(in srgb, var(--chat-hue) 17%, transparent);
   color: var(--chat-hue);
-}
-
-.app .chat-roster {
-  gap: 2px;
-  padding: 2px 0;
-  scrollbar-width: none;
-}
-
-.app .chat-roster::-webkit-scrollbar {
-  display: none;
-}
-
-.app .chat-roster button {
-  gap: 5px;
-  min-width: 48px;
-  padding: 6px 4px 5px;
-  border-radius: 9px;
-  font-size: 11px;
-  transition: background 0.15s, color 0.15s;
-}
-
-.app .chat-roster button:hover:not(:disabled) {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-}
-
-.app .chat-roster button:disabled {
-  opacity: 0.4;
 }
 
 .app .chats-sidebar-content .chat-avatar {
@@ -621,13 +600,14 @@ html .chat-avatar.group[class*='chat-color-'] {
   background: var(--ui-hover);
 }
 
+/* Main-area tabs are plain: the selected one gets a quiet neutral fill, with no tint, rim light or glint. */
 .app .main-view-tab.active {
-  background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
-  box-shadow: var(--ui-specular);
+  background: var(--main-tab-selected);
+  box-shadow: none;
 }
 
 .app .main-view-tab.active .main-view-tab-icon {
-  color: var(--accent);
+  color: inherit;
 }
 
 /* ---------- Home and composer ---------- */
@@ -779,26 +759,50 @@ html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
   box-shadow: 0 2px 10px rgba(var(--accent-rgb), 0.35);
 }
 
-/* The send slot (Send, Queue, Stop, Stop recording), the Stop beside Queue and the mic are circles of
-   the same 30px, and their focus ring is drawn as a shadow so it follows the circle. A filled Send
-   keeps its own light and glow under the ring. */
-.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-dictate-btn) {
+/* The send slot (Send, Queue, Stop, Stop recording), the Stop beside Queue, the send mode and the mic are
+   circles of the same 30px. Keyboard focus is the shared focus fill over the circle; a filled Send keeps
+   its own light and glow under it. */
+.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-send-mode-btn, .composer-dictate-btn) {
   border-radius: 50%;
 }
 
-.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-dictate-btn):focus-visible {
+/* The send mode's fill (Steer, hover, focus) is a 26px circle inside the 30px button, so it never touches the
+   send circle beside it. Steer gets a soft fill so the mode reads at a glance; Queue is a plain icon. */
+.app .chat-input-area .composer-send-mode-btn {
+  padding: 2px;
+}
+
+.app .chat-input-area .composer-send-mode-btn,
+.app .chat-input-area .composer-send-mode-btn:hover:not(:disabled) {
+  background-clip: content-box;
+}
+
+.app .chat-input-area .composer-send-mode-btn.is-steer {
+  background-color: color-mix(in srgb, var(--text-primary) 9%, transparent);
+  color: var(--text-primary);
+}
+
+.app .chat-input-area .composer-send-mode-btn.is-steer:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--text-primary) 14%, transparent);
+}
+
+.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-send-mode-btn, .composer-dictate-btn):focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .app .chat-input-area .composer-action-btn-active:focus-visible {
-  box-shadow: var(--ui-specular-accent), 0 2px 10px rgba(var(--accent-rgb), 0.3), var(--ui-focus-ring);
+  outline: none;
+  box-shadow: var(--ui-specular-accent), 0 2px 10px rgba(var(--accent-rgb), 0.3);
+  background-image: var(--ui-focus-layer);
 }
 
 /* ---------- Agent chat workspace ---------- */
-/* Same canvas as the thread pane, so Chats never falls through to the window. */
+/* Same canvas as the thread pane, so Chats never falls through to the window. The bot chat's fades paint it too
+   (bots.css). */
 .app .chat-workspace {
-  background-color: var(--vscode-sideBar-background, var(--surface-strong));
+  --pane-backdrop: var(--vscode-sideBar-background, var(--surface-strong));
+  background-color: var(--pane-backdrop);
 }
 
 .app .chat-workspace:has(.chat-workspace-empty) {
@@ -903,11 +907,6 @@ html .settings-nav-item.active {
 }
 
 /* ---------- Inputs ---------- */
-input:focus,
-textarea:focus {
-  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.55), var(--ui-focus-ring);
-}
-
 /* Composer fields draw focus on their card, not on the bare field. */
 .composer textarea:focus,
 .agent-chat-composer textarea:focus,
@@ -956,7 +955,7 @@ html .composer-workspace-menu {
 }
 
 .app .threads-sidebar-tab.active {
-  box-shadow: var(--ui-specular), inset 0 0 0 1px var(--ui-line-strong), 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--ui-specular), 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .app .navigation-rail-button.active {
@@ -968,7 +967,6 @@ html .composer-workspace-menu {
 .app .threads-sidebar-thread.active,
 .app .chat-list-row.active,
 .app .navigation-rail-button.active,
-.app .main-view-tab.active,
 .app .threads-sidebar-tab.active,
 .app .header-toggle-active,
 .app .header-actions .icon-btn-ghost.header-toggle-active,
@@ -980,7 +978,6 @@ html .composer-command-suggestion.selected {
 .app .threads-sidebar-thread.active::before,
 .app .chat-list-row.active::before,
 .app .navigation-rail-button.active::before,
-.app .main-view-tab.active::before,
 .app .threads-sidebar-tab.active::before,
 .app .header-toggle-active::before,
 .app .header-actions .icon-btn-ghost.header-toggle-active::before,
@@ -997,7 +994,10 @@ html .composer-command-suggestion.selected::before {
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
   background-size: 36% 100%;
   background-repeat: no-repeat;
-  animation: ui-edge-glint calc(680ms * var(--ui-motion-scale)) ease-out 1 forwards;
+  /* Hidden at rest, so the run ends where it started and nothing holds it: a fill-mode of forwards would keep the
+     finished run in effect, and with it a composited layer, for as long as the item stays selected. */
+  opacity: 0;
+  animation: ui-edge-glint calc(680ms * var(--ui-motion-scale)) ease-out 1;
 }
 
 @keyframes ui-edge-glint {
@@ -1060,7 +1060,6 @@ html :is(
   .btn-primary,
   .chat-primary-button,
   .an-approve-fill,
-  .composer-implement-btn,
   .composer-question-btn.is-primary,
   .chat-workspace-recovery-btn-primary,
   .devices-dialog-btn.primary,
@@ -1080,7 +1079,6 @@ html :is(
   .btn-primary,
   .chat-primary-button,
   .an-approve-fill,
-  .composer-implement-btn,
   .composer-question-btn.is-primary,
   .chat-workspace-recovery-btn-primary,
   .devices-dialog-btn.primary,
@@ -1096,7 +1094,6 @@ html :is(
   .btn-primary,
   .chat-primary-button,
   .an-approve-fill,
-  .composer-implement-btn,
   .composer-question-btn.is-primary,
   .chat-workspace-recovery-btn-primary,
   .devices-dialog-btn.primary,
@@ -1147,13 +1144,44 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   padding-bottom: var(--chat-composer-gap);
 }
 
+/*
+ * The composer's height (`--chat-composer-stack`, composer-stack-height.ts) and the mask made from it are not
+ * inherited. They change when the composer grows, folds or mounts with a thread, and an inherited value made
+ * every element of the transcript compute its style again each time (tens of ms per change on a long reply).
+ * Only the elements on the way to the ones that use them take them from their parent.
+ */
+@property --chat-composer-stack {
+  syntax: '*';
+  inherits: false;
+}
+
+@property --transcript-mask {
+  syntax: '*';
+  inherits: false;
+}
+
+.mousse-chat-shell > .an-message-list-wrap,
+.an-message-list-wrap > :is(.an-message-list, .chat-prompt-rail, .chat-jump),
+.an-message-list-wrap > .an-message-list > div {
+  --chat-composer-stack: inherit;
+}
+
 /* At the end of the transcript the last line sits just above the composer, clear of the fade below. */
-.chat:not(.chat--empty) .an-message-list > div {
+.chat:not(.chat--empty) .an-message-list > div:not([data-end-reserve]) {
   padding-bottom: calc(var(--chat-composer-stack, 160px) + 16px);
 }
 
-/* The transcript runs down to the composer and fades out only in the last 12px above its top edge. */
-.chat:not(.chat--empty) .an-message-list {
+/*
+ * The transcript runs down to the composer and fades out only in the last 12px above its top edge, and fades in
+ * over its first 28px.
+ *
+ * Over a solid pane the fades are painted: two bands in the pane's own colour (`--pane-backdrop`) lie over
+ * the top and the bottom of the transcript, under the composer, the prompt rail and the jump pill. A mask on the
+ * scroller would look the same but makes the GPU keep a transcript-sized copy of it, its mask and their tiles:
+ * about 75 MB at 1400x870 on a 2x screen. Only a see-through window (acrylic) or the frosted composer, where no
+ * colour can stand in for what lies behind, keeps the mask; so does a theme's wallpaper (wallpaper.css).
+ */
+:is(html[data-acrylic='true'], html[data-frosted-composer='true'], html[data-wallpaper]) .chat:not(.chat--empty) .an-message-list {
   --transcript-mask: linear-gradient(
     to bottom,
     transparent 0,
@@ -1164,6 +1192,35 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   );
   -webkit-mask-image: var(--transcript-mask);
   mask-image: var(--transcript-mask);
+}
+
+/* The transcript is one stacking context, so nothing in it can rise above the bands. */
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list {
+  isolation: isolate;
+}
+
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list-wrap::before,
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list-wrap::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list-wrap::before {
+  top: 0;
+  height: 28px;
+  background: linear-gradient(to bottom, var(--pane-backdrop), transparent);
+}
+
+/* From 12px above the composer's top edge to the bottom of the pane: the fade, then the pane's colour. */
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list-wrap::after {
+  --chat-composer-stack: inherit;
+  bottom: 0;
+  height: min(calc(var(--chat-composer-stack, 160px) + 12px), calc(100% - 28px));
+  background: linear-gradient(to bottom, transparent, var(--pane-backdrop) 12px);
 }
 
 .chat:not(.chat--empty) .an-message-list-wrap .chat-prompt-rail {
@@ -1211,9 +1268,9 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
 }
 
 .chat-jump:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 2px;
+  outline: none;
   color: var(--text-primary);
+  background-image: var(--ui-focus-layer);
 }
 
 .chat-jump[data-hidden] {
@@ -1231,7 +1288,7 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
  * translucent, blurred composer instead of fading out above it. The backdrop blur makes the GPU
  * keep a copy of the window, which is why it is opt-in. Vars are set in lib/frostedComposer.ts.
  */
-html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list > div {
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list > div:not([data-end-reserve]) {
   padding-bottom: calc(var(--chat-composer-stack, 160px) + 12px);
 }
 
@@ -1272,4 +1329,19 @@ html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
+}
+
+/* ---------- Keyboard focus ---------- */
+/* Focus is shown as a fill, never an outline, ring or border. No control draws
+   the browser's focus ring; a control without a focus rule of its own still
+   gets the focus fill over its background. Text fields keep their own focus
+   look (global.css). */
+:focus-visible {
+  outline: none;
+}
+
+:is(button, a[href], summary, [role='button'], [role='link'], [role='menuitem'], [role='menuitemradio'],
+  [role='menuitemcheckbox'], [role='option'], [role='tab'], [role='treeitem'], [role='row'],
+  [role='gridcell'], [role='switch'], [role='checkbox'], [role='radio'], [role='listitem']):focus-visible {
+  background-image: var(--ui-focus-layer);
 }

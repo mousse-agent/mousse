@@ -100,6 +100,38 @@ describe('Mousse ID sign-in', () => {
     ;(globalThis as { window?: unknown }).window = original
   })
 
+  it('a removed computer signs in straight away, as one with no identity, and asks for no setup', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { useMousseIdStore } = await import('../../src/renderer/stores/mousseIdStore')
+    // Removed on the owner computer; even a locked key store does not stand in the way.
+    const net = { enabled: true, self: { node: 'n', user: 'u', isAuthority: false, removed: true }, keystore: 'locked', protected: true, routes: [], peers: [] }
+    const request = vi.fn((method: string, _params?: unknown) => {
+      if (method === 'net.plus.discover') return Promise.resolve({ apiOrigin: 'https://id.example' })
+      if (method === 'net.plus.login.begin')
+        return Promise.resolve({ id: 'login-1', verificationUri: 'https://id.example/approve/1', expiresAt: Date.now() + 600_000, pollIntervalMs: 60_000 })
+      if (method === 'net.plus.login.finish') return new Promise(() => undefined)
+      if (method === 'net.status') return Promise.resolve(net)
+      return Promise.resolve({})
+    })
+    ;(globalThis as { window?: unknown }).window = {
+      open: vi.fn(),
+      mousse: {
+        platformRequest: { request },
+        app: { getInfo: async () => ({ deviceName: 'Mac mini' }) },
+        mousseId: { config: async () => undefined, startCallback: async () => undefined, waitCallback: () => new Promise(() => undefined), cancelCallback: async () => undefined }
+      }
+    }
+    useMousseIdStore.setState({ profileId: useAppStore.getState().profileId, loaded: true, runtimeOrigin: 'https://id.example', net: net as never, busy: false, pending: undefined, error: '' })
+
+    expect(await useMousseIdStore.getState().signIn()).toBe('started')
+    await vi.waitFor(() => expect(useMousseIdStore.getState().pending?.id).toBe('login-1'))
+
+    const methods = request.mock.calls.map(([method]) => method)
+    expect(methods).not.toContain('net.init')
+    expect(methods).not.toContain('net.protect')
+    expect(request.mock.calls.find(([method]) => method === 'net.plus.login.begin')![1]).toMatchObject({ deviceName: 'Mac mini', bindRoot: false })
+  })
+
   it('a sign-in cancelled before its callback was ready opens nothing and leaves the next sign-in going', async () => {
     const { useAppStore } = await import('../../src/renderer/stores/appStore')
     const { useMousseIdStore } = await import('../../src/renderer/stores/mousseIdStore')

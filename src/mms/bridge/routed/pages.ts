@@ -33,7 +33,7 @@ export class ReplyPages {
   constructor(private readonly clock: Pick<Clock, 'now'>) {}
 
   /** Keeps `reply` for `caller` and says how to fetch it. */
-  hold(caller: NodeId, reply: RoutedReply): RoutedPaged {
+  hold(caller: NodeId, reply: unknown): RoutedPaged {
     const bytes = Buffer.from(JSON.stringify(reply))
     if (bytes.length > ROUTED_PAGES_CALLER_BYTES) throw new NetError('too_large')
     this.expire()

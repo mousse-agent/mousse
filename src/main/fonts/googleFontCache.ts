@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
-  findGoogleFont,
   fontCacheSlug,
   FONT_ROLE_WEIGHTS,
   googleFontCssUrl,
@@ -11,6 +10,7 @@ import {
   type FontRole,
   type LoadedGoogleFont
 } from '../../shared/fontSettings'
+import { findGoogleFont } from '../../shared/googleFontCatalog'
 
 /**
  * Google Fonts families, downloaded once and kept under `root`. A family's files for one set of

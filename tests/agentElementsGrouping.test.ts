@@ -1,16 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatSearchRowLabels,
-  latestThoughtHeading,
-  thoughtHeading,
+  searchResultCount,
+  thoughtHeadline,
 } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mapPartStateToInvocationState } from '../src/renderer/chat/components/agent-elements/utils/tool-adapters'
 import {
-  activityGroupLabel,
   analyzeAssistantMessage,
+  foldTurnWork,
   partitionTurnSegments,
   settleFinishedTurn,
+  workGroupHeading,
+  workGroupIconType,
+  workGroupTitle,
 } from '../src/renderer/chat/components/agent-elements/utils/assistant-blocks'
 
 const tool = (type: string, toolCallId: string, extra: Record<string, unknown> = {}) => ({
@@ -21,40 +24,67 @@ const tool = (type: string, toolCallId: string, extra: Record<string, unknown> =
   ...extra,
 })
 
-describe('latestThoughtHeading', () => {
-  it('takes the last titled summary, else the last paragraph', () => {
-    expect(latestThoughtHeading('**One**\n\nbody\n\n__Two__\n\nmore body')).toBe('Two')
-    expect(latestThoughtHeading('First idea.\n\n  \n\nSecond idea\nwith detail')).toBe('Second idea')
-    expect(latestThoughtHeading('   ')).toBe('')
-    expect(latestThoughtHeading(undefined)).toBe('')
+describe('thoughtHeadline', () => {
+  it.each([
+    // The latest title heads every paragraph after it.
+    ['a bold title', '**Checking the auth flow**\n\nThe token is read twice.', 'Checking the auth flow'],
+    ['a title with a colon', '__Plan:__\nRead the file first.', 'Plan'],
+    ['a markdown heading', '## Plan of attack\nStart with the store.', 'Plan of attack'],
+    ['a title alone above the body', '**Two**\n\nmore body', 'Two'],
+    ['a title heads its whole section, not just the paragraph under it', '**Finding why the test is slow**\n\nThe file runs twice. I should time it.\n\nThen I can compare it with one file.', 'Finding why the test is slow'],
+    ['the latest title, not the first', '**One**\n\nbody\n\n__Two__\n\nmore body\n\neven more body', 'Two'],
+    ['a title written mid-paragraph heads what follows', 'Some notes first.\n**Next step**\nRead the file.', 'Next step'],
+    ['untitled text after untitled text: the first sentence of the newest paragraph', 'Old idea.\n\nFirst look at the store. Then the list.', 'First look at the store.'],
+    ['untitled text before a title is headed by the title once it arrives', 'Old idea.\n\n## Fix', 'Fix'],
+    ['a bold phrase inside a sentence is no title', 'This is **very** slow. Next.', 'This is very slow.'],
+    ['a sentence still being written is shown as far as it goes', 'Looking at the sto', 'Looking at the sto'],
+    ['a question ends a sentence', 'Why does it remount? The key changes.', 'Why does it remount?'],
+    ['a closing quote stays with its sentence', 'He said "stop." Then left.', 'He said "stop."'],
+    // Not a sentence end.
+    ['abbreviations', 'Check the caches, e.g. the disk one. Then stop.', 'Check the caches, e.g. the disk one.'],
+    ['etc. and vs.', 'Compare a vs. b etc. in the list. Next.', 'Compare a vs. b etc. in the list.'],
+    ['dotted names', 'Read package.json and src/main.ts first. Then build.', 'Read package.json and src/main.ts first.'],
+    ['a path ending in a dot word', 'Open ~/.mousse/config now. Then edit.', 'Open ~/.mousse/config now.'],
+    ['version numbers', 'Node 24.2.0 is fine. Next.', 'Node 24.2.0 is fine.'],
+    ['initials', 'Ask J. Smith first. Then go.', 'Ask J. Smith first.'],
+    ['inside inline code', 'Run `a. b` then go. Next.', 'Run a. b then go.'],
+    // Plain text out.
+    ['inline markdown is dropped', 'A **bold** move with `code`. More.', 'A bold move with code.'],
+    ['links keep their text', 'See [the docs](https://example.com) now. Then go.', 'See the docs now.'],
+    ['quote and list markers', '> quoted thought. More.', 'quoted thought.'],
+    ['lines of a paragraph join', 'Looking at the\nstore now. Then go.', 'Looking at the store now.'],
+    // Edges.
+    ['empty', '', ''],
+    ['whitespace', '   \n\n  ', ''],
+    ['missing', undefined, ''],
+  ] as const)('%s', (_name, content, expected) => {
+    expect(thoughtHeadline(content)).toBe(expected)
   })
-})
 
-describe('thoughtHeading', () => {
-  it('uses the first non-empty line as the heading', () => {
-    expect(thoughtHeading('  \nCheck the auth flow\nSecond line')).toBe('Check the auth flow')
+  it('cuts a long sentence at 200 code points, never inside an emoji', () => {
+    const long = '😀'.repeat(300)
+    const headline = thoughtHeadline(long)
+    expect(headline.endsWith('…')).toBe(true)
+    expect(Array.from(headline)).toHaveLength(200)
+    expect(Array.from(headline).slice(0, -1).every((ch) => ch === '😀')).toBe(true)
   })
 
-  it('strips markdown heading and quote markers', () => {
-    expect(thoughtHeading('## Plan of attack')).toBe('Plan of attack')
-    expect(thoughtHeading('> quoted thought')).toBe('quoted thought')
-  })
-
-  it('strips inline markdown formatting from the heading', () => {
-    expect(thoughtHeading('**Bold** move with `code`')).toBe('Bold move with code')
-    expect(thoughtHeading('See [the docs](https://example.com) now')).toBe('See the docs now')
-    expect(thoughtHeading('*italic* and ~~struck~~ text')).toBe('italic and struck text')
-  })
-
-  it('truncates long headings', () => {
-    const heading = thoughtHeading(`x${'y'.repeat(100)}`)
-    expect(heading.endsWith('...')).toBe(true)
-    expect(heading.length).toBeLessThanOrEqual(64)
-  })
-
-  it('returns empty for missing content', () => {
-    expect(thoughtHeading(undefined)).toBe('')
-    expect(thoughtHeading('   \n  ')).toBe('')
+  it('stays the same while its paragraph grows, and changes when a new one starts', () => {
+    const chunks = ['Looking at', ' the store. It holds', ' the text and', ' the parts.', '\n\nNow the list', '. It remounts.']
+    let text = ''
+    const seen: string[] = []
+    for (const chunk of chunks) {
+      text += chunk
+      seen.push(thoughtHeadline(text))
+    }
+    expect(seen).toEqual([
+      'Looking at',
+      'Looking at the store.',
+      'Looking at the store.',
+      'Looking at the store.',
+      'Now the list',
+      'Now the list.',
+    ])
   })
 })
 
@@ -104,6 +134,14 @@ describe('formatSearchRowLabels', () => {
     })
   })
 
+  it('reads how many a code or file search found from its output', () => {
+    expect(searchResultCount({ numFiles: 4, text: 'a' })).toBe(4)
+    expect(searchResultCount({ numFiles: 0 })).toBe(0)
+    expect(searchResultCount({ text: 'a' })).toBeUndefined()
+    expect(searchResultCount('raw text')).toBeUndefined()
+    expect(searchResultCount(undefined)).toBeUndefined()
+  })
+
   it('falls back to a bare tool name without a query', () => {
     expect(formatSearchRowLabels(undefined, undefined, 0)).toEqual({
       completeLabel: 'No matches',
@@ -140,31 +178,6 @@ describe('analyzeAssistantMessage', () => {
         false
       ).toolsOnly
     ).toBe(false)
-  })
-
-  it('titles a run with the latest non-empty thought', () => {
-    const items = [
-      { part: tool('tool-Thinking', 't1', { input: { thought: 'First pass' } }) },
-      { part: tool('tool-Bash', 'a') },
-      { part: tool('tool-Thinking', 't2', { input: { thought: '   ' } }) },
-      { part: tool('tool-Thinking', 't3', { input: { thought: 'Check the model list' } }) },
-      { part: tool('tool-Read', 'r') },
-    ]
-    expect(activityGroupLabel(items)).toBe('Check the model list')
-    expect(activityGroupLabel([{ part: tool('tool-Grep', 'g') }, { part: tool('tool-Read', 'r') }])).toBe('')
-  })
-
-  it('titles a run with one line from the newest part of the latest thought', () => {
-    // Codex: titled reasoning summaries, merged into one thought.
-    const codex = '**Finding the start script**\n\nThe package has a start script.\n\n**Checking the build output**\n\nThe bundle is missing.'
-    expect(activityGroupLabel([{ part: tool('tool-Thinking', 't', { input: { thought: codex } }) }, { part: tool('tool-Bash', 'a') }])).toBe(
-      'Checking the build output'
-    )
-    // Claude: summarized prose; the last paragraph's first line.
-    const claude = 'The user wants the app running.\n\nnpm start downloads Electron first, so wait for it.\nThen check the log.'
-    expect(activityGroupLabel([{ part: tool('tool-Bash', 'a') }, { part: tool('tool-Thinking', 't', { output: claude }) }])).toBe(
-      'npm start downloads Electron first, so wait for it.'
-    )
   })
 
   it('ignores suppressed questions and task output so runs stay joined', () => {
@@ -206,9 +219,122 @@ describe('analyzeAssistantMessage', () => {
     ).toBe(true)
     expect(analyzeAssistantMessage([tool('tool-Question', 'q')], false).toolsOnly).toBe(false)
   })
+
+  it('keeps quick-action and plan cards out of a group', () => {
+    for (const type of ['tool-QuickAction', 'tool-PlanWrite']) {
+      expect(analyzeAssistantMessage([tool(type, 'x')], false).toolsOnly).toBe(false)
+    }
+  })
+})
+
+describe('workGroupTitle', () => {
+  const item = (type: string, input: Record<string, unknown> = {}, id = Math.random().toString(36)) => ({ part: tool(type, id, { input }) })
+  const read = (path: string) => item('tool-Read', { file_path: path })
+  const run = (command = 'ls') => item('tool-Bash', { command })
+  const edit = (path: string) => item('tool-Edit', { file_path: path })
+  const thought = (text: string) => item('tool-Thinking', { thought: text })
+
+  it('names what the calls did, by kind, in the order they first ran', () => {
+    expect(workGroupTitle([read('a.ts'), run(), read('b.ts'), run(), read('c.ts'), run()])).toBe('Read 3 files and ran 3 commands')
+    expect(workGroupTitle([run(), read('a.ts')])).toBe('Ran 1 command and read 1 file')
+    expect(workGroupTitle([edit('a.ts'), edit('b.ts')])).toBe('Edited 2 files')
+    expect(workGroupTitle([item('tool-Write', { file_path: 'n.ts' })])).toBe('Edited 1 file')
+    expect(workGroupTitle([item('tool-Grep', { pattern: 'x' }), item('tool-Glob', { pattern: '*' })])).toBe('Searched code twice')
+    expect(workGroupTitle([item('tool-WebSearch', { query: 'x' })])).toBe('Searched the web once')
+    expect(workGroupTitle([item('tool-WebFetch'), item('tool-WebFetch')])).toBe('Fetched 2 pages')
+    expect(workGroupTitle([item('tool-mcp__github__get_issue'), item('tool-TodoWrite')])).toBe('Used 2 tools')
+  })
+
+  it('counts a file read twice once', () => {
+    expect(workGroupTitle([read('a.ts'), read('a.ts'), read('b.ts')])).toBe('Read 2 files')
+  })
+
+  it('names up to three kinds; with more, changes before reads, and the rest counted as other actions', () => {
+    expect(workGroupTitle([read('a.ts'), read('b.ts'), run(), run(), edit('a.ts')])).toBe('Read 2 files, ran 2 commands and edited 1 file')
+    expect(workGroupTitle([read('a.ts'), item('tool-Grep'), edit('a.ts'), run()])).toBe('Edited 1 file, ran 1 command and 2 other actions')
+    expect(workGroupTitle([read('a.ts'), item('tool-Grep'), item('tool-WebFetch'), item('tool-WebSearch')])).toBe('Read 1 file, searched code once and 2 other actions')
+  })
+
+  it('leaves thoughts out, and takes the latest thought\'s line for a group of thoughts alone', () => {
+    expect(workGroupTitle([thought('Look'), read('a.ts'), thought('More')])).toBe('Read 1 file')
+    expect(workGroupTitle([thought('**First**\n\nbody'), thought('   '), thought('**Checking the order**\n\nbody')])).toBe('Checking the order')
+    expect(workGroupTitle([thought('')])).toBe('Thought')
+  })
+
+  it('gives the icon of the calls\' kind, none for a mix', () => {
+    expect(workGroupIconType([read('a.ts'), thought('x'), read('b.ts')])).toBe('tool-Read')
+    expect(workGroupIconType([read('a.ts'), run()])).toBeUndefined()
+    expect(workGroupIconType([thought('x')])).toBe('tool-Thinking')
+  })
+})
+
+describe('foldTurnWork', () => {
+  const tools = { kind: 'tools' as const }
+  const text = { kind: 'message' as const, text: true }
+  const call = { kind: 'message' as const, toolsOnly: true }
+  const keep = { kind: 'message' as const, keep: true }
+  const steer = { kind: 'message' as const, steer: true }
+  const cards = { kind: 'cards' as const }
+
+  it('folds the work and the narration, never the answer', () => {
+    expect(foldTurnWork([text, tools, text, call, tools, text])).toEqual([true, true, true, true, true, false])
+  })
+
+  it('keeps errors, questions and notices in view, and finds the answer before them', () => {
+    expect(foldTurnWork([tools, text, keep])).toEqual([true, false, false])
+    expect(foldTurnWork([tools, keep, tools])).toEqual([true, false, true])
+  })
+
+  it('keeps calls with a failure the agent did not get past in view', () => {
+    expect(foldTurnWork([tools, { kind: 'tools', keep: true }, keep])).toEqual([true, false, false])
+    expect(foldTurnWork([{ kind: 'message', toolsOnly: true, keep: true }, text])).toEqual([false, false])
+  })
+
+  it('folds all the work of a turn cut off before its answer', () => {
+    expect(foldTurnWork([text, tools])).toEqual([true, true])
+  })
+
+  it('keeps steered messages and the replies written before them in view', () => {
+    expect(foldTurnWork([text, tools, steer, tools, text])).toEqual([false, true, false, true, false])
+  })
+
+  it('keeps subagent cards in view, finished or not, and still finds the answer after them', () => {
+    expect(foldTurnWork([tools, cards, tools, cards, text])).toEqual([true, false, true, false, false])
+  })
 })
 
 describe('partitionTurnSegments', () => {
+  // Messages: c = subagent start, t = thought, x = tool call, r = reply. `near` says which starts are close in time.
+  const shape = (kinds: string, near = (_a: number, _b: number) => true) =>
+    partitionTurnSegments(
+      [...kinds].map((k) => k === 't' || k === 'x'),
+      [...kinds].map((k) => k === 'c'),
+      [...kinds].map(() => 1),
+      undefined,
+      { quiet: (i) => kinds[i] === 't', join: near },
+    )
+
+  it('joins starts in quick succession into one card list, the thoughts between them above it', () => {
+    expect(shape('ctcc')).toEqual([{ kind: 'message', msgIndex: 1 }, { kind: 'cards', msgIndices: [0, 2, 3] }])
+    expect(shape('tctcr')).toEqual([
+      { kind: 'message', msgIndex: 0 },
+      { kind: 'message', msgIndex: 2 },
+      { kind: 'cards', msgIndices: [1, 3] },
+      { kind: 'message', msgIndex: 4 },
+    ])
+  })
+
+  it('keeps a thought after the last start where it was', () => {
+    expect(shape('cctr')).toEqual([{ kind: 'cards', msgIndices: [0, 1] }, { kind: 'message', msgIndex: 2 }, { kind: 'message', msgIndex: 3 }])
+  })
+
+  it('starts a new card list after tool work, narration, or a long gap', () => {
+    expect(shape('cxc')).toEqual([{ kind: 'cards', msgIndices: [0] }, { kind: 'message', msgIndex: 1 }, { kind: 'cards', msgIndices: [2] }])
+    expect(shape('crc')).toEqual([{ kind: 'cards', msgIndices: [0] }, { kind: 'message', msgIndex: 1 }, { kind: 'cards', msgIndices: [2] }])
+    expect(shape('ctc', () => false)).toEqual([{ kind: 'cards', msgIndices: [0] }, { kind: 'message', msgIndex: 1 }, { kind: 'cards', msgIndices: [2] }])
+    expect(shape('cc', () => false)).toEqual([{ kind: 'cards', msgIndices: [0] }, { kind: 'cards', msgIndices: [1] }])
+  })
+
   it('groups runs of 2+ consecutive tools-only messages', () => {
     expect(partitionTurnSegments([true, true, false, true])).toEqual([
       { kind: 'tools', msgIndices: [0, 1] },
@@ -225,6 +351,22 @@ describe('partitionTurnSegments', () => {
       { kind: 'message', msgIndex: 1 },
     ])
   })
+
+  it('splits at narration, and groups one message that holds two calls', () => {
+    expect(partitionTurnSegments([true, true, false, true, true], [], [1, 1, 0, 1, 1])).toEqual([
+      { kind: 'tools', msgIndices: [0, 1] },
+      { kind: 'message', msgIndex: 2 },
+      { kind: 'tools', msgIndices: [3, 4] },
+    ])
+    expect(partitionTurnSegments([true], [], [2])).toEqual([{ kind: 'tools', msgIndices: [0] }])
+  })
+
+  it('groups a smaller run when asked (a call still running in a live turn)', () => {
+    expect(partitionTurnSegments([false, true], [], [0, 1], (run) => run.includes(1))).toEqual([
+      { kind: 'message', msgIndex: 0 },
+      { kind: 'tools', msgIndices: [1] },
+    ])
+  })
 })
 
 describe('applet activity segmentation', () => {
@@ -236,20 +378,18 @@ describe('applet activity segmentation', () => {
 describe('settleFinishedTurn', () => {
   const said = (id: string, text: string, role = 'assistant') => ({ id, role, parts: [{ type: 'text', text }] })
   const step = (id: string, type = 'tool-Bash') => ({ id, role: 'assistant', parts: [tool(type, id)] })
-  const settle = (messages: Array<{ id: string; role?: string; parts: unknown[] }>) => {
-    const settled = settleFinishedTurn(messages, messages.map((message) => analyzeAssistantMessage(message.parts, false)))
+  const settle = (messages: Array<{ id: string; role?: string; parts: unknown[]; metadata?: unknown }>, cutOff = false) => {
+    const settled = settleFinishedTurn(messages, messages.map((message) => analyzeAssistantMessage(message.parts, false)), cutOff)
     return {
       order: settled.order.map((index) => messages[index]!.id),
       grouped: settled.order.filter((index) => settled.analyses[index]!.toolsOnly).map((index) => messages[index]!.id),
-      notes: settled.analyses.flatMap((analysis) => analysis.toolItems.filter((item) => item.part.type === 'tool-Note').map((item) => item.part.input)),
     }
   }
 
-  it('puts the answer last and folds the notes before it into the activity', () => {
+  it('puts the answer last and keeps the narration before it as prose, where it was', () => {
     const turn = settle([said('n1', 'Checking.'), step('c1'), said('n2', ' Reading the log. '), step('c2'), said('a1', 'Done.'), step('t1', 'tool-Thinking')])
     expect(turn.order).toEqual(['n1', 'c1', 'n2', 'c2', 't1', 'a1'])
-    expect(turn.grouped).toEqual(['n1', 'c1', 'n2', 'c2', 't1'])
-    expect(turn.notes).toEqual([{ text: 'Checking.' }, { text: 'Reading the log.' }])
+    expect(turn.grouped).toEqual(['c1', 'c2', 't1'])
   })
 
   it('keeps a turn without reply text, and what is not activity, where it was', () => {
@@ -258,14 +398,57 @@ describe('settleFinishedTurn', () => {
     expect(errored.order).toEqual(['c1', 'c2', 'a1', 'e1'])
   })
 
-  it('never takes a steer for the answer or a note', () => {
+  it('never takes a steer for the answer', () => {
     const turn = settle([said('a1', 'Started.'), step('c1'), said('s1', 'Also check the docs', 'user')])
     expect(turn.order).toEqual(['c1', 'a1', 's1'])
-    expect(turn.notes).toEqual([])
   })
 
   it('moves the one reply row of an older turn below the work that came after it', () => {
     // Turns saved before notes had rows of their own keep all their text in the first reply row.
     expect(settle([step('t1', 'tool-Thinking'), said('a1', 'Checking.All done.'), step('c1'), step('t2', 'tool-Thinking')]).order).toEqual(['t1', 'c1', 't2', 'a1'])
+  })
+
+  it('keeps a stopped turn in the order it ran when its last text came before its last command', () => {
+    // "Running the build." then a command the Stop cut off: the text is narration, not an answer.
+    const turn = settle([said('n1', 'Running the build.'), step('c1')], true)
+    expect(turn.order).toEqual(['n1', 'c1'])
+    const steer = { id: 's1', role: 'user', parts: [], metadata: { steerGroup: [said('m1', 'Also check the docs', 'user')] } }
+    const steered = settle([said('a1', 'Started.'), step('c0'), steer, said('n1', 'Checking the docs.'), step('c1'), step('t1', 'tool-Thinking')], true)
+    expect(steered.order).toEqual(['a1', 'c0', 's1', 'n1', 'c1', 't1'])
+  })
+
+  it('leaves a model switch marker where it is, never as the answer', () => {
+    const marker = { id: 'h1', role: 'assistant', parts: [{ type: 'text', text: 'Claude Opus 5.5 → Claude Sonnet 5.5' }], metadata: { contextHandoff: { from: { model: 'opus' }, to: { model: 'sonnet' } } } }
+    const turn = settle([marker, step('t1', 'tool-Thinking'), said('a1', 'Done.')])
+    expect(turn.order).toEqual(['h1', 't1', 'a1'])
+    expect(turn.grouped).toEqual(['t1'])
+  })
+
+  it('still ends a stopped turn on text written after its work', () => {
+    const turn = settle([said('n1', 'Checking.'), step('c1'), said('a1', 'Half an ans')], true)
+    expect(turn.order).toEqual(['n1', 'c1', 'a1'])
+  })
+})
+
+describe('workGroupHeading', () => {
+  const item = (type: string, input: Record<string, unknown> = {}, id = Math.random().toString(36)) => ({ part: tool(type, id, { input }) })
+  const run = (command = 'ls') => item('tool-Bash', { command })
+  const read = (path: string) => item('tool-Read', { file_path: path })
+  const thought = (text: string) => item('tool-Thinking', { thought: text })
+  const long = `I need to find where the open-pencil MCP server is configured, so I will look in the Claude settings ${'and more '.repeat(10)}`.trim()
+
+  it.each([
+    ['a thought before the calls titles them, what they did follows', [thought('Find the config'), run()], { title: 'Find the config', summary: 'Ran 1 command', thought: true }],
+    ['the latest thought before the last call titles the group: the headline last seen while it ran', [thought('Look around'), read('a.ts'), thought('Run the tests'), run()], { title: 'Run the tests', summary: '2 actions', thought: true }],
+    ['of the thoughts before the first call, the latest one', [thought('Look around'), thought('Read it'), read('a.ts')], { title: 'Read it', summary: 'Read 1 file', thought: true }],
+    ['a thought between calls with none before the first still titles the group', [read('a.ts'), thought('Now run it'), run()], { title: 'Now run it', summary: '2 actions', thought: true }],
+    ['a thought after the last call is about what comes next: the count stays the title', [run(), thought('Now the fix')], { title: 'Ran 1 command' }],
+    ['no thought: the count is the title', [run(), run()], { title: 'Ran 2 commands' }],
+    ['thoughts alone: the latest one, no count', [thought('Look around'), thought('Check the order')], { title: 'Check the order' }],
+    ['a long thought is whole: the row cuts it at its width', [thought(long), run()], { title: long, summary: 'Ran 1 command', thought: true }],
+    ['an empty thought titles nothing', [thought(''), run()], { title: 'Ran 1 command' }],
+    ['a mix counts every call, a file read twice too', [thought('Check it'), read('a.ts'), read('a.ts'), run()], { title: 'Check it', summary: '3 actions', thought: true }],
+  ] as const)('%s', (_name, items, expected) => {
+    expect(workGroupHeading([...items])).toEqual(expected)
   })
 })

@@ -1,4 +1,4 @@
-import { AUTOMATIONS_CAPABILITY, type AutomationIndex } from '../../shared/automations'
+import { AUTOMATIONS_CAPABILITY, type AutomationIndex, type ManagerTurn } from '../../shared/automations'
 import { isId } from '../../shared/net'
 import { isKeyName, MAX_KEY_VALUE_BYTES } from '../../shared/automationKeys'
 import type { ScheduledJob } from '../../shared/types'
@@ -35,6 +35,8 @@ export interface AutomationsDomain {
   }
   /** The Automation manager's hidden thread, made the first time. Its turns work in the project the composer picked. */
   managerThread(projectId?: string): { id: string }
+  /** How a turn of the manager's thread stands, by its run id; another thread's run reads as unknown. */
+  managerTurn(runId: string): ManagerTurn
   /** The inbox: runs, the Needs you queue, Tuning notes and this month's usage. */
   inbox: {
     list(): AutomationInbox
@@ -263,6 +265,20 @@ export function registerAutomationMethods(
     async handle(context, params, binding) {
       if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'The Automation manager is used from a Mousse window.')
       return { threadId: (await bound(binding)).managerThread(params.projectId as string | undefined || undefined).id }
+    }
+  })
+  domains.register({
+    method: 'automations.manager.turn',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => {
+      const p = domainObject(params ?? {}, ['profileId', 'runId'])
+      if (typeof p.runId !== 'string' || !p.runId.startsWith('run:') || p.runId.length > 512) throw new DomainRpcError('invalid_params', 'runId is a run id')
+      return p
+    },
+    async handle(context, params, binding) {
+      if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'The Automation manager is used from a Mousse window.')
+      return { turn: (await bound(binding)).managerTurn(params.runId as string) }
     }
   })
   // ── The inbox ──

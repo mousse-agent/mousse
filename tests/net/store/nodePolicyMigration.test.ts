@@ -192,3 +192,113 @@ describe('the editor switch in net_node_policy', () => {
     expect(policy.get(fresh).editor).toBe(false)
   })
 })
+
+describe('the bots switch in net_node_policy', () => {
+  it('adds the column with every device on, as before the switch, and leaves the schema version', () => {
+    const dir = profile()
+    const blocked = newId('node'),
+      plain = newId('node')
+    writeOldDatabase(dir, [
+      [blocked, 1, 'full', 1],
+      [plain, 0, 'ask', 0]
+    ])
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(columns(db).find((column) => column.name === 'bots')).toMatchObject({ notnull: 1, dflt_value: '1' })
+    expect(policy.get(blocked)).toMatchObject({ blocked: true, maxPermissionMode: 'full', terminal: true, bots: true })
+    expect(policy.get(plain)).toMatchObject({ blocked: false, maxPermissionMode: 'ask', terminal: false, bots: true })
+    // A device with no row at all is on too.
+    expect(policy.get(newId('node')).bots).toBe(true)
+    expect(userVersion(db)).toBe(1)
+  })
+
+  it('turned off for one device, is kept across a restart, touches no other switch, and reads off for anything but 1', () => {
+    const dir = profile()
+    const node = newId('node'),
+      other = newId('node')
+    writeOldDatabase(dir, [[node, 0, 'full', 1], [other, 0, 'ask', 0]])
+    let db = new NetDatabase({ profileDir: dir })
+    const seen: Array<[boolean, boolean]> = []
+    const first = new SqliteNodePolicy(db, systemClock)
+    first.onChange((event) => seen.push([event.before.bots, event.after.bots]))
+    expect(first.set(node, { bots: false })).toMatchObject({ bots: false, terminal: true, maxPermissionMode: 'full', editor: false })
+    expect(seen).toEqual([[true, false]])
+    db.close()
+    db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(policy.get(node).bots).toBe(false)
+    expect(policy.get(other).bots).toBe(true)
+    // An earlier build's write leaves the switch as it is.
+    db.database
+      .prepare(
+        'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,created_at) VALUES(?,?,?,?,?,?) ' +
+          'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal,editor=excluded.editor'
+      )
+      .run(node, 0, 'ask', 0, 1, 5)
+    expect(new SqliteNodePolicy(db, systemClock).get(node)).toMatchObject({ bots: false, editor: true, maxPermissionMode: 'ask' })
+    expect(() => db.database.prepare('UPDATE net_node_policy SET bots=2 WHERE node=?').run(node)).toThrow()
+    expect(() => policy.set(node, { bots: 'no' as never })).toThrow()
+  })
+})
+
+describe('agent reach in net_node_policy (issue #1160)', () => {
+  it('adds the column with every device at "launched" and leaves the schema version', () => {
+    const dir = profile()
+    const node = newId('node')
+    writeOldDatabase(dir, [[node, 0, 'full', 1]])
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    expect(columns(db).find((column) => column.name === 'agent_reach')).toMatchObject({ notnull: 1, dflt_value: "'launched'" })
+    expect(userVersion(db)).toBe(1)
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(policy.get(node)).toMatchObject({ agentReach: 'launched', maxPermissionMode: 'full', terminal: true })
+    expect(policy.get(newId('node')).agentReach).toBe('launched')
+  })
+
+  it('keeps what is set across a restart, refuses a value it does not know, and reads an unknown stored one as none', () => {
+    const dir = profile()
+    const node = newId('node')
+    let db = new NetDatabase({ profileDir: dir })
+    new SqliteNodePolicy(db, systemClock).set(node, { agentReach: 'all' })
+    db.close()
+    db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(policy.get(node).agentReach).toBe('all')
+    expect(() => policy.set(node, { agentReach: 'everything' as never })).toThrow()
+    db.database.prepare("UPDATE net_node_policy SET agent_reach='later' WHERE node=?").run(node)
+    expect(policy.get(node).agentReach).toBe('none')
+  })
+})
+
+describe('"Work on threads from this device" in net_node_policy', () => {
+  it('adds the column with every device on, an earlier build\'s write leaves it, and only a stored 1 is on', () => {
+    const dir = profile()
+    const node = newId('node')
+    writeOldDatabase(dir, [[node, 0, 'full', 1]])
+    let db = new NetDatabase({ profileDir: dir })
+    expect(columns(db).find((column) => column.name === 'work')).toMatchObject({ notnull: 1, dflt_value: '1' })
+    expect(userVersion(db)).toBe(1)
+    const first = new SqliteNodePolicy(db, systemClock)
+    expect(first.get(node)).toMatchObject({ work: true, maxPermissionMode: 'full', terminal: true })
+    expect(first.get(newId('node')).work).toBe(true)
+    expect(first.set(node, { work: false })).toMatchObject({ work: false, terminal: true, maxPermissionMode: 'full' })
+    db.close()
+    db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(policy.get(node).work).toBe(false)
+    // An earlier build's write names only its own columns: the switch stays off.
+    db.database
+      .prepare(
+        'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,created_at) VALUES(?,?,?,?,?,?,?,?) ' +
+          'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal'
+      )
+      .run(node, 0, 'ask', 0, 0, 1, 'launched', 5)
+    expect(policy.get(node)).toMatchObject({ work: false, maxPermissionMode: 'ask' })
+    expect(() => db.database.prepare('UPDATE net_node_policy SET work=2 WHERE node=?').run(node)).toThrow()
+    expect(() => policy.set(node, { work: 'no' as never })).toThrow()
+  })
+})

@@ -72,6 +72,22 @@ describe('run protocol validation', () => {
     await expect(client.request('orchestrator.send', { threadId: thread.id, content: 'x', clientRequestId: 'shared-id' })).rejects.toMatchObject({ code: 'client_request_id_conflict' })
   }, 30_000)
 
+  it('Send now (orchestrator.steerNow) is a person\'s: a window may send it, the CLI is refused before anything is recorded', async () => {
+    const thread = mms.threads.createThread('Send now')
+    // A window: validated and dispatched; no run is active, so the engine ignores it.
+    expect(await client.request('orchestrator.steerNow', { threadId: thread.id, runId: 'run:none', holdGeneration: 1, itemIds: [], clientRequestId: 'gui-1' })).toMatchObject({ ok: false, ignored: true })
+    await expect(client.request('orchestrator.steerNow', { threadId: thread.id, runId: 'run:none', holdGeneration: 1, itemIds: [], bogus: 1 })).rejects.toMatchObject({ code: 'invalid_params' })
+    const cli = new LocalMmsClient({ homeDir: home, endpoint: server.endpoint!, ownerToken: mms.getOwnerLease()!.owner.token, clientType: 'cli' })
+    await cli.connect()
+    try {
+      await expect(cli.request('orchestrator.steerNow', { threadId: thread.id, runId: 'run:none', holdGeneration: 1, itemIds: [], clientRequestId: 'cli-1' })).rejects.toMatchObject({ code: 'forbidden' })
+    } finally {
+      await cli.close()
+    }
+    // The refused call wrote nothing: only the window's ignored command is in the log.
+    expect(mms.runEngine.listEvents(thread.id).filter((event) => event.type === 'command.ignored')).toHaveLength(1)
+  }, 30_000)
+
   it('pages runs.effects newest first with a cursor (L3)', async () => {
     const thread = mms.threads.createThread('Effects')
     for (let i = 0; i < 3; i++) mms.runEngine.outbox.enqueue({ threadId: thread.id, kind: 'turn.interrupt', availableAt: '2999-01-01T00:00:00.000Z' })

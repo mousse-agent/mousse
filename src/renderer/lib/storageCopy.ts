@@ -26,7 +26,7 @@ export const STORAGE_RULE_COPY: Record<StorageRuleId, StorageRuleCopy> = {
     deletes: 'the worktree folder of a thread that has had no activity for this long. It is restored the next time you use the thread.'
   },
   merged: {
-    title: 'Remove worktrees whose work is merged into the default branch',
+    title: 'Remove merged worktrees',
     line: 'Restored when you use the thread again.',
     deletes: 'the worktree folder of a thread once its commits are in the default branch. It is restored the next time you use the thread.',
     note: 'Merged means the worktree’s commits are in the default branch, or Publish put exactly the worktree’s files into your checkout. A pull request’s state is not checked, and a rebased or squashed branch counts as not merged.'
@@ -102,7 +102,7 @@ export const RECOMMENDED_COPY = {
   modalIntro: 'These rules are off for you now. Turning them on lets Mousse remove these things on a schedule, and Preview cleanup shows you what before it removes anything.',
   rules: {
     inactive: 'Remove worktrees inactive for 30 days',
-    merged: 'Remove worktrees whose work is merged into the default branch',
+    merged: 'Remove merged worktrees',
     captures: 'Delete saved browser captures after 30 days'
   }
 }

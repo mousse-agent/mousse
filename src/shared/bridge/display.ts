@@ -4,6 +4,11 @@ import type { BridgeEntityRef } from './types'
 export const BRIDGE_DISPLAY_CHUNK_BYTES = 32 * 1024
 export const BRIDGE_DISPLAY_MAX_BYTES = 32 * 1024 * 1024
 export const BRIDGE_DISPLAY_FRAME_BYTES = 64 * 1024
+/**
+ * The node bound of a whole display snapshot (`MAX_DISPLAY_JSON_NODES` on the computer): the 32 MiB byte bound
+ * binds first for real threads. A frame keeps the wire's 16,384.
+ */
+export const BRIDGE_DISPLAY_MAX_NODES = 4_194_304
 export const BRIDGE_DISPLAY_EVENT_TYPES = BRIDGE_THREAD_EVENT_TYPES
 export interface BridgeDisplayPosition {
   stream: StreamId
@@ -55,11 +60,14 @@ const large = (): never => {
 }
 const encoder = new TextEncoder()
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
-/** Browser-portable compact JSON, with the same numeric/structure limits as Net JSON. */
-export function displayJson(value: unknown): Uint8Array {
+/**
+ * Browser-portable compact JSON, with the same numeric/structure limits as Net JSON. A whole snapshot passes
+ * `BRIDGE_DISPLAY_MAX_NODES`; a frame keeps the wire's 16,384 nodes.
+ */
+export function displayJson(value: unknown, maximumNodes = 16384): Uint8Array {
   let nodes = 0
   const serialize = (item: unknown, depth: number): string => {
-    if (depth > 32 || ++nodes > 16384) return large()
+    if (depth > 32 || ++nodes > maximumNodes) return large()
     if (item === null || typeof item === 'boolean') return JSON.stringify(item)
     if (typeof item === 'number') {
       if (!Number.isFinite(item) || (Number.isInteger(item) && !Number.isSafeInteger(item)))
@@ -211,7 +219,8 @@ export function validateDisplayEvent(value: unknown): BridgeDisplayEvent {
     return bad()
   if (update.kind === 'snapshot') {
     fields(update, ['kind', 'value'])
-    if (displayJson(update.value).length > BRIDGE_DISPLAY_MAX_BYTES) return large()
+    if (displayJson(update.value, BRIDGE_DISPLAY_MAX_NODES).length > BRIDGE_DISPLAY_MAX_BYTES)
+      return large()
   } else if (update.kind === 'event') {
     fields(update, ['kind', 'type', 'data'])
     if (
@@ -349,7 +358,7 @@ export class BridgeDisplayDecoder {
     if (update.kind === 'snapshot' || update.kind === 'event') {
       if (this.pending.has(key)) return bad()
       this.checkPosition(key, position)
-      const hash = await displayHash(displayJson(update))
+      const hash = await displayHash(displayJson(update, BRIDGE_DISPLAY_MAX_NODES))
       if (this.closed || revision !== this.revision || signal?.aborted)
         throw new NetError('cancelled')
       return this.finish(key, part as BridgeDisplayEvent, hash)
@@ -413,7 +422,7 @@ export class BridgeDisplayDecoder {
     } catch {
       return bad()
     }
-    const canonical = displayJson(value)
+    const canonical = displayJson(value, BRIDGE_DISPLAY_MAX_NODES)
     if (canonical.length !== bytes.length || canonical.some((byte, index) => byte !== bytes[index]))
       return bad()
     this.pending.delete(key)
@@ -424,7 +433,7 @@ export class BridgeDisplayDecoder {
         ...position,
         update: { kind: 'snapshot', value }
       },
-      hash = await displayHash(displayJson(event.update))
+      hash = await displayHash(displayJson(event.update, BRIDGE_DISPLAY_MAX_NODES))
     if (this.closed || revision !== this.revision || signal?.aborted)
       throw new NetError('cancelled')
     return this.finish(key, event, hash)

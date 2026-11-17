@@ -446,6 +446,34 @@ export function useProviderSnapshots(scope: ProviderScope): ProviderSnapshotsVie
   return { snapshots: state?.snapshots, error: state?.error, loading: state?.loading ?? true, reload }
 }
 
+/**
+ * Keeps this computer's snapshots loaded outside any page (the update button reads their updates)
+ * and calls `changed` with them whenever they change, the first time at once. Remote computers'
+ * providers are not included.
+ */
+export function watchDeviceSnapshots(changed: (snapshots: InstanceSnapshot[] | undefined) => void): () => void {
+  const key = scopeKey(DEVICE_SCOPE)
+  const sync = (): void => {
+    ensureProfile(useAppStore.getState().profileId)
+    ensureListening()
+    const current = useProviderSnapshotsStore.getState().scopes[key]
+    if (!current?.snapshots && !current?.loading) void loadProviderSnapshots(DEVICE_SCOPE)
+  }
+  sync()
+  const offProfile = useAppStore.subscribe((state, previous) => {
+    if (state.profileId !== previous.profileId) sync()
+  })
+  const offSnapshots = useProviderSnapshotsStore.subscribe((state, previous) => {
+    const next = state.scopes[key]?.snapshots
+    if (next !== previous.scopes[key]?.snapshots) changed(next)
+  })
+  changed(useProviderSnapshotsStore.getState().scopes[key]?.snapshots)
+  return () => {
+    offProfile()
+    offSnapshots()
+  }
+}
+
 /** An operation of the instance that is still running (progress or waiting on a prompt). */
 export function useRunningOperation(instanceId: string): ProviderOperationEvent | undefined {
   return useProviderSnapshotsStore((store) =>
@@ -505,6 +533,15 @@ function pickerModel(model: InstanceSnapshot['models']['entries'][number], catal
 }
 
 /**
+ * A model's list entries in a picker: the model, then one variant per other speed it runs at
+ * (`opus:fast`), so the picker's speed control offers it. Snapshots list the model once.
+ */
+function withSpeedVariants(model: LlmModelOption, speeds: readonly ('fast' | 'slow')[] | undefined): LlmModelOption[] {
+  if (!speeds?.length || model.speed) return [model]
+  return [model, ...speeds.map((speed) => ({ ...model, id: `${model.id}:${speed}`, speed }))]
+}
+
+/**
  * Mousse's provider order, the same on the providers page and in every model picker. A data
  * table: model APIs (many instances of one driver) sort by name, agents keep their seeded order.
  */
@@ -542,15 +579,35 @@ export function sortInstances<T extends Pick<InstanceSnapshot, 'driver' | 'built
  * daemon's catalog is shown as it is.
  */
 export function pickerProviders(snapshots: readonly InstanceSnapshot[] | undefined, catalog: readonly LlmProviderOption[]): PickerProvider[] {
-  if (!snapshots) return catalog.map((provider) => ({ ...provider, llmProvider: provider.id }))
+  // The same lists give the same entries, so the model lists keep their identity across thread switches and
+  // what is worked out from them (the model families, `groupModelsByFamily`) is not worked out again.
+  const byCatalog = snapshots ? pickerProvidersMade.get(snapshots) : undefined
+  const made = snapshots ? byCatalog?.get(catalog) : catalogProvidersMade.get(catalog)
+  if (made) return made
+  const providers = makePickerProviders(snapshots, catalog)
+  if (!snapshots) catalogProvidersMade.set(catalog, providers)
+  else if (byCatalog) byCatalog.set(catalog, providers)
+  else pickerProvidersMade.set(snapshots, new WeakMap([[catalog, providers]]))
+  return providers
+}
+
+/** Picker entries already made, by the snapshots and the catalog they were made from (both replaced, never changed). */
+const pickerProvidersMade = new WeakMap<readonly InstanceSnapshot[], WeakMap<readonly LlmProviderOption[], PickerProvider[]>>()
+const catalogProvidersMade = new WeakMap<readonly LlmProviderOption[], PickerProvider[]>()
+
+function makePickerProviders(snapshots: readonly InstanceSnapshot[] | undefined, catalog: readonly LlmProviderOption[]): PickerProvider[] {
+  if (!snapshots) return catalog.map((provider) => ({ ...provider, llmProvider: provider.id, models: provider.models.flatMap((model) => withSpeedVariants(model, model.speeds)) }))
   const providers: PickerProvider[] = []
   for (const snapshot of sortInstances(snapshots)) {
     // A locked entry runs bot turns only.
     if (!snapshot.enabled.effective || snapshot.config?.profile === 'locked') continue
     const listed = catalog.find((provider) => provider.instanceId === snapshot.instanceId)
+    // The catalog's entry for each model, the first one listed under its id.
+    const listedModels = new Map<string, LlmModelOption>()
+    for (const entry of listed?.models ?? []) if (!listedModels.has(entry.id)) listedModels.set(entry.id, entry)
     const models = snapshot.models.entries
       .filter((model) => !model.hidden)
-      .map((model) => pickerModel(model, listed?.models.find((entry) => entry.id === model.id)))
+      .flatMap((model) => withSpeedVariants(pickerModel(model, listedModels.get(model.id)), model.capabilities.speeds ?? listedModels.get(model.id)?.speeds))
     if (models.length === 0) continue
     providers.push({
       id: pickerIdOf(snapshot),

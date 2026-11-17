@@ -1,4 +1,5 @@
 import type { TimelineStep, StepState } from "../types/timeline";
+import { splitExitCode } from "./bash-output";
 
 function calculateDiffStatsFromPatch(
   patches: Array<{ lines?: string[] }>,
@@ -154,8 +155,11 @@ export function mapToolInvocationToStep(
     // A running command shows the output it has so far; a finished one its whole result.
     if (result) {
       if (typeof result === "string") {
-        step.bashOutput = result;
-        step.bashSuccess = true;
+        // A runtime that reports a failed command as text puts its exit code on the first line.
+        const { exitCode, output } = splitExitCode(result);
+        step.bashOutput = output;
+        step.bashSuccess = exitCode === undefined ? true : exitCode === 0;
+        if (exitCode !== undefined) step.bashExitCode = exitCode;
       } else if (typeof result === "object") {
         const stdout =
           typeof result?.stdout === "string"

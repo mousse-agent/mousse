@@ -1,100 +1,78 @@
-import { useEffect } from 'react'
-import { create } from 'zustand'
-import type { BotBrowserInput, BotBrowserView, BotsBrowserApi, BotsBrowserMethod } from '../../shared/bots/personal/browser'
-import { errorText } from '../services/personalBotsClient'
+import type { RefObject } from 'react'
+import type { BotBrowserFrameEvent, BotBrowserView, BotsBrowserApi, BotsBrowserMethod } from '../../shared/bots/personal/browser'
+import { createWatchedBrowserStore, type WatchedBrowserCall, type WatchedBrowserNeed, type WatchedBrowserStream } from './watchedBrowserStore'
 
 /**
- * Each bot's own browser as its chat shows it: the live preview in its reply and the split view.
- * Read with `bots.browser.get` while the bot's chat is open: often, with a picture, while the
- * browser is open and on screen; seldom otherwise. A daemon without the methods shows none.
+ * Each bot's own browser as its chat shows it: the live preview in its reply and the split view. The
+ * general view store (`watchedBrowserStore.ts`) over the `bots.browser.*` methods, keyed by bot. A
+ * service that predates watching or holds answers `bots.browser.get` with a picture and takes
+ * `control` and `input` instead.
  */
 
-/** How often an open browser on screen is pictured again. */
-export const BOT_BROWSER_FRAME_MS = 700
-/** How often a bot's browser is checked while nothing of it shows. */
-const IDLE_POLL_MS = 3000
+export { STOP_GRACE_MS, WATCHED_BROWSER_FRAME_MS as BOT_BROWSER_FRAME_MS, viewId } from './watchedBrowserStore'
 
-interface BotBrowserState {
-  views: Record<string, BotBrowserView>
-  /** The bot whose browser is open in the split view beside its chat. */
-  paneBotId: string | null
-  /** Set when the daemon has no bot-browser methods (an older one): nothing polls or shows. */
-  unavailable: boolean
-  busy: boolean
-  error: string | null
-  load(botId: string, frame: boolean): Promise<void>
-  openPane(botId: string): void
-  closePane(): void
-  control(botId: string, control: 'owner' | 'bot'): Promise<void>
-  input(botId: string, input: BotBrowserInput): Promise<void>
-  open(botId: string, url?: string): Promise<void>
-}
+/** Whether pictures can arrive: live, or not updating since a time (ms since the epoch). */
+export type BotBrowserStream = WatchedBrowserStream
+/** What a preview or the split view needs while it is seen: its width in CSS pixels and pictures a second. */
+export type BotBrowserNeed = WatchedBrowserNeed
 
-type Call = <M extends BotsBrowserMethod>(method: M, params: BotsBrowserApi[M]['params']) => Promise<BotsBrowserApi[M]['result']>
-let transport: Call | null = null
-/** The transport the store calls through; tests pass a fake. */
-export function setBotBrowserTransport(next: Call | null): void { transport = next }
-const call: Call = (method, params) => (transport ?? ((m, p) => window.mousse.platformRequest.request(m, p)) as Call)(method, params)
-
-/** The daemon (or this app's bridge) does not know the bot-browser methods. */
-const missingMethod = (cause: unknown) => /method not allowed|not allowlisted|unknown method/i.test(errorText(cause))
-
-export const useBotBrowserStore = create<BotBrowserState>((set, get) => {
-  const put = (botId: string, view: BotBrowserView) => set((state) => {
-    const previous = state.views[botId]
-    // A view without a picture keeps the last one: a seldom check never blanks the preview.
-    const frame = view.frame ?? previous?.frame
-    return { views: { ...state.views, [botId]: { ...view, ...(frame ? { frame } : {}) } } }
-  })
-  const act = async (botId: string, run: () => Promise<{ browser: BotBrowserView }>) => {
-    set({ busy: true, error: null })
-    try {
-      put(botId, (await run()).browser)
-      set({ busy: false })
-    } catch (cause) {
-      set({ busy: false, error: errorText(cause) })
-    }
-  }
-  return {
-    views: {},
-    paneBotId: null,
-    unavailable: false,
-    busy: false,
-    error: null,
-    async load(botId, frame) {
-      if (get().unavailable) return
-      try {
-        put(botId, (await call('bots.browser.get', { botId, ...(frame ? { frame: true } : {}) })).browser)
-      } catch (cause) {
-        if (missingMethod(cause)) set({ unavailable: true })
-      }
-    },
-    openPane: (botId) => set({ paneBotId: botId, error: null }),
-    closePane: () => set({ paneBotId: null, error: null }),
-    control: (botId, control) => act(botId, () => call('bots.browser.control', { botId, control })),
-    input: (botId, input) => act(botId, () => call('bots.browser.input', { botId, input })),
-    open: (botId, url) => act(botId, () => call('bots.browser.open', { botId, ...(url ? { url } : {}) }))
+const bots = createWatchedBrowserStore<BotBrowserView, BotBrowserFrameEvent>({
+  owner: (botId) => ({ botId }),
+  keyOf: (event) => event.botId,
+  methods: {
+    get: 'bots.browser.get',
+    watch: 'bots.browser.watch',
+    unwatch: 'bots.browser.unwatch',
+    hold: 'bots.browser.hold',
+    send: 'bots.browser.send',
+    open: 'bots.browser.open',
+    legacy: { control: 'bots.browser.control', input: 'bots.browser.input' }
+  },
+  frames: (listener) => window.mousse.personalBots?.onBrowserFrame?.(listener) ?? (() => undefined),
+  chooseFiles: () => {
+    const choose = window.mousse?.personalBots?.chooseBrowserFiles
+    return choose ? ({ key, ...request }) => choose({ botId: key, ...request }) : undefined
+  },
+  window: () => {
+    const open = window.mousse?.personalBots?.browserWindow
+    return open ? ({ key, ...request }) => open({ botId: key, ...request }) : undefined
   }
 })
 
+/** Whether this app can open a bot's browser in a window (an older app's bridge cannot). */
+export function canOpenBotBrowserWindow(): boolean {
+  return typeof window !== 'undefined' && typeof window.mousse?.personalBots?.browserWindow === 'function'
+}
+
+export const useBotBrowserStore = bots.useStore
+/** The store's hooks, for the general view (`WatchedBrowserPane`). */
+export const botBrowserKit = { useStore: bots.useStore, useWatch: bots.useWatch, useStream: bots.useStream }
+
+type Call = <M extends BotsBrowserMethod>(method: M, params: BotsBrowserApi[M]['params']) => Promise<BotsBrowserApi[M]['result']>
+type Subscribe = (listener: (event: BotBrowserFrameEvent) => void) => () => void
+
+/** The transport the store calls through, and where pushed pictures come from; tests pass fakes. */
+export function setBotBrowserTransport(next: Call | null, frames?: Subscribe | null): void {
+  bots.setTransport(next as unknown as WatchedBrowserCall | null, frames)
+}
+
 /**
- * Keeps a bot's browser view fresh while its chat is open: a picture every `BOT_BROWSER_FRAME_MS`
- * while the browser is open and its preview or split view shows, else a light check now and then.
+ * While `element` is on screen in a shown window, the bot's browser is watched at `need`; scrolled
+ * out of sight, the window hidden, or unmounted, it no longer is. Pass `need` undefined to need nothing.
  */
-export function useBotBrowser(botId: string, showing: boolean): BotBrowserView | undefined {
-  const view = useBotBrowserStore((state) => state.views[botId])
-  const unavailable = useBotBrowserStore((state) => state.unavailable)
-  const live = Boolean(view?.open) && showing
-  useEffect(() => {
-    if (unavailable) return
-    let stopped = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const tick = async () => {
-      await useBotBrowserStore.getState().load(botId, live)
-      if (!stopped) timer = setTimeout(() => { void tick() }, live ? BOT_BROWSER_FRAME_MS : IDLE_POLL_MS)
-    }
-    void tick()
-    return () => { stopped = true; if (timer) clearTimeout(timer) }
-  }, [botId, live, unavailable])
-  return unavailable ? undefined : view
+export function useBotBrowserWatch(botId: string, element: RefObject<Element | null>, need: BotBrowserNeed | undefined): void {
+  bots.useWatch(botId, element, need)
+}
+
+/**
+ * Keeps a bot's browser state fresh while its chat is open: a light read every few seconds. Its
+ * pictures come from what is seen of it (`useBotBrowserWatch`).
+ */
+export function useBotBrowser(botId: string): BotBrowserView | undefined {
+  return bots.useBrowserState(botId)
+}
+
+/** Whether a bot's pictures can arrive now (undefined while nothing of it is watched). */
+export function useBotBrowserStream(botId: string): BotBrowserStream | undefined {
+  return bots.useStream(botId)
 }

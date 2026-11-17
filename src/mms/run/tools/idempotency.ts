@@ -22,12 +22,16 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'list_delegations',
   // Asks the user's other computers whether they have the repository; changes nothing anywhere.
   'list_computers',
+  // Reads the provider entries and models offered here or on another computer; changes nothing.
+  'list_models',
   // The retired merge tools only report a finished task's result (and pin it again).
   'integrate_delegation',
   'integrate_subagent',
   // Phase 5 Mousse MCP server (SPEC §15.1).
   'thread_read',
   'queue_list',
+  // Reads a thread's terminals from memory; never writes to them.
+  'terminal_read',
   // A bot's Mousse tools (PR 6 §3). A consult's effects are the consult run's own calls, each in the
   // ledger; an escalation writes only bots.db. Either cut off by a crash leaves nothing unknown.
   'consult',
@@ -53,7 +57,6 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'answer_subagent',
   'task_status',
   'task_cancel',
-  'present_plan',
   'ask_user',
   'queue_enqueue'
 ])

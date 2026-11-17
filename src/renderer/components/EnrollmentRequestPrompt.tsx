@@ -28,7 +28,7 @@ export function EnrollmentRequestPrompt({
       onClose={onClose}
       footer={
         <>
-          <button type="button" className="settings-btn" data-action="deny-enrollment" disabled={busy} onClick={() => onDecide(false)}>
+          <button type="button" className="settings-btn" data-action="deny-enrollment" disabled={busy} data-mousse-decision="" onClick={() => onDecide(false)}>
             <X size={14} />
             Deny
           </button>

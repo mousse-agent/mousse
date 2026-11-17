@@ -35,6 +35,28 @@
   text-overflow: ellipsis;
 }
 
+/* The entry after the model, muted as the menu's subtitle. Model and entry each cut with an ellipsis, never wrap: the
+   entry gives way first, down to a few letters, so a narrow control still shows the model's name and which entry. */
+.settings-model-btn-label.with-entry {
+  display: flex;
+  gap: 4px;
+}
+
+.settings-model-btn-model,
+.settings-model-btn-entry {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-btn-entry {
+  flex-shrink: 100;
+  min-width: 3.5em;
+  color: var(--text-secondary);
+}
+
 .settings-model-btn svg {
   flex-shrink: 0;
 }
@@ -53,4 +75,31 @@
 .settings-model-btn:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* A choice of no model in the menu's footer (a bot's Images row): muted text, a light chip while it is the choice. */
+.model-picker-clear {
+  height: 24px;
+  margin-left: auto;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.model-picker-clear:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.model-picker-clear.selected {
+  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  color: var(--text-primary);
+}
+
+.model-picker-clear:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { SettingsRow } from '../settings/SettingsRow'
 import { useDaemonCall } from './useDaemonCall'
-import { openThread } from '../../lib/openThread'
+import { isThreadShownOrOpening, openThread } from '../../lib/openThread'
 import { formatAgo } from '../../lib/formatAgo'
 import { activityHeadline, readsLine, ruleLine, rulesLine, showsActivity } from '../../lib/deviceActivity'
 import { useAppStore } from '../../stores/appStore'
@@ -58,6 +58,7 @@ export function DeviceActivityView({ name, activity, now, open, busy, blocked, o
                 <li key={`${entry.at}-${entry.method}-${index}`}>
                   <span className="devices-activity-when">{formatAgo(entry.at, now)}</span>
                   <span className={entry.kind === 'refused' ? 'devices-activity-what refused' : 'devices-activity-what'}>{describeActivityEntry(entry)}</span>
+                  {entry.actor === 'agent' && <span className="devices-activity-who">by an agent</span>}
                   {entry.thread && <span className="devices-activity-where">in <ThreadLink id={entry.thread.id} name={entry.thread.name} onOpen={onOpenThread} /></span>}
                   {entry.project?.name && <span className="devices-activity-where">project {entry.project.name}</span>}
                 </li>
@@ -126,7 +127,7 @@ export function DeviceActivityRows({ device, onLimits, onBlock }: {
   }
   const show = (threadId: string) => {
     void openThread(threadId).then(() => {
-      if (useAppStore.getState().activeThreadId === threadId) useAppStore.getState().setSettingsOpen(false)
+      if (isThreadShownOrOpening(threadId)) useAppStore.getState().setSettingsOpen(false)
     })
   }
 

@@ -8,7 +8,7 @@
  *   `admittedChatSource` in the protocol handlers);
  * - never tracked: `delegation` (it has its row already), `wake` (delivers a result, is not new work),
  *   `provider-continuation`, `integration`, `resume` and `resume_now` (the continue turn after a
- *   usage-limit pause: the task is the paused run's), `steer-late` and `steer-followup` (a steer that
+ *   usage-limit pause: the task is the paused run's), `goal` (a turn Mousse starts for the thread's goal), `steer-late` and `steer-followup` (a steer that
  *   missed its turn), `lease-race`, `queue` (a legacy queue item without a source), `schedule`,
  *   `workflow-observer`, `protocol`, `cli-steer`, `protocol-steer` and local actions (undo, restore).
  */
@@ -23,7 +23,8 @@ export function isFollowUpSource(source: string): boolean {
  * Sources of work that starts on behalf of a parent or of the engine, not of a person: a delegated
  * task or follow-up (`delegation`), the wake and the queued steer that deliver a subagent's result
  * (`wake`, `steer-late`), a provider's own continuation turn, an integration, and the continue turn
- * that follows a usage-limit pause (`resume`, `resume_now`). The Stop fence (`stopGeneration.ts`)
+ * that follows a usage-limit pause (`resume`, `resume_now`), and the turns Mousse starts for a thread's goal (`goal`,
+ * issue #1207). The Stop fence (`stopGeneration.ts`)
  * refuses such work at execution once a Stop came after it was admitted, and while a thread is
  * paused none of it runs beside the pause, except the resume itself (`RESUME_SOURCES`). Every other
  * source (a person's send from the app, the CLI, a remote send or the protocol, a plain steer left for
@@ -36,7 +37,8 @@ export const FENCED_SOURCES: ReadonlySet<string> = new Set([
   'provider-continuation',
   'integration',
   'resume',
-  'resume_now'
+  'resume_now',
+  'goal'
 ])
 
 /** Whether work with this `source` is subject to the Stop fence. */
@@ -49,9 +51,10 @@ export function isFencedSource(source: string | null | undefined): boolean {
  * is not a person's message, so on a thread paused by a usage limit it neither ends the pause nor
  * restarts its chain of automatic resumes: `commitSend` refuses it (`thread_paused`), and one that was
  * admitted before the pause waits (`markStarting` refuses it) until the pause has ended on its own. A
- * message another thread's agent sends is held the same way (agent sends).
+ * message another thread's agent sends is held the same way (agent sends), and so is the turn that delivers a settle
+ * notice (`thread-notice`).
  */
-export const PAUSE_HELD_SOURCES: ReadonlySet<string> = new Set(['schedule'])
+export const PAUSE_HELD_SOURCES: ReadonlySet<string> = new Set(['schedule', 'thread-notice'])
 
 export function isPauseHeldSource(source: string | null | undefined): boolean {
   return source !== null && source !== undefined && PAUSE_HELD_SOURCES.has(source)

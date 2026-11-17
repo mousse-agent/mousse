@@ -8,11 +8,10 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
-import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
-import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
+import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { BOTS_MIGRATIONS, BotStore } from '../../src/mms/bots/store/BotStore'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
@@ -23,9 +22,8 @@ import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isIdempotentTool } from '../../src/mms/run/tools/idempotency'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
 import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
-import { filesAsk, permissionText, withPermission, type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
+import { type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
-import { addedPermissions } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 
 let base: string
@@ -55,7 +53,6 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   appTools: [],
   mcp: [],
   skills: [],
-  // No file access: a file call outside its own folders is a wall asking for it (these tests write their ledger rows directly).
   workspace: null,
   budget: { maxActiveMs: 10 * 60_000 },
   audience: 'owner',
@@ -187,9 +184,11 @@ async function endAtWall(payload: BotTurnPayload) {
   await tick()
 }
 
-/** A gate refusal of a folder outside the grant: in the chat lane, a wall at once. */
-const gateWall = (prepared: { authority: BotAuthority }) =>
-  prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: other } })
+/** A call of a thread tool: the chat uses "use your threads" itself, so the grant lacking it is a wall asking for it. */
+const threadCall = { kind: 'app' as const, tool: 'thread_create', args: {} }
+
+/** A gate refusal of a permission outside the grant: in the chat lane, a wall at once. */
+const gateWall = (prepared: { authority: BotAuthority }) => prepared.authority.check(threadCall)
 
 /** `escalate` in a chat turn: recorded now; the turn finishes and then waits with its card. */
 async function askAndFinish(prepared: { authority: { escalate?: (request: { permission: unknown; reason: string }) => string } }, payload: BotTurnPayload, permission: BotPermissionRequest = { tool: 'web_fetch' }) {
@@ -213,17 +212,16 @@ describe('walls', () => {
     // The chat's first dispatch starts from a cleared home context.
     expect(prepared.history).toBe('cleared')
     expect(cleared).toEqual([HOME])
-    const wall = prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(other, 'a.md') } })
-    // A file is asked for by its folder.
-    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: 'use files on this computer' } })
+    const wall = prepared.authority.check(threadCall)
+    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: 'use your threads' } })
     expect(isBotWallAbort(prepared.authority.time.signal.reason)).toBe(true)
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', mode: 'wall', expiresAt: null, permission: filesAsk() } })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', mode: 'wall', expiresAt: null, permission: { tool: 'threads' } } })
     expect(escalations).toHaveLength(1)
     // Every later call waits, and asks nobody again.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'waiting' } })
     expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
-    // Asks never expire: no expiry is armed (the only timer is the dispatch's deadline).
-    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000])
+    // Asks never expire: no expiry is armed (the only timers are the dispatch's deadline and its look).
+    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000, BOT_OFFLINE_WATCH_MS])
   })
 
   it('escalate asks for a structured permission; a malformed one is refused, and a chat turn finishes before it waits', async () => {
@@ -273,14 +271,14 @@ describe('answers and continuations', () => {
     expect(answered).toMatchObject({ escalation: { status: 'allowed_once' }, activation: { status: 'running' } })
     const next = store.dispatch(activation.id, 2)!
     expect(next).toMatchObject({ kind: 'continue', clientRequestId: `${activation.id}:d2` })
-    expect(next.prompt.text).toBe('[Mousse] The owner allowed: use files on this computer. Continue.')
+    expect(next.prompt.text).toBe('[Mousse] The owner allowed: use your threads. Continue.')
     expect(runs.getRun(next.runId!)!.outcome?.continuationOf).toBe(payload.runId)
     const again = bots.prepare(payloadOf(next.runId!))
     if ('refused' in again) throw new Error(again.refused)
     expect(again.history).toBe('thread')
-    expect(again.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: other } })).toEqual({ ok: true })
+    expect(again.authority.check(threadCall)).toEqual({ ok: true })
     // The grant itself is unchanged: a later activation does not get it.
-    expect(store.activeGrant('site-editor')!.manifest.workspace).toBeNull()
+    expect(store.activeGrant('site-editor')!.manifest.appTools).not.toContain('threads')
   })
 
   it('"Allow for this bot" publishes and approves a wider revision in one action', async () => {
@@ -355,7 +353,7 @@ describe('answers and continuations', () => {
     expect(store.unknownCalls(activation.id)[0].acknowledged).toBe(false)
     await bots.continueActivation(activation.id, { acknowledge: { calls: ['consult-edit'] } })
     const next = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'continue')!
-    expect(next.prompt.text).toContain('The owner allowed: use files on this computer.')
+    expect(next.prompt.text).toContain('The owner allowed: use your threads.')
     expect(next.prompt.text).toContain('edit (consult run')
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
@@ -400,7 +398,7 @@ describe('consults', () => {
     expect(context).toMatchObject({ history: 'thread', authority: { role: 'context' } })
     // Depth is 1: no consult from a context thread; it narrows to read.
     expect(context.authority.consult).toBeUndefined()
-    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, 'read'].sort())
+    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, 'mcp_servers', 'read', 'running_list'].sort())
     expect(context.authority.counters).toBe(prepared.authority.counters)
     expect(context.authority.time.signal).toBe(prepared.authority.time.signal)
     start(payload.runId)
@@ -461,37 +459,139 @@ describe('consults', () => {
 })
 
 describe('startup pass', () => {
-  function supervised(activationId: string, n: number) {
-    const dispatch = store.dispatch(activationId, n)!
-    store.run('UPDATE bot_dispatches SET prepaid_ms = 15000, exit_at = ? WHERE activation_id = ? AND n = ?', clock, activationId, n)
-    store.run('UPDATE bot_counters SET active_ms = active_ms - ? + 15000 WHERE activation_id = ?', dispatch.prepaidMs!, activationId)
-  }
-
+  /** A crash: the process is gone without closing (nothing of the old engine runs again), then the next start. */
   async function crash() {
-    bots.close()
     bots = makeEngine()
     await bots.reconcileOnStartup()
   }
 
-  it('settles an open main dispatch at its full allowance without exit evidence, and keeps open reservations charged', async () => {
-    const { activation, payload } = await running()
+  /** A call the dispatch makes `after` ms into its run: its last recorded call. */
+  const callAt = (prepared: { authority: BotAuthority }, at: number) => {
+    clock = at
+    expect(prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} })).toEqual({ ok: true })
+  }
+
+  it('settles an open main dispatch up to its last recorded call, keeps open reservations charged, and carries it on', async () => {
+    const { activation, payload, prepared } = await running()
     store.run("INSERT INTO bot_spend_reservations(id, activation_id, run_id, input_bound, wire_cap, usd_micros, cost_limited, created_at) VALUES('r1', ?, ?, 100, 50, 7, 0, 'x')", activation.id, payload.runId)
-    clock += 30_000
+    callAt(prepared, T0 + 20_000)
+    // It went on past that call for a while, then Mousse crashed and stayed down for an hour.
+    clock = T0 + 30_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    clock += 60 * 60_000
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 20_000 })
+    expect(store.counters(activation.id).activeMs).toBe(20_000)
+    expect(store.get('SELECT committed_input, committed_output FROM bot_spend WHERE activation_id = ?', activation.id)).toEqual({ committed_input: 100, committed_output: 50 })
+    // Row 11: time left, so it carries on once by itself, with the rest of its time.
+    const next = store.dispatch(activation.id, 2)!
+    expect(next.prompt.text).toContain('Mousse restarted')
+    const again = bots.prepare(payloadOf(next.runId!))
+    if ('refused' in again) throw new Error(again.refused)
+    expect(again.authority.time.deadline() - clock).toBe(10 * 60_000 - 20_000)
+  })
+
+  it('a dispatch whose last call came at its deadline is a budget wall after a crash, as at the deadline', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 10 * 60_000 - 5_000)
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     await crash()
-    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 10 * 60_000 })
-    expect(store.get('SELECT committed_input, committed_output FROM bot_spend WHERE activation_id = ?', activation.id)).toEqual({ committed_input: 100, committed_output: 50 })
-    // Row 10: no work time left, so a budget wall that says why, never an automatic restart.
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'budget', reason: expect.stringContaining('Mousse stopped unexpectedly') } })
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 10 * 60_000 - 5_000 })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'budget', reason: 'This bot used up its work time.' } })
+  })
+
+  /** The live dispatch's look (`BOT_OFFLINE_WATCH_MS`) at `at`: it finds the dispatch working and records the moment. */
+  const lookAt = async (at: number) => {
+    clock = at
+    timers.filter((timer) => timer.ms === BOT_OFFLINE_WATCH_MS && !timer.cleared).at(-1)!.fn()
+    await tick()
+  }
+
+  it('a dispatch that made no call is charged up to its last look, and carries on with the rest of its time', async () => {
+    const { activation, payload } = await running()
+    await lookAt(T0 + 20_000)
+    clock = T0 + 30_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 20_000 })
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('Mousse restarted')
+  })
+
+  it('a long call in flight when Mousse crashed is charged up to the last look, not only to when it was checked', async () => {
+    const { activation, payload, prepared } = await running()
+    // A 40-minute command is checked at 20 s; the dispatch is looked at every 20 s while it runs (no internet check
+    // runs without `connectivity`: it counts as working).
+    callAt(prepared, T0 + 20_000)
+    for (let at = T0 + 40_000; at <= T0 + 8 * 60_000; at += 20_000) await lookAt(at)
+    clock = T0 + 8 * 60_000 + 15_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 8 * 60_000 })
+  })
+
+  it('a call that finishes records the moment too', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 20_000)
+    const attempt = runs.getRun(payload.runId)!.activeAttemptId!
+    runs.tools.start({ invocationId: 'long', runId: payload.runId, attemptId: attempt, tool: 'shell', argsDigest: 'd', now: 'n', idempotent: false })
+    clock = T0 + 50_000
+    runs.tools.commit('long', 'n2')
+    bots.toolCallEnded(payload.runId)
+    clock = T0 + 55_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 50_000 })
+  })
+
+  it('a clean quit charges a running dispatch up to the shutdown and never fails it; the next start carries it on', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 20_000)
+    clock = T0 + 30_000
+    // The profile closes: its turn is cut by the shutdown and settled in this process, then the engine closes.
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    bots.settle(payload, { text: 'Half way.' })
+    await tick()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'run', usedMs: 30_000 })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'running' })
+    bots.close()
+    bots = makeEngine()
+    await bots.reconcileOnStartup()
+    expect(store.counters(activation.id).activeMs).toBe(30_000)
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('Mousse restarted')
+  })
+
+  it('a run the boot ended is left to the startup pass, even when its terminal event comes first', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 20_000)
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    bots = makeEngine()
+    bots.settleRun(payload.runId)
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: null, endedAt: null })
+    expect(bots.getActivation(activation.id).status).toBe('running')
+    await bots.reconcileOnStartup()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 20_000 })
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('Mousse restarted')
+  })
+
+  it('a close that comes before the turn has let go settles it up to the close, once', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 20_000)
+    clock = T0 + 30_000
+    bots.close()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'run', usedMs: 30_000 })
+    // The turn's end, after the close, charges nothing more.
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    bots.settle(payload, {})
+    bots = makeEngine()
+    await bots.reconcileOnStartup()
+    expect(store.counters(activation.id).activeMs).toBe(30_000)
+    expect(bots.getActivation(activation.id).status).toBe('running')
   })
 
   it('an interrupted run with time left continues once automatically; a second crash pauses it', async () => {
-    const { activation, payload } = await running()
-    clock += 30_000
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 30_000)
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-    // A supervisor that prepays in 15-second chunks, and confirmed the processes gone before the
-    // crash: the measured window is charged (this build prepays the whole allowance instead).
-    supervised(activation.id, 1)
     await crash()
     expect(store.counters(activation.id).activeMs).toBe(30_000)
     const next = store.dispatch(activation.id, 2)!
@@ -502,7 +602,6 @@ describe('startup pass', () => {
     start(again.runId)
     clock += 30_000
     end(again.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-    supervised(activation.id, 2)
     await crash()
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', endReason: 'restarted_twice' })
   })
@@ -612,24 +711,7 @@ describe('trash and profile hooks', () => {
   })
 })
 
-describe('file access is one permission (bot-architecture.md §3.7)', () => {
-  const authorityFor = (granted: BotManifest) => {
-    const compiled = compileBotThread({ grant: granted, digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'x'), profileHome: profile, nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
-    if (!compiled.ok) throw new Error(compiled.error.message)
-    return createBotAuthority({ activationId: 'a', role: 'activation', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
-  }
-  const edit = (path: string) => ({ kind: 'builtin' as const, tool: 'edit' as const, nativeName: 'edit', args: { path: join(path, 'a.md') } })
-
-  it('an answer for one folder grants every folder, read and write; another adds nothing', () => {
-    const none = manifest({ tools: ['read', 'edit'] })
-    const wider = withPermission(none, { path: other, access: 'read' })
-    expect(addedPermissions(wider, none).map((line) => line.text)).toEqual([permissionText(filesAsk())])
-    const authority = authorityFor(wider)
-    expect(authority.check(edit(root))).toEqual({ ok: true })
-    expect(authority.check(edit(other))).toEqual({ ok: true })
-    expect(addedPermissions(withPermission(wider, { path: root, access: 'write' }), wider)).toEqual([])
-  })
-
+describe('native names', () => {
   it('a native name that stands for several tools walls only when all are refused, and once', async () => {
     const { activation, prepared } = await running()
     const files = bots.filesFolder('site-editor')
@@ -641,18 +723,11 @@ describe('file access is one permission (bot-architecture.md §3.7)', () => {
     expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
   })
 
-  it('any folder, a relative one too, asks for file access as a whole, once; a relative folder is never asked for by name', async () => {
-    const { activation, prepared } = await running()
-    expect(prepared.authority.escalate!({ permission: { path: 'docs', access: 'read' }, reason: 'r' })).toContain('full path')
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: '../../outside.md' } })).toEqual({ ok: false, wall: { kind: 'escalated', permission: 'use files on this computer' } })
-    expect(store.escalations({ activationId: activation.id }).map((row) => row.permission)).toEqual([filesAsk()])
-    expect(bots.getActivation(activation.id).status).toBe('waiting_grant')
-  })
 })
 
 describe('round 1: startup recovery', () => {
+  /** A crash: the process is gone without closing, then the next start. */
   async function crash() {
-    bots.close()
     bots = makeEngine()
     await bots.reconcileOnStartup()
   }
@@ -670,14 +745,11 @@ describe('round 1: startup recovery', () => {
     const { activation, prepared, payload } = await running()
     gateWall(prepared)
     await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_once' })
-    // The walled run never reported its end: boot ended it. Its processes were confirmed gone, so
-    // only the window is charged (a supervisor's 15-second prepay; this build prepays everything).
+    // The walled run never reported its end: boot ended it, and charged it up to its last call.
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-    store.run('UPDATE bot_dispatches SET prepaid_ms = 15000, exit_at = ? WHERE activation_id = ? AND n = 1', clock, activation.id)
-    store.run('UPDATE bot_counters SET active_ms = 15000 WHERE activation_id = ?', activation.id)
     await crash()
     expect(store.dispatches(activation.id).map((dispatch) => dispatch.kind)).toEqual(['start', 'continue'])
-    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner allowed: use files on this computer.')
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner allowed: use your threads.')
     expect(bots.getActivation(activation.id).status).toBe('running')
     await crash()
     expect(store.dispatches(activation.id)).toHaveLength(2)
@@ -1001,16 +1073,4 @@ describe('round 3', () => {
     await bots.remove('site-editor')
     expect(existsSync(scratch)).toBe(true)
   })
-
-  it('an older grant with a write folder nested in a read-only one is file access: both are writable', () => {
-    const outer = join(base, 'outer')
-    const inner = join(outer, 'inner')
-    mkdirSync(inner, { recursive: true })
-    const compiled = compileBotThread({ grant: manifest({ tools: ['edit'], workspace: { roots: [outer, inner], access: 'read', rootAccess: { [inner]: 'write' } } }), digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'n'), profileHome: profile, nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
-    if (!compiled.ok) throw new Error(compiled.error.message)
-    const authority = createBotAuthority({ activationId: 'a', role: 'activation', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
-    expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(inner, 'a.md') } })).toEqual({ ok: true })
-    expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(outer, 'a.md') } })).toEqual({ ok: true })
-  })
-
 })

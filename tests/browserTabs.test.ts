@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { useAppStore } from '../src/renderer/stores/appStore'
+import { qualifyId } from '../src/shared/threadRef'
 import {
   browserCompatibleUserAgent,
   isAllowedBrowserPopupUrl
@@ -99,6 +100,31 @@ describe('thread workspace persistence', () => {
       expect.objectContaining({ id: first, ownerThreadId: 'thread-a', ptyId: 'pty-a', cwd: '/projects/a' }),
       expect.objectContaining({ id: second, ownerThreadId: 'thread-b', ptyId: 'pty-b', cwd: '/projects/b' })
     ]))
+  })
+})
+
+describe("a thread's browser tabs when the thread leaves", () => {
+  const thread = (id: string, settledAt?: string) => ({ id, name: id, order: 0, ...(settledAt ? { settledAt } : {}) })
+  const setThreads = (threads: ReturnType<typeof thread>[]) => useAppStore.setState({ threads: threads as never })
+  const tabOwners = () => useAppStore.getState().browserTabs.map((tab) => tab.ownerThreadId)
+  // A thread from another computer has a qualified id; it leaves the list while that computer is away.
+  const remote = qualifyId('nod_0123456789abcdefghjkmnpqrs', 'thread_r')
+
+  afterEach(() => setThreads([]))
+
+  it.each([
+    { case: 'archived', next: [thread('thread_a', '2026-11-15T00:00:00Z'), thread('thread_b'), thread(remote)], left: [null, 'thread_b', remote] },
+    { case: 'deleted', next: [thread('thread_b'), thread(remote)], left: [null, 'thread_b', remote] },
+    { case: 'archived already and listed again', start: 'archived', next: [thread('thread_a', '2026-11-16T00:00:00Z'), thread('thread_b'), thread(remote)], left: [null, 'thread_a', 'thread_b', remote] },
+    { case: 'of another computer and out of reach', next: [thread('thread_a'), thread('thread_b')], left: [null, 'thread_a', 'thread_b', remote] },
+    { case: 'gone with the whole list (a list not loaded yet)', next: [], left: [null, 'thread_a', 'thread_b', remote] }
+  ])('closes only the right tabs when a thread is $case', ({ start, next, left }) => {
+    setThreads([thread('thread_a', start ? '2026-11-15T00:00:00Z' : undefined), thread('thread_b'), thread(remote)])
+    const shared = useAppStore.getState().addBrowserTab(null)
+    for (const owner of ['thread_a', 'thread_b', remote]) useAppStore.getState().addBrowserTab(owner)
+    setThreads(next)
+    expect(tabOwners()).toEqual(left)
+    expect(useAppStore.getState().browserTabs[0].id).toBe(shared)
   })
 })
 

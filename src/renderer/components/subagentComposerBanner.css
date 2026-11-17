@@ -39,7 +39,7 @@ button.composer-banner-row:active {
 
 button.composer-banner-row:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-banner-text {

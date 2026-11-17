@@ -53,7 +53,9 @@ export const PRIVATE_DELTA_TYPES = [
   'actions.updated',
   'workspace.updated',
   'git.selectionChanged',
-  'thread.title-generation-failed'
+  'thread.title-generation-failed',
+  // A Send now click's outcome (`applied` or `stale`): the window that clicked leaves "Sending…". Phones cannot Send now.
+  'steer.now'
 ] as const
 export interface ThreadDisplayEvent {
   type: (typeof THREAD_EVENT_TYPES)[number] | (typeof BRIDGE_ROUTED_EVENT_TYPES)[number]
@@ -72,6 +74,11 @@ export type ThreadSourceEvent =
   | { snapshot: true }
 export interface ThreadSourcePort {
   snapshot(threadId: string): unknown
+  /**
+   * Reads what the next `snapshot` of the thread needs off the event loop (the newest page of its database), so that
+   * snapshot does not load the whole thread. `ThreadStreamAdapter.open` awaits it before a stream is opened.
+   */
+  warm?(threadId: string): Promise<void>
   onThread(
     threadId: string,
     listener: (event: ThreadSourceEvent) => void,
@@ -105,6 +112,12 @@ interface ActiveThread {
   lastBusyAt: number
   /** A terminal's output that arrived within a few milliseconds of each other, not yet signed and stored. */
   batch?: { bodies: unknown[]; bytes: number; timer?: { cancel(): void } }
+  /**
+   * Where the snapshot the stream published last begins, while a reader that opens the stream can still be served it:
+   * the store holds it whole (no trim cut into it) and no display-only delta went out since, which a new reader would
+   * not get. Undefined otherwise, and a reader's open publishes a fresh snapshot first.
+   */
+  published?: { begin: number }
 }
 export interface ThreadStreamOptions {
   db: NetDatabase
@@ -122,6 +135,11 @@ export interface ThreadStreamOptions {
   maxThreadsPerHolder?: number
   /** Threads that never count against a caller's quota, such as the shared lists stream. */
   unmetered?(threadId: string): boolean
+  /**
+   * The one device that may read the stream stored under `threadId` (a phone's own lists, `mousse:lists:<node>`), and
+   * the thread id its records carry instead of the key. Undefined for a stream every device of the user may read.
+   */
+  boundReader?(threadId: string): { reader: NodeId; subject: string } | undefined
   /**
    * Whether a session (of `holder`, when given) is being served the stream. Without it, no stream
    * is ever released for being idle.
@@ -163,6 +181,18 @@ const IDLE_MS = 10 * 60 * 1000,
   /** Well under what one transaction may hold (STORE_TXN_MAX_BYTES, 1 MiB), with the envelopes and signatures counted in. */
   BATCH_MAX_BYTES = 256 * 1024
 const PRIVATE_DELTA_SET: readonly string[] = PRIVATE_DELTA_TYPES
+/**
+ * The bytes a record body takes on the wire, or undefined when it has more nodes than one record may carry
+ * (`MAX_JSON_NODES`). Callers treat that like a body that is too large, never as a failed stream.
+ */
+function wireSize(body: unknown): number | undefined {
+  try {
+    return canonicalJson(body).byteLength
+  } catch (error) {
+    if (error instanceof NetError && error.code === 'too_large') return undefined
+    throw error
+  }
+}
 const PRIVATE_DURABLE_SET: readonly string[] = BRIDGE_ROUTED_EVENT_TYPES
 
 /**
@@ -192,6 +222,8 @@ function omittedIds(data: unknown): Record<string, string> {
 export class ThreadStreamAdapter {
   readonly store: StreamStore
   private readonly active = new Map<StreamId, ActiveThread>()
+  /** Which streams one device alone reads (`boundReader`), by stream, kept so a read is not a query. */
+  private readonly readerBindings = new Map<StreamId, NodeId | undefined>()
   /** Which streams are private to a reader, kept so the check that runs for every record is not a query. */
   private readonly privateBindings = new Map<
     StreamId,
@@ -249,7 +281,8 @@ export class ThreadStreamAdapter {
         if (key === 'openSnapshot')
           return (stream: StreamId) => {
             const thread = this.active.get(stream)
-            if (thread) this.refreshSnapshot(thread)
+            // The snapshot already published, with the records after it, is what a fresh one would show.
+            if (thread && !thread.published) this.refreshSnapshot(thread)
             return target.openSnapshot(stream)
           }
         const value = Reflect.get(target, key, target)
@@ -261,11 +294,31 @@ export class ThreadStreamAdapter {
   /**
    * Opens the thread's display stream. `holder` names the caller (a node) opening it: one holder
    * may keep only `maxThreadsPerHolder` threads open, so a single device cannot fill the shared cap.
+   * When either cap is full, streams no one reads give way first; only streams in use refuse an open.
    */
   activate(threadId: string, holder?: string): StreamDescriptor {
     // A private stream is opened for its reader only (`openPrivate`); no caller names its key.
     if (typeof threadId === 'string' && isPrivateKey(threadId)) throw new NetError('bad_request')
     return this.activateKey(threadId, holder)
+  }
+
+  /**
+   * Opens the thread's display stream as `activate` does. A stream not open yet first has its source read what the
+   * snapshot needs off the event loop (`ThreadSourcePort.warm`); the snapshot is then built once, from that.
+   */
+  async open(threadId: string, holder?: string): Promise<StreamDescriptor> {
+    if (
+      typeof threadId === 'string' &&
+      !isPrivateKey(threadId) &&
+      ![...this.active.values()].some((thread) => thread.threadId === threadId)
+    ) {
+      try {
+        await this.options.source.warm?.(threadId)
+      } catch {
+        // Reading ahead is only to spare the event loop; the snapshot reads what it needs itself.
+      }
+    }
+    return this.activate(threadId, holder)
   }
 
   /**
@@ -295,6 +348,24 @@ export class ThreadStreamAdapter {
     }
     const bound = this.privateBindings.get(stream)
     return bound && { ...bound, open: false }
+  }
+
+  /**
+   * The one device that may read `stream`, when it is bound to one that is not a private stream (a phone's own lists,
+   * `ThreadStreamOptions.boundReader`). Read for every subscription, so a guessed stream id reads nothing.
+   */
+  boundReader(stream: StreamId): NodeId | undefined {
+    if (!this.options.boundReader) return undefined
+    if (!this.readerBindings.has(stream)) {
+      const live = this.active.get(stream)
+      const key = live
+        ? live.threadId
+        : (this.options.db.database.prepare('SELECT thread_id FROM bridge_thread_streams WHERE stream=?').get(stream)?.thread_id as string | undefined)
+      // A stream this computer never made reads nothing anyway, and is not remembered.
+      if (key === undefined) return undefined
+      this.readerBindings.set(stream, this.options.boundReader(String(key))?.reader)
+    }
+    return this.readerBindings.get(stream)
   }
 
   /** The computers that have a private stream open. */
@@ -396,13 +467,19 @@ export class ThreadStreamAdapter {
     else {
       if (holder !== undefined && this.metered(threadId)) this.assertHolderRoom(holder)
       // Private streams have quotas of their own, so they do not use up what phones may open.
-      if (this.sharedOpen() >= (this.options.maxThreads ?? 64)) this.releaseIdle()
-      if (this.sharedOpen() >= (this.options.maxThreads ?? 64)) throw new NetError('rate_limited')
+      const maxThreads = this.options.maxThreads ?? 64
+      if (this.sharedOpen() >= maxThreads) this.releaseIdle()
+      // Still full: the stream least recently in use that no one reads and no turn runs on gives way.
+      while (this.sharedOpen() >= maxThreads && this.releaseLeastBusy()) {
+        // Released one; check again.
+      }
+      if (this.sharedOpen() >= maxThreads) throw new NetError('rate_limited')
     }
     if (this.options.db.database.isTransaction)
       throw new NetError('forbidden', 'Display generations must commit before publication.')
-    // Validate the actual source exists before allocating a permanent stream identity.
-    this.options.source.snapshot(threadId)
+    // The snapshot is built before a permanent stream identity is allocated, which also checks that the source
+    // exists, and published once the stream is: nothing runs in between, so no event can come before it.
+    const first = this.buildSnapshot(threadId)
     const self = this.options.identity.self()
     if (!self) throw new NetError('not_enrolled')
     let descriptor!: StreamDescriptor
@@ -445,7 +522,7 @@ export class ThreadStreamAdapter {
     const terminal = spec?.kind === 'terminal'
     const thread: ActiveThread = {
       threadId,
-      subject: spec ? privateRecordSubject(spec) : threadId,
+      subject: spec ? privateRecordSubject(spec) : (this.options.boundReader?.(threadId)?.subject ?? threadId),
       ...(spec ? { spec } : {}),
       ...(terminal
         ? { maxRows: PRIVATE_TERMINAL_RING_ROWS, maxBytes: PRIVATE_TERMINAL_RING_BYTES }
@@ -460,7 +537,7 @@ export class ThreadStreamAdapter {
     }
     if (spec) this.privateBindings.set(descriptor.id, { reader: spec.reader, kind: spec.kind })
     else if (holder !== undefined && this.metered(threadId)) thread.holders.set(holder, now)
-    this.refreshSnapshot(thread)
+    this.refreshSnapshot(thread, first)
     this.active.set(thread.stream, thread)
     this.scheduleSweep()
     const fail = (error: unknown): void => {
@@ -488,8 +565,8 @@ export class ThreadStreamAdapter {
           // A terminal's output waits a few milliseconds to be stored with what comes right after it. Nothing else
           // on its stream overtakes it: anything that is not output is stored behind what is already waiting.
           if (thread.spec?.kind === 'terminal' && event.type === 'pty.data' && !event.ephemeral) {
-            const size = canonicalJson(body).byteLength
-            if (size <= 48 * 1024) {
+            const size = wireSize(body)
+            if (size !== undefined && size <= 48 * 1024) {
               this.queueBatch(thread, body, size)
               return
             }
@@ -497,9 +574,12 @@ export class ThreadStreamAdapter {
           this.flushBatch(thread)
           if (event.ephemeral) {
             if (!deltaTypes.includes(event.type)) throw new NetError('bad_request')
+            // A delta is never stored: a reader that opens the stream later is given a fresh snapshot that has it.
+            thread.published = undefined
             const key = deltaKey(event)
             if (!key) return
-            if (canonicalJson(body).byteLength <= DELTA_MAX) this.queueDelta(thread, key, body)
+            const size = wireSize(body)
+            if (size !== undefined && size <= DELTA_MAX) this.queueDelta(thread, key, body)
             // A note too large to send whole still says that something changed; the reader fetches it.
             else if (PRIVATE_DELTA_SET.includes(event.type))
               this.queueDelta(thread, key, {
@@ -516,8 +596,10 @@ export class ThreadStreamAdapter {
             const key = deltaKey(event)
             if (key) this.dropDeltas(thread, (candidate) => candidate === key)
           }
-          // Oversized display events are replaced by a fresh source snapshot, never inline oversize.
-          if (canonicalJson(body).byteLength > 48 * 1024) this.refreshSnapshot(thread)
+          // Oversized display events are replaced by a fresh source snapshot, never inline oversize. One with
+          // more nodes than a record may carry counts as oversized too: it would fail the stream when stored.
+          const size = wireSize(body)
+          if (size === undefined || size > 48 * 1024) this.refreshSnapshot(thread)
           else this.append(thread, 'thread.event', body)
           this.trim(thread)
         } catch (error) {
@@ -534,7 +616,8 @@ export class ThreadStreamAdapter {
     try {
       const body = { threadId: thread.subject, type, data }
       // Progress is small; one that is not is dropped rather than turned into a snapshot.
-      if (canonicalJson(body).byteLength > 48 * 1024) return
+      const size = wireSize(body)
+      if (size === undefined || size > 48 * 1024) return
       this.append(thread, 'thread.event', body)
       this.trim(thread)
     } catch (error) {
@@ -607,15 +690,15 @@ export class ThreadStreamAdapter {
     thread.deltaTimer = undefined
     thread.deltas.clear()
   }
-  private append(thread: ActiveThread, type: string, body: unknown): void {
-    this.appendMany(thread, type, [body])
+  private append(thread: ActiveThread, type: string, body: unknown): StoredRecord {
+    return this.appendMany(thread, type, [body])[0]!
   }
   /**
    * Signs and stores records, one after another in one transaction: the roster and this computer's delegation are
    * checked once, each record is signed on its own, and the records are published after the commit. Each body is
    * its own record, in the order given, so nothing about a record changes by being stored with others.
    */
-  private appendMany(thread: ActiveThread, type: string, bodies: readonly unknown[]): void {
+  private appendMany(thread: ActiveThread, type: string, bodies: readonly unknown[]): StoredRecord[] {
     if (this.options.db.database.isTransaction)
       throw new NetError('forbidden', 'Display records cannot escape an enclosing transaction.')
     const identity = this.options.identity,
@@ -680,18 +763,26 @@ export class ThreadStreamAdapter {
       }
       this.options.onRecord?.(thread.stream, record)
     }
+    return records
   }
-  private refreshSnapshot(thread: ActiveThread): void {
+  /** The thread's display snapshot from its source, as the bytes its records carry. */
+  private buildSnapshot(threadId: string): Uint8Array {
+    const bytes = canonicalJson(this.options.source.snapshot(threadId), MAX_DISPLAY_JSON_NODES)
+    if (bytes.byteLength > SNAPSHOT_MAX)
+      throw new NetError('too_large', 'Display snapshot exceeds 32 MiB.')
+    return bytes
+  }
+  /** Publishes a snapshot (`built`, or one built now) and lets go of the records before it. */
+  private refreshSnapshot(thread: ActiveThread, built?: Uint8Array): void {
     // What is waiting was printed before this snapshot was read: it goes first, then the snapshot replaces it.
     this.flushBatch(thread)
-    const bytes = canonicalJson(this.options.source.snapshot(thread.threadId), MAX_DISPLAY_JSON_NODES)
-    if (bytes.byteLength > SNAPSHOT_MAX)
-      throw new NetError('too_large', 'Display snapshot exceeds32MiB.')
+    thread.published = undefined
+    const bytes = built ?? this.buildSnapshot(thread.threadId)
     const snapshot = randomUUID(),
       sha256 = createHash('sha256').update(bytes).digest('base64url'),
       chunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES)),
       previous = this.options.store.head(thread.stream).seq
-    this.append(thread, 'thread.snapshot.begin', {
+    const begin = this.append(thread, 'thread.snapshot.begin', {
       threadId: thread.subject,
       snapshot,
       totalBytes: bytes.length,
@@ -709,10 +800,14 @@ export class ThreadStreamAdapter {
       })
     this.append(thread, 'thread.snapshot.end', { threadId: thread.subject, snapshot, sha256 })
     if (previous) this.options.store.truncate(thread.stream, previous, { forgetIds: true })
+    thread.published = { begin: begin.seq }
   }
   private trim(thread: ActiveThread): void {
-    if (thread.ring.length && thread.ring[0].seq > 1)
-      this.options.store.truncate(thread.stream, thread.ring[0].seq - 1, { forgetIds: true })
+    if (!thread.ring.length || thread.ring[0].seq <= 1) return
+    const through = thread.ring[0].seq - 1
+    this.options.store.truncate(thread.stream, through, { forgetIds: true })
+    // A snapshot larger than the ring loses its first records here; a reader that opens the stream needs a new one.
+    if (thread.published && through >= thread.published.begin) thread.published = undefined
   }
   deactivate(threadId: string): void {
     for (const [stream, thread] of this.active)
@@ -743,8 +838,25 @@ export class ThreadStreamAdapter {
       return
     // Streams this caller no longer uses give way before it is refused.
     this.releaseIdle()
-    if (this.threadsHeldBy(holder) >= (this.options.maxThreadsPerHolder ?? HOLDER_MAX_THREADS))
-      throw new NetError('rate_limited')
+    const max = this.options.maxThreadsPerHolder ?? HOLDER_MAX_THREADS
+    const isSubscribed = this.options.isSubscribed
+    if (this.threadsHeldBy(holder) >= max && isSubscribed) {
+      // Then the caller's own holds on threads it no longer reads, least recently opened first, even before
+      // they are idle: a phone moving through many threads is never refused while it reads only a few.
+      const unread = [...this.active.values()]
+        .filter(
+          (thread) =>
+            this.metered(thread.threadId) &&
+            thread.holders.has(holder) &&
+            !isSubscribed(thread.stream, holder)
+        )
+        .sort((a, b) => a.holders.get(holder)! - b.holders.get(holder)!)
+      for (const thread of unread) {
+        if (this.threadsHeldBy(holder) < max) break
+        thread.holders.delete(holder)
+      }
+    }
+    if (this.threadsHeldBy(holder) >= max) throw new NetError('rate_limited')
   }
   private admitHolder(thread: ActiveThread, holder: string | undefined, now: number): void {
     if (holder === undefined || !this.metered(thread.threadId)) return
@@ -799,15 +911,34 @@ export class ThreadStreamAdapter {
         continue
       }
       if (now - thread.lastBusyAt < idle) continue
-      this.deactivate(thread.threadId)
-      this.options.db.transaction(() =>
-        this.options.db.database
-          .prepare('UPDATE bridge_thread_streams SET last_active=? WHERE thread_id=?')
-          .run(thread.lastBusyAt, thread.threadId)
-      )
+      this.release(thread)
       released++
     }
     return released
+  }
+  /**
+   * Releases the shared stream least recently in use that no session is subscribed to and no turn is running
+   * on, idle or not. False when there is none, or when the host cannot say who is subscribed.
+   */
+  private releaseLeastBusy(): boolean {
+    const { isSubscribed, isTurnActive } = this.options
+    if (!isSubscribed) return false
+    let oldest: ActiveThread | undefined
+    for (const thread of this.active.values()) {
+      if (thread.spec || isSubscribed(thread.stream) || isTurnActive?.(thread.subject)) continue
+      if (!oldest || thread.lastBusyAt < oldest.lastBusyAt) oldest = thread
+    }
+    if (!oldest) return false
+    this.release(oldest)
+    return true
+  }
+  private release(thread: ActiveThread): void {
+    this.deactivate(thread.threadId)
+    this.options.db.transaction(() =>
+      this.options.db.database
+        .prepare('UPDATE bridge_thread_streams SET last_active=? WHERE thread_id=?')
+        .run(thread.lastBusyAt, thread.threadId)
+    )
   }
   /**
    * Stored display records of a stream nobody opened for the stale period go away. The stream keeps

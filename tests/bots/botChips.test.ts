@@ -27,9 +27,9 @@ describe('chipForCall: live chips, worded as attempts', () => {
     expect(chipForCall('set_depth', { depth: 'quick', scope: 'now' }, ctx)).toMatchObject({ text: 'going quicker' })
   })
 
-  it('shows none for escalate (its card is the chip) or use_model (the model is never shown)', () => {
+  it('shows none for escalate (its card is the chip); use_model shows the change without naming the model (#673)', () => {
     expect(chipForCall('escalate', { permission: { tool: 'read' }, reason: 'x' }, ctx)).toBeNull()
-    expect(chipForCall('use_model', { model: 'claude-opus-5-5', scope: 'now' }, ctx)).toBeNull()
+    expect(chipForCall('use_model', { model: 'claude-opus-5-5', scope: 'now' }, ctx)).toEqual({ icon: 'think', text: 'switching models', live: true })
     expect(chipForCall('something_else', {}, ctx)).toBeNull()
   })
 
@@ -60,6 +60,14 @@ describe('rollUpChips: settled chips', () => {
       .toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'a.md, b.md' }])
   })
 
+  it('work\'s subagents settle to one chip with their titles; waiting on them and reading them show none', () => {
+    const start = (title: string): BotChipCall => ({ tool: 'subagent_start', input: { title, brief: 'x' }, result: { subagent: title } })
+    expect(chipForCall('subagent_start', { title: 'Prices', brief: 'x' }, ctx)).toMatchObject({ text: 'starting a subagent', highlight: 'Prices' })
+    expect(rollUpChips([start('Prices'), start('Reviews'), { tool: 'subagent_wait', input: {} }, { tool: 'subagent_result', input: { subagent: 'Prices' } }, { tool: 'subagent_send', input: { subagent: 'Prices', message: 'more' } }], ctx))
+      .toEqual([{ icon: 'think', text: 'used 2 subagents', highlight: 'Prices, Reviews' }])
+    expect(rollUpChips([start('Prices')], ctx)).toEqual([{ icon: 'think', text: 'used a subagent', highlight: 'Prices' }])
+  })
+
   it('a new schedule is an outcome chip with its label, once it returned', () => {
     const add: BotChipCall = { tool: 'bot_schedule_add', input: { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'inbox' }, result: { scheduleId: 's1', label: 'every weekday · 09:00' } }
     expect(rollUpChips([add], ctx)).toEqual([{ icon: 'schedule', text: 'every weekday · 09:00' }])
@@ -83,18 +91,24 @@ describe('rollUpChips: settled chips', () => {
     ])
   })
 
-  it('depth and renames show the last one; escalate and use_model show nothing', () => {
-    expect(rollUpChips([
+  it('depth and renames show the last one; escalate shows nothing; use_model says it switched, never to what', () => {
+    const chips = rollUpChips([
       { tool: 'set_depth', input: { depth: 'quick', scope: 'now' }, result: { ok: true } },
       { tool: 'set_depth', input: { depth: 'deep', scope: 'now' }, result: { ok: true } },
       { tool: 'set_profile', input: { name: 'Inbox helper' }, result: { ok: true } },
       { tool: 'set_profile', input: { name: 'Inbox buddy' }, result: { ok: true } },
       { tool: 'escalate', input: {} },
-      { tool: 'use_model', input: { model: 'claude-opus-5-5' }, result: { ok: true } }
-    ], ctx)).toEqual([
+      { tool: 'use_model', input: { model: 'claude-opus-5-5' }, result: { ok: true, scope: 'now' } },
+      { tool: 'use_model', input: { model: 'claude-opus-5-5', scope: 'always', for: 'work' }, result: { ok: true, scope: 'always', for: 'work' } },
+      { tool: 'use_model', input: { model: 'grok' }, result: { ok: false, reason: 'not here' } }
+    ], ctx)
+    expect(chips).toEqual([
       { icon: 'think', text: 'taking more time' },
-      { icon: 'name', text: 'renamed itself', highlight: 'Inbox buddy' }
+      { icon: 'name', text: 'renamed itself', highlight: 'Inbox buddy' },
+      { icon: 'think', text: 'switched models', highlight: 'for this chat' },
+      { icon: 'think', text: 'switched models', highlight: 'for work' }
     ])
+    expect(JSON.stringify(chips)).not.toContain('opus')
   })
 })
 
@@ -158,6 +172,18 @@ describe('BotActivitySink', () => {
       { icon: 'memory', text: 'remembered', highlight: 'Invoices go to ~/Documents/Invoices' },
       { icon: 'schedule', text: 'every weekday · 09:00' }
     ])
+  })
+
+  it('a thread the bot started or messaged shows at once, with the thread and what it sent, before the turn ends', () => {
+    const { activity, events, advance } = sink()
+    activity.onAllowed(at, { tool: 'thread_create', input: { title: 'Fix the login page' } })
+    advance(BOT_ACTIVITY_MIN_INTERVAL_MS)
+    activity.onAppResult({ botId: 'b1', activationId: 'a1', dispatchId: '' }, 'thread_create', { threadId: 't-new', title: 'Fix the login page', sent: 'Look at the login page.' })
+    advance(BOT_ACTIVITY_MIN_INTERVAL_MS)
+    const done = { icon: 'think', text: 'started thread', highlight: 'Fix the login page', thread: 't-new', said: 'Look at the login page.' }
+    expect(events.at(-1)).toEqual({ botId: 'b1', activationId: 'a1', chip: done })
+    // And the posted message carries it.
+    expect(activity.drain('d1')).toEqual([done])
   })
 
   it('counts a call once when several check points allow it, and a repeat later as a new call', () => {

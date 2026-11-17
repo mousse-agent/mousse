@@ -57,13 +57,20 @@ export const NET_LOCAL_METHODS = [
   'net.unlock',
   'bridge.invite',
   'bridge.join',
+  'net.join.retry',
+  'net.join.abandon',
+  'net.startOver.check',
+  'net.startOver',
   'bridge.nodes',
   'bridge.revoke',
   'bridge.rename',
   'bridge.setCaps',
   'bridge.setKind',
   'bridge.policy',
+  'bridge.connect',
+  'bridge.disconnect',
   'bridge.workOnThreads',
+  'bridge.shareBots',
   'bridge.editorServer',
   'net.authority.transfer',
   'net.authority.status',
@@ -110,6 +117,13 @@ export interface BridgeInviteInput {
   caps?: NodeCapability[]
 }
 /**
+ * Whether another device of this user's list is connected here (`connection` on each `bridge.nodes` row, set with
+ * `bridge.connect` and `bridge.disconnect`). `none`: never connected here; `disconnected`: someone disconnected it.
+ * Either way this computer serves it nothing but the keeper's control traffic, and two members not connected on
+ * both ends open no session.
+ */
+export type BridgeNodeConnection = 'connected' | 'disconnected' | 'none'
+/**
  * What this computer lets another device do here (`bridge.policy`, and `policy` on each
  * `bridge.nodes` row). It is kept on this computer only, so every computer sets its own.
  */
@@ -125,12 +139,36 @@ export interface BridgeNodePolicy {
    * server, carried over Mousse Net. Shell access as the user, like a terminal. Off until the owner turns it on.
    */
   editor: boolean
+  /**
+   * The device may reach this computer's personal bots, each within its own Devices choice. On until the owner turns
+   * it off. Absent from a service from before the switch.
+   */
+  bots?: boolean
+  /**
+   * Which threads here the device's agents may change with calls marked as an agent's: none, the threads its agents
+   * started here (the default), or all. Absent from a service from before the setting.
+   */
+  agentReach?: AgentReach
+  /**
+   * The device may work on threads here ("Work on threads from this device"): start, send, steer, stop, change
+   * settings, files and Git, and make or change bots. Off, it reads threads and chats with bots only. On until the
+   * owner turns it off. Absent from a service from before the switch.
+   */
+  work?: boolean
 }
+
+/** What a device's agents may change on this computer (`net_node_policy.agent_reach`). */
+export type AgentReach = 'none' | 'launched' | 'all'
+export const AGENT_REACHES: readonly AgentReach[] = ['none', 'launched', 'all']
+export const isAgentReach = (value: unknown): value is AgentReach =>
+  (AGENT_REACHES as readonly unknown[]).includes(value)
 export interface NetStatus {
   enabled: boolean
   features?: import('../featureFlags').NetFeatureFlags
   /** Whether other computers of the user may work on this computer's threads (`bridge.workOnThreads`). On by default. */
   workOnThreads?: boolean
+  /** Whether this computer shares its personal bots with the user's other devices (`bridge.shareBots`). On by default. */
+  shareBots?: boolean
   /**
    * Which SSH server answers editor connections from other computers (`bridge.editorServer`): `system` is the
    * owner's choice "Use this computer's SSH server", and `available` says whether Mousse's own endpoint can
@@ -150,13 +188,24 @@ export interface NetStatus {
     detail?: string
   }>
   protected?: boolean
+  /** The keys are protected by a passphrase; `net.protect` without one moves them to the system keychain. */
+  passphraseProtected?: boolean
   /**
    * The system keychain refused to protect network keys (it is missing, or access was denied). Until
    * Mousse restarts, only a passphrase can protect them.
    */
   vaultUnavailable?: boolean
-  self?: { node: NodeId; user: UserId; isAuthority: boolean }
+  /**
+   * `removed`: this computer was removed from the user's devices and cannot reconnect with this
+   * identity. Signing in to Mousse ID sets it aside and adds the computer back as a new one.
+   */
+  self?: { node: NodeId; user: UserId; isAuthority: boolean; removed?: true }
   rosterState?: RosterState
+  /**
+   * A join sent to another computer whose answer never came back (no identity yet). `name` is that
+   * computer's; `net.join.retry` asks again with the same keys, `net.join.abandon` gives up.
+   */
+  unfinishedJoin?: { name?: string; expiresAt?: number }
   routes: Route[]
   peers: Array<{ node: NodeId; state: 'connecting' | 'open' | 'closed'; error?: NetErrorCode }>
   error?: NetErrorCode
@@ -170,6 +219,23 @@ export interface PlusConfiguration {
   gatewayId: string
 }
 /** `net.plus.status`. Not configured (and never connected) when the Mousse ID module is absent. */
+/**
+ * Whether this computer may start over with a new identity, as `net.startOver.check` answers.
+ */
+export interface NetStartOverCheck {
+  /** It was removed, no other device holds a pass in its list, or its own pass lapsed past renewal. */
+  allowed?: 'removed' | 'alone' | 'lapsed'
+  /** It hosts a Space, is signed in to Mousse ID, or other devices still hold a pass in its list. */
+  refused?: 'space_host' | 'mousse_id' | 'live_devices'
+  /** It keeps the list; its key stays in the set-aside folder. */
+  keeper: boolean
+  /** The Spaces it hosts, when that is why it is refused. */
+  hosted?: string[]
+  /** The other devices that still hold a pass in its list. */
+  live?: string[]
+  /** The Spaces it belongs to, to join again afterwards. */
+  spaces: string[]
+}
 export interface PlusStatus {
   configured: boolean
   connected: boolean

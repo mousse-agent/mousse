@@ -274,4 +274,5 @@ it('verifies the real 128-stream export boundary including a signature wrapper a
   } finally {
     verified.close()
   }
-})
+  // 128 real signed streams: about 4 s alone, past 20 s in a loaded full run.
+}, 60_000)

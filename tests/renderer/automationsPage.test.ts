@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * Automations: time on the owning computer's clock, the labels, the job draft behind Edit details, and the Edit
- * details form itself (opened from the inbox): its sentence, Tell me (the level filter), requests, keys, Keep and bots.
+ * details form itself (opened from the inbox): its rows, Tell me (the level filter), requests, keys, Keep and bots.
  * The inbox's list, keys and cards are in automationsInbox.test.ts.
  */
 import { act, createElement } from 'react'
@@ -14,7 +14,7 @@ import type { Project, ScheduledJob } from '../../src/shared/types'
 import type { Thread } from '../../src/shared/types'
 import { pauseUntil } from '../../src/renderer/components/automations/automationList'
 import { ownedWhenText, skippedDates, whenText, zonedDayOffset } from '../../src/renderer/components/automations/automationTime'
-import { botComputerOptions } from '../../src/renderer/components/bots/BotAboutPanel'
+import { botComputerOptions } from '../../src/renderer/components/bots/BotRunsOn'
 import { whenSentence } from '../../src/renderer/components/automations/AutomationDetail'
 import { openEdit, setInboxClient, useInboxStore } from '../../src/renderer/components/automations/inbox/inboxStore'
 import { cronFormOf, cronOfForm, draftFromJob, heldPermissionMode, modelGroups, newDraft, patchOf, validateDraft, type ScheduledCatalog } from '../../src/renderer/components/scheduled/jobDraft'
@@ -98,7 +98,7 @@ describe('labels', () => {
     expect(nameFromPrompt('Summarize open PRs. Post them to #eng.')).toBe('Summarize open PRs')
   })
 
-  it('words the detail\'s sentence', () => {
+  it('words the detail\'s When', () => {
     const draft = (patch: Partial<ReturnType<typeof draftFromJob>>) => ({ ...draftFromJob(job(), catalog, providers), ...patch })
     expect(whenSentence(draft({ scheduleKind: 'cron', expr: '0 9 * * 1-5' }))).toBe(`Every weekday at ${clockText(9, 0)}`)
     expect(whenSentence(draft({ scheduleKind: 'interval', minutes: '30' }))).toBe('Every 30 minutes')
@@ -240,6 +240,8 @@ const openForm = async (key: string) => {
   await act(async () => { openEdit(key.replace(/^job:/, '')) })
   await act(async () => {})
 }
+/** Edit details' rows as [label, what its control shows]. */
+const formRows = () => $$('[data-testid="automation-form"] .automation-form-row').map((row) => [row.querySelector('.automation-form-label')!.textContent, row.querySelector('.automation-form-control')!.textContent])
 const option = (text: string) => $$('.ui-select-option-label').find((entry) => entry.textContent === text)?.closest('[role="option"]')
 
 beforeEach(() => {
@@ -257,12 +259,16 @@ afterEach(() => {
 })
 
 describe('Edit details, from the inbox', () => {
-  it('opens a job\'s detail, where the sentence is the editor and Tell me saves alone', async () => {
+  it('opens a job\'s detail as label-and-control rows with one Save, and Tell me saves alone', async () => {
     const stored = job({ id: 'j1', name: 'Nightly', projectId: 'p1' })
     const mousse = await mount([item({ key: 'job:j1', name: 'Nightly', next: { at: stored.nextRunAt!, timeZone: ZONE }, tellMe: 'look' })], [stored])
     await openForm('job:j1')
     expect($('[data-testid="automation-detail"]')).not.toBeNull()
-    expect($('[data-testid="automation-sentence"]')?.textContent).toMatch(/^Every 30 minutes, Claude does this in mousse\.$/)
+    expect(formRows()).toEqual([['When', 'Every 30 minutes'], ['Who', 'Claude'], ['Where', 'mousse'], ['Task', 'Check CI'], ['May', 'Auto-accept edits'], ['Tell me', 'Worth a look'], ['Next', expect.stringMatching(/Why\?$/)]])
+    // One Save, with no Cancel or Done beside it (Back and Escape leave); Keys and the request setup wait behind More.
+    expect($$('[data-testid="automation-detail"] button').map((button) => button.textContent).filter((text) => /^(Save|Cancel|Done)$/.test(text ?? ''))).toEqual(['Save'])
+    expect($('[data-testid="keys-row"]')).toBeNull()
+    expect($('[data-testid="request-row"]')).toBeNull()
     await click($('[aria-labelledby$="tell-label"]'))
     await click(option('Needs you'))
     await click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Save'))
@@ -387,7 +393,7 @@ describe('Edit details, from the inbox', () => {
     const mousse = await mount([item({ key: 'job:b--s', name: 'Weather', who: pip, mayIsGrant: true, next: { at: stored.nextRunAt!, timeZone: ZONE }, tellMe: 'look', link: { kind: 'job', jobId: 'b--s', botId: 'b' } })], [stored])
     await openForm('job:b--s')
     expect($('[data-testid="automation-detail"]')).not.toBeNull()
-    expect($('[data-testid="automation-sentence"]')?.textContent).toMatch(/^Every 30 minutes, Pip does this\.$/)
+    expect(formRows()).toEqual([['When', 'Every 30 minutes'], ['Who', 'Pip'], ['Task', 'Tell me if it rains'], ['May', "Pip's grant View"], ['Tell me', 'Worth a look'], ['Next', expect.stringMatching(/Why\?$/)]])
     expect($('[aria-label="Where"]')).toBeNull()
     expect([...document.querySelectorAll('button')].some((button) => button.textContent === 'Run now')).toBe(false)
     expect($('[data-testid="automation-may-bot"]')?.textContent).toContain("Pip's grant")
@@ -397,6 +403,15 @@ describe('Edit details, from the inbox', () => {
     await click(option('Needs you'))
     await click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Save'))
     expect(mousse.scheduled.update).toHaveBeenCalledWith('b--s', { tellMe: 'needs_you' })
+  })
+
+  it('a said line always tells and shows its end on the Automations page', async () => {
+    const stored = job({ id: 'b--s', name: 'Pills', prompt: 'Say exactly: Take your pills', schedule: { kind: 'interval', minutes: 60 }, threadId: 'bot-schedule:b', bot: { botId: 'b', scheduleId: 's', createdBy: 'bot', say: 'Take your pills' }, expiresAt: '2030-11-21T23:59:59.999Z' })
+    await mount([item({ key: 'job:b--s', name: 'Pills', who: { kind: 'bot', name: 'Pip', look: { colour: 'teal', accessory: 'none' } }, mayIsGrant: true, link: { kind: 'job', jobId: 'b--s', botId: 'b' } })], [stored])
+    await openForm('job:b--s')
+    expect(document.body.textContent).toContain('Always, like a reminder')
+    expect($('[aria-labelledby$="tell-label"]')).toBeNull()
+    expect($('[data-testid="automation-bot-end"]')?.textContent).toContain('Ends')
   })
 
   it('shows who actually ran each run, and when its saved agent changed since the run before', async () => {

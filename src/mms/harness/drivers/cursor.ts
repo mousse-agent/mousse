@@ -198,6 +198,7 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
   const sessions = new CursorSessions({
     label,
     host,
+    questions: context.questions,
     storeDir: join(context.stateDir, 'cursor-store'),
     apiKey: () => (state.refused ? undefined : effective()?.key),
     settingSources: CURSOR_SETTING_SOURCES,

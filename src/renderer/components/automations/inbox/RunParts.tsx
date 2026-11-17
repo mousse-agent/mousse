@@ -14,17 +14,23 @@ export function TriggerIcon({ trigger, size = 14 }: { trigger: AutomationItem['t
 }
 
 /** A run's leading icon: its state while it is not simply done, else its automation's trigger. */
-export function RunIcon({ run, automation, resolved }: { run: InboxRun; automation?: AutomationItem; resolved?: boolean }) {
+/**
+ * A run's icon, for a state that asks for a look (running, waiting, paused, failed, no report). `inline`: the small
+ * one in a row's second line, and nothing at all for a quiet, fine or resolved run, so rows keep no empty gutter.
+ */
+export function RunIcon({ run, automation, resolved, inline }: { run: InboxRun; automation?: AutomationItem; resolved?: boolean; inline?: boolean }) {
+  const size = inline ? 12 : 15
   const [icon, title, tone]: [ReactNode, string, string] =
-    resolved ? [<CircleCheck key="i" size={15} strokeWidth={1.8} />, 'Resolved', 'done']
-      : run.state === 'running' ? [<Loader2 key="i" size={15} strokeWidth={1.8} className="inbox-spin" />, 'Running', 'running']
-        : run.state === 'queued' ? [<Clock key="i" size={15} strokeWidth={1.8} />, 'Waiting to start', 'waiting']
-          : run.state === 'waiting_computer' ? [<Monitor key="i" size={15} strokeWidth={1.8} />, 'Waiting for its computer', 'waiting']
-            : run.state === 'paused_usage' ? [<Pause key="i" size={15} strokeWidth={1.8} />, 'Paused for usage', 'paused']
-              : run.state === 'failed' ? [<CircleX key="i" size={15} strokeWidth={1.8} />, 'Failed', 'failed']
-                : !run.level ? [<MessageQuestion key="i" size={15} strokeWidth={1.8} />, 'No report', 'none']
-                  : [<TriggerIcon key="i" trigger={automation?.trigger} size={15} />, LEVEL_VIEW[run.level].label, run.level === 'quiet' ? 'quiet' : 'trigger']
-  return <span className="inbox-run-icon" data-tone={tone} title={title} role="img" aria-label={title}>{icon}</span>
+    resolved ? [<CircleCheck key="i" size={size} strokeWidth={1.8} />, 'Resolved', 'done']
+      : run.state === 'running' ? [<Loader2 key="i" size={size} strokeWidth={1.8} className="inbox-spin" />, 'Running', 'running']
+        : run.state === 'queued' ? [<Clock key="i" size={size} strokeWidth={1.8} />, 'Waiting to start', 'waiting']
+          : run.state === 'waiting_computer' ? [<Monitor key="i" size={size} strokeWidth={1.8} />, 'Waiting for its computer', 'waiting']
+            : run.state === 'paused_usage' ? [<Pause key="i" size={size} strokeWidth={1.8} />, 'Paused for usage', 'paused']
+              : run.state === 'failed' ? [<CircleX key="i" size={size} strokeWidth={1.8} />, 'Failed', 'failed']
+                : !run.level ? [<MessageQuestion key="i" size={size} strokeWidth={1.8} />, 'No report', 'none']
+                  : [<TriggerIcon key="i" trigger={automation?.trigger} size={size} />, LEVEL_VIEW[run.level].label, run.level === 'quiet' ? 'quiet' : 'trigger']
+  if (inline && (tone === 'trigger' || tone === 'quiet' || tone === 'done')) return null
+  return <span className={`inbox-run-icon${inline ? ' inline' : ''}`} data-tone={tone} title={title} role="img" aria-label={title}>{icon}</span>
 }
 
 export type PrChecks = 'pass' | 'fail' | 'pending' | 'merged' | 'closed' | 'unknown'

@@ -121,7 +121,7 @@ describe('profile cross-feature production composition', () => {
       await entered
       // A real profile switch drains the window-owned raw browser session before
       // rebinding its connection; unregister is the host's explicit close proof.
-      await client.request('browser.sessions.close', { threadId: aThread.id, sessionId: opened.ok ? opened.value.session!.id : '' })
+      await aServices.platform.browser.sessions.close(browserContext(a.id, aThread.id), opened.ok ? opened.value.session!.id : '')
       await client.request('browser.attachments.unregister', { registrationId, registrationEpoch: 1 })
       await client.request('profiles.bind', { profile: b.id })
       releaseChat()
@@ -131,7 +131,7 @@ describe('profile cross-feature production composition', () => {
       expect(aServices.orchestrator.getMessages(aThread.id).some((message) => message.content === 'late answer owned by A')).toBe(true)
       expect(bServices.orchestrator.getMessages(bThread.id).some((message) => message.content.includes('late answer owned by A'))).toBe(false)
       expect(JSON.stringify(events)).not.toContain('late answer owned by A')
-      await expect(client.request('browser.sessions.list', { threadId: aThread.id })).rejects.toMatchObject({ code: 'invalid_action' })
+      await expect(client.request('browser.view.get', { threadId: aThread.id })).rejects.toMatchObject({ code: 'invalid_action' })
       await expect(client.request('workflowRuns.get', { profileId: b.id, runId: run.manifest.runId })).rejects.toMatchObject({ code: 'run_not_found' })
       expect(aServices.platform.browser.managedDispatchAttempted).toBe(false)
     } finally {

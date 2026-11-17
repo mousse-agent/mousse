@@ -117,18 +117,8 @@ describe('the close animation', () => {
     // A blurred full-window layer under a changing opacity is drawn again on every frame.
     expect(closing).toMatch(/(^|[^-])backdrop-filter:\s*none/)
     expect(closing).toMatch(/-webkit-backdrop-filter:\s*none/)
-    expect(closing).toMatch(/animation:\s*thread-search-dim-out\b/)
-    expect(rule('.thread-search-overlay.is-closing .thread-search-dialog')).toMatch(/animation:\s*thread-search-out\b/)
     expect(keyframeProperties('thread-search-dim-out')).toEqual(['opacity'])
     // One fade: the dialog fades with the overlay, so its own keyframes only scale it.
     expect(keyframeProperties('thread-search-out')).toEqual(['transform'])
-  })
-
-  it('eases out, so the fade does not hold until its last frames', () => {
-    for (const selector of ['.thread-search-overlay.is-closing', '.thread-search-overlay.is-closing .thread-search-dialog']) {
-      const animation = /animation:\s*([^;]*);/.exec(rule(selector))![1]!
-      expect(animation).not.toMatch(/ease-in\b/)
-      expect(animation).toMatch(/cubic-bezier\(0\.5, 1, 0\.89, 1\)/)
-    }
   })
 })

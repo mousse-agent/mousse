@@ -30,6 +30,11 @@ export type TurnWindowOptions = {
   modeRef: { readonly current: FollowMode };
   /** Called before every programmatic `scrollTop` write. */
   onProgrammaticScroll: () => void;
+  /**
+   * Moves the view to the end while following it, after a layout change has been held. Without it
+   * the end is written at once.
+   */
+  followEnd?: () => void;
 };
 
 /** One in-flight landing. Beginning another one, or cancelling, invalidates it. */
@@ -120,6 +125,11 @@ function sameKeys(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
+/**
+ * The window of a thread that opens with its turns: the rows near where it
+ * opens, from estimated heights. Also used when a long thread arrives in a
+ * transcript that was empty, so it opens the same way.
+ */
 function initialWindow(options: TurnWindowOptions): WindowState {
   const n = options.keys.length;
   if (!options.enabled || n <= 2) {
@@ -175,14 +185,31 @@ function createEngine(
     return value;
   };
 
+  /** The rows wrapper's gap as last read, and the wrapper it was read from. */
+  let gapCache: { rows: HTMLElement; value: number } | null = null;
+  let rootObserver: MutationObserver | null = null;
+
   /**
    * The rows wrapper's `gap` as laid out. It is a rem value (`gap-6`), so the
-   * pixels depend on the root font size and are read, not assumed.
+   * pixels depend on the root font size and are read, not assumed. Reading a
+   * computed style forces a style pass over the whole transcript, and the
+   * layout is rebuilt on every commit and row resize, so the value is kept
+   * until something that could change it happens: another wrapper, a change
+   * to the root element's attributes (theme, density, font size), or a resize
+   * of the scroll container.
    */
   const rowGap = (): number => {
     const rows = getOptions().rowsRef.current;
-    const parsed = rows ? Number.parseFloat(getComputedStyle(rows).rowGap) : Number.NaN;
-    return Number.isFinite(parsed) ? parsed : ROW_GAP;
+    if (!rows) return ROW_GAP;
+    if (gapCache?.rows === rows) return gapCache.value;
+    const parsed = Number.parseFloat(getComputedStyle(rows).rowGap);
+    const value = Number.isFinite(parsed) ? parsed : ROW_GAP;
+    gapCache = { rows, value };
+    return value;
+  };
+
+  const forgetRowGap = () => {
+    gapCache = null;
   };
 
   const rebuildLayout = () => {
@@ -348,8 +375,11 @@ function createEngine(
     // hold within the frame, so it is never skipped.
     if (anchor && (!navigation.active || options.modeRef.current === "following-end")) {
       const scrollTop = container.scrollTop;
+      // With a follower, what is on screen is held here and the follower takes the view to the
+      // end, gliding while a turn runs.
+      const follower = options.modeRef.current === "following-end" ? options.followEnd : undefined;
       const next = nextScrollTop({
-        mode: options.modeRef.current,
+        mode: follower ? "free" : options.modeRef.current,
         scrollTop,
         delta: shiftOf(anchor, container, containerTop, prevLayout),
         end: container.scrollHeight - container.clientHeight,
@@ -358,6 +388,7 @@ function createEngine(
         options.onProgrammaticScroll();
         container.scrollTop = next;
       }
+      follower?.();
     }
     anchor = pickReadingPoint(container, rows, containerTop);
   };
@@ -385,6 +416,8 @@ function createEngine(
 
   const onRowsResized = (entries: ResizeObserverEntry[]) => {
     const { containerRef } = getOptions();
+    // A resized container can cross a breakpoint that changes the gap.
+    if (entries.some((entry) => entry.target === containerRef.current)) forgetRowGap();
     let rowResized = false;
     let otherRowResized = false;
     const lastKey = layout.keys[layout.keys.length - 1];
@@ -583,9 +616,18 @@ function createEngine(
     container.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("error", onError);
     getObserver().observe(container);
+    // Theme, density and font size are set on the root element; any change
+    // there can change the rem the gap is measured in.
+    if (typeof MutationObserver === "function") {
+      rootObserver = new MutationObserver(forgetRowGap);
+      rootObserver.observe(document.documentElement, { attributes: true });
+    }
     return () => {
       container.removeEventListener("scroll", onScroll);
       window.removeEventListener("error", onError);
+      rootObserver?.disconnect();
+      rootObserver = null;
+      forgetRowGap();
       if (scrollFrame) cancelAnimationFrame(scrollFrame);
       scrollFrame = 0;
       observer?.disconnect();
@@ -651,9 +693,31 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
   const keysVersion = versionRef.current;
 
   const n = options.keys.length;
+  // The turn count of the last commit. A transcript that showed two turns or
+  // fewer (empty while its thread loads) mounted no rows between the first and
+  // the last, so it has no window to keep. When a long thread arrives in it,
+  // the window opens near the viewport as if the thread had mounted with its
+  // turns, instead of growing from the end up to the row cap. A thread that
+  // grows past the threshold one turn at a time had every row mounted, and
+  // keeps them for that commit so they are measured.
+  const committedCountRef = useRef<number | null>(null);
+  let current = stored;
+  if (
+    options.enabled &&
+    n > 2 &&
+    stored.n !== n &&
+    committedCountRef.current !== null &&
+    committedCountRef.current <= 2
+  ) {
+    current = initialWindow(options);
+    setStored(current);
+  }
   const range = options.enabled
-    ? reconcileWindow(stored, n)
+    ? reconcileWindow(current, n)
     : { start: Math.min(1, n), end: Math.max(Math.min(1, n), n - 1) };
+  useLayoutEffect(() => {
+    committedCountRef.current = n;
+  });
 
   const openedRef = useRef(false);
   const seenVersionRef = useRef(keysVersion);

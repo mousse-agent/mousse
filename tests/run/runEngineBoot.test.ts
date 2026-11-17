@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { RunEngine } from '../../src/mms/run/RunEngine'
+import { RESTART_TRANSCRIPTS_THREAD_ID, RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { RunRecord, ThreadEvent } from '../../src/mms/run/types'
 
@@ -22,7 +22,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
   })
 
   /** A daemon: a fresh connection and engine that has booted. */
-  const daemon = (pid: number) => {
+  const daemon = (pid: number, options?: Parameters<RunEngine['reconcileOnBoot']>[0]) => {
     profileHome ??= mkdtempSync(join(tmpdir(), 'mousse-boot-'))
     let tick = Date.UTC(2026, 9, 12) + pid * 1_000_000
     const db = new ProfileDatabase({ profileHome, clock: () => (tick += 1000) })
@@ -32,7 +32,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     const engine = new RunEngine({ store, pid, outbox: new EffectOutbox(store, { allowReservedKinds: true }) })
     const events: ThreadEvent[] = []
     engine.on('event', (event: ThreadEvent) => events.push(event))
-    const boot = engine.reconcileOnBoot()
+    const boot = engine.reconcileOnBoot(options)
     return { store, engine, events, boot }
   }
 
@@ -94,6 +94,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(second.events.map((event) => event.type)).toEqual([
       'run.status',
       'attempt.status',
+      'restart.transcript_pending',
       'restart.note'
     ])
   })
@@ -159,7 +160,8 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     ])
     expect(notes('t3')).toEqual([])
     // Boot events reach listeners for every thread it touched, effect-only threads included.
-    expect(new Set(second.events.map((event) => event.threadId))).toEqual(new Set(['t1', 't2', 't3']))
+    // And the markers of the transcripts still to write, under their own thread id.
+    expect(new Set(second.events.map((event) => event.threadId))).toEqual(new Set(['t1', 't2', 't3', RESTART_TRANSCRIPTS_THREAD_ID]))
   })
 
   it('lists a queued run whose turn.start died in the restart note (queuedRunIds)', async () => {
@@ -180,6 +182,52 @@ describe('RunEngine boot (SPEC §12.5)', () => {
       { epoch: 2, runIds: [], uncertainRunIds: [], cutOffTools: [], queuedRunIds: [sent.runId] }
     ])
     expect(second.store.listEvents('u').filter((event) => event.type === 'restart.note')).toEqual([])
+  })
+
+  describe('a send the previous daemon had begun but not started (its turn.start claimed, its run still queued)', () => {
+    const claimed = async (first: ReturnType<typeof daemon>, threadId: string, key: string, payload: Record<string, unknown> = {}) => {
+      const sent = await first.engine.dispatch({ kind: 'send', threadId, clientRequestId: key, source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      first.engine.outbox.enqueue({ threadId, runId: sent.runId, kind: 'turn.start', payload: { runId: sent.runId, threadId, input: 'hello', ...payload } })
+      const effect = first.engine.outbox.claimNext(first.engine.leaseOwner, '2026-10-13T00:00:00.000Z')
+      if (effect?.runId !== sent.runId) throw new Error('not claimed')
+      return sent.runId
+    }
+
+    it('is interrupted by the restart and noted as cut off, not left queued for rule 5 to send again', async () => {
+      const first = daemon(10)
+      const runId = await claimed(first, 't', 'req-1')
+      // Left to others: a send whose turn.start was never claimed (rule 5), and a queue item's (the message queue).
+      const pending = await first.engine.dispatch({ kind: 'send', threadId: 'p', clientRequestId: 'req-p', source: 'gui' })
+      if (pending.status !== 'accepted') throw new Error('send rejected')
+      const item = await claimed(first, 'q', 'req-q', { queueItemId: 'item-1' })
+      first.engine.outbox.enqueue({ threadId: 'p', runId: pending.runId, kind: 'turn.start', payload: { runId: pending.runId, threadId: 'p', input: 'later' } })
+      // Crash.
+
+      const second = daemon(20)
+      expect(second.boot.interrupted).toEqual([runId])
+      expect(second.store.getRun(runId)).toMatchObject({ status: 'interrupted', startedAt: null, outcome: { interruptedBy: 'daemon_restart' } })
+      const notes = second.store.listEvents('t').filter((event) => event.type === 'restart.note')
+      expect(notes.map((event) => event.payload)).toEqual([{ epoch: 2, runIds: [runId], uncertainRunIds: [], cutOffTools: [] }])
+      expect(second.boot.strandedQueued).toEqual([pending.runId])
+      expect(second.store.getRun(pending.runId)!.status).toBe('queued')
+      expect(second.store.getRun(item)!.status).toBe('queued')
+      // The thread's transcript still has to say so, until the orchestrator has written it.
+      expect(second.engine.pendingRestartTranscripts().map((run) => run.runId)).toEqual([runId])
+      second.engine.markRestartTranscriptWritten(second.store.getRun(runId)!)
+      expect(second.engine.pendingRestartTranscripts()).toEqual([])
+    })
+
+    it('is left queued when the message queue holds its run (a send that went back to the queue)', async () => {
+      const first = daemon(10)
+      const runId = await claimed(first, 't', 'req-1')
+      // Crash.
+
+      const second = daemon(20, { queued: (run) => run.runId === runId })
+      expect(second.boot.interrupted).toEqual([])
+      expect(second.store.getRun(runId)!.status).toBe('queued')
+      expect(second.engine.pendingRestartTranscripts()).toEqual([])
+    })
   })
 
   it('cancels a queued integration run whose turn.start died, and leaves queued runs of other sources alone', async () => {

@@ -7,18 +7,17 @@ export type EffectExecutor = (
 ) => Promise<void>
 
 /**
- * Fibres per lane class (SPEC §12.3). `turn` fibres claim only `turn.start` and so cap the
- * profile's concurrent turns; `control` fibres claim only interrupts, steers and answers, so a
- * Stop runs however many turns are live; `replaySafe` fibres claim the replay-safe kinds.
+ * Fibres per lane class (SPEC §12.3) for the effects that are not turns: `control` fibres claim only interrupts,
+ * steers and answers, so a Stop reaches a live turn however many turns run; `replaySafe` fibres claim the replay-safe
+ * kinds. `turn.start` has no fibres: one claimer starts every turn as soon as it is due, with no limit on how many
+ * run at once.
  */
 export interface EffectWorkerFibres {
-  turn: number
   control: number
   replaySafe: number
 }
 
 export const DEFAULT_EFFECT_WORKER_FIBRES: Readonly<EffectWorkerFibres> = {
-  turn: 8,
   control: 2,
   replaySafe: 2
 }
@@ -75,9 +74,10 @@ class EffectCancelledError extends Error {
 }
 
 /**
- * In-process effect worker (SPEC §12.3): async fibres, grouped by lane class, claim from the
- * outbox, execute under a deadline and settle by CAS on the lease. Wake sources: outbox commits
- * (`subscribe`), `notify()`, the next `available_at` and a safety poll.
+ * In-process effect worker (SPEC §12.3): one turn claimer and async fibres for the other lane classes claim from
+ * the outbox, execute under a deadline and settle by CAS on the lease. The turn claimer starts each `turn.start` it
+ * claims without waiting for it and claims again, so every due turn runs at once; the outbox's lanes still keep one
+ * turn per thread. Wake sources: outbox commits (`subscribe`), `notify()`, the next `available_at` and a safety poll.
  *
  * Settlement rules: success → `succeed`; `EffectDeferredError` → `defer` (pending again later);
  * failure → `fail(message)` (`'timeout'` when the deadline fired); `cancelInFlight` →
@@ -98,6 +98,8 @@ export class EffectWorker {
   private readonly wakers = new Set<() => void>()
   private generation = 0
   private readonly running = new Map<string, AbortController>()
+  /** Turn executions the turn claimer started that have not settled yet (`stop()` waits for them). */
+  private readonly turns = new Set<Promise<void>>()
   /** Executor promises still running, including ones a race already gave up on. */
   private readonly executing = new Set<Promise<unknown>>()
 
@@ -107,7 +109,6 @@ export class EffectWorker {
     this.owner = options.owner
     const fibres = { ...DEFAULT_EFFECT_WORKER_FIBRES, ...(options.fibres ?? {}) }
     this.fibres = {
-      turn: Math.max(1, Math.floor(fibres.turn)),
       control: Math.max(1, Math.floor(fibres.control)),
       replaySafe: Math.max(1, Math.floor(fibres.replaySafe))
     }
@@ -120,21 +121,17 @@ export class EffectWorker {
     const controller = new AbortController()
     this.stopController = controller
     this.unsubscribe = this.outbox.subscribe(() => this.notify())
-    const lanes = Object.keys(this.fibres) as EffectLaneClass[]
-    this.loops = lanes.flatMap((lane) =>
-      Array.from({ length: this.fibres[lane] }, () => this.loop(controller.signal, [lane]))
-    )
-  }
-
-  /** Fibres per lane class; `turn` is the profile's concurrent-turn cap. */
-  get fibreCounts(): Readonly<EffectWorkerFibres> {
-    return this.fibres
+    const lanes = Object.keys(this.fibres) as Array<keyof EffectWorkerFibres>
+    this.loops = [
+      this.turnLoop(controller.signal),
+      ...lanes.flatMap((lane) => Array.from({ length: this.fibres[lane] }, () => this.loop(controller.signal, [lane])))
+    ]
   }
 
   /**
-   * Interrupts every fibre and its in-flight execution, then waits for the fibres and for every
-   * executor promise to settle: an aborted executor may still be unwinding (writing its run's
-   * terminal state) after its fibre has moved on.
+   * Interrupts the turn claimer, every fibre and every in-flight execution, then waits for them, for every turn the
+   * claimer started and for every executor promise to settle: an aborted executor may still be unwinding (writing
+   * its run's terminal state) after its execution has moved on.
    */
   async stop(): Promise<void> {
     const controller = this.stopController
@@ -146,10 +143,11 @@ export class EffectWorker {
     this.notify()
     await Promise.all(this.loops)
     this.loops = []
+    while (this.turns.size) await Promise.allSettled([...this.turns])
     while (this.executing.size) await Promise.allSettled([...this.executing])
   }
 
-  /** Wakes idle fibres to claim again. */
+  /** Wakes the idle turn claimer and fibres to claim again. */
   notify(): void {
     this.generation++
     const wakers = [...this.wakers]
@@ -167,6 +165,35 @@ export class EffectWorker {
 
   inFlight(): number {
     return this.running.size
+  }
+
+  /**
+   * Claims every due `turn.start` and starts each at once, without waiting for it to end, then claims again; idles
+   * only when nothing is claimable. A turn waits only for its own thread's lane (one turn per thread at a time).
+   */
+  private async turnLoop(signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      const generation = this.generation
+      const now = this.now()
+      let effect: EffectRecord | null
+      try {
+        effect = this.outbox.claimNext(this.owner, now, { lanes: ['turn'] })
+      } catch (error) {
+        console.warn(`[effect-worker] claim failed: ${messageOf(error)}`)
+        await this.idle(signal, generation, this.pollMs)
+        continue
+      }
+      if (effect) this.startTurn(effect, signal)
+      else await this.idle(signal, generation, this.idleDelay(now))
+    }
+  }
+
+  private startTurn(effect: EffectRecord, signal: AbortSignal): void {
+    const execution = this.execute(effect, signal).catch((error: unknown) => {
+      console.warn(`[effect-worker] executing ${effect.effectId} failed: ${messageOf(error)}`)
+    })
+    this.turns.add(execution)
+    void execution.then(() => this.turns.delete(execution))
   }
 
   private async loop(signal: AbortSignal, lanes: readonly EffectLaneClass[]): Promise<void> {

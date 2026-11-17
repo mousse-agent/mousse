@@ -1,5 +1,7 @@
+import { normalizeProfilerSettings, type ProfilerSettings } from './diagnostics/profiler'
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
 import { isExpiryPreset, type ExpiryPreset } from './threadExpiry'
+import { normalizeGoalTurnLimit } from './threadGoal'
 import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
 import type { ModelOverride } from './providerInstances'
@@ -8,6 +10,7 @@ import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode }
 import { generateRandomUsername } from './randomUsername'
 import type { ShortcutOverrides } from './commands'
 import { DEFAULT_FONT_CHOICE, normalizeFontChoice, type FontChoice } from './fontSettings'
+import { normalizeUserThemes, type UserTheme } from './themes/userThemes'
 
 /** Color themes only — acrylic is a separate appearance toggle. */
 export type ThemeId =
@@ -42,8 +45,15 @@ export interface AgentModelOption {
   group?: string
 }
 
+export type ThreadProjectColorStyle = 'off' | 'outline' | 'fill' | 'gradient'
+
 export interface AppearanceSettings {
+  /** The built-in theme in use: the active user theme's base while one is on. */
   theme: ThemeId
+  /** Themes the person or an agent made (`src/shared/themes/userThemes.ts`). */
+  userThemes: UserTheme[]
+  /** The id of the user theme in use; empty when a built-in theme is. */
+  userTheme: string
   accentColor: string
   /** Windows acrylic / translucent glass over any theme. */
   acrylic: boolean
@@ -51,16 +61,24 @@ export interface AppearanceSettings {
   acrylicIntensity: number
   /** Show LaTeX in chat replies and Markdown previews as formatted equations. */
   renderMath: boolean
+  /** Show a streaming reply a finished paragraph (list item, heading, line of code) at a time, each fading in. */
+  replyPacing: boolean
   /** Font for interface text. */
   interfaceFont: FontChoice
   /** Font for monospace text: code, diffs, the file editor and terminals. */
   codeFont: FontChoice
-  /** Tint each thread in the Threads tab with its project's color. */
-  threadProjectColors: boolean
+  /** How cards in the Threads tab show their project's color. */
+  threadProjectColors: ThreadProjectColorStyle
+  /** Thread rows and the Bots list show the latest reply under each title, on one muted line. */
+  replyPreviews: boolean
+  /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
+  threadPathInTitleBar: boolean
   /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
   animationSpeed: AnimationSpeed
   /** What a turn that changed files shows at its end. */
   turnChangedFiles: TurnChangedFilesMode
+  /** How wide the transcript's text column is: 736px, 1152px, or the whole pane. */
+  chatWidth: ChatWidth
   /** The chat shows blurred through a translucent composer. Off by default: the blur costs graphics memory. */
   frostedComposer: boolean
   /** Frosted composer opacity, in percent. */
@@ -69,6 +87,8 @@ export interface AppearanceSettings {
   frostedComposerBlur: number
   /** Frosted composer saturation multiplier (shown as "Color boost"). */
   frostedComposerSaturation: number
+  /** The composer shows the context ring (how full the model's context is). Off by default. */
+  contextRingInComposer: boolean
 }
 
 export type AnimationSpeed = 'off' | 'fast' | 'normal' | 'slow'
@@ -96,6 +116,15 @@ export function normalizeTurnChangedFiles(value: unknown): TurnChangedFilesMode 
   return TURN_CHANGED_FILES_MODES.includes(value as TurnChangedFilesMode) ? value as TurnChangedFilesMode : 'summary'
 }
 
+/** The transcript's text column: normal (736px), wide (1152px) or the whole pane. */
+export type ChatWidth = 'normal' | 'wide' | 'full'
+
+export const CHAT_WIDTHS: readonly ChatWidth[] = ['normal', 'wide', 'full']
+
+export function normalizeChatWidth(value: unknown): ChatWidth {
+  return CHAT_WIDTHS.includes(value as ChatWidth) ? value as ChatWidth : 'normal'
+}
+
 /**
  * A moment a thread tells the person about: its agent finished, it needs them (a question or an
  * approval), or it stopped without finishing (interrupted, failed, or paused by a usage limit).
@@ -111,7 +140,17 @@ export interface NotificationChannels {
   sound: boolean
 }
 
+export interface QuietHours { from: string; to: string }
+export function isQuietHours(value: unknown): value is QuietHours {
+  if (!value || typeof value !== 'object') return false
+  const { from, to } = value as QuietHours
+  const time = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+  return typeof from === 'string' && typeof to === 'string' && time.test(from) && time.test(to) && from !== to
+}
+
 export interface NotificationSettings {
+  /** Absent means off. Times use the owner's last device zone. */
+  quietHours?: QuietHours
   /**
    * The sound for every event, from before sounds were chosen per event. Still read for an event
    * whose `sound` has not been chosen.
@@ -124,6 +163,11 @@ export interface NotificationSettings {
   allRemoteThreads: boolean
   /** The channels chosen for each event. A channel not chosen yet is on. */
   events?: Partial<Record<ThreadNotificationEvent, Partial<NotificationChannels>>>
+  /**
+   * The profiler's "High memory use" notice, at most once a day (Settings → Labs). Unset is on, but nothing shows while
+   * the profiler itself is off (`experimental.profiler.enabled`).
+   */
+  memoryNotices?: boolean
 }
 
 /** The channels an event uses: what the person chose, and on for anything not chosen yet. */
@@ -274,20 +318,17 @@ export function settingCompactionPoint(
 }
 
 /**
- * What an agent calling the Mousse MCP server may do on threads other than its own and its
- * delegation lineage (docs/run-engine/SPEC.md §15.1): `lineage` nothing more, `read` list, search and
- * read other threads, `manage` also change them.
+ * A level an agent's credential, delegation or run once recorded (docs/run-engine/SPEC.md §15.1). Agents are no
+ * longer limited by it: every agent reads and manages every thread, and new records carry `manage`. Kept so stored
+ * values still read.
  */
 export type AgentAccessLevel = 'lineage' | 'read' | 'manage'
 
 export interface AgentAccessSettings {
-  level: AgentAccessLevel
-  /** Projects the level applies to; empty means every project. */
-  projectIds: string[]
-  /** `manage` only: an agent may answer a pending approval on another thread. */
+  /** An agent may answer a pending approval on another thread. */
   answerApprovals: boolean
   /**
-   * "Let agents start subagents on your other devices". Off, the default, refuses every remote subagent
+   * "Let agents work on your other devices" (named "Subagents on other devices" before). Off, the default, refuses every remote subagent
    * whatever `computers` lists; the list is kept, so turning it back on restores the same computers.
    */
   remoteSubagents: boolean
@@ -316,30 +357,17 @@ export function narrowAgentAccess(...levels: Array<AgentAccessLevel | null | und
 }
 
 /**
- * The setting as the daemon reads it. An absent project list means every project, but a list that is
- * present and malformed (not an array, or an entry that is not a non-empty string) is a narrowing
- * that cannot be read, so it fails closed: the level becomes `lineage`, which reaches no other thread,
- * rather than widening to every project.
+ * The setting as the daemon reads it. The removed `level`, `projectIds` and `projectsUnreadable` of older profiles
+ * are dropped: they no longer limit anything.
  */
 export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> | null): AgentAccessSettings {
-  const ids: unknown = raw?.projectIds
-  const malformed =
-    ids !== undefined && ids !== null && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || id.length === 0))
   // A computer list that cannot be read allows none, whatever else the setting says.
   const nodes: unknown = raw?.computers
   const computers = Array.isArray(nodes) && nodes.every((node) => typeof node === 'string' && node.length > 0) ? [...new Set(nodes as string[])] : []
-  const remoteSubagents = raw?.remoteSubagents === true
-  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents, computers }
-  const level = isAgentAccessLevel(raw?.level) ? raw.level : 'lineage'
   return {
-    level,
-    projectIds: Array.isArray(ids) ? [...new Set(ids as string[])] : [],
-    remoteSubagents,
-    computers,
-    // Answering approvals is part of Manage. Below it the switch reads, and is saved, as off, whoever wrote the
-    // level (the Settings screen, a partial update from another client, a hand edit), so raising the level
-    // again never brings the permission back by itself.
-    answerApprovals: level === 'manage' && raw?.answerApprovals === true
+    answerApprovals: raw?.answerApprovals === true,
+    remoteSubagents: raw?.remoteSubagents === true,
+    computers
   }
 }
 
@@ -357,21 +385,42 @@ export interface RunSettings {
   newThreadWorktree: boolean
   /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
   privateThreadExpiry: ExpiryPreset | 'never'
+  /** How many turns Mousse starts for a thread's goal (`/goal`) before it stops; Continue allows as many again. */
+  goalTurnLimit: number
+  /**
+   * Keep this computer from sleeping while a run of a thread, a subagent or a bot is working, and for a short grace
+   * after the last one ends. The screen may still turn off. Absent counts as on.
+   */
+  keepAwake: boolean
+  /**
+   * How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2). `strict`: on
+   * a provider that reports a tool only when it starts, a steer held for a tool waits for the provider's own turn to
+   * end, or Send now. Absent or `best_effort`: it goes in shortly after the tool. No UI sets it.
+   */
+  steerRelease?: Record<string, SteerRelease>
 }
+
+export type SteerRelease = 'best_effort' | 'strict'
 
 export const DEFAULT_USAGE_LIMIT_PAUSE_CAP = 3
 export const MAX_USAGE_LIMIT_PAUSE_CAP = 10
 
 export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSettings {
   const cap = raw?.usageLimitPauseCap
+  const release = raw?.steerRelease && typeof raw.steerRelease === 'object'
+    ? Object.entries(raw.steerRelease).filter((entry): entry is [string, SteerRelease] => entry[1] === 'strict' || entry[1] === 'best_effort')
+    : []
   return {
+    ...(release.length ? { steerRelease: Object.fromEntries(release) } : {}),
     resumeAfterUsageLimit: raw?.resumeAfterUsageLimit === true,
     usageLimitPauseCap:
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
         ? cap
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
     newThreadWorktree: raw?.newThreadWorktree !== false,
-    privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never'
+    privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never',
+    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit),
+    keepAwake: raw?.keepAwake !== false
   }
 }
 
@@ -383,11 +432,14 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
  * always has (`workspace` isolated or shared). Either way a subagent's work is reported, never merged.
  */
 export interface ExperimentalSettings {
+  botAsksFirst: boolean
   subagentWorktrees: boolean
+  /** The profiler (Settings → Labs). */
+  profiler: ProfilerSettings
 }
 
 export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings> | null): ExperimentalSettings {
-  return { subagentWorktrees: raw?.subagentWorktrees === true }
+  return { botAsksFirst: raw?.botAsksFirst === true, subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
 }
 
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */
@@ -492,7 +544,9 @@ export type DeepPartial<T> = {
       : T[K]
 }
 
-export type MousseSettingsUpdate = DeepPartial<MousseSettings>
+export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'notifications'> & {
+  notifications?: Omit<DeepPartial<NotificationSettings>, 'quietHours'> & { quietHours?: QuietHours | null }
+}
 
 export interface ThemeOption {
   id: ThemeId
@@ -519,6 +573,11 @@ export interface LlmModelOption {
   thinkingOff?: false
   /** Effective endpoint speed, including provider defaults. */
   speed?: 'fast' | 'slow'
+  /**
+   * Speeds besides the standard one this model runs at, chosen by a suffix on its id (`opus:fast`).
+   * The picker offers each as a variant of the model; other lists show the model once.
+   */
+  speeds?: Array<'fast' | 'slow'>
   /** `false`: this model cannot run a single request (chat titles) even though its provider can. */
   oneShot?: false
   /** The model takes images, when its catalogue says so. */
@@ -585,6 +644,33 @@ export function botProviderOptions(providers: readonly LlmProviderOption[], hold
       models: provider.models
         .filter((model) => held.has(`${provider.instanceId}\u0000${model.id}`))
         .map(({ efforts: _efforts, defaultEffort: _defaultEffort, effortDescriptions: _descriptions, ...model }) => model)
+    }))
+    .filter((provider) => provider.models.length > 0)
+}
+
+/**
+ * A bot's Runs on choices for the app's model picker (#673): `providers` narrowed to the models `picks` names (each
+ * entry's models that can hold a bot), with the reasoning levels the bot may pick and no "Off", which a bot never runs at.
+ */
+export function botPickProviderOptions(providers: readonly LlmProviderOption[], picks: ReadonlyArray<{ instanceId: string; model: string; efforts: readonly string[] }>): LlmProviderOption[] {
+  const held = new Map(picks.map((entry) => [`${entry.instanceId}\u0000${entry.model}`, entry.efforts]))
+  return providers
+    .filter((provider) => provider.instanceId !== undefined)
+    .map((provider) => ({
+      ...provider,
+      models: provider.models.flatMap((model) => {
+        const efforts = held.get(`${provider.instanceId}\u0000${model.id}`)
+        if (!efforts) return []
+        const levels = (model.efforts ?? []).filter((effort) => efforts.includes(effort))
+        const { efforts: _efforts, defaultEffort, effortDescriptions: _descriptions, thinkingOff: _off, ...rest } = model
+        return [{
+          ...rest,
+          ...(levels.length ? { efforts: levels } : {}),
+          ...(defaultEffort && levels.includes(defaultEffort) ? { defaultEffort } : {}),
+          ...(model.effortDescriptions && levels.length ? { effortDescriptions: model.effortDescriptions } : {}),
+          thinkingOff: false as const
+        }]
+      })
     }))
     .filter((provider) => provider.models.length > 0)
 }
@@ -794,19 +880,26 @@ export function getDefaultSettings(): MousseSettings {
     },
     appearance: {
       theme: 'blacksphere-plus',
+      userThemes: [],
+      userTheme: '',
       accentColor: '#a785c7',
       acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
       renderMath: true,
+      replyPacing: true,
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
-      threadProjectColors: true,
+      threadProjectColors: 'fill',
+      replyPreviews: true,
+      threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
+      chatWidth: 'normal',
       frostedComposer: false,
       frostedComposerOpacity: FROSTED_COMPOSER_RANGES.frostedComposerOpacity.default,
       frostedComposerBlur: FROSTED_COMPOSER_RANGES.frostedComposerBlur.default,
-      frostedComposerSaturation: FROSTED_COMPOSER_RANGES.frostedComposerSaturation.default
+      frostedComposerSaturation: FROSTED_COMPOSER_RANGES.frostedComposerSaturation.default,
+      contextRingInComposer: false
     },
     notifications: {
       threadCompletionSound: true,
@@ -883,7 +976,7 @@ export function getDefaultSettings(): MousseSettings {
  * Migrates legacy theme ids (`*-acrylic`) into theme + acrylic boolean.
  */
 export function normalizeAppearance(
-  raw: Partial<AppearanceSettings> & { theme?: string } | null | undefined
+  raw: (Omit<Partial<AppearanceSettings>, 'threadProjectColors'> & { threadProjectColors?: ThreadProjectColorStyle | boolean; theme?: string }) | null | undefined
 ): AppearanceSettings {
   const defaults = getDefaultSettings().appearance
   if (!raw || typeof raw !== 'object') {
@@ -914,6 +1007,11 @@ export function normalizeAppearance(
     acrylic = defaults.acrylic
   }
 
+  // A user theme in use sets the built-in theme to its base, so everything that reads `theme` sees the right one.
+  const userThemes = normalizeUserThemes(raw.userThemes)
+  const active = typeof raw.userTheme === 'string' ? userThemes.find((entry) => entry.id === raw.userTheme) : undefined
+  if (active) theme = active.base
+
   const accentColor =
     typeof raw.accentColor === 'string' && raw.accentColor.trim()
       ? raw.accentColor.trim()
@@ -921,22 +1019,34 @@ export function normalizeAppearance(
 
   return {
     theme: theme as ThemeId,
+    userThemes,
+    userTheme: active?.id ?? '',
     accentColor,
     acrylic,
     acrylicIntensity: clampAcrylicIntensity(
       raw.acrylicIntensity !== undefined ? raw.acrylicIntensity : defaults.acrylicIntensity
     ),
     renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath,
+    replyPacing: typeof raw.replyPacing === 'boolean' ? raw.replyPacing : defaults.replyPacing,
     interfaceFont: normalizeFontChoice(raw.interfaceFont),
     codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
-      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
+      raw.threadProjectColors === false ? 'off'
+        : raw.threadProjectColors === true ? 'fill'
+          : raw.threadProjectColors === 'off' || raw.threadProjectColors === 'outline' || raw.threadProjectColors === 'fill' || raw.threadProjectColors === 'gradient'
+            ? raw.threadProjectColors : defaults.threadProjectColors,
+    replyPreviews: typeof raw.replyPreviews === 'boolean' ? raw.replyPreviews : defaults.replyPreviews,
+    threadPathInTitleBar:
+      typeof raw.threadPathInTitleBar === 'boolean' ? raw.threadPathInTitleBar : defaults.threadPathInTitleBar,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,
     turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles),
+    chatWidth: normalizeChatWidth(raw.chatWidth),
     frostedComposer: typeof raw.frostedComposer === 'boolean' ? raw.frostedComposer : defaults.frostedComposer,
     frostedComposerOpacity: clampFrostedComposer('frostedComposerOpacity', raw.frostedComposerOpacity),
     frostedComposerBlur: clampFrostedComposer('frostedComposerBlur', raw.frostedComposerBlur),
-    frostedComposerSaturation: clampFrostedComposer('frostedComposerSaturation', raw.frostedComposerSaturation)
+    frostedComposerSaturation: clampFrostedComposer('frostedComposerSaturation', raw.frostedComposerSaturation),
+    contextRingInComposer:
+      typeof raw.contextRingInComposer === 'boolean' ? raw.contextRingInComposer : defaults.contextRingInComposer
   }
 }
 

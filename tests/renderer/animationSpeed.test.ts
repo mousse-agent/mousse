@@ -113,7 +113,7 @@ describe('motion helper', () => {
   })
 })
 
-describe('Settings › General › Advanced', () => {
+describe('Settings › Appearance › Window', () => {
   let view: Root
   let host: HTMLElement
   let home: string
@@ -151,13 +151,16 @@ describe('Settings › General › Advanced', () => {
     })))
     draw()
 
-    const advanced = host.querySelector('details.settings-advanced')
-    expect(advanced?.textContent).toContain('Animation speed')
-    expect(host.querySelectorAll('details.settings-advanced')).toHaveLength(1)
-    const select = advanced!.querySelector<HTMLSelectElement>('select[aria-label="Animation speed"]')!
+    // Out in the Window group, not folded away.
+    expect(host.querySelector('details')).toBeNull()
+    const row = host.querySelector('[data-settings-anchor="appearance-animation-speed"]')
+    expect(row?.textContent).toContain('Animation speed')
+    const windowGroup = [...host.querySelectorAll('.settings-group-title')].find((title) => title.textContent === 'Window')
+    expect(windowGroup!.closest('.settings-group')!.contains(row)).toBe(true)
+    const select = row!.querySelector<HTMLSelectElement>('select[aria-label="Animation speed"]')!
     expect([...select.options].map((option) => option.textContent)).toEqual(['Off', 'Fast', 'Normal', 'Slow'])
     expect(select.value).toBe('normal')
-    expect(advanced!.querySelector('[title]')?.getAttribute('title')).toMatch(/reduce motion/)
+    expect(row!.querySelector('[title]')?.getAttribute('title')).toMatch(/reduce motion/)
 
     await act(async () => {
       select.value = 'off'

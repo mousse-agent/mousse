@@ -1,6 +1,8 @@
+import { registerByteCache } from "../../../lib/windowCounters";
 import type { BundledLanguage, CodeHighlighterPlugin } from "streamdown";
 import type { HighlighterCore } from "shiki/core";
 import { bundledLanguages, bundledLanguagesInfo } from "shiki/langs";
+import { ByteLruCache } from "../../../lib/byteLruCache";
 import { countRender } from "./render-counts";
 
 type HighlightOptions = Parameters<CodeHighlighterPlugin["highlight"]>[0];
@@ -10,7 +12,14 @@ type ThemeInput = HighlightOptions["themes"][number];
 /** Larger blocks are shown as plain text: tokenizing them blocks the UI. */
 export const MAX_HIGHLIGHT_CHARS = 20_000;
 export const MAX_HIGHLIGHT_LINES = 500;
-const RESULT_CACHE_LIMIT = 100;
+/**
+ * Highlighted code kept for blocks drawn again (a row scrolled back into the window, a thread opened
+ * again), by language, themes and code, bounded by an estimate of the bytes its tokens hold.
+ */
+export const HIGHLIGHT_CACHE_BYTES = 50 * 1024 * 1024;
+/** About what one token costs beyond its text: the token object, its colours and style. */
+const TOKEN_OVERHEAD_BYTES = 120;
+const LINE_OVERHEAD_BYTES = 32;
 /** While a code block streams in, it is tokenised again at most this often. */
 export const STREAMING_TOKENIZE_MS = 250;
 
@@ -59,9 +68,10 @@ export function plainTokens(code: string): HighlightResult {
 const themeName = (theme: ThemeInput): string =>
   typeof theme === "string" ? theme : ((theme as { name?: string }).name ?? "custom");
 
-// One highlighter (and one WASM engine) for the whole renderer. The highlighter
-// itself loads with the first code block, not with the app; grammars load the
-// first time a language is used.
+// One highlighter (and one WASM engine) for the whole renderer. It is not part
+// of the app's first paint: it loads while the window is idle after startup
+// (`scheduleHighlighterWarmup`), or with the first code block if that comes
+// sooner. Other grammars load the first time their language is used.
 let highlighterPromise: Promise<HighlighterCore> | null = null;
 const languageLoads = new Map<string, Promise<void>>();
 
@@ -99,15 +109,113 @@ function loadLanguage(highlighter: HighlighterCore, language: string): Promise<v
   return load;
 }
 
-const resultCache = new Map<string, HighlightResult>();
+/** Grammars most replies use, loaded by the warm-up so their first block is coloured as it streams. */
+export const WARM_LANGUAGES = ["typescript", "javascript", "tsx", "json", "shellscript", "python", "rust", "go"] as const;
+
+/** What the warm-up needs from the window; tests pass their own. */
+export type WarmupHost = {
+  requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => unknown;
+  setTimeout: (callback: () => void, ms: number) => unknown;
+  isHidden: () => boolean;
+  /** Calls `callback` once, the next time the window is shown. */
+  onceVisible: (callback: () => void) => void;
+};
+
+/** The longest an idle step waits for an idle period before it runs anyway. */
+const WARMUP_IDLE_TIMEOUT_MS = 3_000;
+/** Without `requestIdleCallback`, how long a step waits. */
+const WARMUP_FALLBACK_DELAY_MS = 200;
+
+const windowHost = (): WarmupHost => ({
+  requestIdleCallback:
+    typeof window.requestIdleCallback === "function" ? window.requestIdleCallback.bind(window) : undefined,
+  setTimeout: (callback, ms) => window.setTimeout(callback, ms),
+  isHidden: () => document.visibilityState === "hidden",
+  onceVisible: (callback) => {
+    const listener = () => {
+      if (document.visibilityState === "hidden") return;
+      document.removeEventListener("visibilitychange", listener);
+      callback();
+    };
+    document.addEventListener("visibilitychange", listener);
+  },
+});
+
+/** Resolves in an idle period of a visible window; a hidden window waits until it is shown. */
+function whenIdleAndVisible(host: WarmupHost): Promise<void> {
+  return new Promise((resolve) => {
+    const step = () => {
+      if (host.isHidden()) {
+        host.onceVisible(step);
+        return;
+      }
+      resolve();
+    };
+    const wait = () => {
+      if (host.isHidden()) {
+        host.onceVisible(wait);
+        return;
+      }
+      if (host.requestIdleCallback) host.requestIdleCallback(step, { timeout: WARMUP_IDLE_TIMEOUT_MS });
+      else host.setTimeout(step, WARMUP_FALLBACK_DELAY_MS);
+    };
+    wait();
+  });
+}
+
+let warmup: Promise<void> | null = null;
+
+/**
+ * Loads the highlighter (core, WASM engine, both themes) and then the common grammars, each in its
+ * own idle period of a visible window, so no step runs while the app is busy or competes with input.
+ * It shares the loads code blocks use: a block that arrives first is not loaded twice, and a later
+ * block finds everything ready. Runs once; a failed step is left for the first code block to retry.
+ */
+export function warmHighlighterWhenIdle(host: WarmupHost = windowHost()): Promise<void> {
+  warmup ??= (async () => {
+    await whenIdleAndVisible(host);
+    const highlighter = await getHighlighter();
+    for (const language of WARM_LANGUAGES) {
+      await whenIdleAndVisible(host);
+      await loadLanguage(highlighter, language);
+    }
+  })().catch(() => undefined);
+  return warmup;
+}
+
+/** Starts the warm-up once the window has painted. Tests skip it: their code blocks load on use. */
+export function scheduleHighlighterWarmup(): void {
+  if (import.meta.env?.MODE === "test") return;
+  void warmHighlighterWhenIdle();
+}
+
+/** The estimated bytes a highlighted block holds: its text (UTF-16) and each token and line. */
+export function highlightResultBytes(result: HighlightResult): number {
+  let bytes = 0;
+  for (const line of result.tokens) {
+    bytes += LINE_OVERHEAD_BYTES;
+    for (const token of line) bytes += TOKEN_OVERHEAD_BYTES + token.content.length * 2;
+  }
+  return bytes;
+}
+
+const resultCache = new ByteLruCache<string, HighlightResult>(HIGHLIGHT_CACHE_BYTES);
+
+/** The highlighted-code cache, for the profiler and tests. */
+export const highlightCache: Pick<ByteLruCache<string, HighlightResult>, "bytes" | "size" | "hits" | "misses" | "budgetBytes" | "clear"> =
+  resultCache;
+
+/** The cache key of `code` highlighted as `language` (a grammar id) with the light and dark themes named. */
+export function highlightCacheKey(language: string, themes: readonly [string, string], code: string): string {
+  return `${language}\0${themes[0]}\0${themes[1]}\0${code}`;
+}
+
+// The profiler's window breakdown reads the highlight cache's size.
+registerByteCache("codeHighlight", resultCache);
 
 function cacheResult(key: string, result: HighlightResult): void {
-  resultCache.delete(key);
-  resultCache.set(key, result);
-  if (resultCache.size > RESULT_CACHE_LIMIT) {
-    const oldest = resultCache.keys().next().value;
-    if (oldest !== undefined) resultCache.delete(oldest);
-  }
+  // The key holds the code too.
+  resultCache.set(key, result, key.length * 2 + highlightResultBytes(result));
 }
 
 type Tokenized = { code: string; result: HighlightResult };
@@ -208,7 +316,7 @@ function deliver(family: string, stream: BlockStream, code: string, result: High
     } else if (asked.startsWith(code)) {
       // A pass for the newer text is coming; this one only brings the colours it has.
       if (!stream.job) stream.waiting.delete(notify);
-      notify(resultCache.get(`${family}\0${asked}`) ?? extendTokens({ code, result }, asked));
+      notify(resultCache.peek(`${family}\0${asked}`) ?? extendTokens({ code, result }, asked));
     }
   }
 }
@@ -229,7 +337,7 @@ function tokenizeSoon(family: string, stream: BlockStream, code: string, lang: s
       .then(
         (result) => {
           cacheResult(`${family}\0${run}`, result);
-          if (!stream.tokenized || run.length >= stream.tokenized.code.length) stream.tokenized = { code: run, result };
+          if (!stream.tokenized || run.length >= stream.tokenized.code.length) replaceTokenized(family, stream, run, result);
           return result;
         },
         () => plainTokens(run),
@@ -237,6 +345,16 @@ function tokenizeSoon(family: string, stream: BlockStream, code: string, lang: s
       .then((result) => deliver(family, stream, run, result));
   }, STREAMING_TOKENIZE_MS);
   (timer as { unref?: () => void }).unref?.();
+}
+
+/**
+ * A growing block's newer pass replaces its older one. The shorter text is not asked for again, so
+ * its tokens leave the cache rather than push out finished blocks.
+ */
+function replaceTokenized(family: string, stream: BlockStream, code: string, result: HighlightResult): void {
+  const before = stream.tokenized;
+  if (before && before.code !== code && code.startsWith(before.code)) resultCache.delete(`${family}\0${before.code}`);
+  stream.tokenized = { code, result };
 }
 
 async function tokenize(
@@ -276,10 +394,9 @@ export function createCodeHighlighter(
       const lang = resolveHighlightLanguage(language);
       const names: [string, string] = [themeName(requested[0]), themeName(requested[1])];
       const family = `${lang}\0${names[0]}\0${names[1]}`;
-      const key = `${family}\0${code}`;
+      const key = highlightCacheKey(lang, names, code);
       const cached = resultCache.get(key);
       if (cached) {
-        cacheResult(key, cached);
         // A block that reaches text already tokenised (its final text, met before) moves on to it,
         // so a late pass for its shorter text is not delivered. Another block's text leaves it.
         const stream = streamFor(family, code, false, true);
@@ -312,7 +429,7 @@ export function createCodeHighlighter(
         .then(
           (result) => {
             cacheResult(key, result);
-            if (!stream.tokenized || code.length >= stream.tokenized.code.length) stream.tokenized = { code, result };
+            if (!stream.tokenized || code.length >= stream.tokenized.code.length) replaceTokenized(family, stream, code, result);
             return result;
           },
           // A grammar or engine failure leaves the block as plain text.

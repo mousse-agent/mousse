@@ -389,7 +389,7 @@ function PanelHeader({
           aria-busy={refreshing}
           title="Read the pull request again"
         >
-          <RefreshCw size={13} strokeWidth={2} aria-hidden="true" />
+          <RefreshCw size={13} strokeWidth={2} aria-hidden="true" {...(refreshing ? { className: 'pr-panel-spin' } : {})} />
           {refreshing ? 'Refreshing…' : 'Refresh'}
         </button>
         <button type="button" className="pr-panel-action" onClick={() => openExternalUrl(detail.url)} title="Open the pull request on GitHub">

@@ -331,6 +331,7 @@ export const PermissionRequestRow = memo(function PermissionRequestRow({
       aria-label="Permission request"
       data-permission-request={data.requestId}
       data-state={live ? "waiting" : data.status}
+      data-mousse-decision={live ? "" : undefined}
       data-find-ignore
     >
       <div className="permission-request-row">

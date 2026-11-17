@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AutomationIndex, AutomationItem } from '../../src/shared/automations'
 import type { AutomationInbox, InboxRun } from '../../src/shared/automationInbox'
 import {
-  groupOf, inboxGroups, moveCursor, projectDotCount, resolvable, rowKey, runLine, usageText, automationsById, dotLabel
+  groupOf, inboxGroups, moveCursor, projectDotCount, resolvable, rowKey, runLine, automationsById, dotLabel
 } from '../../src/renderer/components/automations/inbox/inboxModel'
 import { onLine, whenChoices } from '../../src/renderer/components/automations/DraftCard'
 import { draftIdOf } from '../../src/renderer/components/automations/inbox/ChatDraftCard'
@@ -101,14 +101,11 @@ describe('the Runs list as data', () => {
     expect(resolvable(rows, null, bot)).toBeUndefined()
   })
 
-  it('says what a run does, its usage (cost only when known), and the project dot', () => {
+  it('says what a run does, and the project dot', () => {
     expect(runLine(live, NOW)).toBe('Running')
     expect(runLine(failed, NOW)).toBe('Failed: No access')
     expect(runLine(noReport, NOW)).toBe('No report')
     expect(runLine(run({ jobId: 'x', state: 'paused_usage' }), NOW)).toBe('Paused for usage')
-    expect(usageText(fyi.usage)).toBe('claude-x 1.2k')
-    expect(usageText([{ model: 'gpt', input: 500, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0.012 }])).toBe('gpt 500 · $0.012')
-    expect(usageText([])).toBeUndefined()
     expect(projectDotCount({ byProject: { p1: 2, p2: 1 }, total: 3 }, ['p1', 'p2'])).toBe(3)
     expect(projectDotCount(null, ['p1'])).toBe(0)
     expect(dotLabel(1)).toBe('1 run needs you')
@@ -252,40 +249,55 @@ describe('the inbox page', () => {
     expect($('[data-testid="inbox-search"]')).not.toBeNull()
   })
 
-  it('filters to an automation by its name, with When, Who and this month\'s cost labelled API keys', async () => {
+  it('filters to an automation by its name, with one line of when and where, and no spend', async () => {
     await mount()
     await click($(`[data-run-id="${needs.id}"] .inbox-row-name`))
     expect($('[data-testid="inbox-filter-automation"]')?.textContent).toContain('Nightly review')
-    expect($('[data-testid="inbox-filter-cost"]')?.textContent).toBe('$0.42API keys · Nov')
+    expect($('[data-testid="inbox-filter-meta"]')?.textContent).toMatch(/^Daily at 9:00.*, in mousse$/)
+    expect($('[data-testid="inbox-filter-automation"]')?.textContent).not.toMatch(/\$|tokens/)
     expect($$('[data-testid="inbox-run"]').every((row) => [live.id, needs.id, noReport.id, resolved.id, quiet1.id].includes(row.dataset.runId!))).toBe(true)
     await click($('[aria-label="Show all runs"]'))
-    // A subscription's automation shows tokens, not a cost.
-    await click($(`[data-run-id="${fyi.id}"] .inbox-row-name`))
-    expect($('[data-testid="inbox-filter-cost"]')?.textContent).toBe('1.2k tokensAPI keys · Nov')
+    expect($('[data-testid="inbox-filter-automation"]')).toBeNull()
   })
 
-  it('shows Manage: the switch pauses and resumes, Edit opens Edit details, Delete asks first, and a Tuning note is removed', async () => {
-    const mousse = await mount(RUNS, [...AUTOMATIONS.slice(0, 2), automation({ id: 'off', name: 'Deploy preview', paused: true })], {
+  it('shows Manage as a table with a switch per row: When, Who, Next run, Last run; no spend; the rest in the menu', async () => {
+    const next = new Date(NOW.getTime() + 3_600_000).toISOString()
+    const mousse = await mount(RUNS, [{ ...AUTOMATIONS[0]!, next: { at: next, timeZone: ZONE } }, AUTOMATIONS[1]!, automation({ id: 'off', name: 'Deploy preview', paused: true })], {
       tuning: [{ id: 'tune_00000000-0000-0000-0000-000000000001', jobId: 'nightly', kind: 'noisy', runNumber: 14, text: 'Too noisy: “Main is green” was reported as FYI', createdAt: ago(60) }]
     })
     await click($('[data-testid="inbox-manage-btn"]'))
     const rows = $$('[data-testid="inbox-manage-row"]')
     expect(rows.map((row) => row.dataset.automation)).toEqual(['nightly', 'deps', 'off'])
+    expect($$('[data-testid="inbox-manage"] th').map((th) => th.textContent)).toEqual(['Name', 'When', 'Who', 'Next run', 'Last run', 'On', ''])
+    expect(rows[1]!.querySelector('.inbox-table-project')?.textContent).toBe('mousse-plus')
+    expect(rows.map((row) => row.querySelector('[data-testid="inbox-manage-last"]')?.textContent)).toEqual(['Running', 'Failed', '—'])
+    expect(rows[0]!.querySelector('[data-testid="inbox-manage-next"]')?.textContent).not.toBe('—')
+    expect(rows[2]!.querySelector('[data-testid="inbox-manage-next"]')?.textContent).toBe('Paused')
+    expect(rows[2]!.hasAttribute('data-off')).toBe(true)
+    // No spend, anywhere in Manage.
+    expect($('[data-testid="inbox-manage"]')?.textContent).not.toMatch(/\$0|12k|1\.2k|9k/)
+    // The switch pauses and resumes; the menu does not.
     await click(rows[0]!.querySelector('[role="switch"]'))
     expect(mousse.scheduled.pause).toHaveBeenCalledWith('nightly')
     await click(rows[2]!.querySelector('[role="switch"]'))
     expect(mousse.scheduled.resume).toHaveBeenCalledWith('off')
-    await click(rows[0]!.querySelector('[data-testid="inbox-tuning-toggle"]'))
+    const choose = async (name: string, testId: string) => {
+      await click($(`[aria-label="More actions for ${name}"]`))
+      await click($(`[data-testid="${testId}"]`))
+    }
+    await click($('[aria-label="More actions for Deps bump"]'))
+    expect($('[data-testid="inbox-manage-toggle"]')).toBeNull()
+    await click($('[data-testid="inbox-manage-run"]'))
+    expect(mousse.scheduled.run).toHaveBeenCalledWith('deps')
+    await choose('Nightly review', 'inbox-tuning-toggle')
     expect($('[data-testid="inbox-tuning-note"]')?.textContent).toContain('run 14')
     await click($('[data-testid="inbox-tuning-remove"]'))
     expect(calls(mousse, 'automations.tuning.remove')).toEqual([['automations.tuning.remove', { noteId: 'tune_00000000-0000-0000-0000-000000000001' }]])
-    await click(rows[1]!.querySelector('[aria-label="More actions for Deps bump"]'))
-    await click($('[data-testid="inbox-manage-delete"]'))
+    await choose('Deps bump', 'inbox-manage-delete')
     expect($('[role="dialog"]')?.textContent).toContain('Delete “Deps bump”?')
     await click($('[data-testid="automation-delete-confirm"]'))
     expect(mousse.scheduled.delete).toHaveBeenCalledWith('deps')
-    await click($('[aria-label="More actions for Nightly review"]'))
-    await click($('[data-testid="inbox-manage-edit"]'))
+    await choose('Nightly review', 'inbox-manage-edit')
     expect(useInboxStore.getState()).toMatchObject({ pane: 'edit', editJobId: 'nightly' })
   })
 
@@ -293,14 +305,301 @@ describe('the inbox page', () => {
     const next = new Date(NOW.getTime() + 3_600_000).toISOString()
     const mousse = await mount([], [automation({ id: 'nightly', name: 'Nightly review', next: { at: next, timeZone: ZONE } })])
     expect($('[data-testid="inbox-empty-card"]')?.textContent).toContain('Nightly review')
-    expect($('[data-testid="inbox-empty-card"]')?.textContent).toContain('Next run ·')
+    expect($('[data-testid="inbox-empty-card"]')?.textContent).toContain('Next run ')
     await click($('[data-testid="inbox-run-now"]'))
     expect(mousse.scheduled.run).toHaveBeenCalledWith('nightly')
   })
 })
 
+describe('creating an automation', () => {
+  const RUN_ID = 'run:thread:manager:ordinal:1'
+  const typeIn = async (input: HTMLInputElement, text: string) => {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+  const enter = async (input: HTMLInputElement) => {
+    await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })) })
+    await act(async () => {})
+  }
+  const draft = automation({ id: 'd-new', name: 'Triage new issues', draft: { draftId: 'd-new', problems: [], prompt: 'Triage' } as AutomationItem['draft'] })
+
+  /**
+   * The manager: the send answers with its run at once (`await: 'ack'`); the turn's outcome comes as a turn event
+   * (`emit`), or from `automations.manager.turn` (`turn`), which says working until a test changes it.
+   */
+  async function mountComposer() {
+    const items: AutomationItem[] = []
+    const mousse = await mount([], items)
+    let listener: ((state: unknown) => void) | undefined
+    const turn: { value: { status: string; error?: string } } = { value: { status: 'working' } }
+    let runs = 0
+    mousse.orchestrator.sendToThread.mockImplementation(async () => ({ message: '', actions: [], runId: runs++ ? `${RUN_ID}${runs}` : RUN_ID, accepted: true }))
+    Object.assign(mousse.orchestrator, {
+      onTurnState: vi.fn((cb: (state: unknown) => void) => { listener = cb; return () => { if (listener === cb) listener = undefined } }),
+      isTurnActive: vi.fn(async () => true)
+    })
+    const request = mousse.platformRequest.request.getMockImplementation()!
+    mousse.platformRequest.request.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === 'automations.manager.thread') return { threadId: 'manager' }
+      if (method === 'automations.manager.turn') return { turn: turn.value }
+      if (method === 'automations.drafts.nextWho') return {}
+      if (method === 'automations.list') return { items, computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '' }
+      return request(method, params)
+    })
+    const emit = async (state: Record<string, unknown>) => {
+      await act(async () => { listener?.({ threadId: 'manager', updatedAt: '', ...state }) })
+      await act(async () => {})
+    }
+    const create = async (text: string) => {
+      const input = $<HTMLInputElement>('[data-testid="inbox-composer"]')!
+      await typeIn(input, text)
+      await enter(input)
+      return input
+    }
+    return { mousse, items, turn, emit, create, listening: () => Boolean(listener) }
+  }
+
+  afterEach(() => { act(() => { useInboxStore.setState({ composing: null }) }); localStorage.clear() })
+
+  it('sends for an ack only: the composer clears and the pane shows the manager working while its turn goes on', async () => {
+    const { mousse, create, listening } = await mountComposer()
+    expect($<HTMLButtonElement>('[data-testid="inbox-composer-send"]')!.disabled).toBe(true)
+    const input = await create('Every weekday at 9, triage new issues')
+    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledWith('manager', { content: expect.stringContaining('triage new issues'), await: 'ack' })
+    expect(input.value).toBe('')
+    expect(useInboxStore.getState()).toMatchObject({ pane: 'drafts', composing: { status: 'working', threadId: 'manager', runId: RUN_ID } })
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('working')
+    expect($('[data-testid="inbox-drafts-row"]')?.dataset.state).toBe('working')
+    expect(listening()).toBe(true)
+    // The request is kept for a reload.
+    expect(JSON.parse(localStorage.getItem('mousse.automations.request.default')!)).toMatchObject({ runId: RUN_ID, status: 'working' })
+  })
+
+  it('clears the composer and shows the request working before the service has answered the send', async () => {
+    const { mousse, create } = await mountComposer()
+    let answer: (value: unknown) => void = () => undefined
+    mousse.orchestrator.sendToThread.mockImplementationOnce(() => new Promise((done) => { answer = done }))
+    const input = await create('Every weekday at 9, triage new issues')
+    // The send is still out: the words are on the card, not in the composer.
+    expect(input.value).toBe('')
+    expect(useInboxStore.getState().composing).toMatchObject({ status: 'working', text: 'Every weekday at 9, triage new issues', threadId: 'manager' })
+    expect(useInboxStore.getState().composing?.runId).toBeUndefined()
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('working')
+    await act(async () => { answer({ message: '', actions: [], runId: RUN_ID, accepted: true }) })
+    await act(async () => {})
+    expect(useInboxStore.getState().composing?.runId).toBe(RUN_ID)
+  })
+
+  it('learns the outcome from the turn\'s events: another turn is not its; done lights the draft it wrote', async () => {
+    const { items, emit, create } = await mountComposer()
+    await create('Every weekday at 9, triage new issues')
+    await emit({ turnId: 'run:thread:manager:ordinal:0', phase: 'completed' })
+    expect(useInboxStore.getState().composing?.status).toBe('working')
+    items.push(draft)
+    await emit({ turnId: RUN_ID, phase: 'completed' })
+    expect(useInboxStore.getState().composing?.status).toBe('done')
+    expect($('[data-testid="inbox-request"]')).toBeNull()
+    expect($('[data-testid="automation-draft-card"]')?.hasAttribute('data-fresh')).toBe(true)
+    expect(localStorage.getItem('mousse.automations.request.default')).toBeNull()
+  })
+
+  it('says the manager replied without a draft when its turn ends with none', async () => {
+    const { emit, create } = await mountComposer()
+    await create('What can you automate?')
+    await emit({ turnId: RUN_ID, phase: 'completed' })
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('done')
+  })
+
+  it('shows the error a failed turn event carries, and Retry sends the same words again', async () => {
+    const { mousse, emit, create } = await mountComposer()
+    await create('Rotate the staging keys every Monday')
+    // The engine's `[code]` in front of the message is not shown.
+    await emit({ turnId: RUN_ID, phase: 'failed', error: '[no_model_selected] No model is set up.' })
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('failed')
+    expect($('[data-testid="inbox-request-error"]')?.textContent).toBe('No model is set up.')
+    expect($('[data-testid="inbox-drafts-row"]')?.dataset.state).toBe('failed')
+    await click($('[data-testid="inbox-request-retry"]'))
+    await act(async () => {})
+    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledTimes(2)
+    expect(mousse.orchestrator.sendToThread.mock.calls[1]![1]).toEqual(mousse.orchestrator.sendToThread.mock.calls[0]![1])
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('working')
+  })
+
+  it('does not lose an outcome that came before it subscribed: it reads the run when the watch starts', async () => {
+    const { turn, create } = await mountComposer()
+    // The turn failed before it showed any phase: no event comes, the run says so.
+    turn.value = { status: 'failed', error: 'The provider refused the request.' }
+    await create('Nightly review')
+    await act(async () => {})
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('failed')
+    expect($('[data-testid="inbox-request-error"]')?.textContent).toBe('The provider refused the request.')
+  })
+
+  it('picks a working request up again after a reload and settles it from its run', async () => {
+    const { turn, items } = await mountComposer()
+    localStorage.setItem('mousse.automations.request.default', JSON.stringify({ at: Date.now() - 5_000, threadId: 'manager', runId: RUN_ID, text: 'Nightly review', status: 'working', known: [] }))
+    act(() => { useInboxStore.setState({ composing: null }) })
+    items.push(draft)
+    turn.value = { status: 'completed' }
+    const { restoreRequest } = await import('../../src/renderer/components/automations/inbox/inboxStore')
+    await act(async () => { restoreRequest('default') })
+    await act(async () => {})
+    expect(useInboxStore.getState().composing).toMatchObject({ status: 'done', runId: RUN_ID })
+  })
+
+  it('keeps a Stop a Stop, and only the newest of two sends counts', async () => {
+    const { mousse, emit, create } = await mountComposer()
+    await create('First')
+    await create('Second')
+    const second = useInboxStore.getState().composing!
+    expect(second.text).toBe('Second')
+    expect(second.runId).not.toBe(RUN_ID)
+    // The first turn ending does not settle the second.
+    await emit({ turnId: RUN_ID, phase: 'completed' })
+    expect(useInboxStore.getState().composing?.status).toBe('working')
+    await click($('[data-testid="inbox-request-stop"]'))
+    expect(mousse.orchestrator.abort).toHaveBeenCalledWith('manager')
+    await emit({ turnId: second.runId, phase: 'completed' })
+    expect(useInboxStore.getState().composing?.status).toBe('stopped')
+  })
+
+  it('shows a refused send on the request card, with Retry and Edit; the composer is free', async () => {
+    const { mousse, create } = await mountComposer()
+    mousse.orchestrator.sendToThread.mockImplementationOnce(async () => ({ message: '', actions: [], requestAcknowledged: false, error: { code: 'thread_busy', message: 'The service is not running.' } }))
+    const input = await create('Nightly review')
+    expect(input.value).toBe('')
+    expect($('[data-testid="inbox-composer-error"]')).toBeNull()
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('failed')
+    expect($('[data-testid="inbox-request-error"]')?.textContent).toBe('The service is not running.')
+    await click($('[data-testid="inbox-request-edit"]'))
+    await act(async () => {})
+    expect(input.value).toBe('Nightly review')
+    expect(useInboxStore.getState().composing).toBeNull()
+  })
+
+  it('waits with a turn a usage limit holds, offers no Retry, and still learns how it ends', async () => {
+    const { items, emit, create, turn } = await mountComposer()
+    await create('Nightly review')
+    await emit({ turnId: RUN_ID, phase: 'paused' })
+    expect(useInboxStore.getState().composing).toMatchObject({ status: 'working', waiting: true })
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('waiting')
+    expect($('[data-testid="inbox-request-retry"]')).toBeNull()
+    // A read of the run that says paused keeps it waiting, too.
+    turn.value = { status: 'paused' }
+    const { checkRequest } = await import('../../src/renderer/components/automations/inbox/inboxStore')
+    await act(async () => { await checkRequest(useInboxStore.getState().composing!.at) })
+    expect(useInboxStore.getState().composing?.status).toBe('working')
+    items.push(draft)
+    await emit({ turnId: RUN_ID, phase: 'thinking' })
+    expect(useInboxStore.getState().composing?.waiting).toBe(false)
+    await emit({ turnId: RUN_ID, phase: 'completed' })
+    expect(useInboxStore.getState().composing?.status).toBe('done')
+  })
+
+  it('stops a queued send by taking it out of the queue, and never aborts the turn before it', async () => {
+    const { mousse, create } = await mountComposer()
+    mousse.orchestrator.sendToThread.mockImplementationOnce(async () => ({ message: '', actions: [], runId: RUN_ID, queued: true, queueItem: { id: 'q-1' } }))
+    const remove = vi.fn(async () => ({ id: 'q-1' }))
+    Object.assign(mousse, { queue: { remove } })
+    await create('Second thoughts')
+    expect(useInboxStore.getState().composing?.queueItemId).toBe('q-1')
+    await click($('[data-testid="inbox-request-stop"]'))
+    await act(async () => {})
+    expect(remove).toHaveBeenCalledWith('manager', 'q-1')
+    expect(mousse.orchestrator.abort).not.toHaveBeenCalled()
+    expect(useInboxStore.getState().composing?.status).toBe('stopped')
+  })
+
+  it('aborts only its own running turn, and claims no Stop it could not confirm', async () => {
+    const { mousse, create } = await mountComposer()
+    await create('Nightly review')
+    const request = mousse.platformRequest.request.getMockImplementation()!
+    mousse.platformRequest.request.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === 'automations.manager.turn') throw new Error('unknown method')
+      return request(method, params)
+    })
+    await click($('[data-testid="inbox-request-stop"]'))
+    await act(async () => {})
+    expect(mousse.orchestrator.abort).not.toHaveBeenCalled()
+    expect(useInboxStore.getState().composing?.status).toBe('working')
+    mousse.platformRequest.request.mockImplementation(request)
+    await click($('[data-testid="inbox-request-stop"]'))
+    await act(async () => {})
+    expect(mousse.orchestrator.abort).toHaveBeenCalledWith('manager')
+    expect(useInboxStore.getState().composing?.status).toBe('stopped')
+  })
+
+  it('falls back to whether the thread works after failed reads, and gives up on a run that outlived its keep', async () => {
+    const { mousse, create } = await mountComposer()
+    const request = mousse.platformRequest.request.getMockImplementation()!
+    mousse.platformRequest.request.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === 'automations.manager.turn') throw new Error('unknown method')
+      return request(method, params)
+    })
+    await create('Nightly review')
+    const { checkRequest, REQUEST_READ_FAILURES, REQUEST_KEEP_MS } = await import('../../src/renderer/components/automations/inbox/inboxStore')
+    const at = useInboxStore.getState().composing!.at
+    for (let i = 0; i < REQUEST_READ_FAILURES; i++) await act(async () => { await checkRequest(at) })
+    expect(useInboxStore.getState().composing?.status).toBe('working')
+    ;(mousse.orchestrator as unknown as { isTurnActive: ReturnType<typeof vi.fn> }).isTurnActive.mockResolvedValue(false)
+    await act(async () => { await checkRequest(at) })
+    expect(useInboxStore.getState().composing?.status).toBe('done')
+    // A hung run: given up after the keep, with a way to look.
+    act(() => { useInboxStore.setState({ composing: { at: Date.now() - REQUEST_KEEP_MS - 1, threadId: 'manager', runId: RUN_ID, text: 'Old', status: 'working', known: [] } }) })
+    await act(async () => { await checkRequest(useInboxStore.getState().composing!.at) })
+    expect(useInboxStore.getState().composing).toMatchObject({ status: 'failed', error: expect.stringContaining('No answer') })
+  })
+
+  it('keeps a request under the profile it was sent from, whatever profile is current when it ends', async () => {
+    const { emit, create } = await mountComposer()
+    await create('Nightly review')
+    expect(useInboxStore.getState().composing?.profileId).toBe('default')
+    act(() => { useAppStore.setState({ profileId: 'work' }) })
+    await emit({ turnId: RUN_ID, phase: 'failed', error: 'No model is set up.' })
+    expect(JSON.parse(localStorage.getItem('mousse.automations.request.default')!)).toMatchObject({ status: 'failed' })
+    expect(localStorage.getItem('mousse.automations.request.work')).toBeNull()
+    // Opening the page for the other profile leaves this one's request saved.
+    const { restoreRequest } = await import('../../src/renderer/components/automations/inbox/inboxStore')
+    act(() => { restoreRequest('work') })
+    expect(useInboxStore.getState().composing).toBeNull()
+    expect(localStorage.getItem('mousse.automations.request.default')).not.toBeNull()
+    act(() => { useAppStore.setState({ profileId: 'default' }) })
+  })
+
+  it('shows the error of a turn that wrote a draft and then failed', async () => {
+    const { items, emit, create } = await mountComposer()
+    await create('Nightly review')
+    items.push(draft)
+    await emit({ turnId: RUN_ID, phase: 'failed', error: 'The provider dropped the connection.' })
+    expect($('[data-testid="automation-draft-card"]')?.hasAttribute('data-fresh')).toBe(true)
+    expect($('[data-testid="inbox-request-error"]')?.textContent).toBe('The provider dropped the connection.')
+  })
+})
+
+describe('Manage switches', () => {
+  it('show the asked state with Pausing…, locked until the change lands', async () => {
+    const mousse = await mount(RUNS, AUTOMATIONS.slice(1, 2))
+    let done: () => void = () => undefined
+    mousse.scheduled.pause.mockImplementation(() => new Promise((resolve) => { done = () => resolve(null) }))
+    await click($('[data-testid="inbox-manage-btn"]'))
+    const row = () => $('[data-testid="inbox-manage-row"]')!
+    const toggle = () => row().querySelector<HTMLButtonElement>('[role="switch"]')!
+    await click(toggle())
+    expect(row().querySelector('[data-testid="inbox-manage-next"]')?.textContent).toBe('Pausing…')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+    expect(toggle().disabled).toBe(true)
+    expect(row().hasAttribute('data-off')).toBe(true)
+    await act(async () => { done() })
+    await act(async () => {})
+    expect(row().querySelector('[data-testid="inbox-manage-next"]')?.textContent).not.toBe('Pausing…')
+    expect(mousse.scheduled.pause).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('the run strip', () => {
-  it('shows the level, the PR with Open PR and Merge, the usage, calibration and Resolve', async () => {
+  it('shows the level, the PR with Open PR and Merge, calibration and Resolve, and no usage', async () => {
     const mousse = await mount()
     const { RunStrip } = await import('../../src/renderer/components/automations/inbox/RunStrip')
     const stripHost = document.createElement('div')
@@ -322,7 +621,7 @@ describe('the run strip', () => {
     expect(useAppStore.getState()).toMatchObject({ mainView: 'pullRequest', mainAreaOpen: true })
     act(() => openRun(fyi))
     await act(async () => {})
-    expect($('[data-testid="inbox-strip-usage"]')?.textContent).toBe('claude-x 1.2k')
+    expect($('[data-testid="inbox-strip"]')?.textContent).not.toContain('1.2k')
     act(() => stripRoot.unmount())
     stripHost.remove()
   })

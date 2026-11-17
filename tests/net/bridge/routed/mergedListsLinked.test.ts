@@ -407,6 +407,27 @@ describe('another computer’s lists over a real link', () => {
     }
   }, 60_000)
 
+  it('drops a computer, its rows and its cached lists once it is disconnected here, and reads it again once connected', async () => {
+    const remote = t.owner.threads.createThread('Kept on the owner')
+    const listed = () => lists().threads().some((row) => row.id === t.qualified(remote.id))
+    const cached = () => t.caller.net.runtime().remoteLists.snapshots().map((row) => row.node)
+    await lists().reconcile()
+    await vi.waitFor(() => expect(listed()).toBe(true), { timeout: 20_000 })
+    // What it sent is cached after a settle time; one is written here so the drop can be seen.
+    t.caller.net.runtime().remoteLists.saveSnapshot(t.node, JSON.stringify({ threads: [] }))
+    expect(cached()).toContain(t.node)
+    await t.caller.net.request('bridge.disconnect', { node: t.node })
+    try {
+      expect(t.router.pairedComputers()?.map((row) => row.node) ?? []).not.toContain(t.node)
+      await vi.waitFor(() => expect(listed()).toBe(false), { timeout: 20_000 })
+      await vi.waitFor(() => expect(cached()).not.toContain(t.node), { timeout: 20_000 })
+    } finally {
+      await t.caller.net.request('bridge.connect', { node: t.node })
+    }
+    await lists().reconcile()
+    await vi.waitFor(() => expect(listed()).toBe(true), { timeout: 20_000 })
+  }, 60_000)
+
   it('keeps the other computers’ projects in the list a clone returns', async () => {
     const path = folder()
     const clone = vi.spyOn(t.caller.gitService.github, 'cloneRepository').mockResolvedValue(path)

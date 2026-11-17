@@ -3,13 +3,16 @@ import { LOCAL_STT_MODELS } from '../../shared/dictation'
 import type { LocalModelManifest, LocalModelStatus } from '../../shared/localModels'
 import { LOCAL_TTS_MODELS } from '../../shared/readAloud'
 import type { UpdateState } from '../../shared/updates'
-import type { ProviderOperationEvent } from '../../shared/harness/types'
-import { useProviderSnapshotsStore } from '../lib/providerSnapshots'
+import type { InstanceSnapshot } from '../../shared/harness/status'
+import type { HarnessDriverKind, ProviderOperationEvent } from '../../shared/harness/types'
+import { useProviderSnapshotsStore, watchDeviceSnapshots } from '../lib/providerSnapshots'
+import { ipcErrorLine } from '../lib/errorText'
 import { subscribeToUpdates, updateActions, useUpdateStore } from './updateStore'
 
 /**
  * Every download Mousse runs, in one list for the downloads indicator (navigation rail and the
- * Settings nav): the app update, the local speech models and the agents Mousse installs or updates. Each source keeps its own state in
+ * Settings nav): the app update, the local speech models, the agents Mousse installs or updates,
+ * and the updates available for the agent CLIs on this computer. Each source keeps its own state in
  * the main process; this store mirrors their broadcasts, so progress keeps flowing whichever
  * dialog started a download and whether or not it is still open.
  */
@@ -47,6 +50,28 @@ export interface DownloadEntry {
   error?: string
   /** When a done or cancelled entry finished; it clears after lingering. */
   settledAt?: number
+  /** The app or agent update this row offers or runs: from version to version. */
+  fromVersion?: string
+  toVersion?: string
+  /** An agent's update: what its operation is (`update` reruns with Update, not Install). */
+  operation?: 'install' | 'update'
+  /** The agent CLI's update: driver for the icon, and the note and command it carries. */
+  offer?: ProviderUpdateOffer
+}
+
+/** An agent CLI on this computer with a newer version published (`InstanceSnapshot.update`). */
+export interface ProviderUpdateOffer {
+  instanceId: string
+  driver: HarnessDriverKind
+  label: string
+  fromVersion?: string
+  toVersion?: string
+  /** Newer than the versions Mousse was tested with; still offered. */
+  untested: boolean
+  /** Mousse cannot run the update: needs administrator rights, or the install method is unknown. */
+  manual: boolean
+  /** The command to copy for a manual update, when there is one. */
+  command?: string
 }
 
 /** How long a finished entry stays while the popover is closed. */
@@ -110,7 +135,8 @@ export function applyProviderOperation(entries: readonly DownloadEntry[], event:
   if (event.kind === 'sign_in' || event.phase === 'prompt') return entries.slice()
   const id = `agent:${event.instanceId}`
   const current = entries.find((entry) => entry.id === id)
-  const base = { id, kind: 'agent' as const, sourceId: event.operationId, label }
+  const kept = current?.offer ? { offer: current.offer, fromVersion: current.fromVersion, toVersion: current.toVersion } : {}
+  const base = { id, kind: 'agent' as const, sourceId: event.operationId, label: current?.offer?.label ?? label, operation: event.kind === 'update' ? 'update' as const : 'install' as const, ...kept }
   switch (event.phase) {
     case 'progress': {
       // Bytes when the download knows them (they also weight the combined percent), else the fraction.
@@ -130,10 +156,62 @@ export function applyProviderOperation(entries: readonly DownloadEntry[], event:
   }
 }
 
+/**
+ * The agent CLI updates to offer: one per executable (instances that run the same CLI share it),
+ * enabled on this computer, the built-in entry first.
+ */
+export function providerUpdateOffers(snapshots: readonly InstanceSnapshot[] | undefined): ProviderUpdateOffer[] {
+  const offers: ProviderUpdateOffer[] = []
+  const seen = new Set<string>()
+  const ordered = [...(snapshots ?? [])].sort((a, b) => Number(b.builtIn) - Number(a.builtIn))
+  for (const snapshot of ordered) {
+    const update = snapshot.update
+    if (!update || !snapshot.enabled.device) continue
+    const binary = snapshot.binary?.path ?? snapshot.instanceId
+    if (seen.has(binary)) continue
+    seen.add(binary)
+    const manual = update.kind === 'notice' || (update.kind === 'advisory' && Boolean(update.manual))
+    offers.push({
+      instanceId: snapshot.instanceId,
+      driver: snapshot.driver,
+      label: snapshot.displayName,
+      ...(snapshot.binary?.version ? { fromVersion: snapshot.binary.version } : {}),
+      ...(update.latestVersion ? { toVersion: update.latestVersion } : {}),
+      untested: Boolean(update.untested),
+      manual,
+      ...(manual && update.kind === 'advisory' ? { command: update.command } : {})
+    })
+  }
+  return offers
+}
+
+/** The id of an agent's row, shared by its update offer and its install or update operation. */
+const agentId = (instanceId: string): string => `agent:${instanceId}`
+
+/**
+ * Folds the offered agent updates into the list. A row whose update runs, failed or finished keeps
+ * its state and takes the offer's details (a finished one is offered again once it clears, when the
+ * new version did not arrive); an offered row that is no longer offered goes away.
+ */
+export function applyProviderOffers(entries: readonly DownloadEntry[], offers: readonly ProviderUpdateOffer[]): DownloadEntry[] {
+  const offered = new Map(offers.map((offer) => [agentId(offer.instanceId), offer]))
+  let next = entries.filter((entry) => entry.kind !== 'agent' || entry.phase !== 'available' || offered.has(entry.id))
+  for (const [id, offer] of offered) {
+    const current = next.find((entry) => entry.id === id)
+    const details = { offer, label: offer.label, fromVersion: offer.fromVersion, toVersion: offer.toVersion }
+    if (current && current.phase !== 'available') next = replace(next, { ...current, ...details })
+    else next = replace(next, { id, kind: 'agent', sourceId: offer.instanceId, phase: 'available', operation: 'update', ...details })
+  }
+  return next
+}
+
 /** The update's entry, or null when there is nothing to offer, download, install or retry. */
 export function updateEntry(state: UpdateState): DownloadEntry | null {
   const version = state.availableVersion ?? ''
-  const base = { id: 'update', kind: 'update' as const, sourceId: version, label: version ? `Mousse ${version}` : 'Mousse update' }
+  const base = {
+    id: 'update', kind: 'update' as const, sourceId: version, label: 'Mousse',
+    ...(state.currentVersion ? { fromVersion: state.currentVersion } : {}), ...(version ? { toVersion: version } : {})
+  }
   switch (state.phase) {
     case 'available': return { ...base, phase: 'available' }
     case 'downloading': return { ...base, phase: 'downloading', percent: state.downloadPercent ?? 0 }
@@ -181,6 +259,8 @@ export function summarizeDownloads(entries: readonly DownloadEntry[]): Downloads
       ? percentOf(active.reduce((sum, entry) => sum + (entry.receivedBytes ?? 0), 0), active.reduce((sum, entry) => sum + (entry.totalBytes ?? 0), 0))
       : Math.floor(active.reduce((sum, entry) => sum + (entry.percent ?? 0), 0) / active.length)
     const count = active.length > 1 ? ` ${active.length}` : ''
+    // Agent updates report steps, not bytes.
+    if (active.every((entry) => entry.operation === 'update')) return { status: 'downloading', active: active.length, label: `Updating${count}…` }
     return { status: 'downloading', active: active.length, percent, label: `Downloading${count} · ${percent}%` }
   }
   const has = (phase: DownloadPhase) => entries.filter((entry) => entry.phase === phase).length
@@ -188,7 +268,8 @@ export function summarizeDownloads(entries: readonly DownloadEntry[]): Downloads
   const failed = has('failed')
   if (failed) return { status: 'failed', active: 0, label: failed > 1 ? `${failed} downloads failed` : 'Download failed' }
   if (has('ready')) return { status: 'ready', active: 0, label: 'Restart to update' }
-  if (has('available')) return { status: 'available', active: 0, label: 'Update available' }
+  const available = has('available')
+  if (available) return { status: 'available', active: 0, label: available > 1 ? `${available} updates available` : 'Update available' }
   if (has('done')) return { status: 'done', active: 0, label: 'Downloaded' }
   return { status: 'idle', active: 0, label: '' }
 }
@@ -204,6 +285,8 @@ interface DownloadsState {
 export const useDownloadsStore = create<DownloadsState>(() => ({ entries: [], pinned: false }))
 
 let pruneTimer: ReturnType<typeof setTimeout> | undefined
+/** The agent updates last offered; a finished row that clears is offered again from these. */
+let lastOffers: readonly ProviderUpdateOffer[] = []
 
 /** Clears finished entries once they have lingered, unless the popover holds them. */
 function schedulePrune(): void {
@@ -215,7 +298,7 @@ function schedulePrune(): void {
   const due = Math.min(...settled.map((entry) => (entry.settledAt as number) + DOWNLOAD_LINGER_MS))
   pruneTimer = setTimeout(() => {
     pruneTimer = undefined
-    useDownloadsStore.setState((state) => ({ entries: pruneSettled(state.entries, Date.now()) }))
+    useDownloadsStore.setState((state) => ({ entries: applyProviderOffers(pruneSettled(state.entries, Date.now()), lastOffers) }))
     schedulePrune()
   }, Math.max(0, due - Date.now()))
 }
@@ -252,6 +335,77 @@ const agentLabel = (instanceId: string): string =>
 /** Feeds a provider operation event into the store (also used by tests). */
 export function receiveProviderOperation(event: ProviderOperationEvent): void {
   setEntries((entries) => applyProviderOperation(entries, event, agentLabel(event.instanceId), Date.now()))
+  if (event.phase === 'completed' || event.phase === 'failed' || event.phase === 'cancelled') settleOperation(event.operationId)
+}
+
+/** Feeds this computer's agent update offers into the store (also used by tests). */
+export function receiveProviderOffers(offers: readonly ProviderUpdateOffer[]): void {
+  lastOffers = offers
+  setEntries((entries) => applyProviderOffers(entries, offers))
+}
+
+// ---------- Agent updates, one at a time ----------
+
+/** An update by a package manager can take minutes; past this the next one starts anyway. */
+const OPERATION_WAIT_MS = 11 * 60_000
+const operationWaiters = new Map<string, () => void>()
+/** Operations that ended before their caller started waiting (a quick failure). */
+const settledOperations = new Set<string>()
+
+function settleOperation(operationId: string): void {
+  const waiter = operationWaiters.get(operationId)
+  if (waiter) waiter()
+  else {
+    settledOperations.add(operationId)
+    if (settledOperations.size > 50) settledOperations.delete(settledOperations.values().next().value as string)
+  }
+}
+
+function waitForOperation(operationId: string): Promise<void> {
+  if (settledOperations.delete(operationId)) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer)
+      operationWaiters.delete(operationId)
+      resolve()
+    }
+    const timer = setTimeout(done, OPERATION_WAIT_MS)
+    operationWaiters.set(operationId, done)
+  })
+}
+
+function setAgentEntry(instanceId: string, patch: Partial<DownloadEntry>): void {
+  setEntries((entries) => {
+    const current = entries.find((entry) => entry.id === agentId(instanceId))
+    return current ? replace(entries, { ...current, ...patch }) : entries.slice()
+  })
+}
+
+/** Runs one agent CLI's update and waits until it ends; a refused request fails its row. */
+async function runAgentUpdate(instanceId: string): Promise<void> {
+  try {
+    const started = await window.mousse.providers.instances.update(instanceId)
+    await waitForOperation(started.operationId)
+  } catch (cause) {
+    setAgentEntry(instanceId, { phase: 'failed', error: ipcErrorLine(cause) || 'The update could not start.', settledAt: undefined })
+  }
+}
+
+let agentQueue: Promise<void> = Promise.resolve()
+
+/** Queues agent updates to run one after another: two package managers never write at once. */
+function queueAgentUpdates(instanceIds: readonly string[]): Promise<void> {
+  for (const instanceId of instanceIds) setAgentEntry(instanceId, { phase: 'queued', error: undefined, settledAt: undefined })
+  agentQueue = agentQueue.then(async () => {
+    for (const instanceId of instanceIds) await runAgentUpdate(instanceId)
+  })
+  return agentQueue
+}
+
+/** Rows "Update all" runs: offered or failed agent updates Mousse can run itself. */
+export function updatableAgents(entries: readonly DownloadEntry[]): DownloadEntry[] {
+  return entries.filter((entry) => entry.kind === 'agent' && entry.offer && !entry.offer.manual &&
+    (entry.phase === 'available' || ((entry.phase === 'failed' || entry.phase === 'cancelled') && entry.operation === 'update')))
 }
 
 export function receiveUpdateState(state: UpdateState): void {
@@ -268,6 +422,8 @@ export function subscribeToDownloads(): void {
   receiveUpdateState(useUpdateStore.getState())
   useUpdateStore.subscribe((state) => receiveUpdateState(state))
   window.mousse.providers?.onOperation?.((event) => receiveProviderOperation(event))
+  // Only this computer's agents: remote computers keep their own.
+  if (window.mousse.providers) watchDeviceSnapshots((snapshots) => receiveProviderOffers(providerUpdateOffers(snapshots)))
   for (const kind of Object.keys(MODEL_SOURCES) as LocalModelKind[]) {
     const ipc = MODEL_SOURCES[kind].ipc()
     if (!ipc) continue
@@ -303,6 +459,10 @@ export const downloadsActions = {
       void updateActions.download()
       return
     }
+    if (entry.kind === 'agent' && entry.operation === 'update') {
+      void queueAgentUpdates([agentInstanceId(entry)])
+      return
+    }
     if (entry.kind === 'agent') {
       void window.mousse.providers.instances.install(agentInstanceId(entry)).catch((cause: unknown) => {
         setEntries((entries) => replace(entries, { ...entry, phase: 'failed', error: cause instanceof Error ? cause.message : String(cause) }))
@@ -314,6 +474,16 @@ export const downloadsActions = {
       receiveLocalModelStatus(kind, { modelId: entry.sourceId, state: { status: 'error', message: cause instanceof Error ? cause.message : String(cause) } })
     })
   },
+  /** Updates one agent CLI the way it was installed; it applies to runs that start afterwards. */
+  updateAgent(entry: DownloadEntry): Promise<void> {
+    return queueAgentUpdates([agentInstanceId(entry)])
+  },
+  /** The app update starts downloading (its restart stays the user's), and every agent CLI updates in turn. */
+  updateAll(): Promise<void> {
+    if (useUpdateStore.getState().phase === 'available') void updateActions.download()
+    const agents = updatableAgents(useDownloadsStore.getState().entries)
+    return agents.length ? queueAgentUpdates(agents.map(agentInstanceId)) : Promise.resolve()
+  },
   dismiss(id: string): void {
     if (id === 'update') return
     setEntries((entries) => without(entries, id))
@@ -322,7 +492,7 @@ export const downloadsActions = {
   setPinned(pinned: boolean): void {
     useDownloadsStore.setState((state) => ({
       pinned,
-      entries: pinned ? state.entries : state.entries.filter((entry) => !isSettled(entry))
+      entries: pinned ? state.entries : applyProviderOffers(state.entries.filter((entry) => !isSettled(entry)), lastOffers)
     }))
     schedulePrune()
   }
@@ -330,6 +500,10 @@ export const downloadsActions = {
 
 /** Test hook: empties the store and stops the linger timer. */
 export function resetDownloadsStore(): void {
+  agentQueue = Promise.resolve()
+  lastOffers = []
+  operationWaiters.clear()
+  settledOperations.clear()
   if (pruneTimer !== undefined) clearTimeout(pruneTimer)
   pruneTimer = undefined
   useDownloadsStore.setState({ entries: [], pinned: false }, true)

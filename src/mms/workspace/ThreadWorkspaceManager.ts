@@ -246,6 +246,19 @@ export function isProjectFolderWorkspace(metadata: Pick<ThreadWorkspaceMetadata,
   return metadata?.kind === 'project-folder'
 }
 
+/** A thread's workspace record (see `ThreadWorkspaceManager.workspacePath`), read without anything else; undefined when absent or unreadable. */
+export function readThreadWorkspaceRecord(threadDirectory: string): ThreadWorkspaceMetadata | undefined {
+  try {
+    const folder = join(threadDirectory, PROJECT_FOLDER_RECORD)
+    const path = existsSync(folder) ? folder : join(threadDirectory, 'workspace.json')
+    if (!existsSync(path)) return undefined
+    const value = JSON.parse(readFileSync(path, 'utf8')) as ThreadWorkspaceMetadata
+    return value && typeof value.worktreePath === 'string' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export class ThreadWorkspaceManager {
   readonly journal: ThreadJournal
   /**
@@ -706,6 +719,15 @@ export class ThreadWorkspaceManager {
       console.warn('the moved repository could not be recorded', { threadId: metadata.threadId, error: error instanceof Error ? error.message : String(error) })
     }
     return rebound
+  }
+
+  /**
+   * Whether an operation of Mousse's own on the worktree did not finish: one its journal still waits on, a rebuild that
+   * stopped, or a retirement that left the folder partly removed. A worktree that is gone or that Git cannot read
+   * without any of these was removed or emptied by someone else (the agent, the person), and nothing waits to recover it.
+   */
+  async ownOperationUnfinished(metadata: ThreadWorkspaceMetadata, inFlight?: InFlightTest): Promise<boolean> {
+    return this.hasPendingOperation(inFlight) || this.rebuildUnfinished(metadata) || await this.partlyRemoved(metadata)
   }
 
   /** Whether the worktree's record has a rebuild that did not finish: the folder at its path is then not the worktree. */

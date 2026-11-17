@@ -1,0 +1,63 @@
+/*
+ * A link to a Mousse thread, drawn as text in the sentence: a small icon, then the title at the surrounding weight.
+ * A live thread reads in the accent, an archived or unreachable one in secondary text; the icon's colour carries the
+ * status, and the tooltip names it. Hover tints the link faintly.
+ */
+
+.thread-chip {
+  padding: 0 3px;
+  margin: 0 -3px;
+  border-radius: 5px;
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.thread-chip:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.thread-chip:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.thread-chip-icon {
+  display: inline-block;
+  margin-right: 3px;
+  vertical-align: -0.1em;
+  color: var(--accent);
+}
+
+.thread-chip[data-status='approval'] .thread-chip-icon,
+.thread-chip[data-status='question'] .thread-chip-icon,
+.thread-chip[data-status='paused'] .thread-chip-icon {
+  color: var(--warning);
+}
+
+.thread-chip[data-status='done'] .thread-chip-icon {
+  color: var(--success);
+}
+
+/* Archived, deleted, or on a computer that is not connected or not sharing: secondary text, and a quiet icon. */
+.thread-chip[data-status='archived'],
+.thread-chip[data-state='missing'],
+.thread-chip[data-state='offline'],
+.thread-chip[data-state='not-shared'] {
+  color: var(--text-secondary);
+}
+
+.thread-chip[data-status='archived'] .thread-chip-icon,
+.thread-chip[data-state='missing'] .thread-chip-icon {
+  color: color-mix(in srgb, var(--text-secondary) 80%, transparent);
+}
+
+.thread-chip[data-state='offline'] .thread-chip-icon,
+.thread-chip[data-state='not-shared'] .thread-chip-icon {
+  color: var(--warning);
+}
+
+.thread-chip[data-state='missing'] .thread-chip-title {
+  text-decoration: line-through;
+}

@@ -294,6 +294,7 @@ export const ToolGroup = memo(function ToolGroup({
                 icon={nestedMeta.icon}
                 title={nestedMeta.title(derivedPart)}
                 subtitle={nestedMeta.subtitle?.(derivedPart)}
+                detailTitle={nestedMeta.detailTitle?.(derivedPart)}
                 isPending={nestedIsPending}
                 isError={nestedIsError}
               />

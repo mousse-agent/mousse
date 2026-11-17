@@ -3,6 +3,7 @@ import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../../.
 import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import {
   BROWSER_READ_TOOLS,
+  browserToolEffect,
   dispatchBrowserTool,
   getBrowserToolDefinitions,
   resolveTrustedBrowserTarget
@@ -53,6 +54,8 @@ export function browserTools(host: AppToolHost): MousseTool[] {
       definition: (turn) => definitions(turn).find((tool) => tool.name === name) ?? listed,
       access: 'actsAsCaller',
       class: BROWSER_READ_TOOLS.has(name as BrowserAutomationTool) ? 'read' : 'mutation',
+      // `browser.read` observes; `browser.act` opens, acts and changes tabs (listing them only reads).
+      browserRight: (args) => browserToolEffect(name as BrowserAutomationTool, args) === 'read' ? 'browser.read' : 'browser.act',
       listed: () => Boolean(host.browserRuntime?.()),
       available: (turn) => {
         const runtime = runtimeFor(host, turn)
@@ -61,6 +64,10 @@ export function browserTools(host: AppToolHost): MousseTool[] {
             ? 'Browser tools are not bound for this turn. Root must supply a trusted execution context.'
             : 'Browser runtime is not bound. Call setBrowserRuntime before dispatching browser tools.'
         if (!turn.trusted && !turn.settingsEnabled(name)) return disabledInSettings(name)
+        // A screenshot cannot reach a model without image input: the turn does not hold it, so neither the turn's
+        // "usable now" line nor a call offers it.
+        if (name === 'browser_screenshot' && !turn.browser.vision)
+          return 'Browser screenshots require a model with image input support. Use browser_observe or browser_find instead.'
         return true
       },
       offered: (turn) => Boolean(turn.browser) && turn.settingsEnabled(name) &&
@@ -90,6 +97,8 @@ export function browserTools(host: AppToolHost): MousseTool[] {
         return {
           text: result.text,
           isError: result.isError,
+          // What the browser reported once it acted is its output, not a refusal.
+          ...(result.isError && result.dispatched ? { ran: true } : {}),
           ...(result.image && binding.vision ? { images: [{ data: result.image.data, mimeType: result.image.mimeType }] } : {})
         }
       }

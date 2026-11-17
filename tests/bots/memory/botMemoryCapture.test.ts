@@ -1,4 +1,8 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { createBotMemoryAdmin } from '../../../src/mms/bots/memory/admin'
 import { BotJournalError, BotMemoryStore } from '../../../src/mms/bots/memory/BotMemoryStore'
 import { botThreadsForCatchUp, createBotJournal, type BotThreadRef } from '../../../src/mms/bots/memory/capture'
 import type { ChatMessage } from '../../../src/shared/types'
@@ -110,6 +114,7 @@ describe('syncThread', () => {
     const fx = memoryFixture()
     const full = new BotMemoryStore({
       db: {
+        database: fx.db.database,
         inTransaction: false,
         transaction: (work) => fx.db.transaction(work),
         statement: (sql) => {
@@ -204,6 +209,7 @@ describe('review round 2', () => {
     const fx = memoryFixture()
     const full = new BotMemoryStore({
       db: {
+        database: fx.db.database,
         inTransaction: false,
         transaction: (work) => fx.db.transaction(work),
         statement: (sql) => {
@@ -243,4 +249,93 @@ describe('review round 2', () => {
       { botId: 'ada', threadId: 'run-1', lane: 'run', activationId: 'act-1' }
     ])
   })
+})
+
+describe('a subagent of the bot\'s work', () => {
+  // Its thread is copied like any bot thread, but as its own rows: what it said is data it returned to the work, from
+  // outside, never the bot's words to its owner; memory search, the run brief and an export show it so.
+  it('its rows are marked as a subagent\'s, and search and the export show them so; the work\'s own words stay the bot\'s', async () => {
+    const fx = memoryFixture()
+    const t = threads()
+    const journal = createBotJournal({ store: fx.store, readThread: t.readThread, listThreads: () => [], isSubagentThread: (threadId) => threadId === 'sub-1' })
+    t.data.set('sub-1', [
+      user('u1', 'Find the prices.'),
+      toolCall('c1', 'web_search', { query: 'prices' }, 'Shop A 199', 'complete', 1),
+      assistant('a1', 'Prices: 199 and 249.', 2)
+    ])
+    t.data.set('run-1', [assistant('a2', 'The prices are 199 and 249.', 3)])
+    await journal.syncThread({ botId: 'ada', threadId: 'sub-1', lane: 'run', activationId: 'act-1' })
+    await journal.syncThread({ botId: 'ada', threadId: 'run-1', lane: 'run', activationId: 'act-1' })
+    expect(kinds(fx)).toEqual([
+      ['notice', 'mousse', '[subagent] Find the prices.'],
+      ['tool_call', 'tool', '[subagent] web_search {"query":"prices"}'],
+      ['tool_result', 'tool', '[subagent] Shop A 199'],
+      ['tool_result', 'tool', '[subagent] Prices: 199 and 249.'],
+      // The control: the work's own words are the bot's.
+      ['bot_msg', 'bot', 'The prices are 199 and 249.']
+    ])
+    const hits = fx.store.search('ada', { query: '249' })
+    expect(hits.map((hit) => [hit.kind, hit.who])).toEqual(expect.arrayContaining([['tool_result', 'tool'], ['bot_msg', 'bot']]))
+    expect(hits.filter((hit) => hit.who === 'bot').every((hit) => !hit.snippet.includes('Prices:'))).toBe(true)
+    // The export: journal.jsonl keeps them, each marked.
+    const dir = mkdtempSync(join(tmpdir(), 'bot-export-'))
+    try {
+      const { files } = await createBotMemoryAdmin({ store: fx.store }).export('ada', dir)
+      const rows = readFileSync(files.find((file) => file.endsWith('journal.jsonl'))!, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { text: string; who: string; json: Record<string, unknown> | null })
+      const marked = rows.filter((row) => row.text.startsWith('[subagent] '))
+      expect(marked).toHaveLength(4)
+      for (const row of marked) expect(row).toMatchObject({ who: expect.not.stringMatching(/^bot$/), json: expect.objectContaining({ subagent: true }) })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a thread it can\'t tell apart waits for the next copy rather than being copied as the bot\'s words', async () => {
+    const fx = memoryFixture()
+    const t = threads()
+    const journal = createBotJournal({ store: fx.store, readThread: t.readThread, listThreads: () => [], isSubagentThread: () => { throw new Error('bots.db busy') }, log: () => {} })
+    t.data.set('sub-1', [assistant('a1', 'Prices: 199.', 1)])
+    await journal.syncThread({ botId: 'ada', threadId: 'sub-1', lane: 'run', activationId: 'act-1' })
+    expect(kinds(fx)).toEqual([])
+  })
+})
+
+describe('scheduled progress and Forget', () => {
+  it.each(['citation', 'copied text'])('capture and older progress rows cannot retain a forgotten %s', async (kind) => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    const text = 'Waiting for the clinic about "the diagnosis"\nand the next appointment.'
+    const seq = fx.message({ botId: 'ada', id: 'owner', author: 'owner', text })
+    const note = kind === 'citation' ? `Waiting for the clinic (j${seq}).` : text
+    t.data.set('run', [toolCall('report', 'mcp__mousse__run_report', { level: 'quiet', summary: 'Nothing new.', leftOff: note })])
+    await journal.syncThread({ botId: 'ada', threadId: 'run', lane: 'run', activationId: 'a1' })
+    const call = fx.store.journal('ada').find((row) => row.kind === 'tool_call')!
+    expect(JSON.stringify(call)).not.toContain('leftOff')
+    expect(call.text).not.toContain('clinic')
+    fx.store.saveProgress('ada', 's1', 'a1', note)
+    fx.store.saveProgress('ada', 's1', 'a2', note + ' Still pending.')
+    fx.store.saveProgress('ada', 's2', 'b1', 'Unrelated task is pending.')
+    fx.store.forget('ada', { refs: [`j${seq}`], by: 'owner_ui' })
+    expect(fx.store.progress('ada', 's1')).toBeUndefined()
+    expect(fx.store.search('ada', { query: 'clinic' })).toEqual([])
+    expect(fx.store.journal('ada').filter((row) => row.json?.op === 'progress' && row.json?.scheduleId === 's1' && !row.redactedAt)).toEqual([])
+    expect(fx.store.progress('ada', 's2')).toBe('Unrelated task is pending.')
+  })
+})
+
+it('capture ignores system packs and compaction or handoff metadata', async () => {
+  const fx = memoryFixture()
+  const { t, journal } = setup(fx)
+  const pack = '<bot_memory>Where I left off: waiting for the clinic.</bot_memory>'
+  // Hand-authored transcript boundary cases. Runtime native context is separate from messages.
+  t.data.set('run', [
+    { id: 'system-pack', role: 'system', content: pack, timestamp: at(0) },
+    { id: 'compaction', role: 'assistant', kind: 'context_compaction', content: pack, timestamp: at(1) },
+    { id: 'handoff', role: 'assistant', kind: 'context_handoff', content: pack, timestamp: at(2) },
+    user('request', 'Check inbox.'),
+    assistant('reply', 'Nothing new.')
+  ])
+  await journal.syncThread({ botId: 'ada', threadId: 'run', lane: 'run', activationId: 'a1' })
+  expect(fx.store.journal('ada').map((row) => row.text)).toEqual(['Check inbox.', 'Nothing new.'])
+  expect(fx.store.search('ada', { query: 'clinic' })).toEqual([])
 })

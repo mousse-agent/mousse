@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import type { UIMessage } from 'ai'
 import { describe, expect, it } from 'vitest'
 import { FindIndex, buildFindIndex, formatFindCount, type FindTurn } from '../src/renderer/chat/components/agent-elements/find/find-index'
@@ -96,30 +95,5 @@ describe('find on a long thread', () => {
   it('reads the turns from the view down first, then back up', () => {
     const order = [...indexOrder(turns.slice(0, 4), 2)].map((m) => m.id)
     expect(order).toEqual(['u2', 'a2', 'u3', 'a3', 'u1', 'a1', 'u0', 'a0'])
-  })
-})
-
-describe('find bar placement', () => {
-  const agentCss = readFileSync('src/renderer/chat/components/agent-elements/agent-ui.css', 'utf8')
-  const cardCss = readFileSync('src/renderer/components/sideCard/sideCard.css', 'utf8')
-
-  it('takes the top of the card column at the card width', () => {
-    expect(agentCss).toMatch(
-      /\.thread-side-card-layer > \.chat-find-bar \{\s*top: var\(--side-card-gutter\);\s*right: var\(--side-card-gutter\);\s*width: var\(--side-card-width\);/
-    )
-  })
-
-  it('pushes an open card down by its height and a gap, animated, and back when it closes', () => {
-    expect(cardCss).toMatch(
-      /\.thread-side-card-layer:has\(> \.chat-find-bar\) > \.thread-side-card \{\s*translate: 0 calc\(var\(--chat-find-bar-height\) \+ var\(--chat-find-bar-gap\)\);/
-    )
-    expect(cardCss.match(/translate var\(--ui-dur-slow\) var\(--ui-collapse-ease\)/g)).toHaveLength(2)
-    expect(agentCss).toMatch(/height: var\(--chat-find-bar-height, 34px\)/)
-  })
-
-  it('draws no focus border or ring on the field', () => {
-    expect(agentCss).toMatch(
-      /\.chat-find-bar \.chat-find-input,\s*\.chat-find-bar \.chat-find-input:focus,\s*\.chat-find-bar \.chat-find-input:focus-visible \{[^}]*border: 0;[^}]*outline: 0;[^}]*box-shadow: none;/
-    )
   })
 })

@@ -11,6 +11,10 @@ import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptR
  */
 export const CURSOR_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
+  // Cursor reports a tool when it starts. Its gaps were never measured (it needs an account), so a held steer waits
+  // for the run to end, or Send now (strict release).
+  steerBoundary: 'start',
+  steerSettleMs: null,
   interrupt: true,
   rollback: 'none',
   fork: 'portable',
@@ -72,10 +76,24 @@ export class CursorAdapter implements ProviderAdapter {
       // SPEC §15.2: the Mousse MCP server over HTTP, and the shared guidance in the first prompt.
       mcp: host.bridge?.mcp ?? null,
       ...(host.bridge?.sessionInstructions ? { orchestrationInstructions: host.bridge.sessionInstructions } : {}),
+      ...(host.bot ? { bot: true as const } : {}),
       drainSteer: () => ctl.drainSteer(),
-      onSteer: (steer) => {
+      // Per drain, with its token (docs/design/steer-and-interruptions.md §2.6, §2.7): read only once the run that
+      // carries it started, handed back otherwise.
+      ...(ctl.drainSteerEntry ? { drainSteerEntry: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => ctl.drainSteerEntry!(opts) } : {}),
+      // The hold: offered only for a turn on it.
+      ...(ctl.peekSteer ? { peekSteer: () => ctl.peekSteer!() } : {}),
+      ...(ctl.mayCut ? { mayCut: (token: string) => ctl.mayCut!(token) } : {}),
+      steerTaken: (token) => ctl.steerTaken?.(token),
+      returnSteer: (text, token) => ctl.returnSteer?.(text, token),
+      onBoundary: () => sink.boundary?.(),
+      onProviderTurn: () => sink.providerTurn?.(),
+      onSteer: (steer, token) => {
         progress()
-        sink.steerAccepted(steer)
+        // The reply goes on below the steered message: what it wrote before keeps its row, above it.
+        streams.thinking.break()
+        streams.text.break()
+        sink.steerAccepted(steer, token)
       },
       onText: (content) => {
         progress()

@@ -70,7 +70,7 @@ function ToneIcon({ tone }: { tone: ComposerNoticeTone }) {
 /** One notice: tone icon, one line, its actions, then jump and dismiss icons. */
 export function ComposerNotice({ tone, title, shortTitle, detail, tooltip, icon, actions = [], onJump, jumpLabel = 'Show', onDismiss, label, priority }: ComposerNoticeProps) {
   return (
-    <div className="composer-notice" data-tone={tone} data-priority={priority} role="group" aria-label={label ?? title}>
+    <div className="composer-notice" data-tone={tone} data-priority={priority} data-mousse-decision={priority === 'approval' ? '' : undefined} role="group" aria-label={label ?? title}>
       <span className="composer-notice-icon">{icon ?? <ToneIcon tone={tone} />}</span>
       <span className="composer-notice-text" role={tone === 'error' ? 'alert' : 'status'} title={tooltip ?? (detail ? `${title}: ${detail}` : title)}>
         <span className="composer-notice-title">

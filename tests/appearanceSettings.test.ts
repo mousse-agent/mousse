@@ -36,6 +36,14 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ renderMath: 'no' as never }).renderMath).toBe(true)
   })
 
+  it('shows replies a paragraph at a time by default and keeps an explicit choice', () => {
+    expect(getDefaultSettings().appearance.replyPacing).toBe(true)
+    // Settings saved before the option existed read as on.
+    expect(normalizeAppearance({}).replyPacing).toBe(true)
+    expect(normalizeAppearance({ replyPacing: false }).replyPacing).toBe(false)
+    expect(normalizeAppearance({ replyPacing: 'no' as never }).replyPacing).toBe(true)
+  })
+
   it('shows a summary line of changed files by default and keeps an explicit choice', () => {
     expect(getDefaultSettings().appearance.turnChangedFiles).toBe('summary')
     // Settings saved before the option existed read as the default; nothing is migrated.
@@ -45,10 +53,25 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ turnChangedFiles: 'cards' as never }).turnChangedFiles).toBe('summary')
   })
 
-  it('tints threads with project colors by default and keeps an explicit choice', () => {
-    expect(getDefaultSettings().appearance.threadProjectColors).toBe(true)
-    expect(normalizeAppearance({}).threadProjectColors).toBe(true)
-    expect(normalizeAppearance({ threadProjectColors: false }).threadProjectColors).toBe(false)
+  it('keeps the chat at normal width by default and keeps an explicit choice', () => {
+    expect(getDefaultSettings().appearance.chatWidth).toBe('normal')
+    // Settings saved before the option existed read as the default.
+    expect(normalizeAppearance({}).chatWidth).toBe('normal')
+    expect(normalizeAppearance({ chatWidth: 'wide' }).chatWidth).toBe('wide')
+    expect(normalizeAppearance({ chatWidth: 'full' }).chatWidth).toBe('full')
+    expect(normalizeAppearance({ chatWidth: 'huge' as never }).chatWidth).toBe('normal')
+  })
+
+  it.each([
+    [undefined, 'fill'], [true, 'fill'], [false, 'off'],
+    ['off', 'off'], ['outline', 'outline'], ['fill', 'fill'], ['gradient', 'gradient'],
+    ['unknown', 'fill'], [null, 'fill']
+  ])('normalizes project color style %s to %s', (value, expected) => {
+    expect(normalizeAppearance({ threadProjectColors: value } as never).threadProjectColors).toBe(expected)
+  })
+
+  it.each([[false, false], [true, true], [undefined, true], ['off', true]])('keeps reply previews %s as %s', (value, expected) => {
+    expect(normalizeAppearance({ replyPreviews: value } as never).replyPreviews).toBe(expected)
   })
 
   it('migrates legacy acrylic theme ids', () => {
@@ -58,15 +81,22 @@ describe('appearance settings', () => {
       acrylic: true,
       acrylicIntensity: 55,
       renderMath: true,
+      replyPacing: true,
       interfaceFont: { source: 'default' },
       codeFont: { source: 'default' },
-      threadProjectColors: true,
+      threadProjectColors: 'fill',
+      replyPreviews: true,
+      threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
+      chatWidth: 'normal',
       frostedComposer: false,
       frostedComposerOpacity: 60,
       frostedComposerBlur: 16,
-      frostedComposerSaturation: 1.12
+      frostedComposerSaturation: 1.12,
+      contextRingInComposer: false,
+      userThemes: [],
+      userTheme: ''
     })
     expect(normalizeAppearance({ theme: 'dark-acrylic' as never, accentColor: '#5b8def' })).toMatchObject({
       theme: 'dark',

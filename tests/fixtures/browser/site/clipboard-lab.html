@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Clipboard lab</title>
+  <style>
+    body { margin: 0; font: 16px sans-serif; }
+    .at { position: absolute; box-sizing: border-box; }
+    #words { left: 40px; top: 30px; width: 600px; margin: 0; font: 20px sans-serif; }
+    #write { left: 40px; top: 100px; width: 200px; height: 36px; }
+    #exec { left: 260px; top: 100px; width: 200px; height: 36px; }
+    #field { left: 40px; top: 160px; width: 300px; height: 36px; font: 16px sans-serif; }
+    #out { left: 40px; top: 230px; width: 640px; margin: 0; font: 13px monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <!-- A page that tries to use the clipboard on its own, for the tests of a person's copy in a bot's browser. -->
+  <p id="words" class="at">Copy <b>these bold</b> words</p>
+  <button id="write" class="at">writeText</button>
+  <button id="exec" class="at">execCommand</button>
+  <input id="field" class="at" value="cut me" autocomplete="off">
+  <pre id="out" class="at"></pre>
+  <script>
+    const out = document.getElementById('out')
+    // Written down in the page and in its title (which an observation always reads whole).
+    const note = (line) => { out.textContent += line + '\n'; document.title = 'Clipboard lab ' + out.textContent.trim().split('\n').join(' ') }
+    // The page's own copy handler would put its own words (and HTML) on the clipboard.
+    document.addEventListener('copy', (event) => {
+      note('copy-event')
+      event.clipboardData.setData('text/plain', 'page hijack text')
+      event.clipboardData.setData('text/html', '<b>page hijack html</b>')
+      event.preventDefault()
+    })
+    document.getElementById('write').addEventListener('click', () => {
+      navigator.clipboard.writeText('page wrote this').then(() => note('writeText:ok'), (error) => note('writeText:' + error.name))
+    })
+    document.getElementById('exec').addEventListener('click', () => {
+      const area = document.createElement('textarea')
+      area.value = 'page exec copy'
+      document.body.appendChild(area)
+      area.select()
+      note('exec:' + document.execCommand('copy'))
+      area.remove()
+    })
+    const field = document.getElementById('field')
+    field.addEventListener('input', () => note('field:' + field.value))
+  </script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Moving</title>
+  <style>
+    body { margin: 0; font: 32px sans-serif; }
+    #box { position: absolute; top: 120px; left: 0; width: 120px; height: 120px; background: #c33; }
+  </style>
+</head>
+<body>
+  <!-- Changes every 30 ms (until ?stopAfter=ms), and says whether the tab is the one Chromium paints. -->
+  <p id="state">tab:<span id="vis"></span> ticks:<span id="ticks">0</span></p>
+  <div id="box"></div>
+  <script>
+    const stopAfter = Number(new URLSearchParams(location.search).get('stopAfter') || 0)
+    const started = Date.now()
+    let ticks = 0
+    const timer = setInterval(() => {
+      if (stopAfter && Date.now() - started > stopAfter) { clearInterval(timer); return }
+      ticks += 1
+      document.getElementById('ticks').textContent = String(ticks)
+      document.getElementById('box').style.left = ((ticks * 7) % 800) + 'px'
+    }, 30)
+    const show = () => { document.getElementById('vis').textContent = document.visibilityState }
+    show()
+    document.addEventListener('visibilitychange', show)
+  </script>
+</body>
+</html>

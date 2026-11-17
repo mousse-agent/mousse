@@ -14,7 +14,9 @@ import type { EffectStatus, RunStatus, ToolInvocationStatus } from '../../src/mm
  * throwing at `transaction.beforeCommit` of one step (that step rolls back, nothing after it
  * runs), the database is reopened by a new daemon, and `reconcileOnBoot()` + `runOnce()` must
  * leave exactly the states in the table. `enqueue-claimed-not-started` is a plain crash after the
- * claim of a `turn.start` that stored its send: rule 5 enqueues it again.
+ * claim of a `turn.start` that stored its send: the turn was being set up and never reached its provider, so boot
+ * ends it `interrupted` and nothing sends it again. A `turn.start` that stored its send and was never claimed
+ * (the claim's kill) is still restarted by rule 5.
  */
 const STEPS = [
   'send', // run.created
@@ -39,14 +41,17 @@ interface Expected {
   boot: 'none' | 'interrupted' | 'uncertain'
   /** Rule 5 on the stranded queued run (its dead effect stored no send, or one). */
   queued?: 'cancelled' | 'restarted'
+  /** The `turn.start` stores its send (implied by `queued: 'restarted'`). */
+  send?: boolean
 }
 
 const MATRIX: Expected[] = [
   { killAt: 'send', tool: 'bash', run: null, effect: null, invocation: null, boot: 'none' },
   { killAt: 'enqueue', tool: 'bash', run: 'queued', effect: null, invocation: null, boot: 'none' },
   { killAt: 'claim', tool: 'bash', run: 'cancelled', effect: 'cancelled', invocation: null, boot: 'none', queued: 'cancelled' },
+  { killAt: 'claim', tool: 'bash', run: 'queued', effect: 'cancelled', invocation: null, boot: 'none', queued: 'restarted' },
   { killAt: 'starting', tool: 'bash', run: 'cancelled', effect: 'cancelled', invocation: null, boot: 'none', queued: 'cancelled' },
-  { killAt: 'enqueue-claimed-not-started', tool: 'bash', run: 'queued', effect: 'cancelled', invocation: null, boot: 'none', queued: 'restarted' },
+  { killAt: 'enqueue-claimed-not-started', tool: 'bash', run: 'interrupted', effect: 'cancelled', invocation: null, boot: 'interrupted', send: true },
   { killAt: 'running', tool: 'bash', run: 'interrupted', effect: 'cancelled', invocation: null, boot: 'interrupted' },
   { killAt: 'tool.start', tool: 'bash', run: 'interrupted', effect: 'cancelled', invocation: null, boot: 'interrupted' },
   { killAt: 'tool.commit', tool: 'bash', run: 'uncertain', effect: 'cancelled', invocation: 'outcome_unknown', boot: 'uncertain' },
@@ -104,7 +109,7 @@ describe('run engine durability matrix', () => {
           threadId: THREAD,
           runId: RUN_ID,
           kind: 'turn.start',
-          ...(row.queued === 'restarted' ? { payload: SEND } : {})
+          ...(row.queued === 'restarted' || row.send ? { payload: SEND } : {})
         }),
       claim: () => {
         if (!engine.outbox.claimNext(engine.leaseOwner, now())) throw new Error('nothing to claim')

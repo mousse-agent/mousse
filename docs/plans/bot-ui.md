@@ -30,7 +30,7 @@ Every later decision in this plan follows these five rules.
 
 1. **One place.** Bots live in the Agents tab (called Chats until early November 2026), in the section now called Roster, renamed **Bots**. No new page, tab or rail icon.
 2. **Little to fill in.** A look (a clay mouse in a colour with one accessory, already picked for you), an optional name and one sentence. Without a name, the bot names itself.
-3. **No model anywhere.** Not in the dialog, not in the composer, not in the header, not in About. Mousse picks it.
+3. **No model anywhere.** Not in the dialog, not in the composer, not in the header, not in About. Mousse picks it. *(Changed by #673: Runs on, in About and New bot, picks models by hand; see §4.7.)*
 4. **Everything else by asking.** What it does, when it runs, what it may use, its name: the user says it in the chat, and the bot confirms in plain words with one chip.
 5. **One menu, one panel.** The bot's ⋯ menu (About this bot, Rename, Change look, Pause, Delete) and the About panel are the only extra surfaces.
 
@@ -128,14 +128,15 @@ Checked open PRs, issues created since 3 Nov, and PRs merged since 4 Nov (5 Nov 
 
 ### 4.2 New bot (mockup 02)
 
-One small dialog in the Chats dialog style (`chat-dialog`):
+One small dialog in the Chats dialog style (`chat-dialog`), in three short steps shown with the same numbered step bar as Add provider (`ui/WizardSteps`). All of it on one screen was too much at once.
 
-1. **Pick a look.** The dialog opens with one already picked: a colour and accessory the owner's other bots don't use yet (§4.3). A large live preview sits on the left. On the right are the eight colours and the 12 accessories, each accessory shown on the mouse. **Shuffle** under the preview picks both. Most owners will not touch any of it.
-2. **Name.** One line, optional. The placeholder says "Optional. Leave it empty and the bot names itself."
-3. **What should it do?** One text box. The placeholder gives an example: "every morning, tell me which emails need a reply."
-4. **Create bot.** It is enabled once the sentence is written.
+1. **Look.** The dialog opens with one already picked: a colour and accessory the owner's other bots don't use yet (§4.3), so Next works at once. A large live preview sits on the left with **Shuffle** and the character under it. On the right are the eight colours, the eye shapes and the 12 accessories, each shown on the chosen character. Most owners will not touch any of it.
+2. **What it does.** **Name**: one line, optional; the placeholder says "Optional. Leave it empty and the bot names itself." **What should it do?**: one text box; the placeholder gives an example, "every morning, tell me which emails need a reply." Next waits for the sentence.
+3. **Runs on.** This computer, then a model for Talk and for Work (Light, Medium and Hard work under Advanced), each picked in the app's model picker (#673). **Create bot** is here, and stays off until every row has a model. The first bot's rows start empty; later ones start from the owner's last bot's picks. An older service without `bots.model.choices` has no Runs on step, so Create bot is on step 2.
 
-If the name is left empty, the bot names itself from the sentence ("Inbox helper"). Either way it can be renamed from its menu or by asking. There are no model, permission, schedule or device fields.
+Back and Next move between the steps; a finished step in the bar can be clicked to return to it. Every step has the same height, so the dialog and its buttons never move. Enter in the name moves on, Cmd/Ctrl+Enter is Next or Create bot, Escape closes, and focus lands on each step's first control. What was put in, and the step, are a draft that survives moving between steps, closing and reopening; once anything is put in, a click beside the dialog no longer closes it. A refused create shows its message on the step that can fix it: a model no longer offered on Runs on, a refused name or sentence on What it does. From Automations the dialog opens on What it does with the automation's words.
+
+If the name is left empty, the bot names itself from the sentence ("Inbox helper"). Either way it can be renamed from its menu or by asking. There are no permission, schedule or device fields, and no model is named until one is picked by hand on Runs on.
 
 The chat opens at once. The bot's first message:
 
@@ -212,6 +213,7 @@ The Chats layout, as in the reference image:
 - **Hidden.** Mousse picks the model from the user's signed-in subscriptions (Bot Architecture's automatic choice). It never appears in the UI.
 - **No subscription signed in:** the bot's first message says so in plain words, with a **Sign in** button that opens Settings → Providers. It does not name models.
 - **Asking** ("think harder", "be quicker", "use Opus") is accepted and acted on without showing a model name. The bot replies "Okay, I'll take more time on this", not "Switched to …".
+- **Runs on (#673, added later).** No automatic choice: a bot's models are picked by its owner. About → Runs on and New bot's Runs on step (`BotModelRows`) show them as rows: **Talk** and **Work**, and with **Advanced**, **Light work**, **Medium work** and **Hard work**. Each row is a label and one control, the app's own model picker (provider entry, model and reasoning level in one choice), every control the same width in one column. No explanatory text, no usage meters; details are in tooltips. Advanced is open while the work rows differ, and closing it puts Medium work's model on all work. A bot made before picks shows "Pick a model" where Mousse still chooses, with a tooltip saying so. There is no Images row (no image path a bot can use yet). These pickers are the only bot screens that name a model, apart from one chat line for the owner when a picked model can't run ("I can't use Haiku 5.5 on Team Claude: it's turned off.", with Pick a model), said once while the problem lasts and never given to the bot. `use_model` shows a chip ("switched models · for work") that never names the model.
 
 ### 4.8 The menu and About this bot
 
@@ -352,7 +354,7 @@ No new Fable round was held for this revision.
 ### Phase 1
 
 - [ ] The Chats tab shows **Bots** where Roster was, with a + button that opens New bot.
-- [ ] New bot has three inputs (a look, already picked and changeable by colour, accessory and Shuffle; an optional name; a description) and one button. Create bot is disabled until the description is written.
+- [ ] New bot has three steps: Look (already picked and changeable by colour, accessory and Shuffle), What it does (an optional name and a description; Next waits for the description) and Runs on, with Create bot. Moving between steps or closing keeps what was put in.
 - [ ] After Create, the bot appears in Bots and Recent with its face and the given or generated name, and its chat opens with the bot's first message.
 - [ ] No screen in the bot flow names a model: not the dialog, header, composer, messages or About.
 - [ ] The composer in a bot chat has only text, attach and send/stop.

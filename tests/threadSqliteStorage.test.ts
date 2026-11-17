@@ -12,13 +12,17 @@ import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import type { ChatMessage, NativeLlmContext } from '../src/shared/types'
 
 const homes: string[] = []
-afterEach(() => {
+const stores: ThreadDataStore[] = []
+afterEach(async () => {
+  // A save queues a search index update a second later; send and finish it before the folders go.
+  for (const threads of stores.splice(0)) await threads.flushSearchIndex()
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
 function open(home: string, sqlite = true) {
   const threads = new ThreadDataStore(new ProjectManager(home), home, { profileId: 'sqlite-test', allowLegacyProjectData: false })
   threads.setSqliteStoreEnabled(sqlite)
+  stores.push(threads)
   const coordinator = new ResourceLifecycleCoordinator(threads.lifecycleStore, {
     assertCanTrash: (record) => settleThreadMutationOwnership(record.location),
     drain: async () => undefined,

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { PlusStatus } from '../../shared/net/local'
-import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
+import { formatCountdown, REMOVED_FROM_DEVICES, secondsLeft } from '../lib/plusSignIn'
 import { mousseIdName, mousseIdSignedIn, mousseIdPreparation, mousseIdSetupStep, useMousseId, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
 import { MousseIdAvatar } from './MousseIdAvatar'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
@@ -52,10 +52,13 @@ export function MousseIdAccount({ onSetUp, lapsed = false, children }: { onSetUp
   }
 
   const signedIn = mousseIdSignedIn(plus)
-  const status = accountState(plus, lapsed)
+  // A computer removed from your devices isn't waiting on anyone: signing in adds it back.
+  const removed = !!net?.self?.removed && !plus?.connected && !plus?.reconnecting
+  const status = removed ? (plus?.configured ? 'disconnected' : 'signed-out') : accountState(plus, lapsed)
   const who = plus?.email ?? (plus?.accountId ? `Account ${plus.accountId}` : undefined)
   const title = signedIn || status !== 'signed-out' ? mousseIdName(plus) : pending ? 'Signing in…' : 'Not signed in to Mousse ID'
   const description = !loaded && !plus ? 'Checking Mousse ID…'
+    : removed ? REMOVED_FROM_DEVICES
     : status === 'connected' ? <>{[who, plus?.plan].filter(Boolean).join(' · ')}{who || plus?.plan ? ' · ' : ''}<span className="settings-status-ok">Connected</span></>
       : status === 'reconnecting' ? <>{who ? `${who} · ` : ''}<span className="settings-status-warn">Reconnecting</span>{lapsed ? ' · waiting for your other computer to reconnect this one' : ''}</>
         : status === 'disconnected' ? `${who ? `${who} · ` : ''}Disconnected · sign in again to reconnect`

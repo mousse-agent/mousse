@@ -11,7 +11,7 @@ import type {
   SyncSession
 } from '../contracts'
 import type { NetDatabase } from '../store/database'
-import { canonicalJson } from './codec'
+import { canonicalJson, MAX_DISPLAY_JSON_NODES } from './codec'
 import type { SessionRpcPort } from './session'
 
 /** Settled request rows and their aliases are kept this long; no retry window comes close. */
@@ -236,7 +236,9 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         onTerminalCommit: (work) => terminalEffects.push(work)
       })
       let result: unknown = returned === undefined ? null : returned
-      const bytes = canonicalJson(result)
+      // A result for the owner's own devices (a long thread, a big list) may have more nodes than a wire message
+      // carries; it then goes out as an artifact, like one with too many bytes.
+      const bytes = canonicalJson(result, MAX_DISPLAY_JSON_NODES)
       if (controller.signal.aborted) {
         this.options.executions.transition(id, 'uncertain', this.options.clock.now(), {
           error: { code: 'outcome_uncertain', message: 'Cancellation did not prove rollback.' }
@@ -245,7 +247,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       }
       this.authorize(name, context.caller, capability)
       let publication: { result: unknown; commit(): void } | undefined
-      if (bytes.byteLength > 63 * 1024) {
+      if (bytes.byteLength > 63 * 1024 || !fitsWire(result)) {
         if (!this.resultPublisher)
           throw new NetError(
             'too_large',
@@ -290,7 +292,15 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
             message: 'Handler did not start.'
           }
         })
-      else if (record.state === 'running') {
+      else if (record.state === 'running' && !method.mutating) {
+        // A read changed nothing, so its failure is certain: the caller gets the real reason.
+        const failure =
+          error instanceof NetError ? error : new NetError('internal', undefined, { cause: error })
+        this.options.executions.transition(id, 'failed', this.options.clock.now(), {
+          error: { code: failure.code, message: failure.message }
+        })
+        throw failure
+      } else if (record.state === 'running') {
         // A thrown handler can have made an external effect; never claim rollback.
         this.options.executions.transition(id, 'uncertain', this.options.clock.now(), {
           error: { code: 'outcome_uncertain', message: 'Handler outcome is not durably proven.' }
@@ -308,6 +318,8 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     const alias = this.alias(id, peer)
     if (!alias) throw new NetError('outcome_uncertain')
     this.authorize(alias.method, peer, alias.capability)
+    // The method's own test of who may still have the result: the parameters it checked at the call are not kept.
+    this.registry.get(alias.method)?.authorizeResult?.(alias.execution as ExecutionRecord['id'], peer)
     const record = this.options.executions.get(alias.execution as ExecutionRecord['id'])
     if (!record) throw new NetError('outcome_uncertain')
     return this.terminal(record)
@@ -404,5 +416,16 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         isNetErrorCode(record.error?.code) ? record.error.code : 'outcome_uncertain'
       )
     throw new NetError('outcome_uncertain')
+  }
+}
+
+/** Whether a value fits one wire message's node bound (`MAX_JSON_NODES`), so it can be sent inline. */
+function fitsWire(value: unknown): boolean {
+  try {
+    canonicalJson(value)
+    return true
+  } catch (error) {
+    if (error instanceof NetError && error.code === 'too_large') return false
+    throw error
   }
 }

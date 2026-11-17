@@ -7,7 +7,6 @@ export {
 export type { BrowserBrokerPhase, BrowserBrokerRemaining } from './brokerLifecycle'
 export type { BrowserBrokerConfig, BrowserPolicyPort, BrowserArtifactPort, BrowserJournalPort, BrowserPolicyDecision } from './ports'
 export { createManagedBrowserInstaller, ManagedBrowserInstallerService } from './install'
-export { BrowserViewerService } from './viewer'
 export { createAllowHttpPolicy, createFilesystemArtifactPort, createFilesystemJournalPort } from './defaultPorts'
 export type { CapabilityReport } from '../../browser-worker/session/SessionManager'
 export { MmsBrowserService } from './MmsBrowserService'

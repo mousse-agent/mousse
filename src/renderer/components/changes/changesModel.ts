@@ -2,6 +2,7 @@
 // what the header drops at narrow widths and the keyboard map. No React, Monaco or window access, so
 // tests can load it.
 import type { ReviewFileEntry, ReviewFileResult, ReviewFilesResult, ReviewScope, ReviewSide } from '../../../shared/review'
+import { joinReviewPath, sameReviewFile } from '../../../shared/chatReferences'
 import type { TurnChoice } from '../review/reviewModel'
 import { formatAgo } from '../../lib/formatAgo'
 import type { ChangesResult } from './changesApi'
@@ -34,6 +35,20 @@ export function scopeIdFor(scope: ReviewScope, pinnedTurnId: string | null = nul
   if (scope.kind === 'worktree') return 'uncommitted'
   if (scope.kind === 'thread') return 'thread'
   return scope.turnId === pinnedTurnId ? 'last' : `turn:${scope.turnId}`
+}
+
+/** A POSIX, drive-letter or UNC path; anything else is relative to the worktree. */
+export function isAbsoluteReviewPath(path: string): boolean {
+  return /^(?:[\\/]|[A-Za-z]:[\\/])/.test(path)
+}
+
+/**
+ * The listed file a path names, or null when the list does not have it. The path is absolute (a comment pill, a file
+ * the agent wrote by its full path) or relative to the list's root.
+ */
+export function listedFile(list: Pick<ReviewFilesResult, 'root' | 'files'>, path: string, platform: string): ReviewFileEntry | null {
+  const wanted = isAbsoluteReviewPath(path) ? path : joinReviewPath(list.root, path)
+  return list.files.find((file) => sameReviewFile(joinReviewPath(list.root, file.path), wanted, platform)) ?? null
 }
 
 /** The newest turn that changed files and has ended; Last turn pins to it. */

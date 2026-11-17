@@ -1,4 +1,5 @@
 import { createChatBrowserRuntime } from '../chats/resources/createChatBrowserRuntime'
+import type { OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
 import { AgentChatService } from '../chats/AgentChatService'
 import { createMmsChatResourceService } from '../chats/resources/createMmsChatResourceService'
 import type { ChatResourceService } from '../chats/resources/ChatResourceService'
@@ -166,6 +167,15 @@ export class MmsProfilePlatform {
 
   getActiveCount(): number {
     return this.chatResources.getActiveCount() + this.chats.getActiveCount() + this.agentRuns.getActiveCount() + (this.browserAssembly?.getActiveCount() ?? 0) + this.browserArtifacts.getActiveCount()
+  }
+
+  /**
+   * The work `getActiveCount` counts, each with the threads it belongs to. The browser's own processes and commands are
+   * counted as the profile's (`scope: null`): they are not tracked by thread.
+   */
+  getActiveWork(): OwnedWorkEntry[] {
+    const browser = Array.from({ length: this.browserAssembly?.getActiveCount() ?? 0 }, (): OwnedWorkEntry => ({ label: 'browser', scope: null }))
+    return [...this.chatResources.getActiveWork(), ...this.chats.getActiveWork(), ...this.agentRuns.getActiveWork(), ...browser, ...this.browserArtifacts.getActiveWork()]
   }
 
   /**

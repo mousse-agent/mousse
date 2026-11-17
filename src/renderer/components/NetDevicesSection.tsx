@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
-import { AlertTriangle, ChevronDown, ChevronRight, CircleCheck, Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Server, Smartphone, type LucideIcon } from '../lib/icons'
+import { AlertTriangle, ChevronDown, ChevronRight, CircleCheck, Laptop, Link2, Monitor, MonitorSmartphone, Plus, RefreshCw, Server, Smartphone, Unlink, type LucideIcon } from '../lib/icons'
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
 import { InviteComputerDialog, addDeviceRoutes, type AddDeviceRouteId, type Invitation } from './devices/AddDeviceDialog'
@@ -18,11 +18,13 @@ import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../st
 import { DeviceLimitsDialog } from './devices/DeviceLimitsDialog'
 import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { DeviceAccessRows } from './devices/DeviceAccessRows'
+import { DeviceBotsRow } from './devices/DeviceBotsRow'
+import { DevicePresetRow } from './devices/DevicePresetRow'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
-import { netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, deviceListLine, isComputer, isIncompatible, listedDevices, passLapsed, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { connectedHere, connectStep, joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, deviceListLine, isComputer, isIncompatible, listedDevices, passLapsed, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import { describePermissionMode } from '../../shared/permissionMode'
 import type { NetDoctor, NetStatus } from '../../shared/net'
-import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
+import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetStartOverCheck, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import '../styles/devices.css'
@@ -38,6 +40,8 @@ function networkingLine(status?: NetStatus): string {
     if (status.enabled) return `No network identity yet${error}`
     return status.vaultUnavailable ? 'Off · set a passphrase to turn it on' : 'Off · turning it on creates a network identity for this device'
   }
+  // Removed on the owner computer: activation is refused, which is expected rather than a fault.
+  if (status.self.removed) return 'Removed from your devices'
   if (!status.enabled) return status.keystore === 'unlocked' ? `Off · local conversations and network records are kept${error}` : `Off · unlock below to turn it on${error}`
   if (status.keystore === 'locked') return `On · locked until you enter the passphrase${error}`
   if (status.rosterState === 'conflict') return `On · device list conflict, recovery required${error}`
@@ -101,6 +105,10 @@ export function NetDevicesSection() {
   const [openNode, setOpenNode] = useState<string>()
   // A grant that opens this computer's threads to another is confirmed with what it opens.
   const [granting, setGranting] = useState<{ device: Device; kind: 'grant' | 'computer' }>()
+  // The keychain refused a join's keys, so the join form asks for a passphrase; Give up on an unfinished join is confirmed.
+  const [joinNeedsPassphrase, setJoinNeedsPassphrase] = useState(false), [givingUp, setGivingUp] = useState(false)
+  // Start over opens on what the daemon says about it: what stands in the way, or what resets.
+  const [startingOver, setStartingOver] = useState<NetStartOverCheck>()
   const nameEdited = useRef(false)
   // Asks for editor connections: the prompt host watches them for the whole window; this screen reads that list.
   const editorAsks = useEditorAskStore((s) => s.asks)
@@ -141,9 +149,11 @@ export function NetDevicesSection() {
     try { const result = await window.mousse.platformRequest.request(method, params); if (!alive.current) return; capture?.(result); await reload() }
     catch (cause) {
       if (alive.current) {
-        const message = String((cause as Error)?.message ?? cause)
+        const joining = method === 'bridge.join' || method === 'net.join.retry'
+        const message = joining ? joinErrorWords(cause as { code?: unknown; details?: unknown; message?: unknown }) : String((cause as Error)?.message ?? cause)
         // A lapsed device pass is told by the Reconnecting note, in plain words.
         setError((cause as { code?: unknown })?.code === 'bad_delegation' ? '' : message)
+        if (joining && (cause as { code?: unknown })?.code === 'keystore_locked') setJoinNeedsPassphrase(true)
         if (method === 'net.init' && (cause as { code?: unknown })?.code === 'keystore_locked') { setKeychainRefusal(message); await reload().catch(() => undefined) }
         if (method === 'net.disable') { setDevices([]); setManifests([]); await reload().catch(() => undefined) }
       }
@@ -219,6 +229,8 @@ export function NetDevicesSection() {
   const authority = !!self?.isAuthority
   // On unless this computer turned it off; an older daemon that does not report it has no such switch.
   const workOnThreads = status?.workOnThreads !== false
+  // "Share bots with other devices": on unless this computer turned it off.
+  const shareBots = status?.shareBots !== false
 
   // The keychain refused to protect a new identity's keys, so a passphrase protects them instead.
   const needsPassphrase = !self && !!status?.vaultUnavailable
@@ -227,7 +239,9 @@ export function NetDevicesSection() {
     else if (self) void action('net.init', {})
     else void action('net.init', { name: name.trim(), listen: true, ...(needsPassphrase ? { passphrase } : {}) })
   }
-  const networkingLocked = !status || (!status.enabled && (!!status.restartRequired || (self ? !unlocked : !name.trim() || (needsPassphrase && !passphrase))))
+  // A join waiting for its answer is finished or given up before this computer starts its own devices.
+  const unfinishedJoin = !self ? status?.unfinishedJoin : undefined
+  const networkingLocked = !status || (!status.enabled && (!!status.restartRequired || !!unfinishedJoin || (self ? !unlocked : !name.trim() || (needsPassphrase && !passphrase))))
   const submitNewPassphrase = (event: FormEvent) => {
     event.preventDefault()
     if (!networkingLocked && !busy) toggleNetworking(true)
@@ -253,10 +267,17 @@ export function NetDevicesSection() {
     setInvitation({ text: issued.invite, expiresAt: issued.expiresAt })
   })
   const reloadQuietly = () => void reload().catch(() => undefined)
+  // A passphrase only where the keychain refuses: these keys are otherwise protected by it, with nothing to type after a restart.
+  const joinPassphrase = joinNeedsPassphrase || !!status?.vaultUnavailable
   const submitJoin = (event: FormEvent) => {
     event.preventDefault()
-    if (!joinText.trim() || !passphrase || !name.trim() || busy) return
-    void action('bridge.join', { invite: joinText.trim(), name: name.trim(), passphrase }, () => { setJoinText(''); setAddStep(undefined) })
+    if (!joinText.trim() || (joinPassphrase && !passphrase) || !name.trim() || busy) return
+    void action('bridge.join', { invite: joinText.trim(), name: name.trim(), ...(joinPassphrase ? { passphrase } : {}) }, () => { setJoinText(''); setAddStep(undefined) })
+  }
+  const retryJoin = (event: FormEvent) => {
+    event.preventDefault()
+    if (busy || (locked && !passphrase)) return
+    void action('net.join.retry', locked ? { passphrase } : {})
   }
 
   // Mousse ID sign-in sits at the top; its Set up and Unlock bring the control it needs into view, opening Advanced when it is there.
@@ -281,9 +302,9 @@ export function NetDevicesSection() {
 
   const devicesDescription = !status ? undefined
     : !self ? (mousseId
-      ? 'Sign in to Mousse ID above to join the computers signed in to it, or turn on networking to start a new set.'
+      ? 'Sign in to Mousse ID above to join the devices signed in to it, or turn on networking to start a new set.'
       : 'Join devices you already use, or turn on networking to start a new set.')
-      : !unlocked ? 'Unlock this device to see your other devices.'
+      : !unlocked ? 'Unlock this device to see my other devices.'
         : signedOut ? 'Nearby devices still sync with this one. The rest catch up when they’re back on the same network, or after you sign in.'
           : undefined
   // Setting this computer up comes first, so it stays on the page; once set up, it moves under Advanced.
@@ -314,6 +335,22 @@ export function NetDevicesSection() {
       control={<Switch id={`${id}-networking`} checked={!!status?.enabled} label="Networking" disabled={busy || networkingLocked} onChange={toggleNetworking} />}
     />
   )
+  // A join that stopped before its answer: retried or given up before this computer starts its own devices.
+  const unfinishedJoinRow = unfinishedJoin && (
+    <SettingsRow
+      title={`Finishing the connection to ${unfinishedJoin.name ?? 'the other computer'}`}
+      anchor="devices-join"
+      htmlFor={locked ? `${id}-join-passphrase` : undefined}
+      description={locked ? 'Enter this computer’s passphrase to retry' : 'The last try didn’t finish'}
+      control={
+        <form className="devices-inline-form" onSubmit={retryJoin}>
+          {locked && <input id={`${id}-join-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy} onChange={(event) => setPassphrase(event.target.value)} autoComplete="current-password" />}
+          <button type="submit" className="settings-btn" disabled={busy || (locked && !passphrase)}>Retry</button>
+          <button type="button" className="settings-btn" disabled={busy} onClick={() => setGivingUp(true)}>Give up…</button>
+        </form>
+      }
+    />
+  )
   const thisComputerRows = <>
     {!self && (
       <SettingsRow
@@ -338,6 +375,7 @@ export function NetDevicesSection() {
       />
     )}
     {networkingRow}
+    {unfinishedJoinRow}
     {status?.restartRequired && status.error === 'outcome_uncertain' && (
       <p role="status" className="settings-muted devices-note">Some work is still draining; its original records are kept.</p>
     )}
@@ -356,7 +394,14 @@ export function NetDevicesSection() {
         }
       />
     )}
-    {self && status.protected && !locked && <SettingsRow anchor="devices-passphrase" title="Network keys" description="Protected on this device" />}
+    {self && status.protected && !locked && (
+      <SettingsRow
+        anchor="devices-passphrase"
+        title="Network keys"
+        description={status.passphraseProtected ? 'Protected by a passphrase you enter after each restart' : 'Protected on this device'}
+        control={status.passphraseProtected && <button type="button" className="settings-btn" disabled={busy} onClick={() => void action('net.protect', {})}>Use the keychain</button>}
+      />
+    )}
   </>
 
   /** One device in the list: kind, name, and online or last seen. Its chevron opens its detail. */
@@ -367,7 +412,9 @@ export function NetDevicesSection() {
     const selfLine = lapsed ? 'Reconnecting · waiting for your other computer to reconnect this one'
       : !status?.enabled ? 'Networking off'
         : signedOut ? 'Signed out · syncs with nearby devices' : 'Online'
-    const line = device.self ? [selfLine, device.version].filter(Boolean).join(' · ') : deviceListLine(device, now, { signedOut })
+    // Another device works with this one only once connected here; until then its line says so and its row offers the way.
+    const connected = device.self || connectedHere(device), step = device.self ? undefined : connectStep(device)
+    const line = device.self ? [selfLine, device.version].filter(Boolean).join(' · ') : connected ? deviceListLine(device, now, { signedOut }) : 'Not connected here'
     const classes = [picked === device.node ? 'devices-row-picked' : '', open ? 'devices-row-open' : ''].filter(Boolean).join(' ')
     return (
       <SettingsRow
@@ -382,7 +429,10 @@ export function NetDevicesSection() {
         title={device.name}
         titleAction={device.self ? <span className="devices-kind">This computer</span> : undefined}
         description={<span title={routeDetails(device) || undefined}>{kind.label} · {line}</span>}
-        control={
+        control={<>
+          {step && ('connect' in step
+            ? <button type="button" className="settings-btn" disabled={busy} onClick={() => void action('bridge.connect', { node: device.node })}><Link2 size={14} />Connect</button>
+            : <span className="settings-muted">{step.hint}</span>)}
           <button
             type="button"
             className="settings-icon-btn devices-row-toggle"
@@ -393,7 +443,7 @@ export function NetDevicesSection() {
           >
             {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
-        }
+        </>}
       />
     )
   }
@@ -406,8 +456,8 @@ export function NetDevicesSection() {
         indent
         title="Works on threads"
         description={worksOnThreads(device)
-          ? <span title="This computer can open and change threads on your other computers that share them.">On · can work on your other computers’ threads</span>
-          : <span title="This computer cannot work on threads on your other computers, which is why theirs are not listed. The computer that manages your devices can turn it on for this one.">Off · the computer that manages your devices can turn it on</span>}
+          ? <span title="This device can open and change threads on my other devices that share them.">On · can work on threads on my other devices</span>
+          : <span title="This device cannot work on threads on my other devices, which is why theirs are not listed. The device that manages my devices can turn it on for this one.">Off · the device that manages my devices can turn it on</span>}
       />
     ),
     self && status?.enabled && unlocked && status.workOnThreads !== undefined && (
@@ -415,11 +465,23 @@ export function NetDevicesSection() {
       <SettingsRow
         key="self-inbound"
         indent
-        title="Let other computers work here"
+        title="Let my other devices work here"
         description={workOnThreads
-          ? 'On · computers with Works on threads can open and change this computer’s threads, within the limits set for each device'
-          : 'Off · no other computer can open or change this computer’s threads'}
-        control={<Switch checked={workOnThreads} label="Let my other computers work on this computer's threads" disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
+          ? 'On · devices with Works on threads can open and change this device’s threads, within the limits set for each device'
+          : 'Off · no other device can open or change this device’s threads'}
+        control={<Switch checked={workOnThreads} label="Let my other devices work on this device's threads" disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
+      />
+    ),
+    self && status?.enabled && unlocked && status.shareBots !== undefined && (
+      <SettingsRow
+        key="self-bots"
+        indent
+        title="Share bots with other devices"
+        anchor="devices-bots"
+        description={shareBots
+          ? 'On · my phones and other devices list this device’s bots and can chat with them'
+          : 'Off · my other devices don’t see this device’s bots'}
+        control={<Switch checked={shareBots} label="Share bots with other devices" disabled={busy} onChange={(next) => void action('bridge.shareBots', { enabled: next })} />}
       />
     ),
     <SettingsRow key="self-networking" indent title="Connection" description={networkingLine(status)} />
@@ -434,13 +496,23 @@ export function NetDevicesSection() {
     )
     const grantable = authority && canWorkOnThreads(device)
     const open = (kind: 'undo' | 'rename' | 'update') => () => { if (record) setRecordDialog({ kind, record, name: device.name }) }
+    // What it may do here applies only while it is connected here.
+    const connected = connectedHere(device)
     return [
       <SettingsRow
         key="connection"
         indent
         title="Connection"
-        description={<span title={routeDetails(device) || undefined}>{deviceLine(device, now)}{offer ? ' · offers an SSH route' : ''}</span>}
-        control={offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}
+        description={connected
+          ? <span title={routeDetails(device) || undefined}>{deviceLine(device, now)}{offer ? ' · offers an SSH route' : ''}</span>
+          : 'Not connected here'}
+        control={<>
+          {offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}
+          {/* Connected here or not is this computer's own choice, like a block. */}
+          {device.connection === 'connected' && (
+            <button type="button" className="settings-btn" disabled={busy} title={`Stop working with ${device.name} from this computer`} onClick={() => void action('bridge.disconnect', { node: device.node })}><Unlink size={14} />Disconnect</button>
+          )}
+        </>}
       />,
       isIncompatible(device) && (
         <SettingsRow key="incompatible" indent title="Incompatible version" description={`Update ${device.name} or this device so they can talk to each other.`} />
@@ -492,10 +564,16 @@ export function NetDevicesSection() {
           </>}
         />
       ),
+      // What it may do here, as one of three presets above the single switches. A phone has none.
+      connected && device.policy && isComputer(device) && worksOnThreads(device) && !blocked && (
+        <DevicePresetRow key="preset" device={device} onChanged={reloadQuietly} />
+      ),
       // Terminals and editor connections from it, side by side, with a waiting ask answered here too.
-      device.policy && isComputer(device) && worksOnThreads(device) && !blocked && (
+      connected && device.policy && isComputer(device) && worksOnThreads(device) && !blocked && (
         <DeviceAccessRows key="access" device={device} ask={pendingEditorAsk({ asks: editorAsks }, device.node)} onChanged={reloadQuietly} />
       ),
+      // Whether it reaches this computer's bots at all, for phones and computers alike.
+      connected && device.policy && !blocked && <DeviceBotsRow key="bots" device={device} onChanged={reloadQuietly} />,
       // What it did here. A phone has none of this: it keeps the phone API.
       device.policy && isComputer(device) && <DeviceActivityRows key="activity" device={device} />,
       record && (
@@ -526,7 +604,7 @@ export function NetDevicesSection() {
           key="remove"
           indent
           title="Remove from my devices"
-          description={`${device.name} will no longer connect to your other devices`}
+          description={`${device.name} will no longer connect to my other devices`}
           control={<button type="button" className="settings-btn danger" disabled={busy} onClick={() => setRevoking(device)}>Remove…</button>}
         />
       )
@@ -604,9 +682,10 @@ export function NetDevicesSection() {
     )}
 
     {status && served && !showAddons && (
-      <SettingsGroup className="devices-group" anchor="devices-tailscale-serve" title="Tailscale Serve">
+      <SettingsGroup className="devices-group">
         <SettingsRow
           title="Tailscale Serve"
+          anchor="devices-tailscale-serve"
           description={servePending ? 'Started but not confirmed · Turn off Serve clears it' : `Still on · tailnet port ${served.servePort} forwards to this device, also while networking is off`}
           control={<button type="button" className="settings-btn" disabled={busy} onClick={() => void turnOffServe()}>Turn off Serve</button>}
         />
@@ -616,9 +695,17 @@ export function NetDevicesSection() {
 
     {status && (
       <SettingsAdvanced>
-        {!setupNeeded && (
+        {(!setupNeeded || self) && (
           <SettingsGroup className="devices-group" title="This computer">
-            {thisComputerRows}
+            {!setupNeeded && thisComputerRows}
+            {self && (
+              <SettingsRow
+                anchor="devices-start-over"
+                title="Start over"
+                description="Leave these devices and get new keys"
+                control={<button type="button" className="settings-btn" disabled={busy} onClick={() => void action('net.startOver.check', {}, (result) => setStartingOver(result as NetStartOverCheck))}>Start over…</button>}
+              />
+            )}
           </SettingsGroup>
         )}
 
@@ -666,6 +753,7 @@ export function NetDevicesSection() {
                     key={`${manifest.id}-serve`}
                     indent
                     title="Tailscale Serve"
+                    anchor="devices-tailscale-serve"
                     description={served ? (servePending ? 'Started but not confirmed · Turn off Serve clears it' : `On · tailnet port ${served.servePort} forwards to this device`) : 'Keep the listener on this computer only and let Tailscale forward a tailnet port to it'}
                     control={served
                       ? <button type="button" className="settings-btn" disabled={busy} onClick={() => void turnOffServe()}>Turn off Serve</button>
@@ -741,13 +829,13 @@ export function NetDevicesSection() {
 
     {addStep === 'phone' && <AddPhoneDialog onClose={closeAdd} />}
 
-    {/* Joining needs the invitation, a name and a passphrase that protects this device's new keys. */}
+    {/* Joining needs the invitation and a name; a passphrase only where the keychain refused. */}
     {addStep === 'join' && (
       <Modal
         open
         title="Join with invitation"
         onClose={closeAdd}
-        footer={<button type="submit" form={`${id}-join`} className="settings-btn devices-dialog-btn primary" disabled={busy || !joinText.trim() || !passphrase || !name.trim()}>Join</button>}
+        footer={<button type="submit" form={`${id}-join`} className="settings-btn devices-dialog-btn primary" disabled={busy || !joinText.trim() || (joinPassphrase && !passphrase) || !name.trim()}>Join</button>}
       >
         <form id={`${id}-join`} className="devices-dialog" onSubmit={submitJoin}>
           <label className="devices-field">
@@ -758,10 +846,12 @@ export function NetDevicesSection() {
             <span>This device’s name</span>
             <input value={name} maxLength={120} onChange={(event) => { nameEdited.current = true; setName(event.target.value) }} />
           </label>
-          <label className="devices-field">
-            <span>Passphrase for this device</span>
-            <input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
-          </label>
+          {joinPassphrase && (
+            <label className="devices-field">
+              <span>Passphrase for this device</span>
+              <input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
+            </label>
+          )}
           {error && <p role="alert" className="chat-error">{error}</p>}
         </form>
       </Modal>
@@ -808,6 +898,33 @@ export function NetDevicesSection() {
       />
     )}
 
+    {givingUp && (
+      <Modal
+        open
+        title={`Give up connecting to ${unfinishedJoin?.name ?? 'the other computer'}?`}
+        onClose={() => setGivingUp(false)}
+        footer={<button type="button" className="settings-btn devices-dialog-btn danger-fill" disabled={busy} onClick={() => { setGivingUp(false); void action('net.join.abandon', {}) }}>Give up</button>}
+      >
+        <p>{unfinishedJoin?.name ?? 'The other computer'} may already list this computer. If it does, remove it there.</p>
+      </Modal>
+    )}
+
+    {startingOver && (
+      <Modal
+        open
+        title={startingOver.refused ? 'Can’t start over yet' : 'Start over on this computer?'}
+        onClose={() => setStartingOver(undefined)}
+        footer={!startingOver.refused && <button type="button" className="settings-btn devices-dialog-btn danger-fill" disabled={busy} onClick={() => { setStartingOver(undefined); void action('net.startOver', {}) }}>Start over</button>}
+      >
+        {startingOver.refused ? <p>{startOverRefusal(startingOver)}</p> : <>
+          <p>This computer leaves its devices and gets new keys. Networking turns off; turn it on, or join with a link.</p>
+          <p>Bot signing keys, Space chat links, SSH approvals and links from other computers reset. Threads, bots and work stay.</p>
+          <p>{startingOver.keeper ? 'The old network folder, with the key that kept these devices, stays on this computer.' : 'The old network folder stays on this computer.'}</p>
+          {startingOver.spaces.length > 0 && <p>Join {startingOver.spaces.join(', ')} again afterwards.</p>}
+        </>}
+      </Modal>
+    )}
+
     {revoking && (
       <Modal
         open
@@ -815,7 +932,7 @@ export function NetDevicesSection() {
         onClose={() => setRevoking(undefined)}
         footer={<button type="button" className="settings-btn devices-dialog-btn danger-fill" disabled={busy} onClick={() => { const node = revoking.node; setRevoking(undefined); void action('bridge.revoke', { node }) }}>Remove</button>}
       >
-        <p>{revoking.name} will no longer connect to your other devices.</p>
+        <p>{revoking.name} will no longer connect to my other devices.</p>
       </Modal>
     )}
 

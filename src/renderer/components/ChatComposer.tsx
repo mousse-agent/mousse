@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
-import { Loader2, Mic, RefreshCw, X } from '../lib/icons'
-import { SpeechWave } from '../speech/SpeechWave'
+import { Mic, RefreshCw, Reply, X } from '../lib/icons'
 import type {
   BrowserElementAttachment,
   FileSearchResponse,
@@ -26,13 +25,21 @@ import {
   type MentionItem
 } from '../../shared/composerCommands'
 import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
-import { ComposerFooter, STEER_BINDING, type ComposerRunProps } from './ComposerFooter'
+import { ComposerFooter, STEER_BINDING, formatRecordingTime as formatDuration, isSteerKey, type ComposerRunProps } from './ComposerFooter'
+import { markSteerKey, steersOnEnter, type SendMode } from '../lib/steerKey'
+import { useThreadSendMode } from '../lib/sendMode'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
+import { ImageGalleryProvider } from '../chat/components/agent-elements/image-gallery'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
-import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
+import { collectFilesFromDataTransfer } from '../utils/imageAttachments'
+import { fileAttachments } from '../lib/composerFilePaths'
+import { ATTACHMENT_LINES_ROOM, isLongPaste, longPasteFile, pastedTextBlock, pastedTextName } from '../lib/longPaste'
+import { PastedTextPreview } from './PastedTextPreview'
+import { formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import type { ChatReference } from '../../shared/chatReferences'
-import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } from '../../shared/chatReferences'
+import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseChatReference, parseReferenceDragData } from '../../shared/chatReferences'
+import { ownFileDrop, startDragOut } from '../lib/fileDragOut'
 import { ChatReferencePill } from './ReferencePill'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
@@ -42,12 +49,34 @@ import { useAppStore } from '../stores/appStore'
 import { openSettingsSection } from '../lib/settingsNavigation'
 import { COMPOSER_SEND_EVENT } from '../lib/composerEvents'
 import { useComposerNotice } from './ComposerNotice'
+import { composerMarkdownSpans, listContinuation, type MarkdownKind } from '../lib/composerMarkdown'
+import {
+  COMPOSER_QUOTE_EVENT,
+  QUOTE_TAG_LENGTH,
+  deleteQuoteTokenAt,
+  expandComposerQuotes,
+  findQuoteTokens,
+  insertQuoteToken,
+  quoteRegistry,
+  quoteTokenAround,
+  registerQuote,
+  type ComposerQuoteDetail
+} from '../lib/composerQuotes'
 
 export interface AttachedFile {
   id: string
   file: File
   previewUrl?: string
+  /** Where the file already is on the thread's computer (a queued message given back): sent as this path. */
+  path?: string
+  /** What the chip and the message call the file, when not its file name: "Pasted text, 1,240 lines". */
+  label?: string
+  /** A long text paste kept as a file: it can be opened, and put back into the box as text. */
+  pastedText?: boolean
 }
+
+/** What the chip and the message call an attached file. */
+export const attachedFileName = (attached: AttachedFile): string => attached.label ?? attached.file.name
 
 export interface VoiceMessage {
   id: string
@@ -55,6 +84,19 @@ export interface VoiceMessage {
   duration: number
   url: string
 }
+
+/** A row of the composer's own `/` list (`commandSuggestions`): its label and action, and the text picking it puts in. */
+export interface ComposerCommandSuggestion {
+  key: string
+  label: string
+  description: string
+  /** The box's text after picking it. */
+  fill: string
+  /** Enter (or a click) on it sends the box when it already reads `fill`, so a finished command runs in one press. */
+  complete: boolean
+}
+
+const NO_COMMAND_SUGGESTIONS: ComposerCommandSuggestion[] = []
 
 export interface ChatComposerProps {
   input: string
@@ -78,6 +120,11 @@ export interface ChatComposerProps {
   run?: ComposerRunProps
   /** `/` commands (`/clear`, `/compact`, …) are offered while typing; a bot's composer has none. */
   slashCommands?: boolean
+  /**
+   * The parent's own `/` list (a bot's chat commands): the rows for what the box holds now, or none. Shown with the same
+   * keys as the thread's list: arrows move, Enter and Tab pick, Escape closes.
+   */
+  commandSuggestions?: (input: string) => ComposerCommandSuggestion[]
   loading?: boolean
   /** A run Stop can end, including one waiting on an approval or an answer; defaults to `loading`. */
   stoppable?: boolean
@@ -86,9 +133,14 @@ export interface ChatComposerProps {
   /**
    * Receives the inline `@skill` token (if any) so the parent can send this
    * prompt in skill mode without flipping the global chat mode. `steer` is set
-   * when Alt+Enter sent the text during a run: it goes into the running turn.
+   * when the text was sent as a steer during a run: it goes into the running turn.
    */
   onSend: (skillMode?: SkillChatMode, options?: { steer?: boolean }) => void
+  /**
+   * The steer chord in an empty composer while a reply runs: sends the next queued message into the reply now.
+   * Returns whether one was sent.
+   */
+  onSteerQueued?: () => boolean
   /** What the send button says it does, when the parent sends somewhere other than the thread (see `ComposerFooter`). */
   sendLabel?: string
   onStop?: () => void
@@ -107,6 +159,18 @@ export interface ChatComposerProps {
   mentionScope?: { scopeKey: string; threadId?: string; projectId?: string }
   /** The thread's permission mode and how to change it (see `ComposerFooter`). */
   permission?: ComponentProps<typeof ComposerFooter>['permission']
+  /** Dictation stays offered while a run can be stopped (see `ComposerFooter`): a bot's chat. */
+  dictateWhileStoppable?: boolean
+  /** Buttons of the caller's own in the footer, left of Attach (see `ComposerFooter`). */
+  extraActions?: ReactNode
+  /**
+   * The thread whose composer Enter follows the profile's send mode in (Queue or Steer, `lib/sendMode.ts`) while a
+   * reply runs; the mode button left of send shows and switches it for every thread. Absent (a bot's chat, which never steers): Enter queues and there is
+   * no button.
+   */
+  sendModeThreadId?: string
+  /** The most characters a message carries: text pasted past it goes on the message as a text file. */
+  messageLimit?: number
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 120
@@ -135,12 +199,6 @@ function readCaret(node: HTMLTextAreaElement): number {
   return node.selectionStart === node.selectionEnd ? node.selectionStart : -1
 }
 
-function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
-}
-
 export function ChatComposer({
   input,
   onInputChange,
@@ -157,11 +215,13 @@ export function ChatComposer({
   enabledSkills,
   run,
   slashCommands = true,
+  commandSuggestions,
   loading = false,
   stoppable = loading,
   disabled = false,
   placeholder,
   onSend,
+  onSteerQueued,
   sendLabel,
   onStop,
   lastPrompt,
@@ -169,15 +229,27 @@ export function ChatComposer({
   banner,
   searchMentions,
   mentionScope,
-  permission
+  permission,
+  sendModeThreadId,
+  dictateWhileStoppable = false,
+  extraActions,
+  messageLimit = Infinity
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  // The send mode is a choice only while a reply runs: idle, Enter just sends. A card that takes the message (an open
+  // question, a waiting approval: `sendLabel`) keeps Enter for itself.
+  const [threadSendMode, setThreadSendMode] = useThreadSendMode(sendModeThreadId)
+  const sendModeShown = Boolean(sendModeThreadId) && loading && !sendLabel
+  const sendMode: SendMode = sendModeShown ? threadSendMode : 'queue'
+  const switchSendMode = () => setThreadSendMode(sendMode === 'steer' ? 'queue' : 'steer')
+  useCommand('composer.switchSendMode', switchSendMode, () => sendModeShown && !disabled && isShown(composerInputRef.current))
   // The prompt Up brought back, until it is sent or edited: Escape clears it again.
   const recalledRef = useRef<string | null>(null)
   // Two composers can be mounted at once (the local thread behind a remote one): the shown one answers.
   useCommand('composer.focus', () => composerInputRef.current?.focus(), () => !disabled && isShown(composerInputRef.current))
+  const backdropRef = useRef<HTMLDivElement>(null)
   const resizeDraft = useCallback(() => {
     const inputElement = composerInputRef.current
     if (!inputElement) return
@@ -185,6 +257,13 @@ export function ChatComposer({
     const height = Math.max(64, Math.min(200, inputElement.scrollHeight))
     inputElement.style.removeProperty('height')
     inputElement.style.setProperty('--draft-input-height', `${height}px`)
+    // The backdrop paints the visible text: it wraps at the textarea's width, scrollbar excluded,
+    // and follows its scroll.
+    const backdrop = backdropRef.current
+    if (backdrop) {
+      backdrop.style.marginRight = `${inputElement.offsetWidth - inputElement.clientWidth}px`
+      backdrop.scrollTop = inputElement.scrollTop
+    }
   }, [])
   useLayoutEffect(() => { resizeDraft() }, [input, resizeDraft])
   useEffect(() => {
@@ -219,11 +298,19 @@ export function ChatComposer({
   const shownMentionKeyRef = useRef('')
   const inputValueRef = useRef(input)
   inputValueRef.current = input
-  // Dictated text goes where the caret is when the transcript arrives, then the box gets focus.
+  // The selection (or caret) when dictation started, with the text it was taken from.
+  const dictationRangeRef = useRef<{ start: number; end: number; value: string } | null>(null)
+  // Dictated text replaces the selection made before dictation started, even if the caret moved since.
+  // If the text changed while recording, that range no longer means the same words, so it goes at the caret.
+  // Then the box gets focus.
   const insertDictation = (text: string) => {
     const node = composerInputRef.current
     const current = node?.value ?? inputValueRef.current
-    const inserted = insertTranscript(current, node?.selectionStart ?? current.length, node?.selectionEnd ?? current.length, text)
+    const range = dictationRangeRef.current
+    dictationRangeRef.current = null
+    const start = range && range.value === current ? range.start : node?.selectionStart ?? current.length
+    const end = range && range.value === current ? range.end : node?.selectionEnd ?? current.length
+    const inserted = insertTranscript(current, start, end, text)
     setSuggestionsDismissed(false)
     setSelectedSuggestion(0)
     onInputChange(inserted.value)
@@ -236,6 +323,18 @@ export function ChatComposer({
   }
   const dictation = useDictation({ disabled, loading, onTranscript: insertDictation })
   const { isRecording, recordingPending, transcribing, recordingDuration } = dictation
+  const startDictation = () => {
+    const node = composerInputRef.current
+    dictationRangeRef.current = node ? { start: node.selectionStart, end: node.selectionEnd, value: node.value } : null
+    dictation.start()
+  }
+  // The dictation key starts recording where the microphone button is offered and finishes it (Done) while recording.
+  const dictationOffered = !stoppable || dictateWhileStoppable
+  useCommand(
+    'composer.dictate',
+    () => (isRecording ? dictation.stop() : startDictation()),
+    () => !disabled && isShown(composerInputRef.current) && (isRecording || (dictationOffered && !recordingPending && !transcribing))
+  )
   const [pendingReferences, setPendingReferences] = useState(0)
   // Dictation and reference progress share the composer's one notice line, so the composer never changes height.
   useComposerNotice(pendingReferences > 0 ? { tone: 'info', title: 'Attaching reference…' } : null)
@@ -244,7 +343,7 @@ export function ChatComposer({
   useComposerNotice(dictation.error ? {
     tone: 'error',
     title: dictation.error.message,
-    actions: [{ label: 'Retry microphone', icon: <RefreshCw size={14} strokeWidth={1.8} />, disabled: loading || disabled || recordingPending || transcribing, onClick: dictation.start }],
+    actions: [{ label: 'Retry microphone', icon: <RefreshCw size={14} strokeWidth={1.8} />, disabled: loading || disabled || recordingPending || transcribing, onClick: startDictation }],
     onDismiss: dictation.dismissError
   } : null)
   // With the picker disabled, `/skills` stays literal text so it is sent to the agent as a prompt.
@@ -256,7 +355,8 @@ export function ChatComposer({
   const skillToken = skillsPickerDisabled
     ? null
     : findInlineSkillToken(input, enabledSkills)
-  const backdropRef = useRef<HTMLDivElement>(null)
+  // Reply pills: text quoted from the conversation, at their place in the typed text (`lib/composerQuotes.ts`).
+  const quoteSpans = useMemo(() => findQuoteTokens(input, quoteRegistry()), [input])
 
   const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || references.length > 0
   const trimmedInput = removeInlineSkillToken(input, skillsPickerDisabled ? [] : enabledSkills).trim()
@@ -296,12 +396,16 @@ export function ChatComposer({
 
   const suggestions = !slashCommands || showSkillsPicker || showMentionPicker ? [] : filterComposerCommandSuggestions(input).filter((command) => !skillsPickerDisabled || command.name !== 'skills')
   const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
-  const pickerOpen = showSuggestions || showSkillsPicker || showMentionPicker
+  const ownSuggestions = commandSuggestions && !showSuggestions && !showSkillsPicker && !showMentionPicker ? commandSuggestions(input) : NO_COMMAND_SUGGESTIONS
+  const showOwnSuggestions = !disabled && !suggestionsDismissed && ownSuggestions.length > 0
+  const pickerOpen = showSuggestions || showSkillsPicker || showMentionPicker || showOwnSuggestions
   const pickerItemCount = showMentionPicker
     ? mentionItems.length
     : showSkillsPicker
       ? skillSuggestions.length
-      : suggestions.length
+      : showOwnSuggestions
+        ? ownSuggestions.length
+        : suggestions.length
   // `/skills` is a local UI command — never send it as a chat message.
   // While a turn is active, ordinary sends are still allowed (they stack on the per-thread queue).
   const canSend =
@@ -376,14 +480,18 @@ export function ChatComposer({
   }, [mentionQueryText, mentionScopeKey])
 
   const addFiles = useCallback(
-    (files: File[]) => {
+    (files: Array<File | Omit<AttachedFile, 'id'>>) => {
       if (!files.length) return
-      const next: AttachedFile[] = files.map((file) => ({
-        id: crypto.randomUUID(),
-        file,
-        previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
-      }))
+      const next: AttachedFile[] = files.map((entry) => {
+        const attached = entry instanceof File ? { file: entry } : entry
+        return {
+          ...attached,
+          id: crypto.randomUUID(),
+          previewUrl: attached.file.type.startsWith('image/') ? URL.createObjectURL(attached.file) : undefined
+        }
+      })
       onAttachedFilesChange([...attachedFiles, ...next])
+      return next
     },
     [attachedFiles, onAttachedFilesChange]
   )
@@ -392,6 +500,33 @@ export function ChatComposer({
     const target = attachedFiles.find((f) => f.id === id)
     if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl)
     onAttachedFilesChange(attachedFiles.filter((f) => f.id !== id))
+  }
+
+  // The long paste Undo takes back while the box is as the paste left it.
+  const pasteUndo = useRef<{ id: string; input: string } | null>(null)
+  const [previewing, setPreviewing] = useState<{ id: string; name: string; text: string } | null>(null)
+
+  /** Puts a long paste back into the box as text, where the caret is, and drops its chip. */
+  const insertPastedText = async (id: string) => {
+    const attached = attachedFiles.find((f) => f.id === id)
+    if (!attached) return
+    const text = await attached.file.text()
+    setPreviewing(null)
+    pasteUndo.current = null
+    removeFile(id)
+    const target = composerInputRef.current
+    if (!target) return
+    target.focus()
+    // Typed in, so Undo takes it out again.
+    if (document.execCommand?.('insertText', false, text)) return
+    const start = target.selectionStart ?? target.value.length
+    const end = target.selectionEnd ?? start
+    commitEdit({ value: target.value.slice(0, start) + text + target.value.slice(end), caret: start + text.length })
+  }
+
+  const previewPastedText = async (id: string) => {
+    const attached = attachedFiles.find((f) => f.id === id)
+    if (attached) setPreviewing({ id, name: attachedFileName(attached), text: await attached.file.text() })
   }
 
   const removeVoice = (id: string) => {
@@ -407,9 +542,9 @@ export function ChatComposer({
     event.target.value = ''
   }
 
-  const imagePasteKey = useRef({ held: false, consumed: false })
+  const filePasteKey = useRef({ held: false, consumed: false })
   useEffect(() => {
-    const reset = () => { imagePasteKey.current = { held: false, consumed: false } }
+    const reset = () => { filePasteKey.current = { held: false, consumed: false } }
     const release = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() === 'v' || event.key === 'Control' || event.key === 'Meta') reset()
     }
@@ -421,15 +556,25 @@ export function ChatComposer({
     }
   }, [])
 
+  // Pasted files (images, videos, any file) are attached; a paste without files pastes its text, unless the text is
+  // long (`LONG_PASTE_BYTES`): then it goes on the message as a text file, which the chip can put back as text.
   const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const images = collectImageFilesFromDataTransfer(event.clipboardData)
-    if (images.length === 0) return
-    event.preventDefault()
-    if (imagePasteKey.current.held) {
-      if (imagePasteKey.current.consumed) return
-      imagePasteKey.current.consumed = true
+    const files = collectFilesFromDataTransfer(event.clipboardData)
+    if (files.length === 0) {
+      const text = event.clipboardData?.getData('text/plain') ?? ''
+      const selected = event.currentTarget.selectionEnd - event.currentTarget.selectionStart
+      if (!isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) return
+      event.preventDefault()
+      const added = addFiles([{ file: longPasteFile(text), label: pastedTextName(text), pastedText: true }])
+      if (added?.[0]) pasteUndo.current = { id: added[0].id, input }
+      return
     }
-    addFiles(images)
+    event.preventDefault()
+    if (filePasteKey.current.held) {
+      if (filePasteKey.current.consumed) return
+      filePasteKey.current.consumed = true
+    }
+    addFiles(files)
   }
 
   const applySuggestion = (command: ComposerCommandDef) => {
@@ -444,6 +589,19 @@ export function ChatComposer({
     onInputChange(`/${command.name}${command.argsHint ? ' ' : ''}`)
     setSuggestionsDismissed(true)
     requestAnimationFrame(() => composerInputRef.current?.focus())
+  }
+
+  // A row of the parent's own list: a finished command the box already reads is sent; otherwise the box takes the row's
+  // text and the list follows it (after `/model ` it offers the slots).
+  const pickOwnSuggestion = (row: ComposerCommandSuggestion | undefined, run = true) => {
+    if (!row) return
+    if (run && row.complete && input.trim().toLowerCase() === row.fill.trim().toLowerCase()) {
+      submitRef.current()
+      return
+    }
+    setSuggestionsDismissed(false)
+    setSelectedSuggestion(0)
+    commitEdit({ value: row.fill, caret: row.fill.length })
   }
 
   // Put the text box at `edit`: new value, caret after the inserted text, focus kept.
@@ -543,30 +701,73 @@ export function ChatComposer({
     return () => window.removeEventListener(COMPOSER_SEND_EVENT, onRequest)
   }, [])
 
+  // Reply on text selected in the conversation: its pill goes in at the caret (or over the selected text).
+  const quoteRef = useRef<(text: string) => void>(() => undefined)
+  quoteRef.current = (text: string) => {
+    const node = composerInputRef.current
+    if (!node || disabled) return
+    const current = node.value
+    commitEdit(insertQuoteToken(current, node.selectionStart ?? current.length, node.selectionEnd ?? current.length, registerQuote(text)))
+  }
+  useEffect(() => {
+    const onQuote = (event: Event) => {
+      const detail = (event as CustomEvent<ComposerQuoteDetail>).detail
+      if (detail?.target === composerInputRef.current) quoteRef.current(detail.text)
+    }
+    window.addEventListener(COMPOSER_QUOTE_EVENT, onQuote)
+    return () => window.removeEventListener(COMPOSER_QUOTE_EVENT, onQuote)
+  }, [])
+
   const handleInputScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
     // The token backdrop paints behind the textarea: keep it scroll-locked.
     if (backdropRef.current) backdropRef.current.scrollTop = e.currentTarget.scrollTop
   }
 
+  // Skill and quote tokens are painted as pills behind the text that spells them.
   const renderInputBackdrop = () => {
-    if (!skillToken) return input.endsWith('\n') ? <>{input}{ '\u200B'}</> : input
-    const before = input.slice(0, skillToken.index)
-    const tokenText = input.slice(skillToken.index, skillToken.index + skillToken.length)
-    const after = input.slice(skillToken.index + skillToken.length)
+    const chip = skillToken ? { start: skillToken.index, end: skillToken.index + skillToken.length } : null
+    const quotes = quoteSpans.map((span) => ({ start: span.index, end: span.index + span.length }))
     return (
       <>
-        {before}
-        <span className="composer-token-chip">{tokenText}</span>
-        {after}
+        {renderMarkdownBackdrop(input, chip, quotes)}
         {input.endsWith('\n') ? '\u200B' : null}
       </>
     )
   }
 
+  // Shift+Enter (or a picker-free new line) on a list item starts the next item, as the textarea's own
+  // typing would: through insertText, so undo and the input event stay native.
+  const continueList = (target: HTMLTextAreaElement): boolean => {
+    const edit = listContinuation(target.value, target.selectionStart, target.selectionEnd)
+    if (!edit) return false
+    target.setSelectionRange(edit.start, edit.end)
+    const inserted = edit.text
+      ? document.execCommand?.('insertText', false, edit.text)
+      : document.execCommand?.('delete')
+    if (!inserted) {
+      commitEdit({
+        value: target.value.slice(0, edit.start) + edit.text + target.value.slice(edit.end),
+        caret: edit.start + edit.text.length
+      })
+    }
+    return true
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Undo right after a long paste takes its chip off, as it would take pasted text out.
+    const undone = pasteUndo.current
+    if (undone && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
+      pasteUndo.current = null
+      if (e.currentTarget.value === undone.input && attachedFiles.some((f) => f.id === undone.id)) {
+        e.preventDefault()
+        removeFile(undone.id)
+        return
+      }
+    }
+
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-      if (!e.repeat) imagePasteKey.current = { held: true, consumed: false }
-      if (e.repeat && imagePasteKey.current.consumed) {
+      if (!e.repeat) filePasteKey.current = { held: true, consumed: false }
+      if (e.repeat && filePasteKey.current.consumed) {
         e.preventDefault()
         return
       }
@@ -586,7 +787,7 @@ export function ChatComposer({
 
     // One keyboard map for all three pickers: arrows, pages and Home/End move, Enter and Tab pick,
     // Escape closes. With no `@` rows Enter falls through and sends the text as typed.
-    const picker = showMentionPicker ? 'mention' : showSkillsPicker ? 'skills' : showSuggestions ? 'slash' : null
+    const picker = showMentionPicker ? 'mention' : showSkillsPicker ? 'skills' : showSuggestions ? 'slash' : showOwnSuggestions ? 'own' : null
     if (picker) {
       const action = pickerKeyAction(keyInfo, { count: pickerItemCount, swallowWhenEmpty: picker === 'skills' })
       if (action) {
@@ -601,6 +802,9 @@ export function ChatComposer({
           } else if (picker === 'skills') {
             const skill = skillSuggestions[selectedSuggestion]
             if (skill) applySkill(skill.id)
+          } else if (picker === 'own') {
+            // Tab only fills in; Enter also runs a finished command.
+            pickOwnSuggestion(ownSuggestions[selectedSuggestion], e.key !== 'Tab')
           } else {
             const suggestion = suggestions[selectedSuggestion]
             if (suggestion) {
@@ -615,6 +819,18 @@ export function ChatComposer({
           }
         }
         return
+      }
+    }
+    // A Reply pill goes as one character would: Backspace after it or Delete before it removes all of it.
+    if ((e.key === 'Backspace' || e.key === 'Delete') && quoteSpans.length > 0) {
+      const node = e.currentTarget
+      if (node.selectionStart === node.selectionEnd) {
+        const edit = deleteQuoteTokenAt(input, quoteSpans, node.selectionStart, e.key)
+        if (edit) {
+          e.preventDefault()
+          commitEdit(edit)
+          return
+        }
       }
     }
     if (e.key === 'Backspace' && input.length === 0 && references.length > 0) {
@@ -646,10 +862,24 @@ export function ChatComposer({
       setCaret(0)
       return
     }
+    if (e.key === 'Enter' && e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      if (continueList(e.currentTarget)) e.preventDefault()
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      // Alt+Enter during a run steers the running turn; otherwise it sends like Enter.
-      submit(e.altKey && !e.ctrlKey && !e.metaKey && loading ? { steer: true } : undefined)
+      // During a run Enter follows the thread's send mode and Ctrl+Enter (Cmd+Enter on macOS) does the other one;
+      // Alt+Enter, the earlier steer key, still steers. With no run every Enter sends.
+      // With nothing typed, the chord sends the next queued message now, as Send now on it does: also while an
+      // approved command still runs (the turn can be stopped but does not count as running).
+      if ((loading || stoppable) && isSteerKey(e, platform) && trimmedInput.length === 0 && !hasAttachments && onSteerQueued?.()) {
+        markSteerKey()
+        return
+      }
+      const steer = loading && steersOnEnter(e, platform, sendMode)
+      // The chord pressed again a moment later finds an empty composer: it must not answer an approval then.
+      if (loading && (steer || isSteerKey(e, platform))) markSteerKey()
+      submit(steer ? { steer: true } : undefined)
     }
   }
 
@@ -665,59 +895,80 @@ export function ChatComposer({
     }
   }
 
+  const takeReference = (reference: ChatReference) => {
+    if (!onAddReference) return
+    setPendingReferences((count) => count + 1)
+    void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
+      onReferenceError(error instanceof Error ? error.message : String(error))
+    }).finally(() => setPendingReferences((count) => count - 1))
+  }
+
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     if (disabled) return
     const reference = onAddReference ? parseReferenceDragData(event.dataTransfer) : null
     if (reference && onAddReference) {
       event.preventDefault()
       event.stopPropagation()
-      setPendingReferences((count) => count + 1)
-      void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
-        onReferenceError(error instanceof Error ? error.message : String(error))
-      }).finally(() => setPendingReferences((count) => count - 1))
+      takeReference(reference)
       return
     }
     const files = Array.from(event.dataTransfer.files)
-    if (files.length) {
-      event.preventDefault()
-      addFiles(files)
+    if (!files.length) return
+    event.preventDefault()
+    // A file this window drags out (a file tree row, a chip) means here what the window's own drag meant.
+    const own = ownFileDrop(files)
+    if (own?.kind === 'ignore') return
+    if (own?.kind === 'reference') {
+      const parsed = parseChatReference({ ...own.reference, id: own.reference.id ?? `${own.reference.kind}:${crypto.randomUUID()}` })
+      if (parsed) takeReference(parsed)
+      return
     }
+    addFiles(files)
   }
 
   return (
-    <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
+    <div data-mousse="composer" className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
       {banner}
-      {(hasAttachments || isRecording || transcribing) && (
+      {previewing && (
+        <PastedTextPreview
+          name={previewing.name}
+          text={previewing.text}
+          onClose={() => setPreviewing(null)}
+          onInsert={() => void insertPastedText(previewing.id)}
+        />
+      )}
+      {hasAttachments && (
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
-            {isRecording && (
-              <div
-                className="composer-attachment-pill composer-attachment-pill-recording"
-                role="status"
-                aria-label={`Recording ${formatDuration(recordingDuration)}`}
-              >
-                <Mic size={12} strokeWidth={2} />
-                <SpeechWave levels={dictation.levels} />
-                <span>{formatDuration(recordingDuration)}</span>
-              </div>
-            )}
-            {transcribing && (
-              <div className="composer-attachment-pill composer-attachment-pill-transcribing" role="status">
-                <Loader2 size={12} strokeWidth={2} className="composer-transcribing-spin" />
-                <span>Transcribing…</span>
-              </div>
-            )}
-            {attachedFiles.map(({ id, file, previewUrl }) => (
-              <FileAttachment
-                key={id}
-                id={id}
-                filename={file.name}
-                size={file.size}
-                isImage={previewUrl !== undefined}
-                url={previewUrl}
-                onRemove={() => removeFile(id)}
-              />
-            ))}
+            {/* An attached image opens a preview that steps through the other attached images. */}
+            <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl ? [{ id, url: previewUrl, filename: file.name }] : []))}>
+              {attachedFiles.map((attached) => {
+                const { id, file, previewUrl, path, pastedText } = attached
+                return (
+                  <FileAttachment
+                    key={id}
+                    id={id}
+                    filename={attachedFileName(attached)}
+                    size={path ? undefined : file.size}
+                    title={pastedText ? 'Sent to the agent as a text file. Click to view.' : path}
+                    isImage={previewUrl !== undefined}
+                    url={previewUrl}
+                    onOpen={pastedText ? () => void previewPastedText(id) : undefined}
+                    onInsertText={pastedText ? () => void insertPastedText(id) : undefined}
+                    className={pastedText ? 'max-w-[280px]' : undefined}
+                    onRemove={() => removeFile(id)}
+                    onDragStart={(event) => startDragOut(event, {
+                      name: file.name,
+                      threadId: mentionScope?.threadId,
+                      projectId: mentionScope?.projectId,
+                      ...(path ? { item: { kind: 'attachment' as const, path, name: file.name } } : { composerFile: file }),
+                      // Dropped back on the composer, it is already attached.
+                      inApp: { kind: 'ignore' }
+                    })}
+                  />
+                )
+              })}
+            </ImageGalleryProvider>
             {references.map((reference) => (
               <ChatReferencePill key={reference.id} reference={reference} onRemove={() => onRemoveReference(reference.id)} />
             ))}
@@ -752,7 +1003,7 @@ export function ChatComposer({
         </div>
         <textarea
           ref={composerInputRef}
-          className="composer-input"
+          className="composer-input composer-input-mirrored"
           value={input}
           onChange={(e) => {
             setSuggestionsDismissed(false)
@@ -760,7 +1011,17 @@ export function ChatComposer({
             setCaret(readCaret(e.target))
             onInputChange(e.target.value)
           }}
-          onSelect={(e) => setCaret(readCaret(e.currentTarget))}
+          onSelect={(e) => {
+            // The caret never rests inside a Reply pill, so typing can't split one.
+            const node = e.currentTarget
+            const inside = node.selectionStart === node.selectionEnd ? quoteTokenAround(quoteSpans, node.selectionStart) : undefined
+            if (inside) {
+              const end = inside.index + inside.length
+              const next = node.selectionStart - inside.index < end - node.selectionStart ? inside.index : end
+              node.setSelectionRange(next, next)
+            }
+            setCaret(readCaret(node))
+          }}
           onKeyUp={(e) => setCaret(readCaret(e.currentTarget))}
           onCompositionStart={() => { composingRef.current = true }}
           onCompositionEnd={(e) => {
@@ -773,7 +1034,9 @@ export function ChatComposer({
           onFocus={resizeDraft}
           placeholder={
             placeholder ?? (loading
-              ? `Queue a follow-up · ${formatBinding(STEER_BINDING, platform)} steers`
+              ? sendMode === 'steer'
+                ? `Steer the reply · ${formatBinding(STEER_BINDING, platform)} queues`
+                : `Queue a follow-up · ${formatBinding(STEER_BINDING, platform)} steers`
               : 'Ask anything · @ files · / commands')
           }
           rows={3}
@@ -860,6 +1123,27 @@ export function ChatComposer({
         />
       )}
 
+      {showOwnSuggestions && (
+        <ComposerSuggestionList
+          ariaLabel="Command suggestions"
+          rows={ownSuggestions.map(
+            (row): SuggestionRow => ({
+              key: row.key,
+              content: (
+                <>
+                  <span className="composer-command-suggestion-name">{row.label}</span>
+                  <span className="composer-command-suggestion-description">{row.description}</span>
+                </>
+              )
+            })
+          )}
+          selected={selectedSuggestion}
+          onHover={setSelectedSuggestion}
+          onPick={(index) => pickOwnSuggestion(ownSuggestions[index])}
+          registerRow={registerSuggestionRow}
+        />
+      )}
+
       <input
         ref={fileInputRef}
         type="file"
@@ -881,13 +1165,19 @@ export function ChatComposer({
         isRecording={isRecording}
         recordingPending={recordingPending}
         transcribing={transcribing}
-        onSend={() => submit()}
+        onSend={() => submit(sendMode === 'steer' ? { steer: true } : undefined)}
         sendLabel={sendLabel}
         onStop={handleStop}
-        onStartRecording={dictation.start}
+        onStartRecording={startDictation}
         onStopRecording={dictation.stop}
+        onCancelRecording={dictation.cancel}
+        recordingDuration={recordingDuration}
+        recordingLevels={dictation.levels}
         allowAttachWhileLoading
         permission={permission}
+        dictateWhileStoppable={dictateWhileStoppable}
+        extraActions={extraActions}
+        {...(sendModeShown ? { sendMode: { mode: sendMode, onSwitch: switchSendMode } } : {})}
       />
     </div>
   )
@@ -897,24 +1187,27 @@ export function formatVoiceDuration(seconds: number): string {
   return formatDuration(seconds)
 }
 
+/**
+ * The message a send carries. Images travel as separate vision payloads; every other file is listed with its path
+ * (`filePaths`, by attached id, from `composerFilePaths`) so the model can read it. Without a path (a draft measured
+ * before sending) a file is listed by name.
+ */
 export function buildComposerMessageContent(
   input: string,
   attachedFiles: AttachedFile[],
   voiceMessages: VoiceMessage[],
   browserElements: BrowserElementAttachment[] = [],
-  references: ChatReference[] = []
+  references: ChatReference[] = [],
+  filePaths: ReadonlyMap<string, string> = new Map(),
+  pastedTexts: ReadonlyArray<{ name: string; text: string }> = []
 ): string {
   const parts: string[] = []
-  if (input.trim()) parts.push(input.trim())
+  const typed = expandComposerQuotes(input).trim()
+  if (typed) parts.push(typed)
+  for (const pasted of pastedTexts) parts.push(pastedTextBlock(pasted.name, pasted.text))
 
-  // Images travel as separate vision payloads — only list non-image files here so
-  // auto-generated paste names (paste-*.png) never pollute queue/transcript text.
-  const nonImageNames = attachedFiles
-    .filter((f) => !f.file.type.startsWith('image/') && !f.previewUrl)
-    .map((f) => f.file.name)
-  if (nonImageNames.length) {
-    parts.push(`[Attached files: ${nonImageNames.join(', ')}]`)
-  }
+  const files = fileAttachments(attachedFiles).map((attached) => ({ name: attachedFileName(attached), path: filePaths.get(attached.id) ?? attached.path }))
+  if (files.length) parts.push(formatAttachedFilesMarker(files))
 
   if (voiceMessages.length) {
     const voiceList = voiceMessages
@@ -930,4 +1223,56 @@ export function buildComposerMessageContent(
   if (references.length) parts.push(formatChatReferences(references))
 
   return parts.join('\n\n')
+}
+
+const MARKDOWN_CLASS: Record<MarkdownKind, string> = {
+  marker: 'composer-md-marker',
+  bold: 'composer-md-bold',
+  italic: 'composer-md-italic',
+  strike: 'composer-md-strike',
+  code: 'composer-md-code',
+  codeblock: 'composer-md-codeblock',
+  heading: 'composer-md-heading',
+  quote: 'composer-md-quote',
+  list: 'composer-md-list',
+  link: 'composer-md-link'
+}
+
+/**
+ * The draft as the backdrop paints it: Markdown spans, with the inline `@skill` token's pill on top.
+ * Every character stays the width the textarea gives it, so the caret sits on the painted text.
+ */
+function renderMarkdownBackdrop(
+  text: string,
+  chip: { start: number; end: number } | null,
+  quotes: Array<{ start: number; end: number }> = []
+): ReactNode[] {
+  const cuts = [...(chip ? [chip.start, chip.end] : []), ...quotes.flatMap((quote) => [quote.start, quote.end])]
+  const nodes: ReactNode[] = []
+  for (const span of composerMarkdownSpans(text)) {
+    const bounds = [...new Set([span.start, ...cuts.filter((cut) => cut > span.start && cut < span.end), span.end])].sort((a, b) => a - b)
+    for (let i = 0; i < bounds.length - 1; i += 1) {
+      const start = bounds[i]
+      const end = bounds[i + 1]
+      // A Reply pill is drawn whole, without Markdown: its reply icon in the token's blank first slot, then the preview.
+      const quote = quotes.find((item) => start >= item.start && end <= item.end)
+      if (quote) {
+        if (start === quote.start) {
+          const token = text.slice(quote.start, quote.end)
+          nodes.push(
+            <span key={start} className="composer-token-chip composer-quote-chip">
+              <span className="composer-quote-tag">{token.slice(0, QUOTE_TAG_LENGTH)}<Reply size={13} strokeWidth={2.2} className="composer-quote-icon" aria-hidden /></span>
+              {token.slice(QUOTE_TAG_LENGTH)}
+            </span>
+          )
+        }
+        continue
+      }
+      const classes = span.kinds.map((kind) => MARKDOWN_CLASS[kind])
+      if (chip && start >= chip.start && end <= chip.end) classes.push('composer-token-chip')
+      const piece = text.slice(start, end)
+      nodes.push(classes.length ? <span key={start} className={classes.join(' ')}>{piece}</span> : piece)
+    }
+  }
+  return nodes
 }

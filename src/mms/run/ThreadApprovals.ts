@@ -695,17 +695,20 @@ export class ThreadApprovals {
    * thread now. A pending request of a run the crash cut off turns `continue`; one the crash left
    * `uncertain` records which tools may already have run. A request whose run cannot be continued
    * is closed. An answer that never reached its provider becomes `continue` too and is reported.
+   *
+   * A request waits for the person across a restart whoever started the run (docs/plans/tool-api.md §2.11): a
+   * scheduled or delegated run's request parks as `continue` like a person's. `notContinuable` names the runs a thread
+   * turn cannot continue (a bot's, a workflow's, an agent definition's: their own runner owns them), whose requests
+   * are closed.
    */
-  recoverOnBoot(uncertainTools: ReadonlyMap<string, string[]>, unattended: (runId: string) => boolean = () => false): BootRecovery {
+  recoverOnBoot(uncertainTools: ReadonlyMap<string, string[]>, notContinuable: (runId: string) => boolean = () => false): BootRecovery {
     return this.db.transaction(() => {
       const report: BootRecovery = { continued: [], cancelled: [], undelivered: [] }
       const rows = select(this.store, "status = 'pending' OR (status = 'answered' AND delivered_at IS NULL AND answer_path = 'live')")
       const at = now(this.store)
       for (const row of rows) {
-        // Nobody watches an unattended run (a scheduled job, a workflow, a bot, a definition): its request had
-        // a ten-minute limit and a restart only makes the wait longer, so it is closed as it would have been.
-        if (row.status === 'pending' && row.runId && unattended(row.runId)) {
-          cancelApprovalRows(this.store, 'request_id = ?', [row.requestId], 'timed_out')
+        if (row.status === 'pending' && row.runId && notContinuable(row.runId)) {
+          cancelApprovalRows(this.store, 'request_id = ?', [row.requestId], 'turn_ended')
           report.cancelled.push(row.requestId)
           continue
         }

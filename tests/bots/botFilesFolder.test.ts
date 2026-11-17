@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { botFilesFolder, botManifestDigest, compileBotThread, type CompileInput } from '../../src/mms/bots/grants/compile'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
-import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { botStarterManifest, describeManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import type { NeutralTool } from '../../src/shared/harness/tools'
@@ -94,31 +93,12 @@ describe('the files folder', () => {
     expect(authority.workspace?.writeRoots).toContain(realpathSync(files))
   })
 
-  it('stays the bot\'s with file access, while the rest of Mousse\'s data stays closed', () => {
-    const grant: BotManifest = { ...botStarterManifest(), workspace: { roots: [notes], access: 'read' } }
-    const authority = authorityOf({ grant })
-    expect(authority.check(builtin('write', join(notes, 'a.md')))).toEqual({ ok: true })
-    expect(authority.check(builtin('write', join(files, 'a.md')))).toEqual({ ok: true })
-    expect(authority.check(builtin('write', join(scratch, 'a.md')))).toEqual({ ok: true })
-    expect(authority.check(builtin('read', join(botFilesFolder(profile, 'bot-2'), 'x.md')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
-    expect(authority.check(builtin('read', join(profile, 'bots', 'bots.db')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
-    expect(authority.workspace).toMatchObject({ files: realpathSync(files), computer: { closed: profile } })
-  })
-
-  it('a grant an older build wrote naming it, or a folder inside Mousse data, compiles as file access', () => {
-    for (const roots of [[files], [join(profile, 'bots')], [join(files, 'sub')]]) {
-      const named = compile({ grant: { ...botStarterManifest(), workspace: { roots, access: 'write' } } })
-      if (!named.ok) throw new Error(named.error.message)
-      expect(named.permissions.workspace, roots[0]).toMatchObject({ files: realpathSync(files), computer: { closed: profile } })
-    }
-  })
-
   it('must be where Mousse keeps bots\' files', () => {
     expect(compile({ filesFolder: notes })).toMatchObject({ ok: false, error: { code: 'policy_unenforceable' } })
     expect(compile({ filesFolder: join(profile, 'bots', 'files') })).toMatchObject({ ok: false })
   })
 
-  it('without one, a grant with no folder has no file access at all, as before', () => {
+  it('without one, a bot has no folder at all, as before', () => {
     const compiled = compile({ filesFolder: undefined })
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.permissions.workspace).toBeNull()
@@ -136,6 +116,6 @@ describe('memory tools on every bot thread', () => {
     }
     const without = compile({ grant: old, botTools: { escalate: true, consult: false } })
     if (!without.ok) throw new Error(without.error.message)
-    expect(without.permissions.appTools).toEqual(['escalate', 'web_search'])
+    expect(without.permissions.appTools).toEqual(['escalate', 'running_list', 'web_search'])
   })
 })

@@ -1,14 +1,16 @@
 import { streamingAppletPresentation } from '../../components/applets/streamPresentation'
-import type { ChatMessage } from '../../../shared/types'
+import type { ChatMessage, TurnEnd } from '../../../shared/types'
+import { agentMessageWords } from '../../../shared/agentMessageWords'
 import type { UIMessage } from 'ai'
-import { isToolTimelineMessage } from '../../../shared/types'
+import { isToolTimelineMessage, RESTART_INTERRUPTED_TEXT, TURN_STOPPED_TEXT } from '../../../shared/types'
 import {
   filterImageAttachmentNames,
   guessMimeTypeFromFilename,
   parseUserMessageContent,
 } from '../../utils/messageAttachments'
-import { commandLabel, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
+import { commandLabel, knownToolName, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
+import { splitExitCode } from '../components/agent-elements/utils/bash-output'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
 
@@ -89,6 +91,16 @@ function planTitle(text: string | undefined): string {
   return heading && heading.length > 0 ? (heading.length > 90 ? `${heading.slice(0, 87)}…` : heading) : 'Implementation plan'
 }
 
+/**
+ * A finished command's output and exit code. A runtime that reports the exit code only as the output's first line
+ * (`Exit code 1`, Claude Code) has it moved to the exit code, where the command's exit line shows it.
+ */
+function commandResult(output: string, exitCode: number | null | undefined): { stdout: string; exitCode?: number | null } {
+  if (typeof exitCode === 'number') return { stdout: output, exitCode }
+  const split = splitExitCode(output)
+  return split.exitCode === undefined ? { stdout: output, exitCode } : { stdout: split.output, exitCode: split.exitCode }
+}
+
 /** The card a typed item draws as, with the input and output that card reads; undefined for a generic or unknown kind. */
 function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape | undefined {
   const running = activity.status === 'running'
@@ -99,8 +111,7 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
           ? compact({ stdout: activity.output, truncated: activity.outputTruncated, bytes: activity.outputBytes })
           : undefined
         : compact({
-            stdout: activity.output ?? '',
-            exitCode: activity.exitCode,
+            ...commandResult(activity.output ?? '', activity.exitCode),
             durationMs: activity.durationMs,
             truncated: activity.outputTruncated,
             bytes: activity.outputBytes,
@@ -168,6 +179,7 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
         // The task id and the background flag let the card follow a background agent to its end.
         input: compact({
           subagent_type: activity.agentType,
+          model: activity.model,
           description: activity.description,
           run_in_background: activity.background ? true : undefined,
           task_id: activity.nativeId,
@@ -189,21 +201,52 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
  */
 const RICH_TOOL_TYPES = new Set([
   'Read', 'Edit', 'MultiEdit', 'Write', 'Bash', 'Grep', 'Glob',
-  'TodoWrite', 'PlanWrite', 'ExitPlanMode',
+  'TodoWrite', 'PlanWrite',
   'WebSearch', 'WebFetch', 'Skill', 'Task', 'Agent',
-  'Question', 'Thinking', 'cloning', 'QuickAction',
+  'Question', 'Thinking', 'cloning', 'QuickAction', 'ToolSearch',
 ])
 
+function mcpToolSlug(rawName: string | undefined): string {
+  return (rawName ?? 'tool').replace(/\W+/g, '_').toLowerCase() || 'tool'
+}
+
 function mcpCustomType(rawName: string | undefined): string {
-  const name = (rawName ?? 'tool').replace(/\W+/g, '_').toLowerCase() || 'tool'
-  return `tool-mcp__custom__${name}`
+  return `tool-mcp__custom__${mcpToolSlug(rawName)}`
+}
+
+/** A runtime's full MCP tool name (`mcp__<server>__<tool>`, as Claude Code and Codex name them), split. */
+function splitMcpName(rawName: string | undefined): { server: string; tool: string } | undefined {
+  const match = rawName?.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/)
+  return match ? { server: match[1]!, tool: match[2]! } : undefined
+}
+
+/**
+ * Built-in tools a runtime names in camel case, with their own handling in the list (`TaskOutput` rows are hidden,
+ * MCP resource tools get their own labels). On an MCP-kind row without a server they keep that name.
+ */
+const BUILTIN_TOOL_NAMES = new Set([
+  'TaskOutput', 'TaskStop',
+  'ListMcpResources', 'ListMcpResourcesTool', 'ReadMcpResource', 'ReadMcpResourceTool',
+])
+
+/**
+ * A title that is a tool's name rather than a sentence: a full MCP name (`mcp__mousse__thread_list`), a camel-case
+ * name (`ToolSearch`, `WebFetch`) or a name the cards know (`Read`, `Bash`). A single word such as "Terminal" or
+ * "Reading" is not one: it is guessed from below.
+ */
+function titleIsToolName(title: string): boolean {
+  return /^mcp__\w+$/.test(title) || /^[A-Z][a-z]+(?:[A-Z][a-z]*)+$/.test(title) || (/^\w+$/.test(title) && knownToolName(title) !== undefined)
 }
 
 function fallbackToolName(msg: ChatMessage): string | undefined {
   const detailTool = msg.toolCall?.details.find((d) => d.startsWith('Tool:'))
   const name = detailTool?.replace('Tool:', '').trim().split(/\s+/)[0]
   if (name) return name
-  const lower = (msg.toolCall?.title ?? '').toLowerCase()
+  const title = (msg.toolCall?.title ?? '').trim()
+  if (titleIsToolName(title)) return title
+  // Older rows named only by a sentence: a guess from its words. A search is not guessed (a web search, a tool
+  // search and a code search all say "search"): it stays a generic row rather than a wrong one.
+  const lower = title.toLowerCase()
   if (lower.includes('read')) return 'Read'
   if (lower.includes('edit')) return 'Edit'
   if (lower.includes('write') && !lower.includes('plan')) return 'Write'
@@ -213,7 +256,6 @@ function fallbackToolName(msg: ChatMessage): string | undefined {
   if (lower.includes('todo')) return 'TodoWrite'
   if (lower.includes('quickaction') || lower.includes('quick action')) return 'QuickAction'
   if (lower.includes('plan')) return 'PlanWrite'
-  if (lower.includes('search') || lower.includes('webfetch') || lower.includes('fetch')) return 'WebSearch'
   if (lower.includes('skill')) return 'Skill'
   if (lower.includes('agent') || lower.includes('spawning')) return 'Agent'
   if (lower.includes('task')) return 'Task'
@@ -257,28 +299,34 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
       state: activity!.status === 'failed' ? 'output-error' : activityState(activity!.status),
       input: typed.input,
       output: typed.output,
+      ...(msg.timestamp ? { createdAt: msg.timestamp } : {}),
     }
   }
 
   // Structured first (provider boundary parses once), legacy string fields as fallback.
   const genericItem = activity?.kind === 'generic' ? activity : undefined
-  const rawName = toolCall.toolName ?? fallbackToolName(msg)
+  // The provider's own name: on the row (newer rows), else on its item (rows saved before the row kept it). An item
+  // named after its title had no name of its own; the fallback reads that title.
+  const itemName = activity && activity.toolName !== toolCall.title ? activity.toolName : undefined
+  const rawName = toolCall.toolName ?? itemName ?? fallbackToolName(msg)
   const toolName = normalizeToolName(rawName, msg.kind)
+  const mcpName = splitMcpName(rawName)
   const structuredInput = toolCall.input ?? genericItem?.input ?? tryParseArgsJson(toolCall.response)
 
   let type: string
   if (subagentTool) {
     type = 'tool-Subagent'
-  } else if (msg.kind === 'mcp_tool_call' || msg.kind === 'mcp_tool_result') {
-    const server = extractServer(toolCall.details)
+  } else if (msg.kind === 'mcp_tool_call' || msg.kind === 'mcp_tool_result' || mcpName) {
+    // True MCP tool: Server + Tool details identify it, or the full `mcp__<server>__<tool>` name does.
+    const server = extractServer(toolCall.details) ?? mcpName?.server
     if (server) {
-      // True MCP tool: Server + Tool details identify it.
-      const name = (rawName ?? 'tool').replace(/\W+/g, '_').toLowerCase() || 'tool'
-      type = `tool-mcp__${server}__${name}`
+      type = `tool-mcp__${server}__${mcpToolSlug(mcpName?.tool ?? rawName)}`
     } else if (RICH_TOOL_TYPES.has(toolName)) {
       // Pi/build tools arrive with rewritten mcp kinds but no Server
       // detail — render their rich cards (Bash terminal, Edit diff, ...).
       type = `tool-${toolName}`
+    } else if (rawName && BUILTIN_TOOL_NAMES.has(rawName)) {
+      type = `tool-${rawName}`
     } else {
       type = mcpCustomType(rawName)
     }
@@ -305,7 +353,9 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
         ?? (toolCall.summary.match(/[^\s]+\.[a-z]{1,4}/i)?.[0] ?? '')
       input = { file_path: file, ...(toolName === 'Edit' ? { old_string: '', new_string: '' } : {}) }
     } else if (toolName === 'Grep' || toolName === 'Glob' || toolName === 'WebSearch') {
-      input = { pattern: toolCall.summary, query: toolCall.summary }
+      // A runtime that sends no arguments puts the tool's own name in the summary: that is not what it searched for.
+      const query = toolCall.summary === rawName ? '' : toolCall.summary
+      input = { pattern: query, query }
     } else if (toolName === 'TodoWrite') {
       input = { todos: [], action: 'update' }
     } else {
@@ -335,11 +385,29 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
     input,
     output,
     ...(subagentTool ? { subagentTool } : {}),
+    // When the call started: its row shows the time on hover.
+    ...(msg.timestamp ? { createdAt: msg.timestamp } : {}),
   }
 }
 
 /** Who sent a turn: a person on another of the user's computers. Keyed by run id, which is the `turnId` of the turn's messages. */
 export type TurnSenders = Readonly<Record<string, { name: string }>>
+
+/** A reply's text as the transcript shows it: without the "(Stopped)" line a stopped reply ends with. */
+export function assistantDisplayText(content: string): string {
+  return content.replace(/(?:[ \t]*\r?\n)*[ \t]*\(Stopped\)\s*$/u, '')
+}
+
+/**
+ * Why a Mousse line says its turn was cut off, or undefined when it says nothing of the kind. Lines written before
+ * `turnEnd` existed are read by their exact text: a Stop's (taken as a person's) and a restart's.
+ */
+function turnEndOf(msg: ChatMessage): TurnEnd | undefined {
+  if (msg.turnEnd) return msg.turnEnd
+  if (msg.content === TURN_STOPPED_TEXT) return { cause: 'user' }
+  if (msg.content === RESTART_INTERRUPTED_TEXT) return { cause: 'daemon_restart' }
+  return undefined
+}
 
 export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSenders): UIMessage[] {
   const out: UIMessage[] = []
@@ -368,13 +436,26 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       createdAt: msg.timestamp,
       // The turn a user message started, for the row that opens that turn in Review.
       ...(msg.turnId ? { turnId: msg.turnId } : {}),
+      // When a reply stopped streaming: a finished turn's saved time runs to it (`createdAt` is when it started).
+      ...(msg.completedAt ? { completedAt: msg.completedAt } : {}),
       metadata: msg.responseMetadata ? { ...msg.responseMetadata } : undefined,
     } as unknown as UIMessage
 
     // A failed turn ends with Mousse's line carrying the error: it shows as the turn's error, where Retry is.
     if (msg.role === 'system' && msg.error) {
       base.role = 'assistant'
-      base.parts = [{ type: 'error', title: 'Request failed', message: msg.error.message || msg.content } as unknown as UIMessage['parts'][number]]
+      base.parts = [{ type: 'error', title: errorTitle(msg.error), message: errorText(msg.error, msg.content) } as unknown as UIMessage['parts'][number]]
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
+    // The line a Stop, a restart or a crash wrote as it cut the turn off: a hidden marker that the turn's header reads
+    // ("Stopped", "Interrupted"). It shows nothing itself, as Mousse's other lines do not.
+    const turnEnd = msg.role === 'system' ? turnEndOf(msg) : undefined
+    if (turnEnd) {
+      base.parts = []
+      base.metadata = { ...(base.metadata as object | undefined), turnEnd }
       out.push(base)
       lastAssistantText = null
       continue
@@ -390,34 +471,8 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
         state,
         input: { thought: msg.thinking.content },
         output: msg.thinking.status === 'complete' ? msg.thinking.content : undefined,
+        ...(msg.timestamp ? { createdAt: msg.timestamp } : {}),
       } as unknown as UIMessage['parts'][number]]
-      out.push(base)
-      lastAssistantText = null
-      continue
-    }
-
-    if (msg.kind === 'plan_card' && msg.planCard) {
-      // Inline approval card: reuse the agent-elements PlanTool
-      // (tool-PlanWrite) so plans render with the same chrome as other tool
-      // cards. Preview and implement actions live on the card itself — the
-      // sidebar document preview no longer auto-opens.
-      const planMarkdown = msg.presentationParts ? msg.presentationParts.filter(part => part.type === 'text').map(part => part.text).join('\n').trim() || 'Interactive plan' : msg.planCard.planMarkdown?.trim() || msg.content?.trim() || 'No plan generated.'
-      const request = msg.planCard.originalRequest?.trim() || 'Implementation plan'
-      const title = request.length > 90 ? `${request.slice(0, 87)}…` : request
-      base.role = 'assistant'
-      base.parts = [{
-        type: 'tool-PlanWrite',
-        toolCallId: msg.id,
-        state: 'output-available',
-        input: {
-          action: 'create',
-          plan: { id: msg.id.slice(0, 8), title, summary: planMarkdown },
-        },
-        output: planMarkdown,
-      } as unknown as UIMessage['parts'][number]]
-      if (!msg.streaming && !msg.incomplete) for (const part of msg.presentationParts ?? []) {
-        if (part.type === 'applet') base.parts.push({type:'data-applet',data:part.reference} as unknown as UIMessage['parts'][number])
-      }
       out.push(base)
       lastAssistantText = null
       continue
@@ -480,9 +535,25 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
         type: 'tool-QuestionAnswers',
         toolCallId: msg.id,
         state: 'output-available',
-        input: { questions: msg.questionAnswers },
+        // The images sent with the answers; each question names its own by index. One of a thread on another
+        // computer may arrive by name first, its bytes fetched when shown.
+        input: {
+          questions: msg.questionAnswers,
+          ...(msg.images?.length
+            ? { images: msg.images.map((img) => ({ name: img.name, ...(img.data ? { url: `data:${img.mimeType};base64,${img.data}` } : {}) })) }
+            : {}),
+        },
       } as unknown as UIMessage['parts'][number]]
       out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
+    // The message that delivers answers to a question the agent asked without waiting (a steer, or a turn of its own)
+    // shows nothing for them: the answers row was recorded when they were given. What else it carries (a subagent's
+    // result delivered with them) shows as usual.
+    const otherNotice = msg.role === 'user' ? msg.subagentNotice?.filter((item) => item.event !== 'answer') : msg.subagentNotice
+    if (msg.role === 'user' && msg.subagentNotice?.length && !otherNotice?.length) {
       lastAssistantText = null
       continue
     }
@@ -512,16 +583,19 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // browser blocks) that the model needs but the transcript must not show
     // raw — images already render as previews via msg.images, other files
     // become file pills below.
-    const text = msg.content ?? ''
-    let displayText = msg.role === 'assistant' ? text.replace(/(?:[ \t]*\r?\n)*[ \t]*\(Stopped\)\s*$/u, '') : text
-    let extraFileNames: string[] = []
+    // A message another thread's agent sent shows that agent's words, without the header and closing line Mousse wrote
+    // around them for the model; which agent is said by the bubble's header, from the stored origin.
+    const agentOrigin = msg.role === 'user' && msg.origin?.kind === 'agent' ? msg.origin : undefined
+    const text = agentOrigin ? agentMessageWords(msg.content ?? '', agentOrigin) : msg.content ?? ''
+    let displayText = msg.role === 'assistant' ? assistantDisplayText(text) : text
+    let extraFiles: ReturnType<typeof parseUserMessageContent>['attachedFiles'] = []
     let references: ReturnType<typeof parseUserMessageContent>['references'] = []
     if (msg.role === 'user' && text.includes('[')) {
       try {
         const parsed = parseUserMessageContent(text)
         displayText = parsed.text
         const imageNames = msg.images?.map((i) => i.name).filter(Boolean) ?? []
-        extraFileNames = filterImageAttachmentNames(parsed.attachedFiles, imageNames)
+        extraFiles = filterImageAttachmentNames(parsed.attachedFiles, imageNames)
         references = parsed.references
       } catch {
         displayText = text
@@ -529,17 +603,22 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     }
     // A message that delivers subagent results carries them structured; the transcript renders
     // those, never the text, which stays what the model reads.
-    if (msg.role === 'user' && msg.steered) base.metadata = { ...(base.metadata as object | undefined), steered: true }
+    // A steer that is the copy of a queued message keeps its item: the Steer block shows the wait line of its hold.
+    if (msg.role === 'user' && msg.steered) base.metadata = { ...(base.metadata as object | undefined), steered: true, ...(msg.steerItemId ? { steerItemId: msg.steerItemId } : {}) }
     // The turn a person on another of the user's computers sent says so (the sender is kept on the run, not on the message).
     const sender = msg.role === 'user' && msg.turnId && !msg.steered ? senders?.[msg.turnId] : undefined
     if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }
-    const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
+    if (agentOrigin) base.metadata = { ...(base.metadata as object | undefined), origin: agentOrigin }
+    const subagentNotice = msg.role === 'user' && otherNotice?.length ? otherNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
     // The same for the message a turn the provider started itself opens with: the background tasks it reports.
     const backgroundNotice = msg.role === 'user' && msg.backgroundNotice?.length ? msg.backgroundNotice : undefined
     if (backgroundNotice) base.metadata = { ...(base.metadata as object | undefined), backgroundNotice }
+    // And for what Mousse told the agent about work it asked to hear about (`notify`).
+    const settleNotice = msg.role === 'user' && msg.settleNotice?.length ? msg.settleNotice : undefined
+    if (settleNotice) base.metadata = { ...(base.metadata as object | undefined), settleNotice }
     if (msg.role === 'assistant' && msg.scheduledRun) base.metadata = { ...(base.metadata as object | undefined), scheduledRun: msg.scheduledRun }
-    if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0 && references.length === 0 && !subagentNotice && !backgroundNotice) {
+    if (!displayText.trim() && !msg.images?.length && extraFiles.length === 0 && references.length === 0 && !subagentNotice && !backgroundNotice && !settleNotice) {
       continue
     }
     // Fold exact-duplicate consecutive assistant text (provider double-adds,
@@ -581,7 +660,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     for (const reference of references) {
       parts.push({ type: 'data-mousse-reference', data: reference } as unknown as UIMessage['parts'][number])
     }
-    for (const name of extraFileNames) {
+    for (const { name, path } of extraFiles) {
       // Guess a mime type from the extension so the renderer can tell
       // image attachments (data lost — e.g. legacy messages saved without
       // image payloads) from generic files. Image-named files without data
@@ -590,6 +669,8 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       parts.push({
         type: 'file',
         filename: name,
+        // Where the file was when it was sent: its chip opens it.
+        ...(path ? { path } : {}),
         ...(mimeType ? { mediaType: mimeType, mimeType } : {}),
       } as unknown as UIMessage['parts'][number])
     }
@@ -601,7 +682,62 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
         ? { text: displayText.trim(), streaming: !!msg.streaming }
         : null
   }
-  return mergeConsecutiveThoughts(out)
+  return markRecoveredFailures(mergeConsecutiveThoughts(out))
+}
+
+/** The title of a failed turn's error: "Provider error" when the provider refused the request, else "Request failed". */
+export function errorTitle(error: { code?: unknown } | undefined): string {
+  const code = typeof error?.code === 'string' ? error.code : ''
+  if (code === 'provider_usage_limit') return 'Usage limit reached'
+  return code.startsWith('provider_') ? 'Provider error' : 'Request failed'
+}
+
+/** A failed turn's error text: its message, then the reference it was logged under when the message does not name it. */
+function errorText(error: { message?: string; details?: unknown }, fallback: string): string {
+  const message = (error.message || fallback).trim()
+  const supportId = error.details && typeof error.details === 'object' ? (error.details as { supportId?: unknown }).supportId : undefined
+  return typeof supportId === 'string' && supportId && !message.includes(supportId) ? `${message} Reference: ${supportId}` : message
+}
+
+type ToolPartShape = { type?: unknown; state?: unknown; failureRecovered?: boolean }
+
+const isToolPartShape = (part: unknown): part is ToolPartShape =>
+  typeof (part as ToolPartShape | undefined)?.type === 'string' && (part as { type: string }).type.startsWith('tool-')
+
+/**
+ * Marks each failed tool call the agent got past (`failureRecovered`), so its row stays quiet: a later call succeeded
+ * or a reply followed in the same turn, or the turn is still running or ended normally. A failure is loud only when
+ * nothing came after it and the turn ended on an error or was cut off.
+ */
+export function markRecoveredFailures(messages: UIMessage[]): UIMessage[] {
+  let pending: ToolPartShape[] = []
+  const settle = (turnFailed: boolean) => {
+    if (!turnFailed) for (const part of pending) part.failureRecovered = true
+    pending = []
+  }
+  for (const message of messages) {
+    if (message.role === 'user') {
+      settle(false)
+      continue
+    }
+    const meta = message.metadata as { turnEnd?: unknown } | undefined
+    for (const part of (message.parts ?? []) as unknown[]) {
+      const type = (part as { type?: unknown }).type
+      if (type === 'error') {
+        settle(true)
+        continue
+      }
+      if (isToolPartShape(part)) {
+        if (part.state === 'output-error') pending.push(part)
+        else if (part.state === 'output-available' && part.type !== 'tool-Thinking') settle(false)
+        continue
+      }
+      if (type === 'text' && typeof (part as { text?: unknown }).text === 'string' && (part as { text: string }).text.trim()) settle(false)
+    }
+    if (meta?.turnEnd) settle(true)
+  }
+  settle(false)
+  return messages
 }
 
 type ThinkingPartShape = {
@@ -610,6 +746,9 @@ type ThinkingPartShape = {
   state?: string
   input?: { thought?: unknown }
   output?: unknown
+  /** On a row that joins thoughts: the latest one's id, and where its text starts in `input.thought`. */
+  liveId?: string
+  liveFrom?: number
 }
 
 function asThinkingPart(msg: UIMessage): ThinkingPartShape | null {
@@ -640,10 +779,14 @@ export function mergeConsecutiveThoughts(messages: UIMessage[]): UIMessage[] {
     const prevPart = prev ? asThinkingPart(prev) : null
     const curPart = asThinkingPart(msg)
     if (prev && prevPart && curPart) {
-      const thought = [thoughtText(prevPart.input?.thought), thoughtText(curPart.input?.thought)]
+      const latest = thoughtText(curPart.input?.thought)
+      const thought = [thoughtText(prevPart.input?.thought), latest]
         .filter((t) => t.trim())
         .join('\n\n')
       prevPart.input = { ...(prevPart.input as object), thought }
+      // Only the latest thought can still be written: the row's live text (see liveTextStore) is its, from where it starts.
+      prevPart.liveId = curPart.toolCallId
+      prevPart.liveFrom = latest.trim() ? thought.length - latest.length : thought.length
       if (thoughtText(curPart.output).trim() || thoughtText(prevPart.output).trim()) {
         prevPart.output = [thoughtText(prevPart.output), thoughtText(curPart.output)]
           .filter((t) => t.trim())

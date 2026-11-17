@@ -29,7 +29,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
   })
 
   /** Turns run on a scripted pi adapter; `reply` answers each. */
-  function scriptTurns(reply: () => Promise<string> | string): void {
+  function scriptTurns(reply: Parameters<typeof piAdapter>[0]): void {
     orch.setHarness(testHarness({ adapters: [piAdapter(reply)], profileHome: home }))
   }
 
@@ -51,8 +51,11 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(result.queueItem?.content).toBe('hello while busy')
     expect(orch.listQueue(thread.id)).toHaveLength(1)
 
-    const second = await orch.send('second', false, { threadId: thread.id })
+    const second = await orch.send('second', false, { threadId: thread.id, clientRequestId: 'req-second' })
     expect(second.queued).toBe(true)
+    // The window that sent it tells it from the copy it shows by the id it gave the send.
+    expect(second.queueItem?.clientRequestId).toBe('req-second')
+    expect(orch.listQueue(thread.id).find((item) => item.content === 'second')?.clientRequestId).toBe('req-second')
     expect(orch.listQueue(thread.id).map((i) => i.content)).toEqual([
       'hello while busy',
       'second'
@@ -165,10 +168,78 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(orch.promoteQueueItem(thread.id, later.id)).toEqual({ ok: true })
     expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['carry on', 'pending'], ['resume', 'pending']])
     expect(session.drainAfterSettle).toBe(true)
-    // With nothing running at all there is still nothing to steer.
+    // With nothing running at all, Send now is still immediate: the message stays first and its turn is started.
     session.activeTurn = null
     session.turnAdmitted = false
-    expect(() => orch.promoteQueueItem(thread.id, later.id)).toThrow('No active turn to steer on this thread.')
+    const drain = vi.spyOn(orch as unknown as { scheduleQueueDrain: (s: unknown) => void }, 'scheduleQueueDrain').mockImplementation(() => {})
+    expect(orch.promoteQueueItem(thread.id, later.id)).toEqual({ ok: true })
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['carry on', 'resume'])
+    expect(drain).toHaveBeenCalledTimes(1)
+    drain.mockRestore()
+  })
+
+  it('Send now while the turn is still being set up puts the message first and joins the turn once it runs', () => {
+    const thread = store.createThread('Setting up')
+    orch.bindThread(thread.id, [], undefined, [])
+    const session = orch.getOrCreateSession(thread.id)
+    // Admitted, still setting up: no active turn yet.
+    session.turnAdmitted = true
+    orch.enqueueForThread(thread.id, 'A')
+    orch.enqueueForThread(thread.id, 'B')
+    const c = orch.enqueueForThread(thread.id, 'C')
+
+    expect(orch.promoteQueueItem(thread.id, c.id)).toEqual({ ok: true })
+    expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['C', 'pending'], ['A', 'pending'], ['B', 'pending']])
+    // A second click changes nothing; nothing waits for the turn's end.
+    expect(orch.promoteQueueItem(thread.id, c.id)).toEqual({ ok: true })
+    expect(session.steerOnStart).toEqual([c.id])
+    expect(session.drainAfterSettle).toBe(false)
+
+    // The turn runs: C joins it at once, shown as sent inside it.
+    session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
+    ;(orch as unknown as { deliverSteersOnStart: (s: unknown) => void }).deliverSteersOnStart(session)
+    expect(session.activeTurn.pendingSteer).toEqual([expect.objectContaining({ text: 'C', itemId: c.id })])
+    expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['C', 'steering'], ['A', 'pending'], ['B', 'pending']])
+    expect(orch.getMessages(thread.id).filter((m) => m.role === 'user').map((m) => [m.content, m.steered])).toEqual([['C', true]])
+    expect(session.steerOnStart).toEqual([])
+  })
+
+  it('a Stop during setup keeps the order of messages sent now: they wait first as sent, nothing joins the stopped turn or runs after it', () => {
+    const thread = store.createThread('Stop during setup')
+    orch.bindThread(thread.id, [], undefined, [])
+    const session = orch.getOrCreateSession(thread.id)
+    session.turnAdmitted = true
+    orch.enqueueForThread(thread.id, 'A')
+    const b = orch.enqueueForThread(thread.id, 'B')
+    const c = orch.enqueueForThread(thread.id, 'C')
+    expect(orch.promoteQueueItem(thread.id, b.id)).toEqual({ ok: true })
+    expect(orch.promoteQueueItem(thread.id, c.id)).toEqual({ ok: true })
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['B', 'C', 'A'])
+    // Stop lands while the turn is still set up; the turn then starts aborted.
+    session.abortRequested = true
+    session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
+    session.activeTurn.abort.abort()
+    ;(orch as unknown as { deliverSteersOnStart: (s: unknown) => void }).deliverSteersOnStart(session)
+    expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['B', 'pending'], ['C', 'pending'], ['A', 'pending']])
+    // As after a Stop of a running turn: nothing runs them until the person sends again.
+    expect(session.drainAfterSettle).toBe(false)
+    expect(orch.getMessages(thread.id).filter((m) => m.role === 'user')).toEqual([])
+  })
+
+  it('a Stop hides the copy of a sent-now message the turn never read, which then runs once as its own turn', () => {
+    const thread = store.createThread('Stop unread')
+    orch.bindThread(thread.id, [], undefined, [])
+    const session = orch.getOrCreateSession(thread.id)
+    session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
+    const c = orch.enqueueForThread(thread.id, 'C')
+    expect(orch.promoteQueueItem(thread.id, c.id)).toEqual({ ok: true })
+    const shown = () => orch.getMessages(thread.id).filter((m) => m.role === 'user' && !m.hidden).map((m) => m.content)
+    expect(shown()).toEqual(['C'])
+
+    expect(orch.abortActiveTurn(thread.id)).toBe(true)
+    expect(shown()).toEqual([])
+    // Still queued, to go first.
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['C'])
   })
 
   it('does not use process.chdir when resolving project cwd for turns', () => {
@@ -207,7 +278,8 @@ describe('OrchestratorService concurrent threads and queue', () => {
     const session = orch.getOrCreateSession(thread.id)
     session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
     expect(orch.steerThread(thread.id, 'local-fast')).toBe(true)
-    expect(session.activeTurn.pendingSteer).toEqual([{ text: 'local-fast' }])
+    expect(session.activeTurn.pendingSteer).toEqual([expect.objectContaining({ text: 'local-fast' })])
+    expect(session.activeTurn.pendingSteer[0]!.itemId).toBeUndefined()
   })
 
   it('promotes a queued GUI item for a live external owner', () => {
@@ -441,12 +513,11 @@ describe('OrchestratorService concurrent threads and queue', () => {
     })
   })
 
-  // Twelve real orchestrator turns run two at a time with thread-file persistence after each,
-  // so this test is bound by throughput, not by a race: about 6 s alone and 15 s inside a full
-  // run on a loaded machine. The assertion on the concurrency bound stays exact.
-  it('startup drain concurrency bound holds across multi-message threads', { timeout: 60_000 }, async () => {
-    // Several eligible threads each with multiple pending normals — internal auto-drain
-    // must not stack turns on top of the startup pump (bound = 2).
+  // Twelve real orchestrator turns with thread-file persistence after each.
+  it("startup drain starts every queued thread without waiting for another thread's turn, and runs each thread's messages one at a time", { timeout: 60_000 }, async () => {
+    // Several eligible threads each with multiple pending normals: every thread starts its first, a few a second,
+    // and goes on to its next when its turn ends; the thread's own auto-drain never stacks a second turn on it.
+    ;(orch as unknown as { startupDrainSpacingMs: number }).startupDrainSpacingMs = 5
     const messagesPerThread = 3
     const threads = Array.from({ length: 4 }, (_, i) =>
       store.createThread(`Startup bound ${i}`)
@@ -467,16 +538,20 @@ describe('OrchestratorService concurrent threads and queue', () => {
       })
     }
 
-    let inFlight = 0
-    let maxInFlight = 0
+    const inFlight = new Map<string, number>()
+    let maxInFlightPerThread = 0
     let totalChatCalls = 0
-    scriptTurns(async () => {
-      inFlight += 1
-      maxInFlight = Math.max(maxInFlight, inFlight)
+    // Every first turn waits until all threads have one running: a drain that waits for one thread's turn to end
+    // before it starts the next never gets there, and the test times out.
+    let allStarted!: () => void
+    const everyThreadRunning = new Promise<void>((resolve) => (allStarted = resolve))
+    scriptTurns(async (input) => {
+      inFlight.set(input.threadId, (inFlight.get(input.threadId) ?? 0) + 1)
+      maxInFlightPerThread = Math.max(maxInFlightPerThread, inFlight.get(input.threadId)!)
       totalChatCalls += 1
-      // Long enough that chained internal drains would overlap another thread's turn.
-      await new Promise((r) => setTimeout(r, 40))
-      inFlight -= 1
+      if ([...inFlight.values()].filter((n) => n > 0).length === threads.length) allStarted()
+      await everyThreadRunning
+      inFlight.set(input.threadId, inFlight.get(input.threadId)! - 1)
       return 'ok'
     })
     orch.setPersistCallback((threadId) => {
@@ -510,9 +585,8 @@ describe('OrchestratorService concurrent threads and queue', () => {
       { timeout: 45_000 }
     )
 
-    // STARTUP_QUEUE_DRAIN_CONCURRENCY is 2 — never exceeded even with multi-item chains.
-    expect(maxInFlight).toBeLessThanOrEqual(2)
-    expect(maxInFlight).toBeGreaterThan(0)
+    // One turn per thread at a time, and every message ran once.
+    expect(maxInFlightPerThread).toBe(1)
     expect(totalChatCalls).toBe(totalMessages)
   })
 

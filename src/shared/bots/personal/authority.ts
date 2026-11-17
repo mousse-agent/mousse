@@ -1,6 +1,8 @@
 import type { CounterScope } from '../../harness/counters'
 import type { SpendScope } from '../../harness/spend'
 import type { NeutralTool } from '../../harness/tools'
+import type { PermissionMode } from '../../permissionMode'
+import type { BotModelPick, BotWorkModelName } from './definition'
 
 /**
  * The contracts of a personal bot's authority (PR 6 §2 and §4). A bot activation's runs are held to
@@ -10,8 +12,8 @@ import type { NeutralTool } from '../../harness/tools'
  * `/pi/request`) and the Mousse MCP registry code against them. Types only, browser-safe.
  */
 
-/** Which thread of an activation a turn runs on: the main thread, or a context thread it consults. */
-export type BotThreadRole = 'activation' | 'context'
+/** Which thread of an activation a turn runs on: the main thread, a context thread it consults, or a run's subagent. */
+export type BotThreadRole = 'activation' | 'context' | 'subagent'
 
 /**
  * The bot threads of a profile (`bots.db`). A turn on a bot thread binds with origin `bot`, ahead
@@ -21,6 +23,23 @@ export type BotThreadRole = 'activation' | 'context'
 export interface BotThreads {
   /** The thread's role, or undefined when it is not a bot thread. */
   roleOf(threadId: string): BotThreadRole | undefined
+  /**
+   * The bot a thread belongs to, by id and its name now, or undefined when it is no bot's: how a thread the bot started
+   * and a message it sent are shown as the bot's ("use your threads"). Never throws.
+   */
+  botOf?(threadId: string): { botId: string; name: string } | undefined
+  /**
+   * The turn (activation) when it may start, message, stop or archive the owner's threads (a chat turn its owner's
+   * message or tapped answer started, or a run), with `limit`: the permission limit of the other device that message came from
+   * (absent: this computer's own window). Undefined for any other turn. Never throws.
+   */
+  ownerTurn?(activationId: string): { limit?: PermissionMode } | undefined
+  /**
+   * The bot's chat thread (its home) for any of its threads (its chat, its work, a subagent, a consult): what it owns as
+   * one bot, whichever turn made it (the scheduled jobs it made, the secrets its owner gave it). Undefined when the thread
+   * is no bot's. Never throws.
+   */
+  homeOf?(threadId: string): string | undefined
 }
 
 /**
@@ -31,8 +50,27 @@ export interface BotThreads {
 export type NormalisedCall =
   | { kind: 'builtin'; tool: NeutralTool; nativeName: string; args: Record<string, unknown>; own?: true }
   | { kind: 'app'; tool: string; args: Record<string, unknown> }
-  | { kind: 'mcp'; server: string; tool: string; args: Record<string, unknown> }
+  /** One of the owner's MCP tools: `server` is the grant's server id (its installation), `serverName` its name for chips. */
+  | { kind: 'mcp'; server: string; tool: string; args: Record<string, unknown>; serverName?: string }
   | { kind: 'skill'; skill: string }
+
+/**
+ * One of the owner's MCP tools a bot's turn is offered: granted, and on a server set up for the whole profile now
+ * (`BotMcp.offered`). Every call of it goes through Mousse, which checks it against the grant before the server sees it.
+ */
+export interface BotMcpTool {
+  /** The name the turn sees: the relay's `<server>__<tool>` on Claude Code and Codex. */
+  name: string
+  /** The proxied name (`McpManager`'s provider name), which Pi's turn sees and every call runs by. */
+  providerName: string
+  /** The grant's pair: the server's id (its installation) and the tool's own name. */
+  server: string
+  tool: string
+  serverName: string
+  /** The server's own description, framed as third-party text (never instructions). */
+  description: string
+  inputSchema: Record<string, unknown>
+}
 
 /**
  * Why a call stops at a wall: the dispatch ends and the owner is asked. `waiting`: the activation
@@ -42,12 +80,15 @@ export type NormalisedCall =
 export type WallReason =
   | { kind: 'tool'; tool: string }
   | { kind: 'path'; tool: string; path: string; access: 'read' | 'write' }
-  /** A path inside Mousse's own data, closed to every bot even with file access: never an ask. */
-  | { kind: 'closed'; tool: string; path: string }
-  /** A path the runtime would rewrite before opening (`~`, a variable): never checked, never an ask. */
-  | { kind: 'path_form'; tool: string; path: string }
+  /**
+   * A path the runtime would rewrite before opening (`~`, a variable): never checked, never an ask.
+   * `home`: the owner's home folder, for a `~` or variable path; `full`: the path it stands for.
+   */
+  | { kind: 'path_form'; tool: string; path: string; home?: string; full?: string }
+  /** A network path to this computer that can't be turned into the local path it means with certainty: never an ask. */
+  | { kind: 'network_path'; tool: string; path: string }
   | { kind: 'skill'; skill: string }
-  | { kind: 'mcp'; server: string; tool: string }
+  | { kind: 'mcp'; server: string; tool: string; serverName?: string }
   | { kind: 'waiting' }
   | { kind: 'policy_unenforceable'; tool: string; missing: string[] }
   /** The grant this turn runs under was revoked or replaced since the turn started. */
@@ -82,6 +123,13 @@ export type BotCheckDenied = Exclude<BotCheck, { ok: true }>
  */
 export type BotAllowedObserver = (call: NormalisedCall) => void
 
+/** Pi's read result metadata; absent bounds are never guessed when a read was truncated. */
+export interface BotFileReadResult {
+  truncated?: boolean
+  firstLineExceedsLimit?: boolean
+  outputLines?: number
+}
+
 /**
  * A bot activation's authority over one turn, registered with the turn's app tools (never in the
  * run policy, which carries only `RunPolicy.authority`'s kind and digest).
@@ -89,6 +137,12 @@ export type BotAllowedObserver = (call: NormalisedCall) => void
 export interface BotAuthority {
   activationId: string
   role: BotThreadRole
+  /**
+   * Set on a chat turn of the bot's own (lane, turn kind and compiled grant digest, as one key): its runtime may run it on a
+   * process kept warm between the chat's turns, reused only while this key and every launch input stay the same. Every call
+   * is still checked against this turn's authority. Absent: the turn runs on a process of its own.
+   */
+  warm?: string
   /** Granted built-ins (neutral names). */
   tools: ReadonlySet<NeutralTool>
   /** Granted Mousse app tools, by their app-tool name. */
@@ -97,9 +151,16 @@ export interface BotAuthority {
   /** Granted MCP tools, as `<server id>::<tool name>`. */
   mcp: ReadonlySet<`${string}::${string}`>
   /**
-   * The roots the bot may touch and how, and the activation's private scratch folder; null when it
-   * may touch no folder at all. With file access the roots are the tops of the file system and
-   * `computer` is set.
+   * The granted MCP tools this turn is offered, on servers set up now (none in a chat turn: they are work's). Read when
+   * the turn starts; every call is checked again against `mcp` and the server as it is then.
+   */
+  mcpTools?: readonly BotMcpTool[]
+  /** Mousse holds calls requiring the owner's answer; undefined means the ordinary call path. */
+  holdMcp?(tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): { text: string; isError?: boolean } | undefined
+  maskMcpArguments?(args: Record<string, unknown>): Record<string, unknown>
+  /**
+   * The bot's own folders: its files folder (`files`) and the activation's private scratch folder, both writable;
+   * `roots` is empty (a bot has no folder beyond them). Null when it may touch no folder at all.
    */
   workspace: {
     roots: readonly string[]
@@ -112,11 +173,6 @@ export interface BotAuthority {
      * on a runtime that asks before calls (Claude Code, Codex on the owner's entries).
      */
     files?: string
-    /**
-     * File access (bot-architecture.md §3.7): every folder, read and write, but `closed`, Mousse's
-     * own data folder, of which only the files folder and scratch are the bot's.
-     */
-    computer?: { closed: string }
   } | null
   /** True while the activation waits for the owner's answer to a wall (`waiting_grant`). */
   waiting(): boolean
@@ -127,6 +183,8 @@ export interface BotAuthority {
    * them passes. Decided without side effects, so a wall or an ask is raised once, only when all are refused.
    */
   checkAny?(calls: readonly NormalisedCall[]): BotCheck
+  /** Pi alone: prepare a file call after the grant check, before charging it. Complete only calls that ran. */
+  piFileCall?(tool: string, args: Record<string, unknown>): { refused: string } | { completed(success: boolean, read?: BotFileReadResult): void }
   /** The activation's request and tool-call counts: one atomic row, shared by its main run and consults. */
   counters: CounterScope
   time: ActiveTimeScope
@@ -142,12 +200,74 @@ export interface BotAuthority {
    */
   escalate?(request: { permission: unknown; reason: string; toolCallId?: string }): string
   /**
+   * What a call of a permission the turn lacks returns when the bot's grant holds it now (the owner allowed it after
+   * the turn started): it is not asked for again. Undefined when the grant does not hold it. Absent: never held.
+   */
+  held?(permission: unknown): string | undefined
+  /**
    * The `consult` app tool (6c-2), on activation threads only: asks the context thread `context`
    * and returns its final message. Absent on context threads (depth is 1).
    */
   consult?(request: { context: string; question: string; signal?: AbortSignal }): Promise<string>
   /** The context threads `consult` may name, by key and title. */
   contexts?: ReadonlyArray<{ key: string; title: string }>
+  /**
+   * The `subagent_*` app tools, on a run's main turn only: subagents of the work, each held to the work's permissions
+   * and counted by the service. Absent on the chat, a consult and a subagent (depth is 1).
+   */
+  subagents?: BotSubagents
+  /**
+   * Why this turn holds the owner's threads ("use your threads") to reading only, for the words of a refused start,
+   * message or Stop: `not_owner` (a chat turn no message or tapped answer of the owner started, such as the bot's first
+   * message). Absent: the turn may act, or holds no thread tool at all.
+   */
+  threadsReadOnly?: 'not_owner'
+  /**
+   * How the turn reaches the tool catalogue (docs/plans/bot-context.md §15): `search` (Claude Code loads any listed tool
+   * itself) or `use_tool` (Codex, Pi: the thread lists the core set and calls the rest through `use_tool`). Absent: none.
+   */
+  catalogue?: 'search' | 'use_tool'
+  /**
+   * Why the turn may not use the app tool `tool` now (its grant was removed or replaced, this computer switched it off,
+   * the activation ended), decided without asking anyone or showing a chip; undefined while it may. For a call that
+   * waited (`thread_wait`), checked again before it returns anything.
+   */
+  stillHolds?(tool: string): string | undefined
+}
+
+/** A subagent of a bot's work, as the work reads it: its title, its model in plain words, where it is, and its result. */
+export interface BotSubagentView {
+  subagent: string
+  model: string
+  state: 'running' | 'done' | 'failed' | 'stopped'
+  /** What it returned, framed as data from a subagent; only once it ended, and only when asked for. */
+  result?: string
+  /** Why it ended without a result, in plain words. */
+  why?: string
+}
+
+/**
+ * The work's handle on its subagents (`BotAuthority.subagents`). Every answer is plain text or a view for the model;
+ * a refusal is `{ refused }` and starts nothing. The engine decides and counts, never the tool.
+ */
+export interface BotSubagents {
+  /**
+   * `model`: one of `work_models`' choices, already matched (`workModelChoice`), with its entry's sign-in now; absent, the
+   * work's own model.
+   */
+  start(request: { title: string; brief: string; model?: { pick: BotModelPick & { instanceId: string }; name: BotWorkModelName }; toolCallId?: string }): Promise<{ started: BotSubagentView; note: string; lacks?: string[] } | { refused: string }>
+  send(request: { subagent: string; message: string }): Promise<{ sent: BotSubagentView; note: string; lacks?: string[] } | { refused: string }>
+  /** Until `subagent` (or, without one, every running subagent) ends, the turn ends, or `timeoutMs` passes. */
+  wait(request: { subagent?: string; timeoutMs?: number; signal?: AbortSignal }): Promise<{ subagents: BotSubagentView[]; note?: string } | { refused: string }>
+  /** One subagent with its result once it ended, or (without `subagent`) every one, without results. */
+  result(request: { subagent?: string }): { subagents: BotSubagentView[]; note?: string } | { refused: string }
+  stop(request: { subagent: string }): { stopped: BotSubagentView } | { refused: string }
+  /**
+   * For `work_models`: by entry, what a subagent there would run without (in the owner's words), or why it can't run
+   * there, for what the work's turn holds now (the hold rule, `subagentHold`). An entry it would run on as the work does
+   * is absent.
+   */
+  holdOn?(instanceIds: readonly string[]): Record<string, { lacks: string[] } | { refused: string }>
 }
 
 /** The active time of an activation's main dispatch, which its consults share. */

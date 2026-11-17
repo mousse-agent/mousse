@@ -1,3 +1,4 @@
+import { tellMeOf, type ScheduledJob } from '../../src/shared/types'
 /**
  * A bot engine over a real `bots.db` and run database, with fakes for the Bot Phase 1 seams
  * (docs/plans/bot-architecture.md §7.1): the model resolver, the context packs and capture, the
@@ -6,9 +7,10 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
-import type { BotDispatchEnd, BotJournalInput, BotModelProblem } from '../../src/mms/bots/seams'
+import type { BotDispatchEnd, BotJournalInput, BotModelProblem, BotPickMiss } from '../../src/mms/bots/seams'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
@@ -17,14 +19,16 @@ import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
-import type { BotChip } from '../../src/shared/bots/personal/chat'
-import type { BotModelChoice } from '../../src/shared/bots/personal/definition'
+import type { BotChip, BotLaunchedThread } from '../../src/shared/bots/personal/chat'
+import type { BotDepth, BotModelPick } from '../../src/shared/bots/personal/definition'
+import type { BotDeviceAccess } from '../../src/shared/bots/personal/deviceAccess'
 import type { ProviderSelection } from '../../src/shared/harness/types'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
 import { BotScheduleBook } from '../../src/mms/scheduled/botJobs'
+import { AutomationRuns } from '../../src/mms/automations/AutomationRuns'
 
 export const T0 = Date.parse('2026-11-07T09:00:00.000Z')
 export const PI: ProviderSelection = { instanceId: 'pi:openrouter', model: 'some/model' }
@@ -42,6 +46,8 @@ export interface BotFixture {
   scheduler: ScheduledJobService
   /** Bots' schedules in the shared store. */
   book: BotScheduleBook
+  /** The Automations run log the scheduler records into, as in the app: where a run's `run_report` level is kept. */
+  automationRuns: AutomationRuns
   /** One tick of the shared scheduler at `now` (the fixture's clock moves there), and the schedule activations it inserted. */
   tickSchedules(now?: Date): Promise<{ inserted: string[] }>
   /** Candidates the fake resolver walks, in order; a limited one is skipped until its time. */
@@ -49,7 +55,12 @@ export interface BotFixture {
   limited: Map<string, string>
   /** What the resolver answers instead of a candidate, when set. */
   problem: { problem: BotModelProblem; until?: string; instanceId?: string } | undefined
-  resolved: Array<{ choice: BotModelChoice; override?: BotModelChoice }>
+  /** What each resolve was asked: the turn's pick (null: Automatic) and depth. */
+  resolved: Array<{ pick: BotModelPick | null; depth: BotDepth }>
+  /** A pick that can't run, and why (the resolver then answers `pick_unavailable` with `missed`). */
+  pickMiss?: (pick: BotModelPick) => BotPickMiss | undefined
+  /** The threads the bot's threads started that still work (`BotEngineHost.launchedThreads`); absent: none. */
+  launched?: (creators: ReadonlySet<string>) => BotLaunchedThread[]
   journal: BotJournalInput[]
   /** Journal rows written outside a transaction (must stay empty). */
   outsideTx: BotJournalInput[]
@@ -69,7 +80,7 @@ export interface BotFixture {
   close(): void
 }
 
-export function botFixture(): BotFixture {
+export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'deviceAccess'> & { realWipe?: boolean } = {}): BotFixture {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-p1-')))
   const profile = join(base, 'profile')
   mkdirSync(profile, { recursive: true })
@@ -89,10 +100,12 @@ export function botFixture(): BotFixture {
   } as unknown as BotFixture
   const host: BotEngineHost = {
     profileHome: profile,
+    ...options,
     store,
     definitions: new BotDefinitionStore(store.directory, (botId) => store.registry(botId)?.revision ?? null),
     threads: { ensureExecutionThread: (key) => ({ id: `thread:${key}` }) },
     runs: () => runs,
+    launchedThreads: (creators) => fixture.launched?.(creators) ?? [],
     harness: {
       checkPolicy: () => ({ ok: true }),
       nativeToolNames: (_instanceId, tools) => ({ ok: true, names: tools.flatMap((tool) => [...(PI_NATIVE_TOOLS[tool] ?? [tool])]) })
@@ -107,20 +120,31 @@ export function botFixture(): BotFixture {
     },
     models: {
       resolve: async (input) => {
-        fixture.resolved.push({ choice: input.choice, ...(input.override ? { override: input.override } : {}) })
+        fixture.resolved.push({ pick: input.pick, depth: input.depth })
         if (fixture.problem) return fixture.problem
+        // A pick on its entry runs there or not at all, as `BotModelChooser` does: one that can't run is a problem, and
+        // one on a limited entry waits for its reset.
+        if (input.pick?.instanceId) {
+          const missed = fixture.pickMiss?.(input.pick)
+          if (missed) return { problem: 'pick_unavailable', missed }
+          const until = fixture.limited.get(input.pick.instanceId)
+          if (until && Date.parse(until) > clock.now) return { problem: 'all_limited', until, instanceId: input.pick.instanceId }
+          return { selection: { instanceId: input.pick.instanceId, model: input.pick.model, ...(input.pick.effort ? { effort: input.pick.effort } : {}) } }
+        }
         const free = fixture.candidates.filter((candidate) => {
           const until = fixture.limited.get(candidate.instanceId)
           return !until || Date.parse(until) <= clock.now
         })
-        const depth = (input.override ?? input.choice).depth
+        const depth = input.depth
         if (!free.length) {
           const until = [...fixture.limited.values()].sort()[0]
           return { problem: 'all_limited', ...(until ? { until } : {}), instanceId: fixture.candidates[0]?.instanceId }
         }
+        // A bot from before picks: the depth's effort on the first free candidate.
         return { selection: { ...free[0]!, ...(depth === 'deep' ? { effort: 'high' } : depth === 'quick' ? { effort: 'low' } : {}) } }
       },
-      markLimited: (instanceId, until) => { fixture.limited.set(instanceId, until) }
+      markLimited: (instanceId, until) => { fixture.limited.set(instanceId, until) },
+      clearLimited: (instanceId) => { fixture.limited.delete(instanceId) }
     },
     context: {
       chatPreamble: async ({ activationId }) => {
@@ -153,9 +177,13 @@ export function botFixture(): BotFixture {
     memory: {
       list: () => ({ entries: [], gauge: 'core 0/2,000' }),
       forget: () => ({ redacted: [] }),
+      edit: (_botId, id) => { throw Object.assign(new Error(`There is no memory entry ${id}.`), { code: 'not_found' }) },
       export: async () => ({ files: [] }),
       reindex: async () => {},
-      purge: async (botId) => { fixture.purged.push(botId) }
+      purge: async (botId) => { fixture.purged.push(botId) },
+      forgetAll: () => 0,
+      wipeHistory: (botId) => options.realWipe ? new BotMemoryStore({ db: store.db }).wipe(botId, true) : 0,
+      reset: () => {}
     },
     clearContext: (threadId) => { fixture.cleared.push(threadId) },
     archiveThread: (threadId) => { fixture.archived.push(threadId) },
@@ -175,11 +203,18 @@ export function botFixture(): BotFixture {
   scheduler.setClock(() => new Date(clock.now))
   const book = new BotScheduleBook({ jobs: scheduler, label: (when) => host.scheduleLabel!(when), now: () => new Date(clock.now) })
   host.schedules = book
+  const automationRuns = new AutomationRuns({ profileHome: profile, clock: () => clock.now })
+  scheduler.setRunLedger(automationRuns)
+  host.runLevel = (activationId) => automationRuns.levelOfActivation(activationId)
   fixture.scheduler = scheduler
   fixture.book = book
+  fixture.automationRuns = automationRuns
   fixture.host = host
   fixture.bots = new BotEngine(host)
-  scheduler.setBotRunner({ runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
+  scheduler.on('jobRemoved', (_id: string, job: ScheduledJob) => {
+    if (job.bot) fixture.bots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job), canWakeMe: job.bot.canWakeMe })
+  })
+  scheduler.setBotRunner({ editSchedule: (botId, save) => fixture.bots.editSchedule(botId, save), findOccurrence: (input) => fixture.bots.findScheduledOccurrence(input), runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
   scheduler.setTickHook((now) => fixture.bots.maintain(now))
   fixture.tickSchedules = async (now) => {
     if (now) clock.now = now.getTime()
@@ -191,6 +226,7 @@ export function botFixture(): BotFixture {
   fixture.close = () => {
     scheduler.beginShutdown()
     fixture.bots.close()
+    automationRuns.close()
     store.close()
     runDb.close()
     rmSync(base, { recursive: true, force: true })
@@ -223,9 +259,9 @@ export async function start(f: BotFixture, activationId: string, n = 1): Promise
 }
 
 /** The run ends and the executor settles it with its final message; then everything that follows runs. */
-export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; outcome?: RunOutcome } = {}): Promise<void> {
+export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; outcome?: RunOutcome; unanswered?: boolean } = {}): Promise<void> {
   f.runs.markTerminal(payload.runId, status, options.outcome)
-  f.bots.settle(payload, options.text !== undefined ? { text: options.text } : {})
+  f.bots.settle(payload, { ...(options.text !== undefined ? { text: options.text } : {}), ...(options.unanswered ? { unanswered: true } : {}) })
   await flush()
 }
 
@@ -238,8 +274,8 @@ export async function runDispatch(f: BotFixture, activationId: string, n = 1, op
 }
 
 /** A new bot through `bots.create`, its first chat message answered with `reply`. */
-export async function createBot(f: BotFixture, options: { name?: string; description?: string; reply?: string } = {}): Promise<{ botId: string; firstActivation: string }> {
-  const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, ...(options.name ? { name: options.name } : {}), description: options.description ?? 'Check my inbox every morning and tell me what matters.', clientRequestId: `create-${Math.random().toString(16).slice(2)}` })
+export async function createBot(f: BotFixture, options: { name?: string; description?: string; reply?: string; access?: BotDeviceAccess; clientRequestId?: string } = {}): Promise<{ botId: string; firstActivation: string }> {
+  const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, ...(options.name ? { name: options.name } : {}), description: options.description ?? 'Check my inbox every morning and tell me what matters.', clientRequestId: options.clientRequestId ?? `create-${Math.random().toString(16).slice(2)}`, ...(options.access ? { access: options.access } : {}) })
   const first = f.store.listActivations(bot.id).find((activation) => activation.lane === 'chat')!
   if (options.reply !== undefined) await runDispatch(f, first.id, 1, { text: options.reply })
   return { botId: bot.id, firstActivation: first.id }

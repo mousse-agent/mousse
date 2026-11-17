@@ -2,12 +2,13 @@ import { AppError } from '../../shared/errors'
 import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import type { NativeContextBoundary, ThreadAction, ExternalEffect } from '../../shared/threadActions'
 import type { ConversationBranchId, WorkspaceActor } from '../../shared/workspace'
-import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { releaseExecutionLeaseHandle, waitAcquireExecutionLease, type ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { RepositoryIdentityError } from '../git/RepositoryIdentity'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
@@ -240,7 +241,56 @@ export class ThreadActionService {
     // Where the turn ended is saved first, under the thread's lease alone: a checkpoint that never gets the repository
     // (or is stopped part way) is recovered with this end, not the boundaries the turn began with.
     if (options.heldThreadLease) this.recordTurnEnd(options, state)
-    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', () => this.checkpointTurnHeld(options, startSha, state), options.signal, options.heldThreadLease, options.signalEndsWork ? options.signal : undefined)
+    let locked = false
+    try {
+      return await withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', () => { locked = true; return this.checkpointTurnHeld(options, startSha, state) }, options.signal, options.heldThreadLease, options.signalEndsWork ? options.signal : undefined)
+    } catch (error) {
+      // The agent removed its own workspace (a subagent that cleaned up its worktree after its work landed): there is
+      // nothing left to snapshot, and the turn's work is not what failed. Only when Git found no repository before the
+      // checkpoint began and no `.git` is left at or above the folder; a repository Git refuses still fails.
+      if (locked || !(error instanceof RepositoryIdentityError) || error.capability.reason !== 'not-a-repository' || !workspaceRemoved(options.workspacePath)) throw error
+      return this.settleWithoutWorkspace(options, startSha, state)
+    }
+  }
+
+  /**
+   * Ends a turn whose workspace folder is gone: the action ends on the last snapshot recorded (where the turn started),
+   * cannot be undone, and says why. Needs only the thread's lease; Git is not run.
+   */
+  private async settleWithoutWorkspace(options: RunThreadActionOptions, startSha: string, state: 'completed' | 'stopped' | 'failed'): Promise<ThreadAction> {
+    const lease = options.heldThreadLease ?? await waitAcquireExecutionLease(this.threadDirectory, { source: 'turn-checkpoint', signal: options.signal })
+    try {
+      if (options.heldThreadLease) assertHeldThreadLease(this.threadDirectory, lease)
+      const actions = this.list()
+      const completed = actions.find((item) => item.turnId === options.turnId && item.state !== 'running')
+      if (completed) return completed
+      let action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
+      if (!action) {
+        new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
+        this.assertExpectedRevision(options.expectedJournalRevision)
+        action = this.newAction(options, startSha, actions)
+        actions.push(action)
+        this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id } })
+      }
+      action.presentationMessageEnd = options.presentationMessageEnd
+      action.nativeContextBoundary = options.nativeContextBoundary
+      action.externalEffects = options.externalEffects ?? action.externalEffects
+      if (options.startNote) action.startNote = options.startNote
+      action.endSha = action.startSha
+      action.commits = []
+      action.changedPaths = []
+      action.reversible = false
+      action.workspaceRemoved = true
+      action.notice = 'The workspace folder was removed during this turn, so no snapshot of its end was recorded.'
+      action.state = state
+      action.completedAt = new Date().toISOString()
+      actions.splice(actions.indexOf(action), 1); actions.push(action)
+      this.replace(actions)
+      this.appendCheckpointCompleted(action, state)
+      return action
+    } finally {
+      if (!options.heldThreadLease) releaseExecutionLeaseHandle(lease)
+    }
   }
 
   /**
@@ -383,10 +433,13 @@ export class ThreadActionService {
 
   /** Recover an interrupted writer as captured code, never replay its model/tools. */
   async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
+    const interrupted = (entry: { operationType: string; state: string }) =>['action-checkpoint', 'change-checkpoint'].includes(entry.operationType) && ['running', 'prepared', 'git_applied', 'recovery_required'].includes(entry.state)
+    // Nothing to finish takes no lock: a worktree the agent removed or emptied does not stop the next turn here.
+    if (![...this.journal.latestByOperation().values()].some(interrupted)) return
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'checkpoint-recovery', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
       for (const entry of [...this.journal.latestByOperation().values()].reverse()) {
-        if (!['action-checkpoint', 'change-checkpoint'].includes(entry.operationType) || !['running', 'prepared', 'git_applied', 'recovery_required'].includes(entry.state)) continue
+        if (!interrupted(entry)) continue
         const history = this.journal.list().filter((item) => item.operationId === entry.operationId)
         const all = this.list()
         const details = [...history].reverse().map((item) => item.details as { action?: ThreadAction; actionState?: 'completed' | 'stopped' | 'failed' } | undefined)
@@ -519,5 +572,14 @@ export class ThreadActionService {
         commits: action.commits
       }
     })
+  }
+}
+
+/** The folder is gone, or nothing at or above it is a Git repository any more: the workspace was removed, not broken. */
+function workspaceRemoved(path: string): boolean {
+  if (!existsSync(path)) return true
+  for (let at = resolve(path); ; at = dirname(at)) {
+    if (existsSync(join(at, '.git'))) return false
+    if (dirname(at) === at) return true
   }
 }

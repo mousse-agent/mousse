@@ -7,7 +7,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { ThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
 import { ThreadDbStore } from '../src/mms/data/threadDb/threadDbStore'
-import { messagesAfter, messagesBefore, newestPage } from '../src/mms/protocol/transcriptPaging'
+import { keepImagesWithin, messagesAfter, messagesBefore, newestMessages, newestPage } from '../src/mms/protocol/transcriptPaging'
 import type { ChatMessage } from '../src/shared/types'
 
 const message = (id: string, content: string, extra: Partial<ChatMessage> = {}): ChatMessage =>
@@ -78,6 +78,36 @@ describe('thread pages from thread.db', () => {
       expect(page.earlier).toEqual({ before: 'b2', count: 2 })
       const one = await client.call('page', other, { limit: 3, maxBytes: 1 })
       expect(one.messages[0]!.length).toBeGreaterThan(200_000)
+    } finally {
+      client.quiesce(other)
+      rmSync(other, { recursive: true, force: true })
+    }
+  })
+
+  it('gives the same newest messages under an image budget as the loaded transcript cut to the same budgets', async () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-paging-images-')))
+    try {
+      client.callSync('create', other)
+      // Images of 100 KiB are kept in blobs, small ones in the row; some messages have two, some none.
+      const image = (i: number, size: number) => ({ name: `i${i}.png`, mimeType: 'image/png', data: `${i}`.padEnd(size, 'A') })
+      const messages = Array.from({ length: 12 }, (_, i) =>
+        message(`p${i}`, `text ${i}`.padEnd(20_000, '.'), i % 3 === 2 ? {} : { images: i % 3 ? [image(i, 100 * 1024), image(i + 100, 3_000)] : [image(i, 3_000)] })
+      )
+      store.save(other, { messages })
+      const loaded = store.load(other).messages.filter((m) => !m.hidden)
+      for (const [maxBytes, imageBudget] of [[10_000_000, 1_000_000], [400_000, 1_000_000], [150_000, 120_000], [150_000, 0], [60_000, 5_000]]) {
+        let remaining = imageBudget
+        const budgeted = loaded.slice()
+        for (let i = budgeted.length - 1; i >= 0; i--) {
+          const kept = keepImagesWithin(budgeted[i]!, remaining)
+          budgeted[i] = kept.message
+          remaining = kept.remaining
+        }
+        const expected = newestMessages(budgeted, maxBytes)
+        const page = await client.call('page', other, { limit: Number.MAX_SAFE_INTEGER, maxBytes, images: true, imageBudget })
+        expect(page.messages.map((payload) => JSON.parse(payload)), `${maxBytes}/${imageBudget}`).toEqual(expected.messages)
+        expect(page.earlier, `${maxBytes}/${imageBudget}`).toEqual(expected.earlier)
+      }
     } finally {
       client.quiesce(other)
       rmSync(other, { recursive: true, force: true })

@@ -138,7 +138,7 @@ describe('thread side card when docked', () => {
     expect(card()?.getAttribute('data-shown')).toBe('true')
     expect(card()?.getAttribute('role')).toBeNull()
     expect(document.querySelector('.thread-side-card-scrim')).toBeNull()
-    expect(pane().style.getPropertyValue('--side-card-reserved')).toBe('172px')
+    expect(pane().style.getPropertyValue('--side-card-reserved')).toBe('276px')
   })
 
   it('reserves nothing in a window with room to spare', async () => {

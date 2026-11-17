@@ -121,6 +121,7 @@ export function formatSubagentResultReport(report: SubagentResultReport): string
   lines.push(report.shared
     ? `Worked in: ${report.workedIn} (your own folder, shared with you; its changes are already in your files, mixed with yours).`
     : `Worked in: ${report.workedIn} (its own worktree).`)
+  if (report.workspaceRemoved) lines.push('Workspace: removed before the task ended, so no snapshot of where it finished was recorded. The result below is the last snapshot recorded; anything it did after that is not in it.')
   const names = report.changedFiles.join(', ') + (report.changedFileCount > report.changedFiles.length ? `, and ${report.changedFileCount - report.changedFiles.length} more` : '')
   lines.push(report.changedFileCount === 0
     ? 'Files: no change from where it started.'
@@ -136,6 +137,6 @@ export function formatSubagentResultReport(report: SubagentResultReport): string
   lines.push(`Git: ${where}. ${history}`)
   if (report.shared) lines.push('Mousse merged nothing.')
   else if (report.changedFileCount > 0) lines.push(`Mousse merged nothing. To bring the files in: git diff --binary ${report.baseSha} ${report.resultSha} | git apply --3way${report.git.commitCount > 0 && !report.git.rewroteHistory ? ' (or cherry-pick the commits above)' : ''}.`)
-  else lines.push('Mousse merged nothing; there is nothing to bring in.')
+  else lines.push(report.workspaceRemoved ? 'Mousse merged nothing; the last recorded snapshot has nothing to bring in.' : 'Mousse merged nothing; there is nothing to bring in.')
   return lines.join('\n')
 }

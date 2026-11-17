@@ -39,6 +39,9 @@ export function createIsolatedMousseHome(environment: NodeJS.ProcessEnv) {
   // The sign-in stores that outrank the config dir stay inside the test home too.
   environment.CLAUDE_SECURESTORAGE_CONFIG_DIR = environment.CLAUDE_CONFIG_DIR
   environment.ANTHROPIC_CONFIG_DIR = join(home, 'anthropic')
+  // The app's Electron user data (the in-app browser's cookies, the key of Mousse's stored secrets): a test that lists
+  // what bots may not open (`botClosedPlaces`) names the test home's, never the installed app's.
+  environment.MOUSSE_ELECTRON_USER_DATA = join(home, 'electron-user-data')
   // A CLI started by a test would otherwise sign in with a token or key inherited from whatever
   // launched the test run, whatever its empty home says.
   for (const name of Object.keys(environment)) {

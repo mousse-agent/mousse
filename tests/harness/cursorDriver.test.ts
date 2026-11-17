@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CursorHostCallError, CursorHostClient } from '../../src/mms/harness/cursor/hostClient'
-import { CursorSessions } from '../../src/mms/harness/cursor/session'
+import { CursorSessions, cursorToolActivity, cursorToolName, type SavedCursorAgent } from '../../src/mms/harness/cursor/session'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { isCursorAuthFailure, redactCursorText } from '../../src/mms/harness/hosts/cursorProtocol'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
@@ -18,10 +18,14 @@ import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import type { TurnInput, TurnResult } from '../../src/mms/harness/adapter'
+import type { StreamingLlmToolEvent } from '../../src/mms/harness/turnEvents'
 import { replayCursorHost } from '../../src/mms/run/testkit/cursorHostReplay'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { readTranscript, ReplayTransport } from '../../src/mms/run/testkit/ReplayTransport'
 import { FakeCursorHost, hostFailure } from './fakeCursorHost'
+import { CURSOR_CAPS } from '../../src/mms/harness/drivers/cursor'
+import { holdControl, type HoldControl } from '../support/steerHoldControl'
+import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 
 const FIXTURES = join(__dirname, '..', 'run', 'fixtures')
 const INSTANCE = 'cursor:work'
@@ -32,7 +36,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[0]>['connect']>, initial?: (home: string) => unknown, extra: { loadDeadlineMs?: number } = {}) {
+function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[0]>['connect']>, initial?: (home: string) => unknown, extra: { loadDeadlineMs?: number; questions?: UserQuestionService } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-cursor-driver-'))
   homes.push(home)
   const stateDir = instanceStateDir(home, INSTANCE)
@@ -41,12 +45,13 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
   if (initial) writeFileSync(join(stateDir, 'cursor.json'), JSON.stringify(initial(home)))
   let stored: unknown = { [INSTANCE]: { driver: 'cursor', enabled: true, config: { displayName: 'Work' } } }
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
-  const harness = testHarness({ drivers: [cursorDriver({ connect, cancelDeadlineMs: 200, ...extra })], instances, profileHome: home })
+  const { questions, ...driverOptions } = extra
+  const harness = testHarness({ drivers: [cursorDriver({ connect, cancelDeadlineMs: 200, ...driverOptions })], instances, profileHome: home, ...(questions ? { questions } : {}) })
   const notices: Array<[string, string]> = []
   harness.setLiveHost({ notice: (threadId, text) => notices.push([threadId, text]) })
   harnesses.push(harness)
   const texts = new Map<string, string>()
-  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; signal?: AbortSignal; mcp?: { url: string; token: string } } = {}): TurnSpec => ({
+  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void; hold?: HoldControl } = {}): TurnSpec => ({
     binding,
     input: {
       threadId,
@@ -59,16 +64,16 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
       nativeHistory: options.history ?? '',
       signal: options.signal ?? new AbortController().signal
     } as unknown as TurnInput,
-    sink: {
+    sink: (options.hold ? options.hold.wrap.bind(options.hold) : <S>(sink: S) => sink)({
       text: (event: { phase: string; content: string }) => event.phase !== 'start' && texts.set(threadId, event.content),
       thinking: () => {},
-      tool: () => {},
+      tool: options.tool ?? (() => {}),
       progress: () => {},
       providerRef: () => {},
       steerAccepted: () => {},
       usage: () => {}
-    } as unknown as TurnSpec['sink'],
-    control: { drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control'],
+    } as unknown as TurnSpec['sink']),
+    control: options.hold?.ctl ?? ({ drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control']),
     host: {
       ...(options.mcp ? { bridge: { mcp: options.mcp, turnToken: 't', sessionInstructions: '', turnPreamble: '', userMcp: 'native' } } : {}),
       context: { nativeHistoryAfterTurn: (text: string) => text }
@@ -184,6 +189,27 @@ describe('Cursor behind the gateway', () => {
     expect(snapshot).toMatchObject({ driver: 'cursor', runs: { state: 'yes' }, binary: { source: 'bundled' }, auth: { state: 'signed_in', methodLabel: 'API key', canSignOut: true } })
   })
 
+  it('a run the provider refused shows its status and message, credentials removed; a refused key still asks for a sign-in', async () => {
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: (_params, fake) => {
+        setTimeout(() => fake.emit({ event: 'run_end', runId: 'run-1', status: 'error', error: { message: 'Model gpt-x is not available on your plan (key crsr_abcdefghijklmnopqrstuv)', status: 400 } }), 5)
+        return { runId: 'run-1' }
+      }
+    })
+    const { turn } = setup(host.connect)
+    await expect((await turn('thread')).result).rejects.toMatchObject({ code: 'provider_api_error', message: '400 · Model gpt-x is not available on your plan (key [redacted])', details: { provider: 'cursor', status: 400 } })
+    const refusedKey = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: (_params, fake) => {
+        setTimeout(() => fake.emit({ event: 'run_end', runId: 'run-1', status: 'error', error: { message: 'Invalid API key', code: 'unauthenticated', auth: true } }), 5)
+        return { runId: 'run-1' }
+      }
+    })
+    const second = setup(refusedKey.connect)
+    await expect((await second.turn('thread')).result).rejects.not.toMatchObject({ code: 'provider_api_error' })
+  })
+
   it('passes the key on every agent call, and a stop cancels a run whose send was still in flight', async () => {
     let releaseSend!: () => void
     const host = new FakeCursorHost({
@@ -230,6 +256,177 @@ describe('Cursor behind the gateway', () => {
     expect(host.transports).toHaveLength(1)
     expect(notices.filter(([threadId, text]) => threadId === 'b' && text.includes('restarted')).map(([, text]) => text)).toEqual(['Work was restarted to stop another chat, so this reply was cut short.'])
     expect(notices.some(([threadId, text]) => threadId === 'a' && text.includes('restarted'))).toBe(false)
+  })
+})
+
+describe("the hold: a person's steer cuts in at once; an agent's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
+  const STEER = 'Use pnpm, not npm'
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+  function held(options: { cancel?: 'ends' | 'never' } = {}) {
+    let runs = 0
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: () => ({ runId: `run-${++runs}` }),
+      cancel: (params, fake) => {
+        if (options.cancel === 'never') return new Promise(() => {})
+        setTimeout(() => fake.emit({ event: 'run_end', runId: params.runId as string, status: 'cancelled' }), 5)
+        return { cancelled: true }
+      }
+    })
+    const delta = (runId: string, update: Record<string, unknown>) => host.emit({ event: 'delta', runId, update } as never)
+    const shell = (callId: string, command = 'npm test') => ({ type: 'shell', args: { command } })
+    const toolStart = (runId: string, callId: string) => delta(runId, { type: 'tool-call-started', callId, toolCall: shell(callId) })
+    const toolDone = (runId: string, callId: string) => delta(runId, { type: 'tool-call-completed', callId, toolCall: { ...shell(callId), result: { status: 'success', value: { exitCode: 0 } } } })
+    const writes = (runId: string, text: string) => delta(runId, { type: 'text-delta', text })
+    const end = (runId: string, status = 'finished') => host.emit({ event: 'run_end', runId, status } as never)
+    const questions = new UserQuestionService()
+    // As in the orchestrator: a question pending in the thread means the turn waits for a person.
+    const hold = holdControl(CURSOR_CAPS, { questions: { pending: () => questions.listPendingForThread('thread').length > 0 } })
+    const { turn } = setup(host.connect, undefined, { questions })
+    const events = () => hold.log.map(([event, detail]) => `${event}:${detail}`)
+    /** The run `n` streams (its updates are watched). */
+    const running = (n: number) => vi.waitFor(() => expect(events().filter((event) => event === 'providerTurn:')).toHaveLength(n))
+    const sent = () => host.calls('send').map((params) => params.text)
+    const mcpStart = (runId: string, callId: string, toolName: string) => delta(runId, { type: 'tool-call-started', callId, toolCall: { type: 'mcp', args: { toolName, providerIdentifier: 'mousse', args: {} } } })
+    return { host, hold, questions, turn: () => turn('thread', { hold }), events, running, toolStart, toolDone, mcpStart, writes, end, sent }
+  }
+  const order = (events: string[], ...steps: string[]) => {
+    let from = 0
+    for (const step of steps) {
+      const at = events.indexOf(step, from)
+      expect(at, `${step} in ${JSON.stringify(events)}`).toBeGreaterThanOrEqual(from)
+      from = at + 1
+    }
+  }
+
+  it.each([['an agent\'s, held for a command before', true], ['a person\'s, sent while it asks', false]] as const)('Mousse\'s ask_user over MCP does not hold a steer (%s): it cancels the run and answers the question', async (_name, heldBefore) => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    if (heldBefore) {
+      c.toolStart('run-1', 'call-1')
+      c.hold.steer(STEER, { person: false })
+      await vi.waitFor(() => expect(c.hold.held()).toBe(true))
+      c.toolDone('run-1', 'call-1')
+    }
+    c.mcpStart('run-1', 'ask-1', 'ask_user')
+    await vi.waitFor(() => expect(c.events()).toContain('tool:start:ask-1'))
+    const answer = c.questions.requestAnswers([{ id: 'q', prompt: 'Which package manager?', options: [{ id: 'npm', label: 'npm' }, { id: 'skip', label: 'Skip' }] }], 'thread')
+    answer.catch(() => undefined)
+    if (!heldBefore) c.hold.steer(STEER)
+    await vi.waitFor(() => expect(c.host.calls('cancel')).toEqual([{ runId: 'run-1' }]))
+    await expect(answer).resolves.toEqual({ q: 'skip' })
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    expect(c.sent()).toEqual(['hi', STEER])
+    expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+  })
+
+  it('strict boundary drain: an agent\'s steer held during a tool goes in as the next run when the run ends, and nothing is cancelled', async () => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    c.toolStart('run-1', 'call-1')
+    c.hold.steer(STEER, { person: false })
+    await vi.waitFor(() => expect(c.hold.held()).toBe(true))
+    c.toolDone('run-1', 'call-1')
+    c.writes('run-1', 'All 12 passed.')
+    // Cursor's gaps were never measured: the steer stays held past the output (strict release).
+    await sleep(300)
+    expect(c.hold.held()).toBe(true)
+    c.end('run-1')
+    await c.running(2)
+    c.writes('run-2', 'Switching to pnpm')
+    c.end('run-2')
+    expect(await handle.result).toMatchObject({ aborted: false })
+    expect(c.host.calls('cancel')).toEqual([])
+    expect(c.sent()).toEqual(['hi', STEER])
+    order(c.events(), 'tool:complete:call-1', 'boundary:', `drain:${STEER}`, 'providerTurn:', 'taken:drain-1', `accepted:${STEER}@drain-1`)
+    expect(c.events().filter((event) => event.startsWith('mayCut'))).toEqual([])
+  })
+
+  it('a steer while Cursor writes cancels the run, and is read only once the next run started', async () => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    c.writes('run-1', 'working')
+    c.hold.steer(STEER)
+    await vi.waitFor(() => expect(c.host.calls('cancel')).toEqual([{ runId: 'run-1' }]))
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    order(c.events(), `drain:${STEER}`, 'mayCut:true', 'providerTurn:', 'taken:drain-1', `accepted:${STEER}@drain-1`)
+    expect(c.sent()).toEqual(['hi', STEER])
+  })
+
+  it("the run a steer becomes is sent with the steer's images", async () => {
+    const c = held()
+    const drain = c.hold.ctl.drainSteerEntry!
+    c.hold.ctl.drainSteerEntry = (opts) => {
+      const entry = drain(opts)
+      return entry && { ...entry, images: [{ name: 'shot.png', mimeType: 'image/png', data: 'AAAA' }] }
+    }
+    const handle = await c.turn()
+    await c.running(1)
+    c.writes('run-1', 'working')
+    c.hold.steer(STEER)
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    const sends = c.host.calls('send')
+    expect(sends[0]).not.toHaveProperty('images')
+    expect(sends[1]).toMatchObject({ text: STEER, images: [{ data: 'AAAA', mimeType: 'image/png' }] })
+  })
+
+  it('a tool that starts between the drain and the cancel keeps an agent\'s steer: handed back, held, and sent at the run\'s end', async () => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    c.writes('run-1', 'working')
+    c.hold.beforeMayCut = () => c.toolStart('run-1', 'late')
+    c.hold.steer(STEER, { person: false })
+    await vi.waitFor(() => expect(c.events()).toContain(`returned:${STEER}`))
+    await vi.waitFor(() => expect(c.hold.held()).toBe(true))
+    c.toolDone('run-1', 'late')
+    c.end('run-1')
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    expect(c.host.calls('cancel')).toEqual([])
+    order(c.events(), 'mayCut:false', `returned:${STEER}`, 'boundary:', `drain:${STEER}`)
+    expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-2`])
+  })
+
+  it('a person\'s steer during a tool cancels the run at once, holds nothing, and the turn goes on with it as the next run, once', async () => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    c.toolStart('run-1', 'call-1')
+    c.hold.steer(STEER)
+    // The tool never reports a result: the cancel comes during it.
+    await vi.waitFor(() => expect(c.host.calls('cancel')).toEqual([{ runId: 'run-1' }]))
+    expect(c.hold.held()).toBe(false)
+    await c.running(2)
+    c.writes('run-2', 'Switching to pnpm')
+    c.end('run-2')
+    expect(await handle.result).toMatchObject({ aborted: false })
+    expect(c.sent()).toEqual(['hi', STEER])
+    order(c.events(), 'tool:start:call-1', `drain:${STEER}`, 'mayCut:true', 'providerTurn:', 'taken:drain-1', `accepted:${STEER}@drain-1`)
+    expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+  })
+
+  it('a host that ends after the cancel and before the next run hands the steer back, never read', async () => {
+    const c = held({ cancel: 'never' })
+    const handle = await c.turn()
+    await c.running(1)
+    c.writes('run-1', 'working')
+    c.hold.steer(STEER)
+    await vi.waitFor(() => expect(c.host.calls('cancel')).toHaveLength(1))
+    c.host.crash()
+    expect(await handle.result).toMatchObject({ aborted: true })
+    expect(c.events().filter((event) => event.startsWith('returned:'))).toEqual([`returned:${STEER}`])
+    expect(c.events().filter((event) => event.startsWith('accepted:') || event.startsWith('taken:'))).toEqual([])
   })
 })
 
@@ -342,6 +539,77 @@ describe('Stop before the run exists', () => {
   })
 })
 
+describe('The tool name a Cursor call shows as', () => {
+  it('maps its call types to tool names, an MCP call to its server and tool, and anything else to a plain name', () => {
+    const name = (type: string, args: Record<string, unknown> = {}) => cursorToolName({ type, args })
+    expect(['shell', 'read', 'edit', 'write', 'grep', 'glob'].map((type) => name(type))).toEqual(['Bash', 'Read', 'Edit', 'Write', 'Grep', 'Glob'])
+    // A folder listing is not a file search, and a Cursor task is not a Mousse subagent.
+    expect(name('ls', { path: 'src' })).toBe('list_directory')
+    expect(name('task')).toBe('cursor_task')
+    expect(name('mcp', { providerIdentifier: 'mousse', toolName: 'thread_list' })).toBe('mcp__mousse__thread_list')
+    expect(name('mcp', { providerIdentifier: 'my-server', toolName: 'lookup' })).toBe('mcp__my_server__lookup')
+    expect(name('mcp', { toolName: 'lookup' })).toBe('lookup')
+    expect(name('mcp')).toBeUndefined()
+    expect(name('readLints')).toBe('read_lints')
+    expect(name('someNewTool')).toBe('cursor_some_new_tool')
+    expect(cursorToolName(undefined)).toBeUndefined()
+  })
+
+  it('reaches the turn on the tool event', async () => {
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: (_params, fake) => {
+        setTimeout(() => {
+          fake.emit({ event: 'delta', runId: 'run-1', update: { type: 'tool-call-started', callId: 'c1', toolCall: { type: 'ls', args: { path: 'src' } } } })
+          fake.emit({ event: 'run_end', runId: 'run-1', status: 'finished' })
+        }, 1)
+        return { runId: 'run-1' }
+      }
+    })
+    const { turn } = setup(host.connect)
+    const tools: StreamingLlmToolEvent[] = []
+    expect(await (await turn('thread', { tool: (event) => void tools.push(event) })).result).toMatchObject({ aborted: false })
+    expect(tools.find((event) => event.phase === 'start')).toMatchObject({ title: 'Ls src', activity: { toolName: 'list_directory' } })
+  })
+
+  it('gives a grep its pattern when it starts and how many it found when it ends', async () => {
+    const call = { type: 'grep', args: { pattern: 'TODO', path: 'src' } }
+    const files = { type: 'files', output: { files: ['src/a.ts', 'src/b.ts'], count: 2 } }
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: (_params, fake) => {
+        setTimeout(() => {
+          fake.emit({ event: 'delta', runId: 'run-1', update: { type: 'tool-call-started', callId: 'g1', toolCall: call } })
+          fake.emit({ event: 'delta', runId: 'run-1', update: { type: 'tool-call-completed', callId: 'g1', toolCall: { ...call, result: { status: 'success', value: { workspaceResults: { '/repo': files } } } } } })
+          fake.emit({ event: 'run_end', runId: 'run-1', status: 'finished' })
+        }, 1)
+        return { runId: 'run-1' }
+      }
+    })
+    const { turn } = setup(host.connect)
+    const tools: StreamingLlmToolEvent[] = []
+    expect(await (await turn('thread', { tool: (event) => void tools.push(event) })).result).toMatchObject({ aborted: false })
+    expect(tools.find((event) => event.phase === 'start')).toMatchObject({
+      title: 'Grep TODO',
+      activity: { toolName: 'Grep', kind: 'search', scope: 'code', query: 'TODO', path: 'src' }
+    })
+    expect(tools.find((event) => event.phase === 'complete')).toMatchObject({
+      activity: { kind: 'search', query: 'TODO', resultCount: 2, output: 'src/a.ts\nsrc/b.ts' }
+    })
+  })
+
+  it('reads every grep output mode and a glob, and marks a failed search', () => {
+    const grep = (output: Record<string, unknown>) =>
+      cursorToolActivity({ type: 'grep', args: { pattern: 'x' }, result: { status: 'success', value: { workspaceResults: { '/a': output } } } })
+    expect(grep({ type: 'count', output: { counts: [{ file: 'a.ts', count: 4 }, { file: 'b.ts', count: 1 }], total: 5 } })).toMatchObject({ resultCount: 5, output: 'a.ts:4\nb.ts:1' })
+    expect(grep({ type: 'content', output: { matches: [], totalMatches: 0 } })).toMatchObject({ resultCount: 0, output: '' })
+    expect(cursorToolActivity({ type: 'glob', args: { globPattern: '*.md', targetDirectory: 'docs' } })).toEqual({ kind: 'search', scope: 'files', query: '*.md', path: 'docs' })
+    expect(cursorToolActivity({ type: 'grep', args: { pattern: 'x' }, result: { status: 'error', error: 'bad regex' } })).toMatchObject({ status: 'failed' })
+    expect(cursorToolActivity({ type: 'grep', args: {} })).toBeUndefined()
+    expect(cursorToolActivity({ type: 'shell', args: { command: 'ls' } })).toBeUndefined()
+  })
+})
+
 describe('A host that ends while a send is in flight', () => {
   it('after Cursor accepted the prompt but before it answered: the turn ends once, interrupted, and the next one starts over without resending', async () => {
     const host = new FakeCursorHost({
@@ -406,6 +674,52 @@ describe('the Mousse MCP token', () => {
     expect(host.calls('create')).toHaveLength(1)
     expect(host.calls('resume')).toEqual([])
     expect(host.calls('send').map((call) => (call.mcpServers as { mousse: { headers: Record<string, string> } }).mousse.headers.Authorization)).toEqual(['Bearer first', 'Bearer second'])
+  })
+})
+
+describe("a bot's instructions", () => {
+  it('an agent given other ones (its owner edited its prompt) is not reopened: a new agent gets them and the history', async () => {
+    const fake = new FakeCursorHost({
+      create: (_params, host) => ({ agentId: `agent-${host.calls('create').length}` }),
+      resume: (params) => ({ agentId: params.agentId }),
+      close: () => ({}),
+      prune: () => ({}),
+      send: (_params, host) => {
+        const runId = `run-${host.calls('send').length}`
+        setTimeout(() => host.emit({ event: 'run_end', runId, status: 'finished' }), 1)
+        return { runId }
+      }
+    })
+    const saved = new Map<string, SavedCursorAgent>()
+    const sessions = new CursorSessions({
+      label: 'Cursor',
+      host: new CursorHostClient(fake.connect),
+      storeDir: '/store',
+      apiKey: () => 'key',
+      settingSources: [],
+      store: { saved: (threadId) => saved.get(threadId), setSaved: (threadId, next) => void (next ? saved.set(threadId, next) : saved.delete(threadId)), threads: () => [...saved.keys()] },
+      markSignedOut: () => undefined,
+      signInRequiredMessage: 'sign in'
+    })
+    const prompts = () => fake.calls('send').map((call) => call.text as string)
+    const turn = async (prompt: string, history: string, instructions: string) => {
+      await sessions.chat({ threadId: 't', cwd: '/w', model: 'default', prompt, history, orchestrationInstructions: instructions, bot: true, onText: () => {} })
+      sessions.commitConversation('t', `${history}+${prompt}`)
+    }
+    await turn('first', '', 'OLD WORDS')
+    await turn('second', '+first', 'OLD WORDS')
+    expect(fake.calls('create')).toHaveLength(1)
+    expect(prompts()[1]).toBe('second')
+    await turn('third', '+first+second', 'NEW WORDS')
+    expect(fake.calls('create')).toHaveLength(2)
+    expect(fake.calls('resume')).toEqual([])
+    expect(prompts()[2]).toBe('<mousse_orchestration_instructions>\nNEW WORDS\n</mousse_orchestration_instructions>\n\nPrevious conversation (context only; do not repeat earlier actions):\n+first+second\n\nCurrent request:\nthird')
+    await vi.waitFor(() => expect(fake.calls('prune')).toEqual([expect.objectContaining({ agentIds: ['agent-1'] })]))
+    // The new agent holds the new words: the next turn goes on in it.
+    await turn('fourth', '+first+second+third', 'NEW WORDS')
+    expect(fake.calls('create')).toHaveLength(2)
+    expect(prompts()[3]).toBe('fourth')
+    sessions.stop()
   })
 })
 

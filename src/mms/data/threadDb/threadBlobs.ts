@@ -180,6 +180,18 @@ export function readBlob(dir: string, ref: BlobPath): string | undefined {
   }
 }
 
+/**
+ * Whether a blob's file is there at its stored size, without reading it: what the context gauge checks for an image
+ * it counts but does not read. A file of the right size whose bytes are damaged passes; a full read finds it.
+ */
+export function blobPresent(dir: string, ref: BlobPath): boolean {
+  try {
+    return statSync(blobPath(dir, ref.sha256)).size === ref.bytes
+  } catch {
+    return false
+  }
+}
+
 export function parseBlobPaths(value: string | null | undefined): BlobPath[] {
   if (!value) return []
   const parsed = JSON.parse(value) as unknown
@@ -190,15 +202,23 @@ export function parseBlobPaths(value: string | null | undefined): BlobPath[] {
 /**
  * A row's payload with its blobs put back. A blob that is missing or damaged becomes its placeholder
  * (`missingPlaceholder`) and is reported, so the thread still opens.
+ *
+ * `images: false` leaves image data out (a page, a search): the value stays empty. `images: 'presence'` leaves it
+ * out too, but an image whose file is missing still becomes its placeholder, as a full read would show it.
  */
-export function hydratePayload(dir: string, payload: string, blobPathsJson: string | null, options: { images?: boolean } = {}): { payload: string; missing: BlobPath[] } {
+export function hydratePayload(dir: string, payload: string, blobPathsJson: string | null, options: { images?: boolean | 'presence' } = {}): { payload: string; missing: BlobPath[] } {
   const paths = parseBlobPaths(blobPathsJson)
   if (!paths.length) return { payload, missing: [] }
   let value = JSON.parse(payload) as Skeleton
   const missing: BlobPath[] = []
   for (const ref of paths) {
-    // Image data stays out when not asked for (a page, a search); the empty value stays.
-    if (options.images === false && ref.kind === 'base64') continue
+    if (options.images !== undefined && options.images !== true && ref.kind === 'base64') {
+      if (options.images === 'presence' && !blobPresent(dir, ref)) {
+        missing.push(ref)
+        value = withValueAt(value, ref.path, missingPlaceholder(ref.kind, ref.sha256))
+      }
+      continue
+    }
     const data = readBlob(dir, ref)
     if (data === undefined) missing.push(ref)
     value = withValueAt(value, ref.path, data ?? missingPlaceholder(ref.kind, ref.sha256))

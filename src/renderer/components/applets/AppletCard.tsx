@@ -4,7 +4,7 @@ import { useAppStore } from '../../stores/appStore'
 import './applets.css'
 import { Button } from '../ui/Button'
 import { useAppletRuntime } from './useAppletRuntime'
-import { addAppletInputToDraft, requestAppletRepair } from './appletActions'
+import { addAppletInputToDraft, requestAppletRepair, type AppletConversation } from './appletActions'
 
 export function isAppletPart(
   value: unknown
@@ -66,24 +66,35 @@ export function AppletConversationInput({ text, onAdd, onDismiss }: { text: stri
 /**
  * An applet in the transcript: only its content at its own height, under a quiet name that opens it in the side
  * panel. Native guest content is mounted only over the measured preview; no generated code enters this DOM.
+ * `conversation`: it shows outside the open thread (a bot's chat), from that thread and with that composer, and `onOpen`
+ * opens it in that place's own view.
  */
-export const AppletCard = memo(function AppletCard({ reference }: { reference: AppletReference }) {
+export const AppletCard = memo(function AppletCard({ reference, conversation, onOpen }: { reference: AppletReference; conversation?: AppletConversation; onOpen?: () => void }) {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
   // The thread this row belongs to. Once another thread is open, the row may render once more before it goes, and must
-  // not show (or start) its applet over the new thread.
+  // not show (or start) its applet over the new thread. An applet shown elsewhere names its own thread.
   const [hostThreadId] = useState(activeThreadId)
-  const threadId = hostThreadId === activeThreadId ? activeThreadId : null
+  const threadId = conversation ? conversation.threadId : hostThreadId === activeThreadId ? activeThreadId : null
   const preview = useRef<HTMLDivElement>(null)
   const applet = useAppletRuntime(preview, { host: 'transcript', threadId, profileId, reference, enabled: true, restart: 0 })
-  const { error, scrollImage, conversationInput, setConversationInput } = applet
+  const { error, scrollImage, liveArea, conversationInput, setConversationInput } = applet
+  // The cached frame shows only where the live view is not drawn (while scrolling, or a strip cut away for a hover
+  // label): under the see-through live view its old pixels would show through as a second, outdated copy.
+  const frameClip = liveArea
+    ? (() => {
+        const { x, y, width, height } = liveArea
+        const right = x + width, bottom = y + height
+        return `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${x}px ${y}px, ${right}px ${y}px, ${right}px ${bottom}px, ${x}px ${bottom}px, ${x}px ${y}px)`
+      })()
+    : undefined
 
-  const openInPanel = threadId ? () => useAppStore.getState().openAppletDocument(threadId, reference) : undefined
+  const openInPanel = conversation ? onOpen : threadId ? () => useAppStore.getState().openAppletDocument(threadId, reference) : undefined
   return (
     <section className="mousse-applet" aria-label={`Applet: ${reference.title}`}>
       <AppletName title={reference.title} description={reference.description} onOpen={openInPanel} />
       {error && threadId && (
-        <AppletError error={error} onRepair={() => requestAppletRepair(profileId, threadId, reference, error)} />
+        <AppletError error={error} onRepair={() => requestAppletRepair(profileId, threadId, reference, error, conversation)} />
       )}
       <div
         ref={preview}
@@ -93,13 +104,13 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
         aria-label="Applet preview"
       >
         {scrollImage && (
-          <img className="mousse-applet-scroll-frame" src={scrollImage} alt="" aria-hidden="true" />
+          <img className="mousse-applet-scroll-frame" src={scrollImage} alt="" aria-hidden="true" style={frameClip ? { clipPath: frameClip } : undefined} />
         )}
       </div>
       {conversationInput && threadId && (
         <AppletConversationInput
           text={conversationInput}
-          onAdd={() => { if (addAppletInputToDraft(profileId, threadId, reference, conversationInput)) setConversationInput(null) }}
+          onAdd={() => { if (addAppletInputToDraft(profileId, threadId, reference, conversationInput, conversation)) setConversationInput(null) }}
           onDismiss={() => setConversationInput(null)}
         />
       )}

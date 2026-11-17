@@ -12,7 +12,8 @@
   right: 12px;
   bottom: 12px;
   z-index: var(--z-floating, 50000);
-  width: min(328px, calc(100vw - 24px));
+  /* As wide as the thread side card (--side-card-width), its right edge on the same 12px gutter. */
+  width: min(272px, calc(100vw - 24px));
   /* `bottom` rises above bottom UI a pane registers, such as the Changes tab's footer (useToastObstruction). */
   transition: height 0.4s var(--toast-ease), bottom var(--ui-dur-slow, 0.2s) var(--toast-ease);
 }
@@ -150,7 +151,10 @@ html[data-theme='light'] .ui-toaster {
   padding-bottom: 7px;
 }
 
-.ui-toast-success { --tone: var(--success); }
+/* --success is vivid so it reads at dot size; across a whole card it shouts. The toast keeps its
+   hue and lightness at part of its chroma: still green, calm against the theme. Light themes keep
+   more (below), or the faint light wash turns grey and reads as a neutral toast. */
+.ui-toast-success { --tone: oklch(from var(--success) l calc(c * var(--toast-success-chroma, 0.5)) h); }
 .ui-toast-attention { --tone: var(--status-input, var(--accent)); }
 .ui-toast-paused { --tone: var(--warning); }
 .ui-toast-error { --tone: var(--danger); }
@@ -167,12 +171,14 @@ html[data-theme='light'] .ui-toaster {
 html[data-theme='light'] .ui-toaster {
   --toast-wash-amount: 7%;
   --toast-edge-amount: 28%;
+  --toast-success-chroma: 0.7;
 }
 
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] .ui-toaster {
     --toast-wash-amount: 7%;
     --toast-edge-amount: 28%;
+    --toast-success-chroma: 0.7;
   }
 }
 
@@ -205,7 +211,7 @@ html[data-theme='light'] .ui-toaster {
 
 .ui-toast-open:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-toast-openable {
@@ -262,7 +268,7 @@ html[data-theme='light'] .ui-toaster {
 
 .ui-toast-text[role='button']:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-toast-expandable:not(.ui-toast-openable):hover {
@@ -333,7 +339,7 @@ html[data-theme='light'] .ui-toaster {
 
 .ui-toast-copy:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-toast-copied {
@@ -379,7 +385,7 @@ html[data-theme='light'] .ui-toaster {
 .ui-toast-close:focus-visible,
 .ui-toaster-clear:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-toast-close {
@@ -421,6 +427,8 @@ html[data-theme='light'] .ui-toaster {
   line-height: 20px;
   padding-bottom: 3px;
   transition: opacity 0.18s ease;
+  /* Faded out, its opacity still stacks it above the close button in the same cell: clicks go through to the button. */
+  pointer-events: none;
 }
 
 /* Close buttons show once the stack is open, or on the toast that has keyboard focus. */

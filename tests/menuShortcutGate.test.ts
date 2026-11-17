@@ -28,7 +28,9 @@ function fakeWebContents() {
 function inputForBinding(binding: string, platform: string): Partial<MenuKeyInput> & { key: string } {
   const parsed = parseBinding(resolveBinding(binding, platform)!)!
   const named = ['Tab', 'Backspace', 'Delete', 'Enter', 'Home', 'End', 'PageUp', 'PageDown']
-  const key = named.includes(parsed.key) ? parsed.key : parsed.key.length === 1 ? parsed.key.toLowerCase() : parsed.key
+  // Electron names the arrows as the DOM does.
+  const arrows: Record<string, string> = { Up: 'ArrowUp', Down: 'ArrowDown', Left: 'ArrowLeft', Right: 'ArrowRight' }
+  const key = named.includes(parsed.key) ? parsed.key : arrows[parsed.key] ?? (parsed.key.length === 1 ? parsed.key.toLowerCase() : parsed.key)
   return { key, control: parsed.ctrl, meta: parsed.cmd, alt: parsed.alt, shift: parsed.shift }
 }
 
