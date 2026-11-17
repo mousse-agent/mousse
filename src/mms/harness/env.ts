@@ -126,6 +126,13 @@ export function grokStandaloneBin(base: NodeJS.ProcessEnv = process.env): string
   return join(home && isAbsolute(home) ? home : join(homedir(), '.grok'), 'bin')
 }
 
+/** The Windows standalone installer's exposed bin directory, even before PATH is updated here. */
+export function codexStandalonePaths(base: NodeJS.ProcessEnv = process.env): string[] {
+  if (process.platform !== 'win32') return []
+  const localAppData = Object.entries(base).find(([key]) => key.toUpperCase() === 'LOCALAPPDATA')?.[1]
+  return localAppData && isAbsolute(localAppData) ? [join(localAppData, 'Programs', 'OpenAI', 'Codex', 'bin')] : []
+}
+
 /**
  * How the environment of an instance with its own home is built, for the drivers that take part
  * (`ownedLaunchEnv`). Mousse's own environment may hold the user's sign-in in more places than a
@@ -310,8 +317,8 @@ export function instanceEnv(input: {
   // Only a Mousse-owned home gets them: the user's own home runs the CLI as the user set it up.
   const own = input.home ? DRIVER_VARIABLES[input.driver] : undefined
   if (own) env = withUserEnv(env, { ...own })
-  // The standalone Grok install is found after PATH, wherever the instance's home is.
-  const extraSearch = input.driver === 'grok' ? [grokStandaloneBin(base)] : []
+  // Standalone installs are found after PATH, wherever the instance's home is.
+  const extraSearch = input.driver === 'grok' ? [grokStandaloneBin(base)] : input.driver === 'codex' ? codexStandalonePaths(base) : []
   return {
     instanceId: input.instanceId,
     driver: input.driver,
