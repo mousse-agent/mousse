@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import { afterAll, beforeAll, expect, it, vi } from 'vitest'
-import { newId } from '../../../../src/shared/net'
+import { NetError, newId, type WireMessage } from '../../../../src/shared/net'
+import { validateWireMessage } from '../../../../src/shared/net/schemas'
 import type { BotChatMessage } from '../../../../src/shared/bots/personal/chat'
 import { botFixture, createBot, type BotFixture } from '../../../bots/botFixture'
 import { cleanupAll, cleanups, linked } from './routerFixture'
@@ -17,6 +18,7 @@ let message: BotChatMessage
 let f: BotFixture
 let realBot: string
 let daemonHomes: string[] = []
+let sent: WireMessage[] = []
 let check = () => {}
 let answer = vi.fn(async () => ({ status: 'declined' }))
 beforeAll(async () => {
@@ -25,6 +27,10 @@ beforeAll(async () => {
     daemonHomes = create.mock.calls.map(([options]) => options!.homeDir!)
     create.mockRestore()
   }
+  const session = t.owner.net.session(t.callerNode) as unknown as { send(header: WireMessage, ...rest: unknown[]): Promise<void> }
+  const send = session.send.bind(session)
+  const spy = vi.spyOn(session, 'send').mockImplementation((header, ...rest) => { sent.push(header); return send(header, ...rest) })
+  cleanups.push(() => spy.mockRestore())
   expect(daemonHomes).toHaveLength(2)
   for (const home of daemonHomes) expect(home.startsWith(join(tmpdir(), 'bridge-router-'))).toBe(true)
   f = botFixture()
@@ -89,7 +95,7 @@ it.each(refusals)('reports %s before effects over a real link', async (reason, s
   const input = { botId: realBot, actionId: ACTION, digest: 'a'.repeat(64), answer: 'send' as const }
   check = () => f.bots.service.actionCheck(input)
   answer = vi.fn(() => f.bots.service.answerAction(input))
-  await expect(rpcAnswer()).rejects.toMatchObject({ code: `bot_action_${reason}`, message: sentence })
+  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict', details: { reason: `bot_action_${reason}` } })
   expect(answer).not.toHaveBeenCalled()
 }, 60_000)
 
@@ -97,7 +103,7 @@ it('refuses oversized Send before effects but allows Not now', async () => {
   check = () => {}
   message = { ...message, text: 'x'.repeat(80_000), action: { ...message.action!, args: { body: 'x'.repeat(80_000) } } }
   answer = vi.fn(async () => ({ status: 'declined' }))
-  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'bot_action_too_large', message: 'Open it on the computer to send.' })
+  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict', details: { reason: 'bot_action_too_large' } })
   expect(answer).not.toHaveBeenCalled()
   expect(await rpcAnswer('not_now')).toMatchObject({ status: 'declined' })
   expect(answer).toHaveBeenCalledTimes(1)
@@ -125,5 +131,28 @@ it('keeps a failure after preflight uncertain', async () => {
 
 it('keeps arbitrary engine error text off the wire', async () => {
   check = () => { throw Object.assign(new Error('private tool answer'), { code: 'bot_action_paused' }) }
-  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'bot_action_paused', message: 'Resume this bot to send this.' })
+  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict', details: { reason: 'bot_action_paused' } })
+}, 60_000)
+
+it('new computer refusals remain a generic conflict for the older device decoder', async () => {
+  sent = []
+  check = () => { throw Object.assign(new Error('DO NOT SEND THIS NAME'), { code: 'bot_action_paused' }) }
+  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict', details: { reason: 'bot_action_paused' } })
+  const response = sent.find(header => header.t === 'rpc.result' && 'error' in header)
+  expect(response).toBeTruthy()
+  expect(validateWireMessage(response)).toBe(true)
+  if (response?.t !== 'rpc.result' || !('error' in response)) throw new Error('Missing refusal')
+  // The old Net decoder preserves only the top-level code for non-forbidden errors.
+  const olderDevice = new NetError(response.error.code)
+  expect(olderDevice.code).toBe('conflict')
+  expect(JSON.stringify(response)).not.toContain('DO NOT SEND THIS NAME')
+  expect(JSON.stringify(response)).not.toContain('Mail')
+}, 60_000)
+
+it('an older computer preflight conflict remains definite on a newer device', async () => {
+  check = () => { throw new NetError('conflict') }
+  answer.mockClear()
+  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict' })
+  expect(answer).not.toHaveBeenCalled()
+  expect(t.caller.net.session(t.node).state()).toBe('open')
 }, 60_000)
