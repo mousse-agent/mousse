@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readlinkSync, statSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
-import { LINUX_RUN_KEPT_OPEN, LINUX_SYSTEM_FOLDERS } from '../harness/claude/locked'
+import { LINUX_RUN_KEPT_OPEN, LINUX_SYSTEM_FOLDERS } from '../harness/linuxFolders'
 import { lockedEnv } from '../harness/env'
 
 /**

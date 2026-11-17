@@ -150,6 +150,8 @@ export interface HarnessGateway {
    * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
    */
   oneShot(request: OneShotRequest): Promise<{ text: string }>
+  /** The driver's runtime masks secret values in its tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean
   /**
    * The models an entry can make pictures with in Mousse's own process (#1088, a bot's Images row); none for an entry
    * that is unknown, turned off, or whose runtime makes none.
@@ -1580,6 +1582,11 @@ export class Harness implements HarnessGateway {
       providerRef: () => ref,
       interrupt: async () => (ended || !ref ? 'not_active' : this.interruptOn(record, ref, spec.input.threadId))
     }
+  }
+
+  /** Whether a driver's runtime masks secrets in tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean {
+    return Boolean(driver && this.drivers.get(driver)?.masksToolResults)
   }
 
   /** Whether the instance's driver runs one-shots (`HarnessDriver.oneShot`); read for picker listings. */

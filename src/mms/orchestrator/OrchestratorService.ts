@@ -126,7 +126,7 @@ import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { botTurnOffers } from '../../shared/bots/personal/walls'
 import { BOT_COMPACTION_HOLD_MS, isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
-import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
+import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type HarnessDriverKind, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -1292,16 +1292,16 @@ export class OrchestratorService extends EventEmitter {
 
   private secretCopies?: SecretCopyControl
   /**
-   * As a turn starts: its thread's agents get readable copies of their secrets only on Claude Code, whose tool results
-   * Mousse masks before Claude Code keeps them (`PostToolUse`). Any other runtime keeps its own tools' results as they
-   * are, so its turn holds the copies of its thread, and of the threads above it (whose agents may have handed it a
+   * As a turn starts: its thread's agents get readable copies of their secrets only on a runtime whose tool results
+   * Mousse masks before the runtime keeps them (`HarnessDriver.masksToolResults`: Claude Code's `PostToolUse`). Any
+   * other runtime keeps its own tools' results as they are, so its turn holds the copies of its thread, and of the threads above it (whose agents may have handed it a
    * path), off until it settles: call the returned release then. Its agent uses secret_run. Throws when a copy cannot be
    * removed, and the turn must not start.
    */
-  private secretCopiesForTurn(threadId: string, driver: string | undefined): () => void {
+  private secretCopiesForTurn(threadId: string, driver: HarnessDriverKind | undefined): () => void {
     const copies = this.secretCopies
     if (!copies) return () => {}
-    if (driver === 'claude') {
+    if (this.harness?.masksToolResults?.(driver)) {
       try {
         copies.allow(threadId)
       } catch {
