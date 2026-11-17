@@ -72,6 +72,8 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.recovery.import': ['file', 'passphrase', 'becomeAuthority'],
   'bridge.invite': ['ttlMs', 'name', 'caps'],
   'bridge.join': ['invite', 'name', 'passphrase', 'via'],
+  'net.join.retry': ['passphrase'],
+  'net.join.abandon': [],
   'bridge.nodes': [],
   'bridge.revoke': ['node'],
   'bridge.rename': ['node', 'name'],
@@ -431,12 +433,15 @@ export function registerEditorTunnelMethods(
     })
 }
 
-function publicError(code: keyof typeof NET_ERRORS, cause?: unknown): AppError {
+/** Methods whose errors carry why a join failed and the other computer's name, for the screen to word. */
+const JOIN_METHODS: ReadonlySet<NetLocalMethod> = new Set(['bridge.join', 'net.join.retry'])
+function publicError(code: keyof typeof NET_ERRORS, cause?: unknown, details?: unknown): AppError {
   const entry = NET_ERRORS[code]
   return new AppError(
     {
       code,
       message: entry.message,
+      ...(details === undefined ? {} : { details }),
       errorInfo: { category: entry.category, retryable: entry.retryable }
     },
     cause
@@ -474,7 +479,8 @@ export function registerNetMethods(
         try {
           return await (await forProfile(binding!.profileId)).request(method, params)
         } catch (error) {
-          if (error instanceof NetError) throw publicError(error.code, error)
+          if (error instanceof NetError)
+            throw publicError(error.code, error, JOIN_METHODS.has(method) ? error.details : undefined)
           throw error
         }
       }

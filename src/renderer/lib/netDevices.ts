@@ -79,6 +79,34 @@ export function netErrorWords(code: string): string {
   return NET_ERROR_WORDS[code] ?? code.replaceAll('_', ' ')
 }
 
+/**
+ * Why a join failed, with the one thing to do next. The daemon names the reason and the other
+ * computer in the error's details; a daemon from before them sends only the code.
+ */
+export function joinErrorWords(error: { code?: unknown; details?: unknown; message?: unknown }): string {
+  const details = (error.details ?? {}) as { reason?: unknown; label?: unknown }
+  const other = typeof details.label === 'string' ? details.label : 'the other computer'
+  switch (details.reason) {
+    case 'unreachable':
+      return `Couldn’t reach ${other}. Check that it’s on and that both computers are on the same network or tailnet, then try again.`
+    case 'clock':
+      return `The clocks on this computer and ${other} are too far apart. Set both to the correct time, then try again.`
+    case 'cancelled':
+      return `This connection was cancelled on ${other}. Start again with a new link from ${other}.`
+    case 'join_unfinished':
+      return `Couldn’t finish connecting to ${other}. Retry, or give up and start again.`
+  }
+  switch (error.code) {
+    case 'invite_invalid':
+      return 'This link isn’t valid or has expired. Make a new one on the other computer.'
+    case 'keystore_locked':
+      return 'The system keychain refused to protect this computer’s keys. Set a passphrase to continue.'
+    case 'conflict':
+      return 'This computer is already set up with its own devices, so it can’t join another set.'
+  }
+  return String(error.message ?? error.code ?? 'The connection failed.')
+}
+
 /** Words for a capability in the device line; `settings` is "work on threads". */
 export function capabilityLabel(cap: NodeCapability): string {
   return cap === WORKS_ON_THREADS ? 'work on threads' : cap

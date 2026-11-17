@@ -8,7 +8,7 @@ import {
   type HostedNetHost,
   type HostedNetModule
 } from './hosted'
-import type { NodeInviteInput } from './enrollment/service'
+import type { NodeInviteInput, PreparedNodeJoin } from './enrollment/service'
 import { DEFAULT_NET_FEATURE_FLAGS, type NetFeatureFlags } from '../../shared/featureFlags'
 import { existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
@@ -187,10 +187,24 @@ interface NetConfiguration {
   editorSystemSshNodes?: NodeId[]
   /** What an add-on action changed outside Mousse, kept so it can be undone. Keyed by add-on. */
   addonRecords?: Record<string, { action: string; appliedAt: number; record: unknown }>
+  /** Written by earlier builds while a join was under way; read as nothing and dropped on load. */
   preparedForJoin?: boolean
 }
 /** Transports that carry a session through a relay server rather than straight to the peer. */
 const RELAY_TRANSPORTS = new Set(['relay', HOSTED_RELAY_TRANSPORT])
+/** The other computer’s own answer to a join, as `EnrollmentQuarantine` marks it. */
+const fromPeer = (error: NetError) => (error.details as { from?: unknown } | undefined)?.from === 'peer'
+/** How long a join waits for its first session with the computer it joined through. */
+const JOIN_FIRST_SESSION_WAIT_MS = 20_000
+/** Clocks further apart than this are named as the reason a join failed. */
+const JOIN_CLOCK_LIMIT_MS = 30_000
+/** A join that succeeded; `wait`: whether to wait for the first session with `authority`. */
+interface JoinOutcome {
+  user: UserId
+  node: NodeId
+  authority: NodeId
+  wait: boolean
+}
 
 /**
  * The open session with `node` to use. Both computers may hold one, each dialed by one side; one
@@ -413,6 +427,7 @@ export class NetService {
           throw new NetError('storage_corrupt')
         if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean')
           throw new NetError('storage_corrupt')
+        delete cfg.preparedForJoin
         if (cfg.workOnThreads !== undefined && typeof cfg.workOnThreads !== 'boolean')
           throw new NetError('storage_corrupt')
         if (cfg.shareBots !== undefined && typeof cfg.shareBots !== 'boolean')
@@ -821,8 +836,34 @@ export class NetService {
         !this.hasIdentity())
     )
       return this.track(this.hosted.joinSignIn(method, params))
-    if (!['net.init', 'bridge.join'].includes(method)) this.assertEnabled()
-    if (method.startsWith('bridge.') && method !== 'bridge.join') this.assertFeature('netBridge')
+    // Joining, and finishing or giving up a join, need no network yet. The wait for the first
+    // session runs outside the serial queue, so nothing else waits on another computer to answer.
+    if (method === 'bridge.join')
+      return this.track(
+        this.serial(() =>
+          this.join(
+            String(params.invite),
+            params.name as string | undefined,
+            params.passphrase as string | undefined,
+            params.via as string | undefined
+          )
+        ).then((joined) => this.firstSession(joined))
+      )
+    // With no network folder there is no join to finish or give up, and none is made to find out.
+    if (
+      (method === 'net.join.retry' || method === 'net.join.abandon') &&
+      !existsSync(join(this.options.profileDir, 'net', 'net.db'))
+    )
+      throw new NetError('disabled')
+    if (method === 'net.join.retry')
+      return this.track(
+        this.serial(() =>
+          this.join(undefined, undefined, params.passphrase as string | undefined)
+        ).then((joined) => this.firstSession(joined))
+      )
+    if (method === 'net.join.abandon') return this.serial(() => this.abandonJoin())
+    if (method !== 'net.init') this.assertEnabled()
+    if (method.startsWith('bridge.')) this.assertFeature('netBridge')
     if (method === 'net.doctor') return this.doctor()
     if (method === 'net.transport.list') return this.transportList()
     if (method === 'net.transport.action.describe') {
@@ -954,13 +995,6 @@ export class NetService {
               .routes
           }
         }
-        case 'bridge.join':
-          return this.join(
-            String(params.invite),
-            params.name as string | undefined,
-            params.passphrase as string | undefined,
-            params.via as string | undefined
-          )
         case 'bridge.revoke': {
           const rt = this.requireEnrolled(),
             node = params.node as NodeId
@@ -1128,11 +1162,18 @@ export class NetService {
     return rt
   }
   private async init(input: NetInitInput): Promise<NetStatus> {
-    const rt = this.runtime()
+    let rt = this.runtime()
+    // Keys or a journal from a join that never sent its request are dropped: this computer starts
+    // its own set of devices from nothing. A sent one waits for Retry or Give up.
+    const leftovers = this.joinLeftovers(rt)
+    if (leftovers === 'sent') throw this.unfinishedJoinError(rt)
+    if (leftovers === 'unsent') {
+      await this.setAsideNetwork('unfinished-join')
+      rt = this.runtime()
+    }
     // With no keys yet, the passphrase protects the new ones; otherwise it unlocks the existing ones.
     const creating = rt.keys.state() === 'missing'
     if (input.passphrase !== undefined && !creating) await rt.keys.unlock(input.passphrase)
-    if (!rt.identity.self() && this.config.preparedForJoin) throw new NetError('conflict')
     if (!rt.identity.self())
       await rt.identity.bootstrapAuthority(input.name ?? 'My device', creating ? input.passphrase : undefined)
     this.assertInstanceOpen()
@@ -1262,18 +1303,25 @@ export class NetService {
         this.emit()
       },
       prepareJoin: async () => {
-        const rt = this.runtime()
+        let rt = this.runtime()
         if (rt.identity.self()) throw new NetError('conflict', 'This profile already has an identity.')
-        if (rt.keys.state() === 'missing') await rt.keys.initialize({ asAuthority: false })
-        this.config.preparedForJoin = true
-        this.saveConfig()
+        // The same rules as a join from a link: a sent one is finished or given up first, and an
+        // unsent one is replaced, keys and all, since these keys are announced to Mousse ID.
+        const leftovers = this.joinLeftovers(rt)
+        if (leftovers === 'sent') throw this.unfinishedJoinError(rt)
+        if (leftovers === 'unsent') {
+          await this.setAsideNetwork('unfinished-join')
+          rt = this.runtime()
+        }
+        await rt.keys.initialize({ asAuthority: false })
         if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
         if (!rt.keys.protectedAtRest()) rt.keys.protect()
         return { transportFingerprint: fingerprint(decodeBase64(rt.keys.nodeKeys().transport)) }
       },
       joinWithInvite: async (invite, name) => {
-        await this.join(invite, name)
-      }
+        await this.firstSession(await this.serial(() => this.join(invite, name, undefined, undefined, true)))
+      },
+      dropUnsentJoin: () => this.serial(() => this.dropUnsentJoin())
     }
   }
   /** A network identity exists for this profile; never creates the network database. */
@@ -1298,14 +1346,21 @@ export class NetService {
    */
   private async setAsideRemovedIdentity(): Promise<void> {
     if (!this.selfRemoved()) return
+    await this.setAsideNetwork('removed')
+  }
+  /**
+   * Moves the profile's `net` folder to `net.<label>-<time>` and leaves the service with no network
+   * data, as on a computer that never had any. Nothing is deleted. Runs in the serial queue.
+   */
+  private async setAsideNetwork(label: string): Promise<void> {
     await this.closeRuntime()
     const directory = join(this.options.profileDir, 'net')
-    let aside = `${directory}.removed-${Date.now()}`
+    let aside = `${directory}.${label}-${Date.now()}`
     if (existsSync(aside)) aside += `-${randomBytes(4).toString('hex')}`
     try {
       renameSync(directory, aside)
     } catch (cause) {
-      // The identity stays where it was: load it again, as it was before the sign-in.
+      // The folder stays where it was: load it again, as it was before.
       try {
         this.runtime()
         if (this.config.enabled) await this.activateWithHosted()
@@ -1315,10 +1370,34 @@ export class NetService {
       this.emit()
       throw new NetError(
         'internal',
-        `Mousse couldn’t set this computer’s old network identity aside: ${cause instanceof Error ? cause.message : String(cause)}`
+        `Mousse couldn’t set this computer’s network folder aside: ${cause instanceof Error ? cause.message : String(cause)}`
       )
     }
     this.emit()
+  }
+  /**
+   * What a join left on a computer with no identity. `sent`: a request may have reached the other
+   * computer and its answer is unknown, so its keys and claims are kept for a retry. `unsent`: keys
+   * or a journal that no request ever left; nothing exists for them anywhere else. `none`: nothing,
+   * or an identity, which is never touched here.
+   */
+  private joinLeftovers(rt: NetRuntime): 'none' | 'unsent' | 'sent' {
+    if (rt.identity.self()) return 'none'
+    const attempt = rt.enrollment.joinAttempt()
+    if (attempt?.phase === 'sent') return 'sent'
+    if (attempt?.phase === 'enrolled') return 'none'
+    return attempt || rt.keys.state() !== 'missing' ? 'unsent' : 'none'
+  }
+  /** Sets aside what a join left when no request ever left this computer. Runs in the serial queue. */
+  private async dropUnsentJoin(): Promise<void> {
+    if (this.joinLeftovers(this.runtime()) === 'unsent') await this.setAsideNetwork('unfinished-join')
+  }
+  /** Refuses a new start while a sent join waits for its answer, naming the other computer. */
+  private unfinishedJoinError(rt: NetRuntime): NetError {
+    const name = rt.enrollment.joinAttempt()?.name
+    return new NetError('conflict', 'Finish or give up the connection already under way first.', {
+      details: { reason: 'join_unfinished', ...(name === undefined ? {} : { label: name }) }
+    })
   }
   /**
    * Ends the loaded runtime and everything running on it, but not the service: the next `runtime()`
@@ -2709,100 +2788,217 @@ export class NetService {
         .map((session) => session.failServingStream(stream, code))
     )
   }
+  /**
+   * Joins the devices of the computer that made `invite`. Without `invite` it retries the join this
+   * computer already sent: the same claims and keys, with a fresh proof bound to the new channel.
+   * A join that fails before its request leaves this computer is dropped at once; one that fails
+   * after keeps everything for Retry or Give up, unless the other computer refused it outright.
+   * `mousseId`: the keys were made and announced by a Mousse ID join, so they are kept.
+   */
   private async join(
-    invite: string,
+    invite: string | undefined,
     name?: string,
     passphrase?: string,
-    via?: string
-  ): Promise<unknown> {
+    via?: string,
+    mousseId = false
+  ): Promise<JoinOutcome> {
     if (via !== undefined && !isJoinVia(via)) throw new NetError('bad_request')
-    const needsProtection = inviteRequiresProtection(invite),
+    if (
+      passphrase !== undefined &&
+      (typeof passphrase !== 'string' || !passphrase.length || Buffer.byteLength(passphrase) > 4096)
+    )
+      throw new NetError('bad_request')
+    // A text that is not an invitation fails here, before anything is dropped or made.
+    const needsProtection = invite !== undefined && inviteRequiresProtection(invite)
+    let rt = this.runtime(),
+      quarantine: EnrollmentQuarantine | undefined,
+      label: string | undefined
+    const leftovers = this.joinLeftovers(rt)
+    if (invite === undefined) {
+      if (leftovers !== 'sent') throw new NetError('not_enrolled')
+      if (passphrase !== undefined && rt.keys.state() === 'locked') await rt.keys.unlock(passphrase)
+      if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+    } else if (leftovers === 'unsent' && !mousseId) {
+      // A new link replaces a join that never sent its request.
+      await this.setAsideNetwork('unfinished-join')
       rt = this.runtime()
-    if (passphrase !== undefined) {
-      if (rt.identity.self() && !rt.enrollment.preparedNodeJoin()) throw new NetError('conflict')
-      if (
-        typeof passphrase !== 'string' ||
-        !passphrase.length ||
-        Buffer.byteLength(passphrase) > 4096
-      )
-        throw new NetError('bad_request')
-      if (rt.keys.state() === 'missing') {
-        await rt.keys.initialize({ asAuthority: false, passphrase })
-        this.config.preparedForJoin = true
-        this.saveConfig()
-      } else {
-        if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
-        rt.keys.protect(passphrase)
-      }
     }
-    if (needsProtection && !rt.keys.protectedAtRest()) throw new NetError('keystore_locked')
-    const prepared = await rt.enrollment.prepareNodeJoin(invite, name)
-    if (prepared.state !== 'enrolled') {
-      const transport = new ProfileTransports({
-        clock: this.clock,
-        profileDir: this.options.profileDir,
-        hosted: this.hosted?.transports,
-        identity: () => this.relayIdentity(prepared.node),
-        relayRendezvous: prepared.rendezvous
-      })
-      await transport.start([], (raw) => raw.destroy())
-      const manager = new RouteManagerImpl({
-        node: prepared.node,
-        transports: transport.transports(),
-        credentials: rt.keys.tlsCredentials(),
-        clock: this.clock
-      })
-      const routes = parseProtocolJson(
-        Buffer.from(prepared.routes.payload, 'base64url')
-      ) as RoutesRecord
-      try {
-        const result = await manager.connect(
-          {
-            node: prepared.authority,
-            user: prepared.user,
-            transportKey: prepared.authorityTransportKey,
-            // A remote machine set up over SSH reaches this computer through its own tunnel first.
-            routes: [
-              ...(via ? [{ transport: 'direct', address: via, priority: 0 }] : []),
-              ...routes.routes
-            ]
-          },
-          this.shutdownSignal.signal
-        )
-        const quarantine = new EnrollmentQuarantine({
-          channel: result.channel,
-          service: rt.enrollment,
-          role: 'joiner',
+    try {
+      let prepared: PreparedNodeJoin
+      if (invite === undefined) prepared = rt.enrollment.preparedNodeJoin()!
+      else {
+        if (passphrase !== undefined) {
+          if (rt.identity.self() && !rt.enrollment.preparedNodeJoin())
+            throw new NetError('conflict')
+          if (rt.keys.state() === 'missing')
+            await rt.keys.initialize({ asAuthority: false, passphrase })
+          else {
+            if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+            rt.keys.protect(passphrase)
+          }
+        } else if (needsProtection && rt.keys.state() === 'missing')
+          // The keychain protects new keys on its own; a passphrase is asked for only when it refuses.
+          await rt.keys.initialize({ asAuthority: false })
+        if (needsProtection && !rt.keys.protectedAtRest()) throw new NetError('keystore_locked')
+        try {
+          prepared = await rt.enrollment.prepareNodeJoin(invite, name)
+        } catch (error) {
+          if (leftovers === 'sent' && error instanceof NetError && error.code === 'conflict')
+            throw this.unfinishedJoinError(rt)
+          throw error
+        }
+      }
+      label = rt.enrollment.joinAttempt()?.name
+      if (prepared.state !== 'enrolled') {
+        const transport = new ProfileTransports({
+          clock: this.clock,
+          profileDir: this.options.profileDir,
+          hosted: this.hosted?.transports,
+          identity: () => this.relayIdentity(prepared.node),
+          relayRendezvous: prepared.rendezvous
+        })
+        await transport.start([], (raw) => raw.destroy())
+        const manager = new RouteManagerImpl({
+          node: prepared.node,
+          transports: transport.transports(),
+          credentials: rt.keys.tlsCredentials(),
           clock: this.clock
         })
-        this.gateways.add(quarantine)
+        const routes = parseProtocolJson(
+          Buffer.from(prepared.routes.payload, 'base64url')
+        ) as RoutesRecord
         try {
-          await quarantine.completed
+          const result = await manager.connect(
+            {
+              node: prepared.authority,
+              user: prepared.user,
+              transportKey: prepared.authorityTransportKey,
+              // A remote machine set up over SSH reaches this computer through its own tunnel first.
+              routes: [
+                ...(via ? [{ transport: 'direct', address: via, priority: 0 }] : []),
+                ...routes.routes
+              ]
+            },
+            this.shutdownSignal.signal
+          )
+          quarantine = new EnrollmentQuarantine({
+            channel: result.channel,
+            service: rt.enrollment,
+            role: 'joiner',
+            clock: this.clock
+          })
+          this.gateways.add(quarantine)
+          try {
+            await quarantine.completed
+          } finally {
+            this.gateways.delete(quarantine)
+            quarantine.close()
+          }
         } finally {
-          this.gateways.delete(quarantine)
-          quarantine.close()
+          await transport.teardown()
         }
-      } finally {
-        await transport.teardown()
+      }
+      this.assertInstanceOpen()
+      this.config.enabled = true
+      this.config.features = {
+        netBridge: true,
+        netSpaces: true,
+        netBridgeThreads: this.config.features?.netBridgeThreads !== false
+      }
+      this.saveConfig()
+      await this.activate()
+      this.adoptRoutes(prepared.routes, prepared.authority)
+      this.refreshPeers()
+      // With `via` the joiner may have no route back to the inviter: the inviter dials it over SSH
+      // once it approves that route, so the join does not wait for its own connection to open.
+      return { user: prepared.user, node: prepared.node, authority: prepared.authority, wait: !via }
+    } catch (error) {
+      throw await this.joinFailed(error, label, quarantine?.peerClockOffsetMs)
+    }
+  }
+  /**
+   * Cleans up after a failed join and says why in words the screen can use. A join that never sent
+   * its request is set aside; so is one the other computer refused outright, since nothing more
+   * can come of it. One whose answer is unknown is kept for Retry or Give up.
+   */
+  private async joinFailed(
+    error: unknown,
+    label: string | undefined,
+    clockOffsetMs: number | undefined
+  ): Promise<unknown> {
+    if (this.stopped) return error
+    const refused = error instanceof NetError && error.code === 'invite_invalid' && fromPeer(error)
+    let leftovers: 'none' | 'unsent' | 'sent' = 'none'
+    try {
+      leftovers = this.joinLeftovers(this.runtime())
+      if (leftovers === 'unsent' || (leftovers === 'sent' && refused))
+        await this.setAsideNetwork('unfinished-join')
+    } catch {
+      // The next join or Networking on sets it aside again.
+    }
+    const named = label === undefined ? {} : { label }
+    if (clockOffsetMs !== undefined && Math.abs(clockOffsetMs) > JOIN_CLOCK_LIMIT_MS)
+      return new NetError('clock_skew', undefined, {
+        cause: error,
+        details: { reason: 'clock', ...named }
+      })
+    if (refused)
+      return new NetError('invite_invalid', undefined, {
+        cause: error,
+        details: { reason: 'cancelled', ...named }
+      })
+    // Errors already worded here (an unfinished join) pass as they are; a failure the other
+    // computer reported, other than a refusal, reads like any other.
+    const worded = error instanceof NetError && error.details !== undefined && !fromPeer(error)
+    if (!(error instanceof NetError) || worded) return error
+    if (leftovers === 'sent')
+      return new NetError('outcome_uncertain', undefined, {
+        cause: error,
+        details: { reason: 'join_unfinished', ...named }
+      })
+    if (['route_unreachable', 'peer_offline', 'deadline_exceeded'].includes(error.code))
+      return new NetError(error.code, undefined, {
+        cause: error,
+        details: { reason: 'unreachable', ...named }
+      })
+    return error
+  }
+  /**
+   * Waits a bounded time, outside the serial queue, for the first session with the computer joined
+   * through. The join has succeeded either way; `connected` says whether that session opened.
+   */
+  private async firstSession(joined: JoinOutcome): Promise<unknown> {
+    const { wait, ...result } = joined
+    const authority = wait ? this.supervisors.get(result.authority) : undefined
+    if (!authority) return result
+    let timer: { cancel(): void } | undefined
+    const connected = await Promise.race([
+      authority.opened.then(
+        () => true,
+        () => false
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = this.clock.setTimeout(() => resolve(false), JOIN_FIRST_SESSION_WAIT_MS)
+      })
+    ])
+    timer?.cancel()
+    return { ...result, connected }
+  }
+  /** A join whose request may have reached the other computer, for Retry and Give up on the screen. */
+  private unfinishedJoin(rt: NetRuntime): Pick<NetStatus, 'unfinishedJoin'> {
+    const attempt = rt.enrollment.joinAttempt()
+    if (attempt?.phase !== 'sent') return {}
+    return {
+      unfinishedJoin: {
+        ...(attempt.name === undefined ? {} : { name: attempt.name }),
+        ...(attempt.expiresAt === undefined ? {} : { expiresAt: attempt.expiresAt })
       }
     }
-    this.assertInstanceOpen()
-    this.config.enabled = true
-    this.config.features = {
-      netBridge: true,
-      netSpaces: true,
-      netBridgeThreads: this.config.features?.netBridgeThreads !== false
-    }
-    this.config.preparedForJoin = false
-    this.saveConfig()
-    await this.activate()
-    this.adoptRoutes(prepared.routes, prepared.authority)
-    this.refreshPeers()
-    const authority = this.supervisors.get(prepared.authority)
-    // With `via` the joiner may have no route back to the inviter: the inviter dials it over SSH
-    // once it approves that route, so the join does not wait for its own connection to open.
-    if (authority && !via) await authority.opened
-    return { user: prepared.user, node: prepared.node, authority: prepared.authority }
+  }
+  /** Give up: whatever a join left is set aside, also a request that may have reached the other computer. */
+  private async abandonJoin(): Promise<NetStatus> {
+    if (this.joinLeftovers(this.runtime()) !== 'none') await this.setAsideNetwork('unfinished-join')
+    return this.status()
   }
   private async transferAuthority(node: NodeId): Promise<unknown> {
     const rt = this.requireEnrolled()
@@ -2958,13 +3154,14 @@ export class NetService {
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
         protected: rt.keys.protectedAtRest(),
+        ...(rt.keys.protectedByPassphrase() ? { passphraseProtected: true } : {}),
         ...(rt.keys.vaultUnavailable?.() ? { vaultUnavailable: true } : {}),
         ...(self
           ? {
               self: rt.identity.selfRemoved() ? { ...self, removed: true as const } : self,
               rosterState: rt.identity.rosterState(self.user)
             }
-          : {}),
+          : this.unfinishedJoin(rt)),
         routes: this.transport?.routes() ?? [],
         transports: this.transport?.statuses() ?? [],
         peers: [...peers.values()],
