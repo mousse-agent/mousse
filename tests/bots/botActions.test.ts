@@ -1,3 +1,4 @@
+import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS } from '../../src/shared/bots/personal/manifest'
@@ -20,7 +21,7 @@ import { ToolRegistry, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools/reg
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
 import { botCatalogueTools } from '../../src/mms/run/mcp/appTools/botCatalogue'
 import { refused } from '../../src/mms/run/mcp/appTools/refusal'
-import { appTurn } from '../run/appToolsFixture'
+import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
@@ -268,15 +269,20 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   expect(t.calls).toEqual([])
 })
 /** A catalogue turn (`use_tool`) of the bot `setup` made, on a registry with the catalogue tools; `call` names its tool call id. */
-function catalogueTurn(t: Awaited<ReturnType<typeof setup>>) {
+function catalogueTurn(t: Awaited<ReturnType<typeof setup>>, fullRegistry = false) {
   const bot = { ...t.work.prepared.authority, catalogue: 'use_tool' as const }
   const turns = new AppToolTurns()
   turns.register(appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot }))
   const registry = new ToolRegistry({ activeRunId: () => 'r1', turns, botMcp: t.mcp, userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never })
   for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
+  if (fullRegistry) {
+    const declarations = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => ({ host: f.bots.tools }) }).registry.list()
+    for (const tool of declarations) if (!registry.list().some(existing => existing.name === tool.name)) registry.register(tool)
+    for (const tool of registry.list()) (tool as { handler: unknown }).handler = vi.fn(async () => ({ text: 'handler ran' }))
+  }
   const credential = { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }
-  return (name: string, args: Record<string, unknown>, toolCallId: string) =>
-    registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, { credential, toolCallId, signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2])
+  return Object.assign((name: string, args: Record<string, unknown>, toolCallId: string) =>
+    registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, { credential, toolCallId, signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]), { registry })
 }
 // A catalogue turn's use_tool call of an offered owner MCP tool is the direct call: the same hold, call key and result.
 // The direct request carries the key the Mousse MCP server makes from a top-level clientRequestId; use_tool's carries it inside.
@@ -318,11 +324,14 @@ async function scheduledCall(on = true, minutes = 5, untilMinutes?: number) {
   const call = (args = t.args) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
   return { ...t, schedule, id, run, call }
 }
-it.each([true, false])('a scheduled use_tool call holds the real arguments once with asks first %s', async on => {
+it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route => ({ on, route }))))('a scheduled $route call holds once and fences every later tool with asks first $on', async ({ on, route }) => {
   const t = await scheduledCall(on)
-  const call = catalogueTurn({ ...t, work: t.run, workId: t.id })
+  const call = catalogueTurn({ ...t, work: t.run, workId: t.id }, true)
+  expect((await call('bot_schedule_list', {}, 'before-hold')).text).toBe('handler ran')
+  for (const tool of call.registry.list()) vi.mocked(tool.handler).mockClear()
   const args = { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'scheduled-once' } }
-  const result = await call('use_tool', args, 'outer-one')
+  const invoke = () => route === 'direct' ? call('mail_send', t.args, 'mcp:scheduled-once') : call('use_tool', args, 'outer-one')
+  const result = await invoke()
   if (!on) {
     expect(result.text).toContain('delivered')
     expect(t.calls).toEqual([t.args])
@@ -330,13 +339,23 @@ it.each([true, false])('a scheduled use_tool call holds the real arguments once 
     return
   }
   expect(result.text).toContain('held')
-  await call('use_tool', args, 'outer-retry')
+  await invoke()
   const a = f.bots.actions.forWork(t.id)!
   expect(a.exec_args).toBe(JSON.stringify(t.args))
   expect(JSON.parse(a.call_key)).toEqual([t.id, f.store.dispatches(t.id)[0]!.clientRequestId, 'mcp:scheduled-once'])
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
   expect((await t.call()).isError).toBe(true)
   expect(botAppToolRefusal(t.run.prepared.authority, 'thread_create')).toBeTruthy()
+  for (const tool of call.registry.list().filter(tool => tool.callable !== 'in_process')) {
+    const later = await call(tool.name, {}, 'after-hold-' + tool.name)
+    expect(later.isError, tool.name).toBe(true)
+    expect(tool.handler, tool.name).not.toHaveBeenCalled()
+    if (tool.name !== 'use_tool') {
+      const wrapped = await call('use_tool', { tool: tool.name, arguments: {} }, 'after-hold-wrapped-' + tool.name)
+      expect(wrapped.isError, 'use_tool ' + tool.name).toBe(true)
+      expect(tool.handler, tool.name).not.toHaveBeenCalled()
+    }
+  }
   await finish(f, t.run.payload)
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
