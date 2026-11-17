@@ -120,8 +120,11 @@ function plainLine(text: string): string {
   return stripInlineMarkdown(text).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
 }
 
-/** A code fence at any indent: a thought nests them in list items, and is no full markdown document. */
-const FENCE_LINE = /^\s*(`{3,}|~{3,})(.*)$/;
+/**
+ * A code fence at any indent, after any quote marks and a list marker (`- ```sh`, `1. ~~~`): a thought nests them in
+ * list items and quotes, and is no full markdown document.
+ */
+const FENCE_LINE = /^\s*(?:>\s?)*\s*(?:(?:[-*+]|\d+[.)])\s+)?(`{3,}|~{3,})(.*)$/;
 
 /**
  * Which of `lines` belong to a fenced code block, its fence lines included. A fence still open at the end (being

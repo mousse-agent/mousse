@@ -238,6 +238,27 @@ describe('a running turn, streamed step by step', () => {
     expect(document.activeElement).toBe(document.body)
   })
 
+  it('focus the person moved elsewhere before the turn ended stays there', () => {
+    const composer = document.createElement('textarea')
+    document.body.append(composer)
+    try {
+      useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'running')], activeThreadId: 'thread-1' })
+      render(TOOL)
+      act(() => toggle()!.focus())
+      act(() => composer.focus())
+      useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'ok')] })
+      render(null, 'ready')
+      expect(host.querySelector('button.turn-work-toggle')).not.toBeNull()
+      expect(document.activeElement).toBe(composer)
+      // Nor does it move later, when the fold opens.
+      act(() => composer.blur())
+      act(() => host.querySelector<HTMLButtonElement>('button.turn-work-toggle')!.click())
+      expect(document.activeElement).toBe(document.body)
+    } finally {
+      composer.remove()
+    }
+  })
+
   it('a focused live chevron that goes with nothing to take its focus leaves none to take later', () => {
     useAppStore.setState({ messages: [prompt, bash('c1', 1, 'ls', 'ok'), bash('c2', 2, 'npm test', 'running')], activeThreadId: 'thread-1' })
     render(TOOL)
