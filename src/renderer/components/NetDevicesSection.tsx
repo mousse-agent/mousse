@@ -16,6 +16,7 @@ import { DeviceLimitsDialog } from './devices/DeviceLimitsDialog'
 import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { DeviceAccessRows } from './devices/DeviceAccessRows'
 import { DeviceBotsRow } from './devices/DeviceBotsRow'
+import { DevicePresetRow } from './devices/DevicePresetRow'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
 import { connectedHere, connectStep, joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
@@ -505,6 +506,10 @@ export function NetDevicesSection() {
                   ? <button type="button" className="settings-btn" onClick={() => setRecordDialog({ kind: 'update', record, name: device.name })}>Update…</button>
                   : selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
               />
+            ),
+            // What it may do here, as one of three presets above the single switches. A phone has none.
+            connected && device.policy && isComputer(device) && worksOnThreads(device) && !device.policy.blocked && (
+              <DevicePresetRow key={`${device.node}-preset`} device={device} onChanged={reloadQuietly} />
             ),
             // Terminals and editor connections from it, side by side, with a waiting ask answered here too.
             connected && device.policy && isComputer(device) && worksOnThreads(device) && !device.policy.blocked && (
