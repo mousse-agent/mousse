@@ -1,5 +1,6 @@
 import React from "react";
 import { cn } from "./utils/cn";
+import { useOffscreenPause } from "../../../lib/offscreenMotion";
 
 export type TextShimmerProps = {
   children: React.ReactNode;
@@ -28,9 +29,12 @@ function TextShimmerComponent({
     // About 15 updates a second, not every frame: each update redraws the whole window (agent-ui.css).
     animationTimingFunction: `steps(${Math.max(1, Math.round(duration * 15))})`,
   } as React.CSSProperties;
+  // The sweep holds still while no one can see it (lib/offscreenMotion.ts).
+  const pause = useOffscreenPause<HTMLElement>(true);
 
   return (
     <Component
+      ref={pause}
       className={cn("an-text-shimmer", "an-text-shimmer--active", className)}
       style={style}
     >

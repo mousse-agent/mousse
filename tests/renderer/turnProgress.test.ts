@@ -105,9 +105,10 @@ function expectLive(label: string | RegExp) {
   expect(lineText()).not.toBe('')
   if (typeof label === 'string') expect(lineText()).toBe(label)
   else expect(lineText()).toMatch(label)
-  // The live row ends the turn's answer, under the Working header.
+  // The live row ends the turn's answer, under the Working header; only its screen reader's status region follows it.
   const answer = line()!.closest('.turn-answer')!
-  expect(answer.lastElementChild).toBe(liveRow())
+  expect(answer.lastElementChild!.matches('[data-live-announce]')).toBe(true)
+  expect(answer.lastElementChild!.previousElementSibling).toBe(liveRow())
   expect(answer.previousElementSibling?.classList.contains('turn-work')).toBe(true)
 }
 
@@ -175,8 +176,9 @@ describe('the line under Working', () => {
     expect(liveRow()!.querySelector<HTMLElement>('.turn-live-thought')!.title).toBe('The output says the')
     expect(liveRows()).toEqual([])
     expect(reasoningRows()).toHaveLength(0)
-    // Its two lines are a status region: a screen reader hears the headline when it changes, not every word.
-    expect(liveRow()!.querySelector('.turn-live-lines')!.getAttribute('role')).toBe('status')
+    // A screen reader hears that the turn is thinking, not each headline (tests/renderer/liveRowAnnouncements.test.ts).
+    expect(liveRow()!.querySelector('[role="status"], [aria-live]')).toBeNull()
+    expect(document.querySelector('[data-live-announce]')!.textContent).toBe('Thinking')
     render([ask(), reply('t1', thought('input-available', '**Reading the test**\n\nThe output says the reminder starts twice.'))], 'streaming', { phase: 'thinking' })
     expect(headline()).toBe('Reading the test')
   })
@@ -220,7 +222,9 @@ describe('the line under Working', () => {
     // And with no thought row at all (an empty thinking block), the line says it.
     render([ask()], 'streaming', { phase: 'thinking', step: { kind: 'reasoning' } })
     expectLive('Thinking…')
-    expect(host.querySelector('.turn-answer')!.textContent).toBe('Thinking…')
+    // (The screen reader's status region, which is not shown, says "Thinking".)
+    expect(host.querySelector('.turn-answer')!.textContent).toBe('Thinking…Thinking')
+    expect(host.querySelector('[data-turn-live]')!.textContent).toBe('Thinking…')
   })
 
   it('3. one thought is titled with its newest paragraph\'s headline; opened, it shows all of it', () => {

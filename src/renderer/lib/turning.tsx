@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, type ReactElement, type ReactNode } from 'react'
 import { useMotionScale } from './motion'
+import { watchOffscreen } from './offscreenMotion'
 import '../styles/turning.css'
 
 /**
@@ -14,7 +15,8 @@ import '../styles/turning.css'
  * thread does nothing for it.
  *
  * Motion: `keep` spinners show pending work and keep turning with Animation speed Off or the OS reduced-motion
- * setting (as `.icon-spin` and `.spin` did in CSS); the others are still then.
+ * setting (as `.icon-spin` and `.spin` did in CSS); the others are still then. Every spinner holds still while no one
+ * can see it (scrolled out of view, or the window hidden: lib/offscreenMotion.ts) and turns on from there.
  */
 const TURNS: Readonly<Record<string, { ms: number; keep?: boolean; from?: number }>> = {
   'icon-spin': { ms: 1000, keep: true },
@@ -62,7 +64,20 @@ export function Turning({ className, children }: { className: string; children?:
       [{ transform: `rotate(${from}deg)` }, { transform: `rotate(${from + 360}deg)` }],
       { duration: ms, iterations: Infinity, easing: 'linear' },
     )
-    return () => animation.cancel()
+    // Played again only while the span is in the document: an animation played on a removed element keeps running
+    // where nothing can see or cancel it.
+    let paused = false
+    const stop = watchOffscreen(span, (offscreen) => {
+      if (offscreen === paused) return
+      if (offscreen) animation.pause()
+      else if (span.isConnected) animation.play()
+      else return
+      paused = offscreen
+    })
+    return () => {
+      stop()
+      animation.cancel()
+    }
   }, [still, ms, from])
   return <span ref={ref} className={`turning ${className}`.trim()}>{children}</span>
 }

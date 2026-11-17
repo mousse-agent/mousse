@@ -30,8 +30,9 @@ export type ToolRowBaseProps = {
   /** Classes for the detail (a command shows in mono). */
   detailClassName?: string;
   /**
-   * Whether a running row's label shimmers (it paints every frame). A thinking row turns its icon instead. A row that
-   * shimmers also shows its icon's state: a gentle pulse while it runs, dimmed once done, the danger colour on failure.
+   * Whether a running row's label shimmers (it paints every frame). A thinking row pulses its own icon instead. A row
+   * that shimmers also shows its icon's state: a gentle pulse while it runs, dimmed once done, the danger colour on
+   * failure.
    */
   shimmer?: boolean;
   /** Short status after the detail (a failure count); never truncated. */
@@ -129,12 +130,9 @@ export function ToolRowBase({
         {trailingContent}
       </div>
       {expandable && (isComplete || isExpanded || isAnimating) && (
-        <div>
-          <IconChevronRight
-            className="ui-collapse-chevron shrink-0 text-muted-foreground size-[18px]"
-            data-open={isExpanded || undefined}
-          />
-        </div>
+        <span className="an-row-chevron-box" aria-hidden="true">
+          <IconChevronRight className="ui-collapse-chevron an-row-chevron" data-open={isExpanded || undefined} />
+        </span>
       )}
       <ToolRowTime at={at} />
     </div>

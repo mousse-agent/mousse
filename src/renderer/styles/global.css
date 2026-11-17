@@ -172,11 +172,16 @@ html[data-theme='light'] {
   height: 13px;
   flex-shrink: 0;
 }
+/* Light like the chat's other disclosure chevrons (.an-row-chevron, tool-icon.css); it brightens with its line. */
 .an-message-list .turn-work-chevron {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   flex-shrink: 0;
+  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
   transition: transform 150ms ease-out;
+}
+.an-message-list .turn-work-toggle:is(:hover, :focus-visible) .turn-work-chevron {
+  color: inherit;
 }
 .an-message-list .turn-work-chevron[data-open] {
   transform: rotate(90deg);

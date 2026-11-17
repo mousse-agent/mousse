@@ -1,4 +1,4 @@
-import { memo, useContext, useLayoutEffect, useRef } from "react";
+import { memo, useCallback, useContext, useLayoutEffect, useRef } from "react";
 import { LiveRunBodyContext } from "./tool-open-state";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
@@ -40,8 +40,16 @@ export function ThinkingCollapsed({
   // In an opened live row the thought being written shows open, so it can be read in full as it grows.
   const inLiveRun = useContext(LiveRunBodyContext);
   const startsOpen = defaultOpen ?? (inLiveRun && isAnimating);
-  const boxRef = useRef<HTMLDivElement>(null);
+  const boxRef = useRef<HTMLDivElement | null>(null);
   const atEndRef = useRef(true);
+  // Opened while it is written (in the opened live row, or by hand), its box starts at its newest words. A finished
+  // thought opens at its start.
+  const followRef = useCallback((box: HTMLDivElement | null) => {
+    boxRef.current = box;
+    if (!box || !isAnimating) return;
+    atEndRef.current = true;
+    box.scrollTop = box.scrollHeight;
+  }, [isAnimating]);
   // While it is written, its box keeps its newest words in view, unless the person scrolled up in it.
   useLayoutEffect(() => {
     const box = boxRef.current;
@@ -53,7 +61,7 @@ export function ThinkingCollapsed({
       icon={<ThinkingIcon size={18} active={isAnimating} />}
       completeLabel={heading || "Thinking"}
       labelTitle={liveThoughtText(step.thoughtContent) || undefined}
-      // The icon turns; a shimmering label would paint every frame.
+      // The icon pulses; a shimmering label would paint every frame.
       shimmer={false}
       isAnimating={isAnimating}
       expandable={!!step.thoughtContent}
@@ -62,7 +70,7 @@ export function ThinkingCollapsed({
       onToggleExpand={onToggleExpand}
     >
       <div
-        ref={boxRef}
+        ref={followRef}
         className="max-h-[175px] overflow-y-auto"
         onScroll={(event) => {
           const box = event.currentTarget;
