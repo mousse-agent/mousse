@@ -48,6 +48,8 @@ import type {
   NetAddonActionResult,
   NetAddonRecords,
   NetDoctor,
+  BridgeAccessMine,
+  BridgeAccessThere,
   BridgeNodeConnection,
   BridgeNodePolicy,
   EditorProbeResult,
@@ -741,8 +743,29 @@ export class NetService {
           remote: bridgeRemoteMethodNames(),
           // The version of each bot method a device may call here, so it sends only keys this computer knows (a choice
           // of reach for a bot it makes). Absent: an older computer.
-          bots: remoteBotVersions()
+          bots: remoteBotVersions(),
+          // `bridge.access.mine` is here, so a refusal of it is a refusal, not an older build.
+          access: 1
         })
+      })
+      // What this computer lets the caller do here, for the caller's Settings, Devices. No family, so a blocked caller
+      // is told it is blocked; one not connected here is refused above, like every call that is not control traffic.
+      rpc.register({
+        method: 'bridge.access.mine',
+        capability: 'read',
+        mutating: false,
+        ephemeral: true,
+        validate: (params) => {
+          if (
+            !params ||
+            typeof params !== 'object' ||
+            Array.isArray(params) ||
+            Object.keys(params).length
+          )
+            throw new NetError('bad_request')
+          return params
+        },
+        handle: async (_params, context) => this.accessMine(context.caller)
       })
       this.state = {
         db,
@@ -1011,6 +1034,7 @@ export class NetService {
       )
     }
     if (method === 'bridge.nodes') return this.nodesView()
+    if (method === 'bridge.access.there') return this.track(this.accessThere(params.node as NodeId))
     if (method === 'net.editor.probe') return this.track(this.editorProbe(params.node as NodeId))
     if (method.startsWith('net.ssh.')) return this.track(this.sshRequest(method, params))
     if (method.startsWith('net.plus.') && !this.hosted) throw hostedUnavailable()
@@ -2778,6 +2802,71 @@ export class NetService {
     if (!rt.policy.get(node).editor) return 'editor_off'
     return undefined
   }
+  /**
+   * `bridge.access.mine`: what this computer lets `caller` do here now. Each answer is a real call's checks, run through
+   * the dispatcher's own authorization (the grant, connected here, the block, "Let my other computers work here", the
+   * per-device switches) without running anything, plus the checks a method makes in its handler: an editor
+   * connection's (`deviceRefusal`) and the bots' (Share bots and the device's Bots switch).
+   */
+  private accessMine(caller: SyncSession['peer']): BridgeAccessMine {
+    const rt = this.requireEnrolled(),
+      policy = rt.policy.get(caller.node)
+    const passes = (method: string): boolean => {
+      try {
+        rt.rpc.authorizedMethod(method, caller)
+        return true
+      } catch {
+        return false
+      }
+    }
+    const threads = passes('routed.threads.list')
+    return {
+      v: 1,
+      blocked: rt.policy.isBlocked(caller.node),
+      threads,
+      work: threads && passes('routed.orchestrator.send'),
+      terminal: threads && passes('routed.pty.create'),
+      editor: threads && passes('routed.editor.folder') && this.deviceRefusal(caller.node) === undefined,
+      bots: passes('bots.chat.list') && this.sharesBots() && policy.bots,
+      maxPermissionMode: policy.maxPermissionMode,
+      agentReach: policy.agentReach
+    }
+  }
+  /** `bridge.access.there`: `bridge.access.mine` asked of `node`, with a refusal or an older build as a result. */
+  private async accessThere(node: NodeId): Promise<BridgeAccessThere> {
+    const rt = this.requireEnrolled()
+    if (node === rt.identity.self()?.node) throw new NetError('bad_request')
+    let session: SyncSession
+    try {
+      session = this.session(node)
+    } catch {
+      return { state: 'unknown', reason: 'offline' }
+    }
+    try {
+      const answer = (await session.rpc('bridge.access.mine', {}, { id: newId('rpc'), deadlineMs: 10_000 })) as BridgeAccessMine
+      if (answer?.v !== 1) return { state: 'unknown', reason: 'older' }
+      return { state: 'known', access: answer }
+    } catch (error) {
+      if (error instanceof NetError && error.code === 'forbidden') {
+        const reason = forbiddenReason(error.details)
+        if (reason === 'not_connected') return { state: 'not_connected' }
+        // A method it does not have is refused with no reason, as is a call this computer's grant does not cover there:
+        // `net.info` tells the two apart. Any other refusal is one.
+        if (reason !== undefined || (await this.knowsAccessMine(session))) return { state: 'refused' }
+        return { state: 'unknown', reason: 'older' }
+      }
+      return { state: 'unknown', reason: 'offline' }
+    }
+  }
+  /** Whether the device on `session` has `bridge.access.mine` (its `net.info` says so); false when it can't be asked. */
+  private async knowsAccessMine(session: SyncSession): Promise<boolean> {
+    try {
+      const info = await session.rpc('net.info', {}, { id: newId('rpc'), deadlineMs: 10_000 })
+      return (info as { access?: unknown } | undefined)?.access === 1
+    } catch {
+      return false
+    }
+  }
   /** The first editor tunnel a device ever opens on this computer (a desktop notification for the owner). */
   onEditorFirstOpen(listener: (node: NodeId) => void): () => void {
     this.editorFirstOpen.add(listener)
@@ -3952,6 +4041,8 @@ export class NetService {
         // What this computer lets the device do here; the device's own limits are on that device.
         policy: policyView(rt.policy.get(node.subject)),
         self: node.subject === rt.identity.self()!.node,
+        // The device that keeps the list: it signs every device's pass and its renewals.
+        keeper: node.subject === roster.authorityNode,
         // Whether the device is connected here, and whether this computer holds its routes (so Connect can reach it).
         connection:
           node.subject === rt.identity.self()!.node

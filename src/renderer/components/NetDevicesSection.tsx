@@ -20,8 +20,9 @@ import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { DeviceAccessRows } from './devices/DeviceAccessRows'
 import { DeviceBotsRow } from './devices/DeviceBotsRow'
 import { DevicePresetRow } from './devices/DevicePresetRow'
+import { DeviceAccessSummary } from './devices/DeviceAccessSummary'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
-import { connectedHere, connectStep, joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, deviceListLine, isComputer, isIncompatible, listedDevices, passLapsed, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { connectedHere, connectStep, joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, deviceListLine, isComputer, isIncompatible, keeperAway, KEEPER_DETAIL, listedDevices, passLapsed, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import { describePermissionMode } from '../../shared/permissionMode'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetStartOverCheck, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
@@ -324,6 +325,8 @@ export function NetDevicesSection() {
   // Setups over SSH that stopped before the machine joined; they have no device row yet.
   const unfinished = sshRecords.filter((record) => record.phase !== 'done' && !record.node)
   const now = Date.now()
+  // The device that keeps the list; a daemon from before the field marks none, and this computer knows only itself.
+  const keeperNode = devices.find((device) => device.keeper)?.node ?? (authority ? self?.node : undefined)
   const toggleOpen = (node: string) => setOpenNode((current) => (current === node ? undefined : node))
 
   // This computer's own rows: naming it and turning networking on, then its keys.
@@ -413,8 +416,10 @@ export function NetDevicesSection() {
       : !status?.enabled ? 'Networking off'
         : signedOut ? 'Signed out · syncs with nearby devices' : 'Online'
     // Another device works with this one only once connected here; until then its line says so and its row offers the way.
-    const connected = device.self || connectedHere(device), step = device.self ? undefined : connectStep(device)
-    const line = device.self ? [selfLine, device.version].filter(Boolean).join(' · ') : connected ? deviceListLine(device, now, { signedOut }) : 'Not connected here'
+    const step = device.self ? undefined : connectStep(device)
+    const line = device.self ? [selfLine, device.version].filter(Boolean).join(' · ') : deviceListLine(device, now, { signedOut })
+    // The keeper signs every pass; unreachable for days, the passes it signed run out.
+    const keeps = device.node === keeperNode, away = keeps ? keeperAway(device, devices, now) : undefined
     const classes = [picked === device.node ? 'devices-row-picked' : '', open ? 'devices-row-open' : ''].filter(Boolean).join(' ')
     return (
       <SettingsRow
@@ -428,7 +433,10 @@ export function NetDevicesSection() {
         leading={<kind.icon size={16} />}
         title={device.name}
         titleAction={device.self ? <span className="devices-kind">This computer</span> : undefined}
-        description={<span title={routeDetails(device) || undefined}>{kind.label} · {line}</span>}
+        description={<>
+          <span title={routeDetails(device) || undefined}>{kind.label}{keeps ? <> · <span title={KEEPER_DETAIL}>keeps your device list</span></> : null} · {line}</span>
+          {away && <span className="settings-status-warn devices-keeper-away"> · <AlertTriangle size={12} aria-hidden="true" /> {away}</span>}
+        </>}
         control={<>
           {step && ('connect' in step
             ? <button type="button" className="settings-btn" disabled={busy} onClick={() => void action('bridge.connect', { node: device.node })}><Link2 size={14} />Connect</button>
@@ -514,6 +522,8 @@ export function NetDevicesSection() {
           )}
         </>}
       />,
+      // What each of the two computers lets the other do, in one short line each.
+      <DeviceAccessSummary key="access-summary" device={device} workOnThreads={workOnThreads} shareBots={shareBots} />,
       isIncompatible(device) && (
         <SettingsRow key="incompatible" indent title="Incompatible version" description={`Update ${device.name} or this device so they can talk to each other.`} />
       ),

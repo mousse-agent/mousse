@@ -1,10 +1,12 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { AgentReach, BridgeAccessMine, BridgeAccessThere, BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
 import { parseVersion } from '../../shared/net/version'
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
+import { accessPreset, accessPresetOf } from '../../shared/net/accessPresets'
+import { NODE_DELEGATION_TTL_MS } from '../../shared/net/limits'
 
 /** One route this computer knows for a device and how its last attempt went. */
 export interface DeviceRouteHealth {
@@ -51,6 +53,8 @@ export interface Device {
   connection?: BridgeNodeConnection
   /** This computer holds the device's routes, so Connect can reach it. */
   routeHeld?: boolean
+  /** The device keeps the list: it signs every device's pass and its renewals. Absent from a daemon that predates it. */
+  keeper?: boolean
 }
 
 /** The device is connected here (a daemon from before the record connects every device). */
@@ -230,8 +234,36 @@ export function passLapsed(status?: Pick<NetStatus, 'error' | 'peers'>): boolean
 }
 
 /**
- * The short line under a device's name in the device list: online or last seen, then only what
- * needs attention. Signed out of Mousse ID, devices reach each other only nearby, so it says that.
+ * A device's state on this computer, for its row: connected here or not. A daemon from before the record sends none.
+ * One more state is planned (a device that came in by a connect link and waits for Allow); it gets its words here.
+ */
+export type DeviceConnectionState = 'connected' | 'not_connected'
+const CONNECTION_WORDS: Record<DeviceConnectionState, string> = {
+  connected: 'connected here',
+  not_connected: 'not connected here'
+}
+export function connectionState(device: Pick<Device, 'connection'>): DeviceConnectionState | undefined {
+  if (device.connection === undefined) return undefined
+  return device.connection === 'connected' ? 'connected' : 'not_connected'
+}
+
+/**
+ * The preset name of what a connected computer may do here ("Work on threads", "Custom"), or undefined where the
+ * detail shows no preset: a phone, a device not connected here, blocked, without Works on threads, or a daemon that
+ * does not report every field.
+ */
+export function presetLabel(device: Device): string | undefined {
+  const policy = device.policy
+  if (!policy || policy.blocked || !connectedHere(device) || !isComputer(device) || !worksOnThreads(device)) return undefined
+  const preset = accessPresetOf(policy)
+  if (!preset) return undefined
+  return preset === 'custom' ? 'Custom' : accessPreset(preset).label
+}
+
+/**
+ * The short line under a device's name in the device list: online or last seen, the route in use, whether it is
+ * connected here and, for a connected computer, its preset, then only what needs attention. Signed out of Mousse ID,
+ * devices reach each other only nearby, so it says that.
  */
 export function deviceListLine(device: Device, now: number, { signedOut = false }: { signedOut?: boolean } = {}): string {
   const online = device.state === 'open'
@@ -240,11 +272,104 @@ export function deviceListLine(device: Device, now: number, { signedOut = false 
     const seen = lastSeenLabel(device.lastSeenAt, now)
     if (seen) parts.push(seen)
   }
+  if (online && device.route?.transport) parts.push(`via ${routeLabel(device.route.transport)}`)
+  const connection = connectionState(device)
+  if (connection) parts.push(CONNECTION_WORDS[connection])
+  const preset = presetLabel(device)
+  if (preset) parts.push(preset)
   if (isIncompatible(device)) parts.push('incompatible version')
   else if (device.olderThanThis) parts.push('older version')
   if (device.policy?.blocked) parts.push('blocked on this computer')
   if (device.sshOffer) parts.push('offers an SSH route')
   return parts.join(' · ')
+}
+
+const DAY_MS = 86_400_000
+/** The keeper unseen this long gets a warning on its row: passes last `NODE_DELEGATION_TTL_MS` (7 days) without it. */
+export const KEEPER_AWAY_WARN_MS = 3 * DAY_MS
+/** The tooltip on the keeper's words. */
+export const KEEPER_DETAIL = `Signs every device's pass. Passes last ${NODE_DELEGATION_TTL_MS / DAY_MS} days and renew while this device is reachable.`
+
+/**
+ * The warning on the keeper's row when this computer has not reached it for days: every pass it signed runs out unless
+ * it renews them. Undefined while it is reachable, recently seen, never seen, or this computer is the keeper.
+ */
+export function keeperAway(keeper: Device, devices: Device[], now: number): string | undefined {
+  if (keeper.self || keeper.state === 'open' || keeper.lastSeenAt === undefined) return undefined
+  const away = now - keeper.lastSeenAt
+  if (away < KEEPER_AWAY_WARN_MS) return undefined
+  const ends = devices.filter((device) => device.node !== keeper.node && !device.revoked && device.expiresAt > now).map((device) => device.expiresAt)
+  const end = ends.length ? `passes end ${passEndLabel(Math.min(...ends))}` : 'passes have ended'
+  return `Not reachable for ${Math.floor(away / DAY_MS)} days · ${end}`
+}
+/** "Wed, Nov 25" in the person's own format. */
+export const passEndLabel = (at: number): string => new Date(at).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+
+/** What one device may do on one computer, in either direction. */
+export type DeviceAccess = Pick<BridgeAccessMine, 'threads' | 'work' | 'terminal' | 'editor' | 'bots'> & {
+  maxPermissionMode?: PermissionMode
+  /** Which threads its agents may change; a person's own calls are not limited by it. */
+  agentReach?: AgentReach
+}
+/** Which threads a device's agents may change, as Limits names it. */
+const AGENT_REACH_WORDS: Record<AgentReach, string> = { none: 'none', launched: 'only threads they started', all: 'all threads' }
+
+/**
+ * What this computer lets `device` do here, from what it knows: connected here, the block, the grant, this computer's
+ * own switches ("Let my other devices work here", Share bots) and the device's switches. A phone keeps the phone API.
+ * A string says why it may do nothing; undefined for a daemon that sends no policy.
+ */
+export function accessHere(device: Device, switches: { workOnThreads: boolean; shareBots: boolean }): DeviceAccess | 'not_connected' | 'blocked' | undefined {
+  const policy = device.policy
+  if (!policy) return undefined
+  if (!connectedHere(device)) return 'not_connected'
+  if (policy.blocked) return 'blocked'
+  // Each item also needs the signed grant its calls check: reads need read, sends chat, terminals write.
+  const has = (cap: NodeCapability) => device.caps.includes(cap)
+  const bots = has('read') && policy.bots !== false && switches.shareBots
+  if (!isComputer(device)) {
+    const threads = device.caps.includes('read')
+    return { threads, work: threads && device.caps.includes('write') && policy.work !== false, terminal: false, editor: false, bots }
+  }
+  const threads = worksOnThreads(device) && has('read') && switches.workOnThreads
+  return {
+    threads,
+    work: threads && has('chat') && policy.work !== false,
+    terminal: threads && has('write') && policy.terminal,
+    editor: threads && policy.editor,
+    bots,
+    maxPermissionMode: policy.maxPermissionMode,
+    ...(policy.agentReach ? { agentReach: policy.agentReach } : {})
+  }
+}
+
+/**
+ * One short line for what a device may do, and every item on or off for its tooltip. A phone keeps the phone API, so
+ * its work on threads is not called Works on threads (the grant it never holds).
+ */
+export function accessWords(access: DeviceAccess, { phone = false }: { phone?: boolean } = {}): { line: string; detail: string } {
+  const work = phone ? 'Uses threads' : 'Works on threads'
+  const parts = [access.work ? work : access.threads ? 'Reads threads' : '', access.terminal ? 'terminals' : '', access.editor ? 'editor' : '', access.bots ? 'bots' : ''].filter(Boolean)
+  const mode = access.work && access.maxPermissionMode ? `, up to ${describePermissionMode(access.maxPermissionMode)}` : ''
+  const detail = [
+    `Threads: ${access.work ? `${phone ? 'starts and sends to them' : 'works on them'}${mode}` : access.threads ? 'reads them' : 'none'}`,
+    ...(access.work && access.agentReach ? [`Agents change: ${AGENT_REACH_WORDS[access.agentReach]}`] : []),
+    `Terminals: ${access.terminal ? 'on' : 'off'}`,
+    `Editor connections: ${access.editor ? 'on' : 'off'}`,
+    `Bots: ${access.bots ? 'on' : 'off'}`
+  ].join('\n')
+  // Agents that may change no thread is the one limit a person working there would not expect.
+  if (access.work && access.agentReach === 'none') parts.push('agents read only')
+  return { line: parts.length ? parts.join(' · ') : 'Nothing', detail }
+}
+
+/** A `bridge.access.there` answer, or undefined for anything else (a daemon here from before the call). */
+export function readAccessThere(value: unknown): BridgeAccessThere | undefined {
+  const answer = value as BridgeAccessThere | undefined
+  if (answer?.state === 'known' && answer.access && typeof answer.access === 'object') return answer
+  if (answer?.state === 'not_connected' || answer?.state === 'refused') return answer
+  if (answer?.state === 'unknown' && (answer.reason === 'offline' || answer.reason === 'older')) return answer
+  return undefined
 }
 
 /** Hover text: the connection in use and every known route with its last result. */

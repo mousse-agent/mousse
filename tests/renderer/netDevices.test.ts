@@ -285,8 +285,8 @@ describe('Net errors in words', () => {
 })
 
 describe('deviceListLine', () => {
-  it('keeps the list to online or last seen, and only what needs attention', () => {
-    expect(deviceListLine(device({ version: '0.1.3', route: { transport: 'ssh', direction: 'out' } }), NOW)).toBe('Online')
+  it('keeps the list to online or last seen, the route in use, and only what needs attention', () => {
+    expect(deviceListLine(device({ version: '0.1.3', route: { transport: 'ssh', direction: 'out' } }), NOW)).toBe('Online · via SSH')
     expect(deviceListLine(device({ state: 'closed', lastSeenAt: NOW - 3 * 3600_000 }), NOW)).toBe('Offline · last seen 3h ago')
     expect(deviceListLine(device({ state: 'closed', olderThanThis: true }), NOW)).toBe('Offline · older version')
     expect(deviceListLine(device({ state: 'closed', error: 'incompatible_peer', olderThanThis: true }), NOW)).toBe('Offline · incompatible version')
