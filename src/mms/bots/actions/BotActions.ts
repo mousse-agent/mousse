@@ -260,7 +260,7 @@ export class BotActions {
   }
   withdrawChanged(botId?: string): void {
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)) {
-      if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: 'This tool, schedule or its permission changed. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
+      if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: this.host.store.activation(String(a.activation_id))?.trigger.kind === 'schedule' ? 'This schedule or its tool changed since you saw it. Nothing was sent; carry on without it.' : 'This tool or its permission changed. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
     }
   }
   get(id: string): ActionRow | undefined { return this.host.store.get('SELECT * FROM bot_actions WHERE id = ?', id) as unknown as ActionRow | undefined }
@@ -383,7 +383,7 @@ export class BotActions {
     if (!action) throw new BotActionChanged("This can't be sent any more.", 'bot_action_gone')
     if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(JSON.parse(action.result_json).text, 'bot_action_unreachable')
     if (action.status === 'expired') throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
-    if (action.status === 'withdrawn') throw new BotActionChanged('No longer needed, so nothing was sent.', 'bot_action_withdrawn')
+    if (action.status === 'withdrawn') throw new BotActionChanged(action.result_json && JSON.parse(action.result_json).text?.includes('changed since') ? 'This changed since you saw it. Nothing was sent.' : 'No longer needed, so nothing was sent.', 'bot_action_withdrawn')
     if (action.status !== 'open') throw new BotActionChanged('This was already answered.', 'bot_action_settled')
     if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
       this.expireDue()
