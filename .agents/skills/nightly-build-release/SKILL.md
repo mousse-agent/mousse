@@ -5,7 +5,7 @@ description: Build and publish a nightly prerelease of master on request, report
 
 # Nightly build and release
 
-Use when the user asks for a nightly to be built, published or installed. The job is done when a new nightly prerelease exists on GitHub (and, when asked, runs on the user's machine), not when a run has been started. How nightlies are made is in [releases.md](../../../docs/releases.md); the workflow is `.github/workflows/nightly.yml`.
+Use when the user asks for a nightly to be built, published or installed. The job is done when a new nightly prerelease exists on GitHub (and, when asked, runs on the user's machine), not when a run has been started. How nightlies are made is in [releases.md](../../../docs/releases.md): read only "Channels" and "The app version" (the nightly, version and publication parts), not the stable-release, in-app update or contract-version sections. The workflow is `.github/workflows/nightly.yml`.
 
 A request to publish a nightly authorizes merging the PRs that fix what blocks it. Each fix still follows [work](../work/SKILL.md): its own task branch from the fetched default branch, the named test files for the changed code, a PR written for a teammate, and `gh pr merge --match-head-commit <tested SHA>`. It does not authorize merging unrelated open PRs.
 
@@ -26,7 +26,7 @@ node .agents/skills/nightly-build-release/watch-run.mjs <run id>
 
 It exits as soon as a job finishes that it has not reported before, or when the run ends, and prints the newly finished jobs, the run's state and the jobs still going. On each exit:
 
-1. Post a short update: what just passed or failed, how many of the jobs have passed, and what is still running.
+1. Post the update as one short line: what just passed or failed, passed count out of total, what is still running (for example "build-linux passed, 5/9 done, 4 running").
 2. If a job failed, start on it now (below) rather than waiting for the rest of the run.
 3. Unless the run has ended, start the watcher again.
 
@@ -34,7 +34,7 @@ Never answer a watcher's exit with silence or "no response requested"; it is the
 
 ## When a job fails
 
-Read the failure: `gh run view <run id> --log-failed`. Look at the test summary and any "Unhandled Errors" section: a run can fail with every test passing when a test file leaves an error behind, such as a timer that fires after its window is torn down.
+Save the failed log to a file and filter it; do not print it whole: `gh run view <run id> --log-failed > "$TMPDIR/nightly-<run id>.log"`, then `rg -n -C 4 'Test Files|Tests +[0-9]|FAIL|Unhandled Errors|Error:|error TS' "$TMPDIR/nightly-<run id>.log" | head -150`. Always keep the test summary lines and any "Unhandled Errors" section with their context: a run can fail with every test passing when a test file leaves an error behind, such as a timer that fires after its window is torn down. Widen the context (`-C 15`) or read the lines around a match only when the filtered output does not show the cause. Say where the full log is when you report the failure.
 
 - **Infrastructure** (download or registry timeouts, a lost runner, a GitHub 5xx): `gh run rerun <run id> --failed` once the run has ended, and keep watching the same run.
 - **A real failure** (a test that failed all three tries, an unhandled error, a type or lint error, a packaging step): reproduce it locally with the named test file, find the cause and fix it in the code, or in the test when the test is wrong. Do not skip, weaken or delete a test to get the build through. A failure from someone else's recent change is still fixed here; say in the PR which change it came from. Open the PR, merge it, and sync the primary worktree as described in "Local availability after merge" in the shared policy.
