@@ -4471,16 +4471,16 @@ export class OrchestratorService extends EventEmitter {
     return this.relayHandlerImpl
   }
 
-  /**
-   * Notices handed to a running turn with its Mousse tool results (docs/plans/tool-api.md §2.2), on a runtime that
-   * steers by restarting its reply: the turn's pending subagent results and requests reach it at its next Mousse tool
-   * call instead of only when the turn ends (`deliverAtToolBoundary`). A native-steer runtime gets them from rule 4.
-   */
   /** The thread waits on a person's answer to a question or an approval (rule 4 holds agent notes until it comes). */
   awaitsAnswer(threadId: string): boolean {
     return this.questions.listPendingForThread(threadId).length > 0 || (this.runEngine?.approvals.listPending(threadId).length ?? 0) > 0
   }
 
+  /**
+   * Notices handed to a running turn with its Mousse tool results (docs/plans/tool-api.md §2.2), on a runtime that
+   * steers by restarting its reply: the turn's pending subagent results and requests reach it at its next Mousse tool
+   * call instead of only when the turn ends (`deliverAtToolBoundary`). A native-steer runtime gets them from rule 4.
+   */
   mcpToolBoundary(): McpToolBoundary {
     return {
       deliver: ({ threadId, runId }) => {
