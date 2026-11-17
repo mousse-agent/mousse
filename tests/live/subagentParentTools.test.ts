@@ -7,7 +7,9 @@
  * Uses the real Claude Code sign-in from the terminal (never signed in or out here) and the MCP servers in its user
  * config, and costs a few short turns, so it only runs with MOUSSE_LIVE_PROVIDERS=1. MOUSSE_LIVE_SCRATCH names the
  * scratch directory, MOUSSE_CLAUDE_BINARY may name the CLI executable, and MOUSSE_LIVE_MCP_TOOL the MCP tool to call
- * (default `mcp__exa__web_search_exa`, with MOUSSE_LIVE_MCP_ARGS as its JSON arguments).
+ * (default `mcp__exa__web_search_exa`, with MOUSSE_LIVE_MCP_ARGS as its JSON arguments). Leave
+ * MOUSSE_LIVE_CLAUDE_CONFIG_DIR unset for the default profile: pointing it at `~/.claude` hides the MCP servers kept in
+ * `~/.claude.json`.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
