@@ -4,8 +4,9 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueuedMessages, queuedContentWithText, splitQueuedContent } from '../../src/renderer/components/QueuedMessages'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
-import { QUEUE_DRAFT_MOVED_NOTICE, STARTING_ITEM_HOLD_MS, startingItem, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
+import { QUEUE_DRAFT_MOVED_NOTICE, SENT_NOW_HIDE_MS, STARTING_ITEM_HOLD_MS, startingItem, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
 import { useAppStore } from '../../src/renderer/stores/appStore'
+import { withSteersOnTheWay } from '../../src/renderer/lib/steersOnTheWay'
 import type { QueuedMessage, Thread } from '../../src/shared/types'
 import { agentMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
 
@@ -27,7 +28,11 @@ let toComposer: ReturnType<typeof vi.fn>
 /** The queue as the chat renders it: in the conversation, with its errors and notes in the composer's notice slot. */
 function Chat({ hold = null, lastPromptId = null, lastPromptQueueItemId = null }: { hold?: QueueHold | null; lastPromptId?: string | null; lastPromptQueueItemId?: string | null }) {
   const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer, lastPromptId, lastPromptQueueItemId })
+  // The reply's steered messages, as the conversation shows them: the transcript with the steers on their way.
+  const transcript = useAppStore((state) => state.messages)
+  const steered = withSteersOnTheWay(transcript, thread.steersOnTheWay, 't1').filter((message) => message.role === 'user' && message.steered)
   return createElement(Fragment, null,
+    createElement('ol', { className: 'reply' }, steered.map((message) => createElement('li', { key: message.id }, message.content))),
     createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
     createElement(ComposerNoticeSource, { notice: thread.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, onDismiss: thread.dismissDraftMoved } : null }),
     createElement(ComposerNoticeSource, { notice: thread.notice ? { tone: 'info', title: thread.notice, onDismiss: thread.clearNotice } : null }),
@@ -47,7 +52,7 @@ beforeEach(() => {
   listed = []
   toComposer = vi.fn()
   // Open edits and their notices live in the app store, by thread.
-  useAppStore.setState({ queueEditDrafts: {}, queueDraftNotices: {} })
+  useAppStore.setState({ queueEditDrafts: {}, queueDraftNotices: {}, messages: [] })
   api = {
     list: vi.fn(async () => listed),
     edit: vi.fn(async (_thread: string, itemId: string, content: string) => ({ item: queued(itemId, content) })),
@@ -71,6 +76,8 @@ const show = async (items: QueuedMessage[], hold: QueueHold | null = null) => {
   await act(async () => { push!({ threadId: 't1', items }) })
 }
 const rows = () => [...host.querySelectorAll<HTMLElement>('.queued-message')]
+/** The steered messages the reply shows, by their words. */
+const reply = () => [...host.querySelectorAll<HTMLElement>('.reply li')].map((item) => item.textContent)
 const row = (id: string) => host.querySelector<HTMLElement>(`[data-queued-id="${id}"]`)!
 const button = (id: string, label: string) => row(id).querySelector<HTMLButtonElement>(`button[aria-label^="${label}"]`)
 const click = async (element: HTMLElement | null) => { await act(async () => { element!.click() }) }
@@ -437,6 +444,47 @@ describe('queued messages in the conversation', () => {
     // The turn was stopped before it read B: the daemon lists it pending, first.
     await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('a', 'one')] }) })
     expect(rows().map((item) => item.dataset.queuedId)).toEqual(['b', 'a'])
+  })
+
+  it('shows a message sent now in the reply from the click, and once when its copy in the turn arrives', async () => {
+    let answer!: () => void
+    api.promoteToSteer.mockImplementation(() => new Promise((resolve) => { answer = () => resolve({ ok: true }) }))
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+    expect(reply()).toEqual(['two'])
+    await act(async () => { answer() })
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('b', 'two', { intent: 'steer', state: 'steering' })] }) })
+    await act(async () => {
+      useAppStore.getState().addMessage({ id: 'echo-b', role: 'user', content: 'two', timestamp: '2026-11-09T10:01:00Z', steered: true, steerItemId: 'b' } as never)
+    })
+    expect(reply()).toEqual(['two'])
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+  })
+
+  it('shows a message sent now while its turn is being set up in the reply, and back in the queue if the turn never takes it', async () => {
+    vi.useFakeTimers()
+    try {
+      await show([queued('a', 'one'), queued('b', 'two')])
+      await click(button('b', 'Send'))
+      // The turn is still being set up: the daemon lists B as waiting, first.
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('a', 'one')] }) })
+      expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+      expect(reply()).toEqual(['two'])
+      await act(async () => { vi.advanceTimersByTime(SENT_NOW_HIDE_MS) })
+      expect(rows().map((item) => item.dataset.queuedId)).toEqual(['b', 'a'])
+      expect(reply()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes a refused message out of the reply as it comes back to the queue', async () => {
+    api.promoteToSteer.mockResolvedValueOnce({ ok: false })
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+    expect(reply()).toEqual([])
   })
 
   it('offers no Send now on a steer another process takes, and says why', async () => {
