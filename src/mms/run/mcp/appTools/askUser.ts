@@ -62,7 +62,7 @@ function openQuestionText(questionId: string): string {
  * workers implement instead of stopping to ask.
  */
 function offeredInMode(turn: AppToolTurn): boolean {
-  return !turn.discovery && (turn.modeFacts.readOnly || (!turn.subagent && turn.modeFacts.agent))
+  return turn.modeFacts.readOnly || (!turn.subagent && turn.modeFacts.agent)
 }
 
 /** The questions a call names: each with an id, a prompt and at least two options; malformed entries are dropped. */

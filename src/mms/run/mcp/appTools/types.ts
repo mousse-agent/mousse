@@ -53,6 +53,13 @@ export type ThreadRelation = 'descendant' | 'ancestor_or_sibling' | 'launched'
  */
 export type ToolClass = 'read' | 'mutation' | 'delegation'
 
+/**
+ * A capability a tool declares it needs beyond its `access` (docs/plans/tool-api.md §1.3). `threads.delegate` (start a
+ * child no wider than yourself) is every delegation tool's and every thread holds it, readers and Plan included;
+ * `threads.start` (an independent thread or a fork) is not held under a Plan ceiling or by a read-only child.
+ */
+export type ToolCapability = 'threads.start' | 'themes' | 'quick_actions'
+
 export const TOOL_CLASSES: ReadonlySet<string> = new Set<ToolClass>(['read', 'mutation', 'delegation'])
 
 /** Who a call acts as: the thread's active run, under the ceiling its turn was given. */
@@ -99,10 +106,8 @@ export interface AppToolTurn {
    * The agent access level recorded for the run (SPEC §15.1). It no longer limits anything.
    */
   accessLevel?: AgentAccessLevel
-  /** A Mousse subagent implementing a delegated task. */
+  /** The thread is a Mousse subagent (its lineage says so): the owner's own preferences do not pass down to it. */
   subagent: boolean
-  /** The read-only pre-allocation phase of such a subagent. */
-  discovery: boolean
   projectPath?: string
   actor: IntegrationActor
   /** The turn's trusted browser binding, with `vision` from the selected model. */
@@ -112,7 +117,7 @@ export interface AppToolTurn {
    * chat's shared browser); absent: the profile's (`AppToolHost.browserRuntime`).
    */
   browserRuntime?: BrowserRuntimePort
-  /** Stages an applet for the response; absent when applets are off or the caller is a subagent. */
+  /** Stages an applet for the response (a subagent's too, in its own thread); absent when applets are off. */
   onPublishApplet?: (source: unknown) => unknown
   enabledSkills: SkillDescriptor[]
   loadedSkills: Array<{ name: string; content: string }>
@@ -213,6 +218,8 @@ export interface ToolListing {
   threadId?: string
   readOnly: boolean
   modeCeiling: ModeCeiling
+  /** The thread is a Mousse subagent: it does not list what never passes down (the owner's own preferences). */
+  subagent?: boolean
   /** The thread's role when it is a personal bot's thread (PR 6 §5): only bot threads list the bot tools. */
   botRole?: 'activation' | 'context' | 'subagent'
   /**
@@ -229,10 +236,11 @@ export interface ToolListing {
 
 /**
  * A Mousse tool's declaration. Who may call it (`access`, `class`, `readOnlySafe`, `callable`, `listed`, `available`,
- * `asksUser`, `launchedOk`, `botGrantAnswers`, `botAsksOwner`, `authorize`) is read only by the authority compiler
- * (`authority.ts`), which the list, the turn preamble and dispatch all ask.
+ * `asksUser`, `launchedOk`, `botGrantAnswers`, `botAsksOwner`, `capabilities`, `authorize`) is read only by the authority
+ * compiler (`authority.ts`), which the list, the turn preamble and dispatch all ask.
  */
-export interface MousseTool {  name: string
+export interface MousseTool {
+  name: string
   description: string
   /**
    * What a personal bot's thread lists instead of `description`: the same tool as a bot uses it, without what does not
@@ -275,6 +283,12 @@ export interface MousseTool {  name: string
    * changes nothing but the caller's own conversation.
    */
   readOnlySafe?: boolean
+  /**
+   * Capabilities the tool needs beyond what its `access` says (docs/plans/tool-api.md §1.3): `threads.start` for a tool
+   * that starts an independent thread (a Plan ceiling and a read-only child lack it), `themes` and `quick_actions` for
+   * the owner's own preferences, which never pass down to a subagent.
+   */
+  capabilities?: readonly ToolCapability[]
   /**
    * `in_process`: never callable over MCP (an older name kept for replayed transcripts). Whether it is listed is
    * `listed`'s to say.

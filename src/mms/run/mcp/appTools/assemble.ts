@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import type { Tool } from '@earendil-works/pi-ai'
 import type { MousseIntegrationsSettings, SkillDescriptor, SkillsRegistrySnapshot } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import { sha256Hex } from '../../../../shared/agents/hashes'
@@ -12,10 +11,8 @@ import { withoutWebhookData } from '../../../scheduled/promptPlaceholders'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
 import type { ModeRegistry } from '../../../modes/ModeRegistry'
 import { mousseOrchestrationInstructions } from '../instructions'
-import type { AppToolFamily } from './index'
-import type { ToolRegistry } from './registry'
 import { normalizeSkillName } from './skills'
-import { truncateForModel, type AppToolTurn, type ModeFacts } from './types'
+import { truncateForModel, type ModeFacts } from './types'
 
 /**
  * Turn assembly shared by every runtime (PR 2 §2 "Assembly" and "Instructions"): skills, what a
@@ -143,19 +140,6 @@ async function loadExplicitSkills(
     loaded.push({ name: result.skill.name, content: truncateForModel(result.content) })
   }
   return loaded
-}
-
-/** The pi-ai definitions an in-process loop sends this turn, per tool family. */
-export function offeredDefinitions(registry: ToolRegistry, families: Record<AppToolFamily, string[]>, turn: AppToolTurn): Record<AppToolFamily, Tool[]> {
-  const offered = new Set(registry.offeredFor(turn).map((tool) => tool.name))
-  const out = {} as Record<AppToolFamily, Tool[]>
-  for (const [family, names] of Object.entries(families) as Array<[AppToolFamily, string[]]>) {
-    out[family] = names.filter((name) => offered.has(name)).map((name) => {
-      const tool = registry.get(name)!
-      return tool.definition?.(turn) ?? { name: tool.name, description: tool.description, parameters: tool.inputSchema as unknown as Tool['parameters'] }
-    })
-  }
-  return out
 }
 
 /** The session sentence of a turn that attaches the MCP relay. */

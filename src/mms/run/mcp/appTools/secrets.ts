@@ -69,9 +69,9 @@ const RUN_DEFINITION: Tool = {
   })
 }
 
-/** Offered where `ask_user` is: the thread's own agent in Agent and Plan mode, never a subagent or a discovery phase. */
+/** Offered where `ask_user` is: the thread's own agent in Agent and Plan mode, never a subagent. */
 function requestOffered(turn: AppToolTurn): boolean {
-  return !turn.discovery && (turn.modeFacts.readOnly || (!turn.subagent && turn.modeFacts.agent))
+  return turn.modeFacts.readOnly || (!turn.subagent && turn.modeFacts.agent)
 }
 
 function runAvailable(turn: AppToolTurn): true | string {
@@ -198,7 +198,7 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       class: 'mutation',
       listed: () => Boolean(secrets()),
       available: (turn) => (secrets() ? runAvailable(turn) : 'secret_run is not available here.'),
-      offered: (turn) => !turn.subagent && !turn.discovery && runAvailable(turn) === true && Boolean(secrets()),
+      offered: (turn) => !turn.subagent && runAvailable(turn) === true && Boolean(secrets()),
       describe: (args) => `Ran a command with ${Array.isArray(args.secrets) ? args.secrets.map((entry) => (entry && typeof entry === 'object' ? String((entry as Record<string, unknown>).name ?? '') : '')).filter(Boolean).join(', ') : 'a secret'}`,
       handler: (args, ctx) => runCommand(args, ctx)
     }

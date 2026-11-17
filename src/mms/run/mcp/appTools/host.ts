@@ -373,6 +373,10 @@ export interface AppToolHost extends DelegationToolsHost {
   projectPathFor?(threadId: string): string | undefined
   /** The ceiling the thread's delegations gave it (the listing ignores the turn's mode). */
   threadCeiling?(threadId: string): ModeCeiling
+  /** `plan` while an ancestor of the thread runs a Plan turn: narrowing from above, read at every call. */
+  liveCeiling?(threadId: string): ModeCeiling | undefined
+  /** The thread is a Mousse subagent, from its lineage. */
+  subagentThread?(threadId: string): boolean
   /** The thread's role when it is a personal bot's thread (PR 6 §5). */
   botRole?(threadId: string): 'activation' | 'context' | 'subagent' | undefined
   /**

@@ -306,7 +306,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const plan = bearer({ instanceId: 'p', modeCeiling: 'plan' })
     const ceiling = await rpc(server.url, plan.token, call(5, 'thread_fork'))
     expect(ceiling.body.error).toBeUndefined()
-    expect(refusalOfResponse(ceiling.body)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'ceiling_exceeded', retry: 'never' } })
+    expect(refusalOfResponse(ceiling.body)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'lacks_capability', retry: 'after_change', lacks: 'threads.start' } })
   })
 
   describe('in-flight tool calls', () => {
