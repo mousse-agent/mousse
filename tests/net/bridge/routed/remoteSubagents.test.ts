@@ -150,4 +150,71 @@ describe('remote subagents over Bridge (issue #469)', () => {
       vi.restoreAllMocks()
     }
   }, 120_000)
+
+  // Issue #685: the owner counts the task's limit as running time and stops the run; its thread there expires with the
+  // parent here.
+  it('the owner keeps the limit and stops the run at it, and its thread there gets the parent\'s expiry', async () => {
+    const service = serviceOf(t.caller)
+    service.pause()
+    vi.spyOn(t.owner.orchestrator, 'send').mockImplementation(async (_input, _reuse, opts) => {
+      const sent = await t.owner.runEngine.dispatch({ kind: 'send', threadId: opts!.threadId!, clientRequestId: opts!.clientRequestId!, source: opts!.source ?? 'gui', ...(opts!.agent ? { actor: opts!.agent } : {}) })
+      if (sent.status !== 'accepted') throw new Error('not accepted')
+      return { message: '', actions: [], runId: sent.runId, sequence: sent.sequence, accepted: true } as never
+    })
+    try {
+      const parentThread = t.caller.threads.createThread('Limited parent')
+      const expiresAt = new Date(Date.now() + 2 * 60 * 60_000).toISOString()
+      t.caller.threads.updateThreadMeta(parentThread.id, { expiresAt, expiryStopsRun: true }, { touch: false })
+      const parent = await t.caller.runEngine.dispatch({ kind: 'send', threadId: parentThread.id, clientRequestId: 'limited-parent-send', source: 'gui' })
+      if (parent.status !== 'accepted') throw new Error('parent not accepted')
+      t.caller.runEngine.markStarting(parent.runId)
+      t.caller.runEngine.markRunning(parent.runId)
+      const accepted = await t.caller.runEngine.requestDelegation({
+        parentThreadId: parentThread.id,
+        parentRunId: parent.runId,
+        clientRequestId: 'delegation:remote-limited',
+        prompt: 'Soak it there',
+        workspace: 'shared',
+        role: 'research',
+        wake: 'always',
+        title: 'Remote soak',
+        remote: {
+          node: t.node, prompt: 'Soak it there', permissionMode: 'accept_edits', chatMode: 'plan', worktree: false, projectId: null, instanceId: null, model: null,
+          deadlineAt: new Date(Date.now() + 5 * 60_000).toISOString(), limitMinutes: 5
+        }
+      })
+      // What `delegate_task` does for a task on another computer: its expiry follows the parent from now on.
+      ;(t.caller.orchestrator as unknown as { trackRemoteExpiry(child: string, node: string): void }).trackRemoteExpiry(accepted.childThreadId, t.node)
+      const launched = await service.launch(accepted.delegationId)
+      expect(launched, JSON.stringify(launched)).toMatchObject({ ok: true })
+      if (launched.ok !== true) return
+
+      // The owner took the limit: it counts it, so the caller no longer stops the task by the clock.
+      expect(t.owner.runEngine.runTimeLimits.get(launched.remoteRunId)).toMatchObject({ threadId: launched.remoteThreadId, limitMs: 5 * 60_000, usedMs: 0 })
+      expect(t.caller.runEngine.remoteSubagents.get(accepted.delegationId)).toMatchObject({ limitMinutes: 5, deadlineAt: null })
+      // The thread there expires with the parent here.
+      expect(t.owner.threads.getThread(launched.remoteThreadId)).toMatchObject({ expiresAt, expiryStopsRun: true })
+      expect(t.caller.runEngine.remoteExpiry.get(accepted.childThreadId)).toMatchObject({ state: 'sent', lastError: null })
+
+      // The run works there until its limit is used: the owner stops it and says why, and the parent's task ends with it.
+      t.owner.runEngine.markStarting(launched.remoteRunId)
+      t.owner.runEngine.markRunning(launched.remoteRunId)
+      const limits = (t.owner.orchestrator as unknown as { runTimeLimits: { pass(): Promise<void>; deps: { now?: () => number } } }).runTimeLimits
+      let now = Date.now()
+      limits.deps.now = () => now
+      await limits.pass()
+      t.owner.runEngine.runTimeLimits.setUsed(launched.remoteRunId, 5 * 60_000 - 5_000)
+      now += 10_000
+      await limits.pass()
+      const stopped = t.owner.runEngine.getRun(launched.remoteRunId)!
+      expect(['cancelled', 'interrupted']).toContain(stopped.status)
+      expect(stopped.outcome?.error).toBe('Stopped after its limit of 5 minutes of running time.')
+      expect(stopped.outcome?.interruptedBy).not.toBe('user')
+      await service.pass()
+      const task = t.caller.runEngine.delegations.get(accepted.delegationId)!
+      expect(task.result?.error).toMatch(/^On .+: Stopped after its limit of 5 minutes of running time\.$/)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  }, 120_000)
 })

@@ -164,8 +164,12 @@ export function waitingLabel(subagent: Pick<SubagentSummary, 'waitingOn'>): stri
   return count > 0 ? `Waiting on ${count} ${count === 1 ? 'subagent' : 'subagents'}` : 'Waiting on subagents'
 }
 
-/** Muted text on the right of a row: the state while running, otherwise how long ago it finished. */
-export function lineageStatusLabel(subagent: Pick<SubagentSummary, 'state' | 'updatedAt' | 'waitingOn'>, now: number): string {
+/**
+ * Muted text on the right of a row: the state while running, otherwise how long ago it finished. A subagent on another
+ * computer whose Stop has not reached that computer yet says so: its run there may still be going.
+ */
+export function lineageStatusLabel(subagent: Pick<SubagentSummary, 'state' | 'updatedAt' | 'waitingOn' | 'computer'>, now: number): string {
+  if (subagent.computer?.stopRequested) return 'Stop requested'
   if (subagent.state === 'waiting') return waitingLabel(subagent)
   const running = RUNNING_LABELS[subagent.state]
   if (running) return running

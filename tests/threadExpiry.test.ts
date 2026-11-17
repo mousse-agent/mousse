@@ -120,6 +120,20 @@ describe('thread expiry', () => {
     await expect(gui('threads.setExpiry', { threadId: child.id, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })).rejects.toMatchObject({ code: 'invalid_params' })
   }, 60_000)
 
+  // Issue #685: a subagent on another computer expires with its root; a change here is queued for that computer.
+  it('queues a change of the root\'s expiry for its subagents on other computers', async () => {
+    const root = mms.threads.createThread('Root', undefined, undefined, { started: true })
+    const child = mms.threads.createThread('Mac helper', undefined, undefined, { lineage: { parentThreadId: root.id, rootThreadId: root.id, relationship: 'subagent' } })
+    const engine = (mms.orchestrator as unknown as { runEngine: import('../src/mms/run/RunEngine').RunEngine }).runEngine
+    engine.remoteExpiry.track({ childThreadId: child.id, rootThreadId: root.id, node: 'node-mac', expiresAt: null, stopsRun: false })
+    engine.remoteExpiry.setRemoteThread(child.id, 'far-thread-1')
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString()
+    await gui('threads.setExpiry', { threadId: root.id, expiresAt, stopsRun: true })
+    expect(engine.remoteExpiry.get(child.id)).toMatchObject({ state: 'pending', expiresAt, stopsRun: true, generation: 2 })
+    await gui('threads.setExpiry', { threadId: root.id, expiresAt: null })
+    expect(engine.remoteExpiry.get(child.id)).toMatchObject({ state: 'pending', expiresAt: null, stopsRun: false, generation: 3 })
+  }, 60_000)
+
   it('refuses a message to an expired thread', async () => {
     const thread = mms.threads.createThread('Gone soon', undefined, undefined, { started: true, expiresAt: new Date(Date.now() - 1000).toISOString() })
     await expect(mms.orchestrator.send({ content: 'hello' } as never, false, { threadId: thread.id } as never)).rejects.toMatchObject({ code: 'thread_expired' })

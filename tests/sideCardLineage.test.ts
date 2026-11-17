@@ -194,6 +194,12 @@ describe('lineageStatusLabel', () => {
     expect(label('interrupted', { updatedAt: minutesAgo(1) })).toBe('Interrupted 1m ago')
     expect(label('idle', { updatedAt: 'nope' })).toBe('Idle')
   })
+
+  it('says a Stop of a subagent on another computer is waiting to reach it', () => {
+    const computer = { node: 'node-mac', name: 'Studio Mac', online: false, ref: 'node-mac:far-1' }
+    expect(label('stopped', { computer: { ...computer, stopRequested: true } })).toBe('Stop requested')
+    expect(label('stopped', { computer })).toBe('Stopped 30m ago')
+  })
 })
 
 describe('lineageSubagentName and lineageModelLabel', () => {

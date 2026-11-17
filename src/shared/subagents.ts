@@ -88,6 +88,8 @@ export interface SubagentComputer {
   ref?: string
   /** Why the latest call to that computer failed, while its task is still open. */
   lastError?: string
+  /** A Stop has not reached that computer yet; it is sent when that computer answers. */
+  stopRequested?: true
 }
 
 /**

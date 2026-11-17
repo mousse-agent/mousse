@@ -159,6 +159,17 @@ export const ROUTED_AGENT_METHODS: Readonly<Record<string, number>> = Object.fre
   'orchestrator.abort': 2
 })
 
+/**
+ * On an agent's `orchestrator.send` (with `agent`), set only by the calling computer's daemon: the minutes of running
+ * time the run it starts may use (a remote subagent's `maxMinutes`, issue #685), a whole number of at least 1. The owner
+ * counts the time the run works, not the time it waits on a person, stops the run when it is used up, and answers with
+ * the same key when it took the limit. A caller sends it only to an owner whose row is at `ROUTED_DEADLINE_SINCE`;
+ * an older owner is stopped by the caller after that many minutes instead.
+ */
+export const ROUTED_DEADLINE_KEY = 'deadlineMinutes'
+/** The version of `orchestrator.send` that added `deadlineMinutes`. */
+export const ROUTED_DEADLINE_SINCE = 8
+
 /** What the `agent` key carries. */
 export interface RoutedAgentMark {
   /** The sending thread, by its id on the calling computer. */
@@ -373,14 +384,16 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       'conversationBranchId',
       'expect',
       ROUTED_SEND_WINDOW_KEY,
-      ROUTED_AGENT_KEY
+      ROUTED_AGENT_KEY,
+      ROUTED_DEADLINE_KEY
     ],
     // Version 3: `refuseWhilePaused`, a parent's follow-up to a subagent, which a thread paused by a usage limit refuses.
     // Version 4: `conversationBranchId`, the branch an edited prompt must land on.
     // Version 5: `expect`, the model, mode and settings revision the sender saw; the owner runs nothing on other ones.
     // Version 6: `window`, set by the calling computer: a window sent this (`ROUTED_SEND_WINDOW_KEY`).
     // Version 7: `agent`, an agent's message (`ROUTED_AGENT_KEY`).
-    { required: ['content'], ...staging(['content', 'images']), version: 7, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5, [ROUTED_SEND_WINDOW_KEY]: 6, [ROUTED_AGENT_KEY]: 7 } }
+    // Version 8: `deadlineMinutes`, the running time an agent's task may use there (`ROUTED_DEADLINE_KEY`).
+    { required: ['content'], ...staging(['content', 'images']), version: 8, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5, [ROUTED_SEND_WINDOW_KEY]: 6, [ROUTED_AGENT_KEY]: 7, [ROUTED_DEADLINE_KEY]: ROUTED_DEADLINE_SINCE } }
   ),
   // Version 3 (both): `agent`, an agent's steer or Stop (`ROUTED_AGENT_KEY`).
   'orchestrator.steer': chat(
