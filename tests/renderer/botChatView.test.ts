@@ -1005,6 +1005,50 @@ describe('a reply as it is written', () => {
     await add({ id: 'u1', role: 'user', content: 'Compare the two drives.', timestamp: AT })
   }
 
+  it('keeps a stored action card single while another chat reply streams and the card settles', async () => {
+    await openWriting()
+    await write('The comparison is ready.\n\n')
+    const cardMessage = message(2, { id: 'held-stream', activationId: 'act_work', text: 'Mail · send_email fallback', action: action() })
+    await act(async () => fake.emit.message('inbox', cardMessage))
+    await frame()
+    expect(live()?.textContent).toBe('The comparison is ready.')
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    expect(transcript().textContent).not.toContain('send_email fallback')
+    // A reread/push of the same row updates it; it must not append a second review or end the chat's live reply.
+    await act(async () => fake.emit.message('inbox', { ...cardMessage, action: { ...cardMessage.action!, status: 'done', at: AT } }))
+    await frame()
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    expect(live()?.textContent).toBe('The comparison is ready.')
+    expect(transcript().querySelector('[aria-label="Action to review"] [role="status"]')?.textContent).toContain('Sent')
+    await act(async () => fake.emit.message('inbox', message(3, { text: 'The comparison is ready.', activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    expect(transcript().textContent?.match(/The comparison is ready\./g)).toHaveLength(1)
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    expect(stopped()).toBeNull()
+  })
+
+  it('keeps the card and both posted replies single across warm turns on the same home thread', async () => {
+    await openWriting()
+    await write('First warm reply.\n\n')
+    await act(async () => fake.emit.message('inbox', message(2, { id: 'first-posted', text: 'First warm reply.', activationId: 'act_c1' })))
+    fake.bots = [{ ...writer, chat: { activationId: 'act_c2' } }]
+    await act(async () => { await useBotsStore.getState().refresh() })
+    await add({ id: 'u2', role: 'user', content: 'What about the email?', timestamp: AT })
+    await write('Second warm reply.\n\n', { id: 'r2' })
+    const cardMessage = message(3, { id: 'warm-card', activationId: 'act_work', text: 'Mail · send_email fallback', action: action() })
+    await act(async () => fake.emit.message('inbox', cardMessage))
+    await act(async () => fake.emit.message('inbox', message(2, { id: 'first-posted', text: 'First warm reply.', activationId: 'act_c1' })))
+    await frame()
+    expect(live()?.textContent).toBe('Second warm reply.')
+    expect(transcript().textContent?.match(/First warm reply\./g)).toHaveLength(1)
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    await act(async () => fake.emit.message('inbox', message(4, { id: 'second-posted', text: 'Second warm reply.', activationId: 'act_c2' })))
+    expect(live()).toBeNull()
+    expect(transcript().textContent?.match(/Second warm reply\./g)).toHaveLength(1)
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    expect(stopped()).toBeNull()
+  })
+
   it('shows the turn a finished block at a time before it ends, then only its posted message', async () => {
     await openWriting()
     expect(transcript().querySelector('.bot-typing')).not.toBeNull()
@@ -2631,4 +2675,19 @@ it('C4 integration approved review names what it will send while waiting for the
   expect(card.querySelector('summary')?.textContent).toBe('What it will send')
   expect(card.querySelector('[role="status"]')?.textContent).toContain('Waiting for Mail…')
   expect(card.textContent).not.toContain('What it is sending')
+})
+
+it.each(['Send', 'Not now'])('keeps the stored review intact when the device Work gate refuses %s', async label => {
+  fake.chats.inbox = [held()]
+  const text = 'Home lets this computer view threads and chat with bots only.'
+  Object.assign(fake.client, { answerAction: vi.fn(async () => { throw Object.assign(new Error(text), { code: 'forbidden', details: { reason: 'work_off' } }) }) })
+  await open()
+  await click(button(label, host.querySelector('[aria-label="Action to review"]')!))
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain(text)
+  expect(card.textContent).toContain('trip.pdf')
+  expect(button('Send', card)?.disabled).toBe(false)
+  expect(button('Not now', card)?.disabled).toBe(false)
+  expect(card.querySelector('[aria-label="Tool result"]')).toBeNull()
+  expect(fake.client.answerAction).toHaveBeenCalledExactlyOnceWith('held-1', 'shown-digest', label === 'Send' ? 'send' : 'not_now')
 })
