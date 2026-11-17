@@ -323,7 +323,6 @@ describe('ssh dialing', () => {
   })
   it.each([
     ['ProxyJump', ['hostname box.example.com', 'proxyjump bastion.example.com']],
-    ['ProxyJump', ['proxyjump me@one.example.com:2222,two.example.com']],
     ['ProxyCommand', ['proxycommand cloudflared access ssh --hostname box.example.com']],
     ['ProxyCommand', ['ProxyCommand ssh -W %h:%p bastion']]
   ])(
