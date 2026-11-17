@@ -138,6 +138,7 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
     <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span>{!card.forgotten && <> · <span className="bot-action-server">{actionText(card.serverName)}</span></>}</p>
     {actionStatus(card) && <p role="status" className="bot-action-outcome" data-find-text data-message-id={messageId} data-part-index="1">{card.at ? <>{outcomeLabel(card)} · <time dateTime={card.at}>{botGroupTime(card.at)}</time></> : actionStatus(card)}</p>}
+    {card.status === 'expired' && !card.forgotten && card.askedAt && <p aria-label="Asked time">Asked <time dateTime={card.askedAt}>{botGroupTime(card.askedAt)}</time></p>}
     {!card.forgotten && card.result && !card.result.notSentInTime && card.result.text && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text ?? '')}</blockquote>}
     {card.forgotten ? <p role="note">Forgotten</p> : card.tooLarge ? null : card.status === 'open' ? argumentsView : <details aria-label={reviewLabel(card)}><summary>{reviewLabel(card)}</summary>{argumentsView}</details>}
     {refusal && !(refusal.reason === 'bot_action_expired' && card.status === 'expired') && <p role="status" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(refusal.text).replace(/\s+/g, ' ')}</p>}

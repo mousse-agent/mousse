@@ -850,7 +850,6 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           if (row.kind === 'system') return <Fragment key={row.id}>{day}{row.expiredReviews?.length
             ? <details className="bot-expired-actions" aria-label="Expired action reviews" data-turn-key={row.id}>
               <summary><span role="note">{row.text}</span></summary>
-              {row.actionHistory?.map(message => <SystemLine key={message.id} row={{ kind: 'system', id: message.id, at: message.at, of: message.id, text: `${message.action!.title} · Asked ${botGroupTime(message.at)}` }} />)}
               {row.expiredReviews.map(message => <BotMessage key={message.id} bot={bot} message={message} onAction={act} quote={false} starts={true} time={false} onReply={reply} onApplet={openApplet} />)}
             </details>
             : row.cut ? <BotCutReply text={row.text} starts={place.starts} /> : <SystemLine row={row} />}</Fragment>

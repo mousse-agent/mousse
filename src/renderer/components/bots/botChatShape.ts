@@ -137,7 +137,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
     const nudge = nudgeOf(message)
     if (nudge && message.action && foldedActions.has(message.action.actionId)) {
       // The newest review is represented inside its schedule fold. Earlier nudge copies stay quiet here.
-      if (latestAction.get(message.action.actionId)?.id !== message.id) rows.push(earlierLine(message))
+      // All history for this call belongs inside its expired review.
       continue
     }
     if (!nudge && message.expiredActionSchedule) {
@@ -149,8 +149,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
       }
       if (message.action) {
         const newest = latestAction.get(message.action.actionId) ?? message
-        ;(expired.row.expiredReviews ??= []).push({ ...newest, action: message.action })
-        if (newest.id !== message.id) (expired.row.actionHistory ??= []).push(message)
+        ;(expired.row.expiredReviews ??= []).push({ ...newest, action: { ...message.action, askedAt: message.action.askedAt ?? message.at } })
       }
       const reviews = expired.row.expiredReviews
       const names = reviews?.map(review => guardTextCharacters(review.action!.title).replace(/\s+/g, ' '))
