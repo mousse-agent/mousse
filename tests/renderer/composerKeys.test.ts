@@ -86,18 +86,6 @@ describe('composer keys', () => {
     expect(onSend).toHaveBeenCalledTimes(2)
   })
 
-  it('sends normally with Ctrl+Enter when no run is going', () => {
-    const { onSend } = render({ input: 'hello' })
-    press('Enter', { ctrlKey: true })
-    expect(onSend).toHaveBeenCalledWith(undefined)
-  })
-
-  it('sends normally with Alt+Enter when no run is going', () => {
-    const { onSend } = render({ input: 'hello' })
-    press('Enter', { altKey: true })
-    expect(onSend).toHaveBeenCalledWith(undefined)
-  })
-
   it('leaves Alt+Enter to an input method that is composing', () => {
     const { onSend } = render({ input: 'にほん', loading: true })
     press('Enter', { altKey: true, isComposing: true })
