@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "claims": [
+    {
+      "task": "claude-model-refresh-timeout",
+      "session": "agibook-b1a60d",
+      "machine": "agibook",
+      "branch": "claude-model-refresh-timeout",
+      "paths": [
+        "src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService.ts",
+        "tests/claudeSubscriptionProvider.test.ts"
+      ],
+      "claimedAt": "2026-11-17T20:54:43.729Z",
+      "expiresAt": "2026-11-17T22:54:43.729Z"
+    }
+  ]
+}
