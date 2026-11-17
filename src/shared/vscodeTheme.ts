@@ -585,7 +585,7 @@ export function injectTokenColors(tokenColors: VsCodeTokenColor[]): void {
     const bg = tc.settings.background ? `background: ${tc.settings.background} !important;` : ''
     const fs = tc.settings.fontStyle ? `font-style: ${tc.settings.fontStyle.includes('italic') ? 'italic' : 'normal'}; font-weight: ${tc.settings.fontStyle.includes('bold') ? 'bold' : 'normal'}; ${tc.settings.fontStyle.includes('underline') ? 'text-decoration: underline;' : ''}` : ''
     if (!fg && !bg && !fs) return ''
-    return `/* ${scopes} */ .hljs-keyword, .hljs-string, .hljs-comment, .chat-markdown code { ${fg} ${bg} ${fs} }`
+    return `/* ${scopes} */ .hljs-keyword, .hljs-string, .hljs-comment { ${fg} ${bg} ${fs} }`
   }).join('\n')
   const syntaxVars = `
     :root {

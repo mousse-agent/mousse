@@ -104,6 +104,32 @@ describe('closing the last open file', () => {
   })
 })
 
+describe('closing tabs', () => {
+  it('keeps the panel while another tab is open, and closes it with the last tab', async () => {
+    useAppStore.setState({ mainAreaOpen: true })
+    await openNotes()
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close notes.txt"]')!.click())
+    await flush()
+    expect(useAppStore.getState().mainAreaOpen).toBe(true)
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close Files"]')!.click())
+    await flush()
+    expect(useAppStore.getState().mainAreaOpen).toBe(false)
+  })
+})
+
+describe('an open file', () => {
+  it('fills the panel, and the file tree comes back beside it on request', async () => {
+    await openNotes()
+    expect(host.querySelector('.files-editor')).not.toBeNull()
+    expect(host.querySelector('.tree-open')).toBeNull()
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Show file tree"]')!.click())
+    expect(host.querySelector('.tree-open')).not.toBeNull()
+    expect(host.querySelector('.files-editor')).not.toBeNull()
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Hide file tree"]')!.click())
+    expect(host.querySelector('.tree-open')).toBeNull()
+  })
+})
+
 describe('background refresh of an open file', () => {
   it('clears "Refresh failed" once a later refresh reads the file again, even when it did not change', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
