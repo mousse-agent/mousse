@@ -12,12 +12,16 @@ export function actionText(text: string): string {
   return text.split(/(\s+)/u).map((token) => guardTextCharacters(token, addressLike(token) ? 'address' : 'data')).join('')
 }
 function fieldName(text: string): string {
-  return actionText(text).replace(/\r\n|\r|\n/g, '↵') || '(no name)'
+  const visible = actionText(text)
+  return !text ? '(no name)' : visible === '(no name)' || /^\s+$/.test(visible) || /[\r\n↵\\"'“”‘’＂«»„]/u.test(visible) ? JSON.stringify(visible) : visible
 }
-function AlphabetWarning({ text, name = false }: { text: string; name?: boolean }) {
+function FieldName({ text }: { text: string }) {
+  return text === '' ? <span className="bot-action-empty" aria-label="Empty field name">(no name)</span> : <>{fieldName(text)}</>
+}
+function AlphabetWarning({ text }: { text: string }) {
   const outsideAscii = (token: string) => /(?=[^\x00-\x7f])[\p{L}\p{N}]/u.test(token)
   const phoneLike = /^\+?[\p{N}(][\p{N}\s()+.-]{4,}$/u.test(text.trim())
-  const warn = name ? outsideAscii(text) : text.split(/\s+/u).some(token => addressLike(token) && outsideAscii(token)) || phoneLike && outsideAscii(text)
+  const warn = text.split(/\s+/u).some(token => addressLike(token) && outsideAscii(token)) || phoneLike && outsideAscii(text)
   return warn ? <small className="bot-action-alphabet" aria-label="Non-ASCII letters or digits">Contains letters or digits outside A–Z and 0–9</small> : null
 }
 
@@ -29,12 +33,12 @@ function Value({ value, literal = false }: { value: unknown; literal?: boolean }
     if (!literal && object.$mousse === 'hidden' && object.text === 'hidden · will be sent')
       return <span className="bot-action-hidden" aria-label="Hidden value that will be sent">hidden · will be sent</span>
     if (!Object.keys(object).length) return <code aria-label="Object">{'{}'}</code>
-    return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt>{fieldName(key)}<AlphabetWarning text={key} name /></dt><dd><Field name={key} value={child} literal={false} /></dd></div>)}</dl>
+    return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt><FieldName text={key} /></dt><dd><Field name={key} value={child} literal={false} /></dd></div>)}</dl>
   }
   if (Array.isArray(value)) return value.length ? <ol>{value.map((child, index) => <li key={index}><Field name="item" value={child} literal={literal} /></li>)}</ol> : <code aria-label="List">[]</code>
   if (typeof value !== 'string') return <code aria-label="Non-text value">{JSON.stringify(value) ?? String(value)}</code>
   if (value === '') return <span className="bot-action-empty">(empty text)</span>
-  const text = /^(?:true|false|null|[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?|\[\]|\{\})$/i.test(value.trim()) || /^["'“”‘’]|["'“”‘’]$/u.test(value) || value === '(empty text)' ? JSON.stringify(value) : value
+  const text = /^(?:true|false|null|[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?|\[\]|\{\})$/i.test(value.trim()) || /^["'“”‘’＂«»„]|["'“”‘’＂«»„]$/u.test(value) || value === '(empty text)' || /^\s+$/.test(value) ? JSON.stringify(value) : value
   return <div><blockquote className="bot-action-text">{actionText(text).replaceAll("\n", "↵\n")}</blockquote><AlphabetWarning text={value} /></div>
 }
 function Field({ name, value, literal }: { name: string; value: unknown; literal: boolean }) {
@@ -67,8 +71,8 @@ function Arguments({ value }: { value: unknown }) {
 function HiddenPaths({ paths }: { paths: string[][] }) {
   return <div className="bot-action-paths">{paths.map((path, index) => <div key={index} aria-label="Hidden field path">
     {path.map((segment, part) => <Fragment key={part}>{part > 0 && ' → '}{segment.length > 80
-      ? <details><summary>Read field name</summary><span className="bot-action-path-segment" aria-label="Field name">{fieldName(segment)}</span></details>
-      : <span className="bot-action-path-segment" aria-label="Field name">{fieldName(segment)}</span>}</Fragment>)}
+      ? <details><summary>Read field name</summary><span className="bot-action-path-segment" aria-label="Field name"><FieldName text={segment} /></span></details>
+      : <span className="bot-action-path-segment" aria-label="Field name"><FieldName text={segment} /></span>}</Fragment>)}
   </div>)}</div>
 }
 
