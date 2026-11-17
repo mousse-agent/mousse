@@ -16,6 +16,7 @@ import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { RelayHandler } from '../../src/mms/run/mcp/relay/handler'
 import { ToolRegistry, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools/registry'
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
+import { botCatalogueTools } from '../../src/mms/run/mcp/appTools/botCatalogue'
 import { appTurn } from '../run/appToolsFixture'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
@@ -262,6 +263,40 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   expect(captured.length).toBeGreaterThan(0)
   expect(JSON.stringify([exported, captured, f.journal, f.bots.service.chatList(t.botId).messages, ledger.start.mock.calls])).not.toContain('private-call-secret')
   expect(t.calls).toEqual([])
+})
+// Direct and catalogue calls must reach the same owner-MCP gate, with and without asks first.
+it.each([true, false].flatMap(on => ['direct', 'use_tool'].map(route => ({ on, route }))))('catalogue MCP $route preserves the call, switch=$on', async ({ on, route }) => {
+  const t = await setup(on, false, true, true)
+  const bot = { ...t.work.prepared.authority, catalogue: 'use_tool' as const }
+  const turns = new AppToolTurns()
+  turns.register(appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot }))
+  const registry = new ToolRegistry({
+    activeRunId: () => 'r1', turns, botMcp: t.mcp,
+    userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never
+  })
+  for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
+  const request = { credential: { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }, toolCallId: 'catalogue-call', signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]
+  const result = await registry.call(route === 'direct' ? 'mail_send' : 'use_tool', {
+    ...(route === 'direct' ? t.args : { tool: 'mail_send', arguments: t.args }), [TURN_TOKEN_KEY]: 'tt'
+  }, request)
+  const action = f.bots.actions.forWork(t.workId)
+  if (on) {
+    expect(action, result.text).toBeDefined()
+    expect(action).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
+    expect(JSON.parse(action!.call_key)).toEqual([t.workId, f.store.dispatches(t.workId)[0]!.clientRequestId, 'catalogue-call'])
+    expect(f.bots.service.chatList(t.botId).messages.find(m => m.id === action!.message_id)?.action).toMatchObject({ title: 'Send', serverName: 'Mail', status: 'open' })
+    for (const name of ['thread_create', 'thread_send', 'thread_archive']) expect(botAppToolRefusal(bot, name, {}), name).toBeTruthy()
+    for (const name of ['mail_send', 'mail_other']) {
+      expect(await registry.call(name, { ...t.args, [TURN_TOKEN_KEY]: 'tt' }, { ...request, toolCallId: `later-${name}` })).toMatchObject({ isError: true })
+    }
+    expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+    expect(t.calls).toEqual([])
+  } else {
+    expect(result, result.text).toMatchObject({ text: expect.stringContaining('delivered') })
+    expect(t.calls).toEqual([t.args])
+    expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+    for (const name of ['thread_create', 'thread_send', 'thread_archive']) expect(botAppToolRefusal(bot, name, {}), name).toBeUndefined()
+  }
 })
 it('a scheduled run is refused without parking or writing a card', async () => {
   const t = await setup(true)
