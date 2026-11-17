@@ -59,7 +59,8 @@ import { countRender } from '../chat/components/agent-elements/render-counts'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { useSubagents } from '../hooks/useSubagents'
-import { isWorkingSubagent } from '../../shared/subagents'
+import { isRunningSubagent, isWorkingSubagent } from '../../shared/subagents'
+import { stopAllSubagents } from './sideCard/lineageLogic'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
 import { isWatchOnlyThread, NativeHelperNotice } from './NativeHelperNotice'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
@@ -1188,12 +1189,20 @@ export function OrchestratorChat() {
     [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, setLoading, queue.threadId, queue.items.length, queue.steer, queue.beginComposerSteer, queue.endComposerSteer]
   )
 
+  // The thread's subagents, and whether any still runs: the chat then shows "Waiting for subagents…".
+  const threadSubagents = useSubagents(newChat ? null : activeThreadId)
+  const subagentsRunning = threadSubagents.some(isRunningSubagent)
   const handleStop = useCallback(async () => {
+    // A thread whose own turn has ended but that waits for its subagents: Stop stops them, as Lineage's Stop all.
+    if (activeThreadId && !turnStoppable && !turnActive && !loading && subagentsRunning) {
+      await stopAllSubagents({ stopAll: window.mousse.subagents.stopAll, abort: window.mousse.orchestrator.abort }, activeThreadId, threadSubagents)
+      return
+    }
     // The thread shows stopped at the click; the daemon confirms it.
     if (activeThreadId) await stopThreadNow(activeThreadId)
     else await window.mousse.orchestrator.abort()
     await refreshTurnActive()
-  }, [activeThreadId, refreshTurnActive])
+  }, [activeThreadId, refreshTurnActive, turnStoppable, turnActive, loading, subagentsRunning, threadSubagents])
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
   useCommand('run.stop', () => void handleStop())
 
@@ -1257,7 +1266,7 @@ export function OrchestratorChat() {
   // Compact now (the composer's chip, the context popover): it starts at once and runs while the person types.
   // Until the daemon's compaction row arrives, and while the request is out, the chip reads Compacting….
   // Never offered beside work in progress: a running turn, or working subagents whose results come back to this thread.
-  const subagentsWorking = useSubagents(newChat ? null : activeThreadId).some(isWorkingSubagent)
+  const subagentsWorking = threadSubagents.some(isWorkingSubagent)
   const [compactingThread, setCompactingThread] = useState<string | null>(null)
   const handleCompactNow = useCallback(() => {
     const threadId = activeThreadId
@@ -1976,7 +1985,7 @@ export function OrchestratorChat() {
                 ...(activeThread?.botOwned ? { contextHidden: true } : {})
               }}
               loading={turnActive || loading}
-              stoppable={turnActive || loading || turnStoppable}
+              stoppable={turnActive || loading || turnStoppable || subagentsRunning}
               placeholder={!workspaceReady ? ''
                 : questionsTakeMessage ? QUESTION_COMPOSER_PLACEHOLDER
                   : approvalWaiting ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}
