@@ -1,5 +1,5 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { BridgeNodePolicy, NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { BridgeNodePolicy, NetAddonRecords, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
@@ -105,6 +105,22 @@ export function joinErrorWords(error: { code?: unknown; details?: unknown; messa
       return 'This computer is already set up with its own devices, so it can’t join another set.'
   }
   return String(error.message ?? error.code ?? 'The connection failed.')
+}
+
+/** Why this computer can't start over now, naming what stands in the way; undefined when it can. */
+export function startOverRefusal(check: NetStartOverCheck): string | undefined {
+  const names = (list?: string[]) => (list ?? []).join(', ')
+  switch (check.refused) {
+    case 'space_host':
+      return `This computer hosts ${names(check.hosted)}. Its members would lose it, so this computer can’t start over.`
+    case 'mousse_id':
+      return 'This computer is signed in to Mousse ID. Sign out first, then start over.'
+    case 'live_devices':
+      return check.keeper
+        ? `${names(check.live)} still rely on this computer. Remove them first, then start over.`
+        : `This computer still belongs with ${names(check.live)}. Remove it there first, then start over.`
+  }
+  return undefined
 }
 
 /** Words for a capability in the device line; `settings` is "work on threads". */

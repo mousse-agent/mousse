@@ -17,9 +17,9 @@ import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { DeviceAccessRows } from './devices/DeviceAccessRows'
 import { DeviceBotsRow } from './devices/DeviceBotsRow'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
-import { joinErrorWords, netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
-import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
+import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetStartOverCheck, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import '../styles/devices.css'
@@ -128,6 +128,8 @@ export function NetDevicesSection() {
   const [granting, setGranting] = useState<{ device: Device; kind: 'grant' | 'computer' }>()
   // The keychain refused a join's keys, so the join form asks for a passphrase; Give up on an unfinished join is confirmed.
   const [joinNeedsPassphrase, setJoinNeedsPassphrase] = useState(false), [givingUp, setGivingUp] = useState(false)
+  // Start over opens on what the daemon says about it: what stands in the way, or what resets.
+  const [startingOver, setStartingOver] = useState<NetStartOverCheck>()
   const nameEdited = useRef(false)
   // Asks for editor connections: the prompt host watches them for the whole window; this screen reads that list.
   const editorAsks = useEditorAskStore((s) => s.asks)
@@ -567,6 +569,17 @@ export function NetDevicesSection() {
           </SettingsGroup>
         )}
 
+        {self && (
+          <SettingsGroup className="devices-group">
+            <SettingsRow
+              anchor="devices-start-over"
+              title="Start over"
+              description="Leave these devices and get new keys"
+              control={<button type="button" className="settings-btn" disabled={busy} onClick={() => void action('net.startOver.check', {}, (result) => setStartingOver(result as NetStartOverCheck))}>Start over…</button>}
+            />
+          </SettingsGroup>
+        )}
+
         {showAddons && (
           <SettingsGroup className="devices-group" anchor="devices-addons" title="Connection add-ons" description="Ways other devices can reach this one">
             {manifests.map((manifest) => {
@@ -764,6 +777,22 @@ export function NetDevicesSection() {
         footer={<button type="button" className="settings-btn devices-dialog-btn danger-fill" disabled={busy} onClick={() => { setGivingUp(false); void action('net.join.abandon', {}) }}>Give up</button>}
       >
         <p>{unfinishedJoin?.name ?? 'The other computer'} may already list this computer. If it does, remove it there.</p>
+      </Modal>
+    )}
+
+    {startingOver && (
+      <Modal
+        open
+        title={startingOver.refused ? 'Can’t start over yet' : 'Start over on this computer?'}
+        onClose={() => setStartingOver(undefined)}
+        footer={!startingOver.refused && <button type="button" className="settings-btn devices-dialog-btn danger-fill" disabled={busy} onClick={() => { setStartingOver(undefined); void action('net.startOver', {}) }}>Start over</button>}
+      >
+        {startingOver.refused ? <p>{startOverRefusal(startingOver)}</p> : <>
+          <p>This computer leaves its devices and gets new keys. Networking turns off; turn it on, or join with a link.</p>
+          <p>Bot signing keys, Space chat links, SSH approvals and links from other computers reset. Threads, bots and work stay.</p>
+          <p>{startingOver.keeper ? 'The old network folder, with the key that kept these devices, stays on this computer.' : 'The old network folder stays on this computer.'}</p>
+          {startingOver.spaces.length > 0 && <p>Join {startingOver.spaces.join(', ')} again afterwards.</p>}
+        </>}
       </Modal>
     )}
 

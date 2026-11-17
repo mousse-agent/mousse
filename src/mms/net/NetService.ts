@@ -44,6 +44,7 @@ import type {
   EditorProbeResult,
   NetInitInput,
   NetLocalMethod,
+  NetStartOverCheck,
   NetStatus
 } from '../../shared/net/local'
 import type { PermissionMode } from '../../shared/permissionMode'
@@ -283,6 +284,8 @@ export interface NetDomainComposition {
   >
   hostedSpacePeerAuthorized?(user: UserId, node: NodeId): boolean
   spaceJoin?: SpaceJoinAdmissionPort
+  /** The Spaces this computer hosts or belongs to, which Start over refuses or names. */
+  spaces?(): Array<{ name: string; host: boolean }>
   onSessionOpened?(session: SyncSession): void
   /** A session ended (it may never have opened); the peer's other sessions, if any, are still in `session()`. */
   onSessionClosed?(session: SyncSession): void
@@ -849,9 +852,10 @@ export class NetService {
           )
         ).then((joined) => this.firstSession(joined))
       )
-    // With no network folder there is no join to finish or give up, and none is made to find out.
+    // With no network folder there is no join to finish or give up and nothing to start over, and
+    // none is made to find out.
     if (
-      (method === 'net.join.retry' || method === 'net.join.abandon') &&
+      (method === 'net.join.retry' || method === 'net.join.abandon' || method.startsWith('net.startOver')) &&
       !existsSync(join(this.options.profileDir, 'net', 'net.db'))
     )
       throw new NetError('disabled')
@@ -862,6 +866,9 @@ export class NetService {
         ).then((joined) => this.firstSession(joined))
       )
     if (method === 'net.join.abandon') return this.serial(() => this.abandonJoin())
+    // Starting over needs no network either: a removed or lapsed computer may have it off.
+    if (method === 'net.startOver.check') return this.startOverCheck()
+    if (method === 'net.startOver') return this.serial(() => this.startOver())
     if (method !== 'net.init') this.assertEnabled()
     if (method.startsWith('bridge.')) this.assertFeature('netBridge')
     if (method === 'net.doctor') return this.doctor()
@@ -2998,6 +3005,44 @@ export class NetService {
   /** Give up: whatever a join left is set aside, also a request that may have reached the other computer. */
   private async abandonJoin(): Promise<NetStatus> {
     if (this.joinLeftovers(this.runtime()) !== 'none') await this.setAsideNetwork('unfinished-join')
+    return this.status()
+  }
+  /**
+   * Whether Start over may run here, and what it would leave behind. Refused while this computer
+   * hosts a Space, is signed in to Mousse ID, or other devices still hold a pass in its list.
+   */
+  private startOverCheck(): NetStartOverCheck {
+    const standing = this.hasIdentity() ? this.runtime().identity.startOver() : undefined
+    if (!standing) throw new NetError('not_enrolled')
+    const spaces = this.domain?.spaces?.() ?? [],
+      hosted = spaces.filter((space) => space.host).map((space) => space.name),
+      plus = this.hosted?.status()
+    const refused = hosted.length
+      ? 'space_host'
+      : plus?.connected || plus?.reconnecting
+        ? 'mousse_id'
+        : standing.allowed
+          ? undefined
+          : 'live_devices'
+    return {
+      ...(refused ? { refused } : { allowed: standing.allowed }),
+      keeper: standing.keeper,
+      ...(hosted.length ? { hosted } : {}),
+      ...(standing.allowed ? {} : { live: standing.live }),
+      spaces: spaces.filter((space) => !space.host).map((space) => space.name)
+    }
+  }
+  /**
+   * Start over: the network folder is set aside, keys, list and all, and this computer is left with
+   * no network, as a fresh one. Threads, bots and the rest of the profile stay. Runs in the queue.
+   */
+  private async startOver(): Promise<NetStatus> {
+    const check = this.startOverCheck()
+    if (check.refused)
+      throw new NetError('conflict', 'This computer can’t start over now.', {
+        details: { reason: check.refused }
+      })
+    await this.setAsideNetwork('start-over')
     return this.status()
   }
   private async transferAuthority(node: NodeId): Promise<unknown> {
