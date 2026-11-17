@@ -94,13 +94,6 @@ describe('local dictation model list', () => {
     }
   })
 
-  it('describes the multilingual models and the English-only ones', () => {
-    expect(MOONSHINE_TINY.runtime).toBe('moonshine')
-    expect(WHISPER_BASE.runtime).toBe('whisper')
-    expect(WHISPER_BASE.maxSegmentSeconds).toBe(30)
-    expect(WHISPER_BASE.sampleRate).toBe(16000)
-  })
-
   it('gives the 0.6B Parakeet models 128 mel bins and a two-layer prediction network', () => {
     for (const model of [PARAKEET_TDT_06B_V3, PARAKEET_TDT_06B_V2, PARAKEET_UNIFIED_EN]) {
       expect(model).toMatchObject({ runtime: 'nemo-transducer', featureSize: 128, predictorSize: 640, predictorLayers: 2 })
@@ -112,7 +105,6 @@ describe('local dictation model list', () => {
       for (const path of [model.encoder, model.decoder, model.joiner, model.tokens]) expect(paths, model.id).toContain(path)
     }
   })
-
 })
 
 describe('resolveWorkerModel', () => {

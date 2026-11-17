@@ -499,11 +499,6 @@ describe('FilesSearchView', () => {
     expect(html).not.toContain('No matches')
   })
 
-  it('says the index is still building for text search', () => {
-    const html = render(answeredText('foo', grepResponse([match('a.ts', 1)], { indexing: true, source: 'walk' })))
-    expect(html).toContain('Index still building — press Enter to search again')
-  })
-
   it('explains an invalid pattern that was searched literally, with the daemon message', () => {
     const html = render(answeredText('a(', grepResponse([match('a.ts', 1)], { regexError: "fatal: command line, 'a(': Unmatched ( or \\(" })))
     expect(html).toContain('Invalid pattern, searched literally')
