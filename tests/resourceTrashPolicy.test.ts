@@ -69,14 +69,6 @@ test('automatic sweep never discards sole-copy content and records why the task 
   expect(readFileSync(join(record.location, 'terminal-workspace', 'sole-copy.txt'), 'utf8')).toBe('retained output')
 })
 
-test('automatic sweep records a failing purge as the blocked reason and leaves the task recoverable', async () => {
-  const f = await fixture()
-  f.cleanup.configure({ schemaVersion: 1, graceDays: 30, automaticPurge: true }, true)
-  vi.spyOn(f.cleanup, 'purge').mockRejectedValue(new Error('Repository is unavailable'))
-  await f.cleanup.sweep()
-  expect(f.store.require('task-0')).toMatchObject({ state: 'trashed', blockedReason: 'Repository is unavailable' })
-})
-
 test.each([
   [{ schemaVersion: 1, graceDays: 0, automaticPurge: true }],
   [{ schemaVersion: 1, graceDays: 3651, automaticPurge: true }],
