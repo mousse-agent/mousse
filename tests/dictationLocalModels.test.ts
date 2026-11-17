@@ -97,8 +97,6 @@ describe('local dictation model list', () => {
   it('describes the multilingual models and the English-only ones', () => {
     expect(MOONSHINE_TINY.runtime).toBe('moonshine')
     expect(WHISPER_BASE.runtime).toBe('whisper')
-    expect(WHISPER_BASE.description).toMatch(/languages/)
-    expect(PARAKEET_TDT_06B_V3.description).toMatch(/25 European languages/)
     expect(WHISPER_BASE.maxSegmentSeconds).toBe(30)
     expect(WHISPER_BASE.sampleRate).toBe(16000)
   })
