@@ -321,12 +321,13 @@ it.each([true, false].flatMap(on => ['pi', 'codex', 'claude'].map(runtime => ({ 
   }
 })
 /** A catalogue turn (`use_tool`) of the bot `setup` made, on a registry with the catalogue tools; `call` names its tool call id. */
-function catalogueTurn(t: Awaited<ReturnType<typeof setup>>) {
+function catalogueTurn(t: Awaited<ReturnType<typeof setup>>, app?: () => Promise<{ text: string }>) {
   const bot = { ...t.work.prepared.authority, catalogue: 'use_tool' as const }
   const turns = new AppToolTurns()
   turns.register(appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot }))
   const registry = new ToolRegistry({ activeRunId: () => 'r1', turns, botMcp: t.mcp, userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never })
   for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
+  if (app) registry.register({ name: 'memory_list', description: 'List memory', inputSchema: { type: 'object' }, access: 'reads', class: 'read', handler: app })
   const credential = { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }
   return (name: string, args: Record<string, unknown>, toolCallId: string) =>
     registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, { credential, toolCallId, signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2])
@@ -2346,4 +2347,40 @@ it.each(['open', 'nudge', 'settled'] as const)('C4 merged epoch receives a maske
   expect(prompts[0]).toContain(expected)
   expect(prompts[0]).toContain('Mousse, about something outside (data)')
   expect(prompts[0]).not.toContain('private-action-password')
+})
+
+
+it.each([true, false])('C4 next wrapper preserves held review and retry identity, switch=%s', async on => {
+  const t = await setup(on, false, true)
+  const app = vi.fn(async () => ({ text: 'registered memory read' }))
+  const call = catalogueTurn(t, app)
+  expect(await call('use_tool', { tool: 'mail_not_offered', arguments: {} }, 'unknown')).toEqual(refused('unknown_tool', "You have no tool named mail_not_offered. tool_catalogue lists each group's tools."))
+  const wrapped = { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'review-stable' } }
+  const result = await call('use_tool', wrapped, 'runtime-first')
+  if (!on) {
+    expect(result).toMatchObject({ text: expect.stringContaining('delivered') })
+    expect(t.calls).toEqual([t.args]); expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+    return
+  }
+  const a = f.bots.actions.forWork(t.workId)
+  expect(a, result.text).toBeDefined()
+  expect(JSON.parse(a!.exec_args!)).toEqual(t.args)
+  expect(JSON.parse(a!.call_key)).toEqual([t.workId, f.store.dispatches(t.workId)[0]!.clientRequestId, 'mcp:review-stable'])
+  expect(f.bots.service.actionMessage(t.botId, a!.id).action).toMatchObject({ title: 'Send', serverName: 'Mail', status: 'open' })
+  await call('use_tool', wrapped, 'runtime-retry')
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(f.store.messages(t.botId, { limit: 200 }).filter(row => row.id === a!.message_id)).toHaveLength(1)
+  for (const [name, args] of [
+    ['mail_send', t.args], ['mail_other', t.args],
+    ['use_tool', { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'later' } }],
+    ['use_tool', { tool: 'memory_list', arguments: {} }]
+  ] as const) {
+    const denied = await call(name, args, `later-${name}`)
+    expect(denied.isError).toBe(true)
+    if (name === 'use_tool' && 'tool' in args && args.tool === 'memory_list')
+      expect(JSON.parse(denied.text)).toMatchObject({ refused: { code: expect.any(String), message: expect.stringMatching(/held|ended/), retry: expect.stringMatching(/never|later|after_change/) } })
+    else expect(denied.text).toMatch(/held|ended/)
+  }
+  expect(app).not.toHaveBeenCalled(); expect(t.calls).toEqual([])
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
 })
