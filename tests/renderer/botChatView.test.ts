@@ -2835,3 +2835,31 @@ it('keeps one labelled asked time on an open review and replaces it with the set
   expect(times()[0]?.textContent).not.toContain('Asked')
   expect(host.querySelector('[data-message-id="held-message"] [role="status"]')?.textContent).toContain('Sent')
 })
+
+it.each([
+  ['bot_action_paused', 'Resume Inbox helper to send this.'],
+  [undefined, 'This could not be sent. Nothing was sent. Open it on the computer for the reason.']
+])('maps a device conflict %s locally instead of displaying its wire words', async (reason, expected) => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: vi.fn(async () => {
+    throw Object.assign(new Error('WIRE WORDS MUST NOT APPEAR'), { code: 'conflict', ...(reason ? { details: { reason } } : {}) })
+  }) })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(transcript().textContent).toContain(expected)
+  expect(host.textContent).not.toContain('WIRE WORDS MUST NOT APPEAR')
+  expect(button('Send', transcript())).toBeTruthy()
+})
+
+it('keeps the cached service name for a device refusal after its card disappears on reload', async () => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: vi.fn(async () => {
+    fake.chats.inbox = [message(1, { id: 'held-message', text: 'Removed review', action: undefined } as never)]
+    throw Object.assign(new Error('WIRE SERVICE MUST NOT APPEAR'), { code: 'conflict', details: { reason: 'bot_action_unreachable' } })
+  }) })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(host.textContent).toContain("Mail couldn't be reached, so nothing was sent.")
+  expect(host.textContent).not.toContain('WIRE SERVICE MUST NOT APPEAR')
+  expect(host.querySelector('[aria-label="Action to review"]')).toBeNull()
+})

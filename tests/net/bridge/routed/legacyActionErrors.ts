@@ -31,4 +31,3 @@ export const legacyRemoteError = (error: WireError): NetError => {
     ? new NetError(error.code, undefined, { details: { reason } })
     : new NetError(error.code)
 }
-
