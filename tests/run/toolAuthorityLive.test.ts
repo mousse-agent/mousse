@@ -4,7 +4,9 @@
  */
 import { describe, expect, it } from 'vitest'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
-import { AppToolTurns, ToolRegistry, type AppToolTurn, type MousseTool } from '../../src/mms/run/mcp/appTools'
+import { AppToolTurns, ToolRegistry, type AppToolHost, type AppToolTurn, type MousseTool } from '../../src/mms/run/mcp/appTools'
+import { appletTools } from '../../src/mms/run/mcp/appTools/applets'
+import { skillTools } from '../../src/mms/run/mcp/appTools/skills'
 import type { ModeCeiling } from '../../src/mms/run/types'
 import { appTurn, denied } from './appToolsFixture'
 
@@ -72,6 +74,24 @@ describe('narrowing from above', () => {
     ceilings.root = 'default'
     expect(ancestorCeiling.call(self, 'grandchild')).toBeUndefined()
     expect(() => ancestorCeiling.call(self, 'loop')).toThrow(/deeper than 64/)
+  })
+})
+
+describe('skills in a Plan or read-only turn (§1.5)', () => {
+  it('are offered to a runtime that lists tools per turn, as in an Agent turn', () => {
+    const tools = skillTools({ skills: () => ({}) } as unknown as AppToolHost)
+    const plan = appTurn({ threadId: 'child', runId: 'r', mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false }, enabledSkills: [{ name: 'review' }] as never }) as AppToolTurn
+    for (const skill of tools) expect(skill.offered!(plan)).toBe(true)
+  })
+})
+
+describe('applets in a subagent (§1.5)', () => {
+  it('are offered and usable, as in the thread that delegated it', () => {
+    const subagent = appTurn({ threadId: 'child', runId: 'r', subagent: true, onPublishApplet: () => ({ queued: true }) }) as AppToolTurn
+    for (const applet of appletTools()) {
+      expect(applet.offered?.(subagent) ?? true).toBe(true)
+      expect(applet.available?.(subagent) ?? true).toBe(true)
+    }
   })
 })
 
