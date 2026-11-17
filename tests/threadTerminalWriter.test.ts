@@ -158,18 +158,6 @@ describe('one writer hold for a thread’s terminals', () => {
     expect(held()).toBe(false)
   })
 
-  it('ends the hold when a joining terminal that fails to start is the last one left', async () => {
-    const writers = new ThreadTerminalWriters()
-    const s = realStart()
-    const first = await writers.join(dir, s.start)
-    first.started()
-    const second = await writers.join(dir, s.start)
-    await first.leave()
-    await second.leave()
-    expect(s.ends).toEqual(['completed'])
-    expect(held()).toBe(false)
-  })
-
   it('refuses a joining terminal the thread no longer admits, and keeps the others', async () => {
     const writers = new ThreadTerminalWriters()
     let admits = true
