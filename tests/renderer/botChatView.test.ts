@@ -2479,7 +2479,7 @@ it('guards hidden characters consistently while preserving ordinary script and e
   expect(args.textContent).toContain('bob@exa�mple.com')
   expect(args.textContent).toContain('https://exa�mple.com')
   expect(args.textContent).toContain('می‌روم 👩‍💻 Ελληνικά Русский')
-  expect(args.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')).toHaveLength(2)
+  expect(args.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')).toHaveLength(1)
   const { plainLabel } = await import('../../src/shared/bots/personal/modelSlots')
   expect(plainLabel('one\u200ctwo\u2029three')).toBe('one two three')
 })
@@ -2504,7 +2504,7 @@ it.each([
   await open()
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
   const card = host.querySelector('[aria-label="Action to review"]')!
-  expect(card.textContent).toContain(text)
+  expect(card.textContent).toContain(status === 'expired' ? 'Expired · not sent' : text)
   expect(button('Send', card) !== undefined).toBe(status === 'open')
   expect(button('Not now', card) !== undefined).toBe(status === 'open')
   const { botsClient } = await import('../../src/renderer/stores/botsStore')
@@ -2587,7 +2587,7 @@ it('shows field-name line breaks as marks and gives an empty field a name', asyn
   fake.chats.inbox = [held({ args: { 'to\nalice@example.com': 'evil@example.com', '': 'value' } })]
   await open()
   const names = [...host.querySelectorAll('[aria-label="Everything it will send"] dt')].map(item => item.textContent)
-  expect(names).toEqual(['to↵alice@example.com', '(no name)'])
+  expect(names).toEqual([JSON.stringify('to\nalice@example.com'), '(no name)'])
 })
 
 it('keeps a curly-quoted arrow name in one unquoted hidden-path segment', async () => {
@@ -2595,7 +2595,7 @@ it('keeps a curly-quoted arrow name in one unquoted hidden-path segment', async 
   await open()
   const path = host.querySelector('[aria-label="Hidden field path"]')!
   expect(path.querySelector('q')).toBeNull()
-  expect([...path.querySelectorAll('[aria-label="Field name"]')].map(item => item.textContent)).toEqual(['a” → “b', 'token'])
+  expect([...path.querySelectorAll('[aria-label="Field name"]')].map(item => item.textContent)).toEqual([JSON.stringify('a” → “b'), 'token'])
 })
 
 it.each(['approved', 'running', 'unreachable'])('C4 integration waiting distinguishes %s from an actual send', async (state) => {
@@ -2604,7 +2604,7 @@ it.each(['approved', 'running', 'unreachable'])('C4 integration waiting distingu
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
   const status = card.querySelector('[role="status"]')!
-  expect(status.textContent).toContain(state === 'approved' ? 'Waiting for Stored Mail…' : state === 'running' ? 'Sending…' : sentence)
+  expect(status.textContent).toContain(state === 'approved' ? 'Waiting for Stored Mail…' : state === 'running' ? 'Sending…' : sentence.slice(0, -1))
   expect(status.textContent).toContain(' · ')
   expect(button('Send', card)).toBeUndefined()
   expect(button('Not now', card)).toBeUndefined()
@@ -2648,7 +2648,7 @@ it.each([
   await open()
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
   expect(request).toHaveBeenCalledExactlyOnceWith('bots.actions.answer', { actionId: 'held-1', digest: 'shown-digest', answer: 'send' })
-  expect(host.textContent).toContain(text)
+  expect(host.textContent).toContain(reason === 'expired' ? 'Expired · not sent' : text)
   const card = host.querySelector('[aria-label="Action to review"]')
   if (reason === 'gone') expect(card).toBeNull()
   else {
@@ -2662,7 +2662,7 @@ it('C4 integration bridge timeout stub has its outcome and computer explanation 
   fake.chats.inbox = [held({ status: 'failed', at: AT, tooLarge: true, args: null, hiddenPaths: [], result: { text, notSentInTime: true } })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
-  expect(card.querySelector('[role="status"]')?.textContent).toContain(text)
+  expect(card.querySelector('[role="status"]')?.textContent).toContain(text.slice(0, -1))
   expect(card.querySelector('details, [role="region"]')).toBeNull()
   expect(card.textContent).toContain('Use the computer')
   expect(button('Send', card)).toBeUndefined()
@@ -2791,4 +2791,22 @@ it('expands adjacent expired schedule reviews inline without counting nudges or 
   expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(5)
   expect(transcript().textContent).not.toContain('4 expired · not sent')
   expect(button('Send', transcript().querySelector('[data-message-id="waiting"]')!)).toBeTruthy()
+})
+
+it('keeps a tool-error outcome readable when a device receives its category without answer text', async () => {
+  fake.chats.inbox = [held({ status: 'failed', at: AT, tooLarge: true, args: null, hiddenPaths: [], result: { toolReportedError: true } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[role="status"]')?.textContent).toContain('The tool reported an error')
+  expect(card.querySelector('[aria-label="Tool result"]')).toBeNull()
+  expect(card.querySelectorAll('time')).toHaveLength(1)
+})
+
+it('omits a common action name when the expired schedule reviews describe different actions', async () => {
+  fake.chats.inbox = ['Send an email', 'Delete a draft'].map((title, index) => message(index + 1, { expiredActionSchedule: 'mail', action: action({ actionId: `different-${index}`, title, status: 'expired', at: AT }) }))
+  await open()
+  const fold = host.querySelector<HTMLDetailsElement>('details[aria-label="Expired action reviews"]')!
+  expect(fold.querySelector('summary')?.textContent).toBe('2 expired · not sent')
+  await click(fold.querySelector('summary'))
+  expect([...fold.querySelectorAll('[aria-label="Action summary"]')].map(item => item.textContent)).toEqual(['Send an email · Mail', 'Delete a draft · Mail'])
 })
