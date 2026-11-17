@@ -8957,6 +8957,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   noteOwnerActivity(): void { this.host.ownerActivity?.(); this.quietHoursChanged() }
   /** Only future tell_at on a soon row denotes a hold; no additional stored state. */
   quietHoursChanged(): void {
+    this.actions.withdrawDisabled()
     const now = this.now()
     for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND (tell_at > at OR id GLOB 'bm_action_*_n[12]')")) {
       const botId = String(row.bot_id)
@@ -9091,6 +9092,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       await Promise.resolve()
       try {
         this.followUpNudgeBudget = { at: now.getTime(), times: new Map() }
+        this.actions.withdrawDisabled()
         this.actions.expireDue()
         // Reminders cancelled, forgotten or purged since they failed are no longer tried.
         for (const id of this.reminderRetryAt.keys()) if (this.store.reminder(id)?.status !== 'waiting') this.reminderRetryAt.delete(id)

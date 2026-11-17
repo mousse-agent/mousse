@@ -249,6 +249,16 @@ export class BotActions {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved')", id))
       this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' })
   }
+  /** Rollback retires all unstarted calls together; an already dispatched call finishes. */
+  withdrawDisabled(): void {
+    if (this.host.enabled()) return
+    this.host.store.db.transaction(() => {
+      for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
+        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This could not wait for your owner after all, so nothing was sent. Say so in your report.' }))
+          this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
+      }
+    })
+  }
   withdrawPaused(botId: string): void {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE bot_id = ? AND status = 'approved'", botId)) {
       if (this.transition(String(action.id), 'approved', 'withdrawn', { text: 'This bot was paused by its owner. Nothing was sent; carry on without it when resumed.' }))
@@ -302,7 +312,7 @@ export class BotActions {
     return { text, isError: true }
   }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
-    if (!this.host.enabled()) return { text: 'Asks first is off.', isError: true }
+    if (!this.host.enabled()) return { text: 'This tool cannot be used now. Carry on without it.', isError: true }
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
     const existing = this.host.store.get('SELECT id, args_digest, target_json FROM bot_actions WHERE call_key = ?', callKey)
@@ -455,6 +465,7 @@ export class BotActions {
   }
   private async runApproved(id: string, refresh = false): Promise<void> {
     if (refresh) await this.host.refresh()
+    this.withdrawDisabled()
     const action = this.get(id)
     if (!action || action.status !== 'approved') return
     if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) { this.sendTimeout(action); return }
@@ -497,6 +508,7 @@ export class BotActions {
       await this.runApproved(String(action.id))
   }
   async reconcile(): Promise<void> {
+    this.withdrawDisabled()
     this.host.store.pruneWorkRefusals()
     this.withdrawChanged()
     this.expireDue()
