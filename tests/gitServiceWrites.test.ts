@@ -77,6 +77,15 @@ describe('GitService writes', () => {
     expect(existsSync(join(cwd, 'base.txt'))).toBe(true)
   })
 
+  it('checkout refuses to overwrite uncommitted work that the target branch changes', async () => {
+    const cwd = repo()
+    git(cwd, 'checkout', '-b', 'other'); writeFileSync(join(cwd, 'base.txt'), 'other branch\n'); git(cwd, 'commit', '-am', 'other change'); git(cwd, 'checkout', 'main')
+    writeFileSync(join(cwd, 'base.txt'), 'uncommitted local work\n')
+    await expect(new GitService().checkout(cwd, USER, 'other')).rejects.toThrow()
+    expect(git(cwd, 'symbolic-ref', '--short', 'HEAD')).toBe('main')
+    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('uncommitted local work\n')
+  })
+
 })
 
 describe('GitService status', () => {
