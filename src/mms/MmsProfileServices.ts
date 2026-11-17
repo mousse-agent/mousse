@@ -1499,6 +1499,7 @@ export class MmsProfileServices {
       },
       runStore: () => this.runEngine.store,
       notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
+      noteStates: (details) => { this.threads.notePullRequestStates(details) },
       onRunEnd: (listener) => {
         const handler = (event: ThreadEvent): void => {
           if (event.type !== 'run.status') return

@@ -173,6 +173,8 @@ export interface BotSummary {
   waiting?: 'internet'
   error?: BotError
   last?: { text: string; at: string; author: 'owner' | 'bot' }
+  /** The bot's latest reply with text, as one clipped line (`replyPreviewText`), for its row in the Bots list. */
+  lastReply?: string
   /** How the last activation ended. */
   lastOutcome?: 'ok' | 'failed' | 'stopped'
   unread: number

@@ -9,6 +9,7 @@ import { BotFace } from '../bots/face/BotFace'
 import { botRowLine } from '../bots/botChatShape'
 import { formatMessageTime } from '../../chat/components/agent-elements/utils/message-time'
 import { Collapse } from '../ui/Collapse'
+import { useReplyPreviews } from '../../lib/replyPreviewSetting'
 import { OpenNetworkChatDialog } from './OpenNetworkChatDialog'
 import '../../styles/chats.css'
 import '../../styles/bots.css'
@@ -38,10 +39,13 @@ const botActivityAt = (bot: BotSummary) => bot.last?.at ?? bot.createdAt
 
 /**
  * One bot in the Bots list: its face, its name and the time of its latest message, and under them what it does now in
- * coloured words (`botRowLine`). An idle bot's face sleeps. Unread messages show as a count until its chat opens.
+ * coloured words (`botRowLine`). An idle bot shows its latest reply there instead, when reply previews are on, and its
+ * face sleeps. Unread messages show as a count until its chat opens.
  */
 function BotRow({ bot, active, happyUntil, onOpen }: { bot: BotSummary; active: boolean; happyUntil: number | undefined; onOpen(): void }) {
   const line = botRowLine(bot)
+  const replyPreviews = useReplyPreviews()
+  const preview = line.resting && replyPreviews ? bot.lastReply : undefined
   const time = bot.last ? formatMessageTime(bot.last.at) : undefined
   const unread = active ? 0 : bot.unread
   return <button type="button" className="bot-row" aria-current={active || undefined} title={bot.stateText && bot.state !== 'idle' ? `${bot.name}: ${bot.stateText}` : bot.name} aria-label={`Message ${bot.name}`} onClick={onOpen}>
@@ -52,7 +56,9 @@ function BotRow({ bot, active, happyUntil, onOpen }: { bot: BotSummary; active: 
         {unread > 0 && <span className="bot-row-unread" aria-label={`${unread} unread`}>{unread}</span>}
         {time && <span className="bot-row-time">{time}</span>}
       </span>
-      <span className="bot-row-state" data-tone={line.tone}>{line.text}</span>
+      {preview
+        ? <span className="bot-row-state bot-row-preview" data-tone="idle">{preview}</span>
+        : <span className="bot-row-state" data-tone={line.tone}>{line.text}</span>}
     </span>
   </button>
 }

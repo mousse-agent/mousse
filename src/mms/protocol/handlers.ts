@@ -1032,9 +1032,9 @@ async function readPullRequestDetail(ctx: HandlerContext, root: string, number: 
  * Writes a thread's link. The same pull request keeps its watch; a different one ends the old watch (with its line), since
  * a watch belongs to the pull request it began on and must not resume later with an old cutoff and a backlog.
  */
-function writeThreadLink(ctx: HandlerContext, threadId: string, next: ThreadPullRequestLink, keepWatch: boolean): Thread {
+function writeThreadLink(ctx: HandlerContext, threadId: string, next: ThreadPullRequestLink, keepWatch: boolean, info: Pick<GitPullRequestInfo, 'title' | 'state' | 'isDraft'>): Thread {
   const previous = ctx.mms.threads.getThread(threadId)?.pullRequest
-  const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: keepWatch ? relinked(previous, next) : next })
+  const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: keepWatch ? relinked(previous, next) : next }, { pullRequestInfo: info })
   if (previous && !sameLinkedPullRequest(previous, next)) ctx.mms.pullRequestWatch.onEnded(threadId, 'unlinked')
   return thread
 }
@@ -1048,10 +1048,22 @@ async function linkOriginThread(ctx: HandlerContext, threadId: string | null, ro
   if (!threadId) return
   try {
     const identity = await ctx.mms.gitService.codeHost.repositoryIdentity(root)
-    writeThreadLink(ctx, threadId, threadPullRequestLink(identity, pullRequest), true)
+    writeThreadLink(ctx, threadId, threadPullRequestLink(identity, pullRequest), true, pullRequest)
     ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
   } catch {
     // Left unlinked; see above.
+  }
+}
+
+/**
+ * Keeps what the host just said about pull requests on the threads linked to them, for the sidebar's count and its
+ * tooltip. A thread list push follows only when a thread changed (the store announces it). Never fails the read.
+ */
+function notePullRequestStates(ctx: HandlerContext, infos: ReadonlyArray<Pick<GitPullRequestInfo, 'url' | 'title' | 'state' | 'isDraft'>>): void {
+  try {
+    ctx.mms.threads.notePullRequestStates(infos)
+  } catch {
+    // The state shown stays as it was until the next read.
   }
 }
 
@@ -5059,6 +5071,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         asOptionalString(p.branch, 512),
         { force: asOptionalBoolean(p.force, 'force') === true }
       )
+      if (lookup.state === 'found') notePullRequestStates(ctx, [lookup.pullRequest, ...(lookup.others ?? [])])
       return { lookup }
     }
     case 'pullRequests.detail': {
@@ -5067,6 +5080,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       await materializeRequestedWorkspace(ctx, p)
       const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, p), number, asOptionalBoolean(p.force, 'force') === true)
+      notePullRequestStates(ctx, [detail])
       return { detail }
     }
     case 'pullRequests.draft': {
@@ -5149,6 +5163,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const method = isMergeMethod(p.method) ? p.method : await codeHost.defaultMergeMethod(root) ?? 'squash'
       try {
         const pullRequest = await codeHost.mergePullRequest(root, number, { method, ...(headSha ? { headSha } : {}) }, gitUserAction(ctx, 'Merge pull request'))
+        notePullRequestStates(ctx, [pullRequest])
         return { pullRequest, method }
       } catch (error) {
         throw new DomainRpcError('pull_request_merge_failed', error instanceof Error ? error.message : String(error), { number })
@@ -5160,7 +5175,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       await materializeRequestedWorkspace(ctx, p)
       try {
-        return { pullRequest: await ctx.mms.gitService.codeHost.closePullRequest(pullRequestFolder(ctx, p), number, gitUserAction(ctx, 'Close pull request')) }
+        const pullRequest = await ctx.mms.gitService.codeHost.closePullRequest(pullRequestFolder(ctx, p), number, gitUserAction(ctx, 'Close pull request'))
+        notePullRequestStates(ctx, [pullRequest])
+        return { pullRequest }
       } catch (error) {
         throw new DomainRpcError('pull_request_close_failed', error instanceof Error ? error.message : String(error), { number })
       }
@@ -5196,7 +5213,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError('pull_request_link_changed', "The thread's pull request link changed while it was being read; try again", { threadId, number })
       }
       // The same pull request keeps its watch; another one starts unwatched (a watch belongs to the pull request it began on).
-      const thread = writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), true)
+      const thread = writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), true, detail)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
@@ -5285,7 +5302,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // No link to this pull request yet: link it first, from the host's full read, as `pullRequests.link` does.
         await ensureWorkspaceMaterialized(ctx, threadId)
         const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, { threadId }), number, true)
-        writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), false)
+        writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), false, detail)
       }
       let status
       try {

@@ -2061,6 +2061,12 @@ export class BotStore {
     return row ? messageOf(row) : undefined
   }
 
+  /** The bot's latest message with text, for the preview of its row in the Bots list. */
+  lastBotReply(botId: string): BotMessageRow | undefined {
+    const row = this.get("SELECT * FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND COALESCE(text, '') != '' ORDER BY seq DESC LIMIT 1", botId)
+    return row ? messageOf(row) : undefined
+  }
+
   /** The bot's messages after the owner's read marker. */
   unread(botId: string, readSeq: number): number {
     return Number(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ?", botId, readSeq)?.n ?? 0)

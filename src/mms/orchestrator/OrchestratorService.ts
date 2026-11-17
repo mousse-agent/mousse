@@ -1,6 +1,7 @@
 import { profilerService } from '../diagnostics/profilerService'
 import { describeQuestionAnswers } from './questionAnswers'
 import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
+import { latestReplyPreview } from '../../shared/threadPreview'
 import type { SecretToolHost } from '../run/mcp/appTools/secrets'
 import { maskedCopy, maskInPlace, type SecretMasker } from '../secrets/secretMasking'
 import { admittedSelection, modelChangeNote, previousTurnModel, turnMarker, turnMarkerText } from './contextHandoff'
@@ -2437,6 +2438,9 @@ export class OrchestratorService extends EventEmitter {
     this.on('turn-completed', (payload: { threadId?: string }) => { if (payload?.threadId) this.nameThreadAfterTurn(payload.threadId, true) })
     for (const event of ['turn-failed', 'turn-interrupted'] as const)
       this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.nameThreadAfterTurn(payload.threadId, false) })
+    // A thread's sidebar row shows its latest reply, kept in its metadata when each turn ends (`Thread.lastReply`).
+    for (const event of ['turn-completed', 'turn-failed', 'turn-interrupted', 'turn-paused'] as const)
+      this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.recordLastReply(payload.threadId) })
     // A thread's goal decides after each of its turns whether the next goal turn is queued.
     const outcomes = { 'turn-completed': 'completed', 'turn-failed': 'failed', 'turn-interrupted': 'interrupted', 'turn-paused': 'paused' } as const
     for (const [event, outcome] of Object.entries(outcomes) as Array<[keyof typeof outcomes, GoalTurnOutcome]>)
@@ -10689,6 +10693,21 @@ export class OrchestratorService extends EventEmitter {
       }
       if (title) this.writeThreadTitle(threadId, shown, title, 'auto')
     })
+  }
+
+  /**
+   * Keeps the preview of the thread's latest reply in its metadata, from the transcript the turn just wrote (in memory,
+   * secrets masked). A turn that left no reply keeps the one before. Never fails the turn.
+   */
+  private recordLastReply(threadId: string): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    if (threadId !== this.boundSession.threadId && !this.sessions.has(threadId)) return
+    try {
+      const preview = latestReplyPreview(this.getMessages(threadId))
+      if (preview !== undefined) this.threadStore.setThreadLastReply(threadId, preview)
+    } catch (error) {
+      console.warn('the reply preview could not be kept', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**

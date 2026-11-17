@@ -279,7 +279,7 @@ export class PullRequestThreadService {
       throw new PullRequestThreadError('pull_request_workspace_failed', `Could not create the worktree for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}${said}`)
     }
     try {
-      thread = this.deps.threads.updateThreadMeta(thread.id, { pullRequest: linkFromDetail(detail) })
+      thread = this.deps.threads.updateThreadMeta(thread.id, { pullRequest: linkFromDetail(detail) }, { pullRequestInfo: detail })
       if (this.deps.prepareThread) thread = this.deps.prepareThread(thread)
     } catch (error) {
       await this.discard(thread.id, project, topLevel, made)
