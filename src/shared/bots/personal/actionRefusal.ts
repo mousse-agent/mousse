@@ -1,6 +1,6 @@
 /** Application reasons carried as data on an existing conflict, never as new Net error codes. */
 export const BOT_ACTION_REFUSAL_CODES = [
-  'bot_action_expired', 'bot_action_withdrawn', 'bot_action_changed', 'bot_action_settled',
+  'bot_action_schedule_changed', 'bot_action_expired', 'bot_action_withdrawn', 'bot_action_changed', 'bot_action_settled',
   'bot_action_gone', 'bot_action_paused', 'bot_action_unreachable', 'bot_action_too_large'
 ] as const
 export type BotActionRefusalCode = (typeof BOT_ACTION_REFUSAL_CODES)[number]
@@ -11,6 +11,7 @@ export interface BotActionRefusalNames { botName?: string; serverName?: string }
 /** Both local chat and device clients use names they already have, never a network error's words. */
 export function botActionRefusalText(code: BotActionRefusalCode, names: BotActionRefusalNames = {}): string {
   switch (code) {
+    case 'bot_action_schedule_changed': return 'This changed since you saw it. Nothing was sent.'
     case 'bot_action_expired': return 'This expired, so nothing was sent.'
     case 'bot_action_withdrawn': return 'No longer needed, so nothing was sent.'
     case 'bot_action_changed': return 'This changed since you saw it. Check it again before sending.'

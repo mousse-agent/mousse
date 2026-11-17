@@ -415,7 +415,10 @@ export class BotActions {
     if (!action) throw new BotActionChanged("This can't be sent any more.", 'bot_action_gone')
     if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(JSON.parse(action.result_json).text, 'bot_action_unreachable')
     if (action.status === 'expired') throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
-    if (action.status === 'withdrawn') throw new BotActionChanged(action.result_json && JSON.parse(action.result_json).text?.includes('changed since') ? 'This changed since you saw it. Nothing was sent.' : 'No longer needed, so nothing was sent.', 'bot_action_withdrawn')
+    if (action.status === 'withdrawn') {
+      if (action.result_json && JSON.parse(action.result_json).text?.includes('changed since')) throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
+      throw new BotActionChanged('No longer needed, so nothing was sent.', 'bot_action_withdrawn')
+    }
     if (action.status !== 'open') throw new BotActionChanged('This was already answered.', 'bot_action_settled')
     if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
       if (settle) this.expireDue()
@@ -427,7 +430,7 @@ export class BotActions {
       if (settle) this.host.store.db.transaction(() => {
         if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent; carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(action))
       })
-      throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_withdrawn')
+      throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
     }
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
     return action
