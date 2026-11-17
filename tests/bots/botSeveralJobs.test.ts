@@ -127,6 +127,7 @@ describe('several pieces of work at once', () => {
     for (const [index, item] of all.entries()) {
       expect(f.store.dispatch(item.workId, 2)).toMatchObject({ kind: 'continue', threadId: live[index]!.payload.threadId })
       expect(f.store.dispatch(item.workId, 2)!.prompt.text).toContain('Mousse restarted while you were working.')
+      expect(f.store.activation(item.workId)!.status).toBe('running')
     }
     await f.bots.reconcileOnStartup()
     expect(all.map((item) => f.store.dispatches(item.workId).length)).toEqual(all.map(() => 2))
@@ -237,25 +238,6 @@ describe('what assumed one live run, with two pieces live', () => {
     expect(f.stopped).toEqual([live[1]!.payload.threadId])
     expect([work[0], work[2]].map((item) => f.store.activation(item!.workId)!.status)).toEqual(['running', 'running'])
     expect(summaryOf().work!.map((line) => line.title)).toEqual(['A', 'C'])
-  })
-
-  it('a restart with two pieces live carries each on once, in its own thread', async () => {
-    const { work } = await handOff(['A', 'B'], 'm1')
-    const live = await Promise.all(work.map((item) => start(f, item.workId)))
-    f.clock.now += 5 * MIN
-    for (const entry of live) f.runs.markTerminal(entry.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-    f.bots.close()
-    f.bots = new BotEngine(f.host)
-    await f.bots.reconcileOnStartup()
-    await flush()
-    for (const [index, item] of work.entries()) {
-      const next = f.store.dispatch(item.workId, 2)!
-      expect(next).toMatchObject({ kind: 'continue', threadId: live[index]!.payload.threadId })
-      expect(next.prompt.text).toContain('Mousse restarted while you were working.')
-      expect(f.store.activation(item.workId)!.status).toBe('running')
-    }
-    await f.bots.reconcileOnStartup()
-    expect(work.map((item) => f.store.dispatches(item.workId).length)).toEqual([2, 2])
   })
 
   it('delete ends every live piece; pause stops only schedules', async () => {
