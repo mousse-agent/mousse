@@ -2788,10 +2788,13 @@ it('expands adjacent expired schedule reviews inline without counting nudges or 
   expect(folds[0]!.querySelector('summary')?.textContent).toBe('3 expired · not sent: Send an email')
   expect(folds[1]!.querySelector('summary')?.textContent).toBe('Expired · not sent: Send an email')
   expect(folds[0]!.open).toBe(false)
+  expect(folds[0]!.querySelectorAll('[role=note]')).toHaveLength(1)
   await click(folds[0]!.querySelector('summary'))
   expect(folds[0]!.open).toBe(true)
   const cards = [...folds[0]!.querySelectorAll('[aria-label="Action to review"]')]
   expect(cards).toHaveLength(3)
+  for (const card of cards) expect(card.querySelector('[aria-label="Asked time"] time')).toBeTruthy()
+  expect(folds[0]!.querySelectorAll('.bot-system-line')).toHaveLength(0)
   for (const card of cards) { expect(card.querySelector('summary')?.textContent).toBe('What it would have sent'); expect(card.querySelector('[role="status"]')?.textContent).toContain('Expired · not sent'); expect(button('Send', card)).toBeUndefined() }
   expect(folds[0]!.querySelectorAll('[data-message-id="bm_action_exp1_n2"] [aria-label="Action to review"]')).toHaveLength(1)
   expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(5)
