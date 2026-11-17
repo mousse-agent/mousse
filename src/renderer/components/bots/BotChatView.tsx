@@ -47,6 +47,8 @@ import { BotImageFiles, BotOtherFiles, botFileImageUrl, useFailedFileImages } fr
 import { botChatImages } from './imageSources'
 import type { RevealNavigation } from '../../chat/components/agent-elements/find/reveal'
 import { useBotChatFind } from './useBotChatFind'
+import { useBotCutReplies, useBotLiveReply, useHasBotLiveReply } from '../../stores/botLiveReplies'
+import { usePacedText } from '../../chat/components/agent-elements/reply-pacing'
 import { FindInThreadBar } from '../../chat/components/agent-elements/find/FindInThreadBar'
 
 const EMPTY: BotChatMessage[] = []
@@ -447,6 +449,43 @@ function BotTyping({ bot, starts, offline, status }: { bot: BotSummary; starts: 
   </article>
 }
 
+/**
+ * The reply the chat's turn is writing, in the bubble its message will have, shown as a thread shows its live reply: a
+ * finished sentence or block at a time (`usePacedText`), never word by word. Until its first block is finished, the
+ * typing bubble stays. Only this renders as the reply grows; its message, once posted, takes its place.
+ */
+function BotLiveReply(props: { bot: BotSummary; starts: boolean; offline: boolean; status?: string; onGrow: () => void }) {
+  const reply = useBotLiveReply(props.bot.id)
+  // Each reply of the turn is paced from its own start.
+  return <PacedLiveReply key={reply?.messageId ?? ''} text={reply?.text ?? ''} {...props} />
+}
+
+function PacedLiveReply({ bot, starts, offline, status, onGrow, text }: { bot: BotSummary; starts: boolean; offline: boolean; status?: string; onGrow: () => void; text: string }) {
+  const shown = usePacedText(text, true)
+  useLayoutEffect(onGrow, [shown, onGrow])
+  if (!shown) return <BotTyping bot={bot} starts={starts} offline={offline} status={status} />
+  return <article className={`chat-participant-message from-agent bot-message bot-live-reply${starts ? ' is-group-start' : ''}`} aria-busy="true">
+    <div className="bot-message-line">
+      <div className="bot-bubble"><BotMarkdown text={shown} className="bot-markdown" streaming /></div>
+    </div>
+  </article>
+}
+
+/**
+ * A reply whose turn stopped before it finished (a Stop, a failure): what it had written, muted and marked stopped, as a
+ * thread keeps a stopped reply. It is this window's only: never stored, never sent to the bot.
+ */
+function BotCutReply({ text, starts }: { text: string; starts: boolean }) {
+  return <article className={`chat-participant-message from-agent bot-message bot-cut-reply${starts ? ' is-group-start' : ''}`}>
+    <div className="bot-message-line">
+      <div className="bot-bubble">
+        <BotMarkdown text={text} className="bot-markdown" />
+        <div className="bot-bubble-foot"><span className="bot-cut-mark" title="This reply stopped before it was finished, and was not sent.">Stopped</span></div>
+      </div>
+    </div>
+  </article>
+}
+
 /** One rise and fall of the dots, and of the status's shimmer. */
 const TYPING_CYCLE_MS = 1200
 /** Each dot starts this long after the one before it. */
@@ -559,15 +598,18 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES
   // The rows: messages, and quiet lines for work started and asks answered; what replies left on the owner's messages.
-  // The lines of the owner's `/` commands go among them by time; they are this window's only, never the bot's.
+  // The lines of the owner's `/` commands go among them by time; they are this window's only, never the bot's. So are
+  // the words of replies whose turn stopped before they were finished (botLiveReplies.ts).
   const notes = useBotsStore((s) => s.notes[bot.id] ?? NO_NOTES)
+  const cuts = useBotCutReplies(bot.id)
   const { rows, marks } = useMemo(() => {
     const shaped = chatRows(messages, bot.name, (message) => (message.ask ? askAnswerLine(message.ask, message.kind === 'notice') : undefined))
-    return { rows: withNotes(shaped.rows, notes), marks: shaped.marks }
-  }, [messages, bot.name, notes])
+    const lines = cuts.length ? [...notes, ...cuts.map((cut) => ({ id: cut.id, at: cut.at, text: cut.text, cut: true as const }))].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) : notes
+    return { rows: withNotes(shaped.rows, lines), marks: shaped.marks }
+  }, [messages, bot.name, notes, cuts])
   // The sent rows and the messages on their way, in one run of groups (a quiet line ends a group), with the day lines.
   const shown = useMemo<BotChatRow[]>(() => (pending.length ? [...rows, ...pending.map((message) => ({ kind: 'message' as const, message }))] : rows), [rows, pending])
-  const places = useMemo(() => placeMessages(shown.map((row, index) => (row.kind === 'message' ? { author: row.message.author, at: row.message.at, sending: index >= rows.length } : { author: 'system', at: row.at }))), [shown, rows.length])
+  const places = useMemo(() => placeMessages(shown.map((row, index) => (row.kind === 'message' ? { author: row.message.author, at: row.message.at, sending: index >= rows.length } : { author: row.cut ? 'bot' : 'system', at: row.at }))), [shown, rows.length])
   // Only the newest rows are drawn (botChatWindow.ts). `from`: the first row drawn while the reader is away from the
   // end; without it, the newest rows. `revealOlder`: a page asked for at the window's top shows once it arrives.
   const [from, setFrom] = useState<string | undefined>(undefined)
@@ -732,7 +774,15 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const composerField = useCallback(() => document.querySelector<HTMLTextAreaElement>('.bot-input-area textarea'), [])
   // The typing bubble is the bot's next message: it joins the group of the bot's message right above it.
   const last = shown.at(-1)
-  const typingStarts = !(last?.kind === 'message' && last.message.author === 'bot')
+  const typingStarts = !((last?.kind === 'message' && last.message.author === 'bot') || (last?.kind === 'system' && last.cut))
+  // The reply the chat's turn is writing takes the typing bubble's place, and the end stays in view as it grows.
+  const writing = useHasBotLiveReply(bot.id)
+  const followEnd = useCallback(() => {
+    const element = transcript.current
+    if (!element || !anchor.current.atEnd) return
+    element.scrollTop = element.scrollHeight
+    anchor.current.height = element.scrollHeight
+  }, [])
   const toggleAbout = () => useBotsStore.setState({ aboutOpen: !aboutOpen })
   const pictureActions = useCallback((image: LightboxImage) => <BotPictureActions image={image} />, [])
   // `/` commands: the list follows what is typed; after `/model` it offers the bot's slots and models, read once.
@@ -796,7 +846,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           const index = start + drawn
           const place = places[index]!
           const day = place.day && <div className="bot-day" role="separator" aria-label={place.day}><span>{place.day}</span></div>
-          if (row.kind === 'system') return <Fragment key={row.id}>{day}<SystemLine row={row} /></Fragment>
+          if (row.kind === 'system') return <Fragment key={row.id}>{day}{row.cut ? <BotCutReply text={row.text} starts={place.starts} /> : <SystemLine row={row} />}</Fragment>
           const message = row.message
           const sending = index >= rows.length
           // A reply shows what it answers unless that is the message right above it.
@@ -810,7 +860,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
                 asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} />}
           </Fragment>
         })}
-        {(working || offline) && <BotTyping bot={bot} starts={typingStarts} offline={offline} status={status} />}
+        {writing
+          ? <BotLiveReply bot={bot} starts={typingStarts} offline={offline} status={status} onGrow={followEnd} />
+          : (working || offline) && <BotTyping bot={bot} starts={typingStarts} offline={offline} status={status} />}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}

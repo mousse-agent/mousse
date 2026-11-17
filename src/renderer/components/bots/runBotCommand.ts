@@ -3,6 +3,7 @@ import type { BotModelPick } from '../../../shared/bots/personal/definition'
 import type { BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { botsClient, useBotsStore, type BotConfirmCommand } from '../../stores/botsStore'
+import { noteBotStopAsked } from '../../stores/botLiveReplies'
 import { errorText } from '../../services/personalBotsClient'
 import { baseSlotOf, parseBotCommand, resolveModelWord, type BotCommand } from './botCommands'
 
@@ -113,7 +114,10 @@ async function stopAll(botId: string, bot: BotSummary | undefined): Promise<stri
   const client = botsClient()
   const ids = [...(bot?.work ?? []).map((item) => item.id), ...(bot?.watchers ?? []).map((item) => item.id)]
   const stops: Array<Promise<unknown>> = ids.map((id) => client.stopWork(botId, id))
-  if (bot?.chat) stops.push(client.stop(botId))
+  if (bot?.chat) {
+    noteBotStopAsked(botId)
+    stops.push(client.stop(botId))
+  }
   if (!stops.length) return 'Nothing is running.'
   await Promise.all(stops)
   void store().refresh()
