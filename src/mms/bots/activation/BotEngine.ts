@@ -662,8 +662,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     enabled: () => botAsksFirst(this.host.settings?.get()),
     publish: id => {
       // State changes are new Mousse facts for resumed chat epochs, not another chat turn or the bot's words.
-      const action = this.store.get('SELECT bot_id, activation_id, status FROM bot_actions WHERE message_id = ?', id)
-      if (action && ['done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn'].includes(String(action.status))) this.store.db.transaction(() => this.host.journal?.appendInTx(this.store.db, {
+      const action = this.store.get('SELECT bot_id, activation_id, status, args_digest FROM bot_actions WHERE message_id = ?', id)
+      if (action && action.args_digest !== '[forgotten]' && ['done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn'].includes(String(action.status))) this.store.db.transaction(() => this.host.journal?.appendInTx(this.store.db, {
         botId: String(action.bot_id), activationId: String(action.activation_id), lane: 'run', kind: 'notice', who: 'mousse', external: true,
         sourceKey: `bm:${id}:status:${action.status}`,
         text: `Held action: ${action.status === 'done' ? 'Sent' : action.status === 'uncertain' ? "Couldn't tell if it went through" : action.status === 'running' ? 'Sending' : action.status === 'approved' ? 'Waiting for the service' : action.status === 'expired' ? 'Expired · not sent' : action.status === 'failed' ? 'Failed; check the card for its outcome' : 'Not sent'}`

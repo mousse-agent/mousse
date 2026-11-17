@@ -231,6 +231,13 @@ export class BotActions {
   }
   /** Erase call content without erasing owner intervention facts or the run-once key. */
   forgetText(botId: string, actionId?: string): void {
+    for (const action of this.host.store.all('SELECT message_id FROM bot_actions WHERE bot_id = ? AND (? IS NULL OR id = ?)', botId, actionId ?? null, actionId ?? null)) {
+      const source = `bm:${action.message_id}`
+      const statusPrefix = `${source}:status:`
+      this.host.store.run(`UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = COALESCE(redacted_at, ?)
+        WHERE bot_id = ? AND (source_key IN (?, ?) OR substr(source_key, 1, ?) = ?)`,
+      '[removed at your request]', this.host.store.now(), botId, `${source}_n1`, `${source}_n2`, statusPrefix.length, statusPrefix)
+    }
     this.host.store.run(`UPDATE bot_actions SET args_json = ?, args_digest = '[forgotten]',
       card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0),
         'toolReportedError', COALESCE(json_extract(result_json, '$.toolReportedError'), json_extract(card_json, '$.toolReportedError')),
