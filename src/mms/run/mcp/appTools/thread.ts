@@ -909,6 +909,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         throw new McpToolError('mousse_conflict', `Thread ${threadId} waits on a question or an approval, so its turn was not restarted and nothing was changed. Use apply next_turn, or answer it first.`, { conflict: 'waiting_on_request' })
       throw new McpToolError('mousse_conflict', `Thread ${threadId} has subagents of its own working, which restarting its turn would stop; nothing was changed. Use apply next_turn.`, { conflict: 'subagents_working' })
     }
+    // The person sees in the subagent's thread that it may now edit, and who allowed it.
+    if (result.changed) showAction(host, threadId, actorOf(ctx), 'lifted this subagent\'s read-only access: it may now edit files and run commands in its parent\'s folder')
     const base = { threadId, link: threadLink(threadId), title: titleOf(threadId) ?? null, access: { readOnly: result.readOnly }, changed: result.changed, ...(result.revision ? { revision: result.revision } : {}) }
     if (!result.stoppedRunId) {
       return json({
