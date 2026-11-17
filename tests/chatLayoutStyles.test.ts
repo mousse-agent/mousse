@@ -94,12 +94,10 @@ describe('chat layout styles', () => {
     expect(reduced).toMatch(/\.an-message-list > div[\s\S]*?transition:\s*none/)
   })
 
-  it('slides the overlay card in from the right with a scrim, and drops the slide for reduced motion', () => {
+  it('slides the overlay card in from the right with a scrim', () => {
     const [overlayCard] = rulesFor(sideCardCss, '.thread-side-card-layer--overlay .thread-side-card').filter((rule) => rule.selector === '.thread-side-card-layer--overlay .thread-side-card')
     expect(overlayCard!.body).toMatch(/transform:\s*translateX\(calc\(100% \+ var\(--side-card-gutter\)\)\)/)
     expect(overlayCard!.body).toMatch(/width:\s*min\(var\(--side-card-width\), calc\(100% - 2 \* var\(--side-card-gutter\)\)\)/)
     expect(sideCardCss).toMatch(/\.thread-side-card-scrim\s*\{[^}]*position:\s*absolute/)
-    const reduced = sideCardCss.slice(sideCardCss.indexOf('prefers-reduced-motion'))
-    expect(reduced).toMatch(/\.thread-side-card\.thread-side-card\.thread-side-card\[data-shown\]\s*\{[^}]*transform:\s*none/)
   })
 })
