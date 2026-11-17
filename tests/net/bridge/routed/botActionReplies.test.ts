@@ -37,7 +37,7 @@ afterAll(async () => {
 
 it('keeps a tool error outcome without its answer text when a device receives an oversized card', async () => {
   message = {
-    id: 'bm_action_test', seq: 1, role: 'notice', text: 'x'.repeat(80_000), at: '2026-11-17T09:00:00Z',
+    id: 'bm_action_test', seq: 1, author: 'bot', kind: 'notice', chips: [], text: 'x'.repeat(80_000), at: '2026-11-17T09:00:00Z',
     action: { actionId: ACTION, digest: 'a'.repeat(64), title: 'Send', serverName: 'Mail',
       args: { body: 'x'.repeat(80_000) }, hasHiddenValues: false, hiddenPaths: [], status: 'failed',
       result: { text: 'private tool answer', toolReportedError: true } }
@@ -77,7 +77,7 @@ it.each(refusals)('reports %s before effects over a real link', async (reason, s
   const input = { botId: realBot, actionId: ACTION, digest: 'a'.repeat(64), answer: 'send' as const }
   check = () => f.bots.service.actionCheck(input)
   answer = vi.fn(() => f.bots.service.answerAction(input))
-  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict', message: sentence })
+  await expect(rpcAnswer()).rejects.toMatchObject({ code: `bot_action_${reason}`, message: sentence })
   expect(answer).not.toHaveBeenCalled()
 }, 60_000)
 
@@ -85,7 +85,7 @@ it('refuses oversized Send before effects but allows Not now', async () => {
   check = () => {}
   message = { ...message, text: 'x'.repeat(80_000), action: { ...message.action!, args: { body: 'x'.repeat(80_000) } } }
   answer = vi.fn(async () => ({ status: 'declined' }))
-  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict', message: 'Open it on the computer to send.' })
+  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'bot_action_too_large', message: 'Open it on the computer to send.' })
   expect(answer).not.toHaveBeenCalled()
   expect(await rpcAnswer('not_now')).toMatchObject({ status: 'declined' })
   expect(answer).toHaveBeenCalledTimes(1)
@@ -109,4 +109,9 @@ it('keeps a failure after preflight uncertain', async () => {
   answer = vi.fn(async () => { throw Object.assign(new Error('Changed during dispatch'), { code: 'bot_action_changed' }) })
   await expect(rpcAnswer()).rejects.toMatchObject({ code: 'outcome_uncertain' })
   expect(answer).toHaveBeenCalledTimes(1)
+}, 60_000)
+
+it('keeps arbitrary engine error text off the wire', async () => {
+  check = () => { throw Object.assign(new Error('private tool answer'), { code: 'bot_action_paused' }) }
+  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'bot_action_paused', message: 'Resume this bot to send this.' })
 }, 60_000)

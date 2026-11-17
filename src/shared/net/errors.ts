@@ -137,6 +137,15 @@ export const NET_ERRORS = {
     retryable: false,
     message: 'This repository is not linked on the target device.'
   },
+  // Held-action admission refusals are definite, including on another device.
+  bot_action_changed: { category: 'conflict', retryable: false, message: 'This changed since you saw it. Check it again before sending.' },
+  bot_action_paused: { category: 'conflict', retryable: false, message: 'Resume this bot to send this.' },
+  bot_action_expired: { category: 'conflict', retryable: false, message: 'This expired, so nothing was sent.' },
+  bot_action_withdrawn: { category: 'conflict', retryable: false, message: 'No longer needed, so nothing was sent.' },
+  bot_action_settled: { category: 'conflict', retryable: false, message: 'This was already answered.' },
+  bot_action_gone: { category: 'conflict', retryable: false, message: "This can't be sent any more." },
+  bot_action_unreachable: { category: 'conflict', retryable: false, message: "The service couldn't be reached, so nothing was sent." },
+  bot_action_too_large: { category: 'conflict', retryable: false, message: 'Open it on the computer to send.' },
   outcome_uncertain: {
     category: 'conflict',
     retryable: false,
@@ -175,6 +184,15 @@ export const isForbiddenReason = (value: unknown): value is ForbiddenReason =>
 export function forbiddenReason(details: unknown): ForbiddenReason | undefined {
   const reason = (details as { reason?: unknown } | null | undefined)?.reason
   return isForbiddenReason(reason) ? reason : undefined
+}
+
+/** Only these owner-facing action sentences may carry a public bot/service name over Net. */
+export function botActionRefusalMessage(code: NetErrorCode, message: unknown): string | undefined {
+  if (typeof message !== 'string' || message.length > 300 || /[\u0000-\u001f\u007f-\u009f]/.test(message)) return undefined
+  if (code === 'bot_action_paused' && /^Resume .{1,200} to send this\.$/u.test(message)) return message
+  if (code === 'bot_action_unreachable' && /^.{1,200} couldn't be reached, so nothing was sent\.$/u.test(message)) return message
+  if (code === 'bot_action_withdrawn' && message === 'This changed since you saw it. Nothing was sent.') return message
+  return undefined
 }
 
 /** Error with a stable code and an optional preserved cause chain. */

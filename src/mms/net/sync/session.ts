@@ -26,6 +26,7 @@ import {
   NetError,
   NET_ERRORS,
   forbiddenReason,
+  botActionRefusalMessage,
   isForbiddenReason,
   type NetErrorCode
 } from '../../../shared/net/errors'
@@ -191,7 +192,7 @@ function wireError(error: unknown): WireError {
     error instanceof NetError && code === 'forbidden' ? forbiddenReason(error.details) : undefined
   return {
     code,
-    message: NET_ERRORS[code].message,
+    message: botActionRefusalMessage(code, error instanceof NetError ? error.message : undefined) ?? NET_ERRORS[code].message,
     retryable: NET_ERRORS[code].retryable,
     ...(reason
       ? {
@@ -209,7 +210,7 @@ const remoteError = (error: WireError): NetError => {
       : undefined
   return reason && isForbiddenReason(reason)
     ? new NetError(error.code, undefined, { details: { reason } })
-    : new NetError(error.code)
+    : new NetError(error.code, botActionRefusalMessage(error.code, error.message))
 }
 
 /** Authenticated normal session. Enrollment-only composition is implemented in P2. */

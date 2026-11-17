@@ -408,7 +408,11 @@ export class BotActions {
     }
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
-  async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
+  /** Read-only admission check; answer repeats it with lifecycle settlement enabled. */
+  check(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): void {
+    this.checked(input, false)
+  }
+  private checked(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }, settle: boolean): ActionRow {
     const action = this.get(input.actionId)
     if (!action) throw new BotActionChanged("This can't be sent any more.", 'bot_action_gone')
     if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(JSON.parse(action.result_json).text, 'bot_action_unreachable')
@@ -416,18 +420,22 @@ export class BotActions {
     if (action.status === 'withdrawn') throw new BotActionChanged(action.result_json && JSON.parse(action.result_json).text?.includes('changed since') ? 'This changed since you saw it. Nothing was sent.' : 'No longer needed, so nothing was sent.', 'bot_action_withdrawn')
     if (action.status !== 'open') throw new BotActionChanged('This was already answered.', 'bot_action_settled')
     if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
-      this.expireDue()
+      if (settle) this.expireDue()
       throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
     }
     if (action && input.answer === 'send' && this.host.store.registry(action.bot_id)?.pausedReason === 'owner') throw new BotActionChanged(`Resume ${this.host.name(action.bot_id)} to send this.`, 'bot_action_paused')
     const row = this.host.store.activation(action.activation_id)
     if (row?.trigger.kind === 'schedule' && this.host.obsolete(action)) {
-      this.host.store.db.transaction(() => {
+      if (settle) this.host.store.db.transaction(() => {
         if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent; carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(action))
       })
       throw changed()
     }
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
+    return action
+  }
+  async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
+    const action = this.checked(input, true)
     if (input.answer === 'not_now') {
       this.host.store.db.transaction(() => {
         if (!this.transition(action.id, 'open', 'declined', { text: 'Your owner chose not to send this: carry on without it and say what you skipped.' })) throw changed()

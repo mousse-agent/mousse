@@ -1,4 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
+import { botActionRefusalMessage, isNetErrorCode } from '../../../shared/net/errors'
 import { NetError, type NodeCapability, type NodeId } from '../../../shared/net'
 import type { BotChatCard, BotChatMessage, BotDetail, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
@@ -74,6 +75,7 @@ export interface RemoteBotsPort {
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<{ message: BotChatMessage }>
   actionMessage(botId: string, actionId: string): BotChatMessage
   answerAction(input: { botId: string; actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }>
+  actionCheck(input: { botId: string; actionId: string; digest: string; answer: 'send' | 'not_now' }): void
   questionCheck(botId: string, questionId: string): void
   answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }>
   pause(botId: string): { bot: BotSummary }
@@ -426,6 +428,8 @@ function refusal(error: unknown): never {
   // Only the engine's own refusals (which carry a code and plain words) are passed on.
   if (typeof code !== 'string') throw error
   const message = error instanceof Error ? error.message : undefined
+  if (code.startsWith('bot_action_') && isNetErrorCode(code))
+    throw new NetError(code, botActionRefusalMessage(code, message))
   if (code === 'bot_not_found') throw new NetError('stream_unknown', 'This bot is gone.')
   if (code.endsWith('_not_found') || code === 'not_found') throw new NetError('stream_unknown', message)
   throw new NetError(code === 'invalid_params' ? 'bad_request' : 'conflict', message)
@@ -579,6 +583,15 @@ export function remoteBotMethods(options: {
     throw new NetError('stream_unknown', `${what} is gone.`)
   }
   const botId = (p: Record<string, unknown>): string => p.botId as string
+  const actionSize = (p: Record<string, unknown>, port: RemoteBotsPort): void => {
+      if (p.answer === 'send') {
+        const message = port.actionMessage(botId(p), p.actionId as string)
+        // Include the page envelope too: fittedPage may cut its only message to leave room for it.
+        const page = port.chatList(botId(p), { limit: 1, beforeSeq: message.seq + 1 })
+        if (bytes({ ...page, messages: [remoteBotMessage(message)] }) + 1 > RESULT_BYTES)
+          throw new NetError('bot_action_too_large')
+      }
+  }
   return [
     method('bots.get', async (p, port) => remoteBotDetail(port.get(botId(p)))),
     method('bots.chat.list', async (p, port) =>
@@ -650,15 +663,12 @@ export function remoteBotMethods(options: {
       first((p, port) => port.questionCheck(botId(p), p.questionId as string))
     ),
     method('bots.actions.answer', async (p, port) => {
-      if (p.answer === 'send') {
-        const message = port.actionMessage(botId(p), p.actionId as string)
-        // Include the page envelope too: fittedPage may cut its only message to leave room for it.
-        const page = port.chatList(botId(p), { limit: 1, beforeSeq: message.seq + 1 })
-        if (bytes({ ...page, messages: [remoteBotMessage(message)] }) + 1 > RESULT_BYTES)
-          throw new NetError('conflict', 'Open it on the computer to send.')
-      }
+      actionSize(p, port)
       return port.answerAction({ botId: botId(p), actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
-    }),
+    }, first((p, port) => {
+      port.actionCheck({ botId: botId(p), actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
+      actionSize(p, port)
+    })),
     method('bots.reminders.snooze', async (p, port) => fitted(remoteBotMessage(port.reminderSnooze(botId(p), p.messageId as string, p.choice as import('../../../shared/bots/personal/chat').BotSnoozeChoice)))),
     method('bots.personal.pause', async (p, port) => ({ bot: remoteBotSummary(port.pause(botId(p)).bot) })),
     method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),
