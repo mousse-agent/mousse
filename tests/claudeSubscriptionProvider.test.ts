@@ -1060,6 +1060,37 @@ describe('Claude reasoning levels', () => {
     ])
   })
 
+  it.each(['settings', 'list'] as const)('keeps the available model list when discovery times out reading %s', async (phase) => {
+    const query = Object.assign(fakeQuery(), {
+      supportedModels: vi.fn(async () => [opus, haiku]),
+      setModel: vi.fn(async () => {}),
+      getSettings: vi.fn(() => new Promise(() => {}))
+    })
+    if (phase === 'list') query.supportedModels.mockImplementation(() => new Promise(() => {}))
+    const { service, home, settings } = fixture(() => query)
+    await service.status()
+
+    vi.useFakeTimers()
+    try {
+      const refresh = service.refreshModels(home).then(() => ({ ok: true }), (error: Error) => ({ ok: false, message: error.message }))
+      await vi.advanceTimersByTimeAsync(15_000)
+      if (phase === 'settings') {
+        expect(await refresh).toEqual({ ok: true })
+        expect(service.llmProvider()?.models.map(({ id, label }) => [id, label])).toEqual([
+          ['opus', 'Opus 5.5'], ['haiku', 'Haiku 5.5']
+        ])
+        expect(settings().modelsRefreshedAt).toBeTruthy()
+      } else {
+        expect(await refresh).toEqual({ ok: false, message: 'Claude Code model discovery timed out' })
+        expect(settings().models).toEqual([{ id: 'sonnet', label: 'Sonnet' }])
+      }
+      expect(query.close).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+      service.stop()
+    }
+  })
+
   it('runs Ultracode with Claude Code\'s ultracode setting at the model\'s default effort', async () => {
     const captured: Options[] = []
     const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) }, true, undefined, [{ id: 'opus', label: 'Opus 5.5', efforts: ['low', 'high', 'ultracode'] }])
