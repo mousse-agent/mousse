@@ -75,6 +75,7 @@ const refusals = [
   ['paused', 'Resume Mail to send this.'],
   ['expired', 'This expired, so nothing was sent.'],
   ['withdrawn', 'No longer needed, so nothing was sent.'],
+  ['schedule_changed', 'This changed since you saw it. Nothing was sent.'],
   ['settled', 'This was already answered.'],
   ['gone', "This can't be sent any more."],
   ['unreachable', "Mail couldn't be reached, so nothing was sent."]
@@ -88,11 +89,11 @@ it.each(refusals)('reports %s before effects over a real link', async (reason, s
   f.store.run('DELETE FROM bot_actions')
   f.store.setPaused(realBot, reason === 'paused' ? 'owner' : null)
   if (reason !== 'gone') {
-    const status = ['expired', 'withdrawn'].includes(reason) ? reason : reason === 'settled' ? 'done' : reason === 'unreachable' ? 'failed' : 'open'
+    const status = reason === 'schedule_changed' ? 'withdrawn' : ['expired', 'withdrawn'].includes(reason) ? reason : reason === 'settled' ? 'done' : reason === 'unreachable' ? 'failed' : 'open'
     f.store.run(`INSERT INTO bot_actions (id, call_key, bot_id, activation_id, lane, kind, target_json, args_json, args_digest, binding_json, status, expires_at, created_at, result_json)
       VALUES (?, ?, ?, 'missing-run', 'run', 'mcp', '{}', '{}', ?, '{}', ?, ?, ?, ?)`,
       ACTION, ACTION, realBot, 'b'.repeat(64), status, new Date(f.clock.now + 60_000).toISOString(), f.store.now(),
-      reason === 'unreachable' ? JSON.stringify({ text: sentence, notSentInTime: true }) : null)
+      reason === 'unreachable' ? JSON.stringify({ text: sentence, notSentInTime: true }) : reason === 'schedule_changed' ? JSON.stringify({ text: sentence }) : null)
   }
   const input = { botId: realBot, actionId: ACTION, digest: 'a'.repeat(64), answer: 'send' as const }
   check = () => f.bots.service.actionCheck(input)

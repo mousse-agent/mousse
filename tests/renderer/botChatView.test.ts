@@ -2867,3 +2867,15 @@ it('keeps the cached service name for a device refusal after its card disappears
   expect(host.textContent).not.toContain('WIRE SERVICE MUST NOT APPEAR')
   expect(host.querySelector('[aria-label="Action to review"]')).toBeNull()
 })
+
+it.each(['local', 'device'])('keeps the changed-schedule sentence and closes buttons on %s', async route => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: vi.fn(async () => {
+    fake.chats.inbox = [held({ status: 'withdrawn' })]
+    throw Object.assign(new Error('wire prose must not appear'), route === 'local' ? { code: 'bot_action_schedule_changed' } : { code: 'conflict', details: { reason: 'bot_action_schedule_changed' } })
+  }) })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(host.textContent).toContain('This changed since you saw it. Nothing was sent.')
+  expect(button('Send', transcript())).toBeUndefined()
+})

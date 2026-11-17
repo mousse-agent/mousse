@@ -475,7 +475,7 @@ it('Send withdraws a stale schedule card even if the edit hook was missed', asyn
   const a = f.bots.actions.forWork(t.id)!
   const current = f.host.schedules!.get.bind(f.host.schedules)
   vi.spyOn(f.host.schedules!, 'get').mockImplementation((bot, id) => { const entry = current(bot, id); return entry ? { ...entry, revision: 'missed-edit' } : undefined })
-  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_withdrawn', message: 'This changed since you saw it. Nothing was sent.' })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_schedule_changed', message: 'This changed since you saw it. Nothing was sent.' })
   expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
 })
@@ -664,7 +664,7 @@ it('a saved schedule edit succeeds and refreshes observers if approval cleanup f
   expect(seen).toContain('Saved new instructions')
   expect(changed).toHaveBeenCalled()
   expect(f.bots.schedulesOf(t.botId).find(row => row.scheduleId === t.schedule.scheduleId)?.prompt).toBe('Saved new instructions')
-  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_withdrawn', message: 'This changed since you saw it. Nothing was sent.' })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_schedule_changed', message: 'This changed since you saw it. Nothing was sent.' })
   expect(t.calls).toEqual([])
 })
 it('an edit whose save itself fails still reports failure and keeps its card', async () => {
