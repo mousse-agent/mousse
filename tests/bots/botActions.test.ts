@@ -2361,7 +2361,7 @@ it.each([true, false])('C4 next wrapper preserves held review and retry identity
   const app = vi.fn(async () => ({ text: 'registered memory read' }))
   const call = catalogueTurn(t, app)
   expect(await call('use_tool', { tool: 'mail_not_offered', arguments: {} }, 'unknown')).toEqual(refused('unknown_tool', "You have no tool named mail_not_offered. tool_catalogue lists each group's tools."))
-  const wrapped = { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'review-stable' } }
+  const wrapped = { tool: 'mail_send', clientRequestId: 'wrapper-key', arguments: { ...t.args, clientRequestId: 'review-stable' } }
   const result = await call('use_tool', wrapped, 'runtime-first')
   if (!on) {
     expect(result).toMatchObject({ text: expect.stringContaining('delivered') })
@@ -2408,8 +2408,7 @@ it('C4 next wait-false question survives a held call and its answer reaches the 
   await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   await flush()
   const continuation = f.store.lastMainDispatch(t.workId)!
-  expect(JSON.stringify(continuation.prompt)).toContain('Work')
-  expect(JSON.stringify(continuation.prompt)).toContain('Which inbox?')
+  expect(continuation.prompt.text).toContain('Your owner answered your question "Which inbox?": Work')
   expect(f.store.question(q.id)!.status).toBe('answered')
   expect(t.calls).toEqual([t.args])
 })
