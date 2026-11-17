@@ -65,6 +65,26 @@ describe('renderer message synchronization', () => {
     expect(useAppStore.getState().messages).toEqual([stopped])
   })
 
+  it('shows a sent message once when the thread view brings its saved copy', () => {
+    const earlier: ChatMessage = { id: 'u-earlier', role: 'user', content: 'yes', timestamp: '2026-07-15T11:00:00.000Z' }
+    const painted: ChatMessage = { id: 'optimistic:a', role: 'user', content: 'Fix it', timestamp: '2026-07-15T12:00:00.000Z' }
+    const saved: ChatMessage = { ...painted, id: 'u-saved', timestamp: '2026-07-15T12:00:15.000Z' }
+    useAppStore.setState({ profileId: 'message-sync', activeThreadId: 'new', openingThreadId: null, messages: [painted] })
+    useAppStore.getState().applyThreadView({ threadId: 'new', messages: [saved] })
+    expect(useAppStore.getState().messages.map((message) => message.id)).toEqual(['u-saved'])
+
+    // The same text sent again while the earlier one is shown keeps its copy until it is saved too.
+    const again: ChatMessage = { id: 'optimistic:b', role: 'user', content: 'yes', timestamp: '2026-07-15T12:01:00.000Z' }
+    useAppStore.setState({ messages: [earlier, saved, again] })
+    useAppStore.getState().applyThreadView({ threadId: 'new', messages: [earlier, saved] })
+    expect(useAppStore.getState().messages.map((message) => message.id)).toEqual(['u-earlier', 'u-saved', 'optimistic:b'])
+
+    // A transcript still loading shows only the copy; the earlier "yes" it brings does not take the copy's place.
+    useAppStore.setState({ messages: [again] })
+    useAppStore.getState().applyThreadView({ threadId: 'new', messages: [earlier, saved] })
+    expect(useAppStore.getState().messages.map((message) => message.id)).toEqual(['u-earlier', 'u-saved', 'optimistic:b'])
+  })
+
   it('does not shorten streaming text when a lagging snapshot arrives', () => {
     const live = { ...stopped, content: 'a much longer partial answer', incomplete: undefined, streaming: true }
     const stale = { ...live, content: 'a much' }
