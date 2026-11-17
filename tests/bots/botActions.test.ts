@@ -503,7 +503,7 @@ it.each([false, true])('one unattended chat starting twenty works has bounded op
   const actions = f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")
   expect(actions).toHaveLength(different ? 3 : 1)
   expect(t.results.filter(result => !result.isError)).toHaveLength(different ? 3 : 1)
-  expect(t.results.at(-1)?.text).toContain(different ? 'three cards' : 'already waiting')
+  expect(t.results.at(-1)?.text).toContain(different ? 'Three requests' : 'already waiting')
   expect(t.calls).toEqual([])
 })
 it('owner-started work retains five different open cards', async () => {
@@ -562,7 +562,7 @@ it('scheduled and unattended work share the same pending-card cap', async () => 
   const due = await f.tickSchedules(new Date(f.clock.now))
   const run = await start(f, due.inserted[0]!)
   const result = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'From the schedule' }, toolCallId: 'scheduled-cap', signal: new AbortController().signal })
-  expect(result).toMatchObject({ isError: true, text: expect.stringContaining('three cards') })
+  expect(result).toMatchObject({ isError: true, text: expect.stringContaining('Three requests') })
   expect(f.bots.actions.forWork(due.inserted[0]!)).toBeUndefined()
 })
 it('a duplicate refusal explains the earlier card without borrowing its outcome', async () => {
@@ -761,7 +761,7 @@ it('three unsent calls stop the tool across occurrences, and owner words reset i
     turn = await start(f, id)
   }
   const call = () => callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'new version' }, toolCallId: 'fourth-call', signal: new AbortController().signal })
-  expect(await call()).toMatchObject({ isError: true, text: expect.stringContaining('three cards') })
+  expect(await call()).toMatchObject({ isError: true, text: expect.stringContaining('Three requests') })
   expect(f.bots.actions.forWork(id)).toBeUndefined()
   await f.bots.service.chatSend({ botId: t.botId, text: 'Please try again', clientRequestId: 'reset-schedule-refusal' })
   expect((await call()).isError).not.toBe(true)
@@ -1840,11 +1840,11 @@ it.each([true, false])('B3 three declined cards stop changed calls until owner i
       const a = f.bots.actions.forWork(t.workId)!
       await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
       await flush(); runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
-    } else expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('had three cards for this tool that were not sent') })
+    } else expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
   }
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(on ? 3 : 0)
   if (!on) { expect(t.calls).toHaveLength(20); return }
-  expect(f.store.unreadWorkRefusals(t.workId).map(n => n.text).join(' ')).toContain('had three cards for this tool that were not sent')
+  expect(f.store.unreadWorkRefusals(t.workId).map(n => n.text).join(' ')).toContain('Three requests for this tool are waiting or were not sent')
   expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__other', args: t.args, toolCallId: 'another-tool', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
   await finish(f, runtime.payload)
   const other = f.bots.actions.forWork(t.workId)!
@@ -1958,12 +1958,12 @@ it('R2-4 three expired cards refuse further calls without claiming the owner dec
     await f.bots.deliverDueReminders(); await flush()
     runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   }
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'before-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('had three cards for this tool that were not sent') })
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'before-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
   const a = f.bots.actions.forWork(t.workId)!
   const memory = new BotMemoryStore({ db: f.store.db })
   const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'declined call' })!
   memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('had three cards for this tool that were not sent') })
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(3)
 })
 
