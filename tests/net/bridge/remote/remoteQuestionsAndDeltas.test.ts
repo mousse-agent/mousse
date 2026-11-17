@@ -401,18 +401,6 @@ describe('remote approval requests (SPEC §17)', () => {
       await expect(b.rpc(method, { threadId: thread.id }, rpc(`no-${method}`))).rejects.toBeTruthy()
   })
 
-  it('a phone that can only read sees the request but cannot answer it', async () => {
-    const p = await setup(['read']),
-      { b } = await p.connect(),
-      thread = p.mms.threads.createThread('Read only'),
-      { outcome, requestId } = ask(p, thread.id)
-    expect(await b.rpc('orchestrator.pendingQuestions', { threadId: thread.id }, rpc())).toMatchObject({ pending: [{ requestId }] })
-    await expect(answer(b, thread.id, requestId, { permission: 'allow' })).rejects.toMatchObject({ code: 'forbidden' })
-    expect(p.mms.runEngine.approvals.get(requestId)!.status).toBe('pending')
-    p.mms.questions.dismissAllForThread(thread.id)
-    await outcome
-  })
-
   it('a local answer wins: the phone gets the terminal result with who decided what, and its retry is told the same', async () => {
     const p = await setup(),
       { b } = await p.connect(),

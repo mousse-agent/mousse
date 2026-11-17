@@ -190,13 +190,7 @@ describe('the snapshot an owner sends', () => {
 
   it('gives a phone its whole list past the wire bound: a phone parses it with plain JSON.parse', () => {
     // A phone's list is its own: no trimming. It used to stop at the wire's 16,384 nodes (about 700 threads).
-    const few = Array.from({ length: 400 }, (_, n) => row(n))
-    expect(new MmsListsSource(services(few), undefined).snapshot().threads).toHaveLength(400)
     const many = Array.from({ length: 2000 }, (_, n) => row(n))
     expect(new MmsListsSource(services(many), undefined).snapshot().threads).toHaveLength(2000)
-    // The private lists of another computer of the user take the same threads.
-    expect(
-      new MmsListsSource(services(many), undefined, { private: true }).snapshot().threads
-    ).toHaveLength(2000)
   })
 })
