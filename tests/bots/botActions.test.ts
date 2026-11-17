@@ -1,3 +1,4 @@
+import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
@@ -340,7 +341,7 @@ it.each([true, false])('a scheduled use_tool call holds the real arguments once 
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
-it.each(['repeat', 'three', 'forgotten'] as const)('recreating a schedule or starting a second one cannot reset %s refusals', async rule => {
+it.each(['repeat', 'three', 'forgotten'] as const)('removed or recreated schedules and a second schedule cannot reset %s refusals', async rule => {
   const t = await scheduledCall()
   let id = t.id, turn = t.run, schedule = t.schedule
   const count = rule === 'three' ? 3 : 1
@@ -357,8 +358,7 @@ it.each(['repeat', 'three', 'forgotten'] as const)('recreating a schedule or sta
     else await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
     await flush()
     const resumed = await start(f, id, 2)
-    // The scheduled run itself removes and recreates its automation, after the held call settled.
-    expect(botAppToolRefusal(resumed.prepared.authority, 'bot_schedule_remove')).toBeUndefined()
+    // Exercise retained history across engine-level replacement. Actual scheduled tool calls are owner-only (tested below).
     f.bots.tools.schedules.remove(t.botId, schedule.scheduleId)
     const added = f.bots.tools.schedules.add(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send the email' })
     schedule = f.book.get(t.botId, added.scheduleId)!
@@ -450,6 +450,19 @@ it.each(['prompt', 'timing', 'end', 'model', 'on/off', 'fixed line'] as const)('
   expect(inTransaction).toContain(true)
   expect(inTransaction).not.toContain(false)
   expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+})
+it('master refuses schedule recreation at the actual scheduled-run tool handlers', async () => {
+  const t = await scheduledCall()
+  const tools = botTools(() => ({ host: f.bots.tools }))
+  const turn = appTurn({ threadId: t.run.payload.threadId, runId: t.run.payload.runId, turnToken: 'tt', bot: t.run.prepared.authority })
+  const context = { caller: { threadId: t.run.payload.threadId, runId: t.run.payload.runId }, turn } as Parameters<(typeof tools)[number]['handler']>[1]
+  for (const [name, args] of [
+    ['bot_schedule_remove', { scheduleId: t.schedule.scheduleId }],
+    ['bot_schedule_add', { when: { kind: 'interval', minutes: 5 }, prompt: 'Recreate' }]
+  ] as const) {
+    expect(await tools.find(tool => tool.name === name)!.handler(args, context)).toMatchObject({ isError: true, text: expect.stringContaining('Only the owner') })
+  }
+  expect(f.book.list(t.botId)).toHaveLength(1)
 })
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
