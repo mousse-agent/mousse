@@ -221,6 +221,23 @@ describe('bot turn setup', () => {
     expect(app.instructions(true).turnPreamble).not.toContain('ZEBRA-REVIEWER')
   })
 
+  it('a thread\'s agent is told its last reply is the one the person sees, with or without Mousse\'s tools; a bot is not', async () => {
+    const internals = orch as unknown as {
+      getOrCreateSession(threadId: string): unknown
+      registerAppTurn(session: unknown, runId: string, mode: string, continuation: boolean, bot?: unknown): { turn: unknown }
+      completeAppTurn(turn: unknown, input: Record<string, unknown>): Promise<{ instructions(mcp: boolean): { sessionInstructions: string } }>
+    }
+    const rule = 'Your last reply of a turn is the only one the person sees. Put every answer they asked for in it, including ones you gave earlier in the turn.'
+    const thread = internals.registerAppTurn(internals.getOrCreateSession('plain-thread'), 'run-thread', 'agent', false)
+    const app = await internals.completeAppTurn(thread.turn, { userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'ask' })
+    expect(app.instructions(true).sessionInstructions).toContain(rule)
+    expect(app.instructions(false).sessionInstructions).toContain(rule)
+    const authority = { skills: new Set<string>(), appTools: new Set<string>(), time: { signal: new AbortController().signal } }
+    const bot = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-bot-rule', 'agent', false, { authority, skills: [] })
+    const botApp = await internals.completeAppTurn(bot.turn, { userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.' })
+    expect(botApp.instructions(true).sessionInstructions).not.toContain(rule)
+  })
+
   it('the context pack leads the turn preamble, ahead of Mousse\'s own text (Bot Phase 1 §5.3.2)', async () => {
     const internals = orch as unknown as {
       getOrCreateSession(threadId: string): unknown
