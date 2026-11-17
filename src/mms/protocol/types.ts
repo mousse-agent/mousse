@@ -1,4 +1,5 @@
 import { APP_PRESENCE_CAPABILITY } from '../notifications/OwnerQuietHours'
+import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
 import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 /**
  * Versioned MMS local protocol envelopes (transport-independent).
@@ -526,6 +527,7 @@ export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
   APP_PRESENCE_CAPABILITY,
+  KEEP_AWAKE_CAPABILITY,
   BOT_TELLING_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   'errors.v1',
