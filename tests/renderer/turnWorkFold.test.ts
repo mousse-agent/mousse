@@ -282,6 +282,27 @@ describe('what you opened in a thread', () => {
     expect(groupLine().getAttribute('aria-expanded')).toBe('true')
   })
 
+  it('keeps a live run opened while the turn ran: the group line it becomes at the end is open, after a switch too', () => {
+    const live = (threadId: string, messages: UIMessage[], status: 'ready' | 'streaming') =>
+      act(() => root.render(createElement(MessageList, { key: threadId, threadId, messages, status })))
+    const running = [...turn(3, 0).slice(0, 5), call('b3', 'tool-Bash', { command: 'node test.js' }, 6, 'input-available')]
+    live('thread-c', running, 'streaming')
+    const liveToggle = host.querySelector<HTMLButtonElement>('[data-turn-live] button.turn-live-toggle')!
+    act(() => liveToggle.click())
+    expect(liveToggle.getAttribute('aria-expanded')).toBe('true')
+    // The turn ends on that run: it takes its group line, inside the work that folds. The narration before the run
+    // moves below the work, so the run joins the thought before it in one line.
+    const ended = [...turn(3, 0).slice(0, 5), call('b3', 'tool-Bash', { command: 'node test.js' }, 6)]
+    live('thread-c', ended, 'ready')
+    act(() => toggles()[0]!.click())
+    expect(groupLine().textContent).toContain('3 actions')
+    expect(groupLine().getAttribute('aria-expanded')).toBe('true')
+    show('thread-b', turn(2, 0))
+    show('thread-c', ended)
+    expect(toggles()[0]!.getAttribute('aria-expanded')).toBe('true')
+    expect(groupLine().getAttribute('aria-expanded')).toBe('true')
+  })
+
   it('is forgotten when the thread is deleted', () => {
     expect(hasThreadOpenMemory('thread-a')).toBe(true)
     forgetThreadOpenMemory(['thread-a'])

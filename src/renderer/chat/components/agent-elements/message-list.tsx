@@ -2774,7 +2774,12 @@ const TurnRow = memo(function TurnRow({
               <ToolCallsGroup
                 key={`${firstId}-toolcalls`}
                 openKey={`${firstId}-toolcalls`}
-                rowKeys={grouped.map((item, k) => itemKey(item, k))}
+                // Also the lines of the runs it takes in: when a turn ends, its narration moves below the work and a run
+                // the person opened live joins the thought before it, under that thought's key. It stays open.
+                rowKeys={[
+                  ...grouped.map((item, k) => itemKey(item, k)),
+                  ...segment.msgIndices.slice(1).map((msgIndex) => `${answerMsgs[msgIndex]!.id}-toolcalls`),
+                ]}
                 count={grouped.length}
                 icon={
                   heading.thought || iconType === "tool-Thinking" ? (
