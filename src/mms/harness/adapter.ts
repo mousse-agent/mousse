@@ -542,6 +542,11 @@ export interface ProviderAdapter {
   /** Whether the adapter keeps a process for `threadId` between turns now (Claude's live query). */
   hasLiveProcess?(threadId: string): boolean
   /**
+   * Closes the process a bot's chat keeps warm on `threadId` between its turns (its bot was paused or deleted, or its
+   * permissions or model changed); one running a turn closes when that turn ends. True when there was one.
+   */
+  releaseBotProcess?(threadId: string): boolean
+  /**
    * SPEC §16.2 native fork: a new provider session branched from `ref` after `atTurnOrdinal`, or
    * null when the runtime cannot branch it (the fork then falls back to a portable handoff). Only
    * called when `featureGates.forkStrategy(caps)` is `native` and `ref` names a session.

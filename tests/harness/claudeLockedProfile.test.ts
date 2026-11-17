@@ -161,7 +161,7 @@ function ownerService(probe: Probe, result: Record<string, unknown> = { subtype:
   }
   const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
     query,
-    // A live process would be kept warm: a bot turn never takes one.
+    // Live processes are on: a bot turn without the chat's key (`BotAuthority.warm`) still never takes one.
     live: true,
     runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
     launchConfig: () => ({ binaryPath: binary, env: { USER_VARIABLE: 'from-settings' } })

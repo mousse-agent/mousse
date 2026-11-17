@@ -275,6 +275,8 @@ export interface HarnessGateway {
   stopThread(threadId: string): Promise<'stopped' | 'not_active'>
   /** Whether any instance keeps a process for the thread between turns now (`ProviderAdapter.hasLiveProcess`). */
   hasLiveProcess?(threadId: string): boolean
+  /** Closes the process a bot's chat keeps warm on the thread, on whichever instance holds it (`ProviderAdapter.releaseBotProcess`). */
+  releaseBotProcess?(threadId: string): boolean
   /**
    * `/compact` on the instance a thread runs on: its own compaction of the thread's native session.
    * False when it has none or compacted nothing (`DriverRuntime.compactConversation`).
@@ -1967,6 +1969,18 @@ export class Harness implements HarnessGateway {
   hasLiveProcess(threadId: string): boolean {
     for (const record of this.records.values()) if (record.runtime.adapter.hasLiveProcess?.(threadId)) return true
     return false
+  }
+
+  releaseBotProcess(threadId: string): boolean {
+    let released = false
+    for (const record of this.records.values()) {
+      try {
+        if (record.runtime.adapter.releaseBotProcess?.(threadId)) released = true
+      } catch (error) {
+        console.warn("a bot's warm process could not be closed", { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return released
   }
 
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
