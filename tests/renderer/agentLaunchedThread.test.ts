@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 /**
  * A thread an agent started with `thread_create`: the new thread says "Started by an agent in «title»" at its top, and
- * the title opens the launching thread; the launcher's transcript shows the new thread as a chip with its live status,
- * whose click switches the main view to it, and Back returns. How the bar and the chip look is checked in the real app
- * (screenshots on the PR), not here.
+ * the title opens the launching thread. The launcher's chat adds no line of Mousse's own for it: the agent's reply names
+ * the new thread. How the bar looks is checked in the real app (screenshots on the PR), not here.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -14,7 +13,6 @@ vi.mock('../../src/renderer/services/navigationGuards', () => ({ confirmNavigati
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { chatStatusFromPhase, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import { ThreadStartedByBar } from '../../src/renderer/components/ThreadStartedByBar'
-import { EMPTY_THREAD_HISTORY, stepHistory, trackThreadHistory, useThreadHistoryStore } from '../../src/renderer/lib/threadHistory'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useBotsStore } from '../../src/renderer/stores/botsStore'
 import type { BotSummary } from '../../src/shared/bots/personal/chat'
@@ -29,7 +27,6 @@ const botsInitial = useBotsStore.getInitialState()
 
 let root: Root
 let host: HTMLElement
-let stopHistory: (() => void) | undefined
 // Like the main process, a select sends the thread's view, which shows the thread.
 const select = vi.fn(async (threadId: string) => useAppStore.getState().applyThreadView({ threadId, messages: [], agents: [], tasks: [] }))
 const text = () => host.textContent?.replace(/\s+/g, ' ').trim() ?? ''
@@ -39,7 +36,6 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   ;(window as unknown as { mousse: unknown }).mousse = { threads: { select } }
   select.mockClear()
-  useThreadHistoryStore.setState(EMPTY_THREAD_HISTORY)
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -48,8 +44,6 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
-  stopHistory?.()
-  stopHistory = undefined
   useAppStore.setState(appInitial)
   useBotsStore.setState(botsInitial)
   vi.unstubAllGlobals()
@@ -83,51 +77,26 @@ describe('above a thread an agent started', () => {
   })
 })
 
-describe('the launching thread\'s note', () => {
-  const prompt: ChatMessage = { id: 'u1', role: 'user', content: 'Split this into a new thread', timestamp: AT }
-  const note: ChatMessage = {
-    id: 'n1',
-    role: 'system',
-    content: 'Created thread «Audit the logs» (launched) in project p1: claude / sonnet, ask mode, the project folder.',
-    timestamp: AT,
-    launchedThread: { threadId: 'launched', summary: 'claude / sonnet, ask mode, the project folder' }
-  }
-  const reply: ChatMessage = { id: 'a1', role: 'assistant', content: 'Started it.', timestamp: AT }
-  const show = (messages: ChatMessage[]) =>
-    act(() => root.render(createElement(MessageList, { messages: mousseToUIMessages(messages), status: chatStatusFromPhase('idle') })))
-  const chip = () => host.querySelector<HTMLAnchorElement>('a.thread-chip')
-
-  it('shows the new thread as a link with its title and live status, beside what was chosen for it', () => {
-    useAppStore.setState({ threads: [thread('launcher', 'Plan the release'), thread('launched', 'Audit the logs')], activeThreadId: 'launcher', threadActivity: { launched: 'processing' } })
-    show([prompt, note, reply])
-    const row = chip()!.closest('[role="note"]')!
-    expect(row.textContent).toBe('Started Audit the logs · claude / sonnet, ask mode, the project folder')
-    expect(chip()!.getAttribute('aria-label')).toBe('Open thread Audit the logs, Working')
-    act(() => useAppStore.setState({ threadActivity: { launched: 'awaiting_input' } }))
-    expect(chip()!.getAttribute('title')).toBe('Needs you · Open Audit the logs')
-    act(() => useAppStore.setState({ threadActivity: { launched: 'completed' } }))
-    expect(chip()!.getAttribute('title')).toBe('Done · Open Audit the logs')
-    // A rename shows at once too.
-    act(() => useAppStore.setState({ threads: [thread('launcher', 'Plan the release'), thread('launched', 'Audit the server logs')] }))
-    expect(chip()!.textContent).toBe('Audit the server logs')
-  })
-
-  it('a click switches the main view to the new thread, and Back returns to the thread with the chip', async () => {
-    useAppStore.setState({ threads: [thread('launcher', 'Plan the release'), thread('launched', 'Audit the logs')], activeThreadId: 'launcher', sidebarMode: 'projects' })
-    stopHistory = trackThreadHistory()
-    show([prompt, note, reply])
-    await click(chip()!)
-    expect(select).toHaveBeenCalledWith('launched')
-    expect(useAppStore.getState().activeThreadId).toBe('launched')
-    await act(async () => { await stepHistory(-1) })
-    expect(useAppStore.getState().activeThreadId).toBe('launcher')
-  })
-
-  it('a note stored before the field shows no chip, whatever its text names', () => {
+describe('the launching thread\'s chat', () => {
+  it('shows the agent\'s reply and no line of Mousse\'s own for the thread it started', () => {
     useAppStore.setState({ threads: [thread('launcher', 'Plan the release'), thread('launched', 'Audit the logs')], activeThreadId: 'launcher' })
-    const { launchedThread: _launched, ...older } = note
-    show([prompt, older, reply])
-    expect(chip()).toBeNull()
+    // The note Mousse keeps in the launcher's record, as `thread_create` writes it.
+    const note: ChatMessage = {
+      id: 'n1',
+      role: 'system',
+      content: 'Created thread «Audit the logs» (launched) in project p1: claude / sonnet, ask mode, the project folder, first message sent.',
+      timestamp: AT,
+      launchedThread: { threadId: 'launched', summary: 'claude / sonnet, ask mode, the project folder, first message sent' }
+    }
+    const messages: ChatMessage[] = [
+      { id: 'u1', role: 'user', content: 'Split this into a new thread', timestamp: AT },
+      note,
+      { id: 'a1', role: 'assistant', content: 'Started it.', timestamp: AT }
+    ]
+    act(() => root.render(createElement(MessageList, { messages: mousseToUIMessages(messages), status: chatStatusFromPhase('idle') })))
     expect(text()).toContain('Started it.')
+    expect(text()).not.toContain('Audit the logs')
+    expect(text()).not.toContain('claude / sonnet')
+    expect(host.querySelector('[role="note"]')).toBeNull()
   })
 })
