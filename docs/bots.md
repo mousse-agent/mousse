@@ -830,6 +830,8 @@ An open card can receive at most two nudges through the question follow-up path 
 
 An accepted Send waiting for its service reads `Waiting for <service>…` with no answer buttons; it changes to “Sending…” only when dispatch starts. If the ten-minute window ends before dispatch, the review shows the stored service-unreachable sentence and settlement time, with “What it would have sent” behind the fold. A forgotten review keeps only the readable tool title, “Forgotten”, its outcome and time. It has no sending account, argument box, bot note, tool answer or internal counters. A forgotten digest cannot trigger an exact-repeat warning.
 
+When you return to the chat, the bot can see the masked review, its nudges and its latest outcome as Mousse updates. Those updates do not start a chat turn by themselves.
+
 Find in chat searches a card’s title and visible status line. It does not search argument values, bot notes or tool answers.
 
 Other devices receive the same card and repeat warning. If the complete card cannot fit, Send is disabled with a request to review and send on the computer; Not now remains available. An older phone app shows the stored plain message and cannot answer the card: `Waiting for <service>…`, the service-unreachable sentence after a timeout, or “[forgotten]” for erased content. About keeps one row per service and its existing switch and Remove. A service with an asking tool says that it asks first; there is no control to let all future sends through.
