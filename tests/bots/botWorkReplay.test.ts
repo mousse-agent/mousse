@@ -55,13 +55,13 @@ describe('work_start through the production registry', () => {
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
   })
 
-  it('a repeated queued request says it is already queued', async () => {
+  it('a repeated request returns the same running work', async () => {
     const call = caller(await chat())
     for (const title of ['First', 'Second', 'Third']) await call({ ...request, title })
     const queued = await call()
     const repeated = await call()
-    expect(repeated).toMatchObject({ workId: queued.workId, status: 'queued', replayed: true, note: expect.stringMatching(/already queued/i) })
-    expect(rollUpChips([{ tool: 'work_start', input: request, result: repeated }])).toMatchObject([{ text: 'already queued' }])
+    expect(repeated).toMatchObject({ workId: queued.workId, status: 'running', replayed: true, note: expect.stringMatching(/already in progress/i) })
+    expect(rollUpChips([{ tool: 'work_start', input: request, result: repeated }])).toMatchObject([{ text: 'already on it' }])
   })
 
   // Every field that chooses the job: changing any one makes a separate request, even with the same runtime id.
@@ -130,16 +130,23 @@ describe('work_start through the production registry', () => {
 
   it('retries work dropped from the full queue', async () => {
     const call = caller(await chat())
-    for (const title of ['First', 'Second', 'Third']) await call({ ...request, title })
+    const park = async (workId: string) => {
+      await flush()
+      const turn = await start(f, workId)
+      await f.bots.tools.wakes!.wait!(botId, workId, { brief: 'Check later', dueAt: new Date(f.clock.now + 3600_000).toISOString() })
+      await finish(f, turn.payload)
+      expect(f.store.activation(workId)?.endReason).toBe('waiting')
+    }
     const first = await call()
-    for (let n = 0; n < MAX_QUEUED_ACTIVATIONS - 3; n += 1) {
+    await park(first.workId)
+    for (let n = 0; n < MAX_QUEUED_ACTIVATIONS; n += 1) {
       f.clock.now += 1
-      await call({ ...request, title: `Other job ${n}` })
+      await park((await call({ ...request, title: `Other job ${n}` })).workId)
     }
     expect(f.store.activation(first.workId)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
     const retry = await call()
     expect(retry.workId).not.toBe(first.workId)
-    expect(retry.status).toBe('queued')
+    expect(retry.status).toBe('running')
     expect((await call()).workId).toBe(retry.workId)
   })
 

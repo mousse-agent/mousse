@@ -19,7 +19,7 @@ const notices = () => chatOf(f, botId).filter(row => row.systemLine).map(row => 
 
 // At expiry: queued, wall-waiting, parked and paused work leaves quietly; an executing run reports.
 it.each(['queued', 'waiting_grant', 'blocked', 'paused'] as const)('expiry withdraws %s work without a stopped line', async status => {
-  if (status === 'queued') for (let i = 0; i < 3; i++) await f.bots.activate({ botId, input: 'Busy', clientRequestId: `busy-${i}` })
+  if (status === 'queued') f.store.setError(botId, { code: 'bot_journal_failed', error: 'Journal is not writable' })
   const schedule = add()
   await f.tickSchedules(new Date(T0 + 5 * MIN))
   const row = ownRun()

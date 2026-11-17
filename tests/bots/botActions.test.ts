@@ -3280,6 +3280,6 @@ it('C9 chat asks-first refusal tells the bot to start work', async () => {
   const t = await setup(true)
   const chat = await f.bots.enqueueChat(t.botId, 'chat:needs-work', 'Send another email')
   const turn = await start(f, chat.id)
-  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'chat-send', signal: new AbortController().signal })
+  const result = turn.prepared.authority.holdMcp!(t.work.prepared.authority.mcpTools![0]!, t.args, 'chat-send')
   expect(result).toMatchObject({ isError: true, text: 'This tool needs your owner to approve each request. Start it as work with work_start so they can answer it in the chat.' })
 })

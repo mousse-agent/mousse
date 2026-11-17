@@ -35,7 +35,7 @@ it('settles a removed schedule\'s last report and creates its Needs you item', a
 })
 
 it('settles cancelled waiting runs after the job is removed without creating failure items', async () => {
-  for (let i = 0; i < 3; i++) await f.bots.activate({ botId, input: 'Busy', clientRequestId: `busy-${i}` })
+  f.store.setError(botId, { code: 'bot_journal_failed', error: 'Journal is not writable' })
   const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check price.' }, 'owner')
   await f.tickSchedules(new Date(T0 + 5 * 60_000))
   const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
