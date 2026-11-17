@@ -199,7 +199,7 @@ describe('ACP "Always for this thread" is Mousse\'s own rule, never the agent\'s
     }
   })
 
-  it('never widens to another command or another argument', async () => {
+  it('never widens to another command, another argument, or an agent that gives no description of the call', async () => {
     const { questions, asked, db } = await bound()
     try {
       const prompter = questionsPrompter(questions)
@@ -215,6 +215,9 @@ describe('ACP "Always for this thread" is Mousse\'s own rule, never the agent\'s
       for (const rawInput of [{ command: 'npm test --watch' }, { command: 'npm test', cwd: '/elsewhere' }, { command: 'npm  test' }, { cmd: 'npm test' }])
         expect(await answerPermission(prompter, forThread('thread'), execute(rawInput), classify), JSON.stringify(rawInput)).toEqual(selected('no'))
       expect(seen).toHaveLength(4)
+      // No description of the call, no fingerprint: asked every time and "always" is not offered.
+      for (let times = 0; times < 2; times += 1) await answerPermission(prompter, forThread('thread'), execute(), classify)
+      expect(seen.slice(4)).toEqual([['once', 'no'], ['once', 'no']])
     } finally {
       db.close()
     }

@@ -112,7 +112,10 @@ describe('Claude Code instances', () => {
 
   it.each([
     ['a private home signed in with an API key', true, { authMethod: 'api_key' }, 'api_key'],
-    ['the user\'s own home signed in with claude.ai', false, { authMethod: 'claude.ai', subscriptionType: 'pro' }, 'subscription']
+    ['a private home signed in with claude.ai', true, { authMethod: 'claude.ai', subscriptionType: 'max' }, 'subscription'],
+    ['a private home on Bedrock', true, { authMethod: 'api_key', apiProvider: 'bedrock' }, 'ambient'],
+    ['the user\'s own home signed in with claude.ai', false, { authMethod: 'claude.ai', subscriptionType: 'pro' }, 'subscription'],
+    ['the user\'s own home with a Console sign-in', false, { authMethod: 'console' }, 'api_key']
   ] as const)('%s: read from the one auth status check, never another', async (_name, privateHome, status, expected) => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-claude-credential-'))
     homes.push(home)

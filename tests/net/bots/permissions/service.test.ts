@@ -316,12 +316,21 @@ describe('actual private owner signature, request hash and single-use action app
       ).phase
     ).toBe('granted')
   })
-  it('denies aborted pending actions and leaves the execution waiting for approval', async () => {
+  it('denies aborted pending actions and never treats an owner denial as approval', async () => {
     const f = await permissionFixture(),
-      aborted = f.port.requestAction(f.input)
-    f.controller.abort()
+      pending = f.port.requestAction(f.input),
+      request = f.outbox
+        .list(f.created.descriptor.id)
+        .find((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.permission.requested')!
+    f.deliver(request.id)
+    const denial = f.service.grant(f.created.descriptor.id, request.id, false)
+    f.service.receive(f.created.descriptor.id, f.deliver(denial))
+    expect(await pending).toEqual({ decision: 'denied', request: request.id })
+    const g = await permissionFixture(),
+      aborted = g.port.requestAction(g.input)
+    g.controller.abort()
     await expect(aborted).rejects.toMatchObject({ code: 'cancelled' })
-    expect(f.executions.get(f.record.id)!.state).toBe('waitingApproval')
+    expect(g.executions.get(g.record.id)!.state).toBe('waitingApproval')
   })
   it('refuses a bot-signed forged grant and emergency stop immediately before consuming a genuine owner grant', async () => {
     const f = await permissionFixture(),

@@ -25,6 +25,7 @@ describe('approval fingerprints (SPEC §17.5)', () => {
     const plain = claude('Bash', { command: 'ls' })
     expect(claude('Bash', { command: 'ls' }, 'claude:command', { instanceId: 'claude-work' })).not.toBe(plain)
     expect(claude('Bash', { command: 'ls' }, 'claude:command', { cwd: '/work/other' })).not.toBe(plain)
+    expect(claude('Bash', { command: 'ls' }, 'claude:command', { cwd: undefined })).not.toBe(plain)
   })
 
   it('an omitted and an explicit default match; any execution-affecting difference does not', () => {
