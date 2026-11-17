@@ -503,7 +503,7 @@ it.each([false, true])('switch off preserves all twenty unattended calls, differ
   expect(t.results.every(result => !result.isError)).toBe(true)
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
 })
-it.each(['create:fan-out', 'question:fan-out', 'bot-message:fan-out', 'answer:fan-out'])('persisted %s origin keeps the correct approval scope', async originKey => {
+it.each(['create:fan-out', 'question:fan-out', 'botmsg:fan-out', 'answer:fan-out'])('persisted %s origin keeps the correct approval scope', async originKey => {
   const t = await fanOut(true, false, 5, true, originKey)
   expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(originKey.startsWith('answer:') ? 5 : 3)
 })
