@@ -1,5 +1,9 @@
 /** Two real daemons with fresh homes; only the bot port is scripted in this transport regression. */
 import { EventEmitter } from 'node:events'
+import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import { afterAll, beforeAll, expect, it, vi } from 'vitest'
 import { newId } from '../../../../src/shared/net'
 import type { BotChatMessage } from '../../../../src/shared/bots/personal/chat'
@@ -12,10 +16,17 @@ let t: Awaited<ReturnType<typeof linked>>
 let message: BotChatMessage
 let f: BotFixture
 let realBot: string
+let daemonHomes: string[] = []
 let check = () => {}
 let answer = vi.fn(async () => ({ status: 'declined' }))
 beforeAll(async () => {
-  t = await linked()
+  const create = vi.spyOn(MousseMainService, 'create')
+  try { t = await linked() } finally {
+    daemonHomes = create.mock.calls.map(([options]) => options!.homeDir!)
+    create.mockRestore()
+  }
+  expect(daemonHomes).toHaveLength(2)
+  for (const home of daemonHomes) expect(home.startsWith(join(tmpdir(), 'bridge-router-'))).toBe(true)
   f = botFixture()
   realBot = (await createBot(f, { name: 'Mail', reply: 'Hello' })).botId
   cleanups.push(() => f.close())
@@ -32,7 +43,8 @@ beforeAll(async () => {
 }, 120_000)
 afterAll(async () => {
   await cleanupAll()
-  console.info('botActionReplies: both isolated daemons stopped and temporary homes removed')
+  for (const home of daemonHomes) expect(existsSync(home)).toBe(false)
+  console.info('botActionReplies: both isolated daemons stopped and temporary homes verified removed')
 })
 
 it('keeps a tool error outcome without its answer text when a device receives an oversized card', async () => {

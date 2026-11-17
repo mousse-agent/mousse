@@ -27,6 +27,7 @@ import {
   NET_ERRORS,
   forbiddenReason,
   botActionRefusalMessage,
+  isNetErrorCode,
   isForbiddenReason,
   type NetErrorCode
 } from '../../../shared/net/errors'
@@ -184,15 +185,23 @@ const equalKey = (a: string, b: string): boolean => {
 }
 /** Why a routed call was refused; the only detail of a refusal that crosses the wire. */
 const FORBIDDEN_REASON_PREFIX = 'forbidden.'
+const actionRefusalCode = (code: unknown): code is NetErrorCode =>
+  typeof code === 'string' && code.startsWith('bot_action_') && isNetErrorCode(code)
 function wireError(error: unknown): WireError {
   const code = error instanceof NetError ? error.code : 'internal'
   // Do not serialize arbitrary provider/OS messages, credentials or payloads. A refusal of a routed
   // call says which kind it was (a fixed word), in the cause slot older peers already accept.
   const reason =
     error instanceof NetError && code === 'forbidden' ? forbiddenReason(error.details) : undefined
+  // Use the existing conflict envelope so older peers need not know the new action codes.
+  // New peers recover only known action refusals from its bounded cause entry.
+  if (actionRefusalCode(code)) return {
+    code: 'conflict', message: NET_ERRORS.conflict.message, retryable: false,
+    cause: [{ code, message: botActionRefusalMessage(code, error instanceof NetError ? error.message : undefined) ?? NET_ERRORS[code].message }]
+  }
   return {
     code,
-    message: botActionRefusalMessage(code, error instanceof NetError ? error.message : undefined) ?? NET_ERRORS[code].message,
+    message: NET_ERRORS[code].message,
     retryable: NET_ERRORS[code].retryable,
     ...(reason
       ? {
@@ -202,6 +211,9 @@ function wireError(error: unknown): WireError {
   }
 }
 const remoteError = (error: WireError): NetError => {
+  const action = error.code === 'conflict' ? error.cause?.find(entry => actionRefusalCode(entry.code)) : undefined
+  if (action && actionRefusalCode(action.code))
+    return new NetError(action.code, botActionRefusalMessage(action.code, action.message))
   const reason =
     error.code === 'forbidden'
       ? error.cause
