@@ -191,6 +191,11 @@ export class NetDatabase {
       this.database.exec(
         "ALTER TABLE net_node_policy ADD COLUMN agent_reach TEXT NOT NULL DEFAULT 'launched'"
       )
+    // "Work on threads from this device": on for every device that already has a row, as before the switch.
+    if (!has('net_node_policy', 'work'))
+      this.database.exec(
+        'ALTER TABLE net_node_policy ADD COLUMN work INTEGER NOT NULL DEFAULT 1 CHECK(work IN (0,1))'
+      )
     // Who made a routed call: null for a person on the device, `agent` for a call marked as an agent's.
     if (!has('bridge_audit', 'actor'))
       this.database.exec('ALTER TABLE bridge_audit ADD COLUMN actor TEXT')
@@ -366,7 +371,7 @@ CREATE TABLE IF NOT EXISTS net_quota_reservations(scope TEXT NOT NULL REFERENCES
 CREATE TABLE IF NOT EXISTS net_rate_config(scope TEXT NOT NULL, principal TEXT NOT NULL, max_units INTEGER NOT NULL, window_ms INTEGER NOT NULL, last_now INTEGER NOT NULL, PRIMARY KEY(scope,principal)) STRICT;
 CREATE TABLE IF NOT EXISTS net_rate_charges(scope TEXT NOT NULL, principal TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, units INTEGER NOT NULL, PRIMARY KEY(scope,principal,id), FOREIGN KEY(scope,principal) REFERENCES net_rate_config(scope,principal)) STRICT;
 CREATE INDEX IF NOT EXISTS net_rate_window ON net_rate_charges(scope,principal,created_at);
-CREATE TABLE IF NOT EXISTS net_node_policy(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1)), bots INTEGER NOT NULL DEFAULT 1 CHECK(bots IN (0,1)), agent_reach TEXT NOT NULL DEFAULT 'launched', created_at INTEGER NOT NULL) STRICT;
+CREATE TABLE IF NOT EXISTS net_node_policy(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1)), bots INTEGER NOT NULL DEFAULT 1 CHECK(bots IN (0,1)), agent_reach TEXT NOT NULL DEFAULT 'launched', work INTEGER NOT NULL DEFAULT 1 CHECK(work IN (0,1)), created_at INTEGER NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS bridge_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, node TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('change','refused')), method TEXT NOT NULL, thread TEXT, project TEXT, outcome TEXT NOT NULL, actor TEXT) STRICT;
 CREATE INDEX IF NOT EXISTS bridge_audit_node ON bridge_audit(node,kind,id);
 CREATE TABLE IF NOT EXISTS bridge_audit_reads(node TEXT NOT NULL, hour INTEGER NOT NULL, calls INTEGER NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(node,hour)) STRICT;

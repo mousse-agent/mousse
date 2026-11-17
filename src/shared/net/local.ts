@@ -149,6 +149,12 @@ export interface BridgeNodePolicy {
    * started here (the default), or all. Absent from a service from before the setting.
    */
   agentReach?: AgentReach
+  /**
+   * The device may work on threads here ("Work on threads from this device"): start, send, steer, stop, change
+   * settings, files and Git, and make or change bots. Off, it reads threads and chats with bots only. On until the
+   * owner turns it off. Absent from a service from before the switch.
+   */
+  work?: boolean
 }
 
 /** What a device's agents may change on this computer (`net_node_policy.agent_reach`). */
