@@ -414,7 +414,7 @@ export class BotChatProjection {
   private actionForMessage(messageId: string): BotActionCard | undefined {
     // Only the two known nudge ids refer back to an existing review; they never create actions.
     messageId = messageId.replace(/_n[12]$/, '')
-    const row = this.store.get('SELECT id, bot_id, activation_id, args_digest, args_json, card_json, status, ran_at, answered_at, target_json, result_json, bot_note FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { bot_note: string | null }) | undefined
+    const row = this.store.get('SELECT id, bot_id, activation_id, args_digest, args_json, card_json, status, created_at, ran_at, answered_at, target_json, result_json, bot_note FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { bot_note: string | null }) | undefined
     if (!row) return undefined
     const storedMetadata = JSON.parse(row.card_json ?? '{}')
     const metadata = storedMetadata && typeof storedMetadata === 'object' && !Array.isArray(storedMetadata) ? storedMetadata : {}

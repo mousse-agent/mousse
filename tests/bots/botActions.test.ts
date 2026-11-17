@@ -3095,7 +3095,7 @@ it.each(['overdue', 'obsolete'] as const)('review5 preflight retires an %s card 
     vi.spyOn(f.host.schedules!, 'get').mockImplementation((bot, id) => { const entry = current(bot, id); return entry ? { ...entry, revision: 'missed-edit' } : undefined })
   }
   expect(() => f.bots.service.actionCheck({ botId: t.botId, actionId: a.id, digest: a.args_digest, answer: 'send' }))
-    .toThrow(expect.objectContaining({ code: kind === 'overdue' ? 'bot_action_expired' : 'bot_action_withdrawn' }))
+    .toThrow(expect.objectContaining({ code: kind === 'overdue' ? 'bot_action_expired' : 'bot_action_schedule_changed' }))
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: kind === 'overdue' ? 'expired' : 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
 })
