@@ -2163,9 +2163,10 @@ export class OrchestratorService extends EventEmitter {
   /** The clock saved queue holds are renewed and judged by (tests move it). */
   private queueHoldClock: () => number = () => Date.now()
 
-  /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
   /** The phase a running turn was in when it asked the person something (`setAwaitingInput`, `inputAnswered`). */
   private readonly phaseBeforeInput = new Map<string, { phase: TurnPhase; turnId: string | null; activeMessageId?: string }>()
+
+  /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
 
   private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause' | 'step' | 'uncertain'>> & { blockedOnWait?: boolean }): void {
     // A stopped turn that is still ending already shows stopped (`showStopped`): what its provider sent before it let go
