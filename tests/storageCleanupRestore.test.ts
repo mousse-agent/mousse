@@ -172,6 +172,5 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     expect(report.trigger).toBe('manual')
     await expect(cli.request('storage.configure', { policy: inactivePolicy })).rejects.toMatchObject({ code: 'handler_error' })
     expect((await cli.request<{ report: StorageCleanupReport | null }>('storage.cleanup.lastReport', {})).report).toMatchObject({ trigger: 'manual' })
-    git(f.repo, 'status', '--porcelain')
   }, 60_000)
 })

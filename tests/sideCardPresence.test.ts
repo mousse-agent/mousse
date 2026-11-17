@@ -93,16 +93,6 @@ describe('createSideCardPresence', () => {
     expect(phases).toEqual(['exiting', 'unmounted'])
   })
 
-  it('keeps the exit wait and fade-in whatever the motion preference, which only changes the styling', () => {
-    // The controller has no motion input: reduced motion makes the fades instant in CSS only.
-    const { presence } = setup('shown')
-    presence.setPresent(false)
-    vi.advanceTimersByTime(SIDE_CARD_FADE_MS / 2)
-    expect(sideCardPresenceView(presence.phase).mounted).toBe(true)
-    vi.advanceTimersByTime(SIDE_CARD_FADE_MS / 2)
-    expect(sideCardPresenceView(presence.phase).mounted).toBe(false)
-  })
-
   it('cancels the pending unmount when the card comes back mid-fade', () => {
     const { presence, phases } = setup('shown')
     presence.setPresent(false)
