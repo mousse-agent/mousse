@@ -232,7 +232,7 @@ export class BotActions {
           WHERE a.bot_id = ? AND (a.message_id = ? OR json_extract(w.trigger_json, '$.replyTo') = ?)`, botId, messageId, messageId)
         for (const action of ids) {
           const pending = ['open', 'approved'].includes(String(action.status))
-          if (pending) this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'The request was forgotten. Nothing was sent.' })
+          if (pending) this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'The request was forgotten. Nothing was sent.' }, 'bot_action_owner_removed')
           this.forgetText(botId, String(action.id))
           if (pending && action.message_id === messageId) this.host.store.run(`UPDATE bot_actions SET card_json = json_set(card_json,
             '$.ownerRemoved', json('true'), '$.removedOwnerSeq', ?, '$.removedNoteSeq', ?) WHERE id = ?`,
@@ -264,21 +264,21 @@ export class BotActions {
   }
   withdrawWork(id: string): void {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved')", id))
-      this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' })
+      this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' }, 'bot_action_work_ended')
   }
   /** Rollback retires all unstarted calls together; an already dispatched call finishes. */
   withdrawDisabled(): void {
     if (this.host.enabled()) return
     this.host.store.db.transaction(() => {
       for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
-        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This could not wait for your owner after all, so nothing was sent. Say so in your report.' }))
+        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This could not wait for your owner after all, so nothing was sent. Say so in your report.' }, 'bot_action_disabled'))
           this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
       }
     })
   }
   withdrawPaused(botId: string): void {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE bot_id = ? AND status = 'approved'", botId)) {
-      if (this.transition(String(action.id), 'approved', 'withdrawn', { text: 'This bot was paused, so nothing was sent. Carry on without it when resumed.' }))
+      if (this.transition(String(action.id), 'approved', 'withdrawn', { text: 'This bot was paused, so nothing was sent. Carry on without it when resumed.' }, 'bot_action_owner_paused'))
         this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
     }
   }
@@ -305,7 +305,7 @@ export class BotActions {
   }
   withdrawChanged(botId?: string): void {
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)) {
-      if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: this.host.store.activation(String(a.activation_id))?.trigger.kind === 'schedule' ? 'This schedule or its tool changed since you saw it. Nothing was sent. Carry on without it.' : 'This tool or its permission changed, so nothing was sent. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
+      if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: this.host.store.activation(String(a.activation_id))?.trigger.kind === 'schedule' ? 'This schedule or its tool changed since you saw it. Nothing was sent. Carry on without it.' : 'This tool or its permission changed, so nothing was sent. Carry on without it.' }, this.host.store.activation(String(a.activation_id))?.trigger.kind === 'schedule' ? 'bot_action_schedule_changed' : 'bot_action_permission_changed')) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
     }
   }
   get(id: string): ActionRow | undefined { return this.host.store.get('SELECT * FROM bot_actions WHERE id = ?', id) as unknown as ActionRow | undefined }
@@ -381,14 +381,14 @@ export class BotActions {
     return { text: 'This call is held for your owner. End your turn now.' }
   }
   /** The only status writer. Settlement clears executable arguments in the same statement. */
-  transition(id: string, from: string, to: string, result?: BotMcpCallOutcome): boolean {
+  transition(id: string, from: string, to: string, result?: BotMcpCallOutcome, withdrawalReason?: BotActionRefusalCode): boolean {
     return this.host.store.db.transaction(() => {
       const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
         result_json = CASE WHEN args_json = '"[forgotten]"' THEN '{"text":"[forgotten]"}' ELSE ? END, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
         ran_at = CASE WHEN ? IN ('running', 'done') THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
       to, pending.has(to) ? 1 : 0, result ? JSON.stringify(boundedActionResult(result)) : null,
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
-      if (moved && to === 'withdrawn') this.host.store.run("UPDATE bot_actions SET card_json = json_set(COALESCE(card_json, '{}'), '$.withdrawalCode', ?) WHERE id = ?", withdrawalCode({ card_json: null, result_json: JSON.stringify(result ?? {}) }), id)
+      if (moved && to === 'withdrawn') this.host.store.run("UPDATE bot_actions SET card_json = json_set(COALESCE(card_json, '{}'), '$.withdrawalCode', ?) WHERE id = ?", withdrawalReason ?? withdrawalCode({ card_json: null, result_json: JSON.stringify(result ?? {}) }), id)
       if (moved && result?.notSentInTime) this.host.store.run("UPDATE bot_actions SET card_json = json_set(card_json, '$.settledAt', ?) WHERE id = ?", this.host.store.now(), id)
       if (moved && ['approved', 'running'].includes(to)) {
         const action = this.get(id)!
@@ -456,7 +456,7 @@ export class BotActions {
     const row = this.host.store.activation(action.activation_id)
     if (row?.trigger.kind === 'schedule' && this.host.obsolete(action)) {
       if (settle) this.host.store.db.transaction(() => {
-        if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(action))
+        if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent. Carry on without it.' }, 'bot_action_schedule_changed')) this.host.store.db.afterCommit(() => this.finish(action))
       })
       throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
     }
@@ -488,7 +488,7 @@ export class BotActions {
     if (!action || action.status !== 'approved') return
     if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) { this.sendTimeout(action); return }
     if (this.host.store.registry(action.bot_id)?.pausedReason === 'owner') {
-      this.transition(id, 'approved', 'withdrawn', { text: 'This bot was paused, so nothing was sent. Carry on without it when resumed.' })
+      this.transition(id, 'approved', 'withdrawn', { text: 'This bot was paused, so nothing was sent. Carry on without it when resumed.' }, 'bot_action_owner_paused')
       this.finish(action)
       return
     }
@@ -498,7 +498,7 @@ export class BotActions {
       let intact = false
       try { intact = Boolean(action.exec_args && action.exec_args.length <= ACTION_MAX_ARGUMENT_CHARS && !containsCredential(JSON.parse(action.exec_args)) && actionDigest(JSON.parse(action.exec_args)) === action.args_digest) } catch { /* Corrupt arguments are never recoverable. */ }
       if (intact && current && !this.host.binding(current, JSON.parse(action.target_json)) && !this.host.obsolete(action)) return
-      this.transition(id, 'approved', 'withdrawn', { text: 'This changed since you saw it. Nothing was sent. Carry on without it.' })
+      this.transition(id, 'approved', 'withdrawn', { text: 'This changed since you saw it. Nothing was sent. Carry on without it.' }, 'bot_action_binding_changed')
       this.finish(action)
       return
     }
