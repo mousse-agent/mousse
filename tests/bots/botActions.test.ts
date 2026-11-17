@@ -340,6 +340,40 @@ it.each([true, false])('a scheduled use_tool call holds the real arguments once 
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
+it.each(['repeat', 'three', 'forgotten'] as const)('recreating a schedule or starting a second one cannot reset %s refusals', async rule => {
+  const t = await scheduledCall()
+  let id = t.id, turn = t.run, schedule = t.schedule
+  const count = rule === 'three' ? 3 : 1
+  for (let n = 0; n < count; n++) {
+    const args = rule === 'three' ? { body: 'draft ' + n } : t.args
+    await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'hold-' + n, signal: new AbortController().signal })
+    await finish(f, turn.payload)
+    const a = f.bots.actions.forWork(id)!
+    if (rule === 'forgotten') f.store.forgetMessage(t.botId, a.message_id)
+    else await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+    await flush()
+    const resumed = await start(f, id, 2)
+    // The scheduled run itself removes and recreates its automation, after the held call settled.
+    expect(botAppToolRefusal(resumed.prepared.authority, 'bot_schedule_remove')).toBeUndefined()
+    f.bots.tools.schedules.remove(t.botId, schedule.scheduleId)
+    schedule = f.bots.tools.schedules.add(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send the email' }, 'bot')
+    await finish(f, resumed.payload)
+    f.clock.now += 5 * 60_000
+    const due = await f.tickSchedules(new Date(f.clock.now))
+    id = due.inserted[0]!
+    turn = await start(f, id)
+  }
+  const args = rule === 'three' ? { body: 'another draft' } : t.args
+  const attempt = (bot: typeof turn.prepared.authority, key: string) => callForBot({ bot, mcp: t.mcp, name: 'Mail__send', args, toolCallId: key, signal: new AbortController().signal })
+  expect((await attempt(turn.prepared.authority, 'recreated')).isError).toBe(true)
+  const second = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Same task elsewhere' }, 'owner')
+  f.clock.now += 5 * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const secondId = due.inserted.find(id => { const r = f.store.activation(id)!; return r.trigger.kind === 'schedule' && r.trigger.scheduleId === second.scheduleId })!
+  const other = await start(f, secondId)
+  expect((await attempt(other.prepared.authority, 'second-schedule')).isError).toBe(true)
+  expect(t.calls).toEqual([])
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
