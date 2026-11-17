@@ -411,6 +411,27 @@ it('schedule_done explains why a later asks-first call cannot wait', async () =>
   expect(f.bots.actions.forWork(t.id)).toBeUndefined()
   expect(t.calls).toEqual([])
 })
+it.each(['name', 'tellMe', 'canWakeMe'] as const)('changing only %s preserves the approval binding', async field => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  if (field === 'name') f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { name: 'New name' })
+  else f.book.setTelling(t.botId, { scheduleId: t.schedule.scheduleId, ...(field === 'tellMe' ? { tellMe: 'every' } : { canWakeMe: true }) })
+  await f.bots.actions.reconcile()
+  expect(f.bots.actions.forWork(t.id)?.status).toBe('open')
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
+it('a paused schedule refuses Send', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  f.scheduler.pauseJob(t.schedule.jobId)
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
+  expect(t.calls).toEqual([])
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
