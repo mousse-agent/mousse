@@ -84,6 +84,8 @@ export interface ComposerRunProps {
   onCompactNow?: () => void
   /** A compaction the person started is running: the chip reads "Compacting…". */
   compacting?: boolean
+  /** Work is going on that Compact now must not run beside; absent: whatever Stop stops. Subagents paused on a usage limit keep Stop but are not work. */
+  workInProgress?: boolean
   /** A bot's own thread: the bot keeps its context, so there is no ring, popover or Compact chip whatever the settings. */
   contextHidden?: boolean
 }
@@ -483,7 +485,7 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={stoppable} /> : null}
+        {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={run.workInProgress ?? stoppable} /> : null}
 
         {extraActions}
 

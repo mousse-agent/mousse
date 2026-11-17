@@ -17,9 +17,9 @@
  * - `steer-two-drains-ack`: as `steer-two-drains`, and the process dies inside the acceptance of `next`: after its text
  *   and id are saved, before its queue row is dropped. What was saved then is written to `at-kill.json`;
  * - `steer-held`: as `tool`, on a provider on the hold (it peeks, and drains only a cut, as Claude does); `next` is
- *   steered and held for the running tool, never drained. A drain would be written to `cuts.log`;
+ *   steered and held for a compaction the turn runs, never drained. A drain would be written to `cuts.log`;
  * - `steer-held-device`: as `steer-held`, but `next` is a steer with no queue item of its own (a device's limited
- *   steer, `steerThread` with a permission limit): it is held for the running tool when the process dies;
+ *   steer, `steerThread` with a permission limit): it is held for the compaction when the process dies;
  * - `approval`: the provider waits for a saved approval;
  * - `question`: the provider waits for an answer to a question.
  *
@@ -81,6 +81,8 @@ class KillAdapter implements ProviderAdapter {
       }
       if (scenario === 'approval' || scenario === 'question') this.ask?.(input.threadId, scenario === 'approval')
       if (scenario === 'steer-held' || scenario === 'steer-held-device') {
+        // A person's steer goes in at once and waits only for a compaction (#1456): one runs for the rest of the turn.
+        sink.compaction('start')
         // On the hold, as Claude's poll: only a cut is drained, and none may come while the tool runs.
         setInterval(() => {
           if (ctl.peekSteer?.()?.delivery !== 'cut') return
