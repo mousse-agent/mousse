@@ -588,10 +588,15 @@ export class BotChatProjection {
         ...this.runningSubagents(row.id)
       }))
     // Posted chat questions and questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
-    const approval = this.store.get(`SELECT m.text FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
+    const approval = this.store.get(`SELECT m.text, a.card_json, a.target_json FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
       LEFT JOIN bot_messages m ON m.id = a.message_id
       WHERE a.bot_id = ? AND a.status = 'open' AND w.status = 'blocked' AND w.end_reason = 'approval'
       ORDER BY a.rowid LIMIT 1`, definition.id)
+    // The legacy message begins with a raw tool id. Reuse the review's stored display names for the sidebar.
+    const approvalMetadata = approval && this.options.asksFirst?.() === true ? JSON.parse(String(approval.card_json ?? '{}')) ?? {} : undefined
+    const approvalLabel = approvalMetadata
+      ? `${typeof approvalMetadata.title === 'string' ? approvalMetadata.title : readableActionTitle(JSON.parse(String(approval!.target_json)).tool)} · ${typeof approvalMetadata.serverName === 'string' ? approvalMetadata.serverName : 'Your service'}`
+      : String(approval?.text ?? 'Send this action?').split('\n')[0]
     const waitingOn = this.store.waitingQuestions(definition.id)
     const chatQuestions = this.store.openChatQuestions(definition.id)
     const needsOwner = !paused && (asks.length + waitingOn.length + chatQuestions.length > 0
@@ -611,7 +616,7 @@ export class BotChatProjection {
         ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
         : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
-        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : approval ? `Wants to send: ${oneLine(String(approval.text ?? 'Send this action?').split('\n')[0], 80)}` : `Asked: ${oneLine((waitingOn[0] ?? chatQuestions[0])?.spec.question ?? 'Your answer is needed', 80)}`)
+        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : approval ? `Wants to send: ${oneLine(approvalLabel, 80)}` : `Asked: ${oneLine((waitingOn[0] ?? chatQuestions[0])?.spec.question ?? 'Your answer is needed', 80)}`)
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn ? 'Working…' : work.length ? workingOn(work) : managing.length ? managingLine(managing) : 'Working…')
             : last ? oneLine(last.text || last.error?.text || plainCards(last.cards)) : ''
     return {
