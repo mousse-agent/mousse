@@ -6,19 +6,26 @@ import { createToolOpenStore, type ToolOpenStore } from "./tools/tool-open-state
  * groups (by their stable keys, `tools/tool-open-state.ts`). Kept in memory per thread for the app session, so
  * switching to another thread and back finds them as they were; nothing is saved to disk. A deleted thread's
  * entry goes with it.
+ *
+ * `turnKeys` holds the list's turn-key aliases (message-list.tsx): a prompt sent from the composer shows first under
+ * a temporary id, and its turn keeps that id as its key once the saved prompt takes its place. The aliases live here,
+ * not in the list, so a turn has the same key after the list remounts, and the folds opened under it are found.
  */
 export type ThreadOpenMemory = {
   folds: Set<string>;
   tools: ToolOpenStore;
+  turnKeys: Map<string, string>;
 };
 
 const memory = new Map<string, ThreadOpenMemory>();
 
+const fresh = (): ThreadOpenMemory => ({ folds: new Set(), tools: createToolOpenStore(), turnKeys: new Map() });
+
 /** The thread's memory, made on first use. Without a thread id, a fresh one that nothing else shares. */
 export function threadOpenMemory(threadId: string | null | undefined): ThreadOpenMemory {
-  if (!threadId) return { folds: new Set(), tools: createToolOpenStore() };
+  if (!threadId) return fresh();
   let entry = memory.get(threadId);
-  if (!entry) memory.set(threadId, (entry = { folds: new Set(), tools: createToolOpenStore() }));
+  if (!entry) memory.set(threadId, (entry = fresh()));
   return entry;
 }
 
