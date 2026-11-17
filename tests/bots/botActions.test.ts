@@ -592,6 +592,34 @@ it.each(['send', 'not_now'] as const)('the open-card limit describes pending req
   expect(f.bots.actions.forWork(first.id)?.status).toBe(answer === 'send' ? 'done' : 'declined')
   expect(f.store.lastMainDispatch(first.id)?.prompt.text).toContain(answer === 'send' ? 'Your owner sent it' : 'chose not to send')
 })
+it('a saved schedule edit succeeds and refreshes observers if approval cleanup fails', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  const seen: string[] = []
+  const changed = vi.fn()
+  f.bots.events.on('changed', changed)
+  f.scheduler.on('updated', () => { seen.push(f.book.get(t.botId, t.schedule.scheduleId)!.prompt); f.bots.schedulesEdited(t.botId) })
+  vi.spyOn(f.bots.actions, 'withdrawChanged').mockImplementationOnce(() => { throw new Error('injected bot database write failure') })
+  const job = f.scheduler.updateJob(t.schedule.jobId, { prompt: 'Saved new instructions' })
+  expect(job?.prompt).toBe('Saved new instructions')
+  expect(seen).toContain('Saved new instructions')
+  expect(changed).toHaveBeenCalled()
+  expect(f.bots.schedulesOf(t.botId).find(row => row.scheduleId === t.schedule.scheduleId)?.prompt).toBe('Saved new instructions')
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_withdrawn', message: 'This changed since you saw it. Nothing was sent.' })
+  expect(t.calls).toEqual([])
+})
+it('an edit whose save itself fails still reports failure and keeps its card', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const store = (f.scheduler as any).store
+  vi.spyOn(store, 'updateJob').mockImplementationOnce(() => { throw new Error('injected save failure') })
+  expect(() => f.scheduler.updateJob(t.schedule.jobId, { prompt: 'Never saved' })).toThrow('injected save failure')
+  expect(f.book.get(t.botId, t.schedule.scheduleId)?.prompt).toBe('Send the email')
+  expect(f.bots.actions.forWork(t.id)?.status).toBe('open')
+})
 it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
   const t = await scheduledCall()
   expect((await t.call()).isError).not.toBe(true)
