@@ -8,8 +8,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { QueuedMessage, Thread } from '../../src/shared/types'
 import { DomainRpcError } from '../../src/mms/protocol/domainRegistry'
 import { QueueAccessError, QueueConflictError } from '../../src/mms/queue/ThreadMessageQueue'
-import { McpToolError, type AgentQueueCommand, type AgentQueueResult, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import type { AgentQueueCommand, AgentQueueResult, McpCallRequest } from '../../src/mms/run/mcp/appTools'
+import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-10-27T00:00:00.000Z'
@@ -63,7 +63,7 @@ describe('the queue tools (SPEC §15.1)', () => {
       request({ threadId: 'caller', runId: callerRun.runId, ...extra })
     const call = (name: string, args: Record<string, unknown> = {}, extra: Partial<Parameters<typeof request>[0]> = {}) =>
       registry.call(name, args, as(extra))
-    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    const denied = refusalIn
     return { fx, registry, turns, request, threads, ledger, answer, queue, call, denied, callerRun, ...fake }
   }
 
@@ -209,7 +209,7 @@ describe('the queue tools (SPEC §15.1)', () => {
       expect(await denied(call('queue_enqueue', { content: 'x', threadId: 'target', expectedRevision: 'rev-1' }))).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' } })
       // Anything else is a plain error result the agent can read.
       answer.result = () => { throw new Error('Queued message content is required.') }
-      expect(await call('queue_edit', args)).toMatchObject({ isError: true, text: 'Queued message content is required.' })
+      expect(await denied(call('queue_edit', args))).toMatchObject({ code: 'failed', message: 'Queued message content is required.' })
     })
 
     it('the transcript row of a change is added by the call that made it and only when an event recorded it, never for a replay', async () => {
@@ -248,8 +248,8 @@ describe('the queue tools (SPEC §15.1)', () => {
 
     it('a host without queue commands says so instead of failing', async () => {
       const { call } = await world({ queueCommand: undefined, queueSnapshot: undefined })
-      for (const { tool, args } of TOOLS) expect(await call(tool, { ...args }), tool).toMatchObject({ isError: true, text: `${tool} is not available in this host.` })
-      expect(await call('queue_list')).toMatchObject({ isError: true, text: 'queue_list is not available in this host.' })
+      for (const { tool, args } of TOOLS) expect(await refusalIn(call(tool, { ...args })), tool).toMatchObject({ message: `${tool} is not available in this host.` })
+      expect(await refusalIn(call('queue_list'))).toMatchObject({ message: 'queue_list is not available in this host.' })
     })
   })
 

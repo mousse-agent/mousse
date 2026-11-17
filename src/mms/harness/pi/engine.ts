@@ -54,6 +54,7 @@ import { preparePiHome, type PiSettingsInput } from './settings'
 import { PI_NATIVE_TOOLS } from './nativeTools'
 import type { BotFileReadResult } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage } from '../../../shared/bots/personal/walls'
+import { refusalText, type RefusalCode } from '../../run/mcp/appTools/refusal'
 import { neutralToolIdempotent, neutralToolsOf } from '../../../shared/harness/tools'
 
 /**
@@ -1263,10 +1264,13 @@ export class PiRpcEngine implements ProviderAdapter {
     if (!turn || turn.attemptToken !== request.attemptToken || turn.phase === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
     // A cut is aborting this prompt: Pi runs none of its calls.
     if (turn.gateRelease.signal.aborted) return { allow: false, reason: GATE_REFUSALS.denied }
-    if (!turn.active.has(request.toolName)) return { allow: false, reason: `${GATE_REFUSALS.denied}: ${request.toolName} is not available in this turn` }
+    const builtin = Object.hasOwn(BUILTIN_CLASSES, request.toolName)
+    // A refusal of a Mousse or proxied MCP tool is in the refusal shape every Mousse tool refuses in; Pi gives the reason
+    // to the model as the tool's error text. A built-in's stays in words.
+    const refuse = (code: RefusalCode, reason: string): PiGateResponse => ({ allow: false, reason: builtin ? reason : refusalText(code, reason) })
+    if (!turn.active.has(request.toolName)) return refuse('unavailable', `${GATE_REFUSALS.denied}: ${request.toolName} is not available in this turn`)
     const kind = turn.classes.get(request.toolName) ?? 'mutation'
     const access = turn.input.child?.readOnly ? turn.host.tools.toolAccess : undefined
-    const builtin = Object.hasOwn(BUILTIN_CLASSES, request.toolName)
     const definition = turn.host.definition
     let input = request.input
     let rewritten: Record<string, unknown> | undefined
@@ -1289,7 +1293,7 @@ export class PiRpcEngine implements ProviderAdapter {
       try {
         await access.execute(request.toolName, input, async () => undefined)
       } catch (error) {
-        return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
+        return refuse('read_only', error instanceof Error ? error.message : GATE_REFUSALS.denied)
       }
     }
     // A bot turn: each built-in is held to the bot's grant (tools, roots, scratch) on the path Pi
@@ -1307,10 +1311,10 @@ export class PiRpcEngine implements ProviderAdapter {
       const mcp = bot.mcpTools?.find((tool) => tool.providerName === request.toolName)
       if (mcp) {
         const decided = bot.check({ kind: 'mcp', server: mcp.server, tool: mcp.tool, serverName: mcp.serverName, args })
-        if (!decided.ok) return { allow: false, reason: checkMessage(decided) }
+        if (!decided.ok) return refuse('not_granted', checkMessage(decided))
       } else {
         const refusal = botAppToolRefusal(bot, request.toolName, args)
-        if (refusal) return { allow: false, reason: refusal }
+        if (refusal) return refuse('not_granted', refusal)
       }
     }
     // A definition run: every call, built-in or app/MCP, is authorized in full (approval included)
@@ -1321,7 +1325,7 @@ export class PiRpcEngine implements ProviderAdapter {
       const uncontainedShell = builtin && isShellTool(request.toolName) && this.capabilities.containment !== 'strong'
       // The arguments checked (and approved) are the ones the tool runs with.
       const decided = await authorizeDefinitionCall(definition, { toolName: request.toolName, args: input, projectPath: thread.cwd, signal: turn.input.signal, ...(uncontainedShell ? { uncontainedShell } : {}) })
-      if (!decided.allowed) return { allow: false, reason: decided.message }
+      if (!decided.allowed) return refuse('not_granted', decided.message)
       // Stopped while the approval was pending, or the run is no longer the thread's active run (it
       // ended elsewhere, or another took the thread): nothing runs, as on the loop and the MCP path.
       if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }

@@ -202,9 +202,9 @@ describe('the delegation tools models are offered', () => {
         expect(served.description).toBe(tool.description)
         const piProperties = Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
         const mcpProperties = Object.keys((served.inputSchema as { properties: Record<string, unknown> }).properties)
-        // The MCP server adds only what its callers need on top: a retry key, and a ceiling for delegate_task.
+        // The MCP server adds only what its callers need on top: a retry key on every tool that changes something, and a ceiling for delegate_task.
         expect(mcpProperties.filter((name) => !piProperties.includes(name)).sort()).toEqual(
-          tool.name === 'delegate_task' ? ['clientRequestId', 'modeCeiling'] : tool.name === 'list_subagents' || tool.name === 'list_computers' || tool.name === 'list_models' || tool.name === 'task_status' || tool.name === 'task_cancel' ? [] : ['clientRequestId']
+          tool.name === 'delegate_task' ? ['clientRequestId', 'modeCeiling'] : tool.name === 'list_subagents' || tool.name === 'list_computers' || tool.name === 'list_models' || tool.name === 'task_status' ? [] : ['clientRequestId']
         )
         expect(piProperties.every((name) => mcpProperties.includes(name))).toBe(true)
       }

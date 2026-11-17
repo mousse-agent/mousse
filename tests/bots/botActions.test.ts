@@ -17,6 +17,7 @@ import { RelayHandler } from '../../src/mms/run/mcp/relay/handler'
 import { ToolRegistry, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools/registry'
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
 import { botCatalogueTools } from '../../src/mms/run/mcp/appTools/botCatalogue'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
 import { appTurn } from '../run/appToolsFixture'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
@@ -299,7 +300,7 @@ it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route 
 it('a catalogue turn still refuses a tool it was not offered through use_tool', async () => {
   const t = await setup(false)
   const result = await catalogueTurn(t)('use_tool', { tool: 'mail_other', arguments: t.args }, 'mcp:outer')
-  expect(result).toEqual({ text: 'You have no tool named mail_other. tool_catalogue lists each group\'s tools.', isError: true })
+  expect(result).toEqual(refused('unknown_tool', 'You have no tool named mail_other. tool_catalogue lists each group\'s tools.'))
   expect(t.calls).toEqual([])
 })
 it('a scheduled run is refused without parking or writing a card', async () => {

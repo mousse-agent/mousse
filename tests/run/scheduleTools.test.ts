@@ -9,12 +9,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
-import { McpToolError, type AgentScheduleHost, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
+import type { AgentScheduleHost, McpCallRequest } from '../../src/mms/run/mcp/appTools'
 import { AGENT_JOB_LIMIT_DEFAULTS } from '../../src/mms/scheduled/agentJobLimits'
 import { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { ScheduledJob, Thread } from '../../src/shared/types'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-10-27T00:00:00.000Z'
@@ -96,7 +96,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       request({ threadId: 'caller', runId: callerRun.runId, ...extra })
     const call = (name: string, args: Record<string, unknown> = {}, extra: Partial<Parameters<typeof request>[0]> = {}) =>
       registry.call(name, args, as(extra))
-    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    const denied = refusalIn
     const result = async (promise: Promise<{ text: string }>) => JSON.parse((await promise).text)
     /** A job made by a call of `caller`, as stored. */
     const create = async (extra: Record<string, unknown> = {}) => (await result(call('schedule_create', { ...CREATE, ...extra }))).job as { id: string }
@@ -156,7 +156,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       state.person = false
       const name = label.split(' ')[0]
       const error = await denied(call(name, args(job.id)))
-      expect(error, label).toBeInstanceOf(McpToolError)
+      expect(error?.refused.code, label).toBe('scope_denied')
       expect(error!.code).toBe('mousse_scope_denied')
       expect(error!.message).toMatch(/only for a turn a person started/)
       expect(stored(job.id)).toEqual(before)
@@ -199,7 +199,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       // A's run (source schedule: not a person's) tries to start B, and B's run would try A.
       state.person = false
       for (const target of [b.id, a.id]) {
-        await expect(call('schedule_run', { jobId: target })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+        expect(await refusalIn(call('schedule_run', { jobId: target }))).toMatchObject({ code: 'mousse_scope_denied' })
       }
       expect(woke).toHaveBeenCalledTimes(1)
       expect(jobs.getJob(b.id)?.nextRunAt).toBeNull()
@@ -210,7 +210,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const { call, state, jobs, create } = await world()
       await create({ schedule: { kind: 'manual' } })
       state.person = false
-      for (let attempt = 0; attempt < 3; attempt += 1) await expect(call('schedule_create', { ...CREATE, name: `Child ${attempt}` })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      for (let attempt = 0; attempt < 3; attempt += 1) expect(await refusalIn(call('schedule_create', { ...CREATE, name: `Child ${attempt}` }))).toMatchObject({ code: 'mousse_scope_denied' })
       expect(jobs.listJobs()).toHaveLength(1)
     })
   })
@@ -338,7 +338,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     it('a refusal from the profile\'s checks reaches the agent and makes nothing', async () => {
       const { call, schedules, jobs } = await world()
       schedules.validate.mockImplementation(() => { throw new Error('The model is hidden') })
-      expect(await call('schedule_create', CREATE)).toMatchObject({ isError: true, text: 'The model is hidden' })
+      expect(refusalOf(await call('schedule_create', CREATE))).toMatchObject({ message: 'The model is hidden' })
       expect(jobs.listJobs()).toEqual([])
     })
 
@@ -545,7 +545,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const before = stored(theirs.id)
       const real = await denied(call(name, { jobId: theirs.id, ...args }))
       const missing = await denied(call(name, { jobId: 'no-such-job', ...args }))
-      expect(real).toBeInstanceOf(McpToolError)
+      expect(real?.refused.code).toBe('scope_denied')
       expect(real!.code).toBe('mousse_scope_denied')
       expect(real!.message.replace(theirs.id, 'X')).toBe(missing!.message.replace('no-such-job', 'X'))
       expect(schedules.update).not.toHaveBeenCalled()
@@ -808,7 +808,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const job = await create({ schedule: { kind: 'manual' } })
       jobs.updateJob(job.id, { pendingOccurrence: { occurrenceKey: 'k', threadId: 't', runId: 'r', state: 'queued' } })
       const { runNowRefusal } = await import('../../src/mms/scheduled/runNowRefusal')
-      expect((await call('schedule_run', { jobId: job.id })).text).toBe(runNowRefusal(jobs.getJob(job.id)!))
+      expect(refusalOf(await call('schedule_run', { jobId: job.id }))?.message).toBe(runNowRefusal(jobs.getJob(job.id)!))
     })
 
     it('never brings back a one-time job that ran, or a job that ran out of time', async () => {
@@ -905,7 +905,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const parents = await w.create({ name: 'The parent\'s' })
       for (const id of [parents.id, 'missing']) {
         const error = await w.denied(asChild('schedule_delete', { jobId: id }))
-        expect(error, id).toBeInstanceOf(McpToolError)
+        expect(error?.refused.code, id).toBe('scope_denied')
         expect(error!.code).toBe('mousse_scope_denied')
       }
       expect(JSON.parse((await asChild('schedule_delete', { jobId: own.id })).text).removed).toBe(true)
@@ -987,7 +987,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     it('a read-only subagent cannot call any of them', async () => {
       const { call, readOnly, schedules } = await world()
       readOnly.add('caller')
-      for (const name of TOOLS) await expect(call(name, { ...CREATE, jobId: 'x' }), name).rejects.toMatchObject({ code: 'mousse_read_only' })
+      for (const name of TOOLS) expect(await refusalIn(call(name, { ...CREATE, jobId: 'x' })), name).toMatchObject({ code: 'mousse_read_only' })
       expect(schedules.create).not.toHaveBeenCalled()
     })
   })

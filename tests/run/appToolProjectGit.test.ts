@@ -12,7 +12,7 @@ import type { DefinitionAuthority } from '../../src/mms/agentDefinitions/definit
 import { FileService } from '../../src/mms/files/FileService'
 import { GitService } from '../../src/mms/git/GitService'
 import { ProjectGitTools } from '../../src/mms/workflows/tools/ProjectGitTools'
-import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
+import { createAppToolRegistry, refused } from '../../src/mms/run/mcp/appTools'
 import type { AgentRuntimePolicy } from '../../src/shared/agents/execution'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -107,7 +107,7 @@ describe('git_status and git_diff as app tools', () => {
   it('a definition without the grant is refused before the tool runs', async () => {
     const root = repo()
     const s = await setup({ projectPath: root, definition: { policy: policy(root), grants: grants('git_status') } as DefinitionAuthority })
-    expect(await s.call('git_diff', { path: 'a.txt' })).toEqual({ text: 'Tool "git_diff" is not granted to this agent definition.', isError: true })
+    expect(await s.call('git_diff', { path: 'a.txt' })).toEqual(refused('not_granted', 'Tool "git_diff" is not granted to this agent definition.'))
   })
 
   it('a path outside the project is refused', async () => {

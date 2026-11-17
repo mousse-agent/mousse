@@ -90,6 +90,8 @@ export function browserTools(host: AppToolHost): MousseTool[] {
         return {
           text: result.text,
           isError: result.isError,
+          // What the browser reported once it acted is its output, not a refusal.
+          ...(result.isError && result.dispatched ? { ran: true } : {}),
           ...(result.image && binding.vision ? { images: [{ data: result.image.data, mimeType: result.image.mimeType }] } : {})
         }
       }

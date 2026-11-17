@@ -23,9 +23,11 @@ import {
   ACCESS_CLASSES,
   McpToolError,
   plainSchema,
+  refusalOutcome,
   TOOL_CLASSES,
   unattendedRefusal,
   type AppToolTurn,
+  type JsonSchema,
   type McpCaller,
   type MousseTool,
   type ToolCallContext,
@@ -36,6 +38,7 @@ import {
   type ToolScope,
   type ToolTimeline
 } from './types'
+import { asRefusal, refused } from './refusal'
 
 /**
  * What a call that waited for a run the provider started (`awaitLiveRun`) learns: the run it must act as,
@@ -197,6 +200,60 @@ function uncoveredThreadArgs(tool: MousseTool): string[] {
   })
 }
 
+/**
+ * The tools that change nothing: they read, list, search or wait. Every other tool declares `clientRequestId`
+ * (docs/plans/tool-api.md §1.2 "Retry"); a tool's `class` cannot say which, since `read` also covers writes to the
+ * caller's own state (§6, finding 6).
+ */
+export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'task_status', 'list_subagents', 'list_computers', 'list_models', 'list_tasks',
+  'thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'schedule_list', 'terminal_read',
+  'automation_list', 'list_skills', 'load_skill', 'tool_catalogue', 'mcp_servers', 'theme_read',
+  'web_search', 'web_fetch', 'browser_observe', 'browser_find', 'browser_wait', 'browser_extract', 'browser_screenshot',
+  'mousse_gui_screenshot', 'mousse_gui_console', 'mousse_gui_status',
+  'bot_list', 'bot_schedule_list', 'work_models', 'work_list', 'watch_list', 'reminder_list', 'subagent_wait', 'subagent_result',
+  'memory_search', 'memory_read', 'memory_list',
+  'profiler_overview', 'profiler_service_breakdown', 'profiler_window_breakdown', 'profiler_gpu_hints', 'profiler_children',
+  'profiler_sample_now', 'profiler_watch', 'profiler_heap_summary'
+])
+
+/** `clientRequestId` as a tool that does not keep its first result declares it: the key a retry reuses. */
+const RETRY_KEY_SCHEMA: JsonSchema = {
+  type: 'string',
+  description: 'Reuse only to retry the same call.'
+}
+
+/** Each schema with `clientRequestId` added, kept so a schema read twice is the same object. */
+const retryKeyed = new WeakMap<object, JsonSchema>()
+
+/** `schema` with `clientRequestId` among its properties, when it is an object schema that does not have it yet. */
+function withRetryKey<T extends JsonSchema | undefined>(schema: T): T {
+  if (!schema || typeof schema !== 'object') return schema
+  const properties = (schema as { properties?: Record<string, JsonSchema> }).properties
+  if ((schema as { type?: unknown }).type !== 'object' || properties?.clientRequestId) return schema
+  let keyed = retryKeyed.get(schema)
+  if (!keyed) {
+    keyed = { ...schema, properties: { ...(properties ?? {}), clientRequestId: RETRY_KEY_SCHEMA } } as JsonSchema
+    retryKeyed.set(schema, keyed)
+  }
+  return keyed as T
+}
+
+/**
+ * A tool as it is registered: one that changes something declares `clientRequestId` in its input schemas. A view
+ * over the tool rather than a copy, so a schema or description the tool computes when read (the schedule tools'
+ * limits) stays current.
+ */
+function declaringRetryKey(tool: MousseTool): MousseTool {
+  if (READ_ONLY_TOOL_NAMES.has(tool.name)) return tool
+  return new Proxy(tool, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver)
+      return key === 'inputSchema' || key === 'botInputSchema' ? withRetryKey(value as JsonSchema | undefined) : value
+    }
+  })
+}
+
 /** Where a call stands once its turn is known (`ToolRegistry.call`). */
 interface CallSite {
   threadId: string
@@ -260,7 +317,7 @@ export class ToolRegistry {
         `Mousse tool ${tool.name} takes a thread id (${uncovered.join(', ')}) that the access check does not cover: make it readsOthers, managesOthers, writesThreads or editsWorkspace (for threadId), or say where it is checked with threadArgChecked`
       )
     if (this.tools.has(tool.name)) throw new Error(`Mousse tool ${tool.name} is already registered`)
-    this.tools.set(tool.name, tool)
+    this.tools.set(tool.name, declaringRetryKey(tool))
     return this
   }
 
@@ -440,8 +497,9 @@ export class ToolRegistry {
 
   /**
    * A call over the Mousse MCP server, under the credential the request's bearer resolved to.
-   * Refusals before the handler are `McpToolError`s (JSON-RPC errors) and write no ledger row; a
-   * tool the turn cannot use now is an error result that says why.
+   * A refused call is an error result in the refusal shape (`refusal.ts`); refusals before the
+   * handler write no ledger row. Only the faults (`REFUSAL_FAULT_CODES`: the credential's turn is
+   * over, no such tool) are thrown as `McpToolError`s, which the server sends as JSON-RPC errors.
    */
   async call(name: string, rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<ToolOutcome> {
     const registered = this.tools.get(name)
@@ -451,22 +509,28 @@ export class ToolRegistry {
     const { threadId, active, turn, args, caller, boundToken } = await this.admit(rawArgs, request)
     const { credential } = request
     const site: CallSite = { threadId, active, turn, credential, boundToken, request }
-    // A catalogue turn's call of a catalogued tool (docs/plans/bot-context.md §15): the tool it names runs exactly as if
-    // it were called directly, through every check below. That is a Mousse tool, or one of the owner's MCP tools the
-    // turn was offered, which goes through the same dispatcher (grant, masking, asks first) as its direct call.
-    if (name === BOT_USE_TOOL && turn.bot?.catalogue === 'use_tool') {
-      const inner = useToolCall(args)
-      if ('refused' in inner) return { text: inner.refused, isError: true }
-      const innerRequest = inner.clientRequestId ? { ...request, toolCallId: `mcp:${inner.clientRequestId}` } : request
-      const named = this.tools.get(inner.name)
-      if (!named && this.options.userMcp && turn.bot.mcpTools?.some((offered) => offered.providerName === inner.name))
-        return this.callUserMcp(inner.name, inner.args, { ...site, request: innerRequest })
-      if (!named || named.hidden || inner.name === BOT_USE_TOOL || !botMayBeOffered(inner.name))
-        return { text: `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`, isError: true }
-      return this.callAdmitted(inner.name, named, inner.args, caller, { ...site, request: innerRequest })
+    try {
+      // A catalogue turn's call of a catalogued tool (docs/plans/bot-context.md §15): the tool it names runs exactly as if
+      // it were called directly, through every check below. That is a Mousse tool, or one of the owner's MCP tools the
+      // turn was offered, which goes through the same dispatcher (grant, masking, asks first) as its direct call.
+      if (name === BOT_USE_TOOL && turn.bot?.catalogue === 'use_tool') {
+        const inner = useToolCall(args)
+        if ('refused' in inner) return refused('invalid_arguments', inner.refused)
+        const innerRequest = inner.clientRequestId ? { ...request, toolCallId: `mcp:${inner.clientRequestId}` } : request
+        const named = this.tools.get(inner.name)
+        if (!named && this.options.userMcp && turn.bot.mcpTools?.some((offered) => offered.providerName === inner.name))
+          return await this.callUserMcp(inner.name, inner.args, { ...site, request: innerRequest })
+        if (!named || named.hidden || inner.name === BOT_USE_TOOL || !botMayBeOffered(inner.name))
+          return refused('unknown_tool', `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`)
+        return await this.callAdmitted(inner.name, named, inner.args, caller, { ...site, request: innerRequest })
+      }
+      if (!tool) return await this.callUserMcp(name, args, site)
+      return await this.callAdmitted(name, tool, args, caller, site)
+    } catch (error) {
+      const outcome = refusalOutcome(error)
+      if (outcome) return outcome
+      throw error
     }
-    if (!tool) return this.callUserMcp(name, args, site)
-    return this.callAdmitted(name, tool, args, caller, site)
   }
 
   /** A call of the app tool `tool`, admitted (`admit`): the bot's grant, scope, availability, approvals, then its handler. */
@@ -478,23 +542,23 @@ export class ToolRegistry {
     const botThreads = turn.bot !== undefined && isBotThreadTool(name)
     if (botThreads) {
       const refusal = botAppToolRefusal(turn.bot!, name, args)
-      if (refusal) return { text: refusal, isError: true }
+      if (refusal) return refused('not_granted', refusal)
     }
     // Scope is checked first: a refused call asks nobody anything and leaves no ledger row.
     const scope = botThreads ? this.botThreadScope(tool, args, caller) : this.authorize(tool, args, caller, this.options.readOnlyThread?.(threadId) === true)
     // A bot's thread lists the browser tools whatever it holds: one its owner has not allowed says so, and how to ask,
     // not that no browser is bound to the turn. One the owner allowed after the turn started is answered as held: the
     // bot is not sent to ask again, and its turn continues with the browser once it ends.
-    if (turn.bot && botBrowserWithheld(turn.bot, name)) return { text: turn.bot.held?.({ tool: name }) ?? botBrowserNotAllowed(turn.bot), isError: true }
+    if (turn.bot && botBrowserWithheld(turn.bot, name)) return refused('not_granted', turn.bot.held?.({ tool: name }) ?? botBrowserNotAllowed(turn.bot))
     const availability = tool.available?.(turn) ?? true
-    if (availability !== true) return { text: availability, isError: true }
+    if (availability !== true) return refused('unavailable', availability)
     const unattended = unattendedRefusal(tool, turn)
-    if (unattended) return { text: unattended, isError: true }
+    if (unattended) return refused('needs_person', unattended)
     // A bot turn: every app tool is held to the bot's grant, on every call (a list cached before a
     // narrower revision cannot reach a removed tool). Nobody is asked. A thread tool was checked above.
     if (turn.bot && !botThreads) {
       const refusal = botAppToolRefusal(turn.bot, name, args)
-      if (refusal) return { text: refusal, isError: true }
+      if (refusal) return refused('not_granted', refusal)
     }
     // A definition run: its grants, policy and approvals hold for every call, as in the in-process loop.
     // A call the runtime's gate already authorized in full (approval included, before it was
@@ -520,13 +584,14 @@ export class ToolRegistry {
     } catch (error) {
       if (ledgerId) ledger?.failed(ledgerId)
       if (error instanceof McpToolError) throw error
-      return { text: error instanceof Error ? error.message : String(error), isError: true }
+      return refused('failed', error instanceof Error ? error.message : String(error))
     }
     if (ledgerId) {
       if (outcome.isError) ledger?.failed(ledgerId)
       else ledger?.commit(ledgerId)
     }
-    return outcome
+    // A handler's own error result says why in words: it is put in the refusal shape here, once for every tool.
+    return asRefusal(outcome)
   }
 
   /**
@@ -586,11 +651,11 @@ export class ToolRegistry {
     const handedOver = credential.binding === 'per_call' && takeAuthorizedCall(definition, { turnToken: boundToken, toolName: name, callId, args: checked })
     if (handedOver) {
       const refusal = definitionRefusal(definition, { toolName: name, args: checked, ...projectPath })
-      if (refusal) return { text: refusal, isError: true }
-      if (request.signal.aborted) return { text: 'Tool dispatch cancelled immediately before side effects.', isError: true }
+      if (refusal) return refused('not_granted', refusal)
+      if (request.signal.aborted) return refused('cancelled', 'Tool dispatch cancelled immediately before side effects.')
     } else {
       const decision = await authorizeDefinitionCall(definition, { toolName: name, args: checked, ...projectPath, signal: request.signal })
-      if (!decision.allowed) return { text: decision.message, isError: true }
+      if (!decision.allowed) return refused('not_granted', decision.message)
     }
     if (this.options.activeRunId(threadId) !== active || this.options.turns?.get(active) !== turn || !credential.current())
       throw notLive(`Run ${active} is no longer the active run of thread ${threadId}; the tool was not run.`)
@@ -614,7 +679,7 @@ export class ToolRegistry {
     }
     const checked = withoutTransportFields(args)
     const allowed = await proxy.allowed(name, turn.projectPath, turn.actor)
-    if (!allowed.allowed) return { text: allowed.reason ?? 'MCP tool is not enabled for this actor.', isError: true }
+    if (!allowed.allowed) return refused('not_granted', allowed.reason ?? 'MCP tool is not enabled for this actor.')
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: request.toolCallId, name, arguments: checked } as ToolCall)
     let outcome: ToolOutcome
@@ -750,8 +815,9 @@ export class ToolRegistry {
     const needs = tool.runsWithoutAsking?.(args) ?? 'edit'
     if (needs === 'full' ? mode === 'full' : permissionModeAllows(mode, 'edit')) return null
     // A run nobody answers (`approvals: 'never'`) is refused at once rather than waiting for a person.
-    if (unattended) return { text: APPROVALS_REFUSED_MESSAGE, isError: true }
-    const rejected: ToolOutcome = { text: `The user did not approve ${tool.name}, so it did not run. Do not retry it unless they ask.`, isError: true }
+    if (unattended) return refused('needs_person', APPROVALS_REFUSED_MESSAGE)
+    const notApproved = `The user did not approve ${tool.name}, so it did not run. Do not retry it unless they ask.`
+    const rejected: ToolOutcome = refused('not_approved', notApproved)
     if (!this.options.askApproval) return rejected
     try {
       const answers = await this.options.askApproval(
@@ -777,7 +843,7 @@ export class ToolRegistry {
       )
       if (answers.permission === 'allow' && !signal.aborted) return null
       const why = typeof answers.feedback === 'string' ? answers.feedback.trim().slice(0, 1000) : ''
-      return why ? { text: `${rejected.text} Reason: ${why}`, isError: true } : rejected
+      return why ? refused('not_approved', `${notApproved} Reason: ${why}`) : rejected
     } catch {
       return rejected
     }

@@ -25,6 +25,7 @@ import {
   type ToolOutcome,
   type ToolScope
 } from './types'
+import { refused, remoteRefusal as remoteRefused } from './refusal'
 
 const THREAD_READ_DEFAULT_LIMIT = 200
 const THREAD_READ_MAX_LIMIT = 500
@@ -736,17 +737,11 @@ function remoteRefusal(error: unknown): ToolOutcome | undefined {
   if (!(error instanceof RemoteThreadRefusal)) return undefined
   // What else the refusal names: the reach that computer gave this one (outside_agent_reach), the computers a name could be.
   const details = (error.details ?? {}) as { reach?: unknown; computers?: unknown }
-  return {
-    text: JSON.stringify({
-      ok: false,
-      code: error.code,
-      ...(error.computer ? { computer: error.computer } : {}),
-      ...(details.reach !== undefined ? { reach: details.reach } : {}),
-      ...(details.computers !== undefined ? { computers: details.computers } : {}),
-      message: error.message
-    }),
-    isError: true
-  }
+  return remoteRefused(error.code, error.message, {
+    ...(error.computer ? { computer: error.computer } : {}),
+    ...(details.reach !== undefined ? { reach: details.reach } : {}),
+    ...(details.computers !== undefined ? { computers: details.computers } : {})
+  })
 }
 
 /**
@@ -1061,8 +1056,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (result.status === 'refused') {
       // Nothing was made: the place under the cap is given back.
       if (!uncounted) releaseCreation(actor.runId)
-      const { status: _status, ...refusal } = result
-      return { text: JSON.stringify({ ok: false, ...refusal, message: `${refusal.message} No thread was created.` }), isError: true }
+      const { status: _status, code, message, ...rest } = result
+      return remoteRefused(code, `${message} No thread was created.`, rest)
     }
     if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', computer: result.computer, message: result.message })
     if (!uncounted && result.replayed) releaseCreation(actor.runId)
@@ -1783,14 +1778,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             end = await ended
           }
           if (end.kind === 'caller_ended') return json({ status: 'caller_ended', threadId })
-          if (end.kind === 'refused') return { text: end.text, isError: true }
+          if (end.kind === 'refused') return refused('not_granted', end.text)
           // A bot's wait that ends after its owner removed "use your threads", or this computer switched it off, or the
           // thread went out of its reach, returns the refusal and nothing of the thread.
           if (bot) {
             const refusal = bot.stillHolds?.('thread_wait')
-            if (refusal) return { text: refusal, isError: true }
+            if (refusal) return refused('not_granted', refusal)
             const reach = botThreadReach(host, engine, ctx.caller.threadId, threadId)
-            if ('refused' in reach) return { text: reach.refused, isError: true }
+            if ('refused' in reach) return refused('scope_denied', reach.refused)
           }
           const now = engine.getRun(target) ?? run
           const fullView = resultTextVisible(scope)
@@ -2105,7 +2100,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             return json({ ok: false, reason: 'unknown', threadId, requestId, message: `No approval ${requestId} exists.` })
           default:
             // The rule refused this agent: the request stays pending for the user.
-            return { text: JSON.stringify({ ok: false, reason: result.reason, threadId, requestId, message: describeApprovalRefusal(result.reason) }), isError: true }
+            return refused('not_granted', describeApprovalRefusal(result.reason), {
+              retry: result.reason === 'approvals_disabled' ? 'after_change' : 'never',
+              data: { ok: false, reason: result.reason, threadId, requestId }
+            })
         }
       }
     },
@@ -2403,7 +2401,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     {
       name: 'queue_promote_to_steer',
       botDescription: BOT_THREAD_TOOL_TEXT.queue_promote_to_steer,
-      description: 'Turn a queued message into guidance for the turn the thread is running now (default: your thread). Refused while the user has a question or approval waiting on the thread: a steer would settle it for them.Name the run you read (expectedRunId) and the queue revision (queue_list): if that run is not the thread\'s active run, or is paused, nothing changes. A message with a mode limit (one an agent sent or edited) joins only a run whose permission mode is no looser than that limit, and your own mode counts too: a running turn cannot be narrowed. The message joins only that run; if the run ends first it goes back to the queue and runs as its own turn.',
+      description: 'Turn a queued message into guidance for the turn the thread is running now (default: your thread). Refused while the user has a question or approval waiting on the thread: a steer would settle it for them. Name the run you read (expectedRunId) and the queue revision (queue_list): if that run is not the thread\'s active run, or is paused, nothing changes. A message with a mode limit (one an agent sent or edited) joins only a run whose permission mode is no looser than that limit, and your own mode counts too: a running turn cannot be narrowed. The message joins only that run; if the run ends first it goes back to the queue and runs as its own turn.',
       inputSchema: {
         type: 'object',
         properties: {

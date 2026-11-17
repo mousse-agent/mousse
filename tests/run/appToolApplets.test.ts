@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AppletStore } from '../../src/mms/applets/AppletStore'
 import { APPLET_GENERATION_GUIDANCE } from '../../src/shared/appletGuidance'
+import { refusalOf } from './appToolsFixture'
 import { callTool, VendorAdapter, vendorDaemon, type ToolCallResult, type VendorDaemon } from './appToolVendorFixture'
 
 const applet = (title: string) => ({
@@ -40,16 +41,15 @@ describe('publish_applet from a vendor turn', () => {
     await d.send('Chart it')
 
     for (const result of results) expect(result.error).toBeUndefined()
-    expect(results[0]).toMatchObject({ isError: true, text: 'Unsupported applet schema version.' })
+    expect(refusalOf(results[0])).toMatchObject({ message: 'Unsupported applet schema version.' })
     // An applet sized to the viewport is refused with the reason, and stages nothing.
-    expect(results[1].isError).toBe(true)
-    expect(results[1].text).toMatch(/sizes itself to the viewport.*Use content-driven heights or pixel heights/)
+    expect(refusalOf(results[1])?.message).toMatch(/sizes itself to the viewport.*Use content-driven heights or pixel heights/)
     expect(results.slice(2, 5).map((result) => [result.isError, JSON.parse(result.text!)])).toEqual([
       [undefined, { queued: true, title: 'One' }],
       [undefined, { queued: true, title: 'Two' }],
       [undefined, { queued: true, title: 'Three' }]
     ])
-    expect(results[5]).toMatchObject({ isError: true, text: 'Only three applets may be published per response.' })
+    expect(refusalOf(results[5])).toMatchObject({ message: 'Only three applets may be published per response.' })
 
     // The reply in the transcript carries one fence per staged applet, after the model's text.
     const reply = d.orch.getMessages(d.thread.id).filter((message) => message.role === 'assistant').at(-1)!
@@ -81,7 +81,7 @@ describe('publish_applet from a vendor turn', () => {
     d = await vendorDaemon([vendor])
     await d.send('Chart it')
     expect(result!.error).toBeUndefined()
-    expect(result).toMatchObject({ isError: true, text: 'Applets are off for this turn.' })
+    expect(refusalOf(result)).toMatchObject({ message: 'Applets are off for this turn.' })
     const reply = d.orch.getMessages(d.thread.id).filter((message) => message.role === 'assistant').at(-1)!
     expect(reply.content).toBe('No charts.')
     expect(vendor.bridges[0].sessionInstructions).not.toContain('In-thread applets')

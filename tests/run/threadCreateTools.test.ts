@@ -5,9 +5,9 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../../src/shared/types'
-import { McpToolError, type AgentCreatedThread, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
+import type { AgentCreatedThread, McpCallRequest } from '../../src/mms/run/mcp/appTools'
 import { THREAD_CREATE_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-10-12T00:00:00.000Z'
@@ -55,7 +55,7 @@ describe('thread_create (SPEC §15.1)', () => {
       request({ threadId: 'caller', runId: callerRun.runId, ...extra })
     const call = (args: Record<string, unknown> = { projectId: 'p1' }, extra: Partial<Parameters<typeof request>[0]> = {}) =>
       registry.call('thread_create', args, as(extra))
-    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    const denied = refusalIn
     return { fx, registry, threads, ledger, call, as, denied, callerRun, ...fake }
   }
 
@@ -106,7 +106,7 @@ describe('thread_create (SPEC §15.1)', () => {
 
     it('a host without thread creation says so', async () => {
       const { call } = await world({ createThread: undefined })
-      expect(await call()).toMatchObject({ isError: true, text: 'thread_create is not available in this host.' })
+      expect(await refusalIn(call())).toMatchObject({ message: 'thread_create is not available in this host.' })
     })
   })
 
@@ -150,8 +150,8 @@ describe('thread_create (SPEC §15.1)', () => {
           .mockRejectedValueOnce(Object.assign(new Error('too many in a row'), { code: 'agent_hops_exceeded' }))
           .mockResolvedValue(created('th1'))
       })
-      const error = await call({ projectId: 'p1', firstMessage: 'go' }).then(() => undefined, (thrown: McpToolError) => thrown)
-      expect(error).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' } })
+      const error = await refusalIn(call({ projectId: 'p1', firstMessage: 'go' }))
+      expect(error).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' }, refused: { code: 'conflict', retry: 'never' } })
       for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) expect((await call()).isError).toBeUndefined()
       expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
     })

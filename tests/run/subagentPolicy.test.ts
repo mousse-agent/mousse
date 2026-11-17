@@ -18,7 +18,7 @@ import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { READ_ONLY_MOUSSE_TOOLS } from '../../src/mms/run/mcp/attachment'
 import { AppToolTurns, ToolRegistry } from '../../src/mms/run/mcp/appTools'
-import { appTurn } from './appToolsFixture'
+import { appTurn, denied, refusalOf } from './appToolsFixture'
 import { subagentTargetRefusal, type ChildPreflightContext, type SubagentRefusal } from '../../src/mms/run/policy/featureGates'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { phase6Daemon, waitFor } from './phase6Fixture'
@@ -548,7 +548,8 @@ describe('delegated child policy', () => {
         ['create_task', { title: 't' }]
       ] as const) {
         results[name][tool] = await tools.call(tool, { ...args }, { credential, toolCallId: `${name}-${tool}`, signal: new AbortController().signal })
-          .then((outcome) => tool === 'delegate_task' ? (JSON.parse(outcome.text).code ?? 'started') : 'allowed', (error: { code?: string }) => error.code ?? 'error')
+          // A refusal names the code it was refused with (`mousse_read_only`); a tool's own error result still counts as allowed.
+          .then((outcome) => tool === 'delegate_task' ? (JSON.parse(outcome.text).code ?? 'started') : (refusalOf(outcome)?.details.reason as string | undefined) ?? 'allowed', (error: { code?: string }) => error.code ?? 'error')
       }
       // A read-only child may start a read-only subagent through the MCP server.
       const nestedShared = await tools.call('delegate_task', { prompt: 'sub', title: 'Looker', workspace: 'shared', role: 'research', readOnly: true, instanceId: 'claude' }, { credential, toolCallId: `${name}-nested`, signal: new AbortController().signal })
@@ -605,7 +606,7 @@ describe('ToolRegistry read-only gate', () => {
     ['reads', true], ['readsOthers', true], ['safe', true], ['acts', false], ['writes', false], ['starts', false]
   ])('%s is %s for a read-only caller', async (name, allowed) => {
     if (allowed) await expect(call(name, 'child')).resolves.toMatchObject({ text: 'ok' })
-    else await expect(call(name, 'child')).rejects.toMatchObject({ code: 'mousse_read_only' })
+    else expect(await denied(call(name, 'child'))).toMatchObject({ code: 'mousse_read_only', refused: { code: 'read_only', retry: 'never' } })
   })
 
   it.each(['reads', 'readsOthers', 'safe', 'acts', 'writes', 'starts'])('%s works for any other caller', async (name) => {

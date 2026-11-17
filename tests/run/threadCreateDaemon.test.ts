@@ -19,12 +19,13 @@ import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import { heuristicTitle } from '../../src/shared/threadTitleText'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { ChatMessage } from '../../src/shared/types'
 import { adapterDriver } from '../../src/mms/run/testkit/harness'
 import type { DriverRuntime } from '../../src/mms/harness/driver'
+import { refusalOfResponse } from './appToolsFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /**
@@ -128,8 +129,8 @@ const parse = <T = Record<string, unknown>>(response: Rpc): T => {
   if (response.result?.isError) throw new Error(response.result.content?.[0]?.text ?? 'tool error')
   return JSON.parse(response.result!.content![0].text) as T
 }
-/** The text of an error result (a tool that refused), or of a JSON-RPC error. */
-const refusal = (response: Rpc): string => response.error?.message ?? (response.result?.isError ? response.result.content?.[0]?.text ?? '' : '')
+/** The words of a refusal, or of a JSON-RPC error. */
+const refusal = (response: Rpc): string => response.error?.message ?? refusalOfResponse(response)?.message ?? ''
 
 describe('thread_create end to end (SPEC §15.1)', () => {
   let home: string | undefined
@@ -482,7 +483,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       await w.run(w.parent.id, GO, 'go')
       await waitFor(() => seen.bare !== undefined, 'the chain to reach the limit', 30_000)
 
-      expect(seen.refused!.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_hops_exceeded' } })
+      expect(refusalOfResponse(seen.refused!)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' } })
       // Refused before the receipt and before any thread: the only thread the run at the limit made is the bare one.
       expect(w.launchedBy(seen.continued!.threadId).map((entry) => entry.id)).toEqual([seen.bare!.threadId])
       expect(w.d.engine.store.getReceipt(`thread_create:${seen.continued!.threadId}:mcp:chain-3`)).toBeNull()
@@ -545,7 +546,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       replies.length = 0
       await w.run(w.parent.id, 'run-c', 'go-c')
       expect(refusal(replies[0])).toMatch(/still working/)
-      expect(replies[0].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'creation_limit' } })
+      expect(refusalOfResponse(replies[0])).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'creation_limit' }, refused: { retry: 'later' } })
       expect(w.launchedBy(w.parent.id)).toHaveLength(THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
       // Once their work is over the creator may launch again.
       for (const run of w.d.engine.store.listNonTerminalRuns().filter((entry) => entry.threadId !== w.parent.id)) w.d.engine.markTerminal(run.runId, 'cancelled')
@@ -622,7 +623,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       })
       await w.attach()
       await w.run(w.parent.id, GO, 'go')
-      for (const reply of [seen.other!, seen.title!]) expect(reply.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'client_request_id_conflict' } })
+      for (const reply of [seen.other!, seen.title!]) expect(refusalOfResponse(reply)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'client_request_id_conflict' } })
       expect(w.launchedBy(w.parent.id).map((entry) => entry.name)).toEqual(['One'])
     })
 
@@ -797,7 +798,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.d.store.getThread(id)).toBeDefined()
       w.d.orch.setThreadPermissionMode(w.parent.id, 'full')
       await w.run(w.parent.id, 'again', 'go-2')
-      expect(replies.again.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'thread_in_use', threadId: id } })
+      expect(refusalOfResponse(replies.again)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'thread_in_use', threadId: id } })
       expect(w.marker(id)).toEqual([])
       expect(w.messages(id).filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['hello from a person'])
       expect(w.d.engine.listRuns(id)).toHaveLength(1)
@@ -812,7 +813,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       ;(w.d.orch as unknown as { recoverAgentThreadCreations(): void }).recoverAgentThreadCreations()
       expect(w.d.store.getThread(id)?.name).toBe('My own name')
       await w.run(w.parent.id, 'again', 'go-2')
-      expect(replies.again.error).toMatchObject({ data: { conflict: 'thread_in_use' } })
+      expect(refusalOfResponse(replies.again)).toMatchObject({ details: { conflict: 'thread_in_use' } })
       expect(w.d.engine.listRuns(id)).toEqual([])
     })
 
