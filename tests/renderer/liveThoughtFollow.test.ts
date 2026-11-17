@@ -63,8 +63,8 @@ afterEach(() => {
 })
 
 const at = (n: number) => new Date(Date.UTC(2026, 10, 18, 10, 0, 0) + n * 1000).toISOString()
-const thinking = (n: number, content: string): ChatMessage =>
-  ({ id: 'th', role: 'system', kind: 'thinking', content: '', timestamp: at(n), thinking: { content, status: 'processing' } })
+const thinking = (n: number, content: string, status: 'processing' | 'complete' = 'processing'): ChatMessage =>
+  ({ id: 'th', role: 'system', kind: 'thinking', content: '', timestamp: at(n), thinking: { content, status } })
 const read = (id: string, n: number): ChatMessage => ({
   id, role: 'system', kind: 'tool_call', content: '', timestamp: at(n),
   toolCall: { title: 'Read', summary: 'Read a.ts', details: ['Tool: Read'], status: 'complete', toolName: 'Read', input: { file_path: 'a.ts' } },
@@ -169,6 +169,27 @@ describe('an opened thought follows its newest words', () => {
       stream(140)
       expect(box()).toBe(scrolledUp)
       expect(fromEnd()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a finished thought reopened before its close has finished opens at its start', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      useAppStore.setState({ messages: [{ id: 'u', role: 'user', content: 'Why?', timestamp: at(0), turnId: 't-u' }, read('r1', 1), thinking(5, `**Checking the build**\n\n${words(80)}`, 'complete'), read('r2', 6)], activeThreadId: 'thread-1' })
+      act(() => root.render(createElement(Transcript)))
+      act(() => liveRow().querySelector<HTMLButtonElement>('button.turn-live-toggle')!.click())
+      act(() => thoughtButton().click())
+      act(() => { vi.advanceTimersByTime(1000) })
+      scrollTo(120)
+      const scrolledDown = box()
+      expect(scrolledDown!.scrollTop).toBe(120)
+      act(() => thoughtButton().click())
+      act(() => { vi.advanceTimersByTime(COLLAPSE_CLOSE_MS / 2) })
+      act(() => thoughtButton().click())
+      expect(box()).toBe(scrolledDown)
+      expect(box()!.scrollTop).toBe(0)
     } finally {
       vi.useRealTimers()
     }

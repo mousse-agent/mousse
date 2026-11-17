@@ -44,10 +44,14 @@ export function ThinkingCollapsed({
   const atEndRef = useRef(true);
   // Each time it opens while it is written (by hand, or as the live row opens), its box goes to its newest words and
   // follows them again: also when it reopens before its close has finished, so its box is still there, scrolled up.
-  // A finished thought opens where it was.
+  // A finished thought opens at its start.
   const onOpen = useCallback(() => {
     const box = boxRef.current;
-    if (!box || !isAnimating) return;
+    if (!box) return;
+    if (!isAnimating) {
+      box.scrollTop = 0;
+      return;
+    }
     atEndRef.current = true;
     box.scrollTop = box.scrollHeight;
   }, [isAnimating]);

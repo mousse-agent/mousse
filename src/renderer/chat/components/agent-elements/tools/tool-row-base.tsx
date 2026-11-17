@@ -43,8 +43,8 @@ export type ToolRowBaseProps = {
   defaultOpen?: boolean;
   onToggleExpand?: () => void;
   /**
-   * Called each time the row goes from closed to open, after its panel is in the document: whether the panel mounted
-   * again or was still there, closing, when it reopened.
+   * Fires when the row opens after it was shown closed, once its panel is in the document: whether the panel mounted
+   * again or was still there, closing. A row that mounts open does not fire it.
    */
   onOpen?: () => void;
   /** Rows in the panel when it is a list; a long one opens without the per-row stagger. */
