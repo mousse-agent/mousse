@@ -2929,6 +2929,8 @@ it.each(['open', 'done'] as const)('review2 Forget redacts nudge and status cont
   const context = await pack.chatContext({ botId: t.botId, activationId: 'after-forget', start: true, selection: { instanceId: 'pi', model: 'test' }, keep: () => undefined })
   expect(context.text).not.toContain('Wants to send')
   expect(context.text).not.toContain('Held action:')
+  expect(context.text).not.toContain('<mousse_notice kind="bot_action"')
+  expect(context.text).not.toContain(':status:')
 })
 
 it('review10 reads shared action nudge history once per bot per read or upkeep pass', async () => {
