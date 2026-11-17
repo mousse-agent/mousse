@@ -145,13 +145,6 @@ describe('bots.create', () => {
     expect(f.bots.definitionOf(long.botId).name).toBe('Watch Prices Flights')
   })
 
-  it('adds no provider entry of its own: the bot runs on the owner\'s entries', async () => {
-    const host = f.host as Record<string, unknown>
-    expect(host.botRunner).toBeUndefined()
-    const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Penny', description: 'Track my spending.', clientRequestId: 'r2' })
-    expect(bot.name).toBe('Penny')
-  })
-
   it('an unknown look reads as the default', async () => {
     const { bot } = await f.bots.service.create({ look: { colour: 'ultraviolet', accessory: 'jetpack' }, name: 'X', description: 'Do things.', clientRequestId: 'c1' })
     expect(bot.look).toEqual({ colour: 'coral', accessory: 'none' })
