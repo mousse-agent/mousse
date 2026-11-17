@@ -2610,6 +2610,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         expiryStopsRun: expiresAt !== null && asOptionalBoolean(p.stopsRun, 'stopsRun') === true ? true : undefined
       }, { touch: false })
       ctx.mms.threadExpiry?.reschedule()
+      // Its subagents on other computers expire with it there too (issue #685).
+      ctx.mms.orchestrator.threadExpiryChanged(threadId)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread: updated, threads: listedThreadsFor(ctx, threads), version }

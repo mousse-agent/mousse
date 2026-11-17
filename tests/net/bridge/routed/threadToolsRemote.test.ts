@@ -292,7 +292,7 @@ describe('the thread tools on a thread launched on another computer (issue #1160
     expect(isTerminal(down.runId!)).toBe(false)
 
     // A restart: the old service is gone; a new one reads the kept Stop from the run database alone and sends it once
-    // that computer answers.
+    // that computer answers, however long that took (issue #685: no day-long cutoff).
     remoteOf().close()
     vi.mocked(port.versions!).mockRestore()
     const fresh = new RemoteLaunchedThreads({
@@ -301,7 +301,8 @@ describe('the thread tools on a thread launched on another computer (issue #1160
       denial: () => undefined,
       related: () => false,
       localOnly: () => false,
-      note: (threadId, text) => (t.caller.orchestrator as unknown as Loose).noteAgentLaunch(threadId, text)
+      note: (threadId, text) => (t.caller.orchestrator as unknown as Loose).noteAgentLaunch(threadId, text),
+      now: () => Date.now() + 2 * 24 * 60 * 60_000
     })
     await fresh.pass()
     expect(t.caller.runEngine.remoteLaunches.get(key)!.stop).toMatchObject({ state: 'sent' })
@@ -312,6 +313,41 @@ describe('the thread tools on a thread launched on another computer (issue #1160
     await fresh.pass()
     expect(calls).not.toHaveBeenCalled()
     remoteOf().start()
+  }, 120_000)
+
+  it('a kept Stop is given up only once that computer is no longer one of the user\'s computers', async () => {
+    standInForTurns()
+    const { thread, launch } = await launcher()
+    const { runId } = await launch('Build it.')
+    running(runId!)
+    const port = portOf()
+    vi.spyOn(port, 'versions').mockRejectedValue(new DomainRpcError('computer_offline', 'The other computer is offline.'))
+    await t.caller.orchestrator.stopThread(thread.id, 'user', { clientRequestId: `person-stop-${++seq}` })
+    const key = t.caller.runEngine.remoteLaunches.listForLauncher(thread.id)[0]!.creationKey
+    await vi.waitFor(() => expect(t.caller.runEngine.remoteLaunches.get(key)!.stop).toMatchObject({ state: 'pending' }), { timeout: 20_000 })
+    remoteOf().close()
+    vi.mocked(port.versions!).mockRestore()
+    // That computer was removed from the device list: nothing can deliver the Stop any more.
+    const listed = vi.spyOn(port, 'computers').mockReturnValue([])
+    const fresh = new RemoteLaunchedThreads({
+      records: t.caller.runEngine.remoteLaunches,
+      port: () => port,
+      denial: () => undefined,
+      related: () => false,
+      localOnly: () => false,
+      note: (threadId, text) => (t.caller.orchestrator as unknown as Loose).noteAgentLaunch(threadId, text)
+    })
+    try {
+      await fresh.pass()
+      expect(t.caller.runEngine.remoteLaunches.get(key)!.stop).toMatchObject({ state: 'expired' })
+      const notes = t.caller.orchestrator.getMessages(thread.id).filter((message) => message.role === 'system').map((message) => String(message.content))
+      expect(notes.some((text) => text.includes('is no longer one of your computers'))).toBe(true)
+    } finally {
+      listed.mockRestore()
+      // Its run there is still going; the test ends it.
+      t.owner.runEngine.markTerminal(runId!, 'cancelled')
+      remoteOf().start()
+    }
   }, 120_000)
 
   it('deleting the launcher stops the work it started there and deletes nothing there', async () => {

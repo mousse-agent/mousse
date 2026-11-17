@@ -142,6 +142,7 @@ import type { RoutedAgentMark } from '../../shared/bridge/routed'
 import { REMOTE_THREAD_COMMAND, remoteThreadFingerprint, remoteThreadRefusal } from './remoteThreadRequest'
 import type { RemoteLaunchRecord } from '../run/delegation/remoteLaunches'
 import { RemoteSubagents } from './RemoteSubagents'
+import { RunTimeLimits } from './RunTimeLimits'
 import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
 import { isRunningSubagent, isWorkingSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
 import type { SettleNoticeItem } from '../../shared/settleNotice'
@@ -1231,6 +1232,7 @@ export class OrchestratorService extends EventEmitter {
   async shutdown(timeoutMs = 30_000): Promise<void> {
     this.beginShutdown()
     this.remoteSubagents?.close()
+    this.runTimeLimits?.close()
     this.remoteLaunches?.close()
     this.remoteThreads?.close()
     await this.lifecycle.waitForIdle(timeoutMs)
@@ -1363,6 +1365,8 @@ export class OrchestratorService extends EventEmitter {
   private remoteComputers?: RemoteComputersPort
   /** Remote subagents' tasks on other computers (issue #469); present while a run engine is attached. */
   private remoteSubagents?: RemoteSubagents
+  /** Running-time limits agents on other computers gave runs here (issue #685); likewise. */
+  private runTimeLimits?: RunTimeLimits
   /** Threads agents here launched on other computers (`thread_create` with `computer`, issue #1160); likewise. */
   private remoteLaunches?: RemoteThreadLaunches
   /** The thread tools and Stops on those threads (issue #1160); likewise. */
@@ -2601,6 +2605,8 @@ export class OrchestratorService extends EventEmitter {
     this.unbindApprovals()
     this.remoteSubagents?.close()
     this.remoteSubagents = undefined
+    this.runTimeLimits?.close()
+    this.runTimeLimits = undefined
     this.remoteLaunches?.close()
     this.remoteLaunches = undefined
     this.remoteThreads?.close()
@@ -2615,11 +2621,21 @@ export class OrchestratorService extends EventEmitter {
       titleOf: (threadId) => this.titleOf(threadId),
       setRunsOn: (threadId, runsOn) => { this.threadStore?.updateThreadMeta(threadId, { runsOn }, { touch: false }) },
       recordMessage: (threadId, role, text) => { this.recordRemoteSubagentMessage(threadId, role, text) },
-      changed: (childThreadId) => { this.emit('subagent-changed', { threadId: childThreadId }) }
+      changed: (childThreadId) => { this.emit('subagent-changed', { threadId: childThreadId }) },
+      threadExists: (threadId) => Boolean(this.threadStore?.getThread(threadId))
     })
     // Tasks left open by the previous daemon go on: their runs on the other computers did not stop with it.
     // Without Bridge the passes reach no computer, but a task's time limit still ends it here.
     this.remoteSubagents.start()
+    // Runs agents on other computers started here with a limit are stopped once they used its running time.
+    this.runTimeLimits = new RunTimeLimits({
+      records: engine.runTimeLimits,
+      getRun: (runId) => engine.getRun(runId),
+      waitingOnPerson: (threadId) => this.subtreeWaitsOnPerson(threadId),
+      stop: (threadId, runId, message) => this.stopAtRunTimeLimit(threadId, runId, message),
+      log: (message, details) => console.warn(message, details)
+    })
+    this.runTimeLimits.start()
     this.remoteLaunches = new RemoteThreadLaunches({
       records: engine.remoteLaunches,
       port: () => this.remoteComputers,
@@ -5571,11 +5587,17 @@ export class OrchestratorService extends EventEmitter {
   async sendForRemoteAgent(
     threadId: string,
     input: { content: string; mode: 'agent' | 'plan' },
-    options: { clientRequestId: string; actor: AgentActor; forceQueue?: boolean; refuseWhilePaused?: boolean }
-  ): Promise<AgentSendResult> {
+    options: { clientRequestId: string; actor: AgentActor; forceQueue?: boolean; refuseWhilePaused?: boolean; runningMinutes?: number }
+  ): Promise<AgentSendResult & { deadlineMinutes?: number }> {
     if (!options.actor.remote) throw new Error('sendForRemoteAgent needs an agent on another computer.')
     this.assertNotBotThread(threadId)
-    return this.sendToThreadAsAgent(threadId, input, options)
+    const { runningMinutes, ...sendOptions } = options
+    const sent = await this.sendToThreadAsAgent(threadId, input, sendOptions)
+    // A limit binds the run the send started (a retry finds the same run and keeps what it used). A queued message has
+    // no run yet: the answer then carries no limit, and the agent's computer keeps stopping it by its own clock.
+    if (runningMinutes === undefined || sent.queued || !sent.runId || !this.runTimeLimits) return sent
+    this.runTimeLimits.set(sent.runId, threadId, runningMinutes)
+    return { ...sent, deadlineMinutes: runningMinutes }
   }
 
   /** A routed `orchestrator.steer` marked as an agent's: `thread_steer`'s path, refused for a run looser than the sender. */
@@ -7862,7 +7884,9 @@ export class OrchestratorService extends EventEmitter {
           projectId: farProjectId,
           instanceId: input.instanceId?.trim() || input.provider?.trim() || null,
           model: remoteModel ?? null,
-          deadlineAt: remoteDeadlineAt(input.maxMinutes)
+          deadlineAt: remoteDeadlineAt(input.maxMinutes),
+          // That computer counts it as running time where it takes a limit; `deadlineAt` is the stop for an older one.
+          limitMinutes: remoteDeadlineAt(input.maxMinutes) ? input.maxMinutes ?? null : null
         }
       })
     } catch (error) {
@@ -7878,6 +7902,8 @@ export class OrchestratorService extends EventEmitter {
       title: this.titleOf(accepted.childThreadId) ?? title ?? null,
       computer: computer.name
     }
+    // Its thread there expires with this thread's root (issue #685).
+    this.trackRemoteExpiry(accepted.childThreadId, computer.node)
     if (accepted.replayed) return { ...value, replayed: true, note: 'Started. Mousse sends you the result when it finishes; end your turn.' }
     this.recordRemoteSubagentMessage(accepted.childThreadId, 'user', input.prompt)
     const launched = await remote.launch(accepted.delegationId)
@@ -8233,6 +8259,7 @@ export class OrchestratorService extends EventEmitter {
     }
     const delegation = engine.delegations.get(accepted.delegationId)
     if (!delegation) throw new Error('The follow-up was not recorded as a task')
+    if (base?.node) this.trackRemoteExpiry(target.childThreadId, base.node)
     if (accepted.replayed) return this.followUpValue(delegation, target.title, { replayed: true })
     this.recordRemoteSubagentMessage(target.childThreadId, 'user', target.prompt)
     const launched = await remote!.launch(accepted.delegationId)
@@ -8241,6 +8268,47 @@ export class OrchestratorService extends EventEmitter {
       return refuse(launched.code, `${remote!.computerName(base?.node ?? '')} did not take the follow-up: ${launched.message}`)
     }
     return this.followUpValue(delegation, target.title, {})
+  }
+
+  /**
+   * A remote subagent's thread there expires with its root thread here (issue #685): its row in `remote_expiry` is made
+   * with the root's expiry as it is now. A subagent already followed keeps its row.
+   */
+  private trackRemoteExpiry(childThreadId: string, node: string): void {
+    const engine = this.requireRunEngine()
+    const rootThreadId = this.threadStore?.getThread(childThreadId)?.lineage?.rootThreadId ?? childThreadId
+    const root = this.threadStore?.getThread(rootThreadId)
+    engine.remoteExpiry.track({ childThreadId, rootThreadId, node, expiresAt: root?.expiresAt ?? null, stopsRun: root?.expiryStopsRun === true })
+  }
+
+  /**
+   * The expiry of `rootThreadId` was set, changed or removed (`threads.setExpiry`): its subagents on other computers get
+   * the same there, now or once their computer answers (issue #685).
+   */
+  threadExpiryChanged(rootThreadId: string): void {
+    const engine = this.runEngine
+    const root = this.threadStore?.getThread(rootThreadId)
+    if (!engine || !root || root.lineage) return
+    if (engine.remoteExpiry.rootChanged(rootThreadId, root.expiresAt ?? null, root.expiryStopsRun === true) > 0) this.remoteSubagents?.kick()
+  }
+
+  /** Whether something in `threadId` or a subagent below it waits on a person: a question or an approval. */
+  private subtreeWaitsOnPerson(threadId: string): boolean {
+    const subtree = new Set([threadId, ...subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? [])])
+    if ([...subtree].some((id) => this.questions.listPendingForThread(id).length > 0)) return true
+    return this.runEngine?.approvals.listPending().some((row) => subtree.has(row.threadId)) ?? false
+  }
+
+  /**
+   * A run reached the running-time limit an agent on another computer gave it (`RunTimeLimits`): the one Stop, as that
+   * agent's own (no person stopped it), with the reason on the run so the agent there reads why.
+   */
+  private async stopAtRunTimeLimit(threadId: string, runId: string, message: string): Promise<void> {
+    const engine = this.requireRunEngine()
+    const run = engine.getRun(runId)
+    if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return
+    engine.store.casRunOutcome({ runId, expectedEpoch: run.epoch, outcomePatch: { error: message } })
+    await this.stopThread(threadId, 'time_limit', { runId, clientRequestId: `time-limit:${runId}`, byAgent: true })
   }
 
   /** A line a remote subagent's stand-in shows in its transcript: what it was asked, what it answered. Never sent to a model. */
