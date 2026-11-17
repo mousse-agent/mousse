@@ -298,7 +298,9 @@ export class BotActions {
     if (!this.host.enabled()) return { text: 'Asks first is off.', isError: true }
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
-    const existing = this.host.store.get('SELECT id FROM bot_actions WHERE call_key = ?', callKey)
+    const existing = this.host.store.get('SELECT id, args_digest, target_json FROM bot_actions WHERE call_key = ?', callKey)
+    if (existing && (existing.args_digest !== actionDigest(args) || existing.target_json !== JSON.stringify({ server: tool.server, tool: tool.tool })))
+      return { text: 'This call id was already used for a different call. Nothing was held for this call.', isError: true }
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
     const origin = this.host.origin(row)
