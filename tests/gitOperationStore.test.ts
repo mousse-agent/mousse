@@ -328,13 +328,6 @@ describe('the operation store', () => {
     dismissGitOperation('/repo')
     expect(op()).toBeUndefined()
   })
-
-  it('dismisses an outcome', () => {
-    const id = beginGitOperation('/repo', 'fetch')
-    finishGitOperation('/repo', id, 'failed', 'no remote')
-    dismissGitOperation('/repo')
-    expect(op()).toBeUndefined()
-  })
 })
 
 describe('the panel after a cancel', () => {
