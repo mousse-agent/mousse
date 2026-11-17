@@ -1,3 +1,4 @@
+import { legacyRemoteError, legacyWireError } from './legacyActionErrors'
 import { botActionRefusal } from '../../../../src/shared/bots/personal/actionRefusal'
 /** Two real daemons with fresh homes; only the bot port is scripted in this transport regression. */
 import { EventEmitter } from 'node:events'
@@ -152,8 +153,8 @@ it('new computer refusals remain a generic conflict for the older device decoder
   expect(response).toBeTruthy()
   expect(validateWireMessage(response)).toBe(true)
   if (response?.t !== 'rpc.result' || !('error' in response)) throw new Error('Missing refusal')
-  // The old Net decoder preserves only the top-level code for non-forbidden errors.
-  const olderDevice = new NetError(response.error.code)
+  // Execute the frozen prior decoder against the actual new computer response.
+  const olderDevice = legacyRemoteError(response.error)
   expect(olderDevice.code).toBe('conflict')
   expect(olderDevice.message).toBe(new NetError('conflict').message)
   expect(response.error.message).toBe(new NetError('conflict').message)
@@ -164,10 +165,14 @@ it('new computer refusals remain a generic conflict for the older device decoder
 }, 60_000)
 
 it('an older computer preflight conflict remains definite on a newer device', async () => {
-  check = () => { throw new NetError('conflict') }
+  sent = []
+  const legacyError = new NetError('conflict')
+  check = () => { throw legacyError }
   answer.mockClear()
   const error = await rpcAnswer().catch(error => error)
   expect(error).toMatchObject({ code: 'conflict' })
+  const response = sent.find(header => header.t === 'rpc.result' && 'error' in header)
+  expect(response).toMatchObject({ error: legacyWireError(legacyError) })
   expect(botActionRefusal(error)?.text).toBe('This could not be sent. Nothing was sent. Open it on the computer for the reason.')
   expect(answer).not.toHaveBeenCalled()
   expect(t.caller.net.session(t.node).state()).toBe('open')
