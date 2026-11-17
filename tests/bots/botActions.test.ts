@@ -1,3 +1,6 @@
+import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
+import { botTools } from '../../src/mms/run/mcp/appTools/bots'
+import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -18,7 +21,7 @@ import { ToolRegistry, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools/reg
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
 import { botCatalogueTools } from '../../src/mms/run/mcp/appTools/botCatalogue'
 import { refused } from '../../src/mms/run/mcp/appTools/refusal'
-import { appTurn } from '../run/appToolsFixture'
+import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
@@ -266,15 +269,20 @@ it.each(['relay', 'pi'] as const)('%s holds through the common path, and journal
   expect(t.calls).toEqual([])
 })
 /** A catalogue turn (`use_tool`) of the bot `setup` made, on a registry with the catalogue tools; `call` names its tool call id. */
-function catalogueTurn(t: Awaited<ReturnType<typeof setup>>) {
+function catalogueTurn(t: Awaited<ReturnType<typeof setup>>, fullRegistry = false) {
   const bot = { ...t.work.prepared.authority, catalogue: 'use_tool' as const }
   const turns = new AppToolTurns()
   turns.register(appTurn({ threadId: 'bot-thread', runId: 'r1', turnToken: 'tt', bot }))
   const registry = new ToolRegistry({ activeRunId: () => 'r1', turns, botMcp: t.mcp, userMcp: { list: async () => [], allowed: async () => ({ allowed: true }), call: async () => { throw new Error('ordinary proxy must not run') } } as never })
   for (const tool of botCatalogueTools(() => registry)) registry.register(tool)
+  if (fullRegistry) {
+    const declarations = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => ({ host: f.bots.tools }) }).registry.list()
+    for (const tool of declarations) if (!registry.list().some(existing => existing.name === tool.name)) registry.register(tool)
+    for (const tool of registry.list()) (tool as { handler: unknown }).handler = vi.fn(async () => ({ text: 'handler ran' }))
+  }
   const credential = { threadId: 'bot-thread', runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', current: () => true }
-  return (name: string, args: Record<string, unknown>, toolCallId: string) =>
-    registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, { credential, toolCallId, signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2])
+  return Object.assign((name: string, args: Record<string, unknown>, toolCallId: string) =>
+    registry.call(name, { ...args, [TURN_TOKEN_KEY]: 'tt' }, { credential, toolCallId, signal: new AbortController().signal } as Parameters<ToolRegistry['call']>[2]), { registry })
 }
 // A catalogue turn's use_tool call of an offered owner MCP tool is the direct call: the same hold, call key and result.
 // The direct request carries the key the Mousse MCP server makes from a top-level clientRequestId; use_tool's carries it inside.
@@ -303,15 +311,415 @@ it('a catalogue turn still refuses a tool it was not offered through use_tool', 
   expect(result).toEqual(refused('unknown_tool', 'You have no tool named mail_other. tool_catalogue lists each group\'s tools.'))
   expect(t.calls).toEqual([])
 })
-it('a scheduled run is refused without parking or writing a card', async () => {
-  const t = await setup(true)
-  f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send the email' }, 'owner')
-  const due = await f.tickSchedules(new Date(f.clock.now + 5 * 60_000))
-  const scheduled = await start(f, due.inserted[0])
-  const outcome = await callForBot({ bot: scheduled.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
-  expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('cannot wait') })
+async function scheduledCall(on = true, minutes = 5, untilMinutes?: number) {
+  const t = await setup(on, false, false, true)
+  await finish(f, t.work.payload)
+  const at = untilMinutes === undefined ? undefined : new Date(f.clock.now + untilMinutes * 60_000)
+  const until = at ? `${at.getFullYear()}-${String(at.getMonth()+1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}T${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` : undefined
+  const schedule = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes }, prompt: 'Send the email', ...(until ? { until } : {}) }, 'owner')
+  f.clock.now += minutes * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const id = due.inserted[0]!
+  const run = await start(f, id)
+  const call = (args = t.args) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
+  return { ...t, schedule, id, run, call }
+}
+it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route => ({ on, route }))))('a scheduled $route call holds once and fences every later tool with asks first $on', async ({ on, route }) => {
+  const t = await scheduledCall(on)
+  const call = catalogueTurn({ ...t, work: t.run, workId: t.id }, true)
+  expect((await call('bot_schedule_list', {}, 'before-hold')).text).toBe('handler ran')
+  for (const tool of call.registry.list()) vi.mocked(tool.handler).mockClear()
+  const args = { tool: 'mail_send', arguments: { ...t.args, clientRequestId: 'scheduled-once' } }
+  const invoke = () => route === 'direct' ? call('mail_send', t.args, 'mcp:scheduled-once') : call('use_tool', args, 'outer-one')
+  const result = await invoke()
+  if (!on) {
+    expect(result.text).toContain('delivered')
+    expect(t.calls).toEqual([t.args])
+    expect(f.bots.actions.forWork(t.id)).toBeUndefined()
+    return
+  }
+  expect(result.text).toContain('held')
+  await invoke()
+  const a = f.bots.actions.forWork(t.id)!
+  expect(a.exec_args).toBe(JSON.stringify(t.args))
+  expect(JSON.parse(a.call_key)).toEqual([t.id, f.store.dispatches(t.id)[0]!.clientRequestId, 'mcp:scheduled-once'])
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect((await t.call()).isError).toBe(true)
+  expect(botAppToolRefusal(t.run.prepared.authority, 'thread_create')).toBeTruthy()
+  for (const tool of call.registry.list().filter(tool => tool.callable !== 'in_process')) {
+    const later = await call(tool.name, {}, 'after-hold-' + tool.name)
+    expect(later.isError, tool.name).toBe(true)
+    expect(tool.handler, tool.name).not.toHaveBeenCalled()
+    if (tool.name !== 'use_tool') {
+      const wrapped = await call('use_tool', { tool: tool.name, arguments: {} }, 'after-hold-wrapped-' + tool.name)
+      expect(wrapped.isError, 'use_tool ' + tool.name).toBe(true)
+      expect(tool.handler, tool.name).not.toHaveBeenCalled()
+    }
+  }
+  await finish(f, t.run.payload)
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
+it.each(['repeat', 'three', 'forgotten'] as const)('removed or recreated schedules and a second schedule cannot reset %s refusals', async rule => {
+  const t = await scheduledCall()
+  let id = t.id, turn = t.run, schedule = t.schedule
+  const count = rule === 'three' ? 3 : 1
+  for (let n = 0; n < count; n++) {
+    const args = rule === 'three' ? { body: 'draft ' + n } : t.args
+    await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'hold-' + n, signal: new AbortController().signal })
+    await finish(f, turn.payload)
+    const a = f.bots.actions.forWork(id)!
+    if (rule === 'forgotten') {
+      const memory = new BotMemoryStore({ db: f.store.db })
+      const seq = memory.append({ botId: t.botId, sourceKey: 'bm:' + a.message_id, kind: 'notice', who: 'bot', text: 'call' })!
+      memory.forget(t.botId, { refs: ['j' + seq], by: 'owner_ui' })
+    }
+    else await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+    await flush()
+    const resumed = await start(f, id, 2)
+    // Exercise retained history across engine-level replacement. Actual scheduled tool calls are owner-only (tested below).
+    f.bots.tools.schedules.remove(t.botId, schedule.scheduleId)
+    const added = f.bots.tools.schedules.add(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send the email' })
+    schedule = f.book.get(t.botId, added.scheduleId)!
+    await finish(f, resumed.payload)
+    f.clock.now += 5 * 60_000
+    const due = await f.tickSchedules(new Date(f.clock.now))
+    id = due.inserted[0]!
+    turn = await start(f, id)
+  }
+  const args = rule === 'three' ? { body: 'another draft' } : t.args
+  const attempt = (bot: typeof turn.prepared.authority, key: string) => callForBot({ bot, mcp: t.mcp, name: 'Mail__send', args, toolCallId: key, signal: new AbortController().signal })
+  expect((await attempt(turn.prepared.authority, 'recreated')).isError).toBe(true)
+  const second = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Same task elsewhere' }, 'owner')
+  f.clock.now += 5 * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const secondId = due.inserted.find(id => { const r = f.store.activation(id)!; return r.trigger.kind === 'schedule' && r.trigger.scheduleId === second.scheduleId })!
+  const other = await start(f, secondId)
+  expect((await attempt(other.prepared.authority, 'second-schedule')).isError).toBe(true)
   expect(t.calls).toEqual([])
+})
+it('an edited schedule withdraws its card before edit observers see it and tells its run', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  const seen: string[] = []
+  f.scheduler.on('updated', () => seen.push(f.bots.actions.forWork(t.id)!.status))
+  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { prompt: 'Changed instructions' })
+  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(seen).not.toContain('open')
+  await flush()
+  expect(f.store.lastMainDispatch(t.id)?.prompt.text).toContain('changed')
+})
+it('Send withdraws a stale schedule card even if the edit hook was missed', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  const current = f.host.schedules!.get.bind(f.host.schedules)
+  vi.spyOn(f.host.schedules!, 'get').mockImplementation((bot, id) => { const entry = current(bot, id); return entry ? { ...entry, revision: 'missed-edit' } : undefined })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow(/changed/)
+  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(t.calls).toEqual([])
+})
+it('schedule_done explains why a later asks-first call cannot wait', async () => {
+  const t = await scheduledCall()
+  f.bots.tools.schedules.done(t.run.payload.threadId, 'All done')
+  const result = await t.call()
+  expect(result).toMatchObject({ isError: true, text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent." })
+  expect(f.bots.actions.forWork(t.id)).toBeUndefined()
+  expect(t.calls).toEqual([])
+})
+it.each(['name', 'tellMe', 'canWakeMe'] as const)('changing only %s preserves the approval binding', async field => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  if (field === 'name') f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { name: 'New name' })
+  else f.book.setTelling(t.botId, { scheduleId: t.schedule.scheduleId, ...(field === 'tellMe' ? { tellMe: 'every' } : { canWakeMe: true }) })
+  await f.bots.actions.reconcile()
+  expect(f.bots.actions.forWork(t.id)?.status).toBe('open')
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
+it('a paused schedule refuses Send', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  f.scheduler.pauseJob(t.schedule.jobId)
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
+  expect(t.calls).toEqual([])
+})
+it.each(['prompt', 'timing', 'end', 'model', 'on/off', 'fixed line'] as const)('changing schedule %s retires its pending approval', async field => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const job = f.scheduler.getJob(t.schedule.jobId)!
+  const patch = field === 'prompt' ? { prompt: 'Different instructions' }
+    : field === 'timing' ? { schedule: { kind: 'interval' as const, minutes: 10 } }
+    : field === 'end' ? { expiresAt: new Date(f.clock.now + 3600_000).toISOString() }
+    : field === 'model' ? { bot: { ...job.bot!, model: 'another/model' } }
+    : field === 'on/off' ? { enabled: false }
+    : { bot: { ...job.bot!, say: 'A fixed line' } }
+  const retire = f.bots.actions.withdrawChanged.bind(f.bots.actions)
+  const inTransaction: boolean[] = []
+  vi.spyOn(f.bots.actions, 'withdrawChanged').mockImplementation(bot => { inTransaction.push(f.store.db.inTransaction); retire(bot) })
+  f.scheduler.updateJob(job.id, patch)
+  expect(inTransaction).toContain(true)
+  expect(inTransaction).not.toContain(false)
+  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+})
+it('master refuses schedule recreation at the actual scheduled-run tool handlers', async () => {
+  const t = await scheduledCall()
+  const tools = botTools(() => ({ host: f.bots.tools }))
+  const turn = appTurn({ threadId: t.run.payload.threadId, runId: t.run.payload.runId, turnToken: 'tt', bot: t.run.prepared.authority })
+  const context = { caller: { threadId: t.run.payload.threadId, runId: t.run.payload.runId }, turn } as Parameters<(typeof tools)[number]['handler']>[1]
+  for (const [name, args] of [
+    ['bot_schedule_remove', { scheduleId: t.schedule.scheduleId }],
+    ['bot_schedule_add', { when: { kind: 'interval', minutes: 5 }, prompt: 'Recreate' }]
+  ] as const) {
+    expect(await tools.find(tool => tool.name === name)!.handler(args, context)).toMatchObject({ isError: true, text: expect.stringContaining('Only the owner') })
+  }
+  expect(f.book.list(t.botId)).toHaveLength(1)
+})
+// One persisted starting chat activation, many pieces of work: no private store rows or slot bypasses.
+async function fanOut(on: boolean, owner: boolean, count: number, different: boolean, originKey?: string) {
+  const t = await setup(on)
+  await finish(f, t.work.payload)
+  const origin = await f.bots.enqueueChat(t.botId, originKey ?? (owner ? 'chat:fan-out-owner' : 'wake:fan-out'), 'Prepare the mail')
+  const chat = await start(f, origin.id)
+  const works: Array<{ id: string; run: Awaited<ReturnType<typeof start>> }> = []
+  for (let n = 0; n < count; n++) {
+    const { workId } = await f.bots.tools.work.start(t.botId, origin.id, { title: 'Email ' + n, brief: 'Prepare email ' + n, key: 'fan-' + n })
+    works.push({ id: workId, run: await start(f, workId) })
+  }
+  const results = []
+  for (const [n, work] of works.entries()) results.push(await callForBot({ bot: work.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: different ? { ...t.args, body: 'Message ' + n } : t.args, toolCallId: 'fan-call-' + n, signal: new AbortController().signal }))
+  return { ...t, origin, chat, works, results }
+}
+it.each([false, true])('one unattended chat starting twenty works has bounded open cards, different arguments=%s', async different => {
+  const t = await fanOut(true, false, 20, different)
+  const actions = f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")
+  expect(actions).toHaveLength(different ? 3 : 1)
+  expect(t.results.filter(result => !result.isError)).toHaveLength(different ? 3 : 1)
+  expect(t.results.at(-1)?.text).toContain(different ? 'three cards' : 'already waiting')
+  expect(t.calls).toEqual([])
+})
+it('owner-started work retains five different open cards', async () => {
+  const t = await fanOut(true, true, 5, true)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(5)
+  expect(t.results.every(result => !result.isError)).toBe(true)
+})
+it('an identical open card is refused even between owner-started pieces of work', async () => {
+  const t = await fanOut(true, true, 5, false)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(1)
+  expect(t.results.at(-1)).toMatchObject({ isError: true, text: expect.stringContaining('already waiting') })
+})
+it.each([false, true])('switch off preserves all twenty unattended calls, different arguments=%s', async different => {
+  const t = await fanOut(false, false, 20, different)
+  expect(t.calls).toHaveLength(20)
+  expect(t.results.every(result => !result.isError)).toBe(true)
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+})
+it.each(['create:fan-out', 'question:fan-out', 'botmsg:fan-out', 'answer:fan-out'])('persisted %s origin keeps the correct approval scope', async originKey => {
+  const t = await fanOut(true, false, 5, true, originKey)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(originKey.startsWith('answer:') ? 5 : 3)
+})
+it.each(['declined', 'expired', 'forgotten'] as const)('unattended %s history follows work into a new piece of work', async settled => {
+  const t = await fanOut(true, false, 1, false)
+  const first = t.works[0]!
+  await finish(f, first.run.payload)
+  const a = f.bots.actions.forWork(first.id)!
+  if (settled === 'declined') await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  else if (settled === 'expired') { f.clock.now = Date.parse(a.expires_at); await f.bots.actions.reconcile() }
+  else {
+    const memory = new BotMemoryStore({ db: f.store.db })
+    const seq = memory.append({ botId: t.botId, sourceKey: 'bm:' + a.message_id, kind: 'notice', who: 'bot', text: 'call' })!
+    memory.forget(t.botId, { refs: ['j' + seq], by: 'owner_ui' })
+  }
+  const { workId } = await f.bots.tools.work.start(t.botId, t.origin.id, { title: 'Again', brief: 'Send it again', key: 'terminal-again' })
+  const run = await start(f, workId)
+  expect(await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'again', signal: new AbortController().signal })).toMatchObject({ isError: true })
+  expect(f.bots.actions.forWork(workId)).toBeUndefined()
+})
+it('a non-waiting question tap still lifts the unattended cap', async () => {
+  const t = await fanOut(true, false, 4, true)
+  const last = t.works.at(-1)!
+  expect(t.results.at(-1)?.isError).toBe(true)
+  expect(f.bots.askOwner(t.botId, last.id, { question: 'May I carry on?', choices: [{ label: 'Yes' }, { label: 'No' }], other: true, wait: false }).asked).toBe(true)
+  const q = f.store.workQuestion(last.id)!
+  const before = f.store.ownerLastWroteSeq(t.botId)
+  await f.bots.service.answerQuestion({ botId: t.botId, questionId: q.id, choice: 'Yes', clientRequestId: 'unattended-cap-tap' })
+  expect(f.store.ownerLastWroteSeq(t.botId)).toBeGreaterThan(before)
+  const result = await callForBot({ bot: last.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'After owner tap' }, toolCallId: 'after-tap', signal: new AbortController().signal })
+  expect(result.isError).not.toBe(true)
+})
+it('scheduled and unattended work share the same pending-card cap', async () => {
+  const t = await fanOut(true, false, 3, true)
+  f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send another email' }, 'owner')
+  f.clock.now += 5 * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const run = await start(f, due.inserted[0]!)
+  const result = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'From the schedule' }, toolCallId: 'scheduled-cap', signal: new AbortController().signal })
+  expect(result).toMatchObject({ isError: true, text: expect.stringContaining('three cards') })
+  expect(f.bots.actions.forWork(due.inserted[0]!)).toBeUndefined()
+})
+it('a scheduled call parks, skips occurrences through the shared scheduler, and Send continues in its thread', async () => {
+  const t = await scheduledCall()
+  expect((await t.call()).isError).not.toBe(true)
+  expect(t.calls).toEqual([])
+  expect(botAppToolRefusal(t.run.prepared.authority, 'thread_create')).toBeTruthy()
+  await finish(f, t.run.payload)
+  expect(f.store.activation(t.id)).toMatchObject({ status: 'blocked', endReason: 'approval' })
+  f.clock.now += 5 * 60_000
+  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+  expect(f.book.get(t.botId, t.schedule.scheduleId)?.skip?.reason).toBe('bot_waiting_for_owner')
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  const next = await start(f, t.id, 2)
+  expect(f.store.dispatch(t.id, 2)?.threadId).toBe(f.store.dispatch(t.id, 1)?.threadId)
+  expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('Your owner sent it')
+  expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('delivered')
+  f.clock.now += 5 * 60_000
+  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+  expect(f.book.get(t.botId, t.schedule.scheduleId)?.skip?.reason).toBe('bot_waiting_for_owner')
+  await finish(f, next.payload, 'completed', { text: 'Sent and recorded.' })
+  expect(t.calls).toEqual([t.args])
+  expect(f.store.activation(t.id)?.status).toBe('done')
+  expect(f.bots.service.chatList(t.botId).messages.filter(m => m.activationId === t.id && m.kind === 'run_report')).toHaveLength(1)
+})
+it('with asks first off a scheduled call sends directly, writes no card and finishes normally', async () => {
+  const t = await scheduledCall(false)
+  expect((await t.call()).text).toContain('delivered')
+  await finish(f, t.run.payload, 'completed', { text: 'Sent.' })
+  expect(t.calls).toEqual([t.args])
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(f.store.activation(t.id)?.status).toBe('done')
+})
+it.each([1, 60, 180])('a schedule card lives for one gap with an hour minimum: %s minutes', async minutes => {
+  const t = await scheduledCall(true, minutes)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  f.host.progress = memory
+  f.host.context = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} } })
+  expect(f.bots.saveLeftOff(t.id, 'Checked through the first invoice')).toContain('pending:')
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  expect(Date.parse(a.expires_at) - f.clock.now).toBe(Math.max(60, minutes) * 60_000)
+  f.clock.now = Date.parse(a.expires_at)
+  await f.bots.actions.reconcile()
+  await flush()
+  const next = await start(f, t.id, 2)
+  expect(f.bots.service.chatList(t.botId).messages.find(m => m.id === a.message_id)?.expiredActionSchedule).toBe(t.schedule.scheduleId)
+  expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('This call expired')
+  await finish(f, next.payload, 'completed', { text: 'Nothing sent.' })
+  f.clock.now += minutes * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  expect(due.inserted).toHaveLength(1)
+  const later = await start(f, due.inserted[0]!)
+  expect(later.prepared.preamble).toContain('Checked through the first invoice')
+})
+it('editing a schedule refuses Send without sending its old call', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { prompt: 'A different email' })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow(/changed/)
+  expect(t.calls).toEqual([])
+})
+it('removing a parked schedule withdraws its card in the ending transaction', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
+  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(f.store.activation(t.id)?.status).toBe('done')
+})
+it('Not now refuses the identical call in the next occurrence until the owner writes', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  await flush()
+  const next = await start(f, t.id, 2)
+  await finish(f, next.payload)
+  f.clock.now += 5 * 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const run = await start(f, due.inserted[0]!)
+  const outcome = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'new-occurrence', signal: new AbortController().signal })
+  expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Do not ask again') })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+})
+it('restart while a schedule waits keeps one run and card and Send resumes once', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  f.bots.close()
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  const a = f.bots.actions.forWork(t.id)!
+  expect(a.status).toBe('open')
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  f.clock.now += 5 * 60_000
+  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(f.store.lastMainDispatch(t.id)?.n).toBe(2)
+  expect(t.calls).toEqual([t.args])
+})
+it('removing a parked schedule delivers its last words once without a card', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload, 'completed', { text: 'Draft ready; send still needs your answer.' })
+  f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
+  await flush()
+  const reports = f.bots.service.chatList(t.botId).messages.filter(m => m.activationId === t.id && m.kind === 'run_report')
+  expect(reports).toHaveLength(1)
+  expect(reports[0]?.text).toContain('Draft ready')
+  expect(reports[0]?.ask).toBeUndefined()
+})
+it.each(['needs_you', 'look', 'fyi', 'every'] as const)('a scheduled approval is told at least soon at Tell me %s', async tellMe => {
+  const t = await scheduledCall()
+  f.book.setTelling(t.botId, { scheduleId: t.schedule.scheduleId, tellMe })
+  await t.call()
+  const a = f.bots.actions.forWork(t.id)!
+  expect(f.store.message(a.message_id)?.tell).toBe('soon')
+})
+it('three unsent calls stop the tool across occurrences, and owner words reset it', async () => {
+  const t = await scheduledCall()
+  let id = t.id, turn = t.run
+  for (let n = 0; n < 3; n++) {
+    await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'version ' + n }, toolCallId: 'call-' + n, signal: new AbortController().signal })
+    await finish(f, turn.payload)
+    const a = f.bots.actions.forWork(id)!
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+    await flush()
+    const resumed = await start(f, id, 2)
+    await finish(f, resumed.payload)
+    f.clock.now += 5 * 60_000
+    const due = await f.tickSchedules(new Date(f.clock.now))
+    id = due.inserted[0]!
+    turn = await start(f, id)
+  }
+  const call = () => callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'new version' }, toolCallId: 'fourth-call', signal: new AbortController().signal })
+  expect(await call()).toMatchObject({ isError: true, text: expect.stringContaining('three cards') })
+  expect(f.bots.actions.forWork(id)).toBeUndefined()
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Please try again', clientRequestId: 'reset-schedule-refusal' })
+  expect((await call()).isError).not.toBe(true)
+})
+it('a schedule ending at until withdraws a parked call and preserves its report', async () => {
+  const t = await scheduledCall(true, 5, 7)
+  await t.call()
+  await finish(f, t.run.payload, 'completed', { text: 'Draft ready.' })
+  f.clock.now += 3 * 60_000
+  await f.tickSchedules(new Date(f.clock.now))
+  await flush()
+  expect(f.bots.actions.forWork(t.id)?.status).toBe('withdrawn')
+  expect(f.bots.service.chatList(t.botId).messages.filter(m => m.kind === 'run_report' && m.activationId === t.id)).toHaveLength(1)
 })
 it('a subagent holds its call on its work and uses its own dispatch in the call key', async () => {
   const t = await setup(true)

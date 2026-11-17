@@ -120,7 +120,7 @@ import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagent
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
-import { isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
+import { computeNextRun, isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
 import { tellMeNotifies } from '../../../shared/automations'
 import type { RunLevel } from '../../../shared/automationInbox'
 import { statusLineOf } from '../activity/statusLine'
@@ -641,6 +641,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     store: this.host.store,
     refresh: async () => { await this.host.mcp?.warm() },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
+    origin: row => {
+      if (row.trigger.kind === 'schedule') return 'unattended'
+      if (row.trigger.kind !== 'work') return undefined
+      const from = this.store.activation(row.trigger.from)
+      if (from?.botId === row.botId) return memoryLaneOf(from) === 'chat' ? 'owner' : 'unattended'
+      // A reminder's work starts automatically, rather than in an owner's chat turn.
+      if (this.store.reminder(row.trigger.from)?.botId === row.botId) return 'unattended'
+      return undefined
+    },
+    lifetime: row => {
+      if (row.trigger.kind !== 'schedule') return 48 * 3600_000
+      const schedule = this.host.schedules?.get(row.botId, row.trigger.scheduleId)
+      if (!schedule) return 3600_000
+      const at = new Date(row.trigger.occurrenceAt)
+      const next = computeNextRun(schedule.when, at.toISOString(), at)
+      return Math.max(3600_000, next ? Date.parse(next) - at.getTime() : 3600_000)
+    },
     name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
     publish: id => { this.chat.republish(id) },
@@ -662,11 +679,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!server) return undefined
       const source = row.trigger.kind === 'work' ? this.store.activation(row.trigger.from) : row
       const limit = source?.trigger.kind === 'manual' ? source.trigger.owner?.limit ?? null : null
-      return { ...server, pairLevel: pair.level ?? 'allowed', deviceLimit: limit }
+      const schedule = row.trigger.kind === 'schedule' ? this.host.schedules?.get(row.botId, row.trigger.scheduleId) : undefined
+      if (row.trigger.kind === 'schedule' && (!schedule || schedule.paused)) return undefined
+      return { ...server, pairLevel: pair.level ?? 'allowed', deviceLimit: limit, ...(schedule ? { scheduleRevision: schedule.revision } : {}) }
     },
     obsolete: action => {
       const row = this.store.activation(action.activation_id)
       const held = JSON.parse(action.binding_json)
+      if (row?.trigger.kind === 'schedule' && this.host.schedules?.get(row.botId, row.trigger.scheduleId)?.revision !== held.scheduleRevision) return true
       const tool = JSON.parse(action.target_json) as BotMcpTool
       const pair = row && this.actionPair(row, tool)
       if (!pair || held.pairLevel !== (pair.level ?? 'allowed')) return true
@@ -1617,9 +1637,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Only this schedule's own previous run skips it: other runs and the owner's work run beside it.
       const same = (row: BotActivationRow) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === scheduleId
       if (this.store.laneActivations(botId, 'run', ['queued']).some(same)) { skip = 'previous_run_still_queued'; return false }
-      const previous = this.holding(botId, 'run').find(same)
+      const parked = this.store.laneActivations(botId, 'run', ['blocked']).find(row => same(row) && workWaits(row))
+      const previous = parked ?? this.store.laneActivations(botId, 'run', ['running', 'waiting_grant']).find(same)
       // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
-      if (previous) { skip = previous.status === 'waiting_grant' ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
+      if (previous) { skip = previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' || this.actions.forWork(previous.id) ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
       const inserted = this.store.insertActivationOnce({
         id,
         botId,
@@ -3494,7 +3515,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string) => {
           const pair = this.store.activeGrant(row.botId)?.manifest.mcp.find(p => p.serverId === tool.server && p.tool === tool.tool)
           if (pair?.level !== 'asks_first') return undefined
-          if (row.trigger.kind !== 'work') return { text: row.trigger.kind === 'schedule' ? 'This tool needs your owner to approve each call. A scheduled run cannot wait for that yet; carry on without it.' : 'This tool needs your owner to approve each call. A run started by hand cannot wait for that yet; ask the owner to start it as work from the chat.', isError: true }
+          if (row.trigger.kind !== 'work' && row.trigger.kind !== 'schedule') return { text: 'This tool needs your owner to approve each call. A run started by hand cannot wait for that yet; ask the owner to start it as work from the chat.', isError: true }
+          if (row.trigger.kind === 'schedule' && !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return { text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent.", isError: true }
           const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]))
           if (!existing) {
             const allowed = base.check({ kind: 'mcp', server: tool.server, tool: tool.tool, args })
@@ -5045,6 +5067,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (workWaits(row)) {
       if (workWaitRule(row) === WORK_WAIT_RULES.approval) {
+        if (row.trigger.kind === 'schedule' && text !== undefined) this.store.moveActivation(row.id, ['blocked'], 'blocked', { result: text })
         if (main?.endedAt) { this.askedIn.delete(row.id); this.releaseParked(row, 'approval') }
         return
       }
@@ -5405,7 +5428,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' | 'question' | 'approval' | 'gone' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
-      const durableWork = current.trigger.kind === 'work'
+      const durableWork = current.trigger.kind === 'work' || current.trigger.kind === 'schedule' && Boolean(this.actions.forWork(current.id))
       const readAtStart = durableWork && Boolean(this.store.workWait(current.id) || this.actions.forWork(current.id))
       const answers = durableWork ? this.store.unreadWorkAnswers(current.id) : input.answers ?? []
       // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`): the chat's
@@ -5468,7 +5491,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return { kind: wall.kind === 'wall' ? 'wall' : wall.kind === 'blocked' ? 'blocked' : 'none' }
       }
       const waits = current.trigger.kind === 'work' ? this.store.unreadWorkWaits(current.id) : []
-      const actions = current.trigger.kind === 'work' ? this.store.unreadWorkActions(current.id) : []
+      const actions = durableWork ? this.store.unreadWorkActions(current.id) : []
       const refusals = this.workRefusalUpdates(current.id)
       const actionCaused = current.endReason === 'approval_answered' ? actions.at(-1) : undefined
       const waited = waits.length > 0
@@ -5486,7 +5509,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const answered = deliveryQuestion?.status === 'answered' || deliveryQuestion?.status === 'defaulted' ? this.workAnswerOf(deliveryQuestion) : undefined
       const workEvents: WorkContinuationEvent[] | undefined = durableWork ? [
         ...refusals,
-        ...actions.map(action => ({ at: JSON.parse(action.card_json ?? '{}').settledAt ?? (action.status === 'declined' ? action.answered_at : action.ran_at) ?? action.answered_at ?? current.createdAt, text: actionContinuation(action), actionId: action.id })),
+        ...actions.map(action => ({ at: JSON.parse(action.card_json ?? '{}').settledAt ?? (action.status === 'declined' ? action.answered_at : action.ran_at) ?? action.answered_at ?? current.createdAt, text: actionContinuation(action, current.trigger.kind === 'schedule'), actionId: action.id })),
         ...waits.map(wait => ({ at: wait.dueAt, text: workWaitInput(wait, clockTime) })),
         ...answers.map(answer => ({ at: answer.answeredAt ?? answer.createdAt, answer })),
         ...(notes?.events ?? []),
@@ -5512,7 +5535,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         kind: 'continue' as const,
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
-        prompt: { ...delivery, text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, ...(actionCaused ? { actionCaused: actionContinuation(actionCaused) } : {}), waited, answerCaused: current.status === 'waiting_grant' && answers.length > 0, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
+        prompt: { ...delivery, text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, ...(actionCaused ? { actionCaused: actionContinuation(actionCaused, current.trigger.kind === 'schedule') } : {}), waited, answerCaused: current.status === 'waiting_grant' && answers.length > 0, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
         policyDigest: grant.digest,
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
@@ -9328,6 +9351,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** One of a bot's schedules changed in the shared store (an edit on the Automations page): its chat and About read it again. */
+  editSchedule<T>(botId: string, save: () => T): T {
+    return this.store.db.transaction(() => {
+      const result = save()
+      this.actions.withdrawChanged(botId)
+      return result
+    })
+  }
+
   schedulesEdited(botId: string): void {
     this.dropRemovedScheduleRuns(botId)
     this.changed({ botId })
@@ -9390,8 +9421,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.status === 'running' || (row.trigger.kind === 'schedule' && row.trigger.completed)) return false
     if (row.trigger.kind !== 'schedule' || !this.removedSchedules.has(this.scheduleKey(row.botId, row.trigger.scheduleId))) return false
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) return false
+    const approval = workWaits(row) && workWaitRule(row) === WORK_WAIT_RULES.approval
     this.store.db.transaction(() => {
-      if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: 'schedule_removed' })) return
+      if (!this.store.moveActivation(row.id, [row.status], approval ? 'done' : 'cancelled', { endReason: 'schedule_removed' })) return
       this.store.closeEscalations(row.id, 'cancelled')
       const runs = this.host.runs()
       for (const dispatch of this.store.dispatches(row.id)) {
@@ -9400,7 +9432,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       this.journalEnd(row, 'schedule_removed')
       const ended = this.store.activation(row.id)!
-      this.store.db.afterCommit(() => this.afterEnd(ended))
+      this.store.db.afterCommit(() => {
+        if (approval) void this.advance(row.id, row.result ?? undefined, { expectText: false })
+        else this.afterEnd(ended)
+      })
     })
     this.usageWaits.delete(row.id)
     return true
