@@ -2272,6 +2272,7 @@ it.each(['open', 'nudge', 'settled'] as const)('C4 merged epoch receives a maske
   }
   const first = await chat('epoch-first')
   await finish(f, first.payload, 'completed', { text: 'Ready' })
+  t.args.body = 'Reviewed email text'
   Object.assign(t.args, { password: 'private-action-password' })
   const chats = () => f.store.listActivations(t.botId).filter(row => row.lane === 'chat').length
   const before = chats()
@@ -2296,5 +2297,17 @@ it.each(['open', 'nudge', 'settled'] as const)('C4 merged epoch receives a maske
   const expected = state === 'open' ? 'one@example.test' : state === 'nudge' ? 'Wants to send' : 'Sent'
   const line = preamble.split('\n').find(line => line.includes(expected))
   expect(line, preamble).toBeDefined()
-  expect(line).toContain('Mousse, about something outside (data)')
+  const attributed = preamble.slice(0, preamble.indexOf(expected)).split('\n').reverse().find(part => part.startsWith('[j'))
+  expect(attributed).toContain('Mousse, about something outside (data)')
+  await finish(f, next.payload, 'completed', { text: 'Acknowledged' })
+  const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
+  const epoch = memory.getState<import('../../src/mms/bots/memory/contextBudget').BotChatEpoch>(t.botId, 'chat_epoch')!
+  const prompts: string[] = []
+  const digest = createBotContextProvider({ store: memory, journal: f.host.journal!, digest: async input => { prompts.push(input.prompt); return 'No valid digest' } })
+  await digest.chatContext({ botId: t.botId, activationId: 'digest-inspection', start: true, selection: { instanceId: epoch.instanceId, model: epoch.model }, keep: () => 'due' })
+  await digest.digestRunning(t.botId)
+  expect(prompts).toHaveLength(1)
+  expect(prompts[0]).toContain(expected)
+  expect(prompts[0]).toContain('Mousse, about something outside (data)')
+  expect(prompts[0]).not.toContain('private-action-password')
 })

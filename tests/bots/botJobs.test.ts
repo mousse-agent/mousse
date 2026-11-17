@@ -1,3 +1,5 @@
+import { remoteBotMethods } from '../../src/mms/bridge/remote/RemoteBots'
+import { getDefaultSettings } from '../../src/shared/settings'
 /**
  * The ledger of work a bot hands to its owner's threads (docs/plans/bot-context.md §16): one row per job with who asked
  * and what, a notice turn in the bot's chat with a capped report and the thread's link when the thread finishes or
@@ -136,6 +138,8 @@ describe('the ledger in the bot engine', () => {
     const jobId = await handOff('Fix the login page in project Web', 't3', 'm3')
     expect(f.bots.openJob(botId, f.store.listActivations(botId).at(-1)!.id, { threadId: 't3', title: 'Fix the login page', sent: 'Also the logout.' }).jobId).toBe(jobId)
 
+    const settings = getDefaultSettings(); settings.experimental.botAsksFirst = true
+    f.host.settings = { get: () => settings } as never
     await f.bots.service.pause(botId)
     threads.set('t3', { status: 'done', title: 'Fix the login page', result: 'Done.' })
     f.bots.threadRunEnded('t3')
@@ -145,6 +149,14 @@ describe('the ledger in the bot engine', () => {
     expect(report?.text).toMatch(/^"Fix the login page" finished: mousse:\/\/thread\/t3\. I didn't follow up on this: I'm paused\./)
     expect(f.store.job(jobId)).toMatchObject({ state: 'done' })
     expect(notices(jobId)).toBe(1)
+    expect(report?.action).toBeUndefined()
+    expect(report?.ask).toBeUndefined()
+    const list = remoteBotMethods({ bots: () => f.bots.service }).find(method => method.method === 'bots.chat.list')!
+    const page = await list.handle(list.validate!({ botId }), { caller: { node: 'phone', user: 'owner' } } as never) as any
+    const remote = page.messages.find((message: any) => message.id === report!.id)
+    expect(remote).toMatchObject({ kind: 'run_report', text: report!.text })
+    expect(remote.action).toBeUndefined()
+    expect(remote.text).toContain('mousse://thread/t3')
   })
 
   it('a thread the bot started that works again after its job ended (the owner said go in it) reaches the bot again when it ends', async () => {
