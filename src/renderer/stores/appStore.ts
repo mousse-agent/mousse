@@ -83,7 +83,7 @@ function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'
   return {
     activeThreadId: id,
     openingThreadId: null,
-    messages: early.reduce(upsertMessage, cached ?? []),
+    messages: early.reduce(upsertMessage, withoutLandedCopies(cached ?? [], early)),
     transcriptPending: !cached && !(target && !isThreadStarted(target)),
     // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
     agents: [],
@@ -586,6 +586,29 @@ function applyMessageUpdate(
   return upsertMessage(messages, message)
 }
 
+/** How far another computer's clock may lag this one's when it saves a message sent from here. */
+const COPY_CLOCK_SLACK_MS = 60_000
+
+/**
+ * `current` without the copy painted at send (an `optimistic:` id) of each user message in `incoming` that `current`
+ * does not hold yet: the saved message takes its place. One copy per saved message, and only one saved after the copy
+ * was painted (give or take another computer's clock), so the same text sent earlier never takes a new copy's place.
+ */
+export function withoutLandedCopies(current: ChatMessage[], incoming: readonly ChatMessage[]): ChatMessage[] {
+  if (!current.some((message) => message.id.startsWith('optimistic:'))) return current
+  const held = new Set(current.map((message) => message.id))
+  const dropped = new Set<string>()
+  for (const message of incoming) {
+    if (message.role !== 'user' || held.has(message.id) || message.id.startsWith('optimistic:')) continue
+    const savedAt = Date.parse(message.timestamp)
+    const copy = current.find((entry) =>
+      entry.id.startsWith('optimistic:') && !dropped.has(entry.id) && entry.role === 'user' && entry.content === message.content &&
+      savedAt >= Date.parse(entry.timestamp) - COPY_CLOCK_SLACK_MS)
+    if (copy) dropped.add(copy.id)
+  }
+  return dropped.size === 0 ? current : current.filter((message) => !dropped.has(message.id))
+}
+
 /**
  * Merge a full/paginated snapshot with live renderer state. Transcripts are append-only during
  * a session, so entries absent from an older snapshot are retained. This is important on long
@@ -596,7 +619,7 @@ export function reconcileMessageSnapshot(
   incoming: ChatMessage[]
 ): ChatMessage[] {
   if (current.length === 0) return sortMessagesDeterministic(incoming)
-  const merged = new Map(current.map((message) => [message.id, message]))
+  const merged = new Map(withoutLandedCopies(current, incoming).map((message) => [message.id, message]))
   for (const message of incoming) {
     const existing = merged.get(message.id)
     merged.set(message.id, existing ? newerMessageVersion(existing, message) : message)
