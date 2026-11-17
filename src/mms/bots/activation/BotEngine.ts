@@ -9125,9 +9125,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         this.tellings.release(now.getTime())
       } finally {
-        this.followUpNudgeBudget = undefined
         if (this.delivering === pass) this.delivering = undefined
-        this.armDue()
+        try { this.armDue() } finally { this.followUpNudgeBudget = undefined }
       }
     })()
     this.delivering = pass
