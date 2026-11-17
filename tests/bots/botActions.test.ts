@@ -875,7 +875,7 @@ it.each(['held', 'stopped', 'switch_off'] as const)('R1 summaries and lists surv
   const summary = f.bots.service.list().bots.find(b => b.id === t.botId)!
   expect(() => f.bots.service.get(t.botId)).not.toThrow()
   if (state === 'stopped') expect(summary.needsOwner).not.toBe(true)
-  else expect(summary).toMatchObject({ needsOwner: true, stateText: state === 'switch_off' ? 'Wants to send: Mail · send' : 'Wants to send: Send · Mail' })
+  else expect(summary).toMatchObject({ needsOwner: true, stateText: state === 'switch_off' ? 'Wants to send: Mail · send' : 'Waiting for you: Send · Mail' })
 })
 it.each(['plain', 'note', 'permission'] as const)('R2 carries the action outcome beside %s continuation context', async context => {
   const t = await setup(true)
@@ -2815,7 +2815,7 @@ it('C4 next wait-false question survives a held call and its answer reaches the 
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
   expect(f.bots.service.actionMessage(t.botId, a.id).action?.status).toBe('open')
-  expect(f.bots.service.get(t.botId).summary).toMatchObject({ state: 'needs_you', needsOwner: true, stateText: expect.stringMatching(/^Wants to send:/) })
+  expect(f.bots.service.get(t.botId).summary).toMatchObject({ state: 'needs_you', needsOwner: true, stateText: expect.stringMatching(/^Waiting for you:/) })
   await f.bots.service.answerQuestion({ botId: t.botId, questionId: q.id, choice: 'Work', clientRequestId: 'answer-while-held' })
   await finish(f, t.work.payload)
   expect(f.bots.actions.get(a.id)!.status).toBe('open')
