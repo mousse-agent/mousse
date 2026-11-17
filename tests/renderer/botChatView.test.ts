@@ -2847,7 +2847,7 @@ it('keeps one labelled asked time on an open review and replaces it with the set
 
 it.each([
   ['bot_action_paused', 'Resume Inbox helper to send this.'],
-  [undefined, 'This could not be sent. Nothing was sent. Open it on the computer for the reason.']
+  [undefined, 'This could not be sent from here. Open it on the computer to see what happened.']
 ])('maps a device conflict %s locally instead of displaying its wire words', async (reason, expected) => {
   fake.chats.inbox = [held()]
   Object.assign(fake.client, { answerAction: vi.fn(async () => {

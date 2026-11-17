@@ -174,7 +174,7 @@ it('an older computer preflight conflict remains definite on a newer device', as
   expect(error).toMatchObject({ code: 'conflict' })
   const response = sent.find(header => header.t === 'rpc.result' && 'error' in header)
   expect(response).toMatchObject({ error: legacyWireError(legacyError) })
-  expect(botActionRefusal(error)?.text).toBe('This could not be sent. Nothing was sent. Open it on the computer for the reason.')
+  expect(botActionRefusal(error)?.text).toBe('This could not be sent from here. Open it on the computer to see what happened.')
   expect(answer).not.toHaveBeenCalled()
   expect(t.caller.net.session(t.node).state()).toBe('open')
 }, 60_000)
