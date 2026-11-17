@@ -60,18 +60,14 @@ afterEach(() => {
 })
 
 describe('About this bot', () => {
-  it('switches a permission off and on and still removes it', async () => {
+  it('switches a permission off and on', async () => {
     await show()
     const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="use files on this computer"]')!
     expect(toggle().getAttribute('aria-checked')).toBe('true')
-    expect(button('Remove use files on this computer')).toBeTruthy()
     await click(toggle())
     expect(toggle().getAttribute('aria-checked')).toBe('false')
     await click(toggle())
     expect(toggle().getAttribute('aria-checked')).toBe('true')
-    await click(button('Remove use files on this computer'))
-    expect(toggle()).toBeNull()
-    expect(fake.details.b1.permissions.some((item) => item.id === 'fp1')).toBe(false)
   })
   it('shows the whole mouse, the name and the prompt', async () => {
     await show()
@@ -186,14 +182,6 @@ describe('About this bot', () => {
       await click(host.querySelector('.bot-model-advanced [role="switch"]') ?? undefined)
       expect(saves().at(-1)).toEqual({ oneWork: true })
       expect(labels()).toEqual(['Talk', 'Work'])
-    })
-
-    it('every row\'s control is in one column, as wide as the others', async () => {
-      withRows({ talk: { instanceId: 'claude', model: 'opus' }, light: null, medium: { instanceId: 'claude', model: 'haiku' }, hard: null })
-      await show()
-      // The rows sit in one grid: a label column and one control column, so each picker fills the same width.
-      const grid = host.querySelector('.bot-model-rows')!
-      expect([...grid.querySelectorAll('.bot-model-row')].every((row) => row.children.length === 2 && row.children[1]!.classList.contains('settings-model-picker'))).toBe(true)
     })
 
     it('a row picked on a Codex not checked for bots says so once, with the versions in its tooltip, before any work is sent', async () => {

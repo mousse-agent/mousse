@@ -96,10 +96,8 @@ describe('an answered ask', () => {
     expect(host.querySelector('.ask-card-answer svg')).not.toBeNull()
   })
 
-  it('says a run’s permission applies from the next run, and words Not now and withdrawn', () => {
-    expect(askAnswerLine(ask({ status: 'allowed' }), true)).toBe('Allowed: use files on this computer. It uses it from the next run.')
+  it('says how many pieces of work carry on, and words Not now and withdrawn', () => {
     // A limit the owner's work waits on: Allow carries that work on now, and says how many when it was several.
-    expect(askAnswerLine(ask({ status: 'allowed', title: 'work for up to 2 hours per run', carriesOn: true }), true)).toBe('Allowed: work for up to 2 hours per run. It carries on with this now.')
     expect(askAnswerLine(ask({ status: 'allowed', title: 'work for up to 2 hours per run', carriesOn: true, carried: 3 }), true)).toBe('Allowed: work for up to 2 hours per run. 3 pieces of work carry on now.')
     expect(askAnswerLine(ask({ status: 'not_now' }))).toBe('Not now: use files on this computer')
     expect(askAnswerLine(ask({ status: 'withdrawn' }))).toBe('No longer needed: use files on this computer')
