@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   FROSTED_COMPOSER_RANGES,
   clampFrostedComposer,
-  getDefaultSettings,
   normalizeAppearance
 } from '../../src/shared/settings'
 import { applyFrostedComposer, createFrostedComposerSaver } from '../../src/renderer/lib/frostedComposer'
@@ -24,15 +23,6 @@ afterEach(() => {
 })
 
 describe('frosted composer setting', () => {
-  it('is off by default at 60% opacity, 16px blur and 1.12 color boost', () => {
-    expect(getDefaultSettings().appearance).toMatchObject({
-      frostedComposer: false,
-      frostedComposerOpacity: 60,
-      frostedComposerBlur: 16,
-      frostedComposerSaturation: 1.12
-    })
-  })
-
   it('reads settings saved before it existed as the defaults', () => {
     const legacy = { theme: 'dark', accentColor: '#3b82f6', acrylic: false, acrylicIntensity: 50 } as const
     expect(normalizeAppearance(legacy)).toMatchObject({

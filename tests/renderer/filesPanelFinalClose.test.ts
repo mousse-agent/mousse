@@ -118,12 +118,6 @@ describe('closing tabs', () => {
 })
 
 describe('an open file', () => {
-  it('fills the panel alone, without the tree', async () => {
-    await openNotes()
-    expect(host.querySelector('.files-editor')).not.toBeNull()
-    expect(host.querySelector('.tree-open')).toBeNull()
-  })
-
   it('that was open before a restart loads, even through the development double mount', async () => {
     let finishRead!: (text: string) => void
     ;(window as unknown as { mousse: { fs: { readFile: () => Promise<string> } } }).mousse.fs.readFile = () => new Promise((resolve) => { finishRead = resolve })

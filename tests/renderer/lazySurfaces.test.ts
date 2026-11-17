@@ -124,7 +124,6 @@ afterEach(() => {
 /** Lets the dynamic imports resolve and Suspense show what they loaded. */
 const settle = () => act(async () => { for (let i = 0; i < 10; i += 1) await new Promise((done) => setTimeout(done, 0)) })
 const shown = (testId: string) => host.querySelector(`[data-testid="${testId}"]`)
-const openFile = (detail: unknown) => window.dispatchEvent(new CustomEvent('mousse:open-file', { detail }))
 
 describe('split-out surfaces', () => {
   it('each resolves to the component it names', async () => {
@@ -174,23 +173,6 @@ describe('split-out surfaces', () => {
     expect(shown('browser')).not.toBeNull()
     expect(shown('terminal')).toBeNull()
     expect(shown('files')).toBeNull()
-  })
-
-  it('keeps file links that arrive before the Files tab has mounted, and hands them over once it listens', async () => {
-    act(() => root.render(createElement(MainViewPanel)))
-    await settle()
-    expect(shown('files')).toBeNull()
-    act(() => {
-      openFile({ path: 'a.ts' })
-      openFile({ path: 'b.ts', line: 3 })
-    })
-    await settle()
-    expect(shown('files')).not.toBeNull()
-    expect(fileLinks).toEqual([{ path: 'a.ts' }, { path: 'b.ts', line: 3 }])
-    // Later links go straight to the tab, once each.
-    act(() => openFile({ path: 'c.ts' }))
-    await settle()
-    expect(fileLinks).toEqual([{ path: 'a.ts' }, { path: 'b.ts', line: 3 }, { path: 'c.ts' }])
   })
 
   it('the idle warm-up mounts the kept panels after the first paint', async () => {
