@@ -1,3 +1,4 @@
+import { botActionRefusal } from '../../shared/bots/personal/actionRefusal'
 import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { BotChatMessage, BotChatQuote, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
@@ -616,6 +617,8 @@ export const useBotsStore = create<BotsState>((set, get) => {
       }
     },
     async answerAction(botId, actionId, digest, answer) {
+      const card = get().chats[botId]?.messages.find(message => message.action?.actionId === actionId)?.action
+      const names = { botName: get().bots.find(bot => bot.id === botId)?.name, serverName: card?.serverName }
       const owner = epoch
       try {
         await bots().answerAction(actionId, digest, answer)
@@ -624,9 +627,10 @@ export const useBotsStore = create<BotsState>((set, get) => {
       } catch (cause) {
         if (owner !== epoch) throw cause
         await get().loadChat(botId)
+        const refusal = botActionRefusal(cause, names)
         // A gone row unmounts its card, so its refusal belongs in the chat's existing notice.
-        if (owner === epoch && !get().chats[botId]?.messages.some(message => message.action?.actionId === actionId)) fail(owner, cause, botId)
-        return { reason: String((cause as { code?: unknown } | null)?.code ?? 'request_failed'), text: errorText(cause) }
+        if (owner === epoch && !get().chats[botId]?.messages.some(message => message.action?.actionId === actionId)) fail(owner, refusal ? { message: refusal.text } : cause, botId)
+        return refusal ?? { reason: String((cause as { code?: unknown } | null)?.code ?? 'request_failed'), text: errorText(cause) }
       }
     },
     async answerQuestion(botId, questionId, choice) {

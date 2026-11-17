@@ -1,3 +1,4 @@
+import { isBotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type {
   BlobId,
@@ -26,8 +27,6 @@ import {
   NetError,
   NET_ERRORS,
   forbiddenReason,
-  botActionRefusalMessage,
-  isNetErrorCode,
   isForbiddenReason,
   type NetErrorCode
 } from '../../../shared/net/errors'
@@ -185,19 +184,19 @@ const equalKey = (a: string, b: string): boolean => {
 }
 /** Why a routed call was refused; the only detail of a refusal that crosses the wire. */
 const FORBIDDEN_REASON_PREFIX = 'forbidden.'
-const actionRefusalCode = (code: unknown): code is NetErrorCode =>
-  typeof code === 'string' && code.startsWith('bot_action_') && isNetErrorCode(code)
+const APPLICATION_REASON_PREFIX = 'application.'
 function wireError(error: unknown): WireError {
   const code = error instanceof NetError ? error.code : 'internal'
   // Do not serialize arbitrary provider/OS messages, credentials or payloads. A refusal of a routed
   // call says which kind it was (a fixed word), in the cause slot older peers already accept.
   const reason =
     error instanceof NetError && code === 'forbidden' ? forbiddenReason(error.details) : undefined
-  // Use the existing conflict envelope so older peers need not know the new action codes.
-  // New peers recover only known action refusals from its bounded cause entry.
-  if (actionRefusalCode(code)) return {
-    code: 'conflict', message: NET_ERRORS.conflict.message, retryable: false,
-    cause: [{ code, message: botActionRefusalMessage(code, error instanceof NetError ? error.message : undefined) ?? NET_ERRORS[code].message }]
+  // Like forbidden reasons: only a known application code crosses, never names or error text.
+  const actionReason = code === 'conflict' && error instanceof NetError
+    ? (error.details as { reason?: unknown } | undefined)?.reason : undefined
+  if (isBotActionRefusalCode(actionReason)) return {
+    code, message: NET_ERRORS[code].message, retryable: NET_ERRORS[code].retryable,
+    cause: [{ code: APPLICATION_REASON_PREFIX + actionReason, message: NET_ERRORS[code].message }]
   }
   return {
     code,
@@ -211,9 +210,11 @@ function wireError(error: unknown): WireError {
   }
 }
 const remoteError = (error: WireError): NetError => {
-  const action = error.code === 'conflict' ? error.cause?.find(entry => actionRefusalCode(entry.code)) : undefined
-  if (action && actionRefusalCode(action.code))
-    return new NetError(action.code, botActionRefusalMessage(action.code, action.message))
+  const actionReason = error.code === 'conflict'
+    ? error.cause?.find(entry => entry.code?.startsWith(APPLICATION_REASON_PREFIX))?.code?.slice(APPLICATION_REASON_PREFIX.length)
+    : undefined
+  if (isBotActionRefusalCode(actionReason))
+    return new NetError('conflict', undefined, { details: { reason: actionReason } })
   const reason =
     error.code === 'forbidden'
       ? error.cause
@@ -222,7 +223,7 @@ const remoteError = (error: WireError): NetError => {
       : undefined
   return reason && isForbiddenReason(reason)
     ? new NetError(error.code, undefined, { details: { reason } })
-    : new NetError(error.code, botActionRefusalMessage(error.code, error.message))
+    : new NetError(error.code)
 }
 
 /** Authenticated normal session. Enrollment-only composition is implemented in P2. */

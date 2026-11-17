@@ -1,3 +1,4 @@
+import { botActionRefusal } from '../../../../src/shared/bots/personal/actionRefusal'
 /** Two real daemons with fresh homes; only the bot port is scripted in this transport regression. */
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
@@ -95,7 +96,14 @@ it.each(refusals)('reports %s before effects over a real link', async (reason, s
   const input = { botId: realBot, actionId: ACTION, digest: 'a'.repeat(64), answer: 'send' as const }
   check = () => f.bots.service.actionCheck(input)
   answer = vi.fn(() => f.bots.service.answerAction(input))
-  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict', details: { reason: `bot_action_${reason}` } })
+  sent = []
+  const error = await rpcAnswer().catch(error => error)
+  expect(error).toMatchObject({ code: 'conflict', details: { reason: `bot_action_${reason}` } })
+  const frame = sent.find(header => header.t === 'rpc.result' && 'error' in header)
+  expect(frame).toMatchObject({ error: { code: 'conflict', message: new NetError('conflict').message,
+    cause: [{ code: `application.bot_action_${reason}`, message: new NetError('conflict').message }] } })
+  expect(botActionRefusal(error, { botName: 'Mail', serverName: message.action!.serverName })?.text).toBe(sentence)
+  expect(error.message).not.toBe(sentence)
   expect(answer).not.toHaveBeenCalled()
 }, 60_000)
 
@@ -103,7 +111,9 @@ it('refuses oversized Send before effects but allows Not now', async () => {
   check = () => {}
   message = { ...message, text: 'x'.repeat(80_000), action: { ...message.action!, args: { body: 'x'.repeat(80_000) } } }
   answer = vi.fn(async () => ({ status: 'declined' }))
-  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict', details: { reason: 'bot_action_too_large' } })
+  const error = await rpcAnswer().catch(error => error)
+  expect(error).toMatchObject({ code: 'conflict', details: { reason: 'bot_action_too_large' } })
+  expect(botActionRefusal(error)?.text).toBe('Open it on the computer to send.')
   expect(answer).not.toHaveBeenCalled()
   expect(await rpcAnswer('not_now')).toMatchObject({ status: 'declined' })
   expect(answer).toHaveBeenCalledTimes(1)
@@ -145,14 +155,20 @@ it('new computer refusals remain a generic conflict for the older device decoder
   // The old Net decoder preserves only the top-level code for non-forbidden errors.
   const olderDevice = new NetError(response.error.code)
   expect(olderDevice.code).toBe('conflict')
+  expect(olderDevice.message).toBe(new NetError('conflict').message)
+  expect(response.error.message).toBe(new NetError('conflict').message)
+  expect(response.error.cause).toEqual([{ code: 'application.bot_action_paused', message: new NetError('conflict').message }])
   expect(JSON.stringify(response)).not.toContain('DO NOT SEND THIS NAME')
   expect(JSON.stringify(response)).not.toContain('Mail')
+  expect(t.caller.net.session(t.node).state()).toBe('open')
 }, 60_000)
 
 it('an older computer preflight conflict remains definite on a newer device', async () => {
   check = () => { throw new NetError('conflict') }
   answer.mockClear()
-  await expect(rpcAnswer()).rejects.toMatchObject({ code: 'conflict' })
+  const error = await rpcAnswer().catch(error => error)
+  expect(error).toMatchObject({ code: 'conflict' })
+  expect(botActionRefusal(error)?.text).toBe('This could not be sent. Nothing was sent. Open it on the computer for the reason.')
   expect(answer).not.toHaveBeenCalled()
   expect(t.caller.net.session(t.node).state()).toBe('open')
 }, 60_000)

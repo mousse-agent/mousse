@@ -1,5 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
-import { botActionRefusalMessage, isNetErrorCode } from '../../../shared/net/errors'
+import { botActionRefusalText, isBotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { NetError, type NodeCapability, type NodeId } from '../../../shared/net'
 import type { BotChatCard, BotChatMessage, BotDetail, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
@@ -428,8 +428,8 @@ function refusal(error: unknown): never {
   // Only the engine's own refusals (which carry a code and plain words) are passed on.
   if (typeof code !== 'string') throw error
   const message = error instanceof Error ? error.message : undefined
-  if (code.startsWith('bot_action_') && isNetErrorCode(code))
-    throw new NetError(code, botActionRefusalMessage(code, message))
+  if (isBotActionRefusalCode(code))
+    throw new NetError('conflict', undefined, { details: { reason: code } })
   if (code === 'bot_not_found') throw new NetError('stream_unknown', 'This bot is gone.')
   if (code.endsWith('_not_found') || code === 'not_found') throw new NetError('stream_unknown', message)
   throw new NetError(code === 'invalid_params' ? 'bad_request' : 'conflict', message)
@@ -589,7 +589,7 @@ export function remoteBotMethods(options: {
         // Include the page envelope too: fittedPage may cut its only message to leave room for it.
         const page = port.chatList(botId(p), { limit: 1, beforeSeq: message.seq + 1 })
         if (bytes({ ...page, messages: [remoteBotMessage(message)] }) + 1 > RESULT_BYTES)
-          throw new NetError('bot_action_too_large')
+          throw new NetError('conflict', botActionRefusalText('bot_action_too_large'), { details: { reason: 'bot_action_too_large' } })
       }
   }
   return [
