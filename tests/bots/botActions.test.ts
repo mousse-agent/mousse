@@ -3099,3 +3099,20 @@ it.each(['overdue', 'obsolete'] as const)('review5 preflight retires an %s card 
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: kind === 'overdue' ? 'expired' : 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
 })
+
+it('C9 queue pressure never counts or evicts work waiting on a card', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const ids = [t.workId]
+  for (let n = 0; n < 21; n++) {
+    const { workId } = await f.bots.tools.work.start(t.botId, t.chatId, { title: `Email ${n}`, brief: `Email ${n}`, key: `queue-card-${n}` })
+    await flush()
+    const turn = await start(f, workId)
+    await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: `mail ${n}` }, toolCallId: `queue-${n}`, signal: new AbortController().signal })
+    await finish(f, turn.payload)
+    ids.push(workId)
+  }
+  expect(ids.map(id => f.store.activation(id)?.endReason)).toEqual(ids.map(() => 'approval'))
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(22)
+  expect(t.calls).toEqual([])
+})
