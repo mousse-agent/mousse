@@ -321,6 +321,10 @@ export class BotActions {
     const dispatch = this.host.store.dispatches(activationId).find(d => d.clientRequestId === dispatchId)
     return dispatch && (dispatch.n === mainN || dispatch.mainN === mainN) ? action : undefined
   }
+  pendingInTurn(activationId: string, mainN: number): ActionRow | undefined {
+    const action = this.inTurn(activationId, mainN)
+    return action && pending.has(action.status) ? action : undefined
+  }
   private ownerWroteAfter(action: ActionRow, removed = false): boolean {
     const card = JSON.parse(action.card_json ?? '{}')
     const note = Number(this.host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', action.bot_id, `cursor:action-note:${action.activation_id}`)?.value ?? 0)
