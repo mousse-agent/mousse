@@ -393,6 +393,8 @@ export const BOT_ASK_HELD_CHAT_TEXT = 'The owner already allowed this; you get i
 export const BOT_ASK_HELD_CONSULT_TEXT = 'The owner already allowed this, but this consult can\'t use it. Do not ask again: answer with what you have and say what needs it.'
 /** What a call or `escalate` is answered with when the grant holds the permission but this turn can't use it. */
 export const BOT_ASK_HELD_UNAVAILABLE_TEXT = 'The owner already allowed this, but it can\'t be used on this turn. Do not ask again. Carry on without it and say in your report what you skipped.'
+/** What a call is refused with when the owner removed its permission while the turn ran (About → Remove). */
+export const BOT_PERMISSION_REMOVED_TEXT = 'Your owner removed this permission while you worked. Do not ask for it again. Carry on without it and say what you skipped.'
 
 /** What an ask for an MCP tool is answered with where Mousse has no MCP servers to offer (no MCP manager): no card. */
 export const BOT_MCP_UNAVAILABLE_TEXT = 'Your owner has no MCP servers set up in Mousse here, so there is nothing to ask for. Carry on without it, and tell the owner plainly if that matters.'
@@ -2701,15 +2703,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return refuse('active_time_exhausted', 'This bot used up its work time.')
     }
     const scratch = row.scratch ?? join(this.store.directory, 'scratch', row.id)
-    const compiled = compileBotThread({
-      grant: effective,
-      digest: grant.digest,
+    const compileWith = (manifest: BotManifest, digest: string) => compileBotThread({
+      grant: manifest,
+      digest,
       thread: definition.main,
       scratch,
       profileHome: this.host.profileHome,
       nativeNames: (tools) => this.nativeNames(selection.instanceId, tools),
       // The limits that run: the activation's scopes hold the shared counts and spend.
-      remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
+      remaining: { ...limitsOf(manifest), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // Every chat turn is offered the same tools, whatever started it (#1360): a tool list that changed with the turn's
@@ -2721,6 +2723,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // quick actions (`owner`): in both lanes, making and changing jobs only where it may act on threads. Its task list.
       botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: row.lane === 'chat', threads: 'all', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row), catalogue: this.catalogueOf(selection.instanceId) }
     })
+    const compiled = compileWith(effective, grant.digest)
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
     if (!checked.ok) return this.block(row, 'policy_unenforceable', checked.error.reason ?? checked.error.message)
@@ -2802,7 +2805,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       controller, deadline, counters: counterScope, spend: spendScope,
       contexts: definition.context.map((thread) => ({ key: thread.key, title: thread.title })),
       dispatchId: dispatch.clientRequestId,
-      mcpTools: this.offeredMcp(compiled.permissions.mcp)
+      mcpTools: this.offeredMcp(compiled.permissions.mcp),
+      permissionsNow: (now) => {
+        const recompiled = compileWith(this.effectiveManifest(row, definition.permissions, now.manifest), now.digest)
+        return recompiled.ok ? recompiled.permissions : undefined
+      }
     })
     const pack = this.packs.get(row.id)
     // A chat turn that only reads the owner's threads (no typed message of theirs started it) is told so, and why, in
@@ -3108,17 +3115,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const remainingMs = main.deadline - this.now()
     if (remainingMs <= 0) return refuse('active_time_exhausted', 'This bot used up its work time.')
     const scratch = row.scratch ?? join(this.store.directory, 'scratch', row.id)
-    const compiled = compileBotThread({
-      grant: effective,
-      digest: grant.digest,
+    const compileWith = (manifest: BotManifest, digest: string) => compileBotThread({
+      grant: manifest,
+      digest,
       thread: spec,
       scratch,
       profileHome: this.host.profileHome,
       nativeNames: (tools) => this.nativeNames(selection.instanceId, tools),
-      remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
+      remaining: { ...limitsOf(manifest), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
       botTools: { escalate: true, consult: false, memory: true }
     })
+    const compiled = compileWith(effective, grant.digest)
     if (!compiled.ok) return refuse('policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
     if (!checked.ok) return refuse('policy_unenforceable', checked.error.reason ?? checked.error.message)
@@ -3144,7 +3152,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       row, mainN: main.n, role: 'context', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
       // A consult's calls are chips of its main dispatch's message.
-      dispatchId: main.dispatchId
+      dispatchId: main.dispatchId,
+      permissionsNow: (now) => {
+        const recompiled = compileWith(this.effectiveManifest(row, definition.permissions, now.manifest), now.digest)
+        return recompiled.ok ? recompiled.permissions : undefined
+      }
     })
     return {
       activationId: row.id,
@@ -3404,28 +3416,57 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     startedWith: BotManifest
     /** The granted MCP tools the turn is offered (`BotMcp.offered`); none in a chat turn. */
     mcpTools?: readonly BotMcpTool[]
+    /**
+     * What this turn would hold under `grant`, compiled as it was at its start, or undefined when it can't be. Absent: a
+     * grant that changed while the turn ran refuses every call.
+     */
+    permissionsNow?(grant: { digest: string; manifest: BotManifest }): BotPermissions | undefined
   }): BotAuthority {
     const { row, controller } = input
     const switchedAtStart = new Map(this.permissionSwitches.get(row.botId))
     const activity: BotActivityContext = { botId: row.botId, activationId: row.id, dispatchId: input.dispatchId }
     let fileReads = this.fileReads.get(row.id)
     if (!fileReads) this.fileReads.set(row.id, fileReads = new Map())
+    // The grant now, when it is no longer the one the turn runs under (About → Remove narrows it while the turn runs): the
+    // turn keeps what it started with, less what the grant took away since. A change that takes nothing away (a work-time
+    // limit) refuses nothing, and one that takes a permission away refuses only that. Undefined: unchanged. An authority
+    // of undefined: no grant at all, or none the turn can be checked against, so every call is refused.
+    let regranted: { digest: string; authority: BotAuthority | undefined } | undefined
+    const grantChanged = (): { authority: BotAuthority | undefined } | undefined => {
+      const grant = this.store.activeGrant(row.botId)
+      // "Allow" on an ask moves the activation to the wider grant; it stays live under it.
+      if (grant && (grant.digest === input.grantDigest || grant.digest === this.store.activation(row.id)?.grantDigest)) return undefined
+      if (!grant || !input.permissionsNow) return { authority: undefined }
+      if (regranted?.digest !== grant.digest) {
+        let permissions: BotPermissions | undefined
+        try {
+          permissions = input.permissionsNow(grant)
+        } catch {
+          permissions = undefined
+        }
+        regranted = {
+          digest: grant.digest,
+          authority: permissions && createBotAuthority({ activationId: row.id, role: input.role, permissions, waiting: () => false, counters: input.counters, time: { deadline: () => input.deadline, signal: controller.signal }, spend: null })
+        }
+      }
+      return { authority: regranted.authority }
+    }
     const base = createBotAuthority({
       fileReads,
       activationId: row.id,
       role: input.role,
       permissions: input.permissions,
       waiting: () => this.store.activation(row.id)?.status === 'waiting_grant',
-      // Every call: the grant must still be the one the activation runs under, and the dispatch live.
+      // Every call: the bot must still hold a grant the turn can be checked against, and the dispatch be live.
       live: () => {
+        const changed = grantChanged()
+        if (changed && !changed.authority) return { kind: 'revoked' }
         const current = this.store.activation(row.id)
-        const digest = this.store.activeGrant(row.botId)?.digest
-        // "Allow" on an ask moves the activation to the wider grant; it stays live under it.
-        if (digest !== input.grantDigest && digest !== current?.grantDigest) return { kind: 'revoked' }
         const status = current?.status
         if (status === 'paused') return { kind: 'paused' }
         if (status === 'waiting_grant') return { kind: 'waiting' }
-        if (controller.signal.aborted || status !== 'running') return { kind: 'ended' }
+        // A dispatch a replaced grant ended (`endUnderGrant`) says why.
+        if (controller.signal.aborted || status !== 'running') return { kind: changed ? 'revoked' : 'ended' }
         // The model changes now (`set_depth`/`use_model`, scope now): this dispatch ends and continues on it.
         if (current?.reloadPending) {
           controller.abort(new BotReloadAbort())
@@ -3445,6 +3486,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if ((this.permissionSwitches.get(row.botId)?.get(id) ?? 0) !== (switchedAtStart.get(id) ?? 0))
           return 'That permission changed while you worked. Carry on without it until your next turn.'
         return undefined
+      },
+      narrowed: (call) => {
+        const now = grantChanged()?.authority
+        return !now || now.check(call).ok ? undefined : BOT_PERMISSION_REMOVED_TEXT
       }
     })
     const effectKey = `${row.id}:${input.mainN}`
@@ -4826,8 +4871,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * About → Remove (§5.4): the manifest narrows, the revision is published and the narrower grant
-   * approved at once (narrowing never needs consent). A run under the wider grant ends at its next
-   * call; queued work moves to the narrower grant.
+   * approved at once (narrowing never needs consent). A turn running under the wider grant goes on: only a call of
+   * what was taken away is refused (`authorityFor`). Queued work moves to the narrower grant.
    */
   narrowGrant(botId: string, narrower: (manifest: BotManifest) => BotManifest, switching = false): void {
     const entry = this.entry(botId)
@@ -4838,7 +4883,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const next: BotDefinition = { ...published, permissions: intersectManifest(narrower(published.permissions), granted) }
     const revision = this.definitionCall(() => this.host.definitions.publishRevision(next))
     const digest = botManifestDigest(granted)
-    // A running dispatch keeps the wider grant's digest, so its next call is refused as revoked;
+    // A running dispatch keeps the wider grant's digest, and each of its calls is checked against the narrower one too;
     // queued work moves to the narrower grant, and so does work that waits to go on (with a dispatch it has not sent
     // yet): it goes on under what is approved now, never under the wider grant.
     this.store.db.transaction(() => {
@@ -6201,7 +6246,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private compileSubagent(row: BotActivationRow, selection: ProviderSelection, deadline: number): { compiled: Extract<ReturnType<typeof compileBotThread>, { ok: true }>; effective: BotManifest; definition: BotDefinition; grant: { digest: string; manifest: BotManifest }; hold: BotSubagentHold } | { refused: string; hold?: BotSubagentHold; manifest?: BotManifest } {
     const definition = this.host.definitions.revision(row.botId, row.revision)
     const grant = this.store.activeGrant(row.botId)
-    if (!definition || !grant || grant.digest !== row.grantDigest) return { refused: `Your permissions changed since this work started. ${SUBAGENT_NOTHING_STARTED}` }
+    // A grant narrowed since the work started (About → Remove) holds the subagent to what it holds now.
+    if (!definition || !grant) return { refused: `Your permissions changed since this work started. ${SUBAGENT_NOTHING_STARTED}` }
     const unchecked = this.host.runsOnNote?.(selection.instanceId)
     if (unchecked) return { refused: `${unchecked.text} ${SUBAGENT_NOTHING_STARTED}` }
     const holds = this.subagentManifestOf(row, definition, grant.manifest)
@@ -6318,7 +6364,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
       // Its calls are chips of the work's message.
       dispatchId: main.dispatchId, callDispatchId: dispatch.clientRequestId,
-      mcpTools: this.offeredMcp(compiled.permissions.mcp)
+      mcpTools: this.offeredMcp(compiled.permissions.mcp),
+      // Compiled as it started, against the grant now (`compileSubagent` reads it).
+      permissionsNow: () => {
+        const now = this.compileSubagent(row, spec.selection, main.deadline)
+        return 'refused' in now ? undefined : now.compiled.permissions
+      }
     })
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, main.controller.signal) : undefined
     const first = this.store.dispatches(row.id).find((entry) => entry.kind === 'subagent' && entry.threadId === dispatch.threadId)?.n === dispatch.n

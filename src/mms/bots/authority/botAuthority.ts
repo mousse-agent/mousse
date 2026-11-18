@@ -60,6 +60,12 @@ export interface BotAuthorityInput {
    * switch turned off refuses the next call of a turn already running. Undefined: not switched off. Must not throw.
    */
   disabled?(call: NormalisedCall): string | undefined
+  /**
+   * Why the grant as it stands now refuses a call this turn's own permissions allow (the owner took that permission away
+   * since the turn started), read on every such call. A change that takes nothing away (a work-time limit) refuses
+   * nothing. Undefined: still held. Must not throw.
+   */
+  narrowed?(call: NormalisedCall): string | undefined
 }
 
 export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
@@ -142,6 +148,13 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   return authority
 
   function decide(call: NormalisedCall): BotCheck {
+    const decided = decideHeld(call)
+    if (!decided.ok) return decided
+    const taken = input.narrowed?.(call)
+    return taken ? { ok: false, refused: { text: taken, askId: '' } } : decided
+  }
+
+  function decideHeld(call: NormalisedCall): BotCheck {
     const disabled = input.disabled?.(call)
     if (disabled) return { ok: false, refused: { text: disabled, askId: '' } }
     const ended = input.live?.() ?? (input.time.signal.aborted ? { kind: 'ended' as const } : undefined)

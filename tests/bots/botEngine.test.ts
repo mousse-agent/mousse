@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BOT_JOURNAL_ERROR, BOT_OFFLINE_WATCH_MS, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_JOURNAL_ERROR, BOT_OFFLINE_WATCH_MS, BOT_PERMISSION_REMOVED_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { botFilesFolder, botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
@@ -310,6 +310,22 @@ describe('activation and dispatch', () => {
     approve()
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'revoked' } })
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
+  })
+
+  it('Remove while a turn runs refuses only what it took away: a shorter work time refuses nothing', async () => {
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
+    if ('refused' in prepared) throw new Error(prepared.refused)
+    const read = { kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path: join(root, 'a.md') } }
+    const search = { kind: 'builtin' as const, tool: 'search' as const, nativeName: 'grep', args: { path: root } }
+    bots.narrowGrant('site-editor', (held) => ({ ...held, budget: { ...held.budget, maxActiveMs: 5 * 60_000 } }))
+    expect(prepared.authority.check(read)).toEqual({ ok: true })
+    expect(prepared.authority.check(search)).toEqual({ ok: true })
+    bots.narrowGrant('site-editor', (held) => ({ ...held, tools: held.tools.filter((tool) => tool !== 'search') }))
+    expect(prepared.authority.check(read)).toEqual({ ok: true })
+    expect(prepared.authority.check(search)).toEqual({ ok: false, refused: { text: BOT_PERMISSION_REMOVED_TEXT, askId: '' } })
+    expect(bots.getActivation(activation.id).status).toBe('running')
+    expect(store.openAsks('site-editor')).toEqual([])
   })
 
   it('a narrower published revision is what runs: tools, limits and work time', async () => {

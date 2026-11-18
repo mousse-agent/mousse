@@ -7,7 +7,7 @@
  * The engine runs over a real `bots.db`; the owner's servers are a real `BotMcp` over a fake catalogue and connection.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_REFUSED_TEXT, BOT_PERMISSION_REMOVED_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { BOT_MCP_NOT_READ_TEXT, BotMcp } from '../../src/mms/bots/mcp/BotMcp'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
@@ -196,8 +196,9 @@ describe('one ask per server', () => {
     expect(four.prepared.authority.check({ kind: 'mcp', server: 'srv-github', tool: 'list_issues', args: {} })).toEqual({ ok: true })
     expect(f.bots.service.revokePermission(botId, github).permissions.some((item) => item.id === github)).toBe(false)
     expect(granted()).toEqual([])
-    // A run that started with the tools is refused at its next call.
-    expect(four.prepared.authority.check({ kind: 'mcp', server: 'srv-github', tool: 'list_issues', args: {} })).toMatchObject({ ok: false, wall: { kind: 'revoked' } })
+    // A run that started with the tools is refused them at its next call, and keeps the rest of what it started with.
+    expect(four.prepared.authority.check({ kind: 'mcp', server: 'srv-github', tool: 'list_issues', args: {} })).toEqual({ ok: false, refused: { text: BOT_PERMISSION_REMOVED_TEXT, askId: '' } })
+    expect(four.prepared.authority.check({ kind: 'app', tool: 'escalate', args: {} })).toEqual({ ok: true })
   })
 
   it('an MCP ask counts toward the ask caps', async () => {
