@@ -3335,3 +3335,39 @@ it('C9 an answered card is carrying on in the chat situation, while ordinary que
   expect(text).toContain(`${t.workId}, carrying on`)
   expect(text).toContain('ordinary, waiting its turn')
 })
+
+// Admission must carry unread outcomes even when the previous activation state looks terminal.
+it.each((['network', 'usage retry', 'usage reset', 'restart', 'reload', 'more room', 'Continue'] as const).flatMap(recovery => (['send', 'not_now'] as const).map(answer => ({ recovery, answer }))))('C9 $recovery recovery preserves $answer outcome until model output', async ({ recovery, answer }) => {
+    const t = await setup(true)
+    await t.call(); await finish(f, t.work.payload)
+    const a = f.bots.actions.forWork(t.workId)!
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer }); await flush()
+    const carrying = await start(f, t.workId, 2)
+    await finish(f, carrying.payload, 'failed', { outcome: { error: 'network_error' } })
+    expect(f.store.activation(t.workId)?.status).toBe('failed')
+    if (recovery === 'Continue' || recovery === 'usage reset') f.store.moveActivation(t.workId, ['failed'], 'paused')
+    if (recovery === 'more room') f.store.moveActivation(t.workId, ['failed'], 'blocked')
+    const input = recovery === 'network' ? { network: true } : recovery === 'usage retry' ? { usageRetry: true } : recovery === 'usage reset' ? { usageReset: true } : recovery === 'restart' ? { restart: true } : recovery === 'reload' ? { reload: true } : { moreRoom: true }
+    if (recovery === 'Continue') await f.bots.continueActivation(t.workId)
+    else await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], input)
+    await flush()
+    const dispatch = f.store.lastMainDispatch(t.workId)!
+    const line = answer === 'send' ? 'Your owner sent it' : 'Your owner chose not to send'
+    expect(dispatch.prompt.text).toContain(line)
+    expect(dispatch.prompt.workActionIds).toContain(a.id)
+    const resumed = await start(f, t.workId, dispatch.n)
+    resumed.prepared.modelOutput?.()
+    expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+    await finish(f, resumed.payload, 'failed', { outcome: { error: 'network_error' } })
+    await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], { network: true })
+    expect(f.store.lastMainDispatch(t.workId)!.prompt.text).not.toContain(line)
+    expect(t.calls).toHaveLength(answer === 'send' ? 1 : 0)
+})
+it('C9 deleting work with an untold sent outcome leaves no unread outcome', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' }); await flush()
+  await f.bots.remove(t.botId)
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+})
