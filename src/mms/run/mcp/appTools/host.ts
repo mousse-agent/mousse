@@ -260,6 +260,8 @@ export type AgentApprovalResult =
   | { ok: true; answered: 'question'; replayed: boolean }
   /** A plain question that is the user's: the caller is not the bot that started the thread, or the thread's turn is not one it supervises. */
   | { ok: false; reason: 'question_for_user' }
+  /** A plain question's answer named no question of the request: `questionIds` are its questions. */
+  | { ok: false; reason: 'unknown_question'; questionIds: string[] }
   /** Someone else (a person at a client, or another agent) answered first; the request is theirs. */
   | { ok: false; reason: 'already_answered'; answeredBy?: AnsweredBy; decision?: 'allow' | 'reject' }
   /** The request was closed before anyone answered (its run ended, its thread was stopped or deleted). */

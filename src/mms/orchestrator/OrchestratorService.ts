@@ -4785,6 +4785,11 @@ export class OrchestratorService extends EventEmitter {
     if (!supervising) return { ok: false, reason: 'question_for_user' }
     const pending = this.questions.getPending(requestId)
     if (!pending || pending.threadId !== threadId) return { ok: false, reason: 'already_answered' }
+    // Answers are keyed by question id. One answer to a one-question request is that question's, whatever its key.
+    const questionIds = pending.questions.map((question) => question.id)
+    const keys = Object.keys(answers)
+    if (keys.length === 1 && questionIds.length === 1 && keys[0] !== questionIds[0]) answers = { [questionIds[0]!]: answers[keys[0]!]! }
+    if (Object.keys(answers).some((id) => !questionIds.includes(id))) return { ok: false, reason: 'unknown_question', questionIds }
     if (!earlier)
       engine.store.putReceipt({ clientRequestId: key, threadId: actor.threadId, commandKind: 'approval_respond', status: 'accepted', result: { requestId, threadId, runId: actor.runId }, createdAt: new Date().toISOString() })
     const label = `From ${supervising.name}, the bot that started this thread (not the user): `

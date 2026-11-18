@@ -4,7 +4,7 @@ import type { EffectRecord, RunRecord, ThreadEvent } from '../run/types'
 import type { RunEngine } from '../run/RunEngine'
 import { subagentDescendantsIn } from '../../shared/threadLineage'
 import { listPendingQueue } from '../queue/ThreadMessageQueue'
-import type { PendingUserQuestions, QueuedMessage, ThreadLineage } from '../../shared/types'
+import type { ChatMessage, PendingUserQuestions, QueuedMessage, ThreadLineage } from '../../shared/types'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
 import type { BotThreadAsk } from '../../shared/bots/personal/jobs'
 import type { JobThreadView } from './jobs'
@@ -218,6 +218,19 @@ export function launchedThreadsIn(profile: {
     ...(profile.projectName ? { projectName: profile.projectName } : {}),
     ...(options.doneSince ? { doneSince: options.doneSince } : {})
   })
+}
+
+/**
+ * The reply a thread's turn ended on: its last message to or from the person, when that is the agent's text; undefined
+ * when the turn ended without one (the person's message is the last).
+ */
+export function lastReplyOf(messages: readonly ChatMessage[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!
+    if (message.role === 'user') return undefined
+    if (message.role === 'assistant' && typeof message.content === 'string' && message.content.trim()) return message.content
+  }
+  return undefined
 }
 
 /** A request the thread waits on, as its job view lists it: an approval without the "Always" option, which is the owner's. */

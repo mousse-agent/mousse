@@ -2423,6 +2423,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         switch (result.reason) {
           case 'question_for_user':
             throw new McpToolError('mousse_scope_denied', `Request ${requestId} is a question for your owner: you answer questions only in a thread you started.`)
+          case 'unknown_question':
+            throw new Error(`answers must be keyed by question id (${result.questionIds.join(', ')}), not by the request id; nothing was answered.`)
           case 'client_request_id_conflict':
             throw new McpToolError('mousse_conflict', 'That clientRequestId was already used to answer another approval; use a fresh one for each new answer.', { conflict: 'client_request_id_conflict', requestId })
           case 'already_answered':

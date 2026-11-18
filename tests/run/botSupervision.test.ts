@@ -9,13 +9,13 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { jobThreadIn } from '../../src/mms/bots/launchedThreads'
+import { jobThreadIn, lastReplyOf } from '../../src/mms/bots/launchedThreads'
 import type { ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from '../../src/shared/bots/personal/manifest'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { AgentActor } from '../../src/mms/run/types'
-import type { UserQuestion, UserQuestionAnswers } from '../../src/shared/types'
+import type { ChatMessage, UserQuestion, UserQuestionAnswers } from '../../src/shared/types'
 import { appTurn } from './appToolsFixture'
 import { phase6Daemon, piAdapter, type Phase6Daemon } from './phase6Fixture'
 
@@ -123,6 +123,29 @@ describe('a bot answers for the threads it started', () => {
     expect(rows).toHaveLength(2)
     expect(rows.every((row) => row.role === 'system')).toBe(true)
     expect(w.rows(w.job.id).some((row) => row.role === 'user')).toBe(false)
+  })
+
+  it('takes one answer to a one-question request as that question\'s, and refuses keys that name no question', async () => {
+    const w = world()
+    await w.runIn(w.job.id)
+    const single = w.ask(w.job.id)
+    // Keyed by the request id, as a model may: still the only question's answer.
+    expect(w.answer('b1', w.job.id, single.requestId, { [single.requestId]: 'pg' })).toMatchObject({ ok: true, answered: 'question' })
+    expect(await single.answered).toEqual({ db: 'pg' })
+    const two: UserQuestion[] = [QUESTION[0]!, { id: 'size', prompt: 'How big?', options: [{ id: 's', label: 'Small' }] }]
+    const answered = w.d.questions.requestAnswers(two, w.job.id, {}).catch((error: unknown) => error)
+    const requestId = w.d.questions.listPendingForThread(w.job.id).at(-1)!.requestId
+    expect(w.answer('b1', w.job.id, requestId, { db: 'pg', [requestId]: 's' })).toEqual({ ok: false, reason: 'unknown_question', questionIds: ['db', 'size'] })
+    expect(w.d.questions.listPendingForThread(w.job.id).map((entry) => entry.requestId)).toEqual([requestId])
+    expect(w.answer('b1', w.job.id, requestId, { db: 'pg', size: 's' })).toMatchObject({ ok: true, answered: 'question' })
+    expect(await answered).toEqual({ db: 'pg', size: 's' })
+  })
+
+  it('reads the reply a turn ended on when no run result was kept', () => {
+    const message = (role: 'user' | 'assistant' | 'system', content: string) => ({ id: content, role, content, timestamp: '' }) as ChatMessage
+    expect(lastReplyOf([message('user', 'Ask me'), message('assistant', 'one'), message('system', 'Answered by alpha')])).toBe('one')
+    // The person's message is the last: the turn ended without a reply, and an older one is not this turn's.
+    expect(lastReplyOf([message('assistant', 'older'), message('user', 'Again')])).toBeUndefined()
   })
 
   it('approves on a thread it started without the switch, named as itself, no wider than the thread\'s own mode', async () => {
