@@ -7,12 +7,11 @@
       "machine": "Animatrix",
       "branch": "prune-redundant-test-assertions",
       "paths": [
-        "tests/modelCatalogBundled.test.ts",
-        "tests/renderer/sidebarRowActions.test.ts",
-        "tests/run/delegationGuidance.test.ts"
+        "tests/bots/botActions.test.ts",
+        "tests/renderer/botChatView.test.ts"
       ],
       "claimedAt": "2026-11-18T05:56:36.991Z",
-      "expiresAt": "2026-11-18T07:56:36.991Z"
+      "expiresAt": "2026-11-18T07:58:45.163Z"
     }
   ]
 }
