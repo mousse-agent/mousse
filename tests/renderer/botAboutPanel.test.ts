@@ -451,7 +451,7 @@ it.each([true, false])('keeps whole-service controls with asks-first projection 
   fake.details.b1.permissions = [{ id: 'mail', title: 'use Mail', enabled: true, grantedAt: AT, note: asking ? 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.' : 'Use the connected Mail service.', ...(asking ? { mark: 'Asks first' } : {}) }]
   await show()
   expect(host.textContent?.includes('Asks first')).toBe(asking)
-  const title = [...host.querySelectorAll('span')].find((item) => item.title.includes(asking ? 'Asks first holds' : 'connected Mail'))
+  const title = [...host.querySelectorAll('span')].find((item) => item.title.includes(asking ? 'Asks you first before sending' : 'connected Mail'))
   expect(title).toBeTruthy()
   const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="use Mail"]')!
   await click(toggle())
