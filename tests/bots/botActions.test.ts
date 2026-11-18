@@ -829,6 +829,7 @@ it('a subagent holds its call on its work and uses its own dispatch in the call 
   const child = await start(f, t.workId, childDispatch.n)
   expect(child.prepared.instructions).toContain('Some of your tools ask your owner first')
   expect(child.prepared.instructions).toContain('If a call was not sent, say so plainly in your report.')
+  expect(child.prepared.instructions).toContain('Your earlier words in this turn were not shown to your owner; repeat any results they need.')
   await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-call', signal: new AbortController().signal })
   const a = f.bots.actions.forWork(t.workId)!
   expect(JSON.parse(a.call_key)).toEqual([t.workId, childDispatch.clientRequestId, 'child-call'])

@@ -341,6 +341,8 @@ export function botInstructions(bot: { name: string; description: string; filesF
   return `${who.join('\n')}\n\n${baseInstructionsWithout(bot.allowed?.off)}${catalogue}${lane ? `\n\n${lane}` : ''}${allowed ? `\n\n${allowed}` : ''}`
 }
 
-export const BOT_ASKS_FIRST_INSTRUCTIONS = 'Some of your tools ask your owner first: the call is held and you end your turn. You carry on with its result, or are told it was not sent. If a call was not sent, say so plainly in your report. Never try another way to do the same thing, and never ask your owner in words to approve what a card asks.'
+export const BOT_ASKS_FIRST_INSTRUCTIONS = 'Some of your tools ask your owner first: the call is held and you end your turn. You carry on with its result, or are told it was not sent. If a call was not sent, say so plainly in your report. Your earlier words in this turn were not shown to your owner; repeat any results they need. Never try another way to do the same thing, and never ask your owner in words to approve what a card asks.'
 
 export const BOT_ASKS_FIRST_CHAT_INSTRUCTIONS = 'When you set up work or a schedule that uses tools which may send or change things, tell your owner that such calls wait for their Send. A schedule waits on one card at a time and skips runs while it waits. Never promise which calls will or will not ask: Mousse decides at each call.'
+
+export const BOT_ASKS_FIRST_SCHEDULE_INSTRUCTIONS = "Your owner's Not now covers only that run. Each new run tries again and asks again if needed; never skip a call only because an earlier run's call was not sent."

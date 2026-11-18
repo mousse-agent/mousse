@@ -154,6 +154,7 @@ export class RunReportError extends Error {}
 export interface AutomationRunsOptions {
   profileHome: string
   clock?: () => number
+  botReportLevel?(activationId: string, level: RunLevel): RunLevel
 }
 
 export class AutomationRuns {
@@ -161,7 +162,7 @@ export class AutomationRuns {
   private readonly listeners = new Set<() => void>()
   private readonly clock: () => number
 
-  constructor(options: AutomationRunsOptions) {
+  constructor(private readonly options: AutomationRunsOptions) {
     this.clock = options.clock ?? Date.now
     this.db = new ProfileDatabase({ profileHome: options.profileHome, name: 'automations', clock: this.clock })
     try {
@@ -296,7 +297,8 @@ export class AutomationRuns {
         row = this.row('SELECT * FROM runs WHERE job_id = ? AND occurrence_key = ?', input.jobId, input.occurrenceKey)!
       }
       const runId = String(row.id)
-      const level = str(row.level) ?? (input.silent && !input.failed ? 'quiet' : null)
+      const rawLevel = str(row.level) ?? (input.silent && !input.failed ? 'quiet' : null)
+      const level = row.activation_id && isRunLevel(rawLevel) ? this.options.botReportLevel?.(String(row.activation_id), rawLevel) ?? rawLevel : rawLevel
       this.run(
         `UPDATE runs SET state = ?, ended_at = COALESCE(ended_at, ?), until = NULL, level = ?, error = ?, thread_id = COALESCE(?, thread_id) WHERE id = ?`,
         input.failed ? 'failed' : 'done', this.now(), level, input.failed ? (input.error ?? 'Failed') : null, input.threadId ?? null, runId
@@ -377,6 +379,8 @@ export class AutomationRuns {
     if (typeof summary !== 'string' || !summary.trim()) throw new RunReportError('summary is one short line saying why')
     const run = this.liveRunFor(caller)
     if (!run) throw new RunReportError('This thread has no automation run going now; run_report is for an automation\'s own run.')
+    const activationId = str(this.row('SELECT activation_id FROM runs WHERE id = ?', run.id)?.activation_id)
+    if (activationId) level = this.options.botReportLevel?.(activationId, level) ?? level
     const line = summary.trim().split(/\r?\n/).find((part) => part.trim())!.trim().slice(0, MAX_SUMMARY)
     this.db.transaction(() => {
       this.run('UPDATE runs SET level = ?, summary = ?, reported_at = ? WHERE id = ?', level, line, this.now(), run.id)

@@ -205,7 +205,7 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
   scheduler.setClock(() => new Date(clock.now))
   const book = new BotScheduleBook({ jobs: scheduler, label: (when) => host.scheduleLabel!(when), now: () => new Date(clock.now) })
   host.schedules = book
-  const automationRuns = new AutomationRuns({ profileHome: profile, clock: () => clock.now })
+  const automationRuns = new AutomationRuns({ profileHome: profile, clock: () => clock.now, botReportLevel: (id, level) => fixture.bots?.scheduledReportLevel(id, level) ?? level })
   scheduler.setRunLedger(automationRuns)
   host.runLevel = (activationId) => automationRuns.levelOfActivation(activationId)
   fixture.scheduler = scheduler
