@@ -24,7 +24,7 @@ import { validateHubParams } from './hub/validation'
 import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
 import { LISTS_STREAM_THREAD_ID, MmsListsSource, readerListsKey, readerOfListsKey } from './remote/MmsListsSource'
-import { accountDevices, createBotReach, keepMakerInReach } from './remote/botReach'
+import { createBotReach, keepMakerInReach } from './remote/botReach'
 import type { BotReachPort } from '../protocol/botReachPort'
 import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
 import { remoteListMethods } from './remote/RemoteLists'
@@ -125,14 +125,15 @@ export class BridgeProfileService {
       // A blocked device, or one not connected here, reads nothing here, so it does not hold a bot back from the
       // streams every device may read.
       devices: () =>
-        accountDevices(rt.identity)?.filter(
-          (node) => !rt.policy.isBlocked(node) && rt.connections.connected(node)
-        ),
+        this.peers
+          .accountDevices()
+          ?.filter((node) => !rt.policy.isBlocked(node) && this.peers.connected(node)),
       changes: [
         (listener) => access.onChange(listener),
         (listener) => rt.policy.onChange(() => listener()),
         (listener) => rt.connections.onChange(() => listener()),
-        (listener) => rt.identity.onRosterChanged(() => listener())
+        (listener) => rt.identity.onRosterChanged(() => listener()),
+        (listener) => this.peers.onChange(listener)
       ]
     })
     const botReach: BotReachPort = {
@@ -164,7 +165,7 @@ export class BridgeProfileService {
     // A device that leaves the account leaves every bot's list of chosen devices; read once now for any that left while
     // this computer was off.
     const dropRemoved = (): void => {
-      const present = accountDevices(rt.identity)
+      const present = this.peers.accountDevices()
       if (!present) return
       try {
         access.dropDevices((node) => present.includes(node as NodeId))
@@ -174,18 +175,20 @@ export class BridgeProfileService {
     }
     dropRemoved()
     const offRoster = rt.identity.onRosterChanged(() => dropRemoved())
+    const offPeers = this.peers.onChange(() => dropRemoved())
     // A message from a device that lost the bot, still waiting for its turn, is not delivered.
     const offWithdraw = reach.onChange(() => {
       const chat = services.personalBots?.service
       if (!chat) return
       // A device that left the account, or is blocked here, reaches no bot whatever each bot's choice says. When the
       // account's devices can't be read, only the two settings decide: a message is not dropped on a guess.
-      const present = accountDevices(rt.identity)?.filter((node) => !rt.policy.isBlocked(node))
+      const present = this.peers.accountDevices()?.filter((node) => !rt.policy.isBlocked(node))
       const left = (node: string): boolean => present !== undefined && !present.includes(node as NodeId)
       void this.track(chat.withdrawQueued((botId, node) => left(node) || !reach.canReach(botId, node))).catch(() => undefined)
     })
     this.disposers.add(() => {
       offRoster()
+      offPeers()
       offWithdraw()
       reach.close()
       if (services.botReach === botReach) services.botReach = undefined
@@ -829,6 +832,7 @@ export class BridgeProfileService {
         .then(() => {
           this.router.nodeOnline(node)
           this.lists.nodeOnline(node)
+          this.peers.changed()
         })
     )
   }
@@ -836,6 +840,7 @@ export class BridgeProfileService {
   peerOffline(node: NodeId): void {
     if (this.stopped) return
     this.lists.nodeOffline(node)
+    this.peers.changed()
   }
   /** Everything held here for one computer ends: its private streams, pages, staged values and terminals. */
   releaseNode(node: NodeId): void {
@@ -844,6 +849,7 @@ export class BridgeProfileService {
     this.routes.pages.dropCaller(node)
     this.staging.dropCaller(node)
     this.routes.terminals.endExcept('access_lost', (other) => other !== node)
+    this.peers.changed()
   }
 
   onClose(dispose: () => void | Promise<void>): () => void {
@@ -865,7 +871,12 @@ export class BridgeProfileService {
   activityAbout<M extends BridgeActivityMethod>(method: M, value: unknown): unknown {
     if (this.stopped) throw new NetError('cancelled')
     const params = validateActivityParams(method, value)
-    const sources = { services: this.options.services, runtime: this.options.runtime, now: this.clock.now() }
+    const sources = {
+      services: this.options.services,
+      runtime: this.options.runtime,
+      now: this.clock.now(),
+      name: (node: NodeId) => this.peers.name(node, 'another computer')
+    }
     if (method === 'bridge.activity')
       return deviceActivityOf(sources, (params as BridgeActivityParams['bridge.activity']).node)
     if (method === 'bridge.clearDeviceRules')

@@ -111,3 +111,56 @@ export function engineLimitProblems(): readonly string[] {
   engineLimits()
   return loaded!.problems
 }
+
+/**
+ * The deliberate defects the owner checks switch on (`MOUSSE_NET_ENGINE_CONTROL`), each proving its check fails
+ * when the thing it guards is broken. Read only by an unpackaged build: an installed app never breaks itself.
+ */
+export const ENGINE_CONTROLS = [
+  // phase1a.picker-v1-off
+  'roster-only-directory',
+  'no-renewal',
+  // phase1a.private-streams
+  'second-reader',
+  // phase1a.once-or-unknown
+  'no-host-dedupe'
+] as const
+export type EngineControl = (typeof ENGINE_CONTROLS)[number]
+
+const CONTROL_VARIABLE = 'MOUSSE_NET_ENGINE_CONTROL'
+
+/** Whether this code runs from an installed app (inside its `app.asar`). */
+function packagedBuild(): boolean {
+  try {
+    return /[\/]app\.asar(?:\.unpacked)?[\/]/iu.test(new URL(import.meta.url).pathname)
+  } catch {
+    return true
+  }
+}
+
+/** Reads the control from `env`; a name that is not a known control, or any control in an installed app, is reported. */
+export function readEngineControl(
+  env: NodeJS.ProcessEnv,
+  packaged = packagedBuild()
+): { control?: EngineControl; problems: string[] } {
+  const raw = env[CONTROL_VARIABLE]?.trim()
+  if (!raw) return { problems: [] }
+  if (packaged) return { problems: [`${CONTROL_VARIABLE} is ignored by an installed app`] }
+  if (!(ENGINE_CONTROLS as readonly string[]).includes(raw))
+    return { problems: [`${CONTROL_VARIABLE}=${JSON.stringify(raw)} is not a known control; none is on`] }
+  return { control: raw as EngineControl, problems: [] }
+}
+
+let control: { control?: EngineControl; problems: string[] } | undefined
+
+/** Whether the owner check's control `name` is on in this process (read once). */
+export function engineControl(name: EngineControl): boolean {
+  control ??= readEngineControl(process.env)
+  return control.control === name
+}
+
+/** What was wrong with the control variable, reported with the limits. */
+export function engineControlProblems(): readonly string[] {
+  control ??= readEngineControl(process.env)
+  return control.problems
+}

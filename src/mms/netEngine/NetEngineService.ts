@@ -11,7 +11,7 @@ import { checkNodePolicy } from '../net/checkNodePolicy'
 import type { EngineCaller, RpcMethod } from '../net/contracts'
 import type { NetRuntime, NetService } from '../net/NetService'
 import type { NodePolicy, NodePolicyChange } from '../net/store/nodePolicy'
-import { engineLimitProblems, engineLimits } from './limits'
+import { engineControl, engineControlProblems, engineLimitProblems, engineLimits } from './limits'
 import { EngineSessions } from './sessions'
 import type { BridgeClient, EngineClient } from './session/client'
 import type { EngineConnection } from './session/transport'
@@ -51,6 +51,8 @@ const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
  */
 export class NetEngineService implements EngineDirectoryPort {
   private started?: Started
+  /** The window of this profile's own delegation, as its last renewal saw it. */
+  private own?: { issuedAt: number; expiresAt: number }
   private starting?: Promise<void>
   constructor(
     private readonly options: {
@@ -90,6 +92,10 @@ export class NetEngineService implements EngineDirectoryPort {
   on(): boolean {
     return !!this.started
   }
+  /** The switch is off, or the engine has started (its pairings are known). */
+  settled(): boolean {
+    return !!this.started || !this.settings()?.enabled
+  }
 
   /** Turns the switch on and starts. */
   async enable(): Promise<void> {
@@ -114,11 +120,12 @@ export class NetEngineService implements EngineDirectoryPort {
   private async startNow(): Promise<void> {
     if (!this.settings()?.enabled) return
     // The limits are read once, here; a variable with a bad value keeps its default and is said so.
-    for (const problem of engineLimitProblems()) console.warn(`network engine limit: ${problem}`)
+    for (const problem of [...engineLimitProblems(), ...engineControlProblems()])
+      console.warn(`network engine limit: ${problem}`)
     const { net } = this.options
     const rt = net.runtime()
     if (!rt.identity.self()) await rt.identity.bootstrapAuthority(this.selfName())
-    if (rt.identity.isKeeper()) rt.identity.renewSelf(engineLimits().renewDueWithinMs)
+    if (rt.identity.isKeeper()) this.renewOwn(rt)
     // A profile that joined another computer's network cannot renew its own delegation: v1 renews it through
     // that computer, so the engine runs only while v1 is on.
     else if (!net.featureEnabled('netBridge'))
@@ -178,12 +185,34 @@ export class NetEngineService implements EngineDirectoryPort {
       this.authorizeEngine(method, caller, capability)
     )
     bridge().activateBridge()
+    // What was read before the pairings were known (bot reach, the device lists) is read again.
+    bridge().peers.changed()
   }
 
   /** Renews this profile's own delegation when it is due (what the hourly timer runs). */
   renew(): void {
     const rt = this.require().rt
-    if (rt.identity.isKeeper()) rt.identity.renewSelf(engineLimits().renewDueWithinMs)
+    if (rt.identity.isKeeper()) this.renewOwn(rt)
+  }
+  private renewOwn(rt: NetRuntime): void {
+    if (engineControl('no-renewal')) return
+    const { issuedAt, expiresAt } = rt.identity.renewSelf(engineLimits().renewDueWithinMs)
+    this.own = { issuedAt, expiresAt }
+  }
+  /**
+   * Renews before serving or calling when the own delegation is due: the clock may have jumped (a computer that
+   * slept for a week) since the hourly check. Reads only the window the last renewal saw.
+   */
+  private renewIfDue(): void {
+    const started = this.started
+    if (!started || !started.rt.identity.isKeeper()) return
+    const now = Date.now()
+    if (this.own && this.own.expiresAt - now > engineLimits().renewDueWithinMs) return
+    try {
+      this.renewOwn(started.rt)
+    } catch {
+      // Tried again on the next call or tick; what needs the delegation says so itself.
+    }
   }
 
   async stop(): Promise<void> {
@@ -191,6 +220,7 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.started
     if (!started) return
     this.started = undefined
+    this.own = undefined
     clearInterval(started.timer)
     this.options.net.setEngineAuthorizer(undefined)
     started.sessions.closeAll('stopped')
@@ -209,6 +239,7 @@ export class NetEngineService implements EngineDirectoryPort {
   authorizeEngine(method: RpcMethod, caller: EngineCaller, _capability: NodeCapability): void {
     const started = this.started
     if (!started) throw new NetError('forbidden')
+    this.renewIfDue()
     const row = started.peers.serving(caller.node)
     if (!row || row.grant !== caller.grant || caller.role !== 'owner')
       throw new NetError('forbidden')
@@ -287,6 +318,7 @@ export class NetEngineService implements EngineDirectoryPort {
   client(node: NodeId): BridgeClient {
     const started = this.started
     if (!started || !started.peers.serving(node)) throw new NetError('peer_offline')
+    this.renewIfDue()
     return started.sessions.client(node)
   }
   online(node: NodeId): boolean {

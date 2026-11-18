@@ -431,12 +431,11 @@ describe('Bridge over an engine session, v1 off', () => {
         vi.useFakeTimers({ toFake: ['Date'] })
         try {
           vi.setSystemTime(Date.now() + days * DAY)
-          owner.netEngine.renew()
-          caller.netEngine.renew()
-          // Each own delegation now runs past the moved clock: nothing is due within a day.
-          for (const mms of [owner, caller]) expect(mms.net.runtime().identity.renewSelf(DAY)).toBeUndefined()
+          // No renewal is run by hand: the first call after the jump renews on both sides, before the hourly check.
           await dispatch('pty.write', { threadId: q(threadId), ptyId, data: `after ${days}\r` })
           expect(shell.pty.written.join('')).toContain(`after ${days}`)
+          // Each own delegation now runs past the moved clock: nothing is due within a day.
+          for (const mms of [owner, caller]) expect(mms.net.runtime().identity.renewSelf(DAY).renewed).toBeUndefined()
           shell.pty.say(`output after ${days} days\r\n`)
           await eventually(() => expect(output(ptyId)).toContain(`output after ${days} days`))
           expect(attached(ptyId)).toBe(true)

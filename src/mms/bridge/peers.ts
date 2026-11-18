@@ -2,7 +2,9 @@ import { NetError } from '../../shared/net/errors'
 import type { NodeDelegation, NodeId, Roster, StoredRecord, StreamId } from '../../shared/net'
 import type { BridgeNodePolicy } from '../../shared/net/local'
 import type { NetService } from '../net/NetService'
+import { engineControl } from '../netEngine/limits'
 import type { BridgeClient } from '../netEngine/session/client'
+import { accountDevices } from './remote/botReach'
 import type { ComputerRef } from './routed/computerErrors'
 import { deviceNameOf } from './routed/deviceName'
 import { isListedComputer } from './routed/listRows'
@@ -28,6 +30,8 @@ export interface PeerRow {
 /** The engine half of the directory (`NetEngineService`). */
 export interface EngineDirectoryPort {
   on(): boolean
+  /** The engine's switch is off, or it has started: what it lists is known. */
+  settled(): boolean
   rows(): PeerRow[]
   /** Whether `node` is one of this profile's engine pairings (in any state). */
   isEngine(node: NodeId): boolean
@@ -49,6 +53,7 @@ export interface EngineDirectoryPort {
  * port: who they are, a client for each, and the fan-out of what this computer serves them.
  */
 export class PeerDirectory {
+  private readonly listeners = new Set<() => void>()
   constructor(
     private readonly options: {
       net: Pick<
@@ -75,8 +80,55 @@ export class PeerDirectory {
     return this.options.net.featureEnabled('netBridge')
   }
   private engine(): EngineDirectoryPort | undefined {
+    // The picker check's control: a directory that reads only the v1 roster.
+    if (engineControl('roster-only-directory')) return undefined
     const engine = this.options.engine()
     return engine?.on() ? engine : undefined
+  }
+
+  /** Called when an engine pairing comes online, goes offline or is released. */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+  changed(): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener()
+      } catch {
+        // One listener's failure does not keep the others from hearing.
+      }
+    }
+  }
+
+  /**
+   * The owner's other devices: v1's roster (not revoked, not this one) and the engine pairings that are serving.
+   * Undefined when v1 is the only source and its roster cannot be read.
+   */
+  accountDevices(): NodeId[] | undefined {
+    // While the engine is still starting its pairings are not known yet: no device is taken as gone.
+    if (!engineControl('roster-only-directory') && this.options.engine()?.settled() === false)
+      return undefined
+    const engine = this.engine()
+    let v1: NodeId[] | undefined
+    try {
+      v1 = accountDevices(this.options.net.runtime().identity)
+    } catch {
+      v1 = undefined
+    }
+    if (!engine) return v1
+    return [...(v1 ?? []), ...engine.rows().map((row) => row.node)]
+  }
+
+  /** Whether `node` is connected here: v1's connection table, or an open, ready engine client. */
+  connected(node: NodeId): boolean {
+    const engine = this.engine()
+    if (engine?.isEngine(node)) return engine.online(node)
+    try {
+      return this.options.net.runtime().connections.connected(node)
+    } catch {
+      return false
+    }
   }
 
   /** The `bridge.nodes` view: v1's rows while v1 is on, then the engine's pairings. */

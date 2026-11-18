@@ -791,9 +791,9 @@ export class NetIdentityService implements IdentityService {
    * Re-issues this profile's own delegation when it is due within `dueWithinMs`, however long it has lapsed: the
    * profile is its own authority, so no other device has to vouch for it. Used by the engine service, which
    * signs host records with this delegation while v1 networking (and its renewal) is off. Refused on a profile
-   * that is not its network's keeper.
+   * that is not its network's keeper. Answers the window of the own delegation in force afterwards.
    */
-  renewSelf(dueWithinMs: number): Signed | undefined {
+  renewSelf(dueWithinMs: number): { renewed?: Signed; issuedAt: number; expiresAt: number } {
     const now = this.clock.now()
     if (!Number.isSafeInteger(now) || now < 0)
       throw new NetError('bad_request', 'Renewal must use the authority clock.')
@@ -806,8 +806,8 @@ export class NetIdentityService implements IdentityService {
       .filter((row): row is NodeDelegation => row.kind === 'node' && row.subject === self.node)
       .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
     if (!own) throw new NetError('bad_delegation')
-    if (own.expiresAt - now > dueWithinMs) return undefined
-    return this.authorityUpdate((next) => {
+    if (own.expiresAt - now > dueWithinMs) return { issuedAt: own.issuedAt, expiresAt: own.expiresAt }
+    const renewed = this.authorityUpdate((next) => {
       next.nodes = next.nodes.filter((row) => {
         const prior = verifyDocument<NodeDelegation>(row, next.rootKey, 'nodeDelegation')
         return prior.subject !== own.subject || prior.keyEpoch !== own.keyEpoch
@@ -818,6 +818,7 @@ export class NetIdentityService implements IdentityService {
         )
       )
     }, 'any')
+    return { renewed, issuedAt: now, expiresAt: now + NODE_DELEGATION_TTL_MS }
   }
   renewExpiring(): Signed | undefined {
     const now = this.clock.now()
