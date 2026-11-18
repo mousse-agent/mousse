@@ -4019,13 +4019,14 @@ async function aloneAsk(answer: 'allow' | 'not_now' = 'allow') {
   await t.call(); await finish(f, t.run.payload)
   const first = f.bots.actions.forWork(t.id)!
   expect(JSON.parse(String(f.store.get('SELECT place_json FROM bot_actions WHERE id = ?', first.id)?.place_json))).toEqual({ to: t.args.to })
-  await f.bots.actions.answer({ actionId: first.id, digest: first.args_digest, answer: 'send' })
+  await f.bots.actions.answer({ actionId: first.id, digest: first.args_digest, answer: 'send' }); await flush()
+  const sent = await start(f, t.id, 2); await finish(f, sent.payload)
   await f.bots.service.chatSend({ botId: t.botId, text: 'Let this automation send there without asking', clientRequestId: 'alone-owner' })
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const chat = await start(f, row.id)
   const request = { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' }
   chat.prepared.authority.escalate!({ permission: request as never, reason: 'Do it alone' })
-  await finish(f, chat.payload)
+  await finish(f, chat.payload, 'completed', { text: 'Allow this automation?' })
   const ask = f.store.openAsks(t.botId).find(a => 'ask' in a.permission && a.permission.ask === 'let_alone')!
   expect(ask).toBeDefined()
   const card = f.bots.chat.card(ask)
@@ -4099,4 +4100,24 @@ it('E1 revocation before dispatch invalidates an already approved automatic call
   await f.bots.actions.retryApproved()
   expect(execute).toHaveBeenCalledTimes(1)
   expect(f.bots.actions.get(next.action.id)?.status).toBe('withdrawn')
+})
+it.each(['no-history', 'no-place', 'off'] as const)('E1 refuses an owner ask with %s', async state => {
+  const t = await scheduledCall()
+  if (state !== 'no-place') t.descriptor.inputSchema.properties.to = { type: 'array' } as never
+  if (state === 'off') f.host.settings!.get().experimental.botAsksFirstOff = true
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Let it act alone', clientRequestId: 'no-history' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.authority.escalate!({ permission: { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' } as never, reason: 'Alone' })).toBe(state === 'off' ? 'Asks first is off' : state === 'no-place' ? "This tool doesn't say where it acts, so it always asks." : 'Let it ask once first. After you send one of these, I can ask to do it alone.')
+  expect(f.store.openAsks(t.botId)).toEqual([])
+})
+it.each(['time', 'prompt', 'pair', 'schedule', 'bot'] as const)('E1 cleans up exceptions after %s changes', async change => {
+  const t = await aloneAsk()
+  if (change === 'time' || change === 'prompt') {
+    f.bots.editSchedule(t.botId, () => f.scheduler.update(t.schedule.jobId, change === 'time' ? { schedule: { kind: 'interval', minutes: 2 } } : { prompt: 'A new job' }))
+  }
+  if (change === 'pair') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  if (change === 'schedule') f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
+  if (change === 'bot') await f.bots.remove(t.botId)
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toHaveLength(change === 'time' ? 1 : 0)
 })
