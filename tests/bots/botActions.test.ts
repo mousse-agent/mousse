@@ -3427,3 +3427,16 @@ it.each(['send', 'not_now', 'expired'] as const)('C10 review inbox keeps a held 
   expect(inbox().error).toBeUndefined()
   expect(t.calls).toEqual(outcome === 'send' ? [t.args] : [])
 })
+
+it('C10 review in-turn Not now and replay describe an answered action, not a question or a hold', async () => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  const sibling = t.work.prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} })
+  expect(JSON.stringify(sibling)).toContain('your owner already answered the request in this turn')
+  expect(JSON.stringify(sibling)).not.toContain('question')
+  const replay = await t.call()
+  expect(replay.text).toContain('chose not to send')
+  expect(replay.text).not.toContain('held for your owner')
+})
