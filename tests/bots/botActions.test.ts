@@ -3440,3 +3440,27 @@ it('C10 review in-turn Not now and replay describe an answered action, not a que
   expect(replay.text).toContain('chose not to send')
   expect(replay.text).not.toContain('held for your owner')
 })
+
+// In-turn outcomes: an owner answer, a lifecycle change, and a tool/transport outcome.
+it.each([
+  ['open', undefined, false], ['approved', undefined, true], ['running', undefined, true],
+  ['done', undefined, true], ['declined', undefined, true],
+  ['withdrawn', 'bot_action_owner_removed', true],
+  ['withdrawn', 'bot_action_permission_changed', false],
+  ['withdrawn', 'bot_action_binding_changed', false],
+  ['withdrawn', 'bot_action_disabled', false], ['withdrawn', 'bot_action_owner_paused', false],
+  ['expired', undefined, false], ['failed', undefined, false], ['uncertain', undefined, false]
+] as const)('R2 in-turn %s (%s) does not invent an owner answer', async (status, reason, ownerAnswered) => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  if (status !== 'open') f.bots.actions.transition(a.id, 'open', status, { text: 'Stored outcome' }, reason)
+  const result = JSON.stringify(t.work.prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} }))
+  if (status === 'open') expect(result).toContain('one call already waits for your owner')
+  else if (ownerAnswered) expect(result).toContain('your owner already answered the request in this turn')
+  else {
+    expect(result).toContain('the request held in this turn is no longer waiting')
+    expect(result).not.toContain('your owner already answered')
+  }
+  expect(t.calls).toEqual([])
+})
