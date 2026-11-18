@@ -282,4 +282,8 @@ it('marks a discovered server naming a bound key unavailable while leaving its n
   const snapshot = await registry.discover()
   expect(snapshot.servers.find(server => server.name === 'e3-bound')).toMatchObject({status: 'missing-env', missingEnvVars: ['secret:BOUND']})
   expect(snapshot.servers.find(server => server.name === 'e3-healthy')?.status).toBe('configured')
+  const {resolver: claude} = resolver({secrets, servers: snapshot.servers.filter(server=>server.name.startsWith('e3-'))})
+  const result = await claude.resolve()
+  expect(Object.keys(result.mcpServers)).toEqual(['e3-healthy'])
+  expect(result.warnings).toEqual([expect.stringMatching(/bound to GitHub/)] )
 })

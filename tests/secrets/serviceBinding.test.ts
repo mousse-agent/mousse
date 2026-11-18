@@ -167,6 +167,7 @@ it.each(['valid', 'missing', 'unreadable', 'invalid JSON', 'invalid entry'] as c
   // Exercise fileFor itself before syncFiles can remove the stale copy.
   expect(restarted.fileFor('BOUND', 'bot')).toBeUndefined()
   expect(() => restarted.list()).not.toThrow()
+  if (state !== 'valid') expect(restarted.list().find(entry=>entry.name==='BOUND')?.binding).toMatchObject({unavailable:true})
   const adapter = createProfileSecretAdapter({profileRoot: home, inheritProcessEnv: false})
   expect(() => adapter.resolveEnv('${secret:BOUND}')).toThrow(/bound/)
   expect(adapter.resolveEnv('${secret:PLAIN}')).toBe('plain-value')
@@ -223,4 +224,38 @@ it.each(['valid', 'malformed'] as const)('caches %s binding file reads across re
     expect(() => adapter.resolveEnv('${secret:KEY}')).toThrow(/OpenAI/)
     expect(spy.mock.calls.filter(([path]) => String(path).endsWith('/bindings.json'))).toHaveLength(2)
   } finally { spy.mockClear(); requests.dispose() }
+})
+it.each(['old delete', 'failed write'] as const)('does not inherit a binding after %s when an unbound value is stored', cause => {
+  const {home, vault, requests} = fixture()
+  const binding = resolveSecretBinding({service: 'github'})
+  if (cause === 'old delete') {
+    vault.store('KEY', VALUE, {threadId:'bot', keep:'saved', binding})
+    new OldMetaReader({profileRoot:home, threadAlive:()=>true}).delete('KEY')
+  } else {
+    mkdirSync(join(home,'secrets'), {recursive:true})
+    writeFileSync(join(home,'secrets/refs.json'), '{')
+    expect(()=>vault.store('KEY',VALUE,{threadId:'bot',keep:'saved',binding})).toThrow()
+    writeFileSync(join(home,'secrets/refs.json'), '{}')
+  }
+  expect(vault.has('KEY')).toBe(true)
+  expect(vault.freeName('KEY')).toBe('KEY_2')
+  expect(vault.isSaved('KEY',binding)).toBe(false)
+  vault.store('KEY', VALUE, {threadId:'bot', keep:'saved'})
+  expect(vault.bindingFor('KEY')).toBeUndefined()
+  expect(existsSync(join(home,'secrets/bound/KEY'))).toBe(false)
+  expect(createProfileSecretAdapter({profileRoot:home,inheritProcessEnv:false}).resolveEnv('${secret:KEY}')).toBe(VALUE)
+  requests.dispose()
+})
+it('does not overwrite unreadable binding data when storing another bound key', () => {
+  const {home,vault,requests}=fixture()
+  vault.store('FIRST',VALUE,{threadId:'bot',keep:'saved',binding:resolveSecretBinding({service:'github'})})
+  const path=join(home,'secrets/bindings.json')
+  writeFileSync(path,'{"FIRST":')
+  expect(()=>vault.store('SECOND',VALUE,{threadId:'bot',keep:'saved',binding:resolveSecretBinding({service:'openai'})})).toThrow(/binding/i)
+  expect(readFileSync(path,'utf8')).toBe('{"FIRST":')
+  expect(vault.value('SECOND')).toBeUndefined()
+  requests.dispose()
+})
+it.each(['https://x.home.arpa','https://x.lan','https://127.0.0.1.nip.io','https://10-0-0-1.sslip.io'])('refuses private convention host %s', origin=>{
+  expect(()=>resolveSecretBinding({origin})).toThrow()
 })
