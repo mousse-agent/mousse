@@ -2,6 +2,19 @@
   "version": 1,
   "claims": [
     {
+      "task": "bot-automation-let-alone",
+      "session": "agibook-66458b",
+      "machine": "agibook",
+      "branch": "bot-automation-let-alone",
+      "paths": [
+        "src/mms/bots",
+        "src/shared/bots/personal",
+        "tests/bots/botActions.test.ts"
+      ],
+      "claimedAt": "2026-11-18T20:43:07.500Z",
+      "expiresAt": "2026-11-18T22:43:07.500Z"
+    },
+    {
       "task": "bot-done-list-drops-archived-and-old",
       "session": "Animatrix-5ccb01",
       "machine": "Animatrix",
