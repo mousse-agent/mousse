@@ -2018,29 +2018,23 @@ it.each(['card', 'request', 'history'] as const)('B5 Forget %s erases the argume
   expect(t.calls).toEqual([])
 })
 
-it.each([true, false])('B3 three declined cards stop changed calls until owner input, switch=%s', async on => {
-  const t = await setup(on, false, true)
+it.each([true, false])('C11 changed calls are not counted after three Not nows, switch=%s', async on => {
+  const t = await setup(on)
   let runtime = t.work
-  for (let n = 0; n < 20; n++) {
-    const outcome = await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: t.args.body + ' '.repeat(n) }, toolCallId: `loop-${n}`, signal: new AbortController().signal })
+  for (let n = 0; n < 4; n++) {
+    const outcome = await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: `Draft ${n}` }, toolCallId: `changed-${n}`, signal: new AbortController().signal })
+    expect(outcome.isError).not.toBe(true)
     if (!on) continue
-    if (n < 3) {
-      await finish(f, runtime.payload)
-      const a = f.bots.actions.forWork(t.workId)!
-      await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
-      await flush(); runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
-    } else expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
+    const a = f.bots.actions.forWork(t.workId)!
+    expect(a.status).toBe('open')
+    if (n === 3) break
+    await finish(f, runtime.payload)
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+    await flush()
+    runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   }
-  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(on ? 3 : 0)
-  if (!on) { expect(t.calls).toHaveLength(20); return }
-  expect(f.store.unreadWorkRefusals(t.workId).map(n => n.text).join(' ')).toContain('Three requests for this tool are waiting or were not sent')
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__other', args: t.args, toolCallId: 'another-tool', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
-  await finish(f, runtime.payload)
-  const other = f.bots.actions.forWork(t.workId)!
-  await f.bots.actions.answer({ actionId: other.id, digest: other.args_digest, answer: 'not_now' })
-  await flush(); runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
-  f.bots.noteWork(t.botId, t.workId, 'Please try again')
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'try again' }, toolCallId: 'after-note', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(on ? 4 : 0)
+  expect(t.calls).toHaveLength(on ? 0 : 4)
 })
 
 it.each(['unrelated permission', 'revision only'] as const)('B6 %s preserves an open card and Send executes once', async change => {
