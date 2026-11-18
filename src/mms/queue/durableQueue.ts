@@ -3,6 +3,8 @@
  * Prevents cross-process lost updates on queue.json RMW.
  */
 
+import { statSync } from 'node:fs'
+import { join } from 'node:path'
 import type { QueuedMessage, QueuedMessageClaim } from '../../shared/types'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { isProcessAlive } from './processLiveness'
@@ -62,9 +64,39 @@ export function runDurableQueueCommand(
   return withQueueMutationLock(threadDir, () => runQueueCommand(store, threadId, commandKey, store.loadMessageQueue(threadId), plan, fingerprint))
 }
 
+/**
+ * The last locked read of each thread's queue, by the identity of its `queue.json` when it was read. The file is only
+ * ever replaced whole (written aside, then renamed over it), so the same identity means the same content, whichever
+ * process wrote it. A running turn's steer poll reads the queue ten times a second; with this, a read whose file has
+ * not changed takes no lock.
+ */
+const lastReads = new Map<string, { stamp: string; items: QueuedMessage[] }>()
+const LAST_READS_MAX = 256
+
+/** `queue.json`'s identity, or none when it is missing or its file system gives no file id to tell a replacement by. */
+function queueStamp(file: string): string | undefined {
+  try {
+    const info = statSync(file)
+    return info.ino ? `${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.birthtimeMs}` : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function readDurableQueue(store: ThreadDataStore, threadId: string): QueuedMessage[] {
   const threadDir = store.getThreadDir(threadId)
-  return withQueueMutationLock(threadDir, () => store.loadMessageQueue(threadId))
+  const key = `${threadId}\0${threadDir}`
+  // Taken before the locked read: a write that lands in between leaves a newer file than this stamp, which the next read sees.
+  const stamp = queueStamp(join(threadDir, 'queue.json'))
+  const kept = stamp ? lastReads.get(key) : undefined
+  if (kept && kept.stamp === stamp) return structuredClone(kept.items)
+  const items = withQueueMutationLock(threadDir, () => store.loadMessageQueue(threadId))
+  lastReads.delete(key)
+  if (stamp) {
+    lastReads.set(key, { stamp, items: structuredClone(items) })
+    if (lastReads.size > LAST_READS_MAX) lastReads.delete(lastReads.keys().next().value!)
+  }
+  return items
 }
 
 /** Atomically claim the next normal pending item under the queue mutation lock. */
