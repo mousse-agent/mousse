@@ -1442,15 +1442,18 @@ export const MessageList = memo(function MessageList({
       return next;
     });
   }, [openMemory]);
-  // Subagents (by task and by thread) whose state a card in the thread shows.
-  const cardedSubagents = useMemo(() => {
+  // Tasks whose state a card in the thread shows, and the subagents those cards are for. A notice that names its task
+  // is matched by task only: a subagent's older card says nothing about a later task it was given, so that task's
+  // result keeps its own line. A notice that names no task (an answer, an older question) is matched by subagent.
+  const { cardedSubagents, cardedThreads } = useMemo(() => {
     const ids = new Set<string>();
+    const threads = new Set<string>();
     for (const card of subagentCards.values()) {
       if (card.delegationId) ids.add(card.delegationId);
-      if (card.childThreadId) ids.add(card.childThreadId);
+      if (card.childThreadId) threads.add(card.childThreadId);
       if (card.native?.taskId) ids.add(card.native.taskId);
     }
-    return ids;
+    return { cardedSubagents: ids, cardedThreads: threads };
   }, [subagentCards]);
 
   const markCopied = useCallback((id: string) => {
@@ -2194,6 +2197,7 @@ export const MessageList = memo(function MessageList({
                 toolRenderers={toolRenderers}
                 suppressQuestionTool={suppressQuestionTool}
                 cardedSubagents={cardedSubagents}
+                cardedThreads={cardedThreads}
                 subagentCardIds={subagentCardIds}
                 spawningCardIds={spawningCardIds}
                 openFolds={openFoldsOf(openWork, turnKey)}
@@ -2328,6 +2332,7 @@ type TurnRowProps = {
   toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
   suppressQuestionTool: boolean;
   cardedSubagents: Set<string>;
+  cardedThreads: Set<string>;
   subagentCardIds: Set<string>;
   spawningCardIds: Set<string>;
   /** Which parts of this finished turn (see `turnFoldParts`) have their work open, as part numbers ("0,2"). */
@@ -2413,6 +2418,7 @@ const TurnRow = memo(function TurnRow({
   toolRenderers,
   suppressQuestionTool,
   cardedSubagents,
+  cardedThreads,
   subagentCardIds,
   spawningCardIds,
   openFolds,
@@ -2591,8 +2597,8 @@ const TurnRow = memo(function TurnRow({
             }
             const notice = readSubagentNotice(msg);
             if (!notice) return [msg];
-            const rest = notice.filter(
-              (item) => !cardedSubagents.has(item.delegationId) && !cardedSubagents.has(item.childThreadId),
+            const rest = notice.filter((item) =>
+              item.delegationId ? !cardedSubagents.has(item.delegationId) : !cardedThreads.has(item.childThreadId),
             );
             if (rest.length === 0) return [];
             return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];

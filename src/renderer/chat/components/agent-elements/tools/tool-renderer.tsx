@@ -14,7 +14,8 @@ import { SearchTool } from "./search-tool";
 import { QuestionTool } from "../question/question-tool";
 import { AnsweredQuestionsTool } from "../question/answered-questions-tool";
 import { QuickActionTool } from "./quick-action-tool";
-import { NativeSubagentCard, SubagentTool } from "./SubagentCard";
+import { NativeSubagentCard, SubagentFollowUpTool, SubagentTool } from "./SubagentCard";
+import { subagentFollowUpTask } from "../../../adapters/subagentCards";
 import { useSubagentCard } from "./subagent-cards-context";
 import { ToolRowContext } from "./tool-icon";
 import type { CustomToolRendererProps } from "../types";
@@ -74,9 +75,15 @@ export const ToolRenderer = memo(function ToolRenderer(props: ToolRendererProps)
     () => ({ at: createdAt, recovered: failureRecovered === true, openKey: toolCallId }),
     [createdAt, failureRecovered, toolCallId],
   );
+  // A thread tool that gave the caller's own subagent a follow-up task is that task's card.
+  const body = subagentFollowUpTask(props.part) ? (
+    <SubagentFollowUpTool part={props.part}><ToolRendererBody {...props} /></SubagentFollowUpTool>
+  ) : (
+    <ToolRendererBody {...props} />
+  );
   return (
     <ToolRowContext.Provider value={info}>
-      <ToolRendererBody {...props} />
+      {body}
     </ToolRowContext.Provider>
   );
 });

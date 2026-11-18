@@ -94,7 +94,7 @@ describe('Nest rows of a thread', () => {
     act(() => vi.advanceTimersByTime(CHAT_NAVIGATION_TIMEOUT_MS + 1))
     expect(useChatNavigationStore.getState().subagent).toBeNull()
     await showChat(messages)
-    expect(host.querySelector('button.subagent-group-head')!.getAttribute('aria-expanded')).toBe('false')
+    expect(host.querySelector('[data-native-subagent="a2"] button.subagent-card')!.getAttribute('aria-expanded')).toBe('false')
   })
 
   it("rename a subagent's model when its provider's list loads after the row is drawn", async () => {
@@ -117,8 +117,8 @@ describe('Nest rows of a thread', () => {
           createElement(MessageList, { messages: ui, status: chatStatusFromTurn({ phase: 'completed', turnId: RUN }) })),
         createElement('aside', null, createElement(LineageSection, { threadId: 't1', projectId: null }))))
     })
-    // The group is folded, so neither card is on the page before the click.
-    expect(host.querySelector('[data-native-subagent="a2"]')).toBeNull()
+    // The card is in sight but not opened before the click.
+    expect(host.querySelector('[data-native-subagent="a2"] button.subagent-card')!.getAttribute('aria-expanded')).toBe('false')
 
     const lineageRow = [...host.querySelectorAll<HTMLButtonElement>('aside button.lineage-row')]
       .find((button) => button.textContent?.includes('Explore bot metering and tools'))!

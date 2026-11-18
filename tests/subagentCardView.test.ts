@@ -363,20 +363,19 @@ describe('a subagent tool row', () => {
     expect(status).toContain('API reviewer')
   })
 
-  it('folds two or more cards into a group with stacked icons, a coloured summary and a toggle', () => {
+  it('gathers two or more cards into a group with stacked icons, a coloured summary and a toggle, open by default', () => {
     const cards = ['a', 'b', 'c', 'd', 'e'].map((id, index) => card({ toolCallId: id, title: index === 0 ? 'Archive builder' : 'Other', state: index < 2 ? 'working' : 'done', completedAt: NOW - 1000 }))
     const html = withCards(cards, createElement(SubagentCardGroup, { toolCallIds: cards.map((entry) => entry.toolCallId) }, createElement('span', null, 'rows')))
     expect(html).toContain('aria-label="5 subagents · 2 working · 3 done"')
-    // Folded: the first subagent's name and how many more.
-    expect(html).toContain('title="Archive builder + 4"')
+    expect(html).toMatch(/class="subagent-group-title">5 subagents</)
     expect(html).toContain('data-tone="running">2 working<')
     expect(html).toContain('data-tone="done">3 done<')
     expect(html.match(/class="subagent-avatar is-chip"/g)).toHaveLength(3)
     expect(html).toMatch(/class="subagent-group-more">\+(<!-- -->)?2</)
     expect(html).toContain('subagent-group-elapsed')
-    // Folded by default, even while tasks are going.
-    expect(html).toContain('aria-expanded="false"')
-    expect(html).not.toContain('rows')
+    // Open by default, so every subagent's row is in sight once the turn ends.
+    expect(html).toContain('aria-expanded="true"')
+    expect(html).toContain('rows')
   })
 
   it('leaves a single card alone, with no group header', () => {
@@ -437,9 +436,9 @@ describe('the transcript with cards and notices', () => {
     const group = html.indexOf('Ran 2 commands')
     expect(group).toBeGreaterThan(-1)
     expect(html).toContain('2 subagents · 1 working · 1 done')
-    // The subagents' card, folded to its first name, comes after the tool group, not inside it.
-    expect(html).toContain('title="Reviewer one + 1"')
+    // The subagents' cards come after the tool group, not inside it.
     expect(html.indexOf('Reviewer one')).toBeGreaterThan(group)
+    expect(html.indexOf('Reviewer two')).toBeGreaterThan(group)
   })
 
   it('draws a wake message as a notice, not as something the user wrote', () => {

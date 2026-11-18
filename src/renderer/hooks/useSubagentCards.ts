@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
 import type { UIMessage } from 'ai'
+import type { SubagentSummary } from '../../shared/subagents'
 import { collectSubagentCalls, joinSubagentCards, type SubagentCardModel } from '../chat/adapters/subagentCards'
 import { collectNativeSubagentCards } from '../chat/adapters/nativeSubagents'
 import { isTurnActivePhase } from '../../shared/types'
@@ -8,14 +9,18 @@ import { useBackgroundLive } from './useNativeSubagents'
 import { useSubagents } from './useSubagents'
 
 const NONE: ReadonlyMap<string, SubagentCardModel> = new Map()
+const NO_ROWS: SubagentSummary[] = []
 
 /**
  * The subagent cards of `threadId`'s transcript: each call that started a task, joined to what the
- * daemon reports about that task. A card stays once it exists, even if its subagent later drops out
- * of the list (a trashed thread), so a finished card never turns back into a raw row.
+ * daemon reports about that task. A subagent whose thread is gone still has its cards, from what the
+ * daemon kept of its tasks (`removed`), and a card stays once it exists, so a finished card never
+ * turns back into a raw row.
  */
 export function useSubagentCardModels(threadId: string | null | undefined, messages: readonly UIMessage[]): ReadonlyMap<string, SubagentCardModel> {
-  const subagents = useSubagents(threadId)
+  const live = useSubagents(threadId)
+  const removed = useAppStore((s) => (threadId ? s.removedSubagentsByParent[threadId] : undefined) ?? NO_ROWS)
+  const subagents = useMemo(() => (removed.length === 0 ? live : [...live, ...removed]), [live, removed])
   const loaded = useAppStore((s) => (threadId ? s.subagentsByParent[threadId] !== undefined : false))
   const turnActive = useAppStore((s) => (threadId ? isTurnActivePhase(s.turnStates[threadId]?.phase ?? 'idle') : false))
   // Background agents a settled turn left running are still going while the thread waits on background work.

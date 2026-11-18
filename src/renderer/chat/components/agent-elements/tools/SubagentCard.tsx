@@ -148,7 +148,8 @@ function useCardResult(card: SubagentCardModel, visible: boolean): string | null
     };
   }, [key, visible, card.childThreadId]);
   if (!isCardRunning(card) && card.error && card.state !== "done") return card.error;
-  if (!key) return null;
+  // A subagent whose thread is gone quotes the result the daemon kept for its task.
+  if (!key) return card.state === "done" ? card.summary ?? null : null;
   return resultCache.get(key) ?? (fetched?.key === key ? fetched.text : null);
 }
 
@@ -301,10 +302,20 @@ export const SubagentTool = memo(function SubagentTool({ part, chatStatus }: { p
 });
 
 /**
+ * A `thread_send` or `thread_update` row that gave the caller's own subagent a follow-up task: that task's card,
+ * like a `continue_subagent` call's. Until the task is known, the row (`children`) stays as it is.
+ */
+export function SubagentFollowUpTool({ part, children }: { part: any; children: ReactNode }) {
+  const card = useSubagentCard(part.toolCallId);
+  if (!card || card.spawning) return <>{children}</>;
+  return <LiveSubagentCard card={card} />;
+}
+
+/**
  * Subagents started in quick succession. Two or more share one card headed by their provider icons, a title,
- * a coloured count of what they are doing and how long they have run. It starts folded, titled with the first
- * subagent's name and how many more ("Archive builder + 2"); opened, it says how many there are ("3 subagents")
- * and lists their rows, each opening its subagent. A single card stands alone.
+ * a coloured count of what they are doing and how long they have run. It starts open: it says how many there are
+ * ("3 subagents") and lists their rows, each opening its subagent. Folded by the user, it is titled with the first
+ * subagent's name and how many more ("Archive builder + 2"). A single card stands alone.
  */
 export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: readonly string[]; children: ReactNode }) {
   const cards = useSubagentCards();
@@ -321,8 +332,8 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
     setChosenOpen(true);
   }
   if (models.length < 2) return <div className="subagent-cards">{children}</div>;
-  // Folded until the user opens it.
-  const open = chosenOpen ?? false;
+  // Open until the user folds it, so every subagent stays in sight after the turn ends.
+  const open = chosenOpen ?? true;
   const { title, parts } = cardGroupSummary(models);
   const folded = cardGroupFoldedTitle(models);
   const stack = cardIconStack(models);

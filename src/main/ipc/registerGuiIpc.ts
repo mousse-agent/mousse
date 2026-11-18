@@ -2668,8 +2668,9 @@ export function registerGuiIpc(
     return res.ok
   })
   registerHandler('subagents:list', async (_e, threadId: string) => {
-    const res = await guiMms.request<{ subagents: SubagentSummary[] }>('subagents.list', { threadId })
-    return res.subagents
+    const res = await guiMms.request<{ subagents: SubagentSummary[]; removed?: SubagentSummary[] }>('subagents.list', { threadId })
+    // Subagents whose thread is gone follow the live ones, each marked `removed` (an older daemon sends none).
+    return [...res.subagents, ...(res.removed ?? []).map((row) => ({ ...row, removed: true as const }))]
   })
   registerHandler('tasks:list', async () => {
     const threadId = currentPresentation().getActiveThreadId()

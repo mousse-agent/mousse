@@ -138,13 +138,10 @@ describe('a thread whose agent starts background agents', () => {
 
   it('shows the agents as subagent cards, working while the thread has background work', async () => {
     const view = await show(launched, true)
-    expect(view.cards).toEqual([])
+    // The group is open, so both cards are in sight.
+    expect(view.cards).toEqual(['a1', 'a2'])
     const group = host.querySelector<HTMLButtonElement>('button.subagent-group-head')!
-    expect(group.getAttribute('aria-expanded')).toBe('false')
-    expect(group.textContent).toContain('Map design language + 1')
-    await act(async () => group.click())
     expect(group.getAttribute('aria-expanded')).toBe('true')
-    expect([...host.querySelectorAll('[data-native-subagent]')].map(node => node.getAttribute('data-native-subagent'))).toEqual(['a1', 'a2'])
     expect(host.textContent).toContain('2 subagents')
     expect(view.text).toContain('2 working')
     expect(view.text).toContain('Map design language')
@@ -156,7 +153,6 @@ describe('a thread whose agent starts background agents', () => {
 
   it('opens a card on the calls its agent made', async () => {
     await show(launched, true)
-    await act(async () => host.querySelector<HTMLButtonElement>('button.subagent-group-head')!.click())
     const card = host.querySelector<HTMLButtonElement>('[data-native-subagent="a1"] button.subagent-card')!
     expect(card.getAttribute('aria-expanded')).toBe('false')
     await act(async () => card.click())

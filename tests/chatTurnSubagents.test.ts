@@ -108,8 +108,9 @@ describe('a reply that launches subagents whose results arrive one by one', () =
   it('stays one turn with one working indicator, and the card shows each result', async () => {
     let view = await show(3, launched, 'streaming', ['working', 'working', 'working'])
     expect(view).toMatchObject({ turns: 1, indicators: ['Working · 3s'], notices: 0 })
-    // The folded group is titled with the first subagent and how many more.
-    expect(view.text).toContain('Test Subagent One + 2')
+    // The group is open: it counts the subagents and lists each one.
+    expect(view.text).toContain('3 subagents')
+    expect(host.querySelectorAll('.subagent-card-title')).toHaveLength(3)
 
     // The parent's run ends while its subagents work: the reply goes on.
     view = await show(5, launched, 'completed', ['working', 'working', 'working'])
@@ -138,14 +139,14 @@ describe('a reply that launches subagents whose results arrive one by one', () =
     // The finished turn folds its work behind its line, but the cards stay where the subagents were started.
     expect(view.text).not.toContain('One replied; two are still running.')
     expect(view.text).toContain('All three test subagents')
-    expect(view.text).toContain('Test Subagent One + 2')
+    expect([...host.querySelectorAll('.subagent-card-title')].map((node) => node.textContent)).toEqual(NAMES)
     // The line opens the rest of the work in place.
     await act(async () => { host.querySelector<HTMLButtonElement>('.turn-work-toggle')!.click() })
     view = { ...view, text: host.textContent ?? '' }
     expect(view.text).toContain('3 done')
     expect(view.text).not.toMatch(/finished task|MODEL-ONLY RESULT/)
     // Every part of the reply is in the one turn, in order.
-    const order = ['I launched three subagents', 'Test Subagent One + 2', 'Test Subagent One finished.', 'All three test subagents'].map((s) => view.text.indexOf(s))
+    const order = ['I launched three subagents', '3 subagents', 'Test Subagent One finished.', 'All three test subagents'].map((s) => view.text.indexOf(s))
     expect(order.every((index) => index >= 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
   })
@@ -259,10 +260,6 @@ describe('a thread whose turns start several subagents', () => {
       root.render(createElement(SubagentCardsContext.Provider, { value: cards },
         createElement(MessageList, { messages, status: chatStatusFromTurn({ phase: 'completed', turnId: 'run:3' }) })))
     })
-    // Open the folded groups so their rows show.
-    await act(async () => {
-      host.querySelectorAll<HTMLButtonElement>('button.subagent-group-head[aria-expanded="false"]').forEach((head) => head.click())
-    })
     return [...host.querySelectorAll('[data-turn-key]')].map((turn) => [...turn.querySelectorAll('.subagent-card-title')].map((node) => node.textContent))
   }
 
@@ -305,7 +302,7 @@ describe('a thread whose turns start several subagents', () => {
     }))
   }
 
-  it('shows a quick burst of starts as one folded card that lists them when opened', async () => {
+  it('shows a quick burst of starts as one open card that lists them, folded to the first name when closed', async () => {
     const titles = ['Archive builder', 'Schedule builder', 'Link builder']
     const rows = [
       user('u9', 0, 'Three changes, in parallel'),
@@ -316,11 +313,12 @@ describe('a thread whose turns start several subagents', () => {
       start('b4', 25, 'delegate_task', titles[2]!, 'd-2'),
       reply('b5', 36, 'All three are on it.')
     ]
-    expect(await showStarts(rows, titles)).toEqual([{ head: 'Archive builder + 2', rows: [] }])
+    expect(await showStarts(rows, titles)).toEqual([{ head: '3 subagents', rows: titles }])
     await act(async () => {
       host.querySelector<HTMLButtonElement>('button.subagent-group-head')!.click()
     })
-    expect(readCards()).toEqual([{ head: '3 subagents', rows: titles }])
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    expect(readCards()).toEqual([{ head: 'Archive builder + 2', rows: [] }])
   })
 
   it('gives starts far apart cards of their own', async () => {
