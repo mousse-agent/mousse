@@ -84,7 +84,7 @@ const refusals = [
   ['schedule_changed', 'This changed since you saw it. Nothing was sent.'],
   ['settled', 'This was already answered.'],
   ['gone', "This can't be sent any more."],
-  ['unreachable', "Mail couldn't be reached. Nothing was sent. Try again when it is available."]
+  ['timed_out', "This can't be sent any more."]
 ] as const
 const rpcAnswer = (choice = 'send') => t.caller.net.session(t.node).rpc('bots.actions.answer', {
   botId: BOT, actionId: ACTION, digest: 'a'.repeat(64), answer: choice
@@ -96,21 +96,22 @@ it.each(refusals)('reports %s before effects over a real link', async (reason, s
   f.store.setPaused(realBot, reason === 'paused' ? 'owner' : null)
   if (reason !== 'gone') {
     const withdrawn = ['schedule_changed', 'work_ended', 'owner_paused', 'permission_changed', 'disabled', 'owner_removed', 'binding_changed'].includes(reason)
-    const status = withdrawn ? 'withdrawn' : ['expired', 'withdrawn'].includes(reason) ? reason : reason === 'settled' ? 'done' : reason === 'unreachable' ? 'failed' : 'open'
+    const status = withdrawn ? 'withdrawn' : ['expired', 'withdrawn'].includes(reason) ? reason : reason === 'settled' ? 'done' : reason === 'timed_out' ? 'failed' : 'open'
     f.store.run(`INSERT INTO bot_actions (id, call_key, bot_id, activation_id, lane, kind, target_json, args_json, args_digest, binding_json, status, expires_at, created_at, result_json, card_json)
       VALUES (?, ?, ?, 'missing-run', 'run', 'mcp', '{}', '{}', ?, '{}', ?, ?, ?, ?, ?)`,
       ACTION, ACTION, realBot, 'b'.repeat(64), status, new Date(f.clock.now + 60_000).toISOString(), f.store.now(),
-      reason === 'unreachable' ? JSON.stringify({ text: sentence, notSentInTime: true }) : withdrawn ? JSON.stringify({ text: sentence }) : null, withdrawn ? JSON.stringify({ withdrawalCode: `bot_action_${reason}` }) : null)
+      reason === 'timed_out' ? JSON.stringify({ text: sentence, notSentInTime: true }) : withdrawn ? JSON.stringify({ text: sentence }) : null, withdrawn ? JSON.stringify({ withdrawalCode: `bot_action_${reason}` }) : null)
   }
   const input = { botId: realBot, actionId: ACTION, digest: 'a'.repeat(64), answer: 'send' as const }
   check = () => f.bots.service.actionCheck(input)
   answer = vi.fn(() => f.bots.service.answerAction(input))
   sent = []
   const error = await rpcAnswer().catch(error => error)
-  expect(error).toMatchObject({ code: 'conflict', details: { reason: `bot_action_${reason}` } })
+  const refusalCode = reason === 'timed_out' ? 'bot_action_gone' : `bot_action_${reason}`
+  expect(error).toMatchObject({ code: 'conflict', details: { reason: refusalCode } })
   const frame = sent.find(header => header.t === 'rpc.result' && 'error' in header)
   expect(frame).toMatchObject({ error: { code: 'conflict', message: new NetError('conflict').message,
-    cause: [{ code: `application.bot_action_${reason}`, message: new NetError('conflict').message }] } })
+    cause: [{ code: `application.${refusalCode}`, message: new NetError('conflict').message }] } })
   expect(botActionRefusal(error, { botName: 'Mail', serverName: message.action!.serverName })?.text).toBe(sentence)
   expect(error.message).not.toBe(sentence)
   expect(answer).not.toHaveBeenCalled()
