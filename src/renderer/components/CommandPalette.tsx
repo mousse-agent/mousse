@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { formatBinding, getCommand } from '../../shared/commands'
 import type { ThreadSearchResult, ThreadSearchSkipped } from '../../shared/types'
-import { Search, X } from '../lib/icons'
+import { Search, SearchEverything, X } from '../lib/icons'
 import { currentContext, isCommandRegistered, useCommandBindings, useCommandOverlay, useCommandRegistry } from '../commands/commandRegistry'
 import { chooseCommandPaletteItem, dismissPalette } from '../commands/paletteActions'
 import {
@@ -18,6 +18,8 @@ import { readableError } from '../lib/errorText'
 import { skippedLine, THREAD_SEARCH_DEBOUNCE_MS } from '../lib/threadSearchSkipped'
 import { motionScale, scaleMotionMs } from '../lib/motion'
 import { useAppStore } from '../stores/appStore'
+import { useBotsStore } from '../stores/botsStore'
+import { useChatsStore } from '../stores/chatsStore'
 import '../styles/thread-search.css'
 
 /** The palette's fade-out, before the speed scale; matches its close animation in thread-search.css. */
@@ -231,6 +233,8 @@ function PaletteDialog({ closing = false, onClosed }: { closing?: boolean; onClo
   const handlers = useCommandRegistry((state) => state.handlers)
   const threads = useAppStore((state) => state.threads)
   const projects = useAppStore((state) => state.projects)
+  const bots = useBotsStore((state) => state.bots)
+  const chats = useChatsStore((state) => state.snapshot.chats)
   const activeThreadId = useAppStore((state) => state.activeThreadId)
   const turnStates = useAppStore((state) => state.turnStates)
   const mainAreaOpen = useAppStore((state) => state.mainAreaOpen)
@@ -267,20 +271,23 @@ function PaletteDialog({ closing = false, onClosed }: { closing?: boolean; onClo
     }
     const messages = found?.results
     const messagesCapped = (messages?.length ?? 0) >= MESSAGE_SEARCH_LIMIT
-    return buildPaletteGroups({ query, commands, threads, projects, computers, messages, expanded, messagesCapped, mode }).map((group) => {
+    return buildPaletteGroups({ query, commands, threads, projects, bots, chats, computers, messages, expanded, messagesCapped, mode }).map((group) => {
       const categories = categoryLabels(group.items)
       return {
         label: group.label,
         items: group.items.map((item, index) => ({ ...toRow(item), trailing: categories[index] }))
       }
     })
-  }, [query, commands, threads, projects, computers, found, expanded, mode, bindings, platform])
+  }, [query, commands, threads, projects, bots, chats, computers, found, expanded, mode, bindings, platform])
   const rows = useMemo(() => groups.flatMap((group) => group.items), [groups])
   const active = Math.min(activeIndex, Math.max(rows.length - 1, 0))
   const skipped = messageQuery(query) ? skippedLine(found?.skipped) : ''
 
   useEffect(() => {
     inputRef.current?.focus()
+    // The bots and chats are kept fresh only while the Chats tab shows; the search reads them once as it opens.
+    void useBotsStore.getState().refresh().catch(() => undefined)
+    void useChatsStore.getState().refresh().catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -329,15 +336,17 @@ function PaletteDialog({ closing = false, onClosed }: { closing?: boolean; onClo
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={mode === 'messages' ? 'Search threads' : 'Command palette'}
+        aria-label={mode === 'messages' ? 'Search everything' : 'Command palette'}
       >
         <div className="thread-search-input-row">
-          <Search size={16} strokeWidth={2} className="thread-search-icon" aria-hidden="true" />
+          {mode === 'messages'
+            ? <SearchEverything size={16} strokeWidth={2} className="thread-search-icon" aria-hidden="true" />
+            : <Search size={16} strokeWidth={2} className="thread-search-icon" aria-hidden="true" />}
           <input
             ref={inputRef}
             className="thread-search-input"
             value={query}
-            placeholder={mode === 'messages' ? 'Search threads and messages…' : 'Search commands, threads, and messages…'}
+            placeholder={mode === 'messages' ? 'Search everything…' : 'Search commands, threads, chats, and messages…'}
             role="combobox"
             aria-expanded="true"
             aria-controls={LIST_ID}
@@ -390,8 +399,8 @@ function PaletteDialog({ closing = false, onClosed }: { closing?: boolean; onClo
 }
 
 /**
- * The Ctrl/Cmd+K palette, which is also thread and message search (Ctrl/Cmd+Shift+O opens it with
- * message hits first). Mounted once; its state lives in `appStore.paletteOpen` and `paletteMode`.
+ * The Ctrl/Cmd+K palette, which is also Search everything (Ctrl/Cmd+Shift+O and the rail's search open it
+ * with what was found first and commands last). Mounted once; its state lives in `appStore.paletteOpen` and `paletteMode`.
  */
 export function CommandPalette() {
   const open = useAppStore((state) => state.paletteOpen)

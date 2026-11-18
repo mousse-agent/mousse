@@ -65,8 +65,8 @@ describe('closing the search palette', () => {
     expect(overlay()?.classList.contains('is-closing')).toBe(true)
     // The fade does not mount a new dialog or list in its place.
     expect(host.querySelector('.thread-search-dialog')).toBe(dialog)
-    // Search threads stays Search threads while it fades: no switch to the command list, which grew the dialog mid-fade.
-    expect(dialog?.getAttribute('aria-label')).toBe('Search threads')
+    // Search everything stays Search everything while it fades: no switch to the command list, which grew the dialog mid-fade.
+    expect(dialog?.getAttribute('aria-label')).toBe('Search everything')
     expect(useAppStore.getState().paletteMode).toBe('messages')
 
     // The dialog's own scale ends first or at the same time; only the overlay's fade unmounts it.

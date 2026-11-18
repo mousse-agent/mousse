@@ -304,7 +304,7 @@ interface AppState {
   setShortcuts: (shortcuts: ShortcutOverrides) => void
   /** The command palette, which also searches threads and messages. Not persisted. */
   paletteOpen: boolean
-  /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). Kept on close. */
+  /** What the palette leads with: `messages` is Search everything, with commands last (the rail's search opens it so). Kept on close. */
   paletteMode: PaletteMode
   setPaletteOpen: (open: boolean, mode?: PaletteMode) => void
   /** The sidebar's tab. It and `sidebarMode` always agree (`agreeWithTab`): setting either moves the other. */

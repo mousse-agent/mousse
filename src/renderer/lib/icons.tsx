@@ -324,6 +324,13 @@ export const RotateCcw = /* @__PURE__ */ createIcon('RotateCcw', RotateCcwIcon)
 export const RotateCcwArrow = /* @__PURE__ */ createIcon('RotateCcwArrow', UndoIcon)
 export const Save = /* @__PURE__ */ createIcon('Save', SaveIcon)
 export const Search = /* @__PURE__ */ createIcon('Search', Search01Icon)
+/** Stacked layers with a lens: the search that finds everything (threads, archived, bots, chats, messages). */
+export const SearchEverything = /* @__PURE__ */ createIcon('SearchEverything', [
+  ['path', { d: 'M2.5 6.5 9 3.2l6.5 3.3L9 9.8z', stroke: 'currentColor', strokeLinecap: 'round', strokeLinejoin: 'round', key: '0' }],
+  ['path', { d: 'M2.5 10.5 9 13.8', stroke: 'currentColor', strokeLinecap: 'round', strokeLinejoin: 'round', key: '1' }],
+  ['circle', { cx: '16.5', cy: '16.5', r: '4', stroke: 'currentColor', key: '2' }],
+  ['path', { d: 'm22 22-2.6-2.6', stroke: 'currentColor', strokeLinecap: 'round', strokeLinejoin: 'round', key: '3' }]
+])
 export const Send = /* @__PURE__ */ createIcon('Send', SentIcon)
 export const Server = /* @__PURE__ */ createIcon('Server', ServerStack01Icon)
 export const Settings = /* @__PURE__ */ createIcon('Settings', Settings01Icon)

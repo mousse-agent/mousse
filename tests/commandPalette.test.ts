@@ -171,7 +171,7 @@ describe('opening and closing with Ctrl+K', () => {
 })
 
 describe('opening thread search', () => {
-  it('opens the palette with message hits first from Search threads, and Ctrl+K opens it plain', () => {
+  it('opens Search everything from its command, and Ctrl+K opens the plain palette', () => {
     const { win } = stubWindow(composer())
     attachCommandShortcuts(win as never)
     registerPaletteToggle()
@@ -364,7 +364,7 @@ describe('opening a thread from the palette', () => {
   it('opens a message hit: selects its thread, then asks the transcript to show the message', async () => {
     const { win } = stubWindow(composer())
     useChatNavigationStore.setState({ message: null })
-    // Search threads works over the Usage page; the thread it opens has to show.
+    // Search everything works over the Usage page; the thread it opens has to show.
     useAppStore.setState({ usageOpen: true })
     openPalette('messages')
 

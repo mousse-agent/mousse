@@ -234,9 +234,9 @@ export const COMMANDS: readonly CommandDefinition[] = [
   },
   {
     id: 'threads.search',
-    title: 'Search threads',
+    title: 'Search everything',
     category: 'Threads',
-    searchTerms: ['find', 'chat', 'messages'],
+    searchTerms: ['find', 'threads', 'chats', 'bots', 'archived', 'messages'],
     defaultBinding: `${MOD}+Shift+O`,
     scope: 'global',
     textInput: 'allow',
