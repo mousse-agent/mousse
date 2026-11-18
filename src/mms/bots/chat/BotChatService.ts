@@ -23,6 +23,7 @@ import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
 import { botDeviceAccessProblem, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import { lateAnsweringLine, plainChoices, type BotQuestionLateAnswer, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { grantedPermissions, permissionId, starterManifest, withoutPermission } from './projection'
+import { turnTimingBegin, turnTimingForget } from '../../diagnostics/turnTiming'
 
 /**
  * The Bot UI's daemon side (Bot Phase 1 §5.3, §5.11): create a bot from a look and a sentence,
@@ -601,6 +602,7 @@ export class BotChatService {
    * and with the chat turn it queues; then a chat waiting at a wall continues with it, or the queued turn starts.
    */
   private async send(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }, tap?: { questionId: string; choice: string }): Promise<{ message: BotChatMessage }> {
+    turnTimingBegin(input.botId)
     const definition = this.engine.definitionOf(input.botId)
     const text = input.text.trim()
     if (!text && !input.attachments?.length) throw new BotEngineError('invalid_params', 'The message is empty.')
@@ -698,6 +700,7 @@ export class BotChatService {
     for (const question of touched) for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.engine.chat.republish(row.id)
     const message = this.engine.chat.toMessage(this.store.message(messageId)!)
     // A turn that runs now takes it as it answers: nothing else starts.
+    if (joined) turnTimingForget(input.botId)
     if (joined && this.store.activation(joined)?.status !== 'queued') return { message }
     try {
       // A limit answered Not now ends its walled turn first; the queued activation then starts. A tap leaves the wall be.

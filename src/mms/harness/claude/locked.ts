@@ -598,8 +598,17 @@ export class ClaudeLockedGate {
   constructor(
     private readonly turn: ClaudeLockedTurn,
     /** The Mousse MCP server is attached to the turn. */
-    private readonly mcp: boolean
+    private readonly mcp: boolean,
+    /**
+     * Told before a shell call is let through, in the hook and again in `canUseTool`: a command may outlive the call
+     * that started it, so the process that ran one is not kept for another turn.
+     */
+    private readonly onCommand?: () => void
   ) {}
+
+  private noteCommand(classified: Classified | undefined): void {
+    if (classified?.kind === 'builtin' && classified.neutral.includes('shell')) this.onCommand?.()
+  }
 
   private classify(toolName: string): Classified {
     if (this.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) return { kind: 'app', tool: toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) }
@@ -677,6 +686,7 @@ export class ClaudeLockedGate {
     try {
       const decided = this.decide(toolName, args)
       if (!decided.ok) return decided
+      this.noteCommand(decided.classified)
       if (decided.classified?.kind === 'builtin') this.turn.authority.counters.charge('tool')
       return { ok: true }
     } catch (error) {
@@ -706,6 +716,7 @@ export class ClaudeLockedGate {
     const decided = this.decide(toolName, args)
     if (!decided.ok) return decided
     const classified = decided.classified!
+    this.noteCommand(classified)
     if (classified.kind === 'app' || classified.kind === 'mcp') return { ok: true }
     const idempotent = classified.kind === 'tool_search' || (classified.kind === 'builtin' && classified.neutral.every(neutralToolIdempotent))
     const row = this.turn.ledger?.start({ type: 'toolCall', id: toolUseId, name: toolName, arguments: args } as ToolCall, { idempotent })

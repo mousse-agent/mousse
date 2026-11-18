@@ -1,4 +1,5 @@
 import { profilerService } from '../diagnostics/profilerService'
+import { turnTimingMark } from '../diagnostics/turnTiming'
 import { describeQuestionAnswers } from './questionAnswers'
 import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
 import { latestReplyPreview } from '../../shared/threadPreview'
@@ -13370,6 +13371,7 @@ export class OrchestratorService extends EventEmitter {
         session.executionLease = lease
       }
     }
+    turnTimingMark(session.threadId, 'lease')
 
     if (recoveryDirectory && session.executionLease) {
       new ConversationActionService(recoveryDirectory).recover(session.executionLease, (action, kind) => {
@@ -13651,6 +13653,7 @@ export class OrchestratorService extends EventEmitter {
     if (conversationDirectory && session.executionLease) {
       new ConversationActionService(conversationDirectory).begin(turnId, conversationBranchId, turnPresentationStart, turnNativeStartBoundary, session.executionLease)
     }
+    turnTimingMark(session.threadId, 'checkpoint')
     if (checkpointEnabled && turnStartSha && checkpointCwd) {
       const directory = this.resolveThreadDir(session.threadId)!
       new ThreadActionService(directory).beginTurn({
@@ -14345,6 +14348,7 @@ export class OrchestratorService extends EventEmitter {
         // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
         userContent: opts?.agent ? '' : userContent,
         instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}), ...(opts?.bot?.preamble ? { botPreamble: opts.bot.preamble } : {}) }) : undefined
+      turnTimingMark(session.threadId, 'appTurn')
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
@@ -14394,6 +14398,7 @@ export class OrchestratorService extends EventEmitter {
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
       const releaseCopies = this.secretCopiesForTurn(session.threadId, binding.driver)
       let result: Awaited<ReturnType<HarnessGateway['startTurn']>['result']>
+      turnTimingMark(session.threadId, 'harness')
       try {
         result = await this.harness.startTurn({
           binding,

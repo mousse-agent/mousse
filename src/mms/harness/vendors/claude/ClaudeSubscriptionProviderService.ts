@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { trackChildProcess, untrackChildProcess } from '../../../diagnostics/liveCounts'
+import { turnTimingEnd, turnTimingFirstText, turnTimingMark } from '../../../diagnostics/turnTiming'
 import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -37,7 +38,7 @@ import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
 import { lockedEnv, withEnforced } from '../../env'
-import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, CLAUDE_PLAN_TOOLS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeLockedSettingsFile, claudeLockedTools, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
+import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, CLAUDE_PLAN_TOOLS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeLockedSettingsFile, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
   cliFingerprint,
@@ -2354,11 +2355,21 @@ export class ClaudeSubscriptionProviderService {
   /**
    * Whether a bot's turn runs on a warm process kept between its turns (`acquireLive` with `bot`), as threads do: a chat
    * turn (the engine marks it, `BotAuthority.warm`) on the owner's own entry, where the process is the SDK's and the turn's
-   * signal ends it, that is offered no commands, so nothing it starts can run on after its turn. A turn on a locked entry,
-   * whose processes the bot supervisor holds per dispatch, and every work or run turn stay one process per turn.
+   * signal ends it. A turn may be offered commands: one that runs a command marks its process to close when it ends
+   * (`ClaudeLockedGate`'s `onCommand`, before the call is let through), and the close ends everything it started
+   * (`closeBotLive`), so nothing a command started runs on into a later turn. A turn on a locked entry, whose processes
+   * the bot supervisor holds per dispatch, and every work or run turn stay one process per turn.
    */
-  private botKeepsWarm(turn: ClaudeLockedTurn, mousseTools: boolean): boolean {
-    return Boolean(this.liveConfig && turn.ownerEntry && turn.authority.warm) && !claudeLockedTools(turn, mousseTools).tools.includes('Bash')
+  private botKeepsWarm(turn: ClaudeLockedTurn): boolean {
+    return Boolean(this.liveConfig && turn.ownerEntry && turn.authority.warm)
+  }
+  /**
+   * The last sign-in reading said signed in and is under `CLAUDE_AUTH_STATUS_TTL_MS` old: a bot's process, new or warm,
+   * gets its prompt without waiting for this turn's own reading, which still runs and ends the turn if it says signed out.
+   */
+  private signInFresh(): boolean {
+    const reading = this.cliProbe
+    return reading?.result.kind === 'signed_in' && Date.now() - reading.at < CLAUDE_AUTH_STATUS_TTL_MS && !this.signedOut()
   }
   /** Closes a bot's warm process and ends everything it started (`reapClosed`). */
   private closeBotLive(threadId: string, live: LiveSession<TurnContext>): void {
@@ -2943,6 +2954,7 @@ export class ClaudeSubscriptionProviderService {
    * prompt; a fork's first turn that cannot open its branch fails, and the resend forks again.
    */
   async chat(input: ClaudeSubscriptionChatInput): Promise<string> {
+    turnTimingMark(input.threadId, 'provider')
     try {
       return await this.chatTurn(input, true)
     } catch (error) {
@@ -3308,7 +3320,7 @@ export class ClaudeSubscriptionProviderService {
     const threadMode: ThreadPermissionMode = (requestedMode === 'full' && bypassDisabled) || (requestedMode === 'auto' && claudeAutoModeDisabled(this.environment(), { cwd: input.cwd }))
       ? 'accept_edits'
       : requestedMode
-    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp)) } : {}) }
+    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp), () => { if (live?.meta.bot) live.meta.closeAfterTurn = true }) } : {}) }
     // The bot's private temporary folder is in use until this turn ends; the last of its turns to end empties it.
     const releaseBotTemp = botTemp ? holdClaudeBotTemp(botTemp.dir) : undefined
     // The folder of the turn's settings file (`claudeLockedSettingsFile`), removed when it ends.
@@ -3350,7 +3362,7 @@ export class ClaudeSubscriptionProviderService {
       const launchAppend = locked ? [] : claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
       const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
       // A bot's chat turn on the owner's entry runs on a warm process (`botKeepsWarm`), started with exactly this launch.
-      const botWarm = lockedTurn && this.botKeepsWarm(lockedTurn, Boolean(input.mcp)) ? lockedTurn.authority.warm : undefined
+      const botWarm = lockedTurn && this.botKeepsWarm(lockedTurn) ? lockedTurn.authority.warm : undefined
       // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.
       const hard = [
         instanceId,
@@ -3429,6 +3441,11 @@ export class ClaudeSubscriptionProviderService {
         this.notifyHost(() => this.liveHost?.notice?.(input.threadId, claudeMcpPolicyText(names)))
       }
       const observe = (message: SDKMessage): void => {
+        turnTimingMark(input.threadId, 'firstFrame')
+        if (message.type === 'stream_event' && !message.parent_tool_use_id) {
+          if (message.event.type === 'message_start') turnTimingMark(input.threadId, 'messageStart')
+          else if (message.event.type === 'content_block_delta' && message.event.delta.type === 'text_delta') turnTimingFirstText(input.threadId)
+        }
         if (userServers.size > 0) {
           const left = claudeMcpLeftOut(message, userServers)
           if (left?.length) noteLeftOut(left)
@@ -3549,6 +3566,7 @@ export class ClaudeSubscriptionProviderService {
           }
           throw error
         }
+        if (live) turnTimingMark(input.threadId, live === reusable ? 'processWarm' : 'processNew')
         if (live && live === reusable) branch = undefined
         // The process found holding the conversation was replaced (its launch settings changed, or it could not switch
         // its model), or the turn runs as a one-shot query: the prompt carries what no resumed session does.
@@ -3558,14 +3576,13 @@ export class ClaudeSubscriptionProviderService {
         try {
           controller.signal.throwIfAborted()
           if (live) {
-            // A bot's new process gets its prompt only once the sign-in check said signed in, as a one-shot query does. One
-            // already running gets it at once while the last reading, under five minutes old, said signed in: this turn's
-            // reading still runs, and a signed-out one ends the turn and with it the process.
+            // A bot's process, new or already running, gets its prompt at once while the last reading said signed in
+            // (`signInFresh`); otherwise only once this turn's check did. That reading still runs, and a signed-out one
+            // ends the turn and with it the process.
             if (locked) {
-              const reading = this.cliProbe
-              const fresh = live.sessionId !== undefined && reading?.result.kind === 'signed_in' && Date.now() - reading.at < CLAUDE_AUTH_STATUS_TTL_MS && !this.signedOut()
-              if (!fresh) await signIn
+              if (!this.signInFresh()) await signIn
               controller.signal.throwIfAborted()
+              turnTimingMark(input.threadId, 'signIn')
             }
             live.current = turn
             // The permission mode follows the composer: a live query switches it for this turn.
@@ -3579,6 +3596,7 @@ export class ClaudeSubscriptionProviderService {
             for (;;) {
               try {
                 promptId = live.push(liveRun, userMessage(live.sessionId ?? resume ?? branch?.id ?? ''))
+                turnTimingMark(input.threadId, 'prompt')
                 break
               } catch (error) {
                 if (!(error instanceof CancelInProgress)) throw error
@@ -3653,13 +3671,16 @@ export class ClaudeSubscriptionProviderService {
         // A one-shot query: the prompt ends with the turn, which ends the process.
         startSteering()
         promptId = randomUUID()
-        const checked = signIn
+        // The same for a bot's one-shot query: no wait while the last reading said signed in (`signInFresh`).
+        const checked = locked && this.signInFresh() ? undefined : signIn
+        const threadId = input.threadId
         let nextPrompt: AsyncIterable<SDKUserMessage> = (async function* (): AsyncGenerator<SDKUserMessage> {
           try {
             await checked
           } catch {
             return
           }
+          turnTimingMark(threadId, 'prompt')
           yield* messages()
         })()
         /** The query that answered, still exiting (`awaitOneShotExit`). */
@@ -3815,6 +3836,7 @@ export class ClaudeSubscriptionProviderService {
       if (branch && !frames.text && cutRefused(error)) throw new CutRefused(error instanceof Error ? error.message : String(error), branch.fork)
       throw error
     } finally {
+      turnTimingEnd(input.threadId)
       // Only this turn's controller: a live query is not the turn's to abort.
       controller.abort()
       // Background helpers keep calling tools after the turn ended, or was cancelled: they are checked by
