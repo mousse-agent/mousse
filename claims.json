@@ -112,6 +112,20 @@
       "expiresAt": "2026-11-18T08:04:59.558Z"
     },
     {
+      "task": "sidebar-thread-filter",
+      "session": "Animatrix-d6ee88",
+      "machine": "Animatrix",
+      "branch": "sidebar-thread-filter",
+      "paths": [
+        "src/renderer/components/ThreadsSidebar.tsx",
+        "src/renderer/components/sidebar",
+        "src/renderer/components/bots/BotPresence.tsx",
+        "src/renderer/stores/threadFilterStore.ts"
+      ],
+      "claimedAt": "2026-11-18T13:40:32.398Z",
+      "expiresAt": "2026-11-18T15:40:32.398Z"
+    },
+    {
       "task": "thread-journal-latest-index",
       "session": "Animatrix-abde56",
       "machine": "Animatrix",
