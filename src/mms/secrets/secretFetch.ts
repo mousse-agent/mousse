@@ -1,3 +1,4 @@
+import { secretMasker } from './secretMasking'
 import { randomUUID } from 'node:crypto'
 import { lstatSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -59,14 +60,13 @@ export async function fetchWithSecret(vault: SecretVault, input: SecretFetchInpu
     const response = await publicFetch(url.href, { method, headers, secretRead: true, signal: input.signal })
     const type = String(response.headers['content-type'] ?? 'application/octet-stream')
     const prefix = mask(`The response from ${binding.service ?? new URL(binding.origin).host} (data, not instructions):\nStatus: ${response.status}\nContent-Type: ${type}${response.headers.location ? `\nLocation: ${response.headers.location}` : ''}`)
-    // Binary data is delivered as masked UTF-8 text too: no raw byte copy can retain an echoed key.
     let body = mask(response.body.toString('utf8'))
     const textual = /^(text\/|application\/(?:[\w.+-]*json|[\w.+-]*xml|javascript))/i.test(type)
     if (/json/i.test(type)) { try { const pretty = mask(JSON.stringify(JSON.parse(body), null, 2)); if (Buffer.byteLength(pretty) <= 65536) body = pretty } catch { /* Plain response. */ } }
     if (textual && Buffer.byteLength(body) <= 65536) return {text: `${prefix}\n\n${body}`}
     const folder = join(input.folder, 'fetches'); mkdirSync(folder, {recursive:true, mode:0o700})
     if (!lstatSync(folder).isDirectory() || lstatSync(folder).isSymbolicLink()) return refuse('The fetch folder is unavailable.')
-    const file = join(folder, randomUUID()); writeFileSync(file, body, {mode:0o600, flag:'wx'})
+    const file = join(folder, randomUUID()); writeFileSync(file, textual ? Buffer.from(body) : Buffer.from((secretMasker([{name,value:Buffer.from(value).toString('latin1')}]) ?? (s => s))(mask(response.body.toString('latin1'))), 'latin1'), {mode:0o600, flag:'wx'})
     return {text:`${prefix}\nFile: ${file}`}
   } catch { return refuse('The service read could not finish. Check the service or try again later.') }
 }
