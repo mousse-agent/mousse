@@ -507,6 +507,11 @@ export interface AppToolHost extends DelegationToolsHost {
    * `thread_send` to a working thread). `tool` is the bot tool the call came from, for its grant (default `thread_steer`).
    */
   steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor; tool?: 'thread_steer' | 'thread_send' }): Promise<AgentRunCommandResult>
+  /**
+   * A personal bot's note to a thread it started: throws unless its turn may message threads and the thread runs no wider
+   * than the device the owner wrote from may run (`device_limit`).
+   */
+  assertBotMayDirect?(threadId: string, actor: AgentActor): void
   /** The profile's scheduled jobs (`schedule_*`); absent: the host registers no schedule tools. */
   schedules?: AgentScheduleHost
   /** Automation drafts (`automation_*`), read at every call: the Automation manager's and granted bots' tools. */

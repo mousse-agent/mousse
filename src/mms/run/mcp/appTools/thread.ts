@@ -1242,14 +1242,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
    * a thread outside the caller's family): today's rules, a subagent only from its own lineage and never a run looser
    * than the caller's.
    */
-  const steerAsAgent = async (threadId: string, runId: string, text: string, args: Record<string, unknown>, ctx: ToolCallContext, tool: 'thread_steer' | 'thread_send'): Promise<{ runId: string; sequence: number; replayed: boolean }> => {
+  const steerAsAgent = async (threadId: string, runId: string, text: string, args: Record<string, unknown>, ctx: ToolCallContext, tool: 'thread_steer' | 'thread_send', requestKey?: string): Promise<{ runId: string; sequence: number; replayed: boolean }> => {
     const bot = botThreadCall(bots, ctx)
     if (bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
     assertNotBotThread(host, threadId, tool)
     assertOwnSubagentsOnly(engine, ctx.caller, threadId, tool)
     assertTakesWork(host, threadId)
     const actor = actorOf(ctx)
-    const result = acceptedRunCommand(await host.steerRun!(threadId, runId, text, { clientRequestId: `${tool === 'thread_steer' ? 'thread_steer' : 'thread_send:note'}:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor, tool }), runId)
+    const result = acceptedRunCommand(await host.steerRun!(threadId, runId, text, { clientRequestId: requestKey ?? `${tool === 'thread_steer' ? 'thread_steer' : 'thread_send:note'}:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor, tool }), runId)
     if (!result.replayed) showAction(host, threadId, actor, bot ? 'added guidance to the turn that was running' : `steered run ${runId}`)
     if (bot && !result.replayed) botChip(bot, tool, threadId, titleOf(threadId), text)
     return result
@@ -1261,16 +1261,25 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
    * then refuses), or it runs in a looser mode than the bot's turn allows (a running turn cannot be narrowed). Every other
    * refusal stands, a question or approval waiting on the owner first among them.
    */
-  const botJoinRunning = async (threadId: string, content: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<{ outcome: ToolOutcome } | { notJoined?: string }> => {
-    const active = engine.getActiveRun(threadId)
-    if (!active) return {}
+  const botJoinRunning = async (threadId: string, content: string, requestKey: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<{ outcome: ToolOutcome } | { notJoined?: string }> => {
+    // The join and the send share the request key, so a retry replays whichever the first call did: a join the engine
+    // recorded is answered from its receipt (the run may have ended since), and anything else goes on to the send.
+    const prior = engine.store.getReceipt(requestKey)
+    if (prior && !(prior.commandKind === 'steer' && prior.status === 'accepted' && prior.threadId === threadId)) return {}
+    const active = prior ? undefined : engine.getActiveRun(threadId)
+    if (!prior && !active) return {}
     let result: { runId: string; sequence: number; replayed: boolean }
-    try {
-      result = await steerAsAgent(threadId, active.runId, content, args, ctx, 'thread_send')
-    } catch (error) {
-      const conflict = error instanceof McpToolError ? error.details?.conflict : undefined
-      if (typeof conflict === 'string' && BOT_JOIN_FALLS_BACK.has(conflict)) return { notJoined: conflict }
-      throw error
+    if (prior) {
+      const stored = (prior.result ?? {}) as { runId?: string; sequence?: number }
+      result = { runId: stored.runId ?? '', sequence: stored.sequence ?? 0, replayed: true }
+    } else {
+      try {
+        result = await steerAsAgent(threadId, active!.runId, content, args, ctx, 'thread_send', requestKey)
+      } catch (error) {
+        const conflict = error instanceof McpToolError ? error.details?.conflict : undefined
+        if (typeof conflict === 'string' && BOT_JOIN_FALLS_BACK.has(conflict)) return { notJoined: conflict }
+        throw sendConflict(error) ?? error
+      }
     }
     const title = titleOf(threadId)
     const job = result.replayed ? undefined : botJob(threadId, title, host.threadMeta?.(threadId)?.projectId, content, ctx)
@@ -1318,7 +1327,16 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       return json({ threadId, intent: 'note', delivery: 'presented' satisfies SendDelivery, ...result })
     }
     assertNotBotThread(host, threadId, 'thread_send')
-    if (bot) assertTakesWork(host, threadId)
+    if (bot) {
+      assertTakesWork(host, threadId)
+      // A note from the bot that started the thread may direct its work: held to what the bot's message may reach.
+      if (!host.assertBotMayDirect) return notAvailable('thread_send with a note')
+      try {
+        host.assertBotMayDirect(threadId, actorOf(ctx))
+      } catch (error) {
+        throw sendConflict(error) ?? error
+      }
+    }
     const waiting = (host.pendingRequests?.(threadId).length ?? 0) > 0 || engine.approvals.listPending(threadId).length > 0
     if (interrupt) {
       if (relation !== 'child') throw new McpToolError('mousse_scope_denied', 'interrupt is for a note to your own subagent: only its direct parent restarts its running reply.')
@@ -1828,21 +1846,24 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         }
         assertNotBotThread(host, threadId, 'thread_send')
         assertTakesWork(host, threadId)
-        // A personal bot's message joins the turn the thread is running, unless it asks to queue (queue: true).
-        let notJoined: string | undefined
-        if (ctx.turn.bot && args.queue !== true && mode !== 'plan' && host.steerRun) {
-          const joined = await botJoinRunning(threadId, args.content, args, ctx)
-          if ('outcome' in joined) return joined.outcome
-          notJoined = joined.notJoined
-        }
-        const actor = actorOf(ctx)
         // A bot's key names its chat turn.
         const requestKey = ctx.turn.bot
           ? `${botRequestPrefix('thread_send', ctx.caller.threadId, ctx.turn.bot.activationId)}${toolRequestId(args, ctx)}`
           : `thread_send:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        // A personal bot's message joins the turn the thread is running, unless it asks to queue (queue: true).
+        let notJoined: string | undefined
+        if (ctx.turn.bot && args.queue !== true && mode !== 'plan' && host.steerRun) {
+          const joined = await botJoinRunning(threadId, args.content, requestKey, args, ctx)
+          if ('outcome' in joined) return joined.outcome
+          notJoined = joined.notJoined
+        }
+        // A join the engine refused keeps its receipt under the shared key: the send that follows takes a key of its own,
+        // derived from it, so a retry finds and replays it.
+        const sendKey = ctx.turn.bot && engine.store.getReceipt(requestKey)?.commandKind === 'steer' ? `${requestKey}:send` : requestKey
+        const actor = actorOf(ctx)
         let sent
         try {
-          sent = await host.sendToThread(threadId, { content: args.content, mode }, { clientRequestId: requestKey, actor })
+          sent = await host.sendToThread(threadId, { content: args.content, mode }, { clientRequestId: sendKey, actor })
         } catch (error) {
           throw sendConflict(error) ?? error
         }
