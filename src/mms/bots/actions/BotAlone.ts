@@ -43,13 +43,14 @@ export class BotAlone {
     const binding = this.host.binding(botId, request.serverId, request.tool)
     if (!schedule || !binding) return 'This automation or tool changed. Let it ask once first.'
     if (!actionPlace(this.host.schema(request.serverId, request.tool), Object.fromEntries(Object.keys((this.host.schema(request.serverId, request.tool) as { properties?: object })?.properties ?? {}).map(k => [k, null])))) return "This tool doesn't say where it acts, so it always asks."
-    const previous = this.host.store.get(`SELECT a.place_json FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
+    const previous = this.host.store.get(`SELECT a.place_json, a.result_json FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
       WHERE a.bot_id = ? AND a.kind = 'mcp' AND a.status = 'done' AND a.place_json IS NOT NULL
       AND json_extract(w.trigger_json, '$.kind') = 'schedule' AND json_extract(w.trigger_json, '$.scheduleId') = ?
       AND json_extract(a.target_json, '$.server') = ? AND json_extract(a.target_json, '$.tool') = ? ORDER BY a.rowid DESC LIMIT 1`, botId, request.scheduleId, request.serverId, request.tool)
     if (!previous) return 'Let it ask once first. After you send one of these, I can ask to do it alone.'
     const place = JSON.parse(String(previous.place_json)) as Record<string, unknown>
-    const values = Object.values(maskedActionData(place) as object).map(v => typeof v === 'string' ? v : JSON.stringify(v)).join(', ')
+    const result = JSON.parse(String(previous.result_json ?? '{}')).text ?? ''
+    const values = Object.values(maskedActionData(place) as object).map(v => placeLabel(v, result)).join(', ')
     this.put(botId, `alone-ask:${activationId}`, { ...request, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest(schedule.prompt), grantedAt: this.host.store.now(), title: `‘${schedule.name}’ · ${readableActionTitle(request.tool)} · ${values} without asking` })
   }
   pending(botId: string, activationId: string): { title: string; details: { summary: string; items: string[] } } | undefined {
@@ -87,4 +88,18 @@ export class BotAlone {
     }
   }
   remove(botId: string, key: string): void { this.host.store.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ? AND key GLOB 'alone:*'", botId, key) }
+}
+
+/** A result may supply a display name, never a different comparison value. */
+export function placeLabel(value: unknown, result: string): string {
+  let parsed: unknown
+  try { parsed = JSON.parse(result) } catch { /* A prose result cannot reliably associate a name with an id. */ }
+  const visit = (node: unknown, depth = 0): string | undefined => {
+    if (!node || typeof node !== 'object' || depth > 16) return undefined
+    const object = node as Record<string, unknown>
+    if (typeof value === 'string' && object.id === value && typeof object.name === 'string') return String(maskedActionData(object.name))
+    for (const child of Object.values(object)) { const found = visit(child, depth + 1); if (found) return found }
+    return undefined
+  }
+  return visit(parsed) ?? (typeof value === 'string' ? value : JSON.stringify(value))
 }
