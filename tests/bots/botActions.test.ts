@@ -3529,3 +3529,11 @@ it('C11 new open cards have a rollback-safe distant deadline', async () => {
   expect(f.bots.actions.forWork(t.workId)?.expires_at).toBe('9999-12-31T23:59:59.999Z')
   expect(f.bots.actions.nextDueAt()).toBeUndefined()
 })
+
+it.each(['approved', 'running'] as const)('C11 Automations knows Send was answered while the call is %s', async status => {
+  const t = await scheduledCall()
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  f.store.run('UPDATE bot_actions SET status = ?, answered_at = ? WHERE id = ?', status, f.store.now(), a.id)
+  expect(f.bots.service.automationFacts(t.botId, t.schedule.scheduleId)?.runs[0]?.endReason).toBe('approval_answered')
+})
