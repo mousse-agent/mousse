@@ -1,3 +1,6 @@
+import { pastedSecretShape } from '../../shared/secretShapes'
+import { SECRET_KEEPS, secretValueProblem, type SecretKeep } from '../../shared/secretRequests'
+import type { SecretVault } from './SecretVault'
 import { isKeyName } from '../../shared/automationKeys'
 import type { SecretEntryView, SecretRequestView } from '../../shared/secretRequests'
 import { DomainRpcError, domainObject, type DomainHandlerRegistry } from '../protocol/domainRegistry'
@@ -14,6 +17,7 @@ export interface SecretsDomain {
     useSaved(threadId: string, requestId: string): { name: string }
     decline(threadId: string, requestId: string): void
   }
+  pasted?: { vault: SecretVault; homeFor(botId: string): { threadId: string; allowed: boolean } }
   list(): SecretEntryView[]
   delete(name: string): boolean
 }
@@ -45,6 +49,33 @@ export function registerSecretMethods(domains: DomainHandlerRegistry, domainFor:
     if (!binding) throw new DomainRpcError('profile_required', 'Secrets need a profile')
     return domainFor(binding.profileId)
   }
+  domains.register({
+    method: 'secrets.keepPasted', scope: 'profile', capability: SECRETS_CAPABILITY,
+    validate: params => {
+      // Unknown fields are refused without repeating field names: even a malformed request may hold a key there.
+      if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).some(key => !['profileId', 'botId', 'value', 'keep'].includes(key))) throw new DomainRpcError('invalid_params', 'Enter a key and choose how long to keep it.')
+      const p = params as Record<string, unknown>
+      id(p.botId, 'A bot id')
+      const problem = secretValueProblem(p.value)
+      if (problem) throw new DomainRpcError('invalid_params', problem)
+      const shape = pastedSecretShape(p.value as string)
+      if (!shape || shape.start !== 0 || shape.end !== (p.value as string).length) throw new DomainRpcError('invalid_params', 'This does not look like a key.')
+      if (!(SECRET_KEEPS as readonly unknown[]).includes(p.keep)) throw new DomainRpcError('invalid_params', 'Choose how long to keep it.')
+      return p
+    },
+    async handle(context, params, binding) {
+      fromWindow(context)
+      try {
+        const domain = (await bound(binding)).pasted
+        if (!domain) throw new DomainRpcError('not_found', 'This bot cannot keep secrets here.')
+        const home = domain.homeFor(params.botId as string)
+        if (!home.allowed) throw new DomainRpcError('forbidden', 'Allow Use secrets in About before keeping a key.')
+        const name = domain.vault.freeName(pastedSecretShape(params.value as string)!.name)
+        domain.vault.store(name, params.value as string, { keep: params.keep as SecretKeep, threadId: home.threadId })
+        return { name }
+      } catch (error) { refusal(error) }
+    }
+  })
   domains.register({
     method: 'secrets.requests.list',
     scope: 'profile',
