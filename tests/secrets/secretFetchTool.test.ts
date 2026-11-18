@@ -5,7 +5,7 @@ import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import { BOT_SECRET_TOOLS } from '../../src/shared/bots/personal/manifest'
 it('offers a bound read only to work with a ledger and hands it to the home vault',async()=>{
  const fetch=vi.fn().mockResolvedValue({text:'safe data'}), record=vi.fn(async(_args,run)=>run())
- const host={...fakeAppToolHost().host,botHomeOf:()=> 'home',secrets:()=>({fetch,masker:()=>undefined,binding:()=>({service:'OpenAI'})})}
+ const host={...fakeAppToolHost().host,botHomeOf:()=> 'home',secrets:()=>({fetch,masker:()=>undefined,prepareFetch:(input:unknown)=>({service:'OpenAI',send:()=>fetch(input)})})}
  const tool=secretTools(host as never).find(t=>t.name==='secret_fetch')!
  expect(tool).toBeDefined();expect(tool.listed!({readOnly:false,modeCeiling:'default'})).toBe(false);expect(BOT_SECRET_TOOLS).toContain('secret_fetch')
  const turn=appTurn({threadId:'work',runId:'run',bot:{secretFetch:record,workspace:{scratch:'/run'}} as never})

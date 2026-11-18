@@ -46,12 +46,12 @@ it('keeps the whole allowance after another bot makes 20 refused calls on the ke
 })
 it.each([
  {secret:'UNBOUND'}, {method:'POST'}, {path:'/outside'}, {path:'/v1/models/../files'},
- {headers:{Authorization:'sk-live-foreign0123456789'}}, {headers:{Accept:'line\r\nbreak'}},
- {headers:{Accept:'sk-live-foreign0123456789'}}, {query:{q:'sk-live-foreign0123456789'}}
+ {headers:{Authorization:'ghp_abcdefghijklmnopqrstuvwxyz'}}, {headers:{Accept:'line\r\nbreak'}},
+ {headers:{Accept:'ghp_abcdefghijklmnopqrstuvwxyz'}}, {query:{q:'ghp_abcdefghijklmnopqrstuvwxyz'}}
 ])('validates %j before reserving any allowance',async patch=>{
  const {store,invoke}=fixture()
  expect((await invoke('owner',{secret:'KEY',path:'/v1/models',...patch})).isError).toBe(true)
  expect(store.get('SELECT ran_at FROM bot_actions')?.ran_at).toBeNull()
  expect(publicFetch).not.toHaveBeenCalled()
- if(patch.headers){const args=JSON.parse(String(store.get('SELECT args_json FROM bot_actions')?.args_json));expect(args.headers).toEqual(Object.keys(patch.headers));expect(JSON.stringify(args)).not.toContain('sk-live-foreign')}
+ if(patch.headers){const args=JSON.parse(String(store.get('SELECT args_json FROM bot_actions')?.args_json));expect(args.headers).toEqual(Object.keys(patch.headers));expect(JSON.stringify(args)).not.toContain('ghp_')}
 })

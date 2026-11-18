@@ -1,4 +1,4 @@
-import { fetchWithSecret } from './secretFetch'
+import { fetchWithSecret, prepareSecretFetch } from './secretFetch'
 import type { SecretToolHost } from '../run/mcp/appTools/secrets'
 import type { SecretRequests } from './SecretRequests'
 import type { SecretVault } from './SecretVault'
@@ -12,7 +12,7 @@ import type { BotSecretContainment } from './botSecretCommand'
 export function createSecretToolHost(input: { vault: SecretVault; requests: SecretRequests; scratchRoot: string; baseEnv?: NodeJS.ProcessEnv; containment?: BotSecretContainment }): SecretToolHost {
   const { vault, requests } = input
   return {
-    binding: name => vault.bindingFor(name),
+    prepareFetch: request => prepareSecretFetch(vault, request),
     fetch: request => fetchWithSecret(vault, request),
     request: (threadId, request, signal) => requests.request(threadId, request, { signal }),
     endThread: (threadId) => requests.endThread(threadId),
