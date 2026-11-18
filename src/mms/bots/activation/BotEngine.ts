@@ -3859,7 +3859,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           }
           const outcome = this.actions.hold(row, input.callDispatchId ?? input.dispatchId, tool, args, toolCallId)
           if (outcome instanceof Promise) return outcome
-          if (!outcome.isError) { this.askedIn.set(row.id, input.mainN); this.releaseParked(this.store.activation(row.id) ?? row, 'approval') }
+          if (!outcome.isError && this.actions.forWork(row.id)?.status === 'open') { this.askedIn.set(row.id, input.mainN); this.releaseParked(this.store.activation(row.id) ?? row, 'approval') }
           return outcome
         }
       } : {}),
