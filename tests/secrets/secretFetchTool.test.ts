@@ -18,3 +18,22 @@ it('offers a bound read only to work with a ledger and hands it to the home vaul
  expect((await tool.handler(args,{...ctx,turn:chat})).isError).toBe(true)
  expect(fetch).toHaveBeenCalledTimes(1)
 })
+
+it.each(['ordinary thread', 'manual run', 'chat', 'read only'])('explains why a service read is unavailable in %s', async kind => {
+  const send = vi.fn(async () => ({ text: 'data' }))
+  const record = vi.fn(async (_args, run) => run())
+  const host = { ...fakeAppToolHost().host, botHomeOf: () => 'home', secrets: () => ({ masker: () => undefined, prepareFetch: () => ({ service: 'OpenAI', send }) }) }
+  const tool = secretTools(host as never).find(tool => tool.name === 'secret_fetch')!
+  const bot = kind === 'ordinary thread' ? undefined : { role: 'activation', workspace: { scratch: '/run' }, ...(kind === 'chat' ? { warm: 'chat:activation:digest' } : {}), ...(kind === 'read only' ? { secretFetch: record } : {}) }
+  const turn = appTurn({ threadId: 't', runId: 'r', bot: bot as never, ...(kind === 'read only' ? { modeFacts: { readOnly: true, agent: false, build: false } } : {}) })
+  const outcome = await tool.handler({ secret: 'KEY', path: '/v1/models' }, { turn, transport: 'in_process', toolCallId: 'call', signal: new AbortController().signal } as ToolCallContext)
+  expect(outcome.isError).toBe(true)
+  if (kind === 'chat') expect(outcome.text).toContain('Hand this service read to your work')
+  else if (kind === 'read only') expect(outcome.text).toContain('read-only')
+  else {
+    expect(outcome.text).toContain('only to bots in work and scheduled runs')
+    expect(outcome.text).not.toContain('Hand')
+  }
+  expect(record).not.toHaveBeenCalled()
+  expect(send).not.toHaveBeenCalled()
+})

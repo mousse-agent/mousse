@@ -1,3 +1,4 @@
+import { botCatalogueGroup } from '../../src/shared/bots/personal/catalogue'
 /**
  * A bot is told what its owner allows now, on every turn of every lane, and the tools it gets match what it is told:
  * the chat (front desk) hears what its work holds, a run what it holds itself, and a change in About or an Allow shows
@@ -270,4 +271,8 @@ it('keeps service-read guidance out of subagents and consults where the tool is 
   const text=botInstructions({name:'Reader',description:'Read models',lane:'run',allowed,...scope})
   expect(text).not.toContain("use secret_fetch with the key's name")
  }
+})
+
+it('keeps service-read catalogue guidance specific to work even when the chat reads it', () => {
+  expect(botCatalogueGroup('secrets')!.guidance).toContain("use secret_fetch with the key's name in your work")
 })

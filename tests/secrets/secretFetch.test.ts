@@ -109,3 +109,22 @@ it.each(['pretty inline', 'compact inline', 'saved file'])('re-masks parsed JSON
   expect(text).not.toContain('\\u0070')
   if (branch === 'pretty inline') expect(text).toContain('\n  "echo":')
 })
+
+it.each([
+  [new Error('The page must resolve only to public addresses.'), 'The service must resolve only to public addresses. Retrying this address will not help; ask your owner for another service.'],
+  [new Error('The response exceeds 5 MiB.'), 'The response exceeds 5 MiB. Ask for a smaller response before retrying.'],
+  [new Error('The request took more than 30 seconds.'), 'The service took more than 30 seconds. Try again later.'],
+  [new Error('The request stopped.'), 'The service read stopped. Retry only if the result is still needed.'],
+  [new Error('The page response was interrupted.'), 'The service response was interrupted. Try again.'],
+  [new Error('connection failed', { cause: Object.assign(new Error(VALUE), { code: 'CERT_HAS_EXPIRED' }) }), "The service's certificate is not valid. Ask your owner to fix it before retrying."],
+  [new Error(VALUE), 'The service could not be reached. Try again later.']
+])('returns fixed retry guidance for a controlled service failure %#', async (error, expected) => {
+  const { run } = fixture()
+  vi.mocked(publicFetch).mockRejectedValue(error)
+  expect(await run()).toEqual({ text: expected, isError: true })
+})
+it('lists the allowed request headers when refusing another header', async () => {
+  const { run } = fixture()
+  const out = await run({ headers: { Cookie: 'anything' } })
+  for (const name of ['Accept', 'Accept-Language', 'If-None-Match', 'If-Modified-Since']) expect(out.text).toContain(name)
+})

@@ -181,3 +181,13 @@ it('tells existing bots that a pasted secret arrives by name', async () => {
   expect(text).toContain('Your owner can keep a pasted key as a secret')
   expect(text).toContain('secret_run')
 })
+
+it('introduces binding and service reads together without promising a later tool', async () => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', 27))
+  const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'service-reads' })
+  expect(pack).toContain('secret bound to one service')
+  expect(pack).toContain('use secret_fetch')
+  expect(pack).not.toContain('secret_fetch comes later')
+  expect(pack).not.toContain('keep working without using a bound key')
+})
