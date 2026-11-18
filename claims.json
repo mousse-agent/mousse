@@ -24,13 +24,14 @@
         "src/mms/bots",
         "src/mms/MmsProfileServices.ts",
         "src/renderer/components/bots/BotActionCard.tsx",
+        "src/renderer/styles/bots.css",
         "src/shared/bots/personal",
         "tests/bots",
         "tests/renderer/botChatView.test.ts",
         "docs/bots.md"
       ],
       "claimedAt": "2026-11-18T12:42:30.929Z",
-      "expiresAt": "2026-11-18T14:42:30.929Z"
+      "expiresAt": "2026-11-18T14:54:45.325Z"
     },
     {
       "task": "bot-phase-two-followups",
