@@ -3133,3 +3133,59 @@ it('R2 a timed-out Send is terminal while the card retains its stored timeout ou
   expect(button('Not now')).toBeUndefined()
   expect(host.textContent).toContain("Mail couldn't be reached, so nothing was sent")
 })
+
+// Pasted credentials must remain in the composer's own state until the owner chooses.
+describe('keeping a pasted key private', () => {
+  const key = 'sk-e5SyntheticKeyForTestsOnly123456'
+  const field = () => host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  it.each([
+    key, 'sk_live_1234567890123456', 'rk_test_1234567890123456',
+    'ghp_12345678901234567890', 'gho_12345678901234567890', 'ghu_12345678901234567890', 'ghs_12345678901234567890', 'ghr_12345678901234567890', 'github_pat_12345678901234567890',
+    'AKIA1234567890123456', 'ASIA1234567890123456', 'xoxb-12345678901234', 'AIza' + 'a'.repeat(35), 'ya29.' + 'a'.repeat(25),
+    '-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----', 'https://me:password@example.com', 'https://example.com?token=example'
+  ])('offers to keep an unmistakable key: %s', async value => {
+    await open(); await type(field(), value)
+    expect(button('Keep as secret')).toBeTruthy()
+    expect(fake.client.send).not.toHaveBeenCalled()
+    expect(JSON.stringify(useBotsStore.getState())).not.toContain(value)
+    expect(transcript().textContent).not.toContain(value)
+  })
+  it.each(['a'.repeat(64), '4fad019e-422c-4a1b-8f54-284951a51f37', 'a'.repeat(40), 'Please check the release'])('does not warn for IDs or prose: %s', async value => {
+    await open(); await type(field(), value)
+    expect(button('Keep as secret')).toBeUndefined()
+  })
+  it('replaces only the matched span before sending and uses the shared keep picker', async () => {
+    const request = vi.fn(async () => ({ name: 'OPENAI_API_KEY_2' }))
+    window.mousse.platformRequest = { request } as never
+    await open(); await type(field(), `Use ${key} please`)
+    await click(button('This thread only'))
+    await click(button('Keep as secret'))
+    expect(request).toHaveBeenCalledWith('secrets.keepPasted', { botId: 'inbox', value: key, keep: 'thread' })
+    expect(field().value).toBe('Use the secret OPENAI_API_KEY_2 please')
+    expect(fake.client.send).not.toHaveBeenCalled()
+    await click(button('Send message'))
+    expect(fake.client.send).toHaveBeenCalledWith('inbox', 'Use the secret OPENAI_API_KEY_2 please', expect.any(String), undefined, undefined)
+  })
+  it.each(['explicit', 'second send'])('sends unchanged only after %s consent', async choice => {
+    await open(); await type(field(), key)
+    if (choice === 'explicit') await click(button('Send as text'))
+    else {
+      await click(button('Send message'))
+      expect(fake.client.send).not.toHaveBeenCalled()
+      expect(host.querySelector('[role="alert"]')?.textContent).toContain('looks like a key')
+    }
+    await click(button('Send message'))
+    expect(vi.mocked(fake.client.send).mock.calls[0]?.[1]).toBe(key)
+  })
+  it('refuses without leaking an error or sending; removing the key cancels the offer', async () => {
+    window.mousse.platformRequest = { request: vi.fn(async () => { throw new Error(key) }) } as never
+    await open(); await type(field(), key); await click(button('Keep as secret'))
+    expect(host.textContent).toContain("Inbox helper can't keep secrets")
+    expect(host.textContent).not.toContain(key)
+    await click(button('Send message'))
+    expect(fake.client.send).not.toHaveBeenCalled()
+    await type(field(), '')
+    expect(button('Keep as secret')).toBeUndefined()
+    expect(JSON.stringify(useBotsStore.getState())).not.toContain(key)
+  })
+})
