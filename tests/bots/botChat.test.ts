@@ -383,19 +383,22 @@ describe('chat turns at their edges (review round 2)', () => {
     expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: .*\n\nNever mind, just say hi$/)
   })
 
-  it('a chat turn dropped from a full queue says so in the chat', async () => {
+  it('a chat turn refused by a full queue says so in the chat, and what already waits is kept', async () => {
     await send('First', 'q0')
     const first = chatActivation()
     // The owner's own messages join the turn that answers them; turns that can't join it (taps, another device's
-    // messages, the bot's own) wait in the queue, filled here directly.
-    for (let n = 1; n <= 21; n += 1) {
+    // messages, the bot's own) wait in the queue, filled here directly. Only a runaway fills the queue; a ceiling of
+    // three stands in for it.
+    f.host.maxQueuedActivations = 3
+    for (let n = 1; n <= 4; n += 1) {
       f.clock.now += 1
       await f.bots.enqueueChat(botId, `chat:q${n}`, `Message ${n}`)
     }
-    const dropped = f.store.activationByKey('chat:q1')!
-    expect(dropped).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    const refused = f.store.activationByKey('chat:q4')!
+    expect(refused).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(['chat:q1', 'chat:q2', 'chat:q3'].map((key) => f.store.activationByKey(key)!.status)).toEqual(['queued', 'queued', 'queued'])
     expect(chatOf(f, botId).filter((message) => message.kind === 'error')).toMatchObject([
-      { activationId: dropped.id, error: { text: 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.' } }
+      { activationId: refused.id, error: { text: 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.' } }
     ])
     expect(f.store.activation(first.id)!.status).toBe('running')
   })

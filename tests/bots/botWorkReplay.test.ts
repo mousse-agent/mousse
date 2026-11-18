@@ -1,4 +1,3 @@
-import { MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
@@ -129,7 +128,7 @@ describe('work_start through the production registry', () => {
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(2)
   })
 
-  it('retries work dropped from the full queue', async () => {
+  it('retries work a full queue refused, once there is room', async () => {
     const call = caller(await chat())
     const park = async (workId: string) => {
       await flush()
@@ -138,15 +137,17 @@ describe('work_start through the production registry', () => {
       await finish(f, turn.payload)
       expect(f.store.activation(workId)?.endReason).toBe('waiting')
     }
-    const first = await call()
-    await park(first.workId)
-    for (let n = 0; n < MAX_QUEUED_ACTIVATIONS; n += 1) {
-      f.clock.now += 1
-      await park((await call({ ...request, title: `Other job ${n}` })).workId)
-    }
-    expect(f.store.activation(first.workId)).toMatchObject({ status: 'failed', endReason: 'queue_full' })
+    // Only a runaway fills the queue; a ceiling of one stands in for it. Work that waits counts, and is never dropped.
+    f.host.maxQueuedActivations = 1
+    const parked = await call({ ...request, title: 'Other job' })
+    await park(parked.workId)
+    const refused = await call()
+    expect(refused.status).toBe('ended')
+    expect(f.store.activation(refused.workId)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(f.store.activation(parked.workId)?.endReason).toBe('waiting')
+    delete f.host.maxQueuedActivations
     const retry = await call()
-    expect(retry.workId).not.toBe(first.workId)
+    expect(retry.workId).not.toBe(refused.workId)
     expect(retry.status).toBe('started')
     expect((await call()).workId).toBe(retry.workId)
   })
