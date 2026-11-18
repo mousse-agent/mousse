@@ -156,6 +156,22 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   expect(next).not.toContain('Tools that send or change things now ask your owner first')
 })
 
+it('C6 support rollback advances a bot that already saw entry 27 after delivering entry 28 once', async () => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', 27))
+  const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false })
+  const laterAdvice = BOT_CHANGELOG.find(entry => entry.id === 28)!.text
+  for (let turn = 0; turn < 3; turn++) {
+    const activationId = `c6-already-seen-${turn}`
+    const pack = await provider.chatPreamble({ botId: 'ada', activationId })
+    expect(pack).not.toContain('Tools that send or change things now ask your owner first')
+    if (turn === 0) expect(pack).toContain(laterAdvice)
+    else expect(pack).not.toContain(laterAdvice)
+    await settled(provider, activationId)
+    expect(memory.getState<number>('ada', 'changelog_seen')).toBe(BOT_CHANGELOG_LATEST)
+  }
+})
+
 it('tells existing bots that a pasted secret arrives by name', async () => {
   existingBot()
   memory.write(() => memory.setState('ada', 'changelog_seen', 25))
