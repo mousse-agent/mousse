@@ -732,13 +732,13 @@ describe('the transcript', () => {
     expect(['b1', 'b2', 'b3'].map(hasTime)).toEqual([true, false, true])
   })
 
-  it('Pick a model opens About with Model and devices open, though the owner had it closed', async () => {
+  it('Pick a model opens About with Runs on open, though the owner had it closed', async () => {
     window.localStorage.removeItem('mousse-profile-default-mousse:bot-about-open')
     fake.chats.inbox = [message(1, { kind: 'error', text: 'Pick a model so I can work.', error: { text: 'Pick a model so I can work.', action: { kind: 'pick_model', label: 'Pick a model' } } })]
     await open()
     await click(button('Pick a model', transcript().querySelector('article')!))
     await act(async () => { await new Promise((resolve) => window.requestAnimationFrame(() => resolve(null))) })
-    const setup = [...document.querySelectorAll('.bot-about-fold-head')].find((head) => head.textContent?.includes('Model and devices'))
+    const setup = [...document.querySelectorAll('.bot-about-fold-head')].find((head) => head.textContent?.includes('Runs on'))
     expect(setup?.getAttribute('aria-expanded')).toBe('true')
     expect(useBotsStore.getState().aboutFocus).toBeNull()
   })

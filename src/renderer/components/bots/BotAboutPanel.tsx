@@ -211,7 +211,7 @@ function Row({ icon: Glyph, title, desc, status, children, className, titleTip, 
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Runs on: read once for the header's model and the Setup section.
+// Runs on: read once for the header's model and the Runs on section.
 
 function useRunsOn(botId: string, refresh: string) {
   const [choices, setChoices] = useState<BotsPersonalV2Result<'bots.model.get'> | null>(null)
@@ -332,8 +332,8 @@ function RunsOn({ name, state }: { name: string; state: RunsOnState }) {
 
 interface CacheWords { text: string; tone: 'ok' | 'warn' | 'quiet'; line: string }
 
-/** How full the chat's context is, and that turn's input split in the composer's colours, scaled to the bar. */
-export interface BotContextView {
+/** How full the chat's context is, and how the last turn's input split, as shares scaled to the bar. */
+interface BotContextView {
   percent: number
   used: number
   window: number
@@ -341,7 +341,7 @@ export interface BotContextView {
 }
 
 /** The context bar and legend from what the latest chat turn measured; null without a token count or a window. */
-export function botContextView(context: BotContextSummary | undefined): BotContextView | null {
+function botContextView(context: BotContextSummary | undefined): BotContextView | null {
   if (!context?.used || !context.window) return null
   const { cacheRead, cacheWrite, fresh } = context.turn
   const input = cacheRead + cacheWrite + fresh
@@ -354,7 +354,7 @@ export function botContextView(context: BotContextSummary | undefined): BotConte
 }
 
 /** The prompt cache in words, for the header and the Context section: warm with time left, expired, or idle. */
-export function cacheWords(context: BotContextSummary | undefined, now: number): CacheWords | null {
+function cacheWords(context: BotContextSummary | undefined, now: number): CacheWords | null {
   if (!context) return null
   const state = promptCacheState({ lastRequestAt: context.lastRequestAt, ...(context.cacheTtlMs ? { ttlMs: context.cacheTtlMs } : {}) }, now)
   const size = context.used ? `${tokensText(context.used)} ` : ''
@@ -452,7 +452,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const paused = bot.state === 'paused'
   const [width, setWidth] = usePanelWidth(profileId)
   const [open, toggle, unfold] = useFolds(profileId)
-  // Pick a model opens Model and devices, then brings the rows to the middle of the panel; only the panel scrolls
+  // Pick a model opens Runs on, then brings the rows to the middle of the panel; only the panel scrolls
   // (scrollIntoView also moved every box around it, the app's own included).
   const focus = useBotsStore((s) => s.aboutFocus)
   const scroller = useRef<HTMLDivElement>(null)
@@ -581,7 +581,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
 
       <Memory botId={bot.id} detail={detail} />
 
-      <Fold id="setup" icon={Cpu} title="Model and devices" open={open.includes('setup')} onToggle={toggle} summary={model ?? undefined}>
+      <Fold id="setup" icon={Cpu} title="Runs on" open={open.includes('setup')} onToggle={toggle} summary={model ?? undefined}>
         <div className="settings-group-rows bot-about-surface bot-about-setup">
           <div className="settings-item bot-about-setup-body">
             <RunsOn name={bot.name} state={runsOn} />

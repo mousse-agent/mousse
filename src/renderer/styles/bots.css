@@ -475,7 +475,7 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-about-when { color: var(--text-secondary); }
 .bot-about-does { color: color-mix(in srgb, var(--text-primary) 78%, transparent); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
-/* Model and devices: the model rows and the device choice, as one block on the surface. */
+/* Runs on: the model rows and the device choice, as one block on the surface. */
 .bot-about-setup-body { display: block; padding: var(--space-8) 0; }
 .bot-about-line { display: grid; grid-template-columns: var(--bot-row-label, 78px) minmax(0, 1fr); column-gap: var(--space-8); align-items: center; padding: 3px 0; font-size: 12px; }
 .bot-about-setup .bot-about-row { font-size: 12px; }

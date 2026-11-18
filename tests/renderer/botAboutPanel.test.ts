@@ -2,7 +2,7 @@
 /**
  * About this bot (bot-ui §4.8): the whole mouse beside what it does now, its model, context and cache; then sections
  * that fold (Context opens by default): Instructions, Can use and Automations, each item with a Remove that asks first;
- * Reminders, Memory, Model and devices; Pause and Delete.
+ * Reminders, Memory, Runs on; Pause and Delete.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -25,8 +25,8 @@ const click = async (element: Element | undefined) => { await act(async () => { 
 const section = (title: string) => [...host.querySelectorAll('.bot-about-fold')].find((element) => element.querySelector('.bot-about-fold-title')?.textContent === title)
 /** The titles of a section's rows, without a status word beside them. */
 const rows = (title: string) => [...section(title)?.querySelectorAll('.settings-item-title') ?? []].map((element) => element.firstChild?.textContent ?? '')
-/** Model and devices: each line's label. */
-const setupRows = () => [...section('Model and devices')?.querySelectorAll('.bot-about-line, .bot-about-row') ?? []].map((element) => element.querySelector('span')?.textContent)
+/** Runs on: each line's label. */
+const setupRows = () => [...section('Runs on')?.querySelectorAll('.bot-about-line, .bot-about-row') ?? []].map((element) => element.querySelector('span')?.textContent)
 /** Remove asks first, as everywhere in Settings: the first click only arms it. */
 async function remove(label: string, confirm = 'Confirm remove') {
   const before = fake.calls.length
@@ -90,7 +90,7 @@ describe('About this bot', () => {
     expect(head.querySelector('h2')?.textContent).toBe('Inbox helper')
     expect(section('Instructions')?.querySelector('.bot-prompt-body')?.textContent).toBe('Tells me which emails need a reply.')
     // Reminders shows only when there are some.
-    expect([...host.querySelectorAll('.bot-about-fold-title')].map((element) => element.textContent)).toEqual(['Context and cache', 'Instructions', 'Can use', 'Automations', 'Memory', 'Model and devices'])
+    expect([...host.querySelectorAll('.bot-about-fold-title')].map((element) => element.textContent)).toEqual(['Context and cache', 'Instructions', 'Can use', 'Automations', 'Memory', 'Runs on'])
   })
 
   it('opens Context alone at first; a section opened stays open next time', async () => {
