@@ -554,7 +554,6 @@ export class BotActions {
   private finish(action: ActionRow): void {
     const row = this.host.store.activation(action.activation_id)
     if (!row) return
-    if (action.card_json === null && row.endReason !== 'approval_answered') return
     this.host.settled(row)
   }
   async retryApproved(): Promise<void> {
