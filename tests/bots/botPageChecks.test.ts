@@ -47,3 +47,42 @@ it('compares only the case-insensitive window, including absent text becoming pr
   body = 'different but absent'; await check(10); expect(runs()).toHaveLength(0)
   body = 'Tickets available'; await check(15); expect(runs()).toHaveLength(1)
 })
+it('drops an old fetch when the schedule is edited and records the edited baseline',async () => {
+  let resolve!: (r: fetcher.PublicResponse) => void
+  vi.mocked(fetcher.publicFetch).mockImplementationOnce(() => new Promise(r => {resolve=r}))
+  const entry = await add(); await f.tickSchedules(new Date(T0+5*60_000))
+  f.book.update(f.scheduler.getJob(entry.jobId)!,{prompt:'Different instructions'})
+  resolve({status:200,headers:{},body:Buffer.from('stale')}); await flush()
+  await check(10); expect(runs()).toHaveLength(0)
+  expect(JSON.parse(state(entry.scheduleId)!.value).handedHash).not.toBeNull()
+})
+it('rolls back the handed hash if activation insertion fails and retries the same change',async () => {
+  const entry=await add(); await check(5); const baseline=JSON.parse(state(entry.scheduleId)!.value).handedHash
+  body='changed'; await f.tickSchedules(new Date(T0+10*60_000)); await flush()
+  const insert=vi.spyOn(f.store,'insertActivationOnce').mockImplementationOnce(() => {throw new Error('crash before transaction commits')})
+  await f.tickSchedules(new Date(T0+10*60_000))
+  expect(runs()).toHaveLength(0); expect(JSON.parse(state(entry.scheduleId)!.value).handedHash).toBe(baseline)
+  insert.mockRestore()
+  // A scheduler crash before finishing its claim replays that occurrence.
+  f.bots.runScheduledOccurrence({botId,scheduleId:entry.scheduleId,prompt:entry.prompt,occurrenceAt:new Date(T0+10*60_000).toISOString()})
+  await flush(); expect(runs()).toHaveLength(1)
+  f.bots.runScheduledOccurrence({botId,scheduleId:entry.scheduleId,prompt:entry.prompt,occurrenceAt:new Date(T0+10*60_000).toISOString()})
+  expect(runs()).toHaveLength(1)
+})
+it('six failures report once in chat and the failed-run ledger, and success clears the streak quietly',async () => {
+  const entry=await add()
+  vi.mocked(fetcher.publicFetch).mockRejectedValue(new Error('The page returned HTTP 403.'))
+  for(let i=1;i<=8;i++) await check(i*5)
+  expect(f.store.messages(botId,{limit:100}).filter(m=>m.text.includes("I can't read"))).toHaveLength(1)
+  expect(f.automationRuns.list().runs.filter(r=>r.botId===botId)).toHaveLength(1)
+  expect(f.automationRuns.list().runs.find(r=>r.botId===botId)?.state).toBe('failed')
+  vi.mocked(fetcher.publicFetch).mockResolvedValue({status:200,headers:{},body:Buffer.from('readable')})
+  await check(45)
+  expect(JSON.parse(state(entry.scheduleId)!.value)).toMatchObject({failures:0,toldUnreadable:false})
+})
+it('times out a persisted in-flight check after restart and ignores its late response',async () => {
+  const entry=await add()
+  vi.mocked(fetcher.publicFetch).mockImplementationOnce(() => new Promise(() => {}))
+  await f.tickSchedules(new Date(T0+5*60_000)); await f.tickSchedules(new Date(T0+8*60_000))
+  expect(JSON.parse(state(entry.scheduleId)!.value).failures).toBe(1)
+})
