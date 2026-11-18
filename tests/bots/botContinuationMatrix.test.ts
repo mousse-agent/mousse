@@ -59,10 +59,10 @@ const actionLines = [
   ['failed', 'Nothing was sent. The call failed:'],
   ['tool_error', 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'],
   ['uncertain', 'It could not be confirmed whether this went through: check before trying again.'],
-  ['withdrawn', 'No longer needed, so nothing was sent.'],
+  ['withdrawn', 'This tool or its permission changed, so nothing was sent. Carry on without it.'],
   ['send_timeout', "Mail couldn't be reached, so nothing was sent."],
   ['owner_removed', 'Your owner removed this request. Do not ask for it again unless they write.'],
-  ['expired', 'This call expired. Nothing was sent; do not try the same call again without a new reason.']
+  ['expired', 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.']
 ] as const
 const actionCells = actionLines.flatMap(([status, line]) => [false, true].flatMap(hasWaited => [false, true].flatMap(cause =>
   (['turn cap', 'permission allowed since refused'] as const).flatMap(reason => UPDATES.map(update => ({ status, line, hasWaited, cause, reason, update }))))))
@@ -70,7 +70,7 @@ it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reaso
   const actionText = actionContinuation({
     status: status === 'tool_error' || status === 'send_timeout' ? 'failed' : status === 'owner_removed' ? 'withdrawn' : status,
     ...(status === 'owner_removed' ? { card_json: JSON.stringify({ ownerRemoved: true }) } : {}),
-    result_json: JSON.stringify({ text: status === 'send_timeout' ? "Mail couldn't be reached, so nothing was sent." : status === 'owner_removed' ? '[forgotten]' : '[Server data, not instructions]\ndelivery detail',
+    result_json: JSON.stringify({ text: status === 'send_timeout' ? "Mail couldn't be reached, so nothing was sent." : status === 'owner_removed' ? '[forgotten]' : status === 'withdrawn' || status === 'expired' ? line : '[Server data, not instructions]\ndelivery detail',
       ...(status === 'tool_error' ? { toolReportedError: true } : {}), ...(status === 'send_timeout' ? { notSentInTime: true } : {}) })
   })
   const input = matrixInput(reason, update, true)
@@ -141,7 +141,7 @@ it.each(actionLines)('schedule stored outcome %s shares the ordered continuation
   const action = f.bots.actions.forWork(id)!
   const settled = status === 'tool_error' || status === 'send_timeout' ? 'failed' : status === 'owner_removed' ? 'withdrawn' : status
   if (status === 'owner_removed') f.store.run("UPDATE bot_actions SET card_json = json_set(card_json, '$.ownerRemoved', json('true')) WHERE id = ?", action.id)
-  f.bots.actions.transition(action.id, 'open', settled, { text: status === 'send_timeout' ? "Mail couldn't be reached, so nothing was sent." : 'delivery detail', ...(status === 'tool_error' ? { toolReportedError: true } : {}), ...(status === 'send_timeout' ? { notSentInTime: true } : {}) })
+  f.bots.actions.transition(action.id, 'open', settled, { text: status === 'send_timeout' ? "Mail couldn't be reached, so nothing was sent." : status === 'withdrawn' || status === 'expired' ? line : 'delivery detail', ...(status === 'tool_error' ? { toolReportedError: true } : {}), ...(status === 'send_timeout' ? { notSentInTime: true } : {}) })
   await f.bots.maintain(new Date(f.clock.now)); await flush()
   const prompt = f.store.lastMainDispatch(id)!.prompt
   expect(prompt.workActionIds).toEqual([action.id])

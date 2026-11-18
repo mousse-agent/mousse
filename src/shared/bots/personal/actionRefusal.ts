@@ -1,5 +1,6 @@
 /** Application reasons carried as data on an existing conflict, never as new Net error codes. */
 export const BOT_ACTION_REFUSAL_CODES = [
+  'bot_action_work_ended', 'bot_action_owner_paused', 'bot_action_permission_changed', 'bot_action_disabled', 'bot_action_owner_removed', 'bot_action_binding_changed',
   'bot_action_schedule_changed', 'bot_action_expired', 'bot_action_withdrawn', 'bot_action_changed', 'bot_action_settled',
   'bot_action_gone', 'bot_action_paused', 'bot_action_unreachable', 'bot_action_too_large'
 ] as const
@@ -11,6 +12,12 @@ export interface BotActionRefusalNames { botName?: string; serverName?: string }
 /** Both local chat and device clients use names they already have, never a network error's words. */
 export function botActionRefusalText(code: BotActionRefusalCode, names: BotActionRefusalNames = {}): string {
   switch (code) {
+    case 'bot_action_work_ended': return 'This work ended. Nothing was sent.'
+    case 'bot_action_owner_paused': return 'This bot was paused, so nothing was sent.'
+    case 'bot_action_permission_changed': return 'This tool or its permission changed, so nothing was sent.'
+    case 'bot_action_disabled': return 'This could not wait for your owner after all, so nothing was sent.'
+    case 'bot_action_owner_removed': return 'You removed this request, so nothing was sent.'
+    case 'bot_action_binding_changed': return 'This changed since you saw it. Nothing was sent.'
     case 'bot_action_schedule_changed': return 'This changed since you saw it. Nothing was sent.'
     case 'bot_action_expired': return 'This expired, so nothing was sent.'
     case 'bot_action_withdrawn': return 'No longer needed, so nothing was sent.'

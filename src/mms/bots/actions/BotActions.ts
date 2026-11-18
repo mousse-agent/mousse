@@ -1,3 +1,4 @@
+import { botActionRefusalText, isBotActionRefusalCode, type BotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { notice, quoted } from '../../../shared/mousseContext'
 /** Longest an accepted Send may wait before transport dispatch, counted from the owner's tap. */
 export const APPROVED_SEND_WINDOW_MS = 10 * 60_000
@@ -161,6 +162,21 @@ export interface ActionRow {
   exec_args: string | null; args_digest: string; binding_json: string; target_json: string
   answered_at: string | null; ran_at: string | null; args_json: string; card_json: string | null; message_id: string; expires_at: string; result_json: string | null
 }
+/** Content-free reason survives redaction; legacy rows fall back to their stored sentence. */
+function withdrawalCode(action: Pick<ActionRow, 'card_json' | 'result_json'>): BotActionRefusalCode {
+  const code = JSON.parse(action.card_json ?? '{}').withdrawalCode
+  if (isBotActionRefusalCode(code)) return code
+  const text: string = JSON.parse(action.result_json ?? '{}').text ?? ''
+  if (text.includes('work ended')) return 'bot_action_work_ended'
+  if (text.includes('paused')) return 'bot_action_owner_paused'
+  if (text.includes('forgotten')) return 'bot_action_owner_removed'
+  if (text.includes('could not wait')) return 'bot_action_disabled'
+  if (text.includes('schedule') && text.includes('changed')) return 'bot_action_schedule_changed'
+  if (text.includes('changed since')) return 'bot_action_binding_changed'
+  if (text.includes('tool') && text.includes('changed')) return 'bot_action_permission_changed'
+  return 'bot_action_withdrawn'
+}
+const EXPIRED_WORK_TEXT = 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.'
 /** Stored outcomes are timed updates, assembled with all other work updates at dispatch. */
 export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'> & Partial<Pick<ActionRow, 'card_json'>>, scheduled = false): string {
   if (scheduled) {
@@ -170,13 +186,14 @@ export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_js
   }
   const result = action.result_json ? JSON.parse(action.result_json) as BotMcpCallOutcome : undefined
   if (JSON.parse(action.card_json ?? '{}').ownerRemoved) return 'Your owner removed this request. Do not ask for it again unless they write.'
+  if (action.status === 'expired' && result?.text !== '[forgotten]') return EXPIRED_WORK_TEXT
   const forgotten = result?.text === '[forgotten]'
+  if (action.status === 'withdrawn') return forgotten ? `${botActionRefusalText(withdrawalCode({ card_json: action.card_json ?? null, result_json: action.result_json }))} The saved details of this outcome were removed.` : result?.text ?? 'Nothing was sent. Carry on without it.'
   const card = JSON.parse(action.card_json ?? '{}')
   if (result?.notSentInTime) return `${result.text} Nothing left Mousse. Decide whether a new request is needed.`
   const line = action.status === 'done' ? forgotten ? 'Your owner sent it.' : 'Your owner sent it. The tool answered:'
     : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
-      : action.status === 'expired' ? 'This call expired. Nothing was sent; do not try the same call again without a new reason.'
-      : action.status === 'withdrawn' ? 'No longer needed, so nothing was sent.'
+      : action.status === 'expired' ? 'This expired, so nothing was sent.'
       : action.status === 'uncertain' ? 'It could not be confirmed whether this went through: check before trying again.'
         : result?.toolReportedError || card.toolReportedError ? 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'
           : 'Nothing was sent. The call failed:'
@@ -216,7 +233,7 @@ export class BotActions {
           WHERE a.bot_id = ? AND (a.message_id = ? OR json_extract(w.trigger_json, '$.replyTo') = ?)`, botId, messageId, messageId)
         for (const action of ids) {
           const pending = ['open', 'approved'].includes(String(action.status))
-          if (pending) this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'The request was forgotten. Nothing was sent.' })
+          if (pending) this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'The request was forgotten. Nothing was sent.' }, 'bot_action_owner_removed')
           this.forgetText(botId, String(action.id))
           if (pending && action.message_id === messageId) this.host.store.run(`UPDATE bot_actions SET card_json = json_set(card_json,
             '$.ownerRemoved', json('true'), '$.removedOwnerSeq', ?, '$.removedNoteSeq', ?) WHERE id = ?`,
@@ -240,6 +257,7 @@ export class BotActions {
     }
     this.host.store.run(`UPDATE bot_actions SET args_json = ?, args_digest = '[forgotten]',
       card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0),
+        'withdrawalCode', json_extract(card_json, '$.withdrawalCode'),
         'toolReportedError', COALESCE(json_extract(result_json, '$.toolReportedError'), json_extract(card_json, '$.toolReportedError')),
         'ownerRemoved', json_extract(card_json, '$.ownerRemoved'), 'removedOwnerSeq', json_extract(card_json, '$.removedOwnerSeq'), 'removedNoteSeq', json_extract(card_json, '$.removedNoteSeq')),
       bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
@@ -247,11 +265,21 @@ export class BotActions {
   }
   withdrawWork(id: string): void {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved')", id))
-      this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' })
+      this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' }, 'bot_action_work_ended')
+  }
+  /** Rollback retires all unstarted calls together; an already dispatched call finishes. */
+  withdrawDisabled(): void {
+    if (this.host.enabled()) return
+    this.host.store.db.transaction(() => {
+      for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
+        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This could not wait for your owner after all, so nothing was sent. Do not make this call again in this work; say in your report what you would have sent.' }, 'bot_action_disabled'))
+          this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
+      }
+    })
   }
   withdrawPaused(botId: string): void {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE bot_id = ? AND status = 'approved'", botId)) {
-      if (this.transition(String(action.id), 'approved', 'withdrawn', { text: 'This bot was paused by its owner. Nothing was sent; carry on without it when resumed.' }))
+      if (this.transition(String(action.id), 'approved', 'withdrawn', { text: 'This bot was paused, so nothing was sent. Carry on without it when resumed.' }, 'bot_action_owner_paused'))
         this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
     }
   }
@@ -271,14 +299,14 @@ export class BotActions {
   }
   expireDue(): void {
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'open' AND expires_at <= ?", this.host.store.now())) {
-      if (this.transition(String(a.id), String(a.status), 'expired', { text: 'This call expired. Carry on without it; do not try the same call again without a new reason.' })) this.finish(a as unknown as ActionRow)
+      if (this.transition(String(a.id), String(a.status), 'expired', { text: EXPIRED_WORK_TEXT })) this.finish(a as unknown as ActionRow)
     }
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'approved'") as unknown as ActionRow[])
       if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) this.sendTimeout(action)
   }
   withdrawChanged(botId?: string): void {
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)) {
-      if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: this.host.store.activation(String(a.activation_id))?.trigger.kind === 'schedule' ? 'This schedule or its tool changed since you saw it. Nothing was sent; carry on without it.' : 'This tool or its permission changed. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
+      if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: this.host.store.activation(String(a.activation_id))?.trigger.kind === 'schedule' ? 'This schedule or its tool changed since you saw it. Nothing was sent. Carry on without it.' : 'This tool or its permission changed, so nothing was sent. Carry on without it.' }, this.host.store.activation(String(a.activation_id))?.trigger.kind === 'schedule' ? 'bot_action_schedule_changed' : 'bot_action_permission_changed')) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
     }
   }
   get(id: string): ActionRow | undefined { return this.host.store.get('SELECT * FROM bot_actions WHERE id = ?', id) as unknown as ActionRow | undefined }
@@ -302,7 +330,7 @@ export class BotActions {
     return { text, isError: true }
   }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
-    if (!this.host.enabled()) return { text: 'Asks first is off.', isError: true }
+    if (!this.host.enabled()) return { text: 'This tool cannot be used now. Carry on without it.', isError: true }
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
     const existing = this.host.store.get('SELECT id, args_digest, target_json FROM bot_actions WHERE call_key = ?', callKey)
@@ -328,7 +356,7 @@ export class BotActions {
     if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
     if (unanswered.length >= MAX_SAME_WAKES)
-      return this.refuse(row, unanswered[0], 'Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
+      return this.refuse(row, unanswered[0], row.trigger.kind === 'schedule' ? 'Three requests for this tool are waiting or were not sent. Say what you need in your report.' : 'Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
     const refused = unanswered.find(action => action.args_digest === digest)
     if (refused)
       return this.refuse(row, refused, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')
@@ -354,13 +382,14 @@ export class BotActions {
     return { text: 'This call is held for your owner. End your turn now.' }
   }
   /** The only status writer. Settlement clears executable arguments in the same statement. */
-  transition(id: string, from: string, to: string, result?: BotMcpCallOutcome): boolean {
+  transition(id: string, from: string, to: string, result?: BotMcpCallOutcome, withdrawalReason?: BotActionRefusalCode): boolean {
     return this.host.store.db.transaction(() => {
       const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
         result_json = CASE WHEN args_json = '"[forgotten]"' THEN '{"text":"[forgotten]"}' ELSE ? END, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
         ran_at = CASE WHEN ? IN ('running', 'done') THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
       to, pending.has(to) ? 1 : 0, result ? JSON.stringify(boundedActionResult(result)) : null,
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
+      if (moved && to === 'withdrawn') this.host.store.run("UPDATE bot_actions SET card_json = json_set(COALESCE(card_json, '{}'), '$.withdrawalCode', ?) WHERE id = ?", withdrawalReason ?? withdrawalCode({ card_json: null, result_json: JSON.stringify(result ?? {}) }), id)
       if (moved && result?.notSentInTime) this.host.store.run("UPDATE bot_actions SET card_json = json_set(card_json, '$.settledAt', ?) WHERE id = ?", this.host.store.now(), id)
       if (moved && ['approved', 'running'].includes(to)) {
         const action = this.get(id)!
@@ -416,8 +445,8 @@ export class BotActions {
     if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(JSON.parse(action.result_json).text, 'bot_action_unreachable')
     if (action.status === 'expired') throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
     if (action.status === 'withdrawn') {
-      if (action.result_json && JSON.parse(action.result_json).text?.includes('changed since')) throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
-      throw new BotActionChanged('No longer needed, so nothing was sent.', 'bot_action_withdrawn')
+      const code = withdrawalCode(action)
+      throw new BotActionChanged(botActionRefusalText(code), code)
     }
     if (action.status !== 'open') throw new BotActionChanged('This was already answered.', 'bot_action_settled')
     if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
@@ -428,7 +457,7 @@ export class BotActions {
     const row = this.host.store.activation(action.activation_id)
     if (row?.trigger.kind === 'schedule' && this.host.obsolete(action)) {
       if (settle) this.host.store.db.transaction(() => {
-        if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent; carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(action))
+        if (this.transition(action.id, 'open', 'withdrawn', { text: 'This schedule changed since you saw it. Nothing was sent. Carry on without it.' }, 'bot_action_schedule_changed')) this.host.store.db.afterCommit(() => this.finish(action))
       })
       throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
     }
@@ -455,11 +484,12 @@ export class BotActions {
   }
   private async runApproved(id: string, refresh = false): Promise<void> {
     if (refresh) await this.host.refresh()
+    this.withdrawDisabled()
     const action = this.get(id)
     if (!action || action.status !== 'approved') return
     if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) { this.sendTimeout(action); return }
     if (this.host.store.registry(action.bot_id)?.pausedReason === 'owner') {
-      this.transition(id, 'approved', 'withdrawn', { text: 'This bot was paused by its owner. Nothing was sent; carry on without it when resumed.' })
+      this.transition(id, 'approved', 'withdrawn', { text: 'This bot was paused, so nothing was sent. Carry on without it when resumed.' }, 'bot_action_owner_paused')
       this.finish(action)
       return
     }
@@ -469,7 +499,7 @@ export class BotActions {
       let intact = false
       try { intact = Boolean(action.exec_args && action.exec_args.length <= ACTION_MAX_ARGUMENT_CHARS && !containsCredential(JSON.parse(action.exec_args)) && actionDigest(JSON.parse(action.exec_args)) === action.args_digest) } catch { /* Corrupt arguments are never recoverable. */ }
       if (intact && current && !this.host.binding(current, JSON.parse(action.target_json)) && !this.host.obsolete(action)) return
-      this.transition(id, 'approved', 'withdrawn', { text: 'This changed since you saw it. Nothing was sent; carry on without it.' })
+      this.transition(id, 'approved', 'withdrawn', { text: 'This changed since you saw it. Nothing was sent. Carry on without it.' }, 'bot_action_binding_changed')
       this.finish(action)
       return
     }
@@ -497,11 +527,12 @@ export class BotActions {
       await this.runApproved(String(action.id))
   }
   async reconcile(): Promise<void> {
+    this.withdrawDisabled()
     this.host.store.pruneWorkRefusals()
     this.withdrawChanged()
     this.expireDue()
     const interrupted = this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")
-    await this.host.refresh()
+    if (interrupted.length) await this.host.refresh()
     this.withdrawChanged()
     if (this.host.store.get("SELECT 1 FROM bot_actions WHERE status IN ('open', 'approved') LIMIT 1")) this.host.held()
     for (const a of interrupted) {

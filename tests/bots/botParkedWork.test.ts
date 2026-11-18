@@ -99,9 +99,9 @@ describe.each(['question', 'budget_exhausted', 'usage_limit'])('parked work: %s'
 /** Review baseline: observe both readers, the refusal text, notes, and /clear before moving those decisions. */
 describe.each([
   ['question', 'question', 'paused', 'This work waits for your answer to its question. Answer it to let it carry on, or stop it.', 'question'],
-  ['question', 'question_answered', 'queued', 'This work has your answer. It carries on when the work before it is done.', 'noted'],
+  ['question', 'question_answered', 'queued', 'This work has your answer and carries on by itself.', 'noted'],
   ['budget_exhausted', 'budget_exhausted', 'paused', 'This work ran out of room. Answer its ask to let it carry on, or stop it.', 'noted'],
-  ['budget_exhausted', 'room_allowed', 'queued', 'This work already has more room. It carries on when the work before it is done.', 'noted'],
+  ['budget_exhausted', 'room_allowed', 'queued', 'This work already has more room and carries on by itself.', 'noted'],
   ['usage_limit', 'usage_limit', 'paused', 'This work waits for a usage limit to reset. It carries on then, or press Resume to try now.', 'noted']
 ])('work readers and controls: %s / %s', (reason, marker, status, refusal, notes) => {
   it('agrees about pending and ready work, with the existing refusal and note result', async () => {

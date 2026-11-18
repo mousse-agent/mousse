@@ -57,7 +57,7 @@ export const WORK_WAIT_RULES = {
     stranded: (row, facts) => !facts.approvalExists(row),
     endReason: 'action_gone', endLine: nothingToWaitFor, resume: 'continue', checkBeforeResume: true,
     continuation: (_row, _facts) => ({}),
-    continueRefusal: (row) => row.endReason === 'approval_answered' ? 'This work has your answer and carries on when a slot is free.' : 'This work waits for Send or Not now on its held action.',
+    continueRefusal: (row) => row.endReason === 'approval_answered' ? 'This work has your answer and carries on by itself.' : 'This work waits for Send or Not now on its held action.',
     waitsOnOwner: (row, _facts) => row.endReason === 'approval',
     needsOwner: (row, facts) => Boolean(facts.store().get("SELECT 1 FROM bot_actions WHERE activation_id = ? AND status = 'open' AND message_id IS NOT NULL", row.id)),
     takesNotes: (row) => row.endReason !== 'approval', noteRefusal: 'approval',
@@ -72,7 +72,7 @@ export const WORK_WAIT_RULES = {
     // Unread wait events are assembled from storage inside continueWith, independent of this park reason.
     continuation: (_row, _facts) => ({}),
     checkBeforeResume: true,
-    continueRefusal: (_row) => 'This work carries on by itself when its time or event comes, or when a slot is free. Stop it if it is no longer needed.',
+    continueRefusal: (_row) => 'This work carries on by itself when its time or event comes. Stop it if it is no longer needed.',
     waitsOnOwner: (_row, _facts) => false, needsOwner: (_row, _facts) => false,
     takesNotes: (_row) => true, noteRefusal: 'waiting',
     line: (row, facts) => {
@@ -87,7 +87,7 @@ export const WORK_WAIT_RULES = {
     stranded: (row, facts) => !facts.questionExists(row),
     endReason: 'question_gone', endLine: questionGoneText, resume: 'continue', continuation: (_row, _facts) => ({ questionAnswered: true }), checkBeforeResume: true,
     continueRefusal: (row) => row.endReason === 'question_answered'
-      ? 'This work has your answer. It carries on when the work before it is done.' : QUESTION_WORK_WAITING_TEXT,
+      ? 'This work has your answer and carries on by itself.' : QUESTION_WORK_WAITING_TEXT,
     waitsOnOwner: (row, _facts) => row.endReason === 'question',
     needsOwner: (row, facts) => {
       const question = facts.store().workQuestion(row.id)
@@ -103,7 +103,7 @@ export const WORK_WAIT_RULES = {
     stranded: (row, facts) => row.endReason === 'budget_exhausted' && facts.roomStranded(row),
     endReason: 'nothing_to_wait_for', endLine: nothingToWaitFor, resume: 'continue', continuation: (_row, _facts) => ({ moreRoom: true }), checkBeforeResume: false,
     continueRefusal: (row) => row.endReason === 'room_allowed'
-      ? 'This work already has more room. It carries on when the work before it is done.'
+      ? 'This work already has more room and carries on by itself.'
       : 'This work ran out of room. Answer its ask to let it carry on, or stop it.',
     waitsOnOwner: (row, facts) => facts.store().openAsks(row.botId).some((ask) => ask.activationId === row.id),
     needsOwner: (row, facts) => facts.store().openAsks(row.botId).some((ask) => ask.activationId === row.id && ask.messageId !== null),

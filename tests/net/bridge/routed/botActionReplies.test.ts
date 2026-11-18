@@ -75,6 +75,12 @@ const refusals = [
   ['paused', 'Resume Mail to send this.'],
   ['expired', 'This expired, so nothing was sent.'],
   ['withdrawn', 'No longer needed, so nothing was sent.'],
+  ['work_ended', 'This work ended. Nothing was sent.'],
+  ['owner_paused', 'This bot was paused, so nothing was sent.'],
+  ['permission_changed', 'This tool or its permission changed, so nothing was sent.'],
+  ['disabled', 'This could not wait for your owner after all, so nothing was sent.'],
+  ['owner_removed', 'You removed this request, so nothing was sent.'],
+  ['binding_changed', 'This changed since you saw it. Nothing was sent.'],
   ['schedule_changed', 'This changed since you saw it. Nothing was sent.'],
   ['settled', 'This was already answered.'],
   ['gone', "This can't be sent any more."],
@@ -89,11 +95,12 @@ it.each(refusals)('reports %s before effects over a real link', async (reason, s
   f.store.run('DELETE FROM bot_actions')
   f.store.setPaused(realBot, reason === 'paused' ? 'owner' : null)
   if (reason !== 'gone') {
-    const status = reason === 'schedule_changed' ? 'withdrawn' : ['expired', 'withdrawn'].includes(reason) ? reason : reason === 'settled' ? 'done' : reason === 'unreachable' ? 'failed' : 'open'
-    f.store.run(`INSERT INTO bot_actions (id, call_key, bot_id, activation_id, lane, kind, target_json, args_json, args_digest, binding_json, status, expires_at, created_at, result_json)
-      VALUES (?, ?, ?, 'missing-run', 'run', 'mcp', '{}', '{}', ?, '{}', ?, ?, ?, ?)`,
+    const withdrawn = ['schedule_changed', 'work_ended', 'owner_paused', 'permission_changed', 'disabled', 'owner_removed', 'binding_changed'].includes(reason)
+    const status = withdrawn ? 'withdrawn' : ['expired', 'withdrawn'].includes(reason) ? reason : reason === 'settled' ? 'done' : reason === 'unreachable' ? 'failed' : 'open'
+    f.store.run(`INSERT INTO bot_actions (id, call_key, bot_id, activation_id, lane, kind, target_json, args_json, args_digest, binding_json, status, expires_at, created_at, result_json, card_json)
+      VALUES (?, ?, ?, 'missing-run', 'run', 'mcp', '{}', '{}', ?, '{}', ?, ?, ?, ?, ?)`,
       ACTION, ACTION, realBot, 'b'.repeat(64), status, new Date(f.clock.now + 60_000).toISOString(), f.store.now(),
-      reason === 'unreachable' ? JSON.stringify({ text: sentence, notSentInTime: true }) : reason === 'schedule_changed' ? JSON.stringify({ text: sentence }) : null)
+      reason === 'unreachable' ? JSON.stringify({ text: sentence, notSentInTime: true }) : withdrawn ? JSON.stringify({ text: sentence }) : null, withdrawn ? JSON.stringify({ withdrawalCode: `bot_action_${reason}` }) : null)
   }
   const input = { botId: realBot, actionId: ACTION, digest: 'a'.repeat(64), answer: 'send' as const }
   check = () => f.bots.service.actionCheck(input)

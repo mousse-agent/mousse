@@ -2,7 +2,7 @@
 
 A bot that works while its owner is away needs five things that a chat assistant does not: nothing that starts it may be lost, its timers must survive a closed laptop, its memory must stay small and true, it must be able to act without holding keys or acting unasked, and it must not ring at 3 AM. This plan says how personal bots get all five while the bot chat stays what it is: a messenger with bubbles, quick replies and one About panel.
 
-**Status:** phases 0 and 1 are built and merged (issues #1288 and #1312; see [What phases 0 and 1 built](#what-phases-0-and-1-built) for where they differ from the text below). Phases 2 to 4 are design. Written against `origin/master` at `0bfd7f476` (15 Nov 2026), where the line numbers below point, and checked again for substance at `2e8a5b9ca` by an independent review, which this version takes in (see How this was decided). The line numbers have not been kept up as the code changed: find things by name. Paths are relative to the repository. Terms are the [glossary](../GLOSSARY.md)'s; how bots work today is in [`docs/bots.md`](../bots.md) and [`docs/bot-memory.md`](../bot-memory.md).
+**Status:** phases 0 and 1 are built and merged (issues #1288 and #1312; see [What phases 0 and 1 built](#what-phases-0-and-1-built) for where they differ from the text below). Phase 2 is built behind an experimental switch that is off; phases 3 and 4 remain design. See [What phase 2 built](#what-phase-2-built). Written against `origin/master` at `0bfd7f476` (15 Nov 2026), where the line numbers below point, and checked again for substance at `2e8a5b9ca` by an independent review, which this version takes in (see How this was decided). The line numbers have not been kept up as the code changed: find things by name. Paths are relative to the repository. Terms are the [glossary](../GLOSSARY.md)'s; how bots work today is in [`docs/bots.md`](../bots.md) and [`docs/bot-memory.md`](../bot-memory.md).
 
 ## The request, and the short answer
 
@@ -13,7 +13,7 @@ The starting point was a checklist for always-on agents, written for a cloud age
 | 1 | **Event inbox.** A table between webhooks and the agent; acknowledge fast; one worker per user; batch rapid messages | Every start is a `bot_activations` row with a unique key, so a repeat starts nothing; the owner's message commits with its turn. Per bot, one chat turn at a time and up to three runs. Messages sent while the bot answers join that turn (#1168). Wakes on a thread, a pull request or a background command (#1212, #1214) | Two starts that a crash can still lose or double; a reply that is not sent when the owner has already written again; pull request wakes on checks and reviews; later, a page check with no model call, and requests from outside held by Mousse ID |
 | 2 | **Timers.** Their own table; one-offs apart from repeating ones; a poller drops due timers into the inbox | One-offs in `bot_reminders` (reminders, work reminders, wakes), repeating ones in the shared scheduler; one armed timer plus a 60 s tick; each fires once by key | One rule for missed time; work that waits for a time or event and goes on in its own thread; a schedule that ends itself; snooze, "until", and repeating lines with no model run |
 | 3 | **Lean memory and dreaming.** Store only what can't be looked up; load a small index; tidy stale facts | A complete journal that is searched, not loaded; capped, dated, versioned entries; a Memory dialog | A "where I left off" line per automation; an index of files; retiring an entry without destroying the owner's words; tidying by code, with a model pass only later and only if needed |
-| 4 | **Unattended permissions.** No raw keys in the sandbox; risky actions pause for approval without blocking the worker | A grant per bot; asks; work that waits on a question without a run slot; a secret store for threads (#595) | Closing the leaks first; "asks first" for single actions, held and run by Mousse, with Send and Not now; later, one automation allowed to do one thing alone, and secrets for bots, bound to a service |
+| 4 | **Unattended permissions.** No raw keys in the sandbox; risky actions pause for approval without blocking the worker | A grant per bot; asks; work that waits on a question between provider turns; a secret store for threads (#595) | Closing the leaks first; "asks first" for single actions, held and run by Mousse, with Send and Not now; later, one automation allowed to do one thing alone, and secrets for bots, bound to a service |
 | 5 | **Outbox.** Queue what goes out, so the agent paces notifications | Tell me levels; quiet runs post nothing; nudges and wakes wait out 22:00 to 08:00 | The chat row is written at once and only the telling is paced: quiet hours for everything unattended, one fold instead of five banners, and later a push to the phone |
 
 So the checklist's tables mostly exist under other names. The plan adds **no inbox table, no timers table and no outbox table**. What it adds is the behaviour those tables were meant to buy, where it is missing.
@@ -75,11 +75,11 @@ This is the whole visible change, across all five capabilities.
  schedule (shared store) ─┤     one row per start, unique key       run lane (3)       the record,        paced: banner,
  event: thread, PR, ──────┘            ▲                 │                             written at once    sound, badge,
  command, page                         │                 ▼                                                phone
-                                       └──── parked work, no run slot ◄── waits on: your answer · your approval ·
+                                       └──── parked work, no provider turn ◄── waits on: your answer · your approval ·
                                                                           more room · a usage limit · a time or event
 ```
 
-Sources never start a turn themselves. Each inserts an activation by key, so a repeat inserts nothing. Work that must wait leaves its run slot and comes back through the same queue. Every message the bot writes goes through one post, and the telling is decided there.
+Sources never start a turn themselves. Each inserts an activation by key, so a repeat inserts nothing. Work that must wait ends its provider turn and resumes from storage. Every message the bot writes goes through one post, and the telling is decided there.
 
 ## Shared pieces
 
@@ -119,7 +119,7 @@ Text from outside enters a turn inside a frame with fixed markers, in which the 
 
 ### 3. One way for work to wait
 
-Today work waits without a run slot for three reasons, on three code paths (`parkForQuestion`, `budgetEnd`, `usagePause`). The plan adds two reasons and makes the path one: `park(row, reason)`, one readiness check, one switch in `resumeWork`, one table of rules for `settleStrandedWork` and the work line.
+At the original plan’s base, work waited between provider turns for three reasons, on three code paths (`parkForQuestion`, `budgetEnd`, `usagePause`). The plan adds two reasons and makes the path one: `park(row, reason)`, one readiness check, one switch in `resumeWork`, one table of rules for `settleStrandedWork` and the work line.
 
 | Parked as | Woken by | Stranded when (ends with a line) | Work line |
 |---|---|---|---|
@@ -131,7 +131,7 @@ Today work waits without a run slot for three reasons, on three code paths (`par
 
 Today only work can wait (`workWaits`, `BotStore.ts:389-390`). A scheduled run may park for one reason, an approval, and the schedule's skip check, which reads only running and walled runs (`holding()`, `BotEngine.ts:1425`), must count a parked run of the same schedule too.
 
-Every parked piece ends after a week. A free run slot goes first to what the owner just unblocked (an answer, an approval, more room), then usage-limit resets, then waits that are over, then the queue in today's order.
+Superseded by #1452: parked work has no general week expiry and the run lane has no slots or concurrency count. Ready work continues beside other work; the queue cap remains except for action-card waits.
 
 ### 4. What is due next
 
@@ -244,7 +244,7 @@ About → Runs and the automation card word each combination: "Inbox check · ev
 
 ### Secrets
 
-**As built.** The secret store (#595) is for threads: values in `<profile>/secrets/refs.json` (mode 0600), a masked card, use by name through `secret_run`, masked output. Bots have none of it (`BOT_OFFERABLE_APP_TOOLS`, `manifest.ts:199`). Four things are wrong today, before any bot secret exists:
+**As built.** The secret store (#595) is for threads: values in `<profile>/secrets/refs.json` (mode 0600), a masked card, use by name through `secret_run`, masked output. The original decision that bots had none is superseded by #1375: bots have `secret_request` and `secret_run` under their grant. Four things are wrong today, before any bot secret exists:
 
 1. **The owner's environment reaches a bot's commands.** Claude Code's sandbox denies only the three Claude variables (`harness/claude/locked.ts:67`); any `GITHUB_TOKEN`, `OPENAI_API_KEY` or `AWS_*` in Mousse's environment reaches a bot's Bash, which can print it to the model. Pi inherits the provider's key too.
 2. **A background command runs outside every sandbox**, by design and as documented (it needs the network and the owner's sign-ins for `gh run watch`). So it reaches what the owner's account can, the secrets file included, and the end of its output goes into the bot's next turn.
@@ -253,8 +253,8 @@ About → Runs and the automation card word each combination: "Inbox check · ev
 
 **Decisions**
 
-- **Close these first, in phase 0.** A bot's turn on the owner's entry starts from the locked environment plus the sign-in variables, not the owner's whole environment (`ClaudeSubscriptionProviderService.ts:2839-2842`; Bash inherits the Claude Code process's environment, so that is where it is fixed), with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. Sandboxed Bash has no network, so `gh` and `aws` never worked there and little breaks. A background command starts only in a turn the owner's own message started. Held-back secrets stay held back in `memory_read` and search.
-- **No secret where commands are not held.** On Pi, on Windows and on Linux without bubblewrap, a bot's commands run as the owner. There a bot that may run commands is not offered a secret, and a bot that holds a secret is not offered "run commands"; each is refused in plain words that name the other. Before the first bot secret (phase 3), a background command of a bot that holds a secret runs in the same sandbox as Bash on Linux and macOS (this needs `@anthropic-ai/sandbox-runtime`, which Mousse does not ship yet), or is refused. What stays a promise is said in the last part of this section.
+- **Close these first, in phase 0.** A bot's turn on the owner's entry starts from the locked environment plus the sign-in variables, not the owner's whole environment (`ClaudeSubscriptionProviderService.ts:2839-2842`; Bash inherits the Claude Code process's environment, so that is where it is fixed), with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. Sandboxed Bash has no network, so `gh` and `aws` never worked there and little breaks. The original owner-turn-only background-command decision is superseded by #1452: any bot chat turn may start one under its grant. Held-back secrets stay held back in `memory_read` and search.
+- **Superseded by #1375: no secret where commands are not held.** Bots now have secret commands under their grant even where commands run as the owner. The following was the original design, not a shipped restriction: On Pi, on Windows and on Linux without bubblewrap, a bot's commands run as the owner. There a bot that may run commands is not offered a secret, and a bot that holds a secret is not offered "run commands"; each is refused in plain words that name the other. Before the first bot secret (phase 3), a background command of a bot that holds a secret runs in the same sandbox as Bash on Linux and macOS (this needs `@anthropic-ai/sandbox-runtime`, which Mousse does not ship yet), or is refused. What stays a promise is said in the last part of this section.
 - **A bot holds a name; Mousse holds the value.** The checklist's "outside proxy" is, in the first version, a tool Mousse runs: `secret_fetch({ secret, method, path, query?, headers?, body? })`. The bot never writes the value anywhere: Mousse adds it, in the one place fixed when the secret was saved.
 - **A secret is bound to more than a host**, when it is saved:
   - an `https` origin (host and port) and nothing else;
@@ -272,12 +272,12 @@ About → Runs and the automation card word each combination: "Inbox check · ev
 **Decisions**
 
 - **A third level beside allowed and not allowed: asks first.** It is stored in the grant beside the allowed tool, so About, Remove and approval work unchanged.
-- **Mousse decides what asks first, and when it can't tell, it asks.** An MCP tool that says it is read-only does not ask. One with no hints does not ask when its name starts with a reading word (get, list, search, read, find, fetch, show, describe, query, count). Every other MCP tool asks. `secret_fetch` asks for anything but a read, when the secret may change things at all. MCP tools and `secret_fetch` exist only in work and runs, so a chat turn never meets a card of this kind.
-- **Mousse holds the call and runs it.** The deferred tool call of Claude Code was considered and rejected: it works only when a turn makes a single call, only in one runtime, and needs sessions kept on disk. The calls worth holding are ones Mousse already runs itself (`callForBot`, the app-tool registry). So Mousse stores the exact call in `bot_actions`, the work parks as `approval` without a run slot, and on **Send** Mousse makes the stored call and the work goes on with its result.
+- **Not built (C6): Mousse decides what asks first, and when it can't tell, it asks.** An MCP tool that says it is read-only does not ask. One with no hints does not ask when its name starts with a reading word (get, list, search, read, find, fetch, show, describe, query, count). Every other MCP tool asks. `secret_fetch` asks for anything but a read, when the secret may change things at all. MCP tools and `secret_fetch` exist only in work and runs, so a chat turn never meets a card of this kind.
+- **Mousse holds the call and runs it.** The deferred tool call of Claude Code was considered and rejected: it works only when a turn makes a single call, only in one runtime, and needs sessions kept on disk. The calls worth holding are ones Mousse already runs itself (`callForBot`, the app-tool registry). So Mousse stores the exact call in `bot_actions`, the work parks as `approval` between provider turns, and on **Send** Mousse makes the stored call and the work goes on with its result.
 - **What a held call is bound to**, so that Send does exactly what the card showed and does it once:
   - **One row per call.** The row is unique on the activation, its dispatch and the runtime's tool call id, so a call the runtime makes again returns the same row and the same card.
   - **The arguments as they will be sent** are kept exactly, apart from the masked copy the card and the journal show, and are cut down to the masked copy once the call has settled.
-  - **What it was approved against:** a digest of those arguments, the MCP server as installed and the tool's schema, the bot's grant revision, the schedule's revision if a schedule asked, and the limit of the device that started the work.
+  - **What it was approved against:** a digest of those arguments, the MCP server as installed and the tool's schema, the granted server/tool pair and its held level, the schedule's revision if a schedule asked, and the limit of the device that started the work.
   - **Send is a compare-and-set.** It names the row and the digest the card showed. It is refused, and the card redrawn, when the row has expired, was withdrawn, or any of those bindings has changed since ("This changed since you saw it"). A phone's Send names them too, so a stale phone can never approve a different email.
   - **Run once.** `open → approved → running` is committed before the call; then `done`, `failed` or `uncertain`. A call left `running` by a restart becomes `uncertain`, is never made again, and the bot is told to check first. A tool that takes an idempotency key is given the row's.
   - **Withdrawn with what it belongs to**, in the same transaction: a Stop of the work, a Forget of the card or of the message that asked for the work, the removal of the schedule, the removal of the tool or the grant, the deletion of the bot.
@@ -287,16 +287,20 @@ About → Runs and the automation card word each combination: "Inbox check · ev
 - **No "Always allow this".** Work the owner asks for in the chat asks each time: the owner is there. The earlier drafts of this plan had a broad Always, then one limited to destinations approved before; both were dropped, because a place the owner approved once can be a shared folder or a mailing list, and what is sent there can be shaped by what the work has read.
 - **One automation may be let to do one thing alone, in one place** (phase 3). The owner asks for it in their own turn ("let the scan sorter file things without asking"), and the answer is an ask in the ask's look: "Let ‘Sort new scans’ upload to your Scans folder in Drive without asking?" · Allow · Not now, on the computer only. What is stored is that automation, that tool, and the place as named arguments with their exact values, taken from a call the owner has already approved. A later call from that automation to that tool with those values runs; anything else asks. A tool with no argument Mousse can read as a place can't be let alone.
 - **Caps where the calls are made.** Every call in these classes, held or let alone, writes a `bot_actions` row. Over 20 an hour per tool or 100 a day per bot, a call that would run alone becomes a card: "Kai has uploaded 20 files this hour. Upload this one too?"
-- **From a phone:** Send and Not now, from any device that reaches the bot. A notification names the action, never its content.
+- **From a phone:** Send and Not now require Work access on a device that reaches the bot. A notification names the action, never its content.
 
 ### What asks first does not cover
 
-Said plainly, because a card that seems to cover everything is worse than none.
+As built on master, it holds a bot's own MCP tool calls marked asks-first, through direct calls and `use_tool`. No classifier marks tools yet; only the development setter does.
 
-- **Commands, where no sandbox holds them.** On Pi, on Windows and on Linux without bubblewrap, a bot that may run commands can do anything the owner's account can, card or no card. That is today's "run commands" there, and this plan does not change it; it only refuses secrets to such a bot (above) and puts the choice to the owner (open question 1).
-- **The bot's browser.** Whatever the owner signed the bot's browser in to, the bot can act on there, and Mousse can't tell a click that reads from one that buys.
-- **What is sent.** An automation let alone always goes to the same place, but what it puts there can be shaped by what it read, and a shared place is read by everyone it is shared with.
-- **The owner's threads.** Starting, messaging and stopping a thread keep today's rule: one permission, only in a turn the owner's own message started, with no card per thread (`docs/bots.md`, Use your threads, "The risk that remains").
+It does not cover:
+
+- The owner's threads or thread jobs, including jobs started by `schedule_create` and `schedule_run`. Work, scheduled runs and chat turns from creation, owner messages or taps, wakes, questions and jobs can act on threads under the grant; another bot's message is read-only.
+- `approval_respond`, when the computer permits agents to answer approvals.
+- Commands, including background commands and secret commands; where no sandbox holds them they run as the owner's account.
+- Messages to other bots, whose turn may itself start a background command.
+- The bot's browser and anything it can do in its signed-in browser session.
+- MCP tools not marked asks-first.
 
 ## 5. Telling
 
@@ -410,10 +414,27 @@ Both phases are on `master`. Each item was one pull request, reviewed on its own
 
 **Not verified in either phase:** real sleep and wake; process isolation of the sandbox; macOS and Windows; live models and GitHub; how desktop banners look, sound and respond to a click; the phone app and other computers through the bridge.
 
+## What phase 2 built
+
+C0, C1, C2, C3a, C8, C3b (#1392), C5 (#1403 and #1475), and C4 (#1390) are merged. Asks first remains behind a switch that is off. The classifier and switch-on are C6. Where this differs from the design above, this section records the built behaviour:
+
+- **Accepted Send:** at most ten minutes after the tap to reach the service, independent of the card's own expiry. Before dispatch it says Waiting for the service; afterwards Sending. A timeout sends nothing, clears executable arguments and tells the work. The work may ask again.
+- **Binding:** exact arguments and their digest, installed server id and tool name, configuration and schema digests, the granted pair's level, the starting device's limit, and schedule revision for a scheduled call. An unrelated permission or grant revision change does not invalidate it. Cards from #1340's older binding withdraw on upgrade (development profiles only).
+- **Freshness:** work cards last 48 hours; a schedule card lasts one gap, at least an hour, or one hour if its schedule cannot be found. A running call finishes. Switch rollback withdraws open and accepted unstarted calls with a truthful outcome.
+- **Unattended limits:** schedules and unattended work share history for each bot and tool. Three open, declined or expired cards since owner input refuse further requests; an identical declined/expired request is refused until the owner writes. Owner-started work keeps its own history. An identical open request is refused with a pointer to the existing card, not a second card.
+- **Nudges:** at most two, one hour after the card was told and a day after the first nudge was told; questions and cards share spacing, and quiet hours defer them. Nothing nudges at or after expiry or with the switch off; an hourly schedule's card never nudges.
+- **Devices and waiting:** Work access is required to answer a card. The queue cap excludes work waiting on a card. There are no run slots or general week expiry since #1452. Thread and command authority is as described under What asks first does not cover; the older secrets and background-command restrictions above were superseded.
+
 ## Open questions
 
-1. **Commands where no sandbox holds them** (Pi, Windows, Linux without bubblewrap). A bot with "run commands" there can do anything the owner's account can, in a run nobody is watching too, and no card can hold it. The review behind this version would switch commands off in runs nobody started on those computers. That would end every scheduled bot that runs a script on Windows. Recommended: keep them, since the owner allowed it for that bot and can switch it off for the whole computer; refuse secrets to such a bot; and make the "run commands" ask say, on those computers, that it is the owner's whole account.
-2. **A background command starts only in the owner's own turn.** This narrows what #1214 shipped: a wake's turn can no longer start one, so "the tests failed, run them again" becomes work, which runs in the sandbox. Recommended: yes.
+- After a rollback, should a tool marked asks-first run without asking, or be refused until the switch is on again?
+
+- Does card expiry remain alongside `tool-api.md`'s no-default-timeout plan?
+- Does the three-unsent rule remain alongside that plan's “no counts” decision?
+- Does an owner note fence an existing card? Today it lifts refusals but leaves the card sendable.
+
+1. **Commands where no sandbox holds them** (Pi, Windows, Linux without bubblewrap). A bot with "run commands" there can do anything the owner's account can, in a run nobody is watching too, and no card can hold it. The review behind this version would switch commands off in runs nobody started on those computers. That would end every scheduled bot that runs a script on Windows. The original recommendation to refuse secrets is superseded by #1375. The remaining original recommendation was to keep commands, since the owner allowed it and can switch it off for the computer; and make the "run commands" ask say, on those computers, that it is the owner's whole account.
+2. **Superseded by #1452:** background commands are allowed in any bot chat turn under the grant, including a wake, instead of the proposed owner-turn-only restriction.
 3. **No "Always" at all for work the owner asks for.** An owner who has a bot send ten emails in a sitting taps Send ten times. Recommended: yes for now; the cards are the product, and letting one automation act alone covers the unattended case.
 4. **The owner's threads stay outside asks first**, as today. A card on every thread a bot starts would undo the hidden quick threads the product just gained. Recommended: leave it, and keep the computer's switch.
 5. **Quiet hours for threads too?** Bots and automations follow them from phase 1. Recommended: threads when asked for.

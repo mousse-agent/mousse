@@ -1,3 +1,4 @@
+import { MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
@@ -126,6 +127,28 @@ describe('work_start through the production registry', () => {
     const next = await start(f, turn.message.activationId!, dispatch.n)
     expect((await caller(next)()).workId).toBe(retry.workId)
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(2)
+  })
+
+  it('retries work dropped from the full queue', async () => {
+    const call = caller(await chat())
+    const park = async (workId: string) => {
+      await flush()
+      const turn = await start(f, workId)
+      await f.bots.tools.wakes!.wait!(botId, workId, { brief: 'Check later', dueAt: new Date(f.clock.now + 3600_000).toISOString() })
+      await finish(f, turn.payload)
+      expect(f.store.activation(workId)?.endReason).toBe('waiting')
+    }
+    const first = await call()
+    await park(first.workId)
+    for (let n = 0; n < MAX_QUEUED_ACTIVATIONS; n += 1) {
+      f.clock.now += 1
+      await park((await call({ ...request, title: `Other job ${n}` })).workId)
+    }
+    expect(f.store.activation(first.workId)).toMatchObject({ status: 'failed', endReason: 'queue_full' })
+    const retry = await call()
+    expect(retry.workId).not.toBe(first.workId)
+    expect(retry.status).toBe('started')
+    expect((await call()).workId).toBe(retry.workId)
   })
 
   it('repeats describe existing and ended work truthfully, and the report still replies to the owner message', async () => {
