@@ -55,7 +55,7 @@ export async function fetchWithSecret(vault: SecretVault, input: SecretFetchInpu
   try {
     const value = vault.value(name)
     if (!value || /[\r\n\x00]/.test(value)) return refuse('That secret is unavailable for a service read.')
-    headers[binding.header] = binding.format.replace('{}', value)
+    headers[binding.header] = binding.format.replace('{}', () => value)
     vault.markUsed(name)
     const response = await publicFetch(url.href, { method, headers, secretRead: true, signal: input.signal })
     const type = String(response.headers['content-type'] ?? 'application/octet-stream')
