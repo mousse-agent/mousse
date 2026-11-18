@@ -15,7 +15,7 @@ export function boundReadPath(raw: unknown, paths?: readonly string[]): string |
   if (typeof raw !== 'string' || !raw.startsWith('/') || /[?#\\\x00-\x20\x7f]|%2f|%5c/i.test(raw)) return
   let decoded: string
   try { decoded = decodeURIComponent(raw) } catch { return }
-  if (/[\\%?#\x00-\x1f\x7f]/.test(decoded) || decoded.includes('//') || decoded.split('/').some(s => s === '.' || s === '..')) return
+  if (/[;\\%?#\x00-\x1f\x7f\u2024-\u2026\u3002\ufe12\ufe19\ufe30\ufe52\uff0e\uff61]/.test(decoded) || decoded.includes('//') || decoded.split('/').some(s => s === '.' || s === '..')) return
   if (paths && !paths.some(p => decoded === p || decoded.startsWith(p + '/'))) return
   return decoded.split('/').map(encodeURIComponent).join('/')
 }
@@ -31,8 +31,10 @@ export function prepareSecretFetch(vault: SecretVault, input: SecretFetchInput):
   if (!binding.header || !binding.origin) return reject('The service binding is unavailable. Ask for the secret again.')
   const method = args.method ?? 'GET'
   if (method !== 'GET' && method !== 'HEAD') return reject('Only GET and HEAD reads are allowed.')
+  const unbounded = boundReadPath(args.path)
+  if (!unbounded) return reject('Use a path without ambiguous segments or encodings.')
   const path = boundReadPath(args.path, binding.paths)
-  if (!path) return reject('Use a path within the service binding, without ambiguous segments.')
+  if (!path) return reject(`That path is outside the service binding. Allowed path prefixes: ${binding.paths!.join(', ')}.`)
   const mask = vault.maskerFor(threadId) ?? ((s: string) => s)
   const safe = (s: string) => mask(s) === s && !pastedSecretShape(s)
   const url = new URL(path, binding.origin)
