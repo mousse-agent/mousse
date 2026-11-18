@@ -896,6 +896,7 @@ export class MmsProfileServices {
           isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
         },
         context: {
+          asksFirstEnabled: () => botAsksFirst(this.settings.get()),
           filesFolder: (botId) => botFilesFolder(homeDir, botId),
           situation: (botId) => this.botSituation(botId),
           scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,

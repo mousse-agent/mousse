@@ -16,7 +16,7 @@ import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import { workModelDetail } from '../../../shared/bots/personal/chips'
 import type { BotJournal } from '../seams'
-import type { BotMcpWhere } from '../mcp/BotMcp'
+import { installationOf, type BotMcpWhere } from '../mcp/BotMcp'
 import { outOfSightRow, workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotQuestionRow, type BotStore } from '../store/BotStore'
 import { plainChoices, type BotChatQuestion } from '../../../shared/bots/personal/questions'
 import { cardFileName, plainCards, type BotCard, type BotChatCard } from '../../../shared/bots/personal/cards'
@@ -490,7 +490,7 @@ export class BotChatProjection {
       note: text.note + (this.options.asksFirst?.() && mcp && tools.some(tool => {
         const where = this.options.mcpWhere?.(mcp.serverId)
         const server = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
-        return asksFirstFor({ tool, serverName: [server?.name ?? mcp.name ?? '', server?.installationId ?? mcp.serverId], readOnlyHint: server?.tools.find(t => t.tool === tool)?.readOnlyHint })
+        return asksFirstFor({ tool, serverName: [server?.name ?? mcp.name ?? '', server?.installationId ?? installationOf(mcp.serverId)], readOnlyHint: server?.tools.find(t => t.tool === tool)?.readOnlyHint })
       }) ? ' Some of these tools send or change things; those ask you before each use.' : ''),
       ...(tip ? { tip } : {}),
       status: cardStatus(escalation.status),
@@ -727,7 +727,7 @@ export class BotChatProjection {
         if (where?.state === 'off') return { id, title, note: `${name} is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.`, grantedAt, mark: 'Switched off' }
         if (where?.state === 'mcp_off') return { id, title, note: `MCP is turned off in Settings → Skills & MCP, so this gives nothing while it is. Turn it on there to use it again, or remove it.`, grantedAt, mark: 'MCP is off' }
         if (where?.state === 'changed') return { id, title, note: `${name} was changed since you allowed it (it runs from another address or command now), so this gives nothing until ${name} is allowed again. The bot asks when it needs it; you can also remove it.`, grantedAt, mark: 'Changed' }
-        if (this.options.asksFirst?.() && manifest.mcp.some(tool => tool.serverId === permission.mcp.serverId && asksFirstFor({ tool: tool.tool, serverName: [name, live?.installationId ?? permission.mcp.serverId], readOnlyHint: live?.tools.find(t => t.tool === tool.tool)?.readOnlyHint, storedLevel: tool.level })))
+        if (this.options.asksFirst?.() && manifest.mcp.some(tool => tool.serverId === permission.mcp.serverId && asksFirstFor({ tool: tool.tool, serverName: [name, live?.installationId ?? installationOf(permission.mcp.serverId)], readOnlyHint: live?.tools.find(t => t.tool === tool.tool)?.readOnlyHint, storedLevel: tool.level })))
           return { id, title, note: 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.', grantedAt, mark: 'Asks first', asksFirst: true }
         const shown = tools.slice(0, 6).join(', ')
         const unusable = live?.unusable.length ? ` (${live.unusable.length} more of its tools can't be used by a bot)` : ''

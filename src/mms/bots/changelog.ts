@@ -11,6 +11,7 @@
 export interface BotChangelogEntry {
   /** Increasing from 1; a bot keeps the highest it has seen. */
   id: number
+  asksFirst?: true
   /** When it landed, `YYYY-MM-DD`. */
   date: string
   /** One or two plain sentences, to the bot. */
@@ -132,6 +133,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   },
   {
     id: 24,
+    asksFirst: true,
     date: '2026-11-18',
     text: 'Tools that send or change things now ask your owner first. End your turn when a call is held; carry on with its result and never try another way around it. A scheduled run waits for the card, with later occurrences skipped. A run started by hand cannot wait: report what you would have sent.'
   }

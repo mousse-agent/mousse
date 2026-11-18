@@ -371,7 +371,7 @@ Each phase ships on its own and leaves bots working. The order is: what is unsaf
 
 - One park path, with the schedule's skip check counting a parked run.
 - `work_wait`.
-- Asks first, built behind a switch that is off and turned on when the whole of it is in: the engine and the held call's contract, the card, a scheduled run that parks, the phone.
+- Asks first, on by default since C6: the engine and the held call's contract, the card, a scheduled run that parks, the phone.
 
 **Phase 3: what needs approvals first.**
 

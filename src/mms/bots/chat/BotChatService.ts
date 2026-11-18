@@ -899,7 +899,7 @@ export class BotChatService {
       // Send can be accepted while the activation still waits for its service.
       const action = this.engine.actions.forWork(String(row.id))
       const settledWithoutAnswer = row.end_reason === 'approval_answered' && ['withdrawn', 'expired'].includes(action?.status ?? '')
-      const sending = row.end_reason === 'approval' && ['approved', 'running'].includes(this.engine.actions.forWork(String(row.id))?.status ?? '')
+      const sending = row.end_reason === 'approval' && ['approved', 'running'].includes(action?.status ?? '')
       return {
         id: row.id as string,
         status: row.status as BotAutomationRunStatus,
