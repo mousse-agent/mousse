@@ -135,12 +135,20 @@
   opacity: 0.7;
 }
 
-/* The open side chat's tab: its title, cut to fit, behind a back chevron. */
+/* The open side chat's tab: its title, cut to fit, behind a back chevron. A narrow panel drops tab labels, but this
+   one is the only place the title shows, so it stays. */
 .main-view-tab.is-side-chat .main-view-tab-label {
+  display: inline;
   max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@container main-area (max-width: 360px) {
+  .main-view-tab.is-side-chat .main-view-tab-label {
+    max-width: 110px;
+  }
 }
 
 .main-view-tab.is-side-chat .main-view-tab-icon {
