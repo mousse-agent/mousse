@@ -99,7 +99,7 @@ it('names the page in the returned and About labels',async () => {
   const entry=await add()
   expect(entry.label).toContain('runs when example.com changes')
   expect(f.bots.listSchedules(botId)[0]!.label).toContain('runs when example.com changes')
-  expect(f.bots.service.automationFacts(botId,entry.scheduleId)?.whenText).toContain('runs when example.com changes')
+  expect(f.bots.service.automationFacts(botId,entry.scheduleId)?.whenText).toBe('when example.com changes')
 })
 it('a late pre-edit fetch cannot overwrite the new generation snapshot',async () => {
   let old!: (r:fetcher.PublicResponse)=>void
