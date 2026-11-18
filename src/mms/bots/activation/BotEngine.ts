@@ -5541,6 +5541,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const wall = this.wallInTransaction(row.id, [current.status], this.timeWall(previous?.n ?? 0, effective))
         return { kind: wall.kind === 'wall' ? 'wall' : wall.kind === 'blocked' ? 'blocked' : 'none' }
       }
+      // The existing continuation guards above decide whether work can go on. Admit it before
+      // reading updates: a failed previous turn is not a permanent ending once this path accepts it.
+      // This and the dispatch insert commit together, or both roll back if prompt assembly fails.
+      if (!this.store.moveActivation(row.id, [current.status], 'running', { endReason: null })) return { kind: 'none' }
       const waits = current.trigger.kind === 'work' ? this.store.unreadWorkWaits(current.id) : []
       const actions = durableWork ? this.store.unreadWorkActions(current.id) : []
       const refusals = this.workRefusalUpdates(current.id)
@@ -5598,7 +5602,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.setLimits(row.id, limitsOf(effective))
       if (input.restart) this.store.setAutoRestarts(row.id, current.autoRestarts + 1)
       if (input.network) this.store.setOffline(row.id, false)
-      this.store.moveActivation(row.id, [current.status], 'running', { endReason: null })
       return { kind: 'sent', dispatch: this.store.dispatch(row.id, n)! }
     })
     if (decided.kind === 'budget') {

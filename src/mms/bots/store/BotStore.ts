@@ -2344,7 +2344,7 @@ export class BotStore {
       ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
   }
 
-  /** Model output or completion consumes an outcome. Ended work consumes all remaining outcomes: nobody can be told. */
+  /** Model output or completion consumes an outcome. Continuation admission restores running before this read; inactive terminal work has nobody to tell. */
   unreadWorkActions(workId: string): ActionRow[] {
     return this.all(`SELECT a.* FROM bot_actions a WHERE a.activation_id = ? AND a.status NOT IN ('open', 'approved', 'running')
       AND EXISTS (SELECT 1 FROM bot_activations w WHERE w.id = a.activation_id AND w.status NOT IN ('done', 'failed', 'cancelled'))
