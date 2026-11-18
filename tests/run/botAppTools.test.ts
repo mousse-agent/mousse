@@ -506,3 +506,14 @@ describe('work_wait', () => {
     expect(await fakeBots().call('work_wait', { why: 'Later', inMinutes: 30 })).toMatchObject({ isError: true, text: expect.stringContaining('Use wake') })
   })
 })
+
+it('page-check schedules reject say and invalid URLs before saving, and keep the page setting', async () => {
+  const bots = fakeBots()
+  for (const onlyIfChanged of [{url:'file:///etc/passwd'},{url:'https://u:p@example.com'},{url:'https://example.com',contains:'x'.repeat(201)}]) {
+    expect((await bots.call('bot_schedule_add',{when:{kind:'interval',minutes:15},prompt:'Watch tickets',onlyIfChanged})).isError).toBe(true)
+  }
+  expect((await bots.call('bot_schedule_add',{when:{kind:'interval',minutes:15},say:'Hi',onlyIfChanged:{url:'https://example.com'}})).isError).toBe(true)
+  const result=await bots.call('bot_schedule_add',{when:{kind:'interval',minutes:15},prompt:'Watch tickets',onlyIfChanged:{url:'https://example.com',contains:'tickets'}})
+  expect(result.isError).toBeFalsy()
+  expect(bots.schedules[0]).toMatchObject({onlyIfChanged:{url:'https://example.com',contains:'tickets'}})
+})
