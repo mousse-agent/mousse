@@ -3390,5 +3390,7 @@ it.each([
   const card = host.querySelector('.bot-secret-requests .secret-request-card')!
   expect(card?.textContent).toContain(`For ${name}, read only. Kai can't see it or send it anywhere else.`)
   expect(card.textContent?.includes("Mousse can't tell what this service's reads do.")).toBe(warning)
+  expect(card.textContent).toContain('Kai never sees it.')
+  expect(card.textContent).not.toContain('The agent')
   expect(calls).toContain('secrets.requests.list')
 })
