@@ -3394,3 +3394,16 @@ it.each([
   expect(card.textContent).not.toContain('The agent')
   expect(calls).toContain('secrets.requests.list')
 })
+
+it.each([
+  ['thread', 'for this thread only, and deleted with the thread.'],
+  ['day', 'for 24 hours, then deleted.'],
+  ['saved', 'until you remove it in Settings → Agents → Secrets.']
+] as const)('builds the bound keep sentence for %s without changing the ordinary agent line', async (keep, duration) => {
+  const {secretKeepLine}=await import('../../src/shared/secretRequests')
+  const bound=secretKeepLine(keep,{bound:'Kai'})
+  expect(bound).toContain(duration)
+  expect(bound).toContain('Kai never sees it.')
+  expect(bound).not.toContain('The agent')
+  expect(secretKeepLine(keep)).toContain('The agent can use it but never shows it in the chat.')
+})

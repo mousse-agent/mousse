@@ -9,6 +9,14 @@ import { ensurePrivateDirectory } from '../data/privateAcl'
 /** Truthy authority with no usable destination: a lost or malformed record never becomes an unbound key. */
 export const UNAVAILABLE_BINDING: SecretBinding = { origin: 'https://unavailable.invalid', service: 'an unavailable service', header: '', format: '' }
 
+/** Safe words for the owner's card; never forward a parser or filesystem error. */
+export class SecretBindingUnavailableError extends Error {
+  constructor() {
+    super('Bound, service unavailable. The binding could not be read. Nothing was stored.')
+    this.name = 'SecretBindingUnavailableError'
+  }
+}
+
 /**
  * Older vaults rewrite meta.json, so authority lives separately. A durable per-name guard is written first: losing
  * bindings.json still denies that key, while legacy unbound keys do not acquire a dependency on either JSON file.
@@ -67,7 +75,7 @@ export class SecretBindings {
 
   set(name: string, binding: SecretBinding): void {
     const entries = this.read()
-    if (!this.readable) throw new Error('Secret bindings could not be read; the file was left unchanged.')
+    if (!this.readable) throw new SecretBindingUnavailableError()
     const directory = join(this.profileRoot, 'secrets')
     ensurePrivateDirectory(directory)
     ensurePrivateDirectory(this.guards)
@@ -80,7 +88,7 @@ export class SecretBindings {
   delete(name: string): void {
     if (!isKeyName(name)) return
     const entries = {...this.read()}
-    if (!this.readable) throw new Error('Secret bindings could not be read; the file was left unchanged.')
+    if (!this.readable) throw new SecretBindingUnavailableError()
     if (Object.hasOwn(entries, name)) {
       delete entries[name]
       atomicWriteJsonSync(this.path, entries, {mode: 0o600})
