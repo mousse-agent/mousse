@@ -36,6 +36,22 @@ export interface EngineLimits {
   renewIntervalMs: number
   /** The own delegation is renewed once it is due within this long. */
   renewDueWithinMs: number
+  /** Clock difference allowed between a delegation's start and this computer's clock, as the engine allows. */
+  clockSkewMs: number
+  /** Largest frame on the channel to the helper (§2.1). Both sides must agree. */
+  appFrameMaxBytes: number
+  /** Largest payload of one DATA frame to or from the helper. */
+  appDataMaxBytes: number
+  /** All the credit this computer grants the helper at once, over every stream (§2.2). */
+  appCreditBudgetBytes: number
+  /** Most credit one stream holds from that budget. */
+  appStreamCreditBytes: number
+  /** Part of the budget only interactive streams may hold. */
+  appInteractiveReserveBytes: number
+  /** Streams one connection may have open, both directions counted; this computer queues its own opens past it. */
+  appStreamsPerConnection: number
+  /** How long a request to the helper (`dial`, `stream.open`, ...) waits for its answer. */
+  appRequestDeadlineMs: number
 }
 
 export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
@@ -51,7 +67,15 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   appendDeadlineMs: 60_000,
   resultWaitFloorMs: 15_000,
   renewIntervalMs: 60 * 60_000,
-  renewDueWithinMs: 24 * 60 * 60_000
+  renewDueWithinMs: 24 * 60 * 60_000,
+  clockSkewMs: 600_000,
+  appFrameMaxBytes: 1024 * 1024,
+  appDataMaxBytes: 64 * 1024,
+  appCreditBudgetBytes: 8 * 1024 * 1024,
+  appStreamCreditBytes: 256 * 1024,
+  appInteractiveReserveBytes: 1024 * 1024,
+  appStreamsPerConnection: 32,
+  appRequestDeadlineMs: 15_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -67,7 +91,15 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   appendDeadlineMs: 'MOUSSE_NET_ENGINE_APPEND_DEADLINE_MS',
   resultWaitFloorMs: 'MOUSSE_NET_ENGINE_RESULT_WAIT_FLOOR_MS',
   renewIntervalMs: 'MOUSSE_NET_ENGINE_RENEW_INTERVAL_MS',
-  renewDueWithinMs: 'MOUSSE_NET_ENGINE_RENEW_DUE_WITHIN_MS'
+  renewDueWithinMs: 'MOUSSE_NET_ENGINE_RENEW_DUE_WITHIN_MS',
+  clockSkewMs: 'MOUSSE_NET_ENGINE_CLOCK_SKEW_MS',
+  appFrameMaxBytes: 'MOUSSE_NET_ENGINE_APP_FRAME_MAX_BYTES',
+  appDataMaxBytes: 'MOUSSE_NET_ENGINE_APP_DATA_MAX_BYTES',
+  appCreditBudgetBytes: 'MOUSSE_NET_ENGINE_APP_CREDIT_BUDGET_BYTES',
+  appStreamCreditBytes: 'MOUSSE_NET_ENGINE_APP_STREAM_CREDIT_BYTES',
+  appInteractiveReserveBytes: 'MOUSSE_NET_ENGINE_APP_INTERACTIVE_RESERVE_BYTES',
+  appStreamsPerConnection: 'MOUSSE_NET_ENGINE_APP_STREAMS_PER_CONNECTION',
+  appRequestDeadlineMs: 'MOUSSE_NET_ENGINE_APP_REQUEST_DEADLINE_MS'
 })
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
@@ -87,7 +119,9 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
     const raw = env[ENGINE_LIMIT_VARIABLES[key]]
     if (raw === undefined || raw.trim() === '') continue
     const value = Number(raw.trim())
-    if (!Number.isSafeInteger(value) || value <= 0) keep(key, 'is not a positive whole number')
+    // Skew alone may be none.
+    if (!Number.isSafeInteger(value) || value < 0 || (value === 0 && key !== 'clockSkewMs'))
+      keep(key, 'is not a positive whole number')
     else limits[key] = value
   }
   // A message must hold its header and a whole blob chunk; when it cannot, the three sizes keep their defaults,
@@ -95,6 +129,13 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
   if (limits.headerReserveBytes + limits.blobChunkBytes > limits.maxMessageBytes)
     for (const key of ['maxMessageBytes', 'headerReserveBytes', 'blobChunkBytes'] as const)
       keep(key, 'does not fit a header and a blob chunk in one message')
+  // A DATA frame (its handle and flags too) fits a frame; a stream's credit fits the budget, beside the reserve.
+  if (limits.appDataMaxBytes + 10 > limits.appFrameMaxBytes)
+    for (const key of ['appFrameMaxBytes', 'appDataMaxBytes'] as const)
+      keep(key, 'does not fit a DATA frame in a frame')
+  if (limits.appStreamCreditBytes + limits.appInteractiveReserveBytes > limits.appCreditBudgetBytes)
+    for (const key of ['appCreditBudgetBytes', 'appStreamCreditBytes', 'appInteractiveReserveBytes'] as const)
+      keep(key, "does not leave a stream's credit beside the interactive reserve")
   return { limits, problems }
 }
 

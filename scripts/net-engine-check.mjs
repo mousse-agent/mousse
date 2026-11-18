@@ -18,7 +18,9 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const CHECKS = {
-  'phase1a.picker-v1-off': 'tests/netEngine/checks/pickerV1Off.test.ts'
+  'phase1a.picker-v1-off': 'tests/netEngine/checks/pickerV1Off.test.ts',
+  'phase1a.private-streams': 'tests/netEngine/checks/privateStreams.test.ts',
+  'phase1a.once-or-unknown': 'tests/netEngine/checks/onceOrUnknown.test.ts'
 }
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -36,7 +38,9 @@ const git = (...gitArgs) => spawnSync('git', gitArgs, { cwd: root, encoding: 'ut
 const commit = git('rev-parse', 'HEAD').stdout.trim() || 'unknown'
 const dirty = git('status', '--porcelain').stdout.trim() !== ''
 console.log(`app_build=${commit}${dirty ? '-dirty' : ''}`)
-console.log(`helper=${process.env.MOUSSE_NET_HELPER ? process.env.MOUSSE_NET_HELPER : 'in-memory'}`)
+// The checks run over the fake helper until the app spawns the real one; a requested helper is named, not used.
+console.log('helper=fake')
+if (process.env.MOUSSE_NET_HELPER) console.log(`helper_requested=${process.env.MOUSSE_NET_HELPER} (not used yet)`)
 if (process.env.MOUSSE_NET_ENGINE_CONTROL) console.log(`control=${process.env.MOUSSE_NET_ENGINE_CONTROL}`)
 
 const vitest = join(root, 'node_modules', 'vitest', 'vitest.mjs')

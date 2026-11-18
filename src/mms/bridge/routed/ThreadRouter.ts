@@ -31,7 +31,7 @@ import {
   translateNetError,
   type ComputerRef
 } from './computerErrors'
-import { RoutedClient } from './RoutedClient'
+import { RoutedClient, type RoutedClientDeps } from './RoutedClient'
 import { RoutedStager } from './stager'
 import { AttachedThreads } from './attachedThreads'
 import { AttachedTerminals } from './attachedTerminals'
@@ -86,6 +86,8 @@ export interface ThreadRouterOptions {
   hub: BridgeHub
   /** Ends every wait when the profile closes. */
   signal: AbortSignal
+  /** Reads a durable result sent as an artifact (`RoutedClientDeps.resolveArtifact`). */
+  resolveArtifact?: RoutedClientDeps['resolveArtifact']
   /** Tests inject a client with other timings. */
   client?: RoutedClient
   /** How long a thread nobody has in view stays attached (default 10 minutes). */
@@ -120,6 +122,7 @@ export class ThreadRouter implements ThreadRouterPort {
         session: (node) => options.peers.client(node),
         computer: (node) => this.computer(node),
         signal: options.signal,
+        resolveArtifact: options.resolveArtifact,
         stager: new RoutedStager({
           identity: net.runtime().identity,
           keys: net.runtime().keys,

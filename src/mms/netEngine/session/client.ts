@@ -318,7 +318,8 @@ export class EngineClient implements BridgeClient {
     if (this.state() !== 'open') return Promise.reject(new NetError('peer_offline'))
     if (options.signal?.aborted) return Promise.reject(new NetError('cancelled'))
     return new Promise<EngineMessage>((resolve, reject) => {
-      const channel = new Channel(this.connection.open(label))
+      const method = typeof header.method === 'string' ? header.method : undefined
+      const channel = new Channel(this.connection.open(label, method))
       let settled = false
       const finish = (error: NetError | undefined, message?: EngineMessage): void => {
         if (settled) return

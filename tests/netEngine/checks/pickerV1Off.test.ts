@@ -4,18 +4,19 @@
  * (`bridge.nodes`), opens a folder there, starts a thread on it and opens a terminal, then does the same again with
  * the clock moved 8 and 40 days.
  *
+ * The computers connect through helpers (the fake helper until the real one is wired in).
+ *
  * Its controls (`MOUSSE_NET_ENGINE_CONTROL`): `roster-only-directory` fails it with `not_listed`, `no-renewal`
  * with `bad_delegation`. `scripts/net-engine-check.mjs phase1a.picker-v1-off` runs it and prints the marker.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { PROJECT_SHELL_AGENT_ID } from '../../../src/shared/types'
 import { DAY, eventually, pairProfiles, step, terminalOutput, type Pair } from './harness'
-import { checkLink } from './links'
 
 describe('phase1a.picker-v1-off', () => {
   let pair: Pair
   beforeAll(async () => {
-    pair = await pairProfiles(checkLink())
+    pair = await pairProfiles()
   }, 120_000)
   afterAll(() => pair?.close())
 
@@ -68,7 +69,7 @@ describe('phase1a.picker-v1-off', () => {
   it('lists the owner in the picker', async () => {
     const row = await step('not_listed', async () => {
       const found = await listed()
-      expect(found).toMatchObject({ source: 'engine', state: 'open', name: 'Owner computer' })
+      expect(found).toMatchObject({ source: 'engine', state: 'open', name: 'owner computer' })
       return found
     })
     expect(row).toBeTruthy()

@@ -88,6 +88,11 @@ export class EnginePeerStore {
     return row && isServingState(row.state) ? row : undefined
   }
 
+  /** The serving pairing with the helper identity `endpoint`. */
+  byEndpoint(endpoint: string): EnginePeerRow | undefined {
+    return this.all().find((row) => row.endpoint === endpoint && isServingState(row.state))
+  }
+
   setState(localId: NodeId, state: EnginePeerState): void {
     this.db.transaction(() => {
       this.db.charge(1)

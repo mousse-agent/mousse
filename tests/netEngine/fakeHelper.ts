@@ -1,0 +1,374 @@
+/**
+ * A fake network helper for tests: the helper's side of the app channel (design §2), with a fake network between
+ * helpers instead of the engine. It frames, hands out stream handles that are never reused, grants and honours
+ * app credit, keeps FIN behind a stream's data, and reports `conn.up`, `conn.down`, `stream.incoming` and
+ * `stream.reset` as the real helper does. A helper can be killed (its app sees the pipe close and its peers see
+ * `conn.down`) and a new one started for the same identity.
+ *
+ * Every engine message that crosses the fake network is decoded and recorded, and a test may drop one (`tap`).
+ */
+import {
+  creditFrame,
+  dataFrame,
+  DATA_FIN,
+  FRAME_CREDIT,
+  FRAME_DATA,
+  FrameReader,
+  jsonFrame,
+  type AppPipe
+} from '../../src/mms/netEngine/helper/appChannel'
+import { encodeMessage, MessageReader, type EngineMessage } from '../../src/mms/netEngine/session/frame'
+
+const STREAM_CREDIT = 256 * 1024
+
+export interface Crossed {
+  /** The identity of the helper the message left from. */
+  from: string
+  label: string
+  /** The method of the call the stream carries (`mousse.rpc`), from its first message. */
+  method?: string
+  header: EngineMessage['header']
+  parts: Uint8Array[]
+}
+
+/** One direction of a stream on the fake wire, as the receiving helper holds it. */
+interface End {
+  helper: FakeHelper
+  handle: number
+  /** Credit the app granted this helper for DATA to it. */
+  appCredit: number
+  /** What waits for that credit. */
+  queue: Array<{ bytes: Uint8Array; fin: boolean }>
+  other?: End
+  label: string
+  /** Messages being read from what this side's app writes, to record and filter them. */
+  reader: MessageReader
+  method?: string
+  closed: boolean
+}
+
+interface Conn {
+  /** Each helper's number for the connection (per helper, never reused). */
+  id: { [identity: string]: number }
+  a: FakeHelper
+  b: FakeHelper
+  ends: Set<End>
+  up: boolean
+}
+
+export class FakeNetwork {
+  private readonly helpers = new Map<string, FakeHelper>()
+  /** For each host identity, the grant each caller identity holds there. */
+  private readonly grants = new Map<string, Map<string, string>>()
+  private readonly conns = new Set<Conn>()
+  private next = 1
+  readonly crossed: Crossed[] = []
+  /** Decides each message that crosses; `drop` loses it on the way. */
+  tap?: (message: Crossed) => 'drop' | void
+
+  /** `caller` may connect to `host`, holding `grant` there. */
+  grant(host: string, caller: string, grant: string): void {
+    let held = this.grants.get(host)
+    if (!held) this.grants.set(host, (held = new Map()))
+    held.set(caller, grant)
+  }
+
+  /** A new helper for `identity` (replacing a killed one). */
+  helper(identity: string): FakeHelper {
+    const helper = new FakeHelper(this, identity)
+    this.helpers.set(identity, helper)
+    return helper
+  }
+
+  /** @internal */
+  dial(from: FakeHelper, identity: string): number {
+    const to = this.helpers.get(identity)
+    if (!to || !to.alive) throw Object.assign(new Error('unreachable'), { code: 'unreachable' })
+    const grant = this.grants.get(identity)?.get(from.identity)
+    if (!grant) throw Object.assign(new Error('not allowed'), { code: 'forbidden' })
+    const conn: Conn = {
+      id: { [from.identity]: this.next++, [identity]: this.next++ },
+      a: from,
+      b: to,
+      ends: new Set(),
+      up: true
+    }
+    this.conns.add(conn)
+    from.connUp(conn, conn.id[from.identity]!, identity, 'out')
+    to.connUp(conn, conn.id[identity]!, from.identity, 'in', grant)
+    return conn.id[from.identity]!
+  }
+
+  /** @internal Every connection of a helper that went away goes down at its peers. */
+  helperGone(helper: FakeHelper): void {
+    for (const conn of [...this.conns])
+      if (conn.a === helper || conn.b === helper) this.down(conn, 'peer_gone')
+  }
+
+  /** Cuts one connection between two identities, as a lost path does. */
+  cut(a: string, b: string): void {
+    for (const conn of [...this.conns])
+      if ((conn.a.identity === a && conn.b.identity === b) || (conn.a.identity === b && conn.b.identity === a))
+        this.down(conn, 'path_lost')
+  }
+
+  private down(conn: Conn, reason: string): void {
+    if (!conn.up) return
+    conn.up = false
+    this.conns.delete(conn)
+    for (const end of conn.ends) end.helper.endGone(end, reason)
+    for (const side of [conn.a, conn.b]) side.connDown(conn, conn.id[side.identity]!, reason)
+  }
+
+  /** @internal Opens a stream from `from` on `conn`; the other helper reports it to its app. */
+  open(from: FakeHelper, conn: Conn, label: string, cls: string): End {
+    const to = conn.a === from ? conn.b : conn.a
+    const mine = from.newEnd(conn, label)
+    const theirs = to.newEnd(conn, label)
+    mine.other = theirs
+    theirs.other = mine
+    conn.ends.add(mine)
+    conn.ends.add(theirs)
+    to.incoming(theirs, conn.id[to.identity]!, label, cls)
+    return mine
+  }
+
+  /** @internal What the app at `end` wrote, whole messages at a time, toward the other end. */
+  carry(end: End, bytes: Uint8Array, fin: boolean): void {
+    const other = end.other
+    if (!other || other.closed) return
+    let messages: EngineMessage[] = []
+    try {
+      messages = end.reader.push(bytes)
+    } catch {
+      other.helper.toApp(other, bytes, false)
+    }
+    for (const message of messages) {
+      if (end.label === 'mousse.rpc' && end.method === undefined && typeof message.header.method === 'string')
+        other.method = end.method = message.header.method
+      const row: Crossed = {
+        from: end.helper.identity,
+        label: end.label,
+        ...(end.method ? { method: end.method } : {}),
+        header: message.header,
+        parts: message.parts
+      }
+      this.crossed.push(row)
+      if (this.tap?.(row) === 'drop') continue
+      other.helper.toApp(other, encodeMessage(message.header, message.parts), false)
+    }
+    if (fin) other.helper.toApp(other, new Uint8Array(0), true)
+  }
+
+  /** @internal */
+  reset(end: End, code: string): void {
+    const other = end.other
+    if (other && !other.closed) other.helper.endGone(other, code)
+  }
+}
+
+/** The app's end of an in-memory pipe and the helper's. */
+function pipePair(): { app: AppPipe; helper: AppPipe } {
+  const make = () => ({ data: [] as Array<(bytes: Uint8Array) => void>, close: [] as Array<() => void>, open: true })
+  const toApp = make(),
+    toHelper = make()
+  const end = (inbox: ReturnType<typeof make>, outbox: ReturnType<typeof make>): AppPipe => ({
+    write: (bytes) => {
+      if (!outbox.open) return true
+      const copy = Uint8Array.from(bytes)
+      setImmediate(() => {
+        if (outbox.open) for (const listener of outbox.data) listener(copy)
+      })
+      return true
+    },
+    onDrain: () => undefined,
+    onData: (listener) => void inbox.data.push(listener),
+    onClose: (listener) => void inbox.close.push(listener),
+    close: () => {
+      for (const box of [inbox, outbox]) {
+        if (!box.open) continue
+        box.open = false
+        for (const listener of box.close.splice(0)) setImmediate(listener)
+      }
+    }
+  })
+  return { app: end(toApp, toHelper), helper: end(toHelper, toApp) }
+}
+
+export class FakeHelper {
+  alive = true
+  /** The app's end of the channel. */
+  readonly pipe: AppPipe
+  private readonly own: AppPipe
+  private readonly reader = new FrameReader()
+  private readonly ends = new Map<number, End>()
+  private readonly conns = new Map<number, Conn>()
+  private nextHandle = 1
+  private helloed = false
+  /** Frames the app sent for a handle that was not open. */
+  dropped = 0
+
+  constructor(
+    private readonly network: FakeNetwork,
+    readonly identity: string
+  ) {
+    const pair = pipePair()
+    this.pipe = pair.app
+    this.own = pair.helper
+    this.own.onData((bytes) => this.fromApp(bytes))
+    this.own.onClose(() => this.kill())
+  }
+
+  /** The helper exits: its app sees the pipe close, its peers see its connections go down. */
+  kill(): void {
+    if (!this.alive) return
+    this.alive = false
+    this.own.close()
+    this.network.helperGone(this)
+  }
+
+  private send(frame: Uint8Array): void {
+    if (this.alive) this.own.write(frame)
+  }
+  private event(event: Record<string, unknown>): void {
+    this.send(jsonFrame(event))
+  }
+
+  /** @internal */
+  connUp(conn: Conn, id: number, identity: string, dir: 'in' | 'out', grant?: string): void {
+    this.conns.set(id, conn)
+    // As the helper until E3: an inbound connection carries its grant and role, an outbound one neither.
+    this.event({ ev: 'conn.up', conn: id, identity, dir, ...(grant ? { grant, role: 'owner' } : {}), deadline: 0 })
+  }
+  /** @internal */
+  connDown(conn: Conn, id: number, reason: string): void {
+    if (this.conns.get(id) !== conn) return
+    this.conns.delete(id)
+    this.event({ ev: 'conn.down', conn: id, identity: (conn.a === this ? conn.b : conn.a).identity, reason })
+  }
+  /** @internal */
+  newEnd(conn: Conn, label: string): End {
+    const end: End = {
+      helper: this,
+      handle: this.nextHandle++,
+      appCredit: 0,
+      queue: [],
+      label,
+      reader: new MessageReader(),
+      closed: false
+    }
+    this.ends.set(end.handle, end)
+    return end
+  }
+  /** @internal The other side opened a stream: the app hears of it and may write once it has credit. */
+  incoming(end: End, conn: number, label: string, cls: string): void {
+    this.event({ ev: 'stream.incoming', conn, handle: end.handle, label, class: cls })
+    this.send(creditFrame(end.handle, STREAM_CREDIT))
+  }
+  /** @internal Bytes for this side's app, under the credit it granted; FIN after them. */
+  toApp(end: End, bytes: Uint8Array, fin: boolean): void {
+    if (end.closed) return
+    for (let at = 0; at < bytes.byteLength; at += 64 * 1024)
+      end.queue.push({ bytes: bytes.subarray(at, Math.min(bytes.byteLength, at + 64 * 1024)), fin: false })
+    if (fin) end.queue.push({ bytes: new Uint8Array(0), fin: true })
+    this.flush(end)
+  }
+  /** @internal The stream ended at the other side or with its connection: the app hears a reset. */
+  endGone(end: End, code: string): void {
+    if (end.closed) return
+    end.closed = true
+    this.ends.delete(end.handle)
+    this.event({ ev: 'stream.reset', handle: end.handle, code })
+  }
+
+  private flush(end: End): void {
+    while (end.queue.length && !end.closed) {
+      const next = end.queue[0]!
+      if (next.bytes.byteLength > end.appCredit) return
+      end.queue.shift()
+      end.appCredit -= next.bytes.byteLength
+      this.send(dataFrame(end.handle, next.bytes, next.fin))
+    }
+  }
+
+  private fromApp(bytes: Uint8Array): void {
+    if (!this.alive) return
+    let frames
+    try {
+      frames = this.reader.push(bytes)
+    } catch {
+      this.kill()
+      return
+    }
+    for (const frame of frames) {
+      const body = Buffer.from(frame.body.buffer, frame.body.byteOffset, frame.body.byteLength)
+      if (frame.type === FRAME_CREDIT) {
+        const end = this.ends.get(body.readUInt32BE(0))
+        if (!end) {
+          this.dropped += 1
+          continue
+        }
+        end.appCredit += body.readUInt32BE(4)
+        this.flush(end)
+        continue
+      }
+      if (frame.type === FRAME_DATA) {
+        const end = this.ends.get(body.readUInt32BE(0))
+        if (!end) {
+          this.dropped += 1
+          continue
+        }
+        const payload = frame.body.subarray(5)
+        const fin = (body.readUInt8(4) & DATA_FIN) !== 0
+        this.network.carry(end, payload, fin)
+        // What was carried is room again for the app.
+        if (payload.byteLength && !fin) this.send(creditFrame(end.handle, payload.byteLength))
+        continue
+      }
+      this.request(JSON.parse(body.toString('utf8')) as Record<string, any>)
+    }
+  }
+
+  private request(message: Record<string, any>): void {
+    const re = message.id
+    const reply = (fields: Record<string, unknown> = {}) => this.send(jsonFrame({ re, ...fields }))
+    try {
+      if (!this.helloed && message.op !== 'hello') return reply({ error: 'no_hello', reason: 'hello first' })
+      switch (message.op) {
+        case 'hello': {
+          const proto = message.proto
+          if (!Array.isArray(proto) || proto[0] !== 1) return reply({ error: 'unsupported_proto', reason: '1.0 only' })
+          this.helloed = true
+          return reply({ proto: [1, 0], identity: this.identity })
+        }
+        case 'config.set':
+          return reply()
+        case 'dial':
+          return reply({ conn: this.network.dial(this, String(message.identity)) })
+        case 'stream.open': {
+          const conn = this.conns.get(Number(message.conn))
+          if (!conn || !conn.up) return reply({ error: 'peer_offline' })
+          const end = this.network.open(this, conn, String(message.label), String(message.class))
+          reply({ handle: end.handle })
+          this.send(creditFrame(end.handle, STREAM_CREDIT))
+          return
+        }
+        case 'stream.accept':
+          return reply()
+        case 'stream.reset': {
+          const end = this.ends.get(Number(message.handle))
+          if (end) {
+            end.closed = true
+            this.ends.delete(end.handle)
+            this.network.reset(end, String(message.code ?? 'reset'))
+          }
+          return reply()
+        }
+        default:
+          return reply({ error: 'unknown_op', reason: String(message.op) })
+      }
+    } catch (error) {
+      reply({ error: (error as { code?: string }).code ?? 'internal' })
+    }
+  }
+}

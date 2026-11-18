@@ -177,6 +177,14 @@ describe('refusals', () => {
     expect(page.messages.map((row: { id: string }) => row.id)).toEqual(['big'])
     expect(page.messages[0].content).toHaveLength(200 * 1024)
   }, 60_000)
+
+  it('reads a durable answer over a reply’s size, which the owner sends as an artifact', async () => {
+    const thread = t.thread()
+    // The answer holds the task twice (the task and the list), so it is larger than a reply.
+    const description = 'd'.repeat(40 * 1024)
+    const created = await t.dispatch('tasks.create', { threadId: t.qualified(thread.id), description })
+    expect(JSON.stringify(created)).toContain(description)
+  }, 60_000)
 })
 
 describe('steer and Stop', () => {

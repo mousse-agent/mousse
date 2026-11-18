@@ -541,7 +541,17 @@ export class BridgeProfileService {
       peers: this.peers,
       enabled: () => this.bridgeThreadsOn(),
       hub: this.hub,
-      signal: this.routerStop.signal
+      signal: this.routerStop.signal,
+      resolveArtifact: (node, session, value, rpc, method, signal) =>
+        this.artifacts.resolveRouted(
+          value,
+          session,
+          node,
+          rpc,
+          method,
+          signal,
+          this.peers.isEngine(node) ? this.peers : undefined
+        )
     })
     services.threadRouter = this.router
     this.disposers.add(() => {

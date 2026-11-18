@@ -340,39 +340,23 @@ describe('Bridge over an engine session, v1 off', () => {
       }
     }, 60_000)
 
-    it('fetches a durable reply over 63 KiB as an artifact the caller subscribes to, then its blob', async () => {
+    it('reads a durable answer over 63 KiB through a window call: the owner sends an artifact, read as the Hub reads', async () => {
       const thread = owner.threads.createThread('Artifact')
-      const client = caller.netEngine.client(ownerOnCaller)
-      const id = newId('rpc') as RpcId
       // Its answer holds the task twice (the task and the list), so it is larger than a reply.
       const description = 'd'.repeat(40 * 1024)
-      const reply = (await client.rpc(
-        routedNetMethod('tasks.create'),
-        { threadId: thread.id, description },
-        { id, idem: `tasks.create:${id}`, deadlineMs: 60_000 }
-      )) as { kind: string; descriptor: StreamDescriptor; artifact: { stream: string; event: string; blob: string } }
-      expect(reply.kind).toBe('bridge.artifact.result.v1')
-      expect(reply.descriptor.artifact).toMatchObject({ rpc: id, method: routedNetMethod('tasks.create') })
-      // As the Hub does: the stream is stored under the pairing and bound to it, then read.
-      const store = caller.bridge.threads.store
-      store.createStream({ ...reply.descriptor, authority: ownerOnCaller }, 1)
-      caller.netEngine.bind(reply.descriptor.id, ownerOnCaller)
-      const records: StoredRecord[] = []
-      await new Promise<void>((resolve, reject) => {
-        const sub = client.subscribe(reply.descriptor.id, {
-          onRecord: (record) => records.push(record),
-          onCaughtUp: () => {
-            sub.close()
-            resolve()
-          },
-          onSnapshotInstalled: () => undefined,
-          onError: (code) => reject(new Error(code))
-        })
-      })
-      expect(records.length).toBeGreaterThan(0)
-      const bytes = await client.getBlob(reply.descriptor.id, reply.artifact.blob as never)
-      const result = JSON.parse(Buffer.from(bytes).toString('utf8'))
-      expect(JSON.stringify(result)).toContain(description)
+      const from = crossed.length
+      const created = await dispatch('tasks.create', { threadId: q(thread.id), description })
+      expect(JSON.stringify(created)).toContain(description)
+      const steps = kinds(from)
+      const reply = crossed
+        .slice(from)
+        .find((row) => row.header.t === 'result' && (row.header.result as { kind?: string })?.kind)
+      expect((reply?.header.result as { kind?: string } | undefined)?.kind).toBe('bridge.artifact.result.v1')
+      expect(steps).toContain('caller mousse.sub subscribe')
+      expect(steps.some((line) => line.startsWith('caller mousse.blob'))).toBe(true)
+      // Stored under the pairing and bound to it, as the Hub's streams are.
+      const descriptor = (reply!.header.result as { descriptor: StreamDescriptor }).descriptor
+      expect(caller.bridge.threads.store.getStream(descriptor.id)?.authority).toBe(ownerOnCaller)
     }, 60_000)
   })
 
@@ -448,6 +432,19 @@ describe('Bridge over an engine session, v1 off', () => {
           vi.useRealTimers()
         }
       }, 60_000)
+
+    it('opens new streams after the clock goes back past a renewal', async () => {
+      // The last test renewed both own delegations 40 days ahead; the clock is back at now.
+      const own = (mms: MousseMainService) => mms.net.runtime().identity.renewSelf(DAY, Number.MAX_SAFE_INTEGER)
+      for (const mms of [owner, caller]) expect(own(mms).issuedAt).toBeGreaterThan(Date.now() + DAY)
+      const thread = folderThread('After the clock went back')
+      const before = shells.length
+      const created = await dispatch('pty.create', { threadId: q(thread.id), agentId: `${PROJECT_SHELL_AGENT_ID}:tab-back` })
+      await eventually(() => expect(attached(created.ptyId)).toBe(true), 20_000)
+      shells[before]!.pty.say('after the clock went back\r\n')
+      await eventually(() => expect(output(created.ptyId)).toContain('after the clock went back'))
+      for (const mms of [owner, caller]) expect(own(mms).issuedAt).toBeLessThanOrEqual(Date.now())
+    }, 60_000)
   })
 
   it('sends no private key and no reader id across the link, and these node and stream fields only', () => {

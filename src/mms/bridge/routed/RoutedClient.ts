@@ -63,6 +63,18 @@ export interface RoutedClientDeps {
   session(node: NodeId): BridgeClient
   computer(node: NodeId): ComputerRef
   stager?: RoutedStager
+  /**
+   * Reads a durable result the owner sent as an artifact (a result over a reply's size) and answers the reply it
+   * holds. `method` is the owner's method name. Without it such a reply is unreadable.
+   */
+  resolveArtifact?(
+    node: NodeId,
+    session: BridgeClient,
+    value: unknown,
+    rpc: RpcId,
+    method: string,
+    signal: AbortSignal
+  ): Promise<unknown>
   /** Ends every wait when the profile closes. */
   signal: AbortSignal
   delay?: (ms: number, signal: AbortSignal) => Promise<void>
@@ -396,7 +408,7 @@ export class RoutedClient {
             reply = await this.send(session, method, params, id, idem, deadlineMs, signal, options)
           }
         } else reply = await this.send(session, method, params, id, idem, deadlineMs, signal, options)
-        return await this.settle(node, session, computer, method, reply, signal)
+        return await this.settle(node, session, computer, method, id, reply, signal)
       } catch (error) {
         if (this.deps.signal.aborted) throw new DomainRpcError('cancelled', 'Mousse is shutting down.')
         if (signal.aborted) {
@@ -412,7 +424,7 @@ export class RoutedClient {
           if (!row.durable) throw timedOut(computer)
           try {
             const late = await session.rpcResult(id, { deadlineMs: remaining(), signal })
-            return await this.settle(node, session, computer, method, late, signal)
+            return await this.settle(node, session, computer, method, id, late, signal)
           } catch {
             throw mayHaveHappened(computer, method)
           }
@@ -477,15 +489,21 @@ export class RoutedClient {
     }
   }
 
-  /** A reply, or a paged reply followed to its end. */
+  /** A reply, a durable result sent as an artifact, or a paged reply followed to its end. */
   private async settle(
     node: NodeId,
     session: BridgeClient,
     computer: ComputerRef,
     method: string,
+    id: RpcId,
     reply: unknown,
     signal: AbortSignal
   ): Promise<RoutedReply> {
+    if ((reply as { kind?: unknown } | null)?.kind === 'bridge.artifact.result.v1') {
+      if (!this.deps.resolveArtifact)
+        throw new DomainRpcError('bad_reply', 'The other computer sent an unreadable reply.')
+      reply = await this.deps.resolveArtifact(node, session, reply, id, routedNetMethod(method), signal)
+    }
     // A paged reply is also `{ ok: true }`, so it is told apart first.
     if (!isRoutedPagedReply(reply)) {
       if (isRoutedReply(reply)) return reply

@@ -792,8 +792,11 @@ export class NetIdentityService implements IdentityService {
    * profile is its own authority, so no other device has to vouch for it. Used by the engine service, which
    * signs host records with this delegation while v1 networking (and its renewal) is off. Refused on a profile
    * that is not its network's keeper. Answers the window of the own delegation in force afterwards.
+   *
+   * A delegation that starts more than `skewMs` from now (the clock went back after a renewal) is re-issued from
+   * now too, so the profile is never left with one that has not started.
    */
-  renewSelf(dueWithinMs: number): { renewed?: Signed; issuedAt: number; expiresAt: number } {
+  renewSelf(dueWithinMs: number, skewMs = 0): { renewed?: Signed; issuedAt: number; expiresAt: number } {
     const now = this.clock.now()
     if (!Number.isSafeInteger(now) || now < 0)
       throw new NetError('bad_request', 'Renewal must use the authority clock.')
@@ -806,7 +809,8 @@ export class NetIdentityService implements IdentityService {
       .filter((row): row is NodeDelegation => row.kind === 'node' && row.subject === self.node)
       .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
     if (!own) throw new NetError('bad_delegation')
-    if (own.expiresAt - now > dueWithinMs) return { issuedAt: own.issuedAt, expiresAt: own.expiresAt }
+    if (own.expiresAt - now > dueWithinMs && own.issuedAt <= now + skewMs)
+      return { issuedAt: own.issuedAt, expiresAt: own.expiresAt }
     const renewed = this.authorityUpdate((next) => {
       next.nodes = next.nodes.filter((row) => {
         const prior = verifyDocument<NodeDelegation>(row, next.rootKey, 'nodeDelegation')
@@ -1269,7 +1273,8 @@ export class NetIdentityService implements IdentityService {
 
   /**
    * Whether this profile holds the authority's root and node keys for its current roster, even
-   * when its own delegation has lapsed. Only renewal uses this: everything else needs a current one.
+   * when its own delegation has lapsed (or, with 'any', has not started). Only renewal uses this:
+   * everything else needs a current one.
    */
   private authorityKeysHeld(
     self: { user: UserId; node: NodeId },
@@ -1323,7 +1328,8 @@ export class NetIdentityService implements IdentityService {
       .filter(
         (row) =>
           row.keyEpoch === epoch &&
-          row.issuedAt <= at &&
+          // 'any' (the keeper renewing itself) also takes one that has not started: the clock went back.
+          (row.issuedAt <= at || allowLapsed === 'any') &&
           (at < row.expiresAt ||
             allowLapsed === 'any' ||
             (allowLapsed && at - row.expiresAt < RENEW_LAPSED_MAX_MS))

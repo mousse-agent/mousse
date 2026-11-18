@@ -15,6 +15,8 @@ import { engineControl, engineControlProblems, engineLimitProblems, engineLimits
 import { EngineSessions } from './sessions'
 import type { BridgeClient, EngineClient } from './session/client'
 import type { EngineConnection } from './session/transport'
+import { AppChannel, type AppPipe } from './helper/appChannel'
+import { EngineHelper } from './helper/connections'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 
 export const NON_KEEPER_MESSAGE =
@@ -53,6 +55,8 @@ export class NetEngineService implements EngineDirectoryPort {
   private started?: Started
   /** The window of this profile's own delegation, as its last renewal saw it. */
   private own?: { issuedAt: number; expiresAt: number }
+  /** The helper this profile's connections run through, while one runs. */
+  private helper?: EngineHelper
   private starting?: Promise<void>
   constructor(
     private readonly options: {
@@ -196,18 +200,22 @@ export class NetEngineService implements EngineDirectoryPort {
   }
   private renewOwn(rt: NetRuntime): void {
     if (engineControl('no-renewal')) return
-    const { issuedAt, expiresAt } = rt.identity.renewSelf(engineLimits().renewDueWithinMs)
+    const limits = engineLimits()
+    const { issuedAt, expiresAt } = rt.identity.renewSelf(limits.renewDueWithinMs, limits.clockSkewMs)
     this.own = { issuedAt, expiresAt }
   }
   /**
    * Renews before serving or calling when the own delegation is due: the clock may have jumped (a computer that
-   * slept for a week) since the hourly check. Reads only the window the last renewal saw.
+   * slept for a week) since the hourly check, or gone back past the delegation's start. Reads only the window the
+   * last renewal saw.
    */
   private renewIfDue(): void {
     const started = this.started
     if (!started || !started.rt.identity.isKeeper()) return
     const now = Date.now()
-    if (this.own && this.own.expiresAt - now > engineLimits().renewDueWithinMs) return
+    const limits = engineLimits()
+    if (this.own && this.own.expiresAt - now > limits.renewDueWithinMs && this.own.issuedAt <= now + limits.clockSkewMs)
+      return
     try {
       this.renewOwn(started.rt)
     } catch {
@@ -221,6 +229,8 @@ export class NetEngineService implements EngineDirectoryPort {
     if (!started) return
     this.started = undefined
     this.own = undefined
+    this.helper?.close()
+    this.helper = undefined
     clearInterval(started.timer)
     this.options.net.setEngineAuthorizer(undefined)
     started.sessions.closeAll('stopped')
@@ -257,6 +267,38 @@ export class NetEngineService implements EngineDirectoryPort {
   /** Saves a pairing (the end of the ceremony in later slices; tests pair directly). */
   pair(row: Omit<EnginePeerRow, 'localId' | 'pairedAt'> & { localId?: NodeId }): EnginePeerRow {
     return this.require().peers.add({ ...row, pairedAt: Date.now() })
+  }
+
+  /**
+   * Runs this profile's connections through a helper over `pipe` (its stdio): every connection it reports up for a
+   * pairing is attached, and every one closes when it exits. A helper started again replaces the last one.
+   */
+  async useHelper(pipe: AppPipe): Promise<EngineHelper> {
+    const started = this.require()
+    this.helper?.close()
+    const helper = new EngineHelper(new AppChannel(pipe), {
+      peers: {
+        byIdentity: (identity) => {
+          const row = started.peers.byEndpoint(identity)
+          return row && { node: row.localId, grant: row.grant, endpoint: row.endpoint }
+        }
+      },
+      attach: (connection) => this.attach(connection),
+      name: () => this.selfName()
+    })
+    this.helper = helper
+    helper.channel.onClose(() => {
+      if (this.helper === helper) this.helper = undefined
+    })
+    await helper.hello()
+    return helper
+  }
+
+  /** Asks the helper to connect to a pairing; its client attaches when the connection comes up. */
+  async dial(node: NodeId): Promise<void> {
+    const row = this.require().peers.serving(node)
+    if (!row || !this.helper) throw new NetError('peer_offline')
+    await this.helper.dial(row.endpoint)
   }
 
   /** A connection the helper reports up for one of this profile's pairings. */
@@ -384,6 +426,8 @@ export class NetEngineService implements EngineDirectoryPort {
     if (!bridge) throw new NetError('forbidden')
     const descriptor = bridge.threads.store.getStream(stream)
     if (!descriptor) throw new NetError('forbidden')
+    // The private-streams check's control serves any stream, bound to this caller or not.
+    if (engineControl('second-reader')) return
     if (descriptor.kind === 'node.artifact') {
       if (!bridge.artifacts.canRead(stream, caller)) throw new NetError('forbidden')
       return

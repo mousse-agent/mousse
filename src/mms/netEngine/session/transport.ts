@@ -40,7 +40,8 @@ export interface EngineConnection {
   readonly grant?: string
   /** On an inbound connection, the endpoint of the caller. */
   readonly endpoint?: string
-  open(label: EngineLabel): EngineStream
+  /** Opens a stream; `method` names the call a `mousse.rpc` stream carries, which decides its class. */
+  open(label: EngineLabel, method?: string): EngineStream
   onStream(listener: (stream: EngineStream) => void): void
   onClose(listener: (reason: string) => void): void
   close(reason: string): void
