@@ -50,6 +50,7 @@ function jsonEchoPatterns(value: string): RegExp[] {
     // Each JSON layer is consistent across the value. Tokens have distinct prefixes, including for
     // backslashes, so near-matching responses cannot trigger exponential regex backtracking.
     const forms = new Set([jsonEscaped(char)])
+    if (!/[\"\\\x00-\x1f]/.test(char)) forms.add(char)
     if (char === '/') forms.add('\\/')
     const alternatives = [...forms].map(form => {
       for (let n = 0; n < depth; n++) form = jsonEscaped(form)
