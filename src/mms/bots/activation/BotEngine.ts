@@ -7535,7 +7535,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (state !== 'running' && state !== 'needs_input') return
       const earlier = this.store.latestJobOn(botId, threadId)
       const title = jobLine(seen?.title?.trim() || earlier?.title || 'Untitled thread', 200)
-      const request = jobLine(earlier ? `More work after "${earlier.request}"` : 'Work in a thread you started')
+      // A follow-up of a follow-up keeps the first request's line instead of quoting it again.
+      const request = jobLine(earlier ? (earlier.request.startsWith('More work after "') ? earlier.request : `More work after "${earlier.request}"`) : 'Work in a thread you started')
       this.store.openJob({ id: `job_${randomUUID()}`, botId, activationId: '', threadId, title, request, askedBy: 'owner', ...(earlier?.project ? { project: earlier.project } : {}) })
       this.changed({ botId })
     } catch (error) {

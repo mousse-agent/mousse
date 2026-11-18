@@ -194,6 +194,11 @@ describe('the ledger in the bot engine', () => {
     const followUpTurn = turns.find((row) => row.idempotencyKey.startsWith(`job:${followUp!.id}:`))
     expect((followUpTurn!.trigger as { input: string }).input).toContain('Opened PR #12.')
     expect(f.store.job(followUp!.id)).toMatchObject({ state: 'done', line: 'Opened PR #12.' })
+
+    // It works again: the next follow-up keeps the first request's line, never quoting it twice.
+    threads.set('t4', { status: 'running', title: 'Fix the login page' })
+    f.bots.launchedThreadChanged(home, 't4')
+    expect(f.store.openJobsOn('t4')).toMatchObject([{ request: 'More work after "Fix the login page in project Web"' }])
   })
 
   it('a message the bot sends to a thread whose follow-up is open takes the follow-up over: its turn, request and asker', async () => {
