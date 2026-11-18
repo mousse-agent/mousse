@@ -457,14 +457,6 @@ it.each(['repeat', 'forgotten'] as const)('recreated schedules keep removed requ
   const args = t.args
   const attempt = (bot: typeof turn.prepared.authority, key: string) => callForBot({ bot, mcp: t.mcp, name: 'Mail__send', args, toolCallId: key, signal: new AbortController().signal })
   expect((await attempt(turn.prepared.authority, 'recreated')).isError).toBe(rule === 'forgotten' ? true : undefined)
-  if (rule === 'repeat') {
-    await finish(f, turn.payload)
-    f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Same task elsewhere' }, 'owner')
-    f.clock.now += 5 * 60_000
-    expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
-    expect(t.calls).toEqual([])
-    return
-  }
   const second = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Same task elsewhere' }, 'owner')
   f.clock.now += 5 * 60_000
   const due = await f.tickSchedules(new Date(f.clock.now))
@@ -2686,8 +2678,7 @@ it('C4 integration bridge timeout stub retains the service sentence and settleme
 })
 
 it('C4 integration read-only profiles keep bytewise chat About bridge and telling snapshots across the switch', async () => {
-  const t = await setup(false)
-  Object.assign(t.descriptor, { readOnlyHint: true })
+  const t = await setup(false, false, false, false, false, false, 'send', true)
   await t.call()
   const methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'full' })
   const remote = methods.find(method => method.method === 'bots.chat.list')!
