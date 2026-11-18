@@ -131,13 +131,13 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     gone: [/What came of it goes to your owner in one line/i, /your owner already has its result from you/i]
   },
   {
-    id: 25,
+    id: 24,
     date: '2026-11-18',
     text: "Thread notices, wake-ups and other bots' messages that arrive close together now reach you as one input, with a line on whether other jobs of the same request still go; those waiting when your owner writes come with their message, as data. Questions and approvals in a thread you started now come to you first: answer what you can with approval_respond, and ask your owner only what is really their call, as your own short question. Before a request is done, speak when a result needs your owner or changes the plan.",
     gone: [/Approvals and questions in a thread are your owner's/i, /pass it on in a line with the link/i]
   },
   {
-    id: 24,
+    id: 25,
     date: '2026-11-18',
     text: 'Use bot_schedule_add with onlyIfChanged: { url, contains? } to watch a public page. Mousse checks it without a model run; the first check records it and only changed text starts work. Give prompt, never say, with this setting.'
   }
