@@ -1,6 +1,8 @@
 import { OldMetaReader } from './oldMetaReader'
-import { afterEach, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import fs from 'node:fs'
+import { SECRET_SERVICES } from '../../src/shared/secretServices'
+import { afterEach, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveSecretBinding } from '../../src/mms/secrets/secretBinding'
@@ -45,7 +47,7 @@ it('keeps the binding across restart, masks the value, and never gives a readabl
   vault.allowCopies('bot', true)
   expect(vault.fileFor('OPENAI_API_KEY', 'bot')).toBeUndefined()
   expect(existsSync(join(home, 'secrets/threads/bot/OPENAI_API_KEY'))).toBe(false)
-  expect(new OldMetaReader(join(home, 'secrets/meta.json')).readMeta().OPENAI_API_KEY).toMatchObject({ keep: 'saved', threads: ['bot'] })
+  expect(new OldMetaReader({profileRoot: home, threadAlive: () => true}).readMeta().OPENAI_API_KEY).toMatchObject({ keep: 'saved', threads: ['bot'] })
   const restarted = new SecretVault({ profileRoot: home, threadAlive: () => true })
   expect(restarted.bindingFor('OPENAI_API_KEY')).toEqual(binding)
   expect(restarted.list()[0].binding).toEqual(card.binding)
@@ -66,7 +68,7 @@ it('offers and reuses saved secrets only for matching origin, header, format, pa
   const { vault, requests } = fixture()
   const binding = resolveSecretBinding({ service: 'notion' })
   vault.store('KEY', VALUE, { threadId: 'first', keep: 'saved', binding })
-  const bindings = [undefined, { ...binding, origin: 'https://other.com' }, { ...binding, header: 'Other' }, { ...binding, format: '{}' }, { ...binding, paths: ['/other'] }, { ...binding, headers: {} }, binding]
+  const bindings = [undefined, { ...binding, serviceId: undefined, origin: 'https://other.com' }, { ...binding, serviceId: undefined, header: 'Other' }, { ...binding, serviceId: undefined, format: '{}' }, { ...binding, serviceId: undefined, paths: ['/other'] }, { ...binding, serviceId: undefined, headers: {} }, binding]
   for (const wanted of bindings) {
     const asked = requests.request('second', { name: 'KEY', label: 'Key', reason: 'Read', binding: wanted })
     const [card] = requests.list('second')
@@ -115,4 +117,97 @@ it('returns the binding refusal through the tool before starting a command', asy
   const output = await run.handler({command:'echo forbidden',secrets:[{name:'KEY'}]}, {turn:{threadId:'bot',projectPath:home},transport:'mcp',caller:{threadId:'bot'},signal:new AbortController().signal} as never)
   expect(output).toEqual({text:'KEY is bound to GitHub; use secret_fetch.',isError:true})
   requests.dispose()
+})
+
+// Old writers, restarts, missing/corrupt authority, stale copies, deletion and unbound controls.
+it.each(['store', 'grant', 'markUsed', 'delete', 'sweep'] as const)('keeps bindings after the v0.1.3 %s writer rewrites metadata', async operation => {
+  const {home, vault, requests} = fixture()
+  const binding = resolveSecretBinding({service: 'github'})
+  vault.store('BOUND', VALUE, {threadId: 'bot', keep: 'saved', binding})
+  const old = new OldMetaReader({profileRoot: home, threadAlive: () => false})
+  old.store('OTHER', 'other-value', {threadId: 'old', keep: 'thread'})
+  if (operation === 'store') old.store('NEW', 'new-value', {threadId: 'old', keep: 'saved'})
+  if (operation === 'grant') old.grant('BOUND', 'old')
+  if (operation === 'markUsed') old.markUsed('BOUND')
+  if (operation === 'delete') old.delete('OTHER')
+  if (operation === 'sweep') old.sweep()
+  expect(JSON.parse(readFileSync(join(home, 'secrets/meta.json'), 'utf8')).BOUND).not.toHaveProperty('binding')
+  const restarted = new SecretVault({profileRoot: home, threadAlive: () => true})
+  expect(restarted.bindingFor('BOUND')).toEqual(binding)
+  restarted.allowCopies('bot', true)
+  expect(restarted.fileFor('BOUND', 'bot')).toBeUndefined()
+  expect(existsSync(join(home, 'secrets/threads/bot/BOUND'))).toBe(false)
+  const adapter = createProfileSecretAdapter({profileRoot: home, inheritProcessEnv: false})
+  expect(() => adapter.resolveEnv('${secret:BOUND}')).toThrow(/bound/)
+  const host = createSecretToolHost({vault: restarted, requests, scratchRoot: home})
+  await expect(host.run({threadId: 'bot', cwd: home, command: 'echo forbidden', secrets: [{name: 'BOUND'}], timeoutMs: 1000, signal: new AbortController().signal})).rejects.toThrow(/bound/)
+  expect(restarted.maskerFor('bot')!(VALUE)).not.toContain(VALUE)
+  requests.dispose()
+})
+it.each(['missing', 'invalid JSON', 'invalid entry'] as const)('fails closed with %s bindings without breaking an unbound key', state => {
+  const {home, vault, requests} = fixture()
+  vault.store('BOUND', VALUE, {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
+  vault.store('PLAIN', 'plain-value', {threadId: 'bot', keep: 'saved'})
+  const path = join(home, 'secrets/bindings.json')
+  if (state === 'missing') rmSync(path, {force: true})
+  else writeFileSync(path, state === 'invalid JSON' ? '{' : '{"BOUND":{"origin":5}}')
+  const copy = join(home, 'secrets/threads/bot/BOUND')
+  mkdirSync(join(home, 'secrets/threads/bot'), {recursive: true}); writeFileSync(copy, VALUE)
+  const restarted = new SecretVault({profileRoot: home, threadAlive: () => true})
+  // Exercise fileFor itself before syncFiles can remove the stale copy.
+  expect(restarted.fileFor('BOUND', 'bot')).toBeUndefined()
+  expect(() => restarted.list()).not.toThrow()
+  const adapter = createProfileSecretAdapter({profileRoot: home, inheritProcessEnv: false})
+  expect(() => adapter.resolveEnv('${secret:BOUND}')).toThrow(/bound/)
+  expect(adapter.resolveEnv('${secret:PLAIN}')).toBe('plain-value')
+  writeFileSync(join(home, 'secrets/meta.json'), '{')
+  expect(adapter.resolveEnv('${secret:PLAIN}')).toBe('plain-value')
+  requests.dispose()
+})
+it('removes a binding on delete and leaves bound keys out of automation pickers', () => {
+  const {home, vault, requests} = fixture()
+  vault.store('BOUND', VALUE, {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
+  vault.store('PLAIN', VALUE, {threadId: 'bot', keep: 'saved'})
+  expect(vault.savedKeyNames()).toEqual(['PLAIN'])
+  vault.delete('BOUND')
+  expect(vault.bindingFor('BOUND')).toBeUndefined()
+  expect(JSON.parse(readFileSync(join(home, 'secrets/bindings.json'), 'utf8'))).not.toHaveProperty('BOUND')
+  vault.store('BOUND', VALUE, {threadId: 'bot', keep: 'saved'})
+  expect(createProfileSecretAdapter({profileRoot: home, inheritProcessEnv: false}).resolveEnv('${secret:BOUND}')).toBe(VALUE)
+  requests.dispose()
+})
+it.each(['https://API.github.com:443.', 'https://API.GITHUB.COM.', 'https://api.github.com:443', 'https://API.OPENAI.COM.:443/'])('uses the known service limits for normalised origin %s', origin => {
+  const expected = resolveSecretBinding({service: origin.toLowerCase().includes('github') ? 'github' : 'openai'})
+  expect(resolveSecretBinding({origin})).toEqual(expected)
+})
+it.each(['https://localhost', 'https://localhost.', 'https://printer', 'https://api.local', 'https://api.internal', 'https://api.localhost', 'https://api.example.com:0'])('refuses local custom origin %s', origin => {
+  expect(() => resolveSecretBinding({origin})).toThrow()
+})
+
+it('stores known service ids and uses the current service table for saved reuse', () => {
+  const {home, vault, requests} = fixture()
+  const original = structuredClone(SECRET_SERVICES.notion)
+  try {
+    vault.store('KEY', VALUE, {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'notion'})})
+    expect(JSON.parse(readFileSync(join(home, 'secrets/bindings.json'), 'utf8')).KEY).toEqual({service: 'notion'})
+    SECRET_SERVICES.notion.headers = {'Notion-Version': 'future-fixture-version'}
+    const binding = resolveSecretBinding({service: 'notion'})
+    expect(vault.bindingFor('KEY')?.headers).toEqual(binding.headers)
+    expect(vault.isSaved('KEY', binding)).toBe(true)
+  } finally { SECRET_SERVICES.notion = original; requests.dispose() }
+})
+it('caches binding file reads across references while observing atomic replacements', () => {
+  const {home, vault, requests} = fixture()
+  vault.store('KEY', VALUE, {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
+  const adapter = createProfileSecretAdapter({profileRoot: home, inheritProcessEnv: false})
+  const spy = vi.spyOn(fs, 'readFileSync')
+  try {
+    for (let n = 0; n < 4; n++) expect(() => adapter.resolveEnv('${secret:KEY}')).toThrow(/GitHub/)
+    expect(spy.mock.calls.filter(([path]) => String(path).endsWith('/bindings.json'))).toHaveLength(1)
+    const path = join(home, 'secrets/bindings.json')
+    const replacement = path + '.new'
+    writeFileSync(replacement, '{"KEY":{"service":"openai"}}'); fs.renameSync(replacement, path)
+    expect(() => adapter.resolveEnv('${secret:KEY}')).toThrow(/OpenAI/)
+    expect(spy.mock.calls.filter(([path]) => String(path).endsWith('/bindings.json'))).toHaveLength(2)
+  } finally { spy.mockRestore(); requests.dispose() }
 })
