@@ -1,3 +1,5 @@
+import { actionPlace } from './BotAlone'
+import { BOT_ALONE_HOURLY_CALLS, BOT_ALONE_DAILY_CALLS } from '../../../shared/bots/personal/definition'
 import { unmistakableCredential } from '../../../shared/secretShapes'
 import { botActionRefusalText, isBotActionRefusalCode, type BotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { notice, quoted } from '../../../shared/mousseContext'
@@ -148,7 +150,7 @@ function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasH
 export interface ActionRow {
   id: string; call_key: string; bot_id: string; activation_id: string; status: string
   exec_args: string | null; args_digest: string; binding_json: string; target_json: string
-  answered_at: string | null; ran_at: string | null; args_json: string; card_json: string | null; message_id: string; expires_at: string; result_json: string | null
+  answered_device: string | null; answered_at: string | null; ran_at: string | null; args_json: string; card_json: string | null; message_id: string; expires_at: string; result_json: string | null
 }
 /** Content-free reason survives redaction; legacy rows fall back to their stored sentence. */
 function withdrawalCode(action: Pick<ActionRow, 'card_json' | 'result_json'>): BotActionRefusalCode {
@@ -197,8 +199,10 @@ interface Host {
   origin(row: BotActivationRow): 'owner' | 'unattended' | undefined
   schema(tool: BotMcpTool): unknown
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
+  alone?(row: BotActivationRow, tool: BotMcpTool, place: Record<string, unknown> | undefined): string | undefined
   obsolete(action: ActionRow): boolean
   post(row: BotActivationRow, id: string, text: string): void
+  sentAlone?(): void
   settled(row: BotActivationRow): void
   publish(messageId: string): void
   ownerAnswered(row: BotActivationRow): void
@@ -249,7 +253,7 @@ export class BotActions {
         'withdrawalCode', json_extract(card_json, '$.withdrawalCode'),
         'toolReportedError', COALESCE(json_extract(result_json, '$.toolReportedError'), json_extract(card_json, '$.toolReportedError')),
         'ownerRemoved', json_extract(card_json, '$.ownerRemoved'), 'removedOwnerSeq', json_extract(card_json, '$.removedOwnerSeq'), 'removedNoteSeq', json_extract(card_json, '$.removedNoteSeq')),
-      bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
+      place_json = NULL, bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
     '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId, actionId ?? null, actionId ?? null)
   }
   withdrawWork(id: string): void {
@@ -319,7 +323,7 @@ export class BotActions {
     this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner chose Not now') ? 'repeat' : 'loop'}`, text)
     return { text, isError: true }
   }
-  hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
+  hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome | Promise<ToolOutcome> {
     if (!this.host.enabled()) return { text: 'This tool cannot be used now. Carry on without it.', isError: true }
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
@@ -358,20 +362,31 @@ export class BotActions {
     const review = reviewArguments(args, this.host.schema(tool))
     if (exact.length > ACTION_MAX_ARGUMENT_CHARS)
       return { text: 'These arguments exceed the 256,000-character limit for a complete review. Nothing was held or sent. Send less.', isError: true }
+    const place = actionPlace(this.host.schema(tool), args)
+    const exception = this.host.alone?.(row, tool, place)
+    const now = Date.parse(this.host.store.now())
+    const counts = exception ? this.host.store.get(`SELECT
+      SUM(CASE WHEN target_json = ? AND ran_at >= ? THEN 1 ELSE 0 END) AS hour,
+      COUNT(*) AS day FROM bot_actions WHERE bot_id = ? AND kind = 'mcp' AND ran_at >= ?`, target, new Date(now - 3600_000).toISOString(), row.botId, new Date(now - 86400_000).toISOString()) : undefined
+    const capped = !!exception && (Number(counts?.hour) >= BOT_ALONE_HOURLY_CALLS || Number(counts?.day) >= BOT_ALONE_DAILY_CALLS)
+    const alone = exception && !capped
+    const capNote = capped ? `${this.host.name(row.botId)} has used this action ${Number(counts?.hour) >= BOT_ALONE_HOURLY_CALLS ? `${counts?.hour} times this hour` : `${counts?.day} times today`}. Send this one too?` : undefined
     const id = `action_${randomUUID()}`
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
-      const introduced = this.host.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, 'asks-first:introduced', '1')", row.botId)
+      const introduced = !alone && this.host.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, 'asks-first:introduced', '1')", row.botId)
       if (introduced) this.host.post(row, `bm_asks_first_${row.botId}`, `${this.host.name(row.botId)} asks you before using tools that may send or change things. Tools that say they only read don't ask.`)
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
-        args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
-        VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
-      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: readableActionTitle(tool.tool), serverName: tool.serverName }), messageId,
+        args_json, args_digest, binding_json, place_json, card_json, status, message_id, expires_at, created_at, answered_at, answered_device)
+        VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
       // expires_at is retained for older settled rows; open rows have no deadline.
-      '9999-12-31T23:59:59.999Z', this.host.store.now())
+      '9999-12-31T23:59:59.999Z', this.host.store.now(), alone ? this.host.store.now() : null, alone ? `alone:${exception}` : null)
+      if (alone) return
       this.host.park(row)
       this.host.post(row, messageId, `${tool.serverName} · ${tool.tool}\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)
     })
+    if (alone) return this.runApproved(id).then(() => JSON.parse(this.get(id)?.result_json ?? '{"text":"Nothing was sent.","isError":true}'))
     this.host.held()
     return { text: 'This call is held for your owner. End your turn now.' }
   }
@@ -385,7 +400,7 @@ export class BotActions {
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
       if (moved && to === 'withdrawn') this.host.store.run("UPDATE bot_actions SET card_json = json_set(COALESCE(card_json, '{}'), '$.withdrawalCode', ?) WHERE id = ?", withdrawalReason ?? withdrawalCode({ card_json: null, result_json: JSON.stringify(result ?? {}) }), id)
       if (moved && result?.notSentInTime) this.host.store.run("UPDATE bot_actions SET card_json = json_set(card_json, '$.settledAt', ?) WHERE id = ?", this.host.store.now(), id)
-      if (moved && ['approved', 'running'].includes(to)) {
+      if (moved && this.get(id)?.card_json !== null && ['approved', 'running'].includes(to)) {
         const action = this.get(id)!
         const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'the service'
         this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'approved' ? `Waiting for ${service}…` : 'Sending…', action.message_id)
@@ -401,7 +416,7 @@ export class BotActions {
         const row = this.host.store.activation(action.activation_id)
         if (action.args_json !== '"[forgotten]"') this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', result?.notSentInTime ? result.text : to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
         if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
-        this.host.store.db.afterCommit(() => this.host.publish(action.message_id))
+        if (action.card_json !== null) this.host.store.db.afterCommit(() => this.host.publish(action.message_id))
       }
       return moved
     })
@@ -414,12 +429,13 @@ export class BotActions {
       const args: unknown = JSON.parse(action.exec_args)
       if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
       const target = JSON.parse(action.target_json)
+      if (action.card_json === null && (!action.answered_device?.startsWith('alone:') || `alone:${this.host.alone?.(row, target, actionPlace(this.host.schema(target), args as Record<string, unknown>))}` !== action.answered_device)) return undefined
       const binding = this.host.binding(row, target)
       // Admission may precede the first relay listing. Execution always requires the full binding.
       if (!binding && allowCold && !this.host.obsolete(action)) return row
       const review = reviewArguments(args, this.host.schema(target))
       if (action.args_json !== '"[forgotten]"' && (canonicalJson(JSON.parse(action.args_json)) !== canonicalJson(review.args)
-        || Boolean(JSON.parse(action.card_json ?? '{}').hasHiddenValues) !== review.hasHiddenValues)) return undefined
+        || action.card_json !== null && Boolean(JSON.parse(action.card_json ?? '{}').hasHiddenValues) !== review.hasHiddenValues)) return undefined
       return binding && canonicalJson(binding) === canonicalJson(JSON.parse(action.binding_json)) ? row : undefined
     } catch { return undefined }
   }
@@ -527,11 +543,12 @@ export class BotActions {
     } finally {
       this.executing.delete(id)
     }
+    if (action.card_json === null) this.host.sentAlone?.()
     this.finish(action)
   }
   private finish(action: ActionRow): void {
     const row = this.host.store.activation(action.activation_id)
-    if (!row) return
+    if (!row || action.card_json === null) return
     this.host.settled(row)
   }
   async retryApproved(): Promise<void> {

@@ -1,3 +1,4 @@
+import { BotAlone } from '../actions/BotAlone'
 import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
 import { BOT_ASKS_FIRST_INSTRUCTIONS, BOT_ASKS_FIRST_CHAT_INSTRUCTIONS, BOT_ASKS_FIRST_SCHEDULE_INSTRUCTIONS } from '../instructions'
 import { dataFrame } from '../../../shared/bots/personal/dataFrames'
@@ -692,6 +693,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (ended) this.store.db.afterCommit(() => this.afterEnd(ended))
     },
     schema: (tool) => this.host.mcp?.inputSchema?.(tool),
+    alone: (row, tool, place) => row.trigger.kind === 'schedule' ? this.alone.match(row.botId, row.trigger.scheduleId, tool.server, tool.tool, place) : undefined,
     binding: (row, tool) => {
       const pair = this.actionPair(row, tool)
       if (!pair) return undefined
@@ -722,6 +724,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return Boolean(binding && (binding.configDigest !== held.configDigest || binding.schemaDigest !== held.schemaDigest))
     },
     post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, ...(id === `bm_asks_first_${row.botId}` ? { quiet: true as const } : {}), activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
+    sentAlone: () => this.scheduledCallChecks.clear(),
     settled: (row) => { this.chat.republish(this.actions.forWork(row.id)!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
     execute: async (row, target, args) => {
       const mcp = this.host.mcp
@@ -735,6 +738,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }, name: tool.name, args, signal, heldAction: true, sanitizeResult: (result) => removeHiddenArguments(result, args, mcp.inputSchema?.(target)), assertDispatchActive: () => {
         this.actions.assertRunning(actionId)
       } })
+    }
+  }) }
+  readonly alone: BotAlone
+  private createAlone(): BotAlone { return new BotAlone({
+    store: this.store,
+    enabled: () => botAsksFirst(this.host.settings?.get()),
+    schedule: (botId, id) => this.host.schedules?.get(botId, id),
+    schema: (server, tool) => this.host.mcp?.inputSchema?.({ server, tool } as BotMcpTool),
+    binding: (botId, server, tool) => {
+      const pair = this.store.activeGrant(botId)?.manifest.mcp.find(p => p.serverId === server && p.tool === tool)
+      if (!pair || this.store.disabledPermissions(botId).some(p => p.manifest.mcp.some(t => t.serverId === server && t.tool === tool))) return undefined
+      return this.host.mcp?.binding?.({ server, tool } as BotMcpTool)
     }
   }) }
   readonly service: BotChatService
@@ -853,6 +868,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly reportChips = new Map<string, BotChip>()
 
   constructor(private readonly host: BotEngineHost) {
+    this.alone = this.createAlone()
     this.actions = this.createActions()
     // A change to what a bot's turns start with (grant, revision, pause, deletion) closes the process its chat keeps warm.
     host.store.launchChanged = (botId) => this.releaseChatProcess(botId)
@@ -864,6 +880,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     this.chat = new BotChatProjection({
       asksFirst: () => botAsksFirst(this.host.settings?.get()),
+      aloneItems: botId => this.alone.items(botId),
+      aloneAsk: (botId, activationId) => this.alone.pending(botId, activationId),
       store: host.store,
       ...(host.journal ? { journal: host.journal } : {}),
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
@@ -1122,6 +1140,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       this.store.withdrawAsks(botId)
       this.store.revoke(botId)
+      this.alone.prune(botId)
+      this.store.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone-ask:*'", botId)
       this.store.markDeleted(botId)
       // A deleted bot says nothing more: its reminders are cancelled with it, and its questions no longer wait for an answer.
       this.watchers.stopBot(botId)
@@ -3838,6 +3858,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             if (!allowed.ok) return { text: checkMessage(allowed), isError: true }
           }
           const outcome = this.actions.hold(row, input.callDispatchId ?? input.dispatchId, tool, args, toolCallId)
+          if (outcome instanceof Promise) return outcome
           if (!outcome.isError) { this.askedIn.set(row.id, input.mainN); this.releaseParked(this.store.activation(row.id) ?? row, 'approval') }
           return outcome
         }
@@ -3885,6 +3906,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (!live.ok && ('refused' in live || live.wall.kind !== 'tool')) return checkMessage(live)
         // An ask for any browser tool is the one "use the browser" ask.
         let asked = grantRequestOf(request.permission as BotAskRequest)
+        if ('ask' in asked && asked.ask === 'let_alone') {
+          if (!ownerChatTurn(row)) return 'Only when your owner asks for it in their own message.'
+          const problem = this.alone.prepare(row.botId, row.id, asked)
+          if (problem) return problem
+        }
         // The owner's MCP tools: one ask per server, for every tool it offers now that the bot lacks. A server or tool
         // that is not set up here is refused now, with no card, in both lanes.
         if ('mcp' in asked) {
@@ -3894,7 +3920,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           asked = resolved.asked
         }
         // A Mousse tool no bot can hold is refused now, before the owner sees a card it can't grant.
-        if ('tool' in asked && !isNeutralTool(asked.tool) && !BOT_APP_TOOLS.has(asked.tool))
+        if (!isSpecialAsk(asked) && 'tool' in asked && !isNeutralTool(asked.tool) && !BOT_APP_TOOLS.has(asked.tool))
           return `A bot can't be given the Mousse tool ${asked.tool}. Carry on without it.`
         // Switched off by the owner for this bot: no card, whatever the grant holds; asking would not help.
         if (this.permissionOff(row.botId, asked)) return this.offText()
@@ -4593,6 +4619,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
   private askCardText(row: BotActivationRow, permission: BotAskRequest, callNote?: string): { title: string; note: string } {
+    if ('ask' in permission && permission.ask === 'let_alone') {
+      const pending = this.alone.pending(row.botId, row.id)
+      if (pending) return { title: pending.title, note: 'Only this automation, this tool and this place. Anything else asks you first.' }
+    }
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
     const text = askText(permission, budget ? { budget } : {})
     // What the refused call would have done ("It would set: …") says more than the permission's own line.
@@ -4815,6 +4845,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, status, amount)) return false
       if (!special && (input.answer === 'allow_once' || input.answer === 'allow_more')) this.store.putOverlay(row.id, escalation.id, escalation.permission, amount)
+      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone') this.alone.answer(row.botId, row.id, status !== 'denied')
       this.journalAnswer(escalation, status === 'denied' ? 'not_now' : 'allow')
       // Work that waits on the same limit is settled with the answer: an overlay for this activation gives it no room.
       if (limit) settled = this.settleRoomInTx(row.botId, limit, status !== 'denied', waiting!)
@@ -4867,6 +4898,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     let settled: RoomSettled | undefined
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, answer === 'allow' ? 'allowed_bot' : 'denied', amount, cooldown)) return false
+      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone') this.alone.answer(botId, escalation.activationId, answer === 'allow')
       this.journalAnswer(escalation, answer)
       // Work that waits for room goes on with the wider grant, or ends with what it posted, with the answer.
       if (limit) settled = this.settleRoomInTx(botId, limit, answer === 'allow', waiting!)
@@ -5142,6 +5174,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.db.transaction(() => {
       this.store.setPublished(botId, revision.revision!)
       this.store.approve(botId, digest, granted)
+      this.alone.prune(botId)
       if (switching) this.store.regrant(botId, grant.digest, digest, revision.revision!)
       for (const row of this.store.activationsIn(botId, ['queued', 'blocked'])) {
         if (row.status === 'blocked' && !workWaits(row)) continue
@@ -9704,6 +9737,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** Keep the deleted job's telling wishes for work whose final report is still pending. */
   scheduleRemoved(botId: string, scheduleId: string, telling: { tellMe: TellMe; canWakeMe?: boolean }): void {
     new PageChecks(this.store).remove(botId, scheduleId)
+    this.alone.prune(botId)
     this.store.db.transaction(() => {
       for (const row of this.store.activationsWith(['queued', 'running', 'waiting_grant', 'paused', 'blocked'])) {
         if (row.botId !== botId || row.trigger.kind !== 'schedule' || row.trigger.scheduleId !== scheduleId) continue
@@ -9716,12 +9750,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   editSchedule<T>(botId: string, save: () => T): T {
     return this.store.db.transaction(() => {
       const result = save()
+      this.alone.prune(botId)
       this.actions.withdrawChanged(botId)
       return result
     })
   }
 
   schedulesEdited(botId: string): void {
+    this.alone.prune(botId)
     this.dropRemovedScheduleRuns(botId)
     this.changed({ botId })
   }
@@ -9945,6 +9981,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.entry(botId)
     const removed = this.host.schedules?.remove(botId, scheduleId) ?? false
     new PageChecks(this.store).remove(botId, scheduleId)
+    this.alone.prune(botId)
     this.dropRemovedScheduleRuns(botId)
     if (removed) this.changed({ botId })
     return removed
@@ -10407,6 +10444,7 @@ function spendLimits(manifest: BotManifest): ActivationLimits {
  * never count.
  */
 function grantHolds(manifest: BotManifest, asked: BotAskRequest): boolean {
+  if (isSpecialAsk(asked)) return false
   // An older build's folder ask: files outside the files folder can no longer be held.
   if ('path' in asked) return false
   if ('skill' in asked) return manifest.skills.includes(asked.skill)
@@ -10433,6 +10471,7 @@ function frontDeskLacks(asked: BotAskRequest): boolean {
 
 /** Whether `authority` already holds the tool, skill or MCP tool `asked` names (a folder or a limit never counts). */
 function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skills' | 'mcp'>, asked: BotAskRequest): boolean {
+  if (isSpecialAsk(asked)) return false
   if ('tool' in asked) {
     // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
     if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool) || authority.appTools.has(asked.tool)
