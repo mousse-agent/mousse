@@ -619,6 +619,8 @@ it('scheduled and unattended work share three waiting cards', async () => {
   expect(await call('Message 0', 'duplicate')).toMatchObject({ isError: true, text: expect.stringContaining('already waiting') })
   expect(await call('From the schedule', 'changed')).toMatchObject({ isError: true, text: 'Not sent: three requests for this tool already wait for your owner. Say in your report what you would have sent; do not ask again until one is answered.' })
   expect(f.bots.actions.forWork(id)).toBeUndefined()
+  await finish(f, run.payload, 'completed', { text: 'Not sent: three requests already wait.' })
+  expect(f.store.activation(id)?.status).toBe('done')
 })
 it('a duplicate refusal explains the earlier card without borrowing its outcome', async () => {
   const t = await fanOut(true, false, 2, false)
