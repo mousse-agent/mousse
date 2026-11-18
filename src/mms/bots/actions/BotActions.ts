@@ -170,7 +170,7 @@ function withdrawalCode(action: Pick<ActionRow, 'card_json' | 'result_json'>): B
   if (text.includes('work ended')) return 'bot_action_work_ended'
   if (text.includes('paused')) return 'bot_action_owner_paused'
   if (text.includes('forgotten')) return 'bot_action_owner_removed'
-  if (text.includes('could not wait')) return 'bot_action_disabled'
+  if (text.includes('could not wait') || text.includes('owner changed a setting')) return 'bot_action_disabled'
   if (text.includes('schedule') && text.includes('changed')) return 'bot_action_schedule_changed'
   if (text.includes('changed since')) return 'bot_action_binding_changed'
   if (text.includes('tool') && text.includes('changed')) return 'bot_action_permission_changed'
@@ -272,7 +272,7 @@ export class BotActions {
     if (this.host.enabled()) return
     this.host.store.db.transaction(() => {
       for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
-        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This could not wait for your owner after all, so nothing was sent. Do not make this call again in this work; say in your report what you would have sent.' }, 'bot_action_disabled'))
+        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'Your owner changed a setting, so this request was withdrawn and nothing was sent. Do not make this call again in this work; say in your report what you would have sent.' }, 'bot_action_disabled'))
           this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
       }
     })

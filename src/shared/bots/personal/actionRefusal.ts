@@ -15,7 +15,7 @@ export function botActionRefusalText(code: BotActionRefusalCode, names: BotActio
     case 'bot_action_work_ended': return 'This work ended. Nothing was sent.'
     case 'bot_action_owner_paused': return 'This bot was paused, so nothing was sent.'
     case 'bot_action_permission_changed': return 'This tool or its permission changed, so nothing was sent.'
-    case 'bot_action_disabled': return 'This could not wait for your owner after all, so nothing was sent.'
+    case 'bot_action_disabled': return 'Withdrawn when asks first was turned off. Nothing was sent.'
     case 'bot_action_owner_removed': return 'You removed this request, so nothing was sent.'
     case 'bot_action_binding_changed': return 'This changed since you saw it. Nothing was sent.'
     case 'bot_action_schedule_changed': return 'This changed since you saw it. Nothing was sent.'
