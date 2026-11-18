@@ -203,7 +203,7 @@ interface Host {
   store: BotStore
   enabled(): boolean
   name(botId: string): string
-  refresh(): Promise<void>
+  refresh(tool?: BotMcpTool): Promise<boolean | void>
   park(row: BotActivationRow): void
   origin(row: BotActivationRow): 'owner' | 'unattended' | undefined
   schema(tool: BotMcpTool): unknown
@@ -474,6 +474,13 @@ export class BotActions {
     return action
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
+    if (input.answer === 'send') {
+      const held = this.get(input.actionId)
+      if (held?.status === 'open' && held.args_digest === input.digest && await this.host.refresh(JSON.parse(held.target_json)) === false) {
+        const service = JSON.parse(held.card_json ?? '{}').serverName ?? 'The service'
+        throw new BotActionChanged(botActionRefusalText('bot_action_unreachable', { serverName: service }), 'bot_action_unreachable')
+      }
+    }
     const action = this.checked(input, true)
     if (input.answer === 'not_now') {
       this.host.store.db.transaction(() => {
@@ -488,7 +495,7 @@ export class BotActions {
       this.host.ownerAnswered(this.host.store.activation(action.activation_id)!)
     })
     this.host.held()
-    await this.runApproved(action.id, true)
+    await this.runApproved(action.id)
     return { status: this.get(action.id)!.status }
   }
   private async runApproved(id: string, refresh = false): Promise<void> {

@@ -634,7 +634,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
   private createActions(): BotActions { return new BotActions({
     store: this.host.store,
-    refresh: async () => { await this.host.mcp?.warm() },
+    refresh: async tool => {
+      if (tool && this.host.mcp?.refresh) return this.host.mcp.refresh(tool.server)
+      await this.host.mcp?.warm()
+    },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
     origin: row => {
       if (row.trigger.kind === 'schedule') return 'unattended'

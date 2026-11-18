@@ -2285,7 +2285,7 @@ it('R2-5 keeps Send unapproved until its fresh listing is checked', async () => 
   f.clock.now += 48 * 3600_000 - 1000
   let release!: () => void
   const refresh = new Promise<void>(resolve => { release = resolve })
-  Object.assign(t.catalog, { refresh: () => refresh })
+  Object.assign(t.catalog, { refreshServer: () => refresh })
   const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   await flush()
   expect(f.bots.actions.get(a.id)?.status).toBe('open')
@@ -3725,7 +3725,7 @@ it('Send re-lists a warm server before checking the held effective level', async
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   const refresh = vi.fn(async () => { t.descriptor.readOnlyHint = true })
-  Object.assign(t.catalog, { refresh })
+  Object.assign(t.catalog, { refreshServer: refresh })
   await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('changed since')
   expect(refresh).toHaveBeenCalled()
   expect(t.calls).toEqual([])
@@ -3734,7 +3734,7 @@ it('Send refuses a bounded re-list that does not finish, keeping the card open',
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  Object.assign(t.catalog, { refresh: () => new Promise<void>(() => {}) })
+  Object.assign(t.catalog, { refreshServer: () => new Promise<void>(() => {}) })
   vi.useFakeTimers()
   try {
     const answer = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_unreachable' })

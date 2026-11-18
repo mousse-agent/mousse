@@ -283,7 +283,7 @@ export class McpManager {
       servers: snapshot.servers,
       settings,
       actor
-    }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
+    }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed' && (!options.installationId || mcpInstallationId(server) === options.installationId))
 
     const toolLists = await Promise.all(
       eligibleServers.map(async (server) => {
@@ -308,7 +308,7 @@ export class McpManager {
   async getEnabledToolsByServer(
     projectPath?: string,
     actor: IntegrationActor = defaultIntegrationActor(false),
-    options: { signIn?: false; onServer?: (entry: McpServerTools) => void } = {}
+    options: { signIn?: false; installationId?: string; onServer?: (entry: McpServerTools) => void } = {}
   ): Promise<McpServerTools[]> {
     this.owned.assertAccepting()
     const settings = this.settingsStore.get().integrations.mcp

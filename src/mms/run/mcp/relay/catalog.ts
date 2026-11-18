@@ -153,6 +153,15 @@ export class RelayCatalog {
     return scope.refreshing
   }
 
+  /** A fresh read of one server after earlier refreshes, for an owner's Send. */
+  async refreshServer(installationId: string, projectPath?: string): Promise<void> {
+    const scope = this.scope(projectPath)
+    while (scope.refreshing) await scope.refreshing
+    if (this.disposed) return
+    scope.refreshing = this.read(projectPath, scope, { signIn: false, installationId }).finally(() => { scope.refreshing = undefined })
+    await scope.refreshing
+  }
+
   /**
    * Marks every scope stale (the manager's discovery cache was invalidated). The profile's own scope, which personal
    * bots read (`listProfile`), is read again at once, without a sign-in, so a server removed or added shows in About.
@@ -203,7 +212,7 @@ export class RelayCatalog {
    * so one slow server hides only itself. A server that fails keeps its last good tools; one that never listed is
    * kept with none, as failing. Nothing changes unless the configured servers could be read.
    */
-  private async read(projectPath: string | undefined, scope: Scope, options: { signIn?: false } = {}): Promise<void> {
+  private async read(projectPath: string | undefined, scope: Scope, options: { signIn?: false; installationId?: string } = {}): Promise<void> {
     const settings = this.deps.settings()
     const seen = this.invalidations
     try {
@@ -220,6 +229,9 @@ export class RelayCatalog {
       if (this.disposed) return
       const before = { servers: scope.servers, byName: scope.byName }
       const answered = new Map<string, RelayServerTools>()
+      if (options.installationId) for (const [id, entry] of before.servers) {
+        if (id !== options.installationId) answered.set(id, { ...entry, ...(scope.failing.has(id) ? { error: 'Previous listing failed' } : {}) })
+      }
       scope.configured = new Map(configured.map((server) => [mcpInstallationId(server), { serverName: server.name, identity: mcpServerIdentity(server), configDigest: shortHash(canonicalJson(server), 64) }]))
       const publish = (final: boolean): void => {
         if (this.disposed) return
@@ -270,6 +282,7 @@ export class RelayCatalog {
         }
         try {
           const listed = await this.deps.manager.getEnabledToolsByServer(projectPath, actor, {
+            ...(options.installationId ? { installationId: options.installationId } : {}),
             ...options,
             onServer: (entry) => {
               heard(entry)
