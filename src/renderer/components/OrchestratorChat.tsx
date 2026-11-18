@@ -143,6 +143,8 @@ const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
 /** Stable empty list — `?? []` in a Zustand selector causes infinite re-renders. */
 const EMPTY_BROWSER_ELEMENTS: BrowserElementAttachment[] = []
 const EMPTY_REFERENCES: ChatReference[] = []
+const NO_ATTACHED_FILES: AttachedFile[] = []
+const NO_VOICE_MESSAGES: VoiceMessage[] = []
 
 /** Composer media (files/voice) cannot go in the persisted workspace store — File/Blob + object URLs. */
 type ComposerMediaDraft = { files: AttachedFile[]; voice: VoiceMessage[] }
@@ -191,6 +193,12 @@ function sameModel(
     has.model === wanted.model &&
     (has.effort ?? '') === (wanted.effort ?? '')
 }
+
+/**
+ * A new chat's first message as shown in the transcript from the click on Send, before its thread is made: its id and
+ * the click's time, which its turn's Working time counts from. `taken` once the send paints it as its own.
+ */
+type ShownFirstPrompt = { id: string; at: string; taken: boolean }
 
 /** The transcript shows a prompt with these words that was not there before the send (`seenBefore`): its turn started. */
 function startedAsPrompt(messages: readonly ChatMessage[], seenBefore: ReadonlySet<string>, content: string): boolean {
@@ -257,7 +265,11 @@ export function OrchestratorChat() {
   // Shared with quick actions and the side card, which also prepare or edit the new chat's workspace.
   const workspacePending = useAppStore(isWorkspacePending)
   const workspaceLocked = useAppStore(isComposerWorkspaceLocked)
-  const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length)
+  // The first message of a new chat, shown in the transcript from the click while its thread is made and set up
+  // (`handleSend`). Until it is sent, the chat is still the new chat it was, and its composer still holds the message.
+  const [firstSendId, setFirstSendId] = useState<string | null>(null)
+  const firstSendShown = firstSendId !== null && messages.some((message) => message.id === firstSendId)
+  const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length - (firstSendShown ? 1 : 0))
   // A new chat whose thread a send still has to make (none yet, or the empty one shown is of another project or
   // computer): it shows what its project remembers from the last pick there, and a pick waits with the draft.
   const createsThread = newChat && composerCreatesThread(activeThread, workspace)
@@ -970,7 +982,9 @@ export function OrchestratorChat() {
       /** The settings the composer showed, which the turn must run on (a new chat's first send). */
       expect?: SendExpectation,
       /** Steer: a message the running turn could not take yet (it is still being set up) is sent now once queued. */
-      steer?: boolean
+      steer?: boolean,
+      /** The copy of this message shown since the click (a new chat's first message): it is kept, not painted again. */
+      firstPrompt?: ShownFirstPrompt
     ) => {
       if (!content && !(images && images.length)) return
 
@@ -1002,8 +1016,13 @@ export function OrchestratorChat() {
       const queueWaiting = Boolean(targetThreadId) && targetThreadId === queue.threadId && queueItemsRef.current.some((item) => !item.heldAfterStop)
       const queuesNow = loading || turnActive || compactionRunning || onTheWay > 0 || queueWaiting
       const optimisticMessageId = !queuesNow && targetThreadId
-        ? `optimistic:${crypto.randomUUID()}`
+        ? firstPrompt?.id ?? `optimistic:${crypto.randomUUID()}`
         : null
+      if (firstPrompt) {
+        firstPrompt.taken = true
+        // Shown since the click: it stays as it is (the same row, the same start), or goes to the queue with the send.
+        if (optimisticMessageId !== firstPrompt.id) useAppStore.getState().dropMessage(targetThreadId, firstPrompt.id)
+      }
       const promptThread = optimisticMessageId ? targetThreadId : null
       if (promptThread) promptsOnTheWay.current.set(promptThread, onTheWay + 1)
       if (steer) setSteersOnTheWay((current) => new Set(current).add(requestId))
@@ -1014,7 +1033,7 @@ export function OrchestratorChat() {
           id: optimisticMessageId,
           role: 'user',
           content: request.content,
-          timestamp: new Date().toISOString(),
+          timestamp: optimisticMessageId === firstPrompt?.id ? firstPrompt.at : new Date().toISOString(),
           images
         })
       }
@@ -1088,8 +1107,7 @@ export function OrchestratorChat() {
         // A message the service queued (a turn started meanwhile, or a run is paused by a usage limit) waits in the
         // queue: it is shown there, not also in the transcript.
         if (result.queued && optimisticMessageId) {
-          const current = useAppStore.getState().messages
-          useAppStore.getState().setMessages(current.filter((message) => message.id !== optimisticMessageId))
+          useAppStore.getState().dropMessage(targetThreadId, optimisticMessageId)
           if (result.queueItem) {
             const held = result.queueItem
             setOptimisticQueueItems((items) => [...items.filter((item) => item.id !== held.id), held])
@@ -1120,6 +1138,8 @@ export function OrchestratorChat() {
         // A send the service refused ran nothing: the same text sent again is a new message. One with no
         // answer (a timeout, another computer that did not confirm) keeps its id, so sending it again replays it.
         sendIds.current.settle(signature, requestId, isOutcomeUncertain(error) ? 'unknown' : 'refused')
+        // Refused while another thread is shown: its copy leaves the thread all the same, so it never shows as sending.
+        if (!stillVisible() && optimisticMessageId && !isOutcomeUncertain(error)) useAppStore.getState().dropMessage(targetThreadId, optimisticMessageId)
         if (!stillVisible()) return
         setSendError(boundSendRefusal(error, Boolean(expect)) ?? sendErrorLine(error))
         // Settings changed since they were shown: the composer shows what the thread really runs now, and for a thread of
@@ -1145,10 +1165,7 @@ export function OrchestratorChat() {
             },
             dropOptimistic: () => {
               if (optimisticQueueId) setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
-              if (optimisticMessageId) {
-                const messagesNow = useAppStore.getState().messages
-                useAppStore.getState().setMessages(messagesNow.filter((message) => message.id !== optimisticMessageId))
-              }
+              if (optimisticMessageId) useAppStore.getState().dropMessage(targetThreadId, optimisticMessageId)
             }
           }).then((outcome) => {
             // It arrived: the same text sent later is a new message, not a repeat of this one.
@@ -1166,10 +1183,7 @@ export function OrchestratorChat() {
         if (optimisticQueueId) {
           setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
         }
-        if (optimisticMessageId) {
-          const current = useAppStore.getState().messages
-          useAppStore.getState().setMessages(current.filter((message) => message.id !== optimisticMessageId))
-        }
+        if (optimisticMessageId) useAppStore.getState().dropMessage(targetThreadId, optimisticMessageId)
         const stillActive = await window.mousse.orchestrator.isTurnActive(
           targetThreadId ?? undefined
         ).catch(() => false)
@@ -1350,6 +1364,10 @@ export function OrchestratorChat() {
     }
     const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
     let pendingRow: PendingThreadRow | undefined
+    // The message as shown in the transcript from the click, and the threads it was shown in (the chat at the click,
+    // then the thread made for it).
+    let firstPrompt: ShownFirstPrompt | undefined
+    const firstPromptIn = new Set<string | null>([activeThreadId])
     // What was typed while the row's frame was drawn (the composer is not locked yet): kept when the send clears it.
     let typedMeanwhile = ''
     try {
@@ -1368,6 +1386,14 @@ export function OrchestratorChat() {
       : undefined
     if (pendingRow) {
       addPendingThreadRow(pendingRow)
+      // The message shows in the transcript in the same frame, under Working (from the click) and Starting…, while its
+      // thread is made and set up. Its files and images join it when the send paints it with them.
+      const shown = removeInlineSkillToken(buildComposerMessageContent(input, [], voiceMessages, browserElements), enabledSkills).trim()
+      if (shown) {
+        firstPrompt = { id: `optimistic:${crypto.randomUUID()}`, at: new Date(pendingRow.at).toISOString(), taken: false }
+        useAppStore.getState().addMessage({ id: firstPrompt.id, role: 'user', content: shown, timestamp: firstPrompt.at })
+        setFirstSendId(firstPrompt.id)
+      }
       // Locking the composer redraws the whole chat, so it waits for the row's frame; the hold above stops a second send.
       await afterNextPaint()
       lockWorkspace()
@@ -1565,7 +1591,10 @@ export function OrchestratorChat() {
           activeMediaKeyRef.current = thread.id
           targetThreadId = thread.id
           store.setWorkspacePending(profileId, thread.id, true)
-          store.switchToThread(thread.id)
+          // The message shown since the click moves with the chat to its thread.
+          const carried = firstPrompt ? store.messages.find((message) => message.id === firstPrompt?.id) : undefined
+          if (carried) firstPromptIn.add(thread.id)
+          store.switchToThread(thread.id, carried ? { carry: [carried] } : undefined)
         }
       })
       if (!id) return
@@ -1658,7 +1687,9 @@ export function OrchestratorChat() {
         return
       }
     }
-    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerQueued)
+    // The composer is clear and the send paints the message from here: the chat is no longer a new one.
+    setFirstSendId(null)
+    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerQueued, firstPrompt)
     // Refused: nothing runs, so the goal set for it goes too. (An unconfirmed send may have arrived; it keeps the goal.)
     if (goalThread && sent === false) void window.mousse.platformRequest.request('threads.goal', { threadId: goalThread, action: 'clear' }).catch(() => undefined)
     if (sent === false && stillVisible()) {
@@ -1675,6 +1706,13 @@ export function OrchestratorChat() {
       }
     } finally {
       releaseWorkspacePending()
+      // Not sent (a failed create or setup, a refusal, the chat left): the message leaves the transcript, so its
+      // Working time stops, and the composer, which kept it with its files, shows it again.
+      if (firstPrompt && !firstPrompt.taken) {
+        const shownId = firstPrompt.id
+        for (const threadId of firstPromptIn) useAppStore.getState().dropMessage(threadId, shownId)
+        setFirstSendId((current) => (current === shownId ? null : current))
+      }
       // Sent (this lasts the first turn) or not: the thread list lists the thread from now on. A send that stopped
       // first (a failed create, a refusal shown above the composer, which keeps the prompt) takes the row away; a
       // thread the service made already is listed (claimed above).
@@ -1832,7 +1870,10 @@ export function OrchestratorChat() {
   // A thread whose transcript is still loading is not empty: it shows the plain chat (no headline, logo or glow) until it lands.
   const emptyThread = shownMessages.length === 0 && !transcriptPending && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
   // A new thread's settings (project above the composer, where it runs and Private / Delete after below) leave once the first send starts.
-  const newThreadSettings = newChat && !turnActive && !loading
+  const newThreadSettings = newChat && !turnActive && !loading && !firstSendShown
+  // The first message shows in the transcript while its thread is made: the locked composer that still holds it (to
+  // show it again if the send does not go ahead) looks empty meanwhile, so the message is not shown twice.
+  const composerHeld = firstSendShown && workspacePending
   const newThreadKey = `${profileId}:${activeThreadId ?? '__blank__'}`
   const composerDevice: ComposerDeviceProps = {
     localName,
@@ -1953,16 +1994,16 @@ export function OrchestratorChat() {
         )}
             <ChatComposer
               disabled={workspacePending || !workspaceReady || isWatchOnlyThread(activeThread)}
-              input={input}
+              input={composerHeld ? '' : input}
               onInputChange={setInput}
-              attachedFiles={attachedFiles}
+              attachedFiles={composerHeld ? NO_ATTACHED_FILES : attachedFiles}
               onAttachedFilesChange={setAttachedFiles}
               messageLimit={MMS_PROTOCOL_MAX_TEXT_LENGTH}
-              voiceMessages={voiceMessages}
+              voiceMessages={composerHeld ? NO_VOICE_MESSAGES : voiceMessages}
               onVoiceMessagesChange={setVoiceMessages}
-              browserElements={browserElements}
+              browserElements={composerHeld ? EMPTY_BROWSER_ELEMENTS : browserElements}
               onRemoveBrowserElement={(id) => removeBrowserElement(activeThreadId, id)}
-              references={references}
+              references={composerHeld ? EMPTY_REFERENCES : references}
               onAddReference={addResolvedReference}
               onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
               onReferenceError={setSendError}

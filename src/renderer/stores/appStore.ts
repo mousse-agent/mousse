@@ -72,9 +72,12 @@ let openingEarly: { threadId: string; messages: ChatMessage[] } | null = null
 /**
  * The store update that shows thread `id`: its cached transcript when there is one, otherwise an empty one that
  * waits for its view (`transcriptPending`) unless the thread never started. Remembers the transcript left behind.
+ * `carry` moves messages shown here to `id`: they leave the transcript left behind and join the one shown.
  */
-function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'>, id: string): Partial<AppState> {
-  if (s.activeThreadId && s.messages.length > 0) rememberMessages(s.activeThreadId, s.messages)
+function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'>, id: string, carry: readonly ChatMessage[] = []): Partial<AppState> {
+  const carried = new Set(carry.map((message) => message.id))
+  const left = carried.size ? s.messages.filter((message) => !carried.has(message.id)) : s.messages
+  if (s.activeThreadId && (left.length > 0 || carried.size > 0)) rememberMessages(s.activeThreadId, left)
   const cached = takeCachedMessages(id)
   const early = openingEarly?.threadId === id ? openingEarly.messages : []
   openingEarly = null
@@ -83,8 +86,9 @@ function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'
   return {
     activeThreadId: id,
     openingThreadId: null,
-    messages: early.reduce(upsertMessage, withoutLandedCopies(cached ?? [], early)),
-    transcriptPending: !cached && !(target && !isThreadStarted(target)),
+    messages: carry.reduce(upsertMessage, early.reduce(upsertMessage, withoutLandedCopies(cached ?? [], early))),
+    // A carried message is the thread's newest: the view that comes joins what it holds.
+    transcriptPending: !cached && !carried.size && !(target && !isThreadStarted(target)),
     // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
     agents: [],
     tasks: [],
@@ -424,6 +428,11 @@ interface AppState {
   setMessages: (messages: ChatMessage[]) => void
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
   addMessage: (message: ChatMessage) => void
+  /**
+   * Takes message `id` out of thread `threadId`'s transcript, shown or kept for a later visit (`null`: the chat
+   * with no thread). For a copy painted at send whose send did not go ahead.
+   */
+  dropMessage: (threadId: string | null, id: string) => void
   updateMessage: (message: ChatMessage) => void
   /** Several updates of the selected thread in one store write (one frame of a stream). */
   updateMessages: (messages: ChatMessage[]) => void
@@ -446,7 +455,7 @@ interface AppState {
    * the main process's echo of a selection (and the thread it restores at launch) is not a request to open it.
    * That echo also leaves a held thread (`openingThreadId`) waiting for its view.
    */
-  switchToThread: (id: string, options?: { keepWorkspace?: boolean }) => void
+  switchToThread: (id: string, options?: { keepWorkspace?: boolean; carry?: readonly ChatMessage[] }) => void
   /** Apply daemon snapshot for the selected thread in a single paint. */
   applyThreadView: (view: ThreadViewSnapshot) => void
   setProjects: (projects: Project[]) => void
@@ -904,6 +913,16 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       return { messages }
     }),
+  dropMessage: (threadId, id) => {
+    const kept = threadId ? messageCache.get(threadId) : undefined
+    if (threadId && kept?.some((message) => message.id === id)) messageCache.set(threadId, kept.filter((message) => message.id !== id))
+    set((s) => {
+      if (s.activeThreadId !== threadId || !s.messages.some((message) => message.id === id)) return s
+      const messages = s.messages.filter((message) => message.id !== id)
+      if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      return { messages }
+    })
+  },
   updateMessage: (message) =>
     set((s) => {
       const messages = applyMessageUpdate(s, s.messages, message)
@@ -993,7 +1012,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       if (options?.keepWorkspace && s.openingThreadId === id) return s
       const opening = s.openingThreadId ? { openingThreadId: null } : {}
       if (s.activeThreadId === id) return options?.keepWorkspace && !s.openingThreadId ? s : { ...workspace, ...opening }
-      return { ...workspace, ...switchPatch(s, id) }
+      return { ...workspace, ...switchPatch(s, id, options?.carry) }
     }),
   applyThreadView: (view) =>
     set((current) => {

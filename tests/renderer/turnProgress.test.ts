@@ -118,21 +118,21 @@ describe('the line under Working', () => {
     vi.setSystemTime(NOW)
   })
 
-  it('1. sent, before the service starts the turn: Thinking…', () => {
+  it('1. sent, before the service starts the turn: Starting…', () => {
     render([ask('optimistic:1')], 'ready', { phase: 'idle' })
-    expectLive('Thinking…')
+    expectLive('Starting…')
     render([ask()], 'submitted', { phase: 'queued' })
-    expectLive('Thinking…')
+    expectLive('Starting…')
   })
 
   it('1. an older service that still reports a wait for a free slot: the line of a turn not started yet', () => {
     render([ask()], 'submitted', { phase: 'queued', step: { kind: 'waiting_slot', running: 8, limit: 8 } as never })
-    expectLive('Thinking…')
+    expectLive('Starting…')
   })
 
-  it('1. the runtime, its tools and Skills being set up: Thinking…, Starting in the tooltip', () => {
+  it('1. the runtime, its tools and Skills being set up: Starting…, what starts in the tooltip', () => {
     render([ask()], 'streaming', { phase: 'thinking', step: { kind: 'starting' } })
-    expectLive('Thinking…')
+    expectLive('Starting…')
     expect(line()!.title).toBe('Starting the agent and its tools')
   })
 
@@ -643,7 +643,7 @@ describe('the line under Working', () => {
 
   it('without a thread behind the list it reads the messages', () => {
     render([ask()], 'submitted', null)
-    expectLive('Thinking…')
+    expectLive('Starting…')
     render([ask(), reply('a1', text('Some text'))], 'streaming', null)
     expectLive('Thinking…')
   })

@@ -39,7 +39,7 @@ import {
   formatTokensPerSecond,
 } from "../../../utils/assistantMessageActions";
 import { takeLiveRunFocus, ToolOpenContext } from "./tools/tool-open-state";
-import { threadOpenMemory } from "./thread-open-memory";
+import { threadOpenMemory, type ThreadOpenMemory } from "./thread-open-memory";
 import { Collapse } from "../../../components/ui/Collapse";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
@@ -230,6 +230,16 @@ function readCreatedAt(message: UIMessage | undefined): number | null {
   if (!raw) return null;
   const ms = raw instanceof Date ? raw.getTime() : Date.parse(String(raw));
   return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * When a turn's prompt was sent. One sent from this window counts from the click (`sentAt`, by its turn's key), not
+ * from the later moment the service saved it: a new thread's workspace may take minutes to set up first.
+ */
+function sentAtOf(user: UIMessage | undefined, memory: ThreadOpenMemory): number | null {
+  const saved = readCreatedAt(user);
+  const sent = user ? memory.sentAt.get(memory.turnKeys.get(user.id) ?? user.id) : undefined;
+  return sent != null && (saved == null || sent < saved) ? sent : saved;
 }
 
 /** A line Mousse adds to the thread (see `ThreadNotice`); it is not part of a turn's work. */
@@ -1768,7 +1778,7 @@ export const MessageList = memo(function MessageList({
         const user = normalizedMessages.find((message) => message.id === turnId);
         workClockRef.current = {
           turnId,
-          startedAt: readCreatedAt(user) ?? Date.now(),
+          startedAt: sentAtOf(user, openMemory) ?? Date.now(),
           endedAt: null,
         };
       } else if (clock.endedAt != null) {
@@ -1793,7 +1803,7 @@ export const MessageList = memo(function MessageList({
           : { ...current, [turnId]: durationMs },
       );
     }
-  }, [replyActive, lastUserMessageId, normalizedMessages, turns]);
+  }, [replyActive, lastUserMessageId, normalizedMessages, turns, openMemory]);
 
   const lastUserMessageIdRef = useRef(lastUserMessageId);
   // The last turn ended with messages still queued: the next prompt to arrive is the queue's next turn.
@@ -1870,6 +1880,8 @@ export const MessageList = memo(function MessageList({
   if (trailingOptimistic && trailingUser) {
     liveOptimisticKeyRef.current = trailingUser.id;
     turnKeyAliasRef.current.set(trailingUser.id, trailingUser.id);
+    const sentAt = readCreatedAt(trailingUser);
+    if (sentAt != null && !openMemory.sentAt.has(trailingUser.id)) openMemory.sentAt.set(trailingUser.id, sentAt);
   } else if (
     trailingUser &&
     showAwaitingReply &&
@@ -2165,6 +2177,7 @@ export const MessageList = memo(function MessageList({
                 showAwaitingReply={isLastTurn && showAwaitingReply}
                 lastTurnNotice={isLastTurn ? lastTurnNotice : undefined}
                 liveStartedAt={isLastTurn ? liveStartedAt : null}
+                sentAt={sentAtOf(turn.userMsg, openMemory)}
                 settledMs={turn.userMsg ? settledWork[turn.userMsg.id] : undefined}
                 copyActive={activeCopyId !== null && (activeCopyId === userCopyKey || activeCopyId === copyKey) ? activeCopyId : null}
                 editingPromptId={turn.userMsg && editingPromptId === turn.userMsg.id ? editingPromptId : null}
@@ -2294,6 +2307,8 @@ type TurnRowProps = {
   lastTurnNotice?: React.ReactNode;
   /** When the reply in progress started, as the work clock saw it; null when it did not see it start. */
   liveStartedAt: number | null;
+  /** When its prompt was sent (`sentAtOf`). */
+  sentAt: number | null;
   /** How long the turn worked, measured in this view when it ended here. */
   settledMs?: number;
   /** The copy key of this turn that was just copied, or null. */
@@ -2381,6 +2396,7 @@ const TurnRow = memo(function TurnRow({
   showAwaitingReply,
   lastTurnNotice,
   liveStartedAt,
+  sentAt,
   settledMs,
   copyActive,
   editingPromptId,
@@ -2516,7 +2532,7 @@ const TurnRow = memo(function TurnRow({
               <div className="group/assistant-turn">
                 <TurnWorkStatus
                   active
-                  startedAt={liveStartedAt ?? readCreatedAt(turn.userMsg)}
+                  startedAt={liveStartedAt ?? sentAt}
                   durationMs={null}
                 />
                 <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
@@ -2557,7 +2573,7 @@ const TurnRow = memo(function TurnRow({
           // A finished turn of this thread can be forked from; a fork's copies of its source name no turn.
           const forkTurnId = isTurnStreaming ? undefined : (turn.userMsg as { turnId?: string } | undefined)?.turnId;
 
-          const liveStart = liveStartedAt ?? readCreatedAt(turn.userMsg);
+          const liveStart = liveStartedAt ?? sentAt;
           // When the turn waited on the person: its time does not count them.
           const waits = turnWaitSpans(turn.assistantMsgs);
 
@@ -2820,7 +2836,7 @@ const TurnRow = memo(function TurnRow({
           };
           const partTimes = (() => {
             if (isTurnStreaming) return parts.map(() => null);
-            const start = readCreatedAt(turn.userMsg);
+            const start = sentAt;
             const bounds = parts.map(({ from, to }, k) => {
               let endedAt: number | null = null;
               for (let index = from; index < to; index += 1) {
