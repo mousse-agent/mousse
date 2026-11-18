@@ -157,15 +157,16 @@ ScheduledJob {
   tellMe?: TellMe
   bot: { botId, scheduleId, createdBy,
          ownerAsked?: true,                  // added in a turn the owner's own message started
-         say?: string,                       // a fixed line, posted with no model run
-         onlyIfChanged?: { url, contains? }  // a check with no model call before each run
+         say?: string                        // a fixed line, posted with no model run
   }
 }
 ```
 
-Everything new sits under `bot`, because `jobs-kept.json` keeps that field whole when an older build's save drops what it does not know (`ScheduledJobStore.ts:229`); `restoreDroppedFields` must also merge missing keys into a `bot` that survived. An older build runs a `say` job as a prompt that says it, and ends an `until` job at its time. The "where I left off" line and the page's last hash live in `bots.db`, never in `jobs.json`, so Forget and search reach them and a file rewritten every tick stays small.
+The page-check setting `onlyIfChanged: { url, contains? }` and its state live in `bot_memory_state`, never on `ScheduledJob` or `ScheduledJob.bot`.
 
-About → Runs and the automation card word each combination: "Inbox check · every weekday 09:00", "Says “Take your pills” · every day 08:00", "Tickets page · checks every 15 min · tells you when it changes", with " · until Fri 21 Nov" appended.
+The new fixed-line fields sit under `bot`, because `jobs-kept.json` keeps that field whole when an older build's save drops what it does not know (`ScheduledJobStore.ts:229`); `restoreDroppedFields` must also merge missing keys into a `bot` that survived. An older build runs a `say` job as a prompt that says it, and ends an `until` job at its time. The "where I left off" line and the page's last hash live in `bots.db`, never in `jobs.json`, so Forget and search reach them and a file rewritten every tick stays small.
+
+About → Runs words each combination: "Inbox check · every weekday 09:00", "Says “Take your pills” · every day 08:00", and "<label> · runs when example.com changes", with " · until Fri 21 Nov" appended. Automations keeps its own time wording: "Every 15 min · when example.com changes".
 
 ## 1. Event inbox
 
@@ -194,12 +195,12 @@ About → Runs and the automation card word each combination: "Inbox check · ev
 - **Wakes grow; standing triggers wait.** A wake on a pull request gains `on: 'merged' | 'checks' | 'review'`. A `checks` wake fires when every check on the current head has completed, with the pass and fail counts and the failed names as data; it needs the checks' state from the pull request read (`wakeSources.ts`).
 - **Files changed by two turns.** The chat and its work are told to keep the same list files, and nothing stops a lost update. On Pi, the authority records each file's hash when it is read and refuses an edit to a file that changed since; Claude Code's own Edit already refuses that; and the instructions say to read a list just before changing it, in one edit.
 - **A general "whenever X, do Y" engine is not built.** A schedule that runs as often as every minute, posts nothing when there is nothing new, and keeps a "where I left off" line covers it, at the cost of a model run per check. Requests from outside, files landing and MCP events come when someone needs them (phase 4), as rows in a `bot_events` table in `bots.db` keyed by the sender's own id, never in `jobs.json`.
-- **"Tell me when this page changes" without a model run per check comes in phase 3**, because its protocol has to be exact or it loses a change. `onlyIfChanged` puts a check in front of a schedule:
-  - **State** is kept per schedule in `bots.db`: the schedule's generation, the hash last handed to a run, the check in flight, and how many checks in a row failed.
+- **"Tell me when this page changes" without a model run per check**, because its protocol has to be exact or it loses a change. `onlyIfChanged` puts a check in front of a schedule:
+  - **Setting and state** are one `bot_memory_state` row, `pagecheck:<scheduleId>`, rather than a new `ScheduledJob.bot` field. The shared job crosses the bridge whole; this keeps its wire shape unchanged. Older builds run the prompt every time and lose nothing. The row keeps the URL, optional `contains` window, and state: the schedule's generation, the hash last handed to a run, the check in flight, and how many checks in a row failed.
   - **The first check** records the page and starts no run.
   - **The fetch** is made by Mousse under the same rules as a secret's request (a public address, checked and then used; no redirect to another host), with no secret. `runScheduledOccurrence` starts it and answers "not ready"; the next tick reads the result.
-  - **Unchanged:** the occurrence is skipped as `unchanged`: no activation, no run in the automation's list, no model call.
-  - **Changed:** the changed text is written to a file, and then one transaction inserts the run, which names that file, and moves the handed-over hash. A crash before it leaves the old hash, so the change is seen again; a crash after it leaves a run that holds the change. A run that then fails is told as a failure, so a change is never lost silently.
+  - **Unchanged:** the computer-only scheduler/engine outcome is `checked`, which advances the occurrence without setting `botSkip` (a new reason would cross to phones): no activation, no run in the automation's list, no model call.
+  - **Changed:** the text waits in `bot_memory_state`. One transaction inserts the run, writes the text into a file in that run’s folder, and moves the handed-over hash only if the queue accepts the run. The run names that file and owns it until it ends, even if its schedule ends or is removed. A crash before it leaves the old hash, so the change is seen again; a crash after it leaves a run that holds the change. A run that then fails is told as a failure, so a change is never lost silently.
   - **A result for an older generation** (the schedule was edited or removed while the page loaded) is dropped.
   - **A page that can't be read** six times in a row, or for a day, is told once ("I can't read the tickets page any more: it asks me to sign in") and counts as a failed run. It is never skipped in silence for ever.
 
@@ -342,7 +343,7 @@ It does not cover:
 
 All `bot_actions` columns are TEXT except `nudges` (INTEGER, NOT NULL, default 0). `id` is the primary key. `call_key`, `bot_id`, `activation_id`, `lane`, `kind`, `target_json`, `args_json`, `args_digest`, `binding_json`, `status` and `created_at` are NOT NULL: each call needs its identity, target, masked arguments, approval binding, state and creation time. `lane` is checked as `chat` or `run`; `kind` and `status` are checked against the sets above. Checks require `exec_args` to be NULL outside `open`, `approved` and `running`, and an `open` card to have `expires_at`. Other fields are nullable: exact arguments are cleared on settlement; place, card and bot note need not exist for counted calls; result, message, follow-up, expiry, answer and execution fields exist only when applicable. There are no foreign keys. Only the 30-day purge deletes actions; withdrawal when their work or cards end is defined by the later approval implementation. Memory export includes a masked `actions.jsonl`, excluding `exec_args`; whole-database migration copies include the table automatically. Every column except `exec_args` holds only masked text, ids and digests, with one deliberate exception: `place_json` holds exact values for phase 3 comparisons and is exported as such; `binding_json` holds the server’s id and a digest of its configuration, never the configuration itself.
 
-Outside `bots.db`: `ScheduledJob.bot` gains `ownerAsked` and `say`, and in phase 3 `onlyIfChanged` (its state is in `bots.db`); the grant gains the asks-first level and, in phase 3, an automation's exception (automation, tool, place); a secret's record gains the bots that use it and its binding (a request for one is an ordinary escalation row whose permission names the secret, so `bots.db` needs nothing for it); the profile's settings gain `notifications.quietHours`.
+Outside `bots.db`: `ScheduledJob.bot` gains `ownerAsked` and `say`; phase 3 keeps `onlyIfChanged` and its state entirely in `bot_memory_state`, with no shared-job field; the grant gains the asks-first level and, in phase 3, an automation's exception (automation, tool, place); a secret's record gains the bots that use it and its binding (a request for one is an ordinary escalation row whose permission names the secret, so `bots.db` needs nothing for it); the profile's settings gain `notifications.quietHours`.
 
 ## Phases
 

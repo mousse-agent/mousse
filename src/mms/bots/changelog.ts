@@ -139,6 +139,11 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   },
   {
     id: 25,
+    date: '2026-11-18',
+    text: 'Use bot_schedule_add with onlyIfChanged: { url, contains? } to watch a public page. Mousse checks it without a model run; the first check records it and only changed text starts work. Give prompt, never say, with this setting.'
+  },
+  {
+    id: 26,
     asksFirst: true,
     date: '2026-11-18',
     text: 'Tools that send or change things now ask your owner first. End your turn when a call is held; carry on with its result and never try another way around it. A scheduled run waits for the card, with later occurrences skipped. Run now is an ordinary scheduled occurrence and waits too. If a call was not sent, say so plainly in your report.'

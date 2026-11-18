@@ -1,3 +1,4 @@
+import { PageChecks } from '../pageChecks'
 import { BotActionChanged } from '../actions/BotActions'
 import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
@@ -38,6 +39,8 @@ export type BotAutomationRunStatus = 'queued' | 'running' | 'waiting_grant' | 'p
  * shared store): the bot's name and face, its own pause, and the runs that schedule started. No model or instance id.
  */
 export interface BotAutomationFacts {
+  /** Computer-local page-check label, rendered through the existing When text. */
+  whenText?: string
   botName: string
   look: BotLook
   /** The bot itself is paused (by its owner, after three failed runs, or until a usage limit resets). */
@@ -910,7 +913,10 @@ export class BotChatService {
       }
     })
     const ask = this.store.openAsks(botId).find((entry) => entry.messageId !== null && runs.some((run) => run.id === entry.activationId))
+    const page = new PageChecks(this.store).read(botId, scheduleId)
+    const whenText = page ? `when ${new URL(page.url).host} changes` : undefined
     return {
+      ...(whenText ? { whenText } : {}),
       botName: definition.name,
       look: summary.look,
       paused: summary.state === 'paused',
