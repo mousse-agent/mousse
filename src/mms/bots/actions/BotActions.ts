@@ -358,7 +358,7 @@ export class BotActions {
     if (origin === 'unattended' && open.length >= 3)
       return this.refuse(row, open[0], 'Not sent: three requests for this tool already wait for your owner. Say in your report what you would have sent; do not ask again until one is answered.')
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
-    const refused = unanswered.find(action => action.args_digest === digest)
+    const refused = unanswered.find(action => action.args_digest === digest && (row.trigger.kind !== 'schedule' || action.activation_id === row.id))
     if (refused)
       return this.refuse(row, refused, 'Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.')
     const binding = this.host.binding(row, tool)
