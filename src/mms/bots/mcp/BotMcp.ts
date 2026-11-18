@@ -335,6 +335,7 @@ export class BotMcp implements BotMcpHost {
         server: held,
         tool: tool.tool,
         serverName: server.name,
+        readOnlyHint: tool.readOnlyHint,
         description: framedDescription(server.name, tool.description),
         inputSchema: boundedSchema(tool.inputSchema)
       }]

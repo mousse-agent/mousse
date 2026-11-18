@@ -3696,11 +3696,12 @@ it.each(['failing', 'starting', 'cold restart'] as const)('keeps an unstamped re
   if (state === 'failing') t.server.failing = true
   if (state === 'starting') Object.assign(t.server, { starting: true })
   const cold = state === 'cold restart' ? vi.spyOn(t.catalog, 'servers').mockReturnValue([]) : undefined
+  const listed = cold ? vi.spyOn(t.catalog, 'listed').mockReturnValue(false) : undefined
   if (cold) { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
   else f.bots.fillMcpAsks()
   expect(f.bots.actions.get(a.id)?.status).toBe('open')
   await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
-  t.server.tools.push(...tools); t.server.failing = false; Object.assign(t.server, { starting: false }); cold?.mockRestore()
+  t.server.tools.push(...tools); t.server.failing = false; Object.assign(t.server, { starting: false }); cold?.mockRestore(); listed?.mockRestore()
   f.bots.fillMcpAsks()
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])

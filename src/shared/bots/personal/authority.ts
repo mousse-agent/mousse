@@ -67,6 +67,8 @@ export interface BotMcpTool {
   server: string
   tool: string
   serverName: string
+  /** The hint the turn was offered; it is not part of a grant. */
+  readOnlyHint?: boolean
   /** The server's own description, framed as third-party text (never instructions). */
   description: string
   inputSchema: Record<string, unknown>

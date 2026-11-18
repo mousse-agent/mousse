@@ -686,7 +686,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (row?.trigger.kind === 'schedule' && this.host.schedules?.get(row.botId, row.trigger.scheduleId)?.revision !== held.scheduleRevision) return true
       const tool = JSON.parse(action.target_json) as BotMcpTool
       const pair = row && this.actionPair(row, tool)
-      if (!pair || held.pairLevel !== this.actionLevel(tool, pair.level)) return true
+      if (!pair) return true
       const where = this.host.mcp?.where?.(tool.server)
       if (!where) return false // A cold catalogue is not evidence of removal.
       if (where.state !== 'on') return true
@@ -694,6 +694,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (config && config !== held.configDigest) return true
       if (where.server.failing || where.server.starting) return false
       if (!where.server.tools.some(t => t.tool === tool.tool)) return true
+      if (held.pairLevel !== this.actionLevel(tool, pair.level)) return true
       const binding = this.host.mcp?.binding?.(tool)
       return Boolean(binding && (binding.configDigest !== held.configDigest || binding.schemaDigest !== held.schemaDigest))
     },
@@ -3035,9 +3036,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     live.controller.abort(new BotWallAbort())
   }
 
-  private actionLevel(tool: { server: string; tool: string }, storedLevel?: string): 'asks_first' | 'allowed' {
+  private actionLevel(tool: { server: string; tool: string; serverName?: string; readOnlyHint?: boolean }, storedLevel?: string, offered = false): 'asks_first' | 'allowed' {
     const server = findServer(this.host.mcp?.servers() ?? [], tool.server)
-    return asksFirstFor({ tool: tool.tool, serverName: [server?.name ?? '', server?.installationId ?? installationOf(tool.server)], readOnlyHint: server?.tools.find(t => t.tool === tool.tool)?.readOnlyHint, storedLevel }) ? 'asks_first' : 'allowed'
+    const listed = server?.tools.find(t => t.tool === tool.tool)
+    if (!listed) return 'asks_first'
+    return asksFirstFor({ tool: tool.tool, serverName: [tool.serverName ?? server?.name ?? '', server?.installationId ?? installationOf(tool.server)], readOnlyHint: offered ? tool.readOnlyHint : listed.readOnlyHint, storedLevel }) ? 'asks_first' : 'allowed'
   }
 
 
@@ -3586,7 +3589,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         maskMcpArguments: (args: Record<string, unknown>) => maskedActionData(args) as Record<string, unknown>,
         holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string) => {
           const pair = this.store.activeGrant(row.botId)?.manifest.mcp.find(p => p.serverId === tool.server && p.tool === tool.tool)
-          if (!pair || this.actionLevel(tool, pair.level) !== 'asks_first') return undefined
+          if (!pair || this.actionLevel(tool, pair.level, true) !== 'asks_first') return undefined
           if (row.lane === 'chat') return { text: 'Hand this to work: it asks your owner first.', isError: true }
           if (row.trigger.kind !== 'work' && row.trigger.kind !== 'schedule') return { text: "A run started by hand can't wait for your owner. Say in your report what you would have sent.", isError: true }
           if (row.trigger.kind === 'schedule' && !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return { text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent.", isError: true }
