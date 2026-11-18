@@ -1,5 +1,5 @@
 import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
-import { BOT_ASKS_FIRST_INSTRUCTIONS } from '../instructions'
+import { BOT_ASKS_FIRST_INSTRUCTIONS, BOT_ASKS_FIRST_CHAT_INSTRUCTIONS } from '../instructions'
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
 import { unattendedChatTurn } from './unattended'
 import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle } from '../actions/BotActions'
@@ -3080,7 +3080,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const role = system && words.role.trim() === words.description.trim() ? undefined : words.role.trim()
     const disabled = this.store.disabledPermissions(definition.id).flatMap((off) => grantedPermissions(off.manifest).filter((item) => permissionId(item) === off.id).map((item) => askText(item).title))
     const offNote = disabled.length ? `Your owner has switched off for now: ${disabled.join(', ')}. These are not offered and you must not ask for them. Carry on without them.` : undefined
-    const asksFirst = lane === 'run' && !permissions?.subagent && botAsksFirst(this.host.settings?.get()) ? BOT_ASKS_FIRST_INSTRUCTIONS : undefined
+    const asksFirst = botAsksFirst(this.host.settings?.get())
+      ? lane === 'chat' ? BOT_ASKS_FIRST_CHAT_INSTRUCTIONS
+        : lane === 'run' && (!permissions?.subagent || permissions.allowed.mcp?.length) ? BOT_ASKS_FIRST_INSTRUCTIONS : undefined
+      : undefined
     const parts = [system?.trim(), role, own?.trim(), offNote, asksFirst].filter((part): part is string => Boolean(part))
     return parts.length ? { instructions: [...new Set(parts)].join('\n\n') } : {}
   }

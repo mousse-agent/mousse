@@ -3772,7 +3772,8 @@ it.each(['work', 'schedule'].flatMap(lane => ['get_items', 'get_and_send'].map(t
 
 it('chat explains waiting without promising which calls ask', async () => {
   const t = await setup(true)
-  const talk = await f.bots.activate({ botId: t.botId, input: 'Schedule mail', clientRequestId: 'waiting-guidance' })
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Schedule mail', clientRequestId: 'waiting-guidance' })
+  const talk = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const turn = await start(f, talk.id)
   expect(turn.prepared.instructions).toContain('When you set up work or a schedule')
   expect(turn.prepared.instructions).toContain('one card at a time')
