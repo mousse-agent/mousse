@@ -28,7 +28,7 @@ import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHo
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import { launchedActive, type BotChatMessage, type BotChip, type BotError, type BotLaunchedThread } from '../../../shared/bots/personal/chat'
 import { jobAskerOf, jobStateOf, jobStep, resultLine, type JobThreadView } from '../jobs'
-import { BOT_JOB_ENDED, jobLine, jobNoticeInput, jobNoticeLabel, type BotJob, type BotJobState } from '../../../shared/bots/personal/jobs'
+import { BOT_JOB_ENDED, jobLine, jobNoticeInput, jobNoticeLabel, THREAD_MESSAGE_KEY_PREFIX, threadMessageInput, threadMessageLabel, type BotJob, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { threadLink } from '../../../shared/threadLink'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import {
@@ -7487,6 +7487,45 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (started) await this.startQueuedChat(job.botId, activationId)
   }
 
+  /**
+   * A message from a thread the bot started (`message_parent`), sent while it works: a question, a blocker, a finding
+   * the bot must know now. It arrives as a job's notice does: a quiet line in the chat and a chat turn of the bot's own
+   * (`threadmsg:<thread>:<request>`) that starts with the message framed as data from that thread, with its link, and it
+   * wakes an idle bot. The same request again replays. Refused, in words for the thread: a deleted or paused bot, or one
+   * that can't run now; `maxWaiting` of the thread's messages still waiting for the bot to read them; or
+   * `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER` of its messages since the owner last wrote, with no person in between.
+   */
+  async threadMessage(botId: string, threadId: string, input: { message: string; title: string; requestKey: string; maxWaiting: number }): Promise<{ bot: string; replayed: boolean }> {
+    const registry = this.store.registry(botId)
+    if (!registry || registry.deletedAt) throw new BotEngineError('bot_not_found', 'The bot that started this thread was deleted, so nothing was sent. Ask the user with ask_user if you need an answer.')
+    let name = 'The bot'
+    try {
+      name = this.definitionOf(botId).name
+    } catch {
+      // A bot without its definition is still told, under a plain name.
+    }
+    const key = `${THREAD_MESSAGE_KEY_PREFIX}${threadId}:${input.requestKey}`
+    if (this.store.activationByKey(key)) return { bot: name, replayed: true }
+    if (registry.pausedReason) throw new BotEngineError('bot_paused', `${name} is paused, so it reads no messages now. Nothing was sent: carry on, or ask the user with ask_user.`)
+    const waiting = this.store.laneActivations(botId, 'chat', ['queued']).filter((row) => row.idempotencyKey.startsWith(`${THREAD_MESSAGE_KEY_PREFIX}${threadId}:`)).length
+    if (waiting >= input.maxWaiting)
+      throw new BotEngineError('agent_queue_full_per_sender', `${name} has ${waiting} messages from this thread it has not read yet, the most one thread may have waiting. Nothing was sent: carry on, and send again once it has read them.`)
+    const rowPrefix = `${WAKE_LINE_PREFIX}threadmsg_${threadId}_`
+    const sent = this.store.chatRowsAfter(botId, rowPrefix, this.store.ownerLastWroteSeq(botId))
+    if (sent >= MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER)
+      throw new BotEngineError('agent_hops_exceeded', `This thread has sent ${name} ${sent} messages since the user last wrote to it, with no person in between. Nothing was sent: carry on with your work, and put what is left in your final answer.`)
+    const activationId = newActivationId()
+    const refused = this.store.db.transaction(() => {
+      const error = this.queueChatInTx(botId, key, threadMessageInput({ threadId, title: input.title, message: input.message }), activationId)
+      if (!error) this.chat.post({ id: `${rowPrefix}${activationId}`, botId, author: 'bot', kind: 'notice', text: threadMessageLabel(input.title), external: true, lane: 'chat' })
+      return error
+    })
+    if (refused) throw new BotEngineError(refused.code, `${name} can't take messages now: ${refused.message} Nothing was sent: carry on, or ask the user with ask_user.`)
+    this.changed({ botId })
+    await this.startQueuedChat(botId, activationId)
+    return { bot: name, replayed: false }
+  }
+
   /** The bot `threadId` belongs to, with its name now (`BotThreads.botOf`). Never throws. */
   botOf(threadId: string): { botId: string; name: string } | undefined {
     let botId: string | undefined
@@ -7897,7 +7936,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       send: (botId, from, input) => this.sendBotMessage(botId, from, input)
     },
     jobs: {
-      open: (botId, from, input) => this.openJob(botId, from, input)
+      open: (botId, from, input) => this.openJob(botId, from, input),
+      message: (botId, threadId, input) => this.threadMessage(botId, threadId, input)
     },
     wakes: {
       add: (botId, from, input) => this.addWake(botId, from, input),
@@ -10187,9 +10227,10 @@ export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKe
 /**
  * The chat turns no message of the owner's started that may still act on the owner's threads (#1359): the bot's first
  * message (`create:`), a wake the bot set, or a watch it started (`wake:`), the default answer of a question the owner
- * left (`question:`), and a notice that a thread the bot handed work to finished or waits for a person (`job:`).
+ * left (`question:`), a notice that a thread the bot handed work to finished or waits for a person (`job:`), and a
+ * message a thread the bot started sent it while it works (`threadmsg:`).
  */
-const ACTING_CHAT_KEYS = ['create:', 'wake:', 'question:', 'job:'] as const
+const ACTING_CHAT_KEYS = ['create:', 'wake:', 'question:', 'job:', THREAD_MESSAGE_KEY_PREFIX] as const
 
 /**
  * Whether the activation may start, message, stop, archive or hide the owner's threads ("use your threads"): a chat
@@ -10278,11 +10319,11 @@ export function withoutSilentMarker(text: string): { text: string; marked: boole
 }
 
 /**
- * The chat turns no person started and no person waits on: a wake-up (`wake:`), a thread's notice (`job:`) and another
- * bot's message (`botmsg:`). They may end silently (`[SILENT]`). A question's default answer (`question:`) always says
- * what it went with, so it is not one of them.
+ * The chat turns no person started and no person waits on: a wake-up (`wake:`), a thread's notice (`job:`) or message
+ * (`threadmsg:`), and another bot's message (`botmsg:`). They may end silently (`[SILENT]`). A question's default answer
+ * (`question:`) always says what it went with, so it is not one of them.
  */
-const UNATTENDED_CHAT_KEYS = ['wake:', 'job:', 'botmsg:'] as const
+const UNATTENDED_CHAT_KEYS = ['wake:', 'job:', 'botmsg:', THREAD_MESSAGE_KEY_PREFIX] as const
 
 export function unattendedChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
   return row.lane === 'chat' && UNATTENDED_CHAT_KEYS.some((key) => row.idempotencyKey.startsWith(key))

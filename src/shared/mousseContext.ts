@@ -21,6 +21,7 @@ export type MousseNoticeKind =
   | 'bot_action'
   | 'work_wait'
   | 'job_update'
+  | 'thread_message'
   | 'bot_message'
   | 'bot_subagent'
   | 'bot_action'
