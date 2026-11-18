@@ -40,16 +40,16 @@ it('never returns or logs transport diagnostics containing the value',async()=>{
 it.each([{headers:{Accept:'application/json',accept:'text/plain'}},{headers:{Accept:'text/plain\r\nCookie: x'}},{query:{limit:2}}])('refuses duplicate, injected or invalid request data %j',async args=>{const {run}=fixture();vi.mocked(publicFetch).mockClear();expect((await run(args)).isError).toBe(true);expect(publicFetch).not.toHaveBeenCalled()})
 it('preserves binary bytes around a masked UTF-8 key',async()=>{
  const {run,vault}=fixture();const value='private-é-key-0123456789'
- vault.store('KEY',value,{threadId:'home',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
+ vault.delete('KEY');vault.store('KEY',value,{threadId:'home',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
  vi.mocked(publicFetch).mockResolvedValue({status:200,headers:{'content-type':'application/octet-stream'},body:Buffer.concat([Buffer.from([255,0]),Buffer.from(value),Buffer.from([254])])})
  const out=await run();const bytes=readFileSync(out.text.split('File: ')[1]!)
  expect([...bytes.subarray(0,2)]).toEqual([255,0]);expect(bytes.at(-1)).toBe(254);expect(bytes.includes(Buffer.from(value))).toBe(false);expect(bytes.toString('latin1')).toContain('[secret KEY hidden]')
 })
 it('keeps a custom HTTPS origin and port with its fixed Bearer format',async()=>{
- const {run,vault}=fixture();vault.store('KEY',VALUE,{threadId:'home',keep:'saved',binding:resolveSecretBinding({origin:'https://api.example.com:8443'})})
+ const {run,vault}=fixture();vault.delete('KEY');vault.store('KEY',VALUE,{threadId:'home',keep:'saved',binding:resolveSecretBinding({origin:'https://api.example.com:8443'})})
  const out=await run({path:'/read'});expect(out.text).toContain('api.example.com:8443');expect(vi.mocked(publicFetch).mock.lastCall?.[0]).toBe('https://api.example.com:8443/read');expect(vi.mocked(publicFetch).mock.lastCall?.[1]?.headers).toEqual({Authorization:`Bearer ${VALUE}`})
 })
 it('treats replacement characters in a key as literal header bytes',async()=>{
- const {run,vault}=fixture();const value='private-$&-key-0123456789';vault.store('KEY',value,{threadId:'home',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
+ const {run,vault}=fixture();const value='private-$&-key-0123456789';vault.delete('KEY');vault.store('KEY',value,{threadId:'home',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
  await run();expect(vi.mocked(publicFetch).mock.lastCall?.[1]?.headers?.Authorization).toBe(`Bearer ${value}`)
 })
