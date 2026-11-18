@@ -38,3 +38,10 @@ it('returns masked redirect metadata without another request',async()=>{const {r
 it.each(['text/plain','application/octet-stream'])('writes only masked bytes to a private file for %s',async type=>{const {run}=fixture();vi.mocked(publicFetch).mockResolvedValue({status:200,headers:{'content-type':type},body:Buffer.from(VALUE+'x'.repeat(70000))});const out=await run();const path=out.text.split('File: ')[1];expect(path).toBeTruthy();expect(readFileSync(path!,'utf8')).not.toContain(VALUE)})
 it('never returns or logs transport diagnostics containing the value',async()=>{const {run}=fixture();const warn=vi.spyOn(console,'warn');const log=vi.spyOn(console,'log');vi.mocked(publicFetch).mockRejectedValue(new Error(`header ${VALUE}`));const out=await run();expect(out.isError).toBe(true);expect(JSON.stringify([out,warn.mock.calls,log.mock.calls])).not.toContain(VALUE)})
 it.each([{headers:{Accept:'application/json',accept:'text/plain'}},{headers:{Accept:'text/plain\r\nCookie: x'}},{query:{limit:2}}])('refuses duplicate, injected or invalid request data %j',async args=>{const {run}=fixture();vi.mocked(publicFetch).mockClear();expect((await run(args)).isError).toBe(true);expect(publicFetch).not.toHaveBeenCalled()})
+it('preserves binary bytes around a masked UTF-8 key',async()=>{
+ const {run,vault}=fixture();const value='private-é-key-0123456789'
+ vault.store('KEY',value,{threadId:'home',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
+ vi.mocked(publicFetch).mockResolvedValue({status:200,headers:{'content-type':'application/octet-stream'},body:Buffer.concat([Buffer.from([255,0]),Buffer.from(value),Buffer.from([254])])})
+ const out=await run();const bytes=readFileSync(out.text.split('File: ')[1]!)
+ expect([...bytes.subarray(0,2)]).toEqual([255,0]);expect(bytes.at(-1)).toBe(254);expect(bytes.includes(Buffer.from(value))).toBe(false);expect(bytes.toString('latin1')).toContain('[secret KEY hidden]')
+})
