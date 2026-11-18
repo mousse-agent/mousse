@@ -7,8 +7,19 @@ import { connect, type LookupFunction, type Socket } from 'node:net'
  * host and of two well-known hosts. Any one that answers is enough.
  */
 export interface BotConnectivity {
-  /** Never throws: an error is "offline". */
-  online(input: { instanceId?: string }): Promise<boolean>
+  /** Never throws: an error is "offline". `fresh` probes again instead of reusing a recent result. */
+  online(input: { instanceId?: string; fresh?: boolean }): Promise<boolean>
+  /** How each host of the last round for the instance's provider ended, for the log. */
+  lastProbes?(input: { instanceId?: string }): readonly BotProbe[]
+}
+
+/** How one host's probe ended: `ok`, `timeout`, or the connection's error code (`ENOTFOUND`, `ECONNREFUSED`, `error`). */
+export type BotProbeOutcome = string
+
+/** One host's probe in a round. */
+export interface BotProbe {
+  host: string
+  outcome: BotProbeOutcome
 }
 
 /** Hosts that are up whenever the internet is. */
@@ -50,28 +61,39 @@ export function botApiHost(driver: string | undefined, provider?: string): BotAp
  * address the name resolves to is tried, IPv6 and IPv4 interleaved (Happy Eyeballs), so a
  * computer whose IPv6 has no route still counts as online over IPv4.
  */
-export function probeHost(host: string, timeoutMs = PROBE_TIMEOUT_MS, options: { port?: number; lookup?: LookupFunction } = {}): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
+export async function probeHost(host: string, timeoutMs = PROBE_TIMEOUT_MS, options: { port?: number; lookup?: LookupFunction } = {}): Promise<boolean> {
+  return (await probeHostOutcome(host, timeoutMs, options)) === 'ok'
+}
+
+/** `probeHost`, saying how it ended (`BotProbeOutcome`). */
+export function probeHostOutcome(host: string, timeoutMs = PROBE_TIMEOUT_MS, options: { port?: number; lookup?: LookupFunction } = {}): Promise<BotProbeOutcome> {
+  return new Promise<BotProbeOutcome>((resolve) => {
     let socket: Socket | undefined
     let settled = false
-    const done = (ok: boolean): void => {
+    const done = (outcome: BotProbeOutcome): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       socket?.removeAllListeners()
       socket?.on('error', () => {})
       socket?.destroy()
-      resolve(ok)
+      resolve(outcome)
     }
-    const timer = setTimeout(() => done(false), timeoutMs)
+    const timer = setTimeout(() => done('timeout'), timeoutMs)
     try {
       socket = connect({ host, port: options.port ?? 443, autoSelectFamily: true, ...(options.lookup ? { lookup: options.lookup } : {}) })
-      socket.once('connect', () => done(true))
-      socket.once('error', () => done(false))
-    } catch {
-      done(false)
+      socket.once('connect', () => done('ok'))
+      socket.once('error', (error: NodeJS.ErrnoException) => done(errorCode(error)))
+    } catch (error) {
+      done(errorCode(error))
     }
   })
+}
+
+/** A short code for a failed connection: its errno code (`ENOTFOUND`), else `error`. */
+function errorCode(error: unknown): BotProbeOutcome {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code) ? code : 'error'
 }
 
 /** True as soon as one probe answers true; false when every probe answered false. */
@@ -90,34 +112,46 @@ function anyOnline(checks: ReadonlyArray<Promise<boolean>>): Promise<boolean> {
 
 /**
  * The daemon's connectivity check. `apiHost` names an instance's provider host; `probe` is the
- * per-host check (injectable for tests); results are reused for a few seconds.
+ * per-host check (injectable for tests); results are reused for a few seconds unless a check
+ * asks for a fresh round, which then replaces the kept one.
  */
 export function createBotConnectivity(options: {
   apiHost(instanceId: string): BotApiHost
-  probe?: (host: string) => Promise<boolean>
+  probe?: (host: string) => Promise<BotProbeOutcome>
   now?: () => number
   cacheMs?: number
 }): BotConnectivity {
-  const probe = options.probe ?? ((host: string) => probeHost(host))
+  const probe = options.probe ?? ((host: string) => probeHostOutcome(host))
   const now = options.now ?? Date.now
   const cacheMs = options.cacheMs ?? PROBE_CACHE_MS
-  const cache = new Map<string, { at: number; result: Promise<boolean> }>()
+  const cache = new Map<string, { at: number; result: Promise<boolean>; probes: BotProbe[] }>()
+  const hostOf = (instanceId: string | undefined): BotApiHost => {
+    try {
+      return instanceId ? options.apiHost(instanceId) : undefined
+    } catch {
+      return undefined
+    }
+  }
   return {
-    online: async ({ instanceId }) => {
-      let host: BotApiHost
-      try {
-        host = instanceId ? options.apiHost(instanceId) : undefined
-      } catch {
-        host = undefined
-      }
+    online: async ({ instanceId, fresh }) => {
+      const host = hostOf(instanceId)
       if (host === 'local') return true
       const key = host ?? ''
       const cached = cache.get(key)
-      if (cached && now() - cached.at < cacheMs) return cached.result
+      if (!fresh && cached && now() - cached.at < cacheMs) return cached.result
       const hosts = [...new Set([...(host ? [host] : []), ...GENERIC_PROBE_HOSTS])]
-      const result = anyOnline(hosts.map((name) => probe(name)))
-      cache.set(key, { at: now(), result })
+      // Each host's outcome is kept as it comes in; a round that went offline has them all.
+      const probes: BotProbe[] = []
+      const result = anyOnline(hosts.map((name) => probe(name).catch(() => 'error').then((outcome) => {
+        probes.push({ host: name, outcome })
+        return outcome === 'ok'
+      })))
+      cache.set(key, { at: now(), result, probes })
       return result
+    },
+    lastProbes: ({ instanceId }) => {
+      const host = hostOf(instanceId)
+      return host === 'local' ? [] : [...(cache.get(host ?? '')?.probes ?? [])]
     }
   }
 }
