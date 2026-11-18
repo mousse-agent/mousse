@@ -3388,3 +3388,15 @@ it.each(['ready', 'unreachable', 'changed'] as const)('C10 Send warms a cold res
   }
   expect(t.catalog.ensure).toHaveBeenCalled()
 })
+
+it('C10 only the first call in a multi-call turn says it was held', async () => {
+  const t = await setup(true, false, true)
+  const call = catalogueTurn(t, async () => ({ text: 'must not run' }))
+  expect((await call('mail_send', t.args, 'first')).text).toBe('This call is held for your owner. End your turn now.')
+  for (const name of ['mail_send', 'mail_other', 'memory_list']) {
+    const result = await call(name, { ...t.args, body: name }, `later-${name}`)
+    expect(result).toMatchObject({ isError: true, text: 'Not sent: one call already waits for your owner in this turn, and this one was not held. End your turn now; ask for it again after your owner answers.' })
+  }
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(t.calls).toEqual([])
+})
