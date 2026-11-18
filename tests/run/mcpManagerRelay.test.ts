@@ -241,3 +241,23 @@ it('a targeted server listing leaves other servers alone', async () => {
     expect(seen).toEqual(['inst-two'])
   } finally { await mcp.shutdown() }
 })
+
+it('re-lists again when a hint changes during an in-flight notification listing', async () => {
+  let notify: (() => Promise<void>) | undefined, release!: () => void
+  let hint: boolean | undefined = true, reads = 0
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const mcp = manager({ connect: async () => ({
+    onToolsChanged: listener => { notify = listener },
+    listTools: async () => { const readOnlyHint = hint; if (++reads === 2) await gate; return { tools: [{ name: 'send', inputSchema: {}, annotations: { readOnlyHint } }] } },
+    callTool: async () => ({}), close: async () => {}
+  }) })
+  try {
+    const [tool] = await mcp.getEnabledTools()
+    const first = notify!()
+    await vi.waitFor(() => expect(reads).toBe(2))
+    hint = undefined
+    const second = notify!()
+    release(); await Promise.all([first, second])
+    expect(mcp.lookupTool(tool!.providerName)?.readOnlyHint).toBeUndefined()
+  } finally { release(); await mcp.shutdown() }
+})
