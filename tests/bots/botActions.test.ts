@@ -3363,20 +3363,23 @@ it.each(['ready', 'unreachable', 'changed'] as const)('C10 Send warms a cold res
   t.catalog.servers = () => []
   t.catalog.listing = () => []
   t.catalog.listed = () => false
-  t.catalog.ensure = vi.fn(async () => {
+  const warm = async () => {
     if (state === 'unreachable') return
     t.catalog.servers = servers
     t.catalog.listing = listing
     t.catalog.listed = () => true
     if (state === 'changed') t.descriptor.inputSchema = { type: 'object', required: ['changed'] } as never
-  })
+  }
+  t.catalog.ensure = vi.fn(async () => undefined)
   f.bots.close()
   f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup()
   expect(f.bots.actions.get(a.id)?.status).toBe('open')
   const input = { botId: t.botId, actionId: a.id, digest: a.args_digest, answer: 'send' as const }
-  // Admission and projection must not mistake a cold catalogue for a changed binding.
-  expect(() => f.bots.service.actionCheck(input)).not.toThrow()
+  expect(t.catalog.ensure).toHaveBeenCalled() // Startup also warms open cards.
+  t.catalog.ensure = vi.fn(warm)
+  expect(() => f.bots.service.actionCheck(input)).toThrow(expect.objectContaining({ code: 'bot_action_unreachable' }))
+  await flush()
   expect(f.bots.service.actionMessage(t.botId, a.id).action?.status).toBe('open')
   if (state === 'ready') {
     await f.bots.service.answerAction(input)
