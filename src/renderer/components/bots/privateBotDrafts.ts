@@ -63,5 +63,6 @@ useBotsStore.subscribe((state,previous)=>{
     if(!incoming || incoming===previous.drafts[botId] || admitting===botId) continue
     const entry=drafts.get(botId)
     if(entry?.text!==undefined) changePrivateBotDraft(botId,`${entry.text}\n\n${incoming}`)
+    else if(pastedSecretShape(incoming) || entry?.saved.length) changePrivateBotDraft(botId,incoming)
   }
 })
