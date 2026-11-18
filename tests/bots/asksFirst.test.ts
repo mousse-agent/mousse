@@ -27,3 +27,10 @@ it('turns on a profile saved with master defaults and only honors the new suppor
   expect(botAsksFirst({ experimental: normalizeExperimentalSettings(saved as never) })).toBe(true)
   expect(botAsksFirst({ experimental: normalizeExperimentalSettings({ ...saved, botAsksFirstOff: true } as never) })).toBe(false)
 })
+
+it.each(['send','delete','remove','archive','update','create','add','set','put','post','write','edit','modify','move','copy','mark','reply','forward','publish','upload','cancel','close','merge','approve','assign','invite','share','submit','run','execute','trigger','start','stop','pay','transfer','book','order','buy','rename','clear','reset','import','sync','save','unsubscribe','and','then','or'])('asks when a reading name contains %s', word => {
+  expect(asksFirstFor({ tool: `get_${word}_items`, serverName: 'Mail' })).toBe(true)
+})
+it.each(['fetch_and_archive','get_and_send','listDelete'])('asks for compound %s', tool => {
+  expect(asksFirstFor({ tool, serverName: 'Mail' })).toBe(true)
+})
