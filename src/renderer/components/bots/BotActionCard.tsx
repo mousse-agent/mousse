@@ -164,7 +164,7 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   </>
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
     <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span>{!card.forgotten && <> · <span className="bot-action-server">{actionText(card.serverName)}</span></>}</p>
-    {identity && <blockquote className="bot-action-identification" aria-label="Request identification">{identity}</blockquote>}
+    {identity && <><blockquote className="bot-action-identification" aria-label="Request identification">{identity}</blockquote><AlphabetWarning text={identity} /></>}
     {actionStatus(card) && <p role="status" className="bot-action-outcome" data-find-text data-message-id={messageId} data-part-index="1">{card.at ? <>{outcomeLabel(card)} · <time dateTime={card.at}>{botGroupTime(card.at)}</time></> : actionStatus(card)}</p>}
     {card.status === 'expired' && !card.forgotten && card.askedAt && <p aria-label="Asked time">Asked <time dateTime={card.askedAt}>{botGroupTime(card.askedAt)}</time></p>}
     {!card.forgotten && card.result && !card.result.notSentInTime && card.result.text && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text ?? '')}</blockquote>}
