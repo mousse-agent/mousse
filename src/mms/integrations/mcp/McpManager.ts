@@ -754,15 +754,24 @@ export class McpManager {
       .map(([key]) => key)
     const exact = this.connections.get(serverId)
     const targets = exact ? [serverId] : keys.length > 0 ? keys : []
-    await Promise.all(
-      targets.map(async (key) => {
+    try {
+      await Promise.all(targets.map(async (key) => {
         const connection = this.connections.get(key)
-        if (!connection) return
-        await this.closeConnected(connection)
-        await this.listToolsForServer(connection.config, connection.projectPath)
-      })
-    )
-    this.invalidateDiscoveryCache()
+        if (connection) await this.closeConnected(connection)
+      }))
+    } finally {
+      this.invalidateDiscoveryCache()
+    }
+  }
+
+  /** Only the explicit Restart action re-lists; config and sign-in changes merely close. */
+  async refreshEnabledServer(serverId: string): Promise<void> {
+    try {
+      const entries = await this.getEnabledToolsByServer(undefined, undefined, { signIn: false, installationId: serverId })
+      for (const entry of entries) if (entry.error) logWarn('McpManager', `Restarted MCP server could not be listed: ${redactSensitiveText(entry.error)}`)
+    } catch (error) {
+      logWarn('McpManager', `Restarted MCP server could not be listed: ${redactSensitiveText(formatError(error))}`)
+    }
   }
 
   lookupTool(providerName: string): McpToolDescriptor | undefined {

@@ -227,6 +227,7 @@ it('re-lists tools after restarting a server', async () => {
     const [before] = await mcp.getEnabledTools()
     tools = [{ name: 'after' }]
     await mcp.restartServer(before!.installationId!)
+    await mcp.refreshEnabledServer(before!.installationId!)
     expect(mcp.lookupTool(before!.providerName)).toBeUndefined()
     expect((await mcp.getEnabledTools()).map(t => t.toolName)).toEqual(['after'])
   } finally { await mcp.shutdown() }
@@ -280,5 +281,28 @@ it.each(['disable', 'delete', 'edit', 'unauthorized', 'unreachable'])('restart s
     await expect(mcp.restartServer('inst-echo')).resolves.toBeUndefined()
     expect(clients).toHaveLength(1)
     expect(mcp.getActiveCount()).toBe(0)
+  } finally { await mcp.shutdown() }
+})
+
+it.each(['enabled', 'disable', 'delete', 'edit', 'unauthorized', 'unreachable'])('explicit Restart re-lists current enabled config: %s', async change => {
+  const servers = [testServerConfig()]
+  const seen: string[] = []
+  let broken = false
+  const { factory, clients } = clientFactory({ tools: server => {
+    seen.push(server.configRevision!)
+    if (broken) throw new Error(change)
+    return [{ name: 'echo' }]
+  } })
+  const mcp = manager(factory, servers)
+  try {
+    await mcp.getEnabledTools()
+    if (change === 'disable') servers[0]!.enabled = false
+    if (change === 'delete') servers.splice(0)
+    if (change === 'edit') servers[0] = { ...servers[0]!, configRevision: 'rev2', url: 'http://example.test/current' }
+    broken = change === 'unauthorized' || change === 'unreachable'
+    await mcp.restartServer('inst-echo')
+    await expect(mcp.refreshEnabledServer('inst-echo')).resolves.toBeUndefined()
+    expect(clients).toHaveLength(['disable', 'delete'].includes(change) ? 1 : 2)
+    expect(seen).toEqual(['disable', 'delete'].includes(change) ? ['rev1'] : ['rev1', change === 'edit' ? 'rev2' : 'rev1'])
   } finally { await mcp.shutdown() }
 })
