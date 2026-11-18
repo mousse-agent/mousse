@@ -354,6 +354,9 @@ export class BotActions {
     const history = scope as unknown as ActionRow[]
     const removed = history.find(action => JSON.parse(action.card_json ?? '{}').ownerRemoved && !this.ownerWroteAfter(action, true))
     if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
+    const open = history.filter(action => action.status === 'open')
+    if (origin === 'unattended' && open.length >= 3)
+      return this.refuse(row, open[0], 'Not sent: three requests for this tool already wait for your owner. Say in your report what you would have sent; do not ask again until one is answered.')
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
     const refused = unanswered.find(action => action.args_digest === digest)
     if (refused)
