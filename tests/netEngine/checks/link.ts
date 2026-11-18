@@ -303,6 +303,15 @@ export function hostSide(
       const row = rowOf(get(name), endpoint)
       return row ? { state: row.state, shown: deviceState(get(name), row.localId) ?? null } : null
     },
+    /** `name`'s helper dials `endpoint` now: `ok`, or what it said. */
+    tryDial: async ({ name, endpoint }: { name: string; endpoint: string }) => {
+      try {
+        await get(name).engine.request('dial', { identity: endpoint }, 20_000)
+        return 'ok'
+      } catch (error) {
+        return `${codeOf(error) ?? 'failed'}: ${String((error as Error)?.message ?? error)}`
+      }
+    },
     state: ({ name, endpoint }: { name: string; endpoint: string }) => {
       const row = rowOf(get(name), endpoint)
       return row ? (deviceState(get(name), row.localId) ?? row.state) : 'none'
@@ -348,8 +357,13 @@ function echo(shell: Spawned): void {
  * Waits until `computer`'s row for the host's `name` and that row's own for `computer` both read Connected; else
  * says what each reads.
  */
-export function bothConnected(link: Link, computer: Computer, node: string, name: string) {
-  return eventually(async () => {
+export async function bothConnected(
+  link: Link,
+  computer: Computer,
+  node: string,
+  name: string
+): Promise<void> {
+  await eventually(async () => {
     const here = computer.mms.netEngine.peerRows().find((row) => row.localId === node)
     const shown = deviceState(computer, node as never)
     const there = await link.ask('row', { name, endpoint: computer.endpoint })
@@ -357,5 +371,12 @@ export function bothConnected(link: Link, computer: Computer, node: string, name
       throw new Error(
         `${computer.name}: ${here?.state}/${shown}; ${name}: ${there ? `${there.state}/${there.shown}` : 'no row'}`
       )
-  }, 60_000)
+  }, 60_000).catch(async (error: Error) => {
+    const dial = await link
+      .ask('tryDial', { name, endpoint: computer.endpoint })
+      .catch((failed: Error) => failed.message)
+    throw Object.assign(new Error(`${error.message}; ${name} dialing ${computer.name}: ${dial}`), {
+      code: codeOf(error)
+    })
+  })
 }
