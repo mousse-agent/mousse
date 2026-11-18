@@ -14,6 +14,11 @@ import type { LineageRecord } from './types'
 export interface AgentApprovalAccess {
   /** The profile's switch "Agents may answer approvals on other threads" (off by default). */
   answerApprovals: boolean
+  /**
+   * The answerer is the personal bot that started the request's thread, answering that thread's own request on a turn
+   * no person started (`OrchestratorService.supervisorOf`): it needs no switch. Every other part of the rule still holds.
+   */
+  startedThread?: boolean
 }
 
 export type Answerer =
@@ -104,7 +109,8 @@ function ancestorsOf(threadId: string, lineage: LineageLookup): string[] {
  * creates one. Whose requests it may answer:
  * - its own direct subagent's;
  * - any other thread's, only when its access (`approval_respond`) is `manage`, the profile's switch for
- *   answering approvals is on and the thread's project is one agents may reach. A thread of its own
+ *   answering approvals is on (or the answerer is the bot that started that thread, `startedThread`) and the
+ *   thread's project is one agents may reach. A thread of its own
  *   lineage (a subagent of a subagent, its parent or an ancestor) is never one of those: a subagent
  *   answers nothing above it, and only the direct parent answers for a child.
  */
@@ -141,7 +147,7 @@ export function canAnswerApproval(
     const mine = ancestorsOf(answerer.threadId, lineage)
     if (above.includes(answerer.threadId) || mine.includes(request.threadId) || above.some((id) => mine.includes(id)))
       return { ok: false, code: 'not_parent' }
-    if (!access.answerApprovals) return { ok: false, code: 'approvals_disabled' }
+    if (!access.answerApprovals && !access.startedThread) return { ok: false, code: 'approvals_disabled' }
   }
   if (!permissionModeAllows(answerer.permissionMode, request.action)) return { ok: false, code: 'mode_forbids' }
   if (answer.decision === 'allow' && answer.scope === 'always') return { ok: false, code: 'agent_no_standing_grant' }

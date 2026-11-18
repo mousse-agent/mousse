@@ -256,6 +256,10 @@ export interface ApprovalRequestInfo {
 export type AgentApprovalResult =
   /** Settled by this call (`replayed: false`), or by an earlier call with the same `clientRequestId` (`replayed: true`). */
   | { ok: true; decision: 'allow' | 'reject'; replayed: boolean }
+  /** A plain question, answered by the bot that started its thread (`supervisorOf`). */
+  | { ok: true; answered: 'question'; replayed: boolean }
+  /** A plain question that is the user's: the caller is not the bot that started the thread, or the thread's turn is not one it supervises. */
+  | { ok: false; reason: 'question_for_user' }
   /** Someone else (a person at a client, or another agent) answered first; the request is theirs. */
   | { ok: false; reason: 'already_answered'; answeredBy?: AnsweredBy; decision?: 'allow' | 'reject' }
   /** The request was closed before anyone answered (its run ended, its thread was stopped or deleted). */

@@ -4,7 +4,9 @@ import type { EffectRecord, RunRecord, ThreadEvent } from '../run/types'
 import type { RunEngine } from '../run/RunEngine'
 import { subagentDescendantsIn } from '../../shared/threadLineage'
 import { listPendingQueue } from '../queue/ThreadMessageQueue'
-import type { QueuedMessage, ThreadLineage } from '../../shared/types'
+import type { PendingUserQuestions, QueuedMessage, ThreadLineage } from '../../shared/types'
+import { withoutStandingRules } from '../orchestrator/UserQuestionService'
+import type { BotThreadAsk } from '../../shared/bots/personal/jobs'
 import type { JobThreadView } from './jobs'
 
 /** What the launched-thread lookup reads of a thread: its title, project, times and the thread that started it. */
@@ -218,14 +220,26 @@ export function launchedThreadsIn(profile: {
   })
 }
 
+/** A request the thread waits on, as its job view lists it: an approval without the "Always" option, which is the owner's. */
+function threadAsk(pending: PendingUserQuestions): BotThreadAsk {
+  const entry = withoutStandingRules(pending)
+  return {
+    requestId: entry.requestId,
+    approval: entry.approval !== undefined,
+    questions: entry.questions.map((question) => ({ id: question.id, text: question.prompt, options: question.options.map((option) => ({ id: option.id, label: option.label })) }))
+  }
+}
+
 /**
  * One thread a bot handed a job to, as the ledger reads it (`JobThreadView`): how it stands, by the same rules as the
- * bot's list (`launchedThreadsOf`, its subagents rolled up), its title, and its last run's answer (`result`) once its
- * turn ended. `gone` when the thread no longer exists (deleted, or in the trash: `trashed`).
+ * bot's list (`launchedThreadsOf`, its subagents rolled up), its title, its last run's answer (`result`) once its turn
+ * ended, and what it waits on (`asks`). `gone` when the thread no longer exists (deleted, or in the trash: `trashed`).
  */
 export function jobThreadIn(profile: Parameters<typeof launchedThreadsIn>[0] & {
   trashed?(threadId: string): boolean
   result?(threadId: string, runId: string): string | undefined
+  /** The thread's own requests it waits on (not its subagents'): `UserQuestionService.listPendingForThread`. */
+  pending?(threadId: string): ReadonlyArray<PendingUserQuestions & { threadId: string }>
 }, threadId: string): JobThreadView {
   const all = profile.threads.listAllThreads()
   const thread = all.find((candidate) => candidate.id === threadId)
@@ -240,7 +254,8 @@ export function jobThreadIn(profile: Parameters<typeof launchedThreadsIn>[0] & {
   const ended = listed.status === 'done' || listed.status === 'failed' || listed.status === 'stopped'
   const run = ended ? profile.engine.store.listRuns(threadId, { limit: 1 })[0] : undefined
   const result = run ? profile.result?.(threadId, run.runId) : undefined
-  return { status: listed.status, ...(title ? { title } : {}), ...(result?.trim() ? { result } : {}) }
+  const asks = listed.status === 'needs_input' ? profile.pending?.(threadId).map(threadAsk) : undefined
+  return { status: listed.status, ...(title ? { title } : {}), ...(result?.trim() ? { result } : {}), ...(asks?.length ? { asks } : {}) }
 }
 
 /**
