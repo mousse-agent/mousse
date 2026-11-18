@@ -4148,12 +4148,12 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** Steer a specific run. Only the thread's active run receives the text; anything else is ignored. */
-  async steerRun(runId: string, text: string, clientRequestId: string, threadId?: string, actor?: AgentSender, ceiling?: PermissionMode, deviceLimit?: PermissionMode, sentFrom?: { node: string }): Promise<CommandResult> {
+  async steerRun(runId: string, text: string, clientRequestId: string, threadId?: string, actor?: AgentSender, ceiling?: PermissionMode, deviceLimit?: PermissionMode, sentFrom?: { node: string }, admit?: () => void): Promise<CommandResult> {
     const engine = this.requireRunEngine()
     const target = threadId ?? engine.getRun(runId)?.threadId
     if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
     this.assertNotBotThread(target)
-    const result = await engine.dispatch({ kind: 'steer', threadId: target, clientRequestId, runId, ...(actor ? { actor, textLength: text.length, ceiling: ceiling ?? 'ask' } : {}) })
+    const result = await engine.dispatch({ kind: 'steer', threadId: target, clientRequestId, runId, ...(actor ? { actor, textLength: text.length, ceiling: ceiling ?? 'ask' } : {}) }, admit ? { admit } : undefined)
     if (result.status === 'accepted' && !result.replayed) {
       // An agent's steer says so in the transcript row it leaves, and keeps the sender's mode, wherever it ends
       // up: read by the live turn, or (it missed its turn, or was never read) run as a turn of its own.
@@ -4639,6 +4639,7 @@ export class OrchestratorService extends EventEmitter {
       setThreadHidden: (threadId, hidden, options) => this.setThreadHiddenAsAgent(threadId, hidden, options),
       updateSubagentAccess: (threadId, _access, options) => this.liftSubagentReadOnly(threadId, options),
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
+      assertBotMayDirect: (threadId, actor) => this.assertBotMayDirect(threadId, actor),
       steerStrategyOf: (threadId) => {
         const caps = this.capabilitiesForThread(threadId)
         return caps ? steerStrategy(caps, this.runEngine?.getActiveRun(threadId) ?? null) : null
@@ -5772,9 +5773,23 @@ export class OrchestratorService extends EventEmitter {
    * with "use your threads" (`botSenderOf`), as its message does: in the thread's own mode, or no wider than the device
    * its owner wrote from, labelled as the bot's words.
    */
-  private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
+  /**
+   * A personal bot's note to a thread it started (`thread_send` with intent `note`): its turn must hold `thread_send`,
+   * and a turn another device's message started directs no thread that runs wider than that device may, as its message
+   * would be refused (`device_limit`).
+   */
+  private assertBotMayDirect(threadId: string, actor: AgentActor): void {
+    const bot = this.botSenderOf(actor, 'thread_send')
+    if (bot?.limit && isStricter(bot.limit, this.storedPermissionMode(threadId)))
+      throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(bot.limit)}).`)
+  }
+
+  private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor; tool?: 'thread_steer' | 'thread_send' }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
-    const bot = options.actor.remote ? undefined : this.botSenderOf(options.actor, 'thread_steer')
+    const bot = options.actor.remote ? undefined : this.botSenderOf(options.actor, options.tool ?? 'thread_steer')
+    // A steer settles what waits on the owner there (a question, an approval): a bot leaves those to them, with the same
+    // words as a message it may not send.
+    if (bot && this.awaitsAnswer(threadId)) return { status: 'rejected', reason: 'questions_pending' }
     let sender: AgentActor
     try {
       sender = bot ? botSenderHops(options.actor) : this.withAgentHops(options.actor)
@@ -5786,7 +5801,13 @@ export class OrchestratorService extends EventEmitter {
     // sender's mode travels with the steer wherever it ends up (SPEC §15.1).
     const callerMode = bot ? bot.limit ?? 'full' : this.senderMode(sender)
     const letter = bot ? this.botLetter(sender, bot, text) : this.agentLetter(sender, text)
-    const result = await this.steerRun(runId, letter.content, options.clientRequestId, threadId, letter.sender, callerMode, undefined, sender.remote ? { node: sender.remote.node } : undefined)
+    // A bot's message that joins the running turn (`thread_send`) is held to the same repeat check as one that starts or
+    // waits for a turn: the same text again within the window is refused, decided at admission so a retry replays.
+    const repeat = bot && options.tool === 'thread_send' ? { key: agentRepeatKey(threadId, agentSenderKey(options.actor), text), claim: { at: 0 } } : undefined
+    const steer = () => this.steerRun(runId, letter.content, options.clientRequestId, threadId, letter.sender, callerMode, undefined, sender.remote ? { node: sender.remote.node } : undefined, repeat ? () => this.claimAgentMessage(repeat.key, repeat.claim) : undefined)
+    const result = repeat ? await this.sendGuardedAgainstRepeat(repeat.key, repeat.claim, steer) : await steer()
+    // A steer the engine admitted and then refused (the run ended meanwhile) sent nothing: a fresh try is no repeat.
+    if (repeat && result.status !== 'accepted' && this.recentAgentMessages.get(repeat.key) === repeat.claim) this.recentAgentMessages.delete(repeat.key)
     if (result.status === 'rejected' && result.reason === 'ceiling_exceeded') return { status: 'ceiling_exceeded', callerMode, targetMode: this.runPermissionMode(runId) }
     return this.agentRunCommandResult(engine, threadId, runId, result)
   }

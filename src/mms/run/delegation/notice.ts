@@ -117,7 +117,8 @@ const NOTE_SENDER: Readonly<Record<AgentNotePayload['from'], string>> = {
   parent: 'Your parent',
   ancestor: 'An agent above your parent',
   subagent: 'Your subagent',
-  sibling: 'A sibling subagent'
+  sibling: 'A sibling subagent',
+  bot: 'The user\'s bot that started this thread'
 }
 
 const NOTE_ACCESS: Readonly<Record<AgentNotePayload['senderAccess'], string>> = {
@@ -128,10 +129,17 @@ const NOTE_ACCESS: Readonly<Record<AgentNotePayload['senderAccess'], string>> = 
 
 /**
  * Another agent's note: who sent it and what it may do, then its words as data. Only a note from above (the receiver's
- * parent or an agent above it) may direct the work; any other note is information and grants nothing.
+ * parent, an agent above it, or the user's bot that started the thread) may direct the work; any other note is
+ * information and grants nothing.
  */
 function agentNoteNotice(payload: AgentNotePayload): string {
   const title = payload.senderTitle ? ` "${payload.senderTitle}"` : ''
+  if (payload.from === 'bot')
+    return notice({ kind: 'agent_note', ref: payload.senderThreadId }, [
+      `${NOTE_SENDER.bot} (its chat${title}, thread ${payload.senderThreadId}) sent you a note.`,
+      'It comes from the bot, not from the user, and may direct your work.',
+      quoted('agent note', payload.text)
+    ])
   const direction = payload.from === 'parent' || payload.from === 'ancestor'
   return notice({ kind: 'agent_note', ref: payload.senderThreadId }, [
     `${NOTE_SENDER[payload.from]}${title} (thread ${payload.senderThreadId}) sent you a note; ${NOTE_ACCESS[payload.senderAccess]}.`,

@@ -183,6 +183,12 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     // A steer goes through to the engine as the bot's (no `bot_thread` refusal): here there is no such run to steer.
     const steered = await s.steerRunAsAgent(target.id, 'run-none', 'Use staging.', { clientRequestId: `thread_steer:${w.chat.id}:s1`, actor: w.actor })
     expect(steered.reason).not.toBe('bot_thread')
+    // A steer, or a message that joins the running turn, never settles a question waiting on the owner.
+    const waiting = w.d.store.createThread('Waiting', w.project.id)
+    void w.orch.questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], waiting.id, {})
+    for (const tool of ['thread_steer', 'thread_send'])
+      expect(await s.steerRunAsAgent(waiting.id, 'run-none', 'Use staging.', { clientRequestId: `${tool}:${w.chat.id}:w1`, actor: w.actor, tool })).toEqual({ status: 'rejected', reason: 'questions_pending' })
+    expect(w.orch.questions.listPendingForThread(waiting.id)).toHaveLength(1)
     // Its scheduled jobs run in Full access, or no wider than its owner's device; a turn that may not act gets Ask.
     expect(s.scheduledCreatorLimits({ threadId: w.chat.id, runId: w.actor.runId })).toEqual({ permissionCeiling: 'full' })
 
@@ -294,6 +300,35 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     release()
     await waitFor(() => [...runs, sent.runId].every((runId) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(w.d.engine.getRun(runId)?.status ?? '')), 'the runs', 120_000)
   }, 180_000)
+
+  it('a message that joins a running turn is held to the repeat check, and a retry replays it', async () => {
+    let busy = ''
+    let release!: () => void
+    const held = new Promise<string>((resolve) => { release = () => resolve('done late') })
+    const w = world({ script: (input) => (input.threadId === busy ? held : 'done') })
+    const s = service(w) as ReturnType<typeof service> & { steerRunAsAgent(threadId: string, runId: string, text: string, options: Record<string, unknown>): Promise<{ status: string; reason?: string; replayed?: boolean }> }
+    const target = w.d.store.createThread('Busy', w.project.id)
+    busy = target.id
+    const owner = await w.d.orch.send('Work on this.', false, { threadId: target.id, clientRequestId: 'owner-busy', awaitMode: 'ack' })
+    await waitFor(() => w.d.engine.getRun(owner.runId!)?.status === 'running', 'the owner\'s turn running')
+    const join = (key: string) => s.steerRunAsAgent(target.id, owner.runId!, 'Use staging.', { clientRequestId: `thread_send:${w.chat.id}:${key}`, actor: w.actor, tool: 'thread_send' })
+    expect(await join('j1')).toMatchObject({ status: 'accepted', replayed: false })
+    await expect(join('j2')).rejects.toMatchObject({ code: 'duplicate_message' })
+    expect(await join('j1')).toMatchObject({ status: 'accepted', replayed: true })
+    release()
+    await w.settled(owner.runId!)
+  })
+
+  it('a note from a turn held to a device\'s limit may not direct a thread that runs wider', () => {
+    const limited = world({ owner: { limit: 'ask' } })
+    const direct = (w: ReturnType<typeof world>, threadId: string) => (w.d.orch as unknown as { assertBotMayDirect(threadId: string, actor: unknown): void }).assertBotMayDirect(threadId, w.actor)
+    const wide = limited.d.store.createThread('Full', limited.project.id)
+    limited.d.orch.setThreadPermissionMode(wide.id, 'full')
+    expect(() => direct(limited, wide.id)).toThrow(expect.objectContaining({ code: 'device_limit' }))
+    const narrow = limited.d.store.createThread('Ask', limited.project.id)
+    limited.d.orch.setThreadPermissionMode(narrow.id, 'ask')
+    expect(() => direct(limited, narrow.id)).not.toThrow()
+  })
 
   it('a Stop is refused while a thread waits on its owner, in the words of a refused message, and stops a turn that is simply running', async () => {
     let busy = ''

@@ -333,6 +333,86 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(open).toHaveBeenCalledTimes(2)
   })
 
+  // What a bot's thread_send does by the thread's state and what it asks for: it joins a running turn unless it asks to
+  // queue or for a plan turn; a running turn that can't take it (ended, not started, looser mode) gets a turn instead;
+  // a question waiting on the owner refuses it.
+  const joins: Array<[string, { running: boolean; args?: Record<string, unknown>; steer?: Record<string, unknown> }, 'steer' | 'send' | 'refused', string?]> = [
+    ['a working thread: it joins the running turn', { running: true }, 'steer'],
+    ['a working thread, queue: true: it waits behind the turn', { running: true, args: { queue: true } }, 'send'],
+    ['a working thread, mode plan: it waits for a plan turn', { running: true, args: { mode: 'plan' } }, 'send'],
+    ['an idle thread: it starts a turn', { running: false }, 'send'],
+    ['the run ended meanwhile: it starts a turn', { running: true, steer: { status: 'ignored', reason: 'not_active', activeRunId: null, runStatus: 'completed' } }, 'send', 'run_not_active'],
+    ['the run has not started its turn: it waits behind it', { running: true, steer: { status: 'rejected', reason: 'steer_target_not_ready' } }, 'send', 'steer_target_not_ready'],
+    ['the run is looser than the bot\'s turn: it waits behind it', { running: true, steer: { status: 'ceiling_exceeded', callerMode: 'ask', targetMode: 'full' } }, 'send', 'ceiling_exceeded'],
+    ['a question waits on the owner: refused', { running: true, steer: { status: 'rejected', reason: 'questions_pending' } }, 'refused', 'questions_pending']
+  ]
+  it.each(joins)('a bot\'s message to %s', async (_name, input, outcome, conflict) => {
+    const { text, host } = await world({ threads: 'all' })
+    const run = input.running ? await fx!.runningRun('mine') : undefined
+    host.steerRun = vi.fn(async (_threadId, runId) => (input.steer ?? { status: 'accepted', runId, sequence: 2, replayed: false }) as never)
+    const result = await text('thread_send', { threadId: 'mine', content: 'Use staging instead.', ...input.args })
+    if (outcome === 'refused') {
+      expect(result).toMatchObject({ error: true, text: expect.stringContaining('waiting for the user to answer') })
+      expect(host.sendToThread).not.toHaveBeenCalled()
+      return
+    }
+    expect(result.error).toBe(false)
+    const body = JSON.parse(result.text)
+    if (outcome === 'steer') {
+      expect(host.steerRun).toHaveBeenCalledWith('mine', run!.runId, 'Use staging instead.', expect.objectContaining({ tool: 'thread_send' }))
+      expect(host.sendToThread).not.toHaveBeenCalled()
+      expect(body).toMatchObject({ delivery: 'presented', runId: run!.runId })
+      return
+    }
+    expect(host.sendToThread).toHaveBeenCalledTimes(1)
+    expect(body.delivery).toBe('started')
+    expect(body.notJoined).toBe(conflict)
+  })
+
+  it('a retried message replays what the first call did: a join after its run ended, and a send after a join the engine refused', async () => {
+    const { text, host } = await world({ threads: 'all' })
+    // Steers reach the real engine, which keeps a receipt per request; `gone` names a run the engine ignores.
+    let steerRunId: string | undefined
+    host.steerRun = vi.fn(async (threadId, runId, _text, options) => (await fx!.engine.dispatch({ kind: 'steer', threadId, clientRequestId: options.clientRequestId, runId: steerRunId ?? runId })) as never)
+    const run = await fx!.runningRun('mine')
+    const first = JSON.parse((await text('thread_send', { threadId: 'mine', content: 'Use staging.', clientRequestId: 'c1' })).text)
+    expect(first).toMatchObject({ delivery: 'presented', runId: run.runId, replayed: false })
+    fx!.finish(run.runId)
+    // The thread is idle now: the retry still answers with the join, and starts nothing.
+    expect(JSON.parse((await text('thread_send', { threadId: 'mine', content: 'Use staging.', clientRequestId: 'c1' })).text)).toMatchObject({ delivery: 'presented', runId: run.runId, replayed: true })
+    expect(host.sendToThread).not.toHaveBeenCalled()
+    // A join the engine ignored (the run it read ended): the send that follows has a key of its own, which the retry reuses.
+    const again = await fx!.runningRun('mine')
+    steerRunId = 'gone'
+    expect(JSON.parse((await text('thread_send', { threadId: 'mine', content: 'Use prod.', clientRequestId: 'c2' })).text).notJoined).toBe('run_not_active')
+    await text('thread_send', { threadId: 'mine', content: 'Use prod.', clientRequestId: 'c2' })
+    const keys = vi.mocked(host.sendToThread!).mock.calls.map((call) => call[2].clientRequestId)
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toMatch(/:send$/)
+    expect(keys[1]).toBe(keys[0])
+    fx!.finish(again.runId)
+  })
+
+  it('a bot\'s note to a thread it started is held to what its message may reach: refused when the device it was written from may not run that thread', async () => {
+    const { text, host, threads } = await world({ threads: 'all' })
+    threads.set('started', thread('started', { createdByThreadId: 'home' }))
+    host.assertBotMayDirect = vi.fn(() => { throw Object.assign(new Error('The thread runs in Full access, more than the device may run.'), { code: 'device_limit' }) })
+    expect(await text('thread_send', { threadId: 'started', content: 'Push to main.', intent: 'note' })).toMatchObject({ error: true, text: expect.stringContaining('Your owner wrote to you from a device') })
+    expect(fx!.engine.inbox.listPending('started')).toHaveLength(0)
+  })
+
+  it('a bot\'s note joins a running turn without naming it, reaches an idle thread it started as from the bot, and is refused by an idle thread it did not start', async () => {
+    const { text, host, threads } = await world({ threads: 'all' })
+    host.steerRun = vi.fn(async (_threadId, runId) => ({ status: 'accepted' as const, runId, sequence: 2, replayed: false }))
+    host.assertBotMayDirect = vi.fn()
+    const run = await fx!.runningRun('mine')
+    expect(JSON.parse((await text('thread_send', { threadId: 'mine', content: 'FYI: staging is down.', intent: 'note' })).text)).toMatchObject({ delivery: 'presented', runId: run.runId })
+    threads.set('started', thread('started', { createdByThreadId: 'home' }))
+    expect((await text('thread_send', { threadId: 'started', content: 'FYI: staging is down.', intent: 'note', attention: 'none' })).error).toBe(false)
+    expect(fx!.engine.inbox.listPending('started').map((row) => (row.payload as { from?: string }).from)).toEqual(['bot'])
+    expect(await text('thread_send', { threadId: 'elsewhere', content: 'FYI: staging is down.', intent: 'note' })).toMatchObject({ error: true, text: expect.stringContaining('not running a turn') })
+  })
+
   it('a bot reads its own description of thread_create and thread_send, with no in-a-row limit; an ordinary thread reads the agents\' one', async () => {
     const { registry, runId } = await world({ threads: 'all' })
     const described = (threadId: string, name: string) => registry.listForThread(threadId, 'default', runId).find((tool) => tool.name === name)?.description ?? ''
