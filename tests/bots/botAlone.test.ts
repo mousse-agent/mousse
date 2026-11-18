@@ -9,3 +9,9 @@ it.each(names)('reads exact top-level %s place values from the schema', name => 
 it('does not infer a place from undeclared, nested or missing arguments', () => {
   expect(actionPlace({ properties: { body: {}, nested: { properties: { folder: {} } }, folder: {} } }, { path: '/x', nested: { folder: 'x' } })).toBeUndefined()
 })
+
+import { placeLabel } from '../../src/mms/bots/actions/BotAlone'
+it('uses a result name only when it names the exact destination id', () => {
+  expect(placeLabel('folder-1', '{"folder":{"id":"folder-1","name":"Scans"}}')).toBe('Scans')
+  expect(placeLabel('folder-2', '{"folder":{"id":"folder-1","name":"Scans"}}')).toBe('folder-2')
+})
