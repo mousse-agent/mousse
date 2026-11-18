@@ -74,3 +74,23 @@ it('offers and reuses saved secrets only for matching origin, header, format, pa
   }
   requests.dispose()
 })
+
+it('accepts bindings through the bot tool only, while threads keep their original schema and input', async () => {
+  const { secretTools } = await import('../../src/mms/run/mcp/appTools/secrets')
+  const { home, vault, requests } = fixture()
+  const host = createSecretToolHost({ vault, requests, scratchRoot: home })
+  const [request] = secretTools({ secrets: () => host } as never)
+  expect(request.botInputSchema?.properties).toHaveProperty('for')
+  expect(request.inputSchema.properties).not.toHaveProperty('for')
+  const context = (bot: boolean) => ({ turn: { threadId: 'bot', ...(bot ? { bot: {} } : {}) }, transport: 'mcp', caller: { threadId: 'bot' }, signal: new AbortController().signal } as never)
+  for (const target of [{ service: 'openai' }, { origin: 'https://api.example.com' }]) {
+    const result = request.handler({ label: 'Key', reason: 'Read', for: target }, context(true))
+    const [card] = requests.list('bot')
+    expect(card.binding?.host).toBe('service' in target ? 'api.openai.com' : 'api.example.com')
+    requests.answer('bot', card.requestId, VALUE, 'saved')
+    expect(JSON.stringify(await result)).not.toContain(VALUE)
+  }
+  expect((await request.handler({ label: 'Key', reason: 'Read', for: { origin: 'http://host' } }, context(true))).isError).toBe(true)
+  expect((await request.handler({ label: 'Key', reason: 'Read', for: { service: 'openai' } }, context(false))).isError).toBe(true)
+  requests.dispose()
+})
