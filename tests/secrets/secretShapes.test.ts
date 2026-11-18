@@ -90,7 +90,7 @@ it('scales the long URL token walk across two sizes',()=>{
 
 it.each([
  `path ${'P'.repeat(40)} then ${id} ${aws}`,
- `older ${'B'.repeat(40)} then ${id} secret is ${aws}`,
+ `older ${'B'.repeat(40)} ${'context '.repeat(8)}${id} secret is ${aws}`,
  ...['aws_secret_access_key','AWS_SECRET_ACCESS_KEY','SecretAccessKey'].map(label=>`older ${'B'.repeat(40)} ${id} ${'C'.repeat(40)} "${label}":"${aws}"`),
  `"SecretAccessKey":"${aws}" older ${'B'.repeat(40)} ${id}`
 ])('prefers the labelled AWS secret, otherwise the nearest token: %s',text=>{
