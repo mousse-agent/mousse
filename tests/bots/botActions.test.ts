@@ -4015,8 +4015,9 @@ it('sleep cannot keep an old listing fresh when the monotonic clock pauses', asy
 })
 
 // E1: owner message, unattended schedule, exact destination, changed binding, rollback and caps.
-async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolName = 'send') {
+async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolName = 'send', body?: unknown) {
   const t = await scheduledCall(true, 1, undefined, toolName)
+  if (body !== undefined) t.args.body = body as string
   t.descriptor.inputSchema.properties.to = { type: 'array' } as never
   await t.call(); await finish(f, t.run.payload)
   const first = f.bots.actions.forWork(t.id)!
@@ -4413,4 +4414,21 @@ it('E1 replay does not park or fence the next automatic call in a live turn', as
   expect((await call('new-content', { ...t.args, body: 'Next plain message' })).text).toContain('delivered')
   expect(f.store.activation(next.id)).toMatchObject({ status: 'running', endReason: null })
   expect(t.calls).toHaveLength(3)
+})
+
+it.each([
+  ['https://safe.example/path', 'Plain changed text'],
+  ['first@example.test', 'second@example.test'],
+  ['A note from @owner', 'A note from @stranger'],
+  ['Read safe.example', 'Read evil.example'],
+  [{ options: [{ path: '/sent' }], text: 'original' }, { options: [{ path: '/sent' }], text: 'changed' }],
+  ['Plain sent text', { options: [{ path: '/new' }] }]
+])('E1 content containing an address or nested destination stays exact: %j', async (before, after) => {
+  const t = await aloneAsk('allow', 'send', before)
+  expect((await aloneNext(t, { ...t.args, body: after as string })).action.status).toBe('open')
+  expect(t.calls).toHaveLength(1)
+})
+it.each(['scheduleId', 'serverId', 'tool'] as const)('E1 wrong %s gives an id correction, not a changed-place instruction', async key => {
+  const t = await aloneAsk()
+  expect(f.bots.alone.prepare(t.botId, 'wrong-id', { ...t.request, ask: 'let_alone', [key]: 'not-an-id' })).toBe('I could not find that automation or MCP tool. Get scheduleId from bot_schedule_list, serverId (id) from mcp_servers, and use the bare tool name.')
 })
