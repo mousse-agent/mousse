@@ -1033,6 +1033,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private changed(event: { botId?: string; activationId?: string }): void {
+    this.alone?.cleanPending(event.botId)
     const ended = event.activationId ? this.store.activation(event.activationId) : undefined
     if (ended && ENDED_ACTIVATION_STATUSES.has(ended.status)) this.postScheduleCompleted(ended)
     // A change may take "run commands" away (a Remove, a switch): background commands stop with it.
@@ -1367,6 +1368,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const refused = [published.main, ...published.context].map((thread) => this.checkThread(thread, published.permissions, botId)).find((check) => !check.ok)
     if (refused) throw new BotEngineError('policy_unenforceable', refused.reason ?? 'A thread of this bot cannot hold its permissions.', { thread: refused.key })
     const grant = this.store.approve(botId, digest, published.permissions)
+    this.alone.prune(botId)
     // Work running under the replaced grant ends now: it never goes on under another grant.
     this.endUnderGrant(botId, 'grant_replaced', grant.digest)
     this.changed({ botId })
@@ -1377,6 +1379,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   revoke(botId: string): boolean {
     this.entry(botId)
     const revoked = this.store.revoke(botId)
+    this.alone.clear(botId)
     this.endUnderGrant(botId, 'grant_revoked')
     this.changed({ botId })
     return revoked
@@ -7267,6 +7270,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       } catch (error) {
         console.warn('bot supervisor records could not be read', { error: error instanceof Error ? error.message : String(error) })
       }
+      this.alone.cleanPending()
       this.tryDropRemovedScheduleRuns()
       await this.reconcileAll()
       try { await this.actions.reconcile() } catch (error) {
@@ -8106,6 +8110,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.entry(botId)
     const memory = this.host.memory
     if (!memory) throw new BotEngineError('bots_unavailable', 'Bot memory is not available in this build.')
+    this.alone.clear(botId)
     if (keep !== 'saved') {
       const forgotten = memory.forgetAll(botId)
       // Work that waited on a question whose words were forgotten ends now, and says so.

@@ -241,6 +241,8 @@ export class BotActions {
   }
   /** Erase call content without erasing owner intervention facts or the run-once key. */
   forgetText(botId: string, actionId?: string): void {
+    // Forgetting the source of authority also forgets the standing consent and pending snapshots.
+    this.host.store.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND (key GLOB 'alone:*' OR key GLOB 'alone-ask:*')", botId)
     for (const action of this.host.store.all('SELECT message_id FROM bot_actions WHERE bot_id = ? AND (? IS NULL OR id = ?)', botId, actionId ?? null, actionId ?? null)) {
       const source = `bm:${action.message_id}`
       const statusPrefix = `${source}:status:`

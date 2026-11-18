@@ -1303,7 +1303,7 @@ export class BotMemoryStore {
   actions(botId: string): Array<Record<string, unknown>> {
     if (!this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")) return []
     return this.all(`SELECT id, call_key, bot_id, activation_id, lane, kind, target_json,
-      args_json, args_digest, binding_json, place_json, card_json, bot_note, status, result_json,
+      args_json, args_digest, binding_json, NULL AS place_json, card_json, bot_note, status, result_json,
       message_id, next_at, nudges, expires_at, answered_at, answered_device, created_at, ran_at
       FROM bot_actions WHERE bot_id = ? ORDER BY created_at, rowid`, botId)
   }

@@ -102,6 +102,16 @@ export class BotAlone {
         ...(!this.holds(botId, entry) ? { mark: 'Changed' } : {}) }]
     })
   }
+  clear(botId: string): void {
+    this.host.store.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND (key GLOB 'alone:*' OR key GLOB 'alone-ask:*')", botId)
+  }
+  cleanPending(botId?: string): void {
+    const bots = botId ? [botId] : this.host.store.all("SELECT DISTINCT bot_id FROM bot_memory_state WHERE key GLOB 'alone-ask:*'").map(r => String(r.bot_id))
+    for (const id of bots) {
+      const open = new Set(this.host.store.openAsks(id).filter(a => 'ask' in a.permission && a.permission.ask === 'let_alone').map(a => pendingKey(a.activationId, a.permission as AloneRequest)))
+      for (const row of this.host.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone-ask:*'", id)) if (!open.has(String(row.key))) this.host.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', id, row.key)
+    }
+  }
   prune(botId: string): void {
     for (const row of this.host.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", botId)) {
       const entry = this.read(botId, String(row.key))
