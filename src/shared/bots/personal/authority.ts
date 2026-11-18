@@ -137,6 +137,9 @@ export interface BotFileReadResult {
  * run policy, which carries only `RunPolicy.authority`'s kind and digest).
  */
 export interface BotAuthority {
+  /** Local service-read ledger. Present on main work and scheduled turns only; never serialized. */
+  secretFetch?(input: { callKey: string; secret: string; service: string; args: Record<string, unknown>; mask(text: string): string }, run: () => Promise<{text: string; isError?: boolean}>): Promise<{text: string; isError?: boolean}>
+
   activationId: string
   role: BotThreadRole
   /**

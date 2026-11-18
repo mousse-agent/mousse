@@ -228,7 +228,7 @@ export const BOT_SCHEDULE_ACT_TOOLS: readonly string[] = ['schedule_create', 'sc
 export const BOT_SECRETS_PERMISSION = 'secrets'
 
 /** The secret tools a bot with "use secrets you give it" gets. */
-export const BOT_SECRET_TOOLS: readonly string[] = ['secret_request', 'secret_run']
+export const BOT_SECRET_TOOLS: readonly string[] = ['secret_request', 'secret_run', 'secret_fetch']
 
 /**
  * "Add quick actions": one permission, asked for once, for `create_quick_action` (a button in the owner's Actions list
