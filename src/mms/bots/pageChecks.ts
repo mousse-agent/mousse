@@ -2,7 +2,7 @@ import { lstatSync, readdirSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { removePageChange } from './pageChangeFiles'
-import { publicFetch, publicUrl } from '../net-public/publicFetch'
+import { publicFetch, publicUrl, pageFailureReason } from '../net-public/publicFetch'
 import { htmlToText } from '../orchestrator/WebTools'
 import type { BotStore } from './store/BotStore'
 export interface PageSetting { url: string; contains?: string }
@@ -80,7 +80,7 @@ export class PageChecks {
         state.failures++; state.firstFailureAt ??= now
         let failure: string | undefined
         if (!state.toldUnreadable && (state.failures >= 6 || now-state.firstFailureAt >= 86_400_000)) {
-          const reason = result.error.replace(/^The page /, 'it ')
+          const reason = pageFailureReason(result.error)
           failure = `I can't read ${new URL(state.url).host} any more: ${reason.charAt(0).toLowerCase()}${reason.slice(1).replace(/[.]+$/, '')}.`
         }
         result.checked=true; result.failure=failure; this.save(botId,id,state); return checked()
@@ -110,7 +110,7 @@ export class PageChecks {
       if (current?.inFlight?.token !== flight.token || current.generation !== generation) return
       const text=comparedText(response.body.toString('utf8'),state.contains)
       finish({flight,hash:createHash('sha256').update(text).digest('hex'),text})
-    }).catch(error => { try { finish({flight,error:error instanceof Error ? error.message : String(error)}) } catch { /* A closed store recovers the in-flight check on restart. */ } })
+    }).catch(error => { try { finish({flight,error:pageFailureReason(error)}) } catch { /* A closed store recovers the in-flight check on restart. */ } })
     return {kind:'not_ready'}
   }
 }

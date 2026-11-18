@@ -65,11 +65,11 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
           if (size > 2 * 1024 * 1024) { req.destroy(new Error('The page exceeds 2 MiB.')); return }
           chunks.push(chunk)
         })
-        res.on('error', reject)
-        res.on('aborted', () => reject(new Error('The page response was interrupted.')))
+        res.on('error', error => reject(controller.signal.aborted ? controller.signal.reason : error))
+        res.on('aborted', () => reject(controller.signal.aborted ? controller.signal.reason : new Error('The page response was interrupted.')))
         res.on('end', () => resolve({ status, headers: res.headers, body: Buffer.concat(chunks) }))
       })
-      req.on('error', error => reject(!responded && !controller.signal.aborted ? new ConnectionFailure(error.message) : error))
+      req.on('error', error => reject(controller.signal.aborted ? controller.signal.reason : !responded ? new ConnectionFailure(error.message, { cause:error }) : error))
       req.end()
     }) } catch (error) {
       if (!(error instanceof ConnectionFailure)) throw error
@@ -78,4 +78,21 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
     }
     throw lastError
   } finally { clearTimeout(timer) }
+}
+
+/** Only controlled clauses reach the owner; transport diagnostics stay out of chat. */
+export function pageFailureReason(error: unknown): string {
+  const message = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
+  if (['the response was interrupted', 'it could not be reached', "its certificate isn't valid", 'it took more than 15 seconds', 'it exceeds 2 MiB', 'it must resolve only to public addresses', 'it returned an invalid redirect'].includes(message) || /^it returned HTTP \d+$/.test(message)) return message
+  const code = typeof error === 'object' && error ? String((error as NodeJS.ErrnoException).code ?? '') : ''
+  if (/CERT|TLS|SSL|certificate|self.signed/i.test(code + ' ' + message)) return "its certificate isn't valid"
+  if (message === 'The page response was interrupted.') return 'the response was interrupted'
+  const status = /^The page returned HTTP (\d+)\.$/.exec(message)
+  if (status) return `it returned HTTP ${status[1]}`
+  if (message === 'The page took more than 15 seconds.') return 'it took more than 15 seconds'
+  if (message === 'The page exceeds 2 MiB.') return 'it exceeds 2 MiB'
+  if (message === 'The page must resolve only to public addresses.') return 'it must resolve only to public addresses'
+  if (message === 'The page returned an invalid redirect.') return 'it returned an invalid redirect'
+  if (/^it moved to [^\s]+$/.test(message)) return message
+  return 'it could not be reached'
 }
