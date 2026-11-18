@@ -166,7 +166,7 @@ it('Not now makes no call and resumes with the refusal as data', async () => {
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
   await flush()
   expect(t.calls).toEqual([])
-  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose not to send')
+  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose Not now; nothing was sent')
   expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'declined', exec_args: null })
 })
 it.each(['send', 'not_now'] as const)('Send racing Not now, %s arriving first, never calls twice', async first => {
@@ -650,7 +650,7 @@ it.each(['send', 'not_now'] as const)('different open calls remain independent w
   const a = f.bots.actions.forWork(first.id)!
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })
   expect(f.bots.actions.forWork(first.id)?.status).toBe(answer === 'send' ? 'done' : 'declined')
-  expect(f.store.lastMainDispatch(first.id)?.prompt.text).toContain(answer === 'send' ? 'Your owner sent it' : 'chose not to send')
+  expect(f.store.lastMainDispatch(first.id)?.prompt.text).toContain(answer === 'send' ? 'Your owner sent it' : 'chose Not now; nothing was sent')
   const next = t.works[3]!
   const result = await callForBot({ bot: next.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'A freed place' }, toolCallId: 'freed-place', signal: new AbortController().signal })
   expect(result.isError).not.toBe(true)
@@ -829,7 +829,7 @@ it('a subagent holds its call on its work and uses its own dispatch in the call 
   const child = await start(f, t.workId, childDispatch.n)
   expect(child.prepared.instructions).toContain('Some of your tools ask your owner first')
   expect(child.prepared.instructions).toContain('If a call was not sent, say so plainly in your report.')
-  expect(child.prepared.instructions).toContain('Your earlier words in this turn were not shown to your owner; repeat any results they need.')
+  expect(child.prepared.instructions).toContain('Your owner sees only your report, not what you wrote before a held call; repeat any results they need.')
   await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-call', signal: new AbortController().signal })
   const a = f.bots.actions.forWork(t.workId)!
   expect(JSON.parse(a.call_key)).toEqual([t.workId, childDispatch.clientRequestId, 'child-call'])
@@ -847,13 +847,13 @@ it('settlement persists readiness with the result, even when no wake callback ru
   await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   // The write commits; imagine shutdown before the post-commit pump.
-  f.bots.actions.transition(a.id, 'open', 'declined', { text: 'Your owner chose not to send this.' })
+  f.bots.actions.transition(a.id, 'open', 'declined', { text: 'Your owner chose Not now; nothing was sent this.' })
   expect(f.store.activation(t.workId)).toMatchObject({ status: 'blocked', endReason: 'approval_answered' })
   f.bots.close()
   f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup()
   await flush()
-  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose not to send')
+  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose Not now; nothing was sent')
   expect(t.calls).toEqual([])
 })
 it('restart after holding but before the runtime settles still resumes after Send', async () => {
@@ -2514,7 +2514,7 @@ it.each(['done', 'declined', 'tool_error', 'uncertain'] as const)('R4-1 forgetti
   memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
   await finish(f, t.work.payload); await flush()
   const prompt = f.store.lastMainDispatch(t.workId)!.prompt.text
-  const line = outcome === 'done' ? 'Your owner sent it' : outcome === 'declined' ? 'Your owner chose not to send' : outcome === 'tool_error' ? 'The tool reported an error' : 'It could not be confirmed whether this went through'
+  const line = outcome === 'done' ? 'Your owner sent it' : outcome === 'declined' ? 'Your owner chose Not now; nothing was sent' : outcome === 'tool_error' ? 'The tool reported an error' : 'It could not be confirmed whether this went through'
   expect(prompt).toContain(line)
   expect(prompt).not.toContain('[forgotten]')
   expect(prompt).not.toContain('private tool answer')
@@ -3316,7 +3316,7 @@ it.each((['network', 'usage retry', 'usage reset', 'restart', 'reload', 'more ro
     else await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], input)
     await flush()
     const dispatch = f.store.lastMainDispatch(t.workId)!
-    const line = answer === 'send' ? 'Your owner sent it' : 'Your owner chose not to send'
+    const line = answer === 'send' ? 'Your owner sent it' : 'Your owner chose Not now; nothing was sent'
     expect(dispatch.prompt.text).toContain(line)
     expect(dispatch.prompt.workActionIds).toContain(a.id)
     const resumed = await start(f, t.workId, dispatch.n)
@@ -3421,7 +3421,7 @@ it('C10 review in-turn Not now and replay describe an answered action, not a que
   expect(JSON.stringify(sibling)).toContain('your owner already answered the request in this turn')
   expect(JSON.stringify(sibling)).not.toContain('question')
   const replay = await t.call()
-  expect(replay.text).toContain('chose not to send')
+  expect(replay.text).toContain('chose Not now; nothing was sent')
   expect(replay.text).not.toContain('held for your owner')
 })
 
@@ -3556,7 +3556,7 @@ it('C11 repeat refusal explains an unsent request without promising expiry', asy
   await flush()
   const turn = await start(f, t.workId, 2)
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-copy', signal: new AbortController().signal })
-  expect(result.text).toBe('Your owner chose Not now for this same request. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
+  expect(result.text).toBe('Your owner chose Not now; nothing was sent. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
 })
 
 it.each(['stop', 'not_now', 'send', 'withdraw', 'forget', 'clear'] as const)('C11 hidden arguments stay while waiting and clear on %s', async path => {
@@ -3847,7 +3847,8 @@ it.each([0, 26_999, 27_001, 31_000])('Send with a slow listing uses only recent 
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  const refreshedAt = Date.now() - age
+  vi.useFakeTimers()
+  const refreshedAt = performance.now() - age
   Object.assign(t.catalog, { serverRefreshedAt: () => refreshedAt, refreshServer: () => new Promise<void>(() => {}) })
   vi.useFakeTimers()
   try {
@@ -3862,7 +3863,7 @@ it('a slow listing cannot reuse a recent hint that changed during the check', as
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  Object.assign(t.catalog, { serverRefreshedAt: () => Date.now(), refreshServer: () => { t.descriptor.readOnlyHint = true; return new Promise<void>(() => {}) } })
+  Object.assign(t.catalog, { serverRefreshedAt: () => performance.now(), refreshServer: () => { t.descriptor.readOnlyHint = true; return new Promise<void>(() => {}) } })
   vi.useFakeTimers()
   try {
     const answer = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
@@ -3873,7 +3874,7 @@ it('a slow listing cannot reuse a recent hint that changed during the check', as
 
 it('a work report repeats results from the hidden held turn', async () => {
   const t = await setup(true)
-  expect(t.work.prepared.instructions).toContain('Your earlier words in this turn were not shown to your owner; repeat any results they need.')
+  expect(t.work.prepared.instructions).toContain('Your owner sees only your report, not what you wrote before a held call; repeat any results they need.')
 })
 it.each([true, false])('chat asks-first guidance depends on holding or being able to ask for MCP, canAsk=%s', async canAsk => {
   const t = await setup(true)
@@ -3955,4 +3956,19 @@ it.each(['none', 'different', 'same'])('only the first successor reports an uncl
     expect(messages).toHaveLength(n === 0 && retry !== 'same' ? 1 : 0)
   }
   expect(levels).toEqual(retry === 'same' ? ['quiet','quiet','quiet'] : ['fyi','quiet','quiet'])
+})
+
+it('a backwards wall clock cannot renew an old Send listing', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.useFakeTimers()
+  const refreshedAt = performance.now() - 31_000
+  vi.setSystemTime(-1_000_000)
+  Object.assign(t.catalog, { serverRefreshedAt: () => refreshedAt, refreshServer: () => new Promise<void>(() => {}) })
+  try {
+    const result = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_unreachable' })
+    await vi.advanceTimersByTimeAsync(3001); await result
+    expect(t.calls).toEqual([])
+  } finally { vi.useRealTimers() }
 })

@@ -363,3 +363,14 @@ it('timestamps only successful server answers, including targeted refreshes', as
   await t.catalog.refreshServer('inst-echo')
   expect(t.catalog.serverRefreshedAt('inst-echo')).toBe(11_000)
 })
+
+it('successful Send evidence uses the monotonic clock, independently of wall time', async () => {
+  const t = setup()
+  const mono = vi.spyOn(performance, 'now').mockReturnValue(1234)
+  const wall = vi.spyOn(Date, 'now').mockReturnValue(9_000_000)
+  const catalog = new RelayCatalog({ manager: t.manager, settings: () => t.settings })
+  try {
+    await catalog.refresh()
+    expect(catalog.serverRefreshedAt('inst-echo')).toBe(1234)
+  } finally { mono.mockRestore(); wall.mockRestore(); catalog.dispose() }
+})
