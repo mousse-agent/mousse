@@ -31,7 +31,7 @@ export class PageChecks {
     this.store.run('INSERT INTO bot_memory_state(bot_id,key,value) VALUES(?,?,?) ON CONFLICT(bot_id,key) DO UPDATE SET value=excluded.value',botId,`pagecheck:${id}`,JSON.stringify(state))
   }
   set(botId: string, id: string, setting: PageSetting, generation: string): void {
-    this.save(botId,id,{...setting,generation,handedHash:null,failures:0,toldUnreadable:false})
+    this.save(botId,id,{url:setting.url,...(setting.contains !== undefined ? {contains:setting.contains} : {}),generation,handedHash:null,failures:0,toldUnreadable:false})
   }
   remove(botId: string, id: string): void { this.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?',botId,`pagecheck:${id}`) }
   sweep(exists: (botId: string, id: string) => boolean): void {

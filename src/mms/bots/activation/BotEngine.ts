@@ -9505,9 +9505,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.entry(botId)
     if (input.onlyIfChanged && input.say !== undefined) throw new Error('onlyIfChanged cannot be combined with say.')
     const setting = input.onlyIfChanged ? pageSetting(input.onlyIfChanged) : undefined
+    const savedInput = setting ? { ...input, prompt: `${input.prompt ?? ''}\n\nWatch the page at ${setting.url} and report when it changes.${setting.contains !== undefined ? ` Compare the text around ${JSON.stringify(setting.contains)}.` : ''}` } : input
     let added: BotScheduleEntry
     try {
-      added = this.scheduleBook().add(botId, input, createdBy, { ownerAsked })
+      added = this.scheduleBook().add(botId, savedInput, createdBy, { ownerAsked })
       if (setting) {
         new PageChecks(this.store).set(botId, added.scheduleId, setting, added.revision)
         added = { ...added, label: `${added.label} · runs when ${new URL(setting.url).host} changes` }
