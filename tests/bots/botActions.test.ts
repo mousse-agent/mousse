@@ -4164,3 +4164,64 @@ it.each([
   expect(next.action.status).toBe(status)
   expect(t.calls).toHaveLength(status === 'done' ? 2 : 1)
 })
+
+it('E1 only the schedule activation can act alone, never its subagent', async () => {
+  const t = await aloneAsk()
+  f.clock.now += 60_000
+  const id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+  const turn = await start(f, id)
+  await turn.prepared.authority.subagents!.start({ title: 'Sender', brief: 'Send mail', toolCallId: 'start-sender' })
+  const dispatch = f.store.dispatches(id).find(d => d.kind === 'subagent')!
+  const child = await start(f, id, dispatch.n)
+  await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-call', signal: new AbortController().signal })
+  expect(f.bots.actions.forWork(id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 in-flight automatic calls name no owner card and skip as running', async () => {
+  const t = await aloneAsk()
+  f.clock.now += 60_000
+  const id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+  const turn = await start(f, id)
+  let release!: (v: unknown) => void
+  vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(r => { release = r }))
+  const call = (toolCallId: string) => callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId, signal: new AbortController().signal })
+  const running = call('slow')
+  await flush()
+  expect((await call('slow')).text).toBe('This call is already running. Wait for its result before trying another call.')
+  expect((await call('parallel')).text).toBe('A call is already running. Wait for its result before trying another call.')
+  expect(f.store.activation(id)?.endReason).not.toBe('approval')
+  f.clock.now += 60_000
+  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+  expect(f.book.get(t.botId, t.schedule.scheduleId)?.skip?.reason).toBe('previous_run_still_running')
+  release({ content: [{ type: 'text', text: 'delivered' }] })
+  await running
+})
+it('E1 restart tells the run an uncertain automatic outcome, finishes, and admits the next occurrence', async () => {
+  const t = await aloneAsk()
+  f.clock.now += 60_000
+  const id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+  const turn = await start(f, id)
+  vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(() => {}))
+  void callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'interrupted', signal: new AbortController().signal })
+  await flush()
+  const action = f.bots.actions.forWork(id)!
+  expect(action.status).toBe('running')
+  f.runs.markTerminal(turn.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup(); await flush()
+  expect(f.bots.actions.get(action.id)?.status).toBe('uncertain')
+  const resumed = await start(f, id, 2)
+  expect(resumed.payload.prompt).toContain('check before trying again')
+  await finish(f, resumed.payload, 'completed', { text: 'The upload could not be confirmed.' })
+  expect(f.store.activation(id)?.status).toBe('done')
+  expect(f.store.message(action.message_id)).toBeUndefined()
+  expect((await aloneNext(t)).action.status).toBe('done')
+})
+it('E1 an uncertain automatic call gets a card under a new call id in the same run', async () => {
+  const t = await aloneAsk()
+  const next = await aloneNext(t)
+  f.store.run("UPDATE bot_actions SET status = 'uncertain' WHERE id = ?", next.action.id)
+  await callForBot({ bot: next.turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'try-again', signal: new AbortController().signal })
+  expect(f.bots.actions.forWork(next.id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
+  expect(t.calls).toHaveLength(2)
+})
