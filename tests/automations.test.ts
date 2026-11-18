@@ -453,3 +453,10 @@ it.each([false, true])('C11 an answered run never asks for another answer, previ
   const item = buildAutomationIndex(sources({ jobs: [scheduled], bots: { b: pip } })).items[0]!
   expect(item.active).toMatchObject({ state: 'running', detail: 'Carrying on with your answer' })
 })
+
+it.each(['withdrawn', 'expired'])('C6 a request that was %s does not claim an owner answer', status => {
+  const pip: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false, runs: [{ id: 'held', status: 'blocked', endReason: `approval_${status}`, at: PAST }] }
+  const scheduled = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
+  const item = buildAutomationIndex(sources({ jobs: [scheduled], bots: { b: pip } })).items[0]!
+  expect(item.active).toMatchObject({ state: 'running', detail: `Carrying on after the request ${status === 'withdrawn' ? 'was withdrawn' : 'expired'}` })
+})
