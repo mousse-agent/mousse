@@ -5,12 +5,27 @@ import { NET_ENGINE_LOCAL_METHODS, type NetEngineLocalMethod } from '../../share
 import { DomainRpcError, type DomainHandlerRegistry } from '../protocol/domainRegistry'
 import type { NetEngineService } from './NetEngineService'
 
-/** Every method takes an object; these take nothing else. */
+/** The string fields each method needs. */
+const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
+  'netEngine.invite.cancel': ['invitation'],
+  'netEngine.approve': ['request'],
+  'netEngine.join': ['ticket'],
+  'netEngine.retry': ['node'],
+  'netEngine.remove': ['node']
+}
+
+/** Every method takes an object, with the string fields it needs (`approve` takes `yes` too). */
 function validate(method: NetEngineLocalMethod, params: unknown): Record<string, unknown> {
   const value = params ?? {}
   if (typeof value !== 'object' || Array.isArray(value))
     throw new DomainRpcError('bad_request', `${method} takes an object`)
-  return value as Record<string, unknown>
+  const fields = value as Record<string, unknown>
+  for (const field of NEEDS[method] ?? [])
+    if (typeof fields[field] !== 'string' || !fields[field])
+      throw new DomainRpcError('bad_request', `${method} needs ${field}`)
+  if (method === 'netEngine.approve' && typeof fields.yes !== 'boolean')
+    throw new DomainRpcError('bad_request', `${method} needs yes`)
+  return fields
 }
 
 /**
@@ -28,8 +43,9 @@ export function registerNetEngineMethods(
       capability: NET_LOCAL_CAPABILITY,
       requiredCapabilities: [NET_LOCAL_CAPABILITY],
       validate: (params) => validate(method, params),
-      async handle(_context, _params, binding) {
+      async handle(_context, params, binding) {
         const engine = await forProfile(binding!.profileId)
+        const p = params as Record<string, any>
         try {
           switch (method) {
             case 'netEngine.status':
@@ -39,6 +55,24 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.disable':
               await engine.disable()
+              return engine.status()
+            case 'netEngine.invite':
+              return await engine.pairing().invite()
+            case 'netEngine.invite.cancel':
+              await engine.pairing().cancelInvite(p.invitation)
+              return engine.status()
+            case 'netEngine.approve':
+              await engine.pairing().approve(p.request, p.yes)
+              return engine.status()
+            case 'netEngine.join': {
+              const row = await engine.pairing().join(p.ticket)
+              return { node: row.localId, status: engine.status() }
+            }
+            case 'netEngine.retry':
+              await engine.retry(p.node)
+              return engine.status()
+            case 'netEngine.remove':
+              await engine.pairing().remove(p.node)
               return engine.status()
           }
         } catch (error) {

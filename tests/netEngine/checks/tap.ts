@@ -28,6 +28,8 @@ export interface Tap {
   crossed: Crossed[]
   /** Decides each message an app sends; `drop` loses it before its helper. */
   decide?: (message: Crossed) => 'drop' | void
+  /** Decides each event or reply a helper sends its app; `drop` loses it before the app. */
+  hold?: (message: Record<string, unknown>, to: string) => 'drop' | void
 }
 
 interface Stream {
@@ -76,7 +78,25 @@ export function tapPipe(pipe: AppPipe, from: () => string, tap: Tap): AppPipe {
   })
   return {
     ...pipe,
-    onData: (listener) => pipe.onData(listener),
+    onData: (listener) => {
+      // What the helper says, its JSON messages maybe held back. Frames are read even with no hold set, so a
+      // hold set later starts at a frame's start.
+      const frames = new FrameReader()
+      pipe.onData((bytes) => {
+        const read = frames.push(bytes)
+        if (!tap.hold) return listener(bytes)
+        const kept: Buffer[] = []
+        for (const frame of read) {
+          const body = Buffer.from(frame.body)
+          if (frame.type === FRAME_JSON) {
+            const message = JSON.parse(body.toString('utf8')) as Record<string, unknown>
+            if (tap.hold(message, from()) === 'drop') continue
+          }
+          kept.push(Buffer.concat([lengthOf(body.byteLength + 1), Buffer.from([frame.type]), body]))
+        }
+        if (kept.length) listener(Buffer.concat(kept))
+      })
+    },
     write: (bytes) => {
       let wants = true
       for (const frame of outFrames.push(bytes)) {

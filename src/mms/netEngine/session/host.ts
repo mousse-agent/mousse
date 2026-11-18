@@ -36,6 +36,11 @@ export interface EngineHostPort {
     append(stream: StreamId, id: EventId, envelope: Uint8Array, sig: Uint8Array, caller: EngineCaller): AppendOutcome
   }
   name(): string
+  /**
+   * The joiner asks for the other direction (§5.1 step 5): this computer records its addresses and connects back.
+   * Resolves once its own `hello` there was answered; the reply is `pairback.done`.
+   */
+  pairback?(caller: EngineCaller, request: { routes: string[]; receipt?: string }): Promise<void>
 }
 
 /**
@@ -133,6 +138,18 @@ export class EngineHost {
     switch (label) {
       case 'mousse.hello':
         if (h.t === 'hello') channel.send({ t: 'hello', proto: 1, name: this.port.name() })
+        else if (h.t === 'pairback') {
+          if (!this.port.pairback) throw new NetError('bad_request')
+          const routes = Array.isArray(h.routes)
+            ? h.routes.filter((route): route is string => typeof route === 'string')
+            : []
+          await this.port.pairback(caller, {
+            routes,
+            ...(typeof h.receipt === 'string' ? { receipt: h.receipt } : {})
+          })
+          channel.send({ t: 'pairback.done' })
+          channel.end()
+        } else throw new NetError('bad_request')
         return
       case 'mousse.rpc':
         if (!first) throw new NetError('bad_request')

@@ -6,7 +6,13 @@
 export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.status',
   'netEngine.enable',
-  'netEngine.disable'
+  'netEngine.disable',
+  'netEngine.invite',
+  'netEngine.invite.cancel',
+  'netEngine.approve',
+  'netEngine.join',
+  'netEngine.retry',
+  'netEngine.remove'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -30,6 +36,18 @@ export interface NetEngineDevice {
   state: NetEngineDeviceState
   /** Whether a connection to it is up and ready for calls. */
   online: boolean
+  /** It refuses this computer (it removed it, or never let it in): only Remove helps. */
+  notAccepted?: boolean
+}
+
+/** A computer asking to join this one, waiting for this computer's window to answer (§5.1 step 3). */
+export interface NetEngineApproval {
+  request: string
+  invitation: string
+  /** The name it gave ("<computer> (<profile>)"). */
+  name: string
+  /** The start of its endpoint id. */
+  device: string
 }
 
 export interface NetEngineStatus {
@@ -44,4 +62,6 @@ export interface NetEngineStatus {
   /** This endpoint's id, once its helper said hello. */
   identity?: string
   devices: NetEngineDevice[]
+  /** Computers waiting for Yes or No. */
+  approvals: NetEngineApproval[]
 }

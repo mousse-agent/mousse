@@ -33,6 +33,7 @@ import {
   HelperSupervisor,
   type HelperStatus
 } from './helper/supervisor'
+import { EnginePairing, type PairingStep } from './pairing'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 
 export const NON_KEEPER_MESSAGE =
@@ -50,6 +51,9 @@ interface Started {
   timer: ReturnType<typeof setInterval>
   /** Aborted at a pairing's revocation: its handlers stop, nothing else does. */
   revocations: Map<NodeId, AbortController>
+  pairing: EnginePairing
+  /** The host's owed rows being written from `grants.list`, while they are. */
+  reconciling?: Promise<void>
 }
 
 const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
@@ -79,6 +83,8 @@ export class NetEngineService implements EngineDirectoryPort {
   private problem?: string
   /** Starts a helper; tests put a fake one here. By default, the binary of this build (design §1). */
   launcher?: () => Promise<LaunchedHelper>
+  /** Tests stop this computer at a pairing step, as a crash would (until the engine starts again). */
+  pairingCrash?: (step: PairingStep) => boolean
   private starting?: Promise<void>
   constructor(
     private readonly options: {
@@ -106,7 +112,14 @@ export class NetEngineService implements EngineDirectoryPort {
     return join(this.directory, 'endpoint')
   }
   private selfName(): string {
-    return this.options.name?.() ?? hostname()
+    return this.displayName ?? this.options.name?.() ?? hostname()
+  }
+  /** The name this computer gives itself to its pairings, when set (tests name their computers). */
+  displayName?: string
+
+  /** Every pairing row, tombstones too (read-only; for diagnostics and tests). */
+  peerRows(): EnginePeerRow[] {
+    return this.started?.peers.all() ?? []
   }
 
   settings(): EngineSettings | undefined {
@@ -160,8 +173,26 @@ export class NetEngineService implements EngineDirectoryPort {
       helper: { state: helper.state, ...(text ? { text } : {}) },
       ...(this.helper?.paused ? { paused: this.helper.paused } : {}),
       ...(typeof this.helper?.info.identity === 'string' ? { identity: this.helper.info.identity } : {}),
-      devices: this.devices()
+      devices: this.devices(),
+      approvals: this.started?.pairing.pendingApprovals() ?? []
     }
+  }
+
+  /** Pairing and removal for this run of the engine (§5). */
+  pairing(): EnginePairing {
+    return this.require().pairing
+  }
+
+  /** Retry on a device's row: its ceremony or removal goes on, and it is dialled. */
+  async retry(node: NodeId): Promise<void> {
+    const started = this.require()
+    const row = started.peers.get(node)
+    if (!row || row.state === 'removed') throw new NetError('bad_request', 'Unknown device.')
+    if (row.state === 'removing') return started.pairing.remove(node)
+    if (row.state !== 'connected' && row.state !== 'awaiting_pairback')
+      await started.pairing.advance(node)
+    if (!started.sessions.online(node) && this.helper && row.state !== 'consented')
+      await this.helper.dial(row.endpoint).catch(() => undefined)
   }
 
   private devices(): NetEngineDevice[] {
@@ -176,6 +207,7 @@ export class NetEngineService implements EngineDirectoryPort {
           node: row.localId,
           name: row.name,
           shortId: row.endpoint.slice(0, 8),
+          ...(started.pairing.accepted(row.localId) ? {} : { notAccepted: true }),
           state:
             row.state === 'removing'
               ? 'removing'
@@ -226,8 +258,10 @@ export class NetEngineService implements EngineDirectoryPort {
     else if (!net.featureEnabled('netBridge'))
       throw new NetError('forbidden', NON_KEEPER_MESSAGE, { details: { reason: 'not_keeper' } })
     const peers = new EnginePeerStore(rt.db)
+    // What aborted handlers wrote under a removed pairing's id goes, then its tombstone (§5.4 step 4).
+    peers.sweep()
     const revocations = new Map<NodeId, AbortController>()
-    const sessions = new EngineSessions({
+    const sessions: EngineSessions = new EngineSessions({
       name: () => this.selfName(),
       host: {
         rpc: rt.rpc,
@@ -249,7 +283,8 @@ export class NetEngineService implements EngineDirectoryPort {
           blobCommitted: (...args) => bridge().artifacts.blobCommitted(...args),
           append: (...args) => bridge().artifacts.append(...args)
         },
-        name: () => this.selfName()
+        name: () => this.selfName(),
+        pairback: (caller, request) => pairing.pairback(caller, request)
       },
       client: {
         get store() {
@@ -260,6 +295,7 @@ export class NetEngineService implements EngineDirectoryPort {
       hooks: {
         onClientReady: (node) => {
           this.options.bridge()?.peerOnline(node)
+          pairing.clientReady(node)
           this.changed()
         },
         onClientClosed: (node) => {
@@ -273,6 +309,14 @@ export class NetEngineService implements EngineDirectoryPort {
       if (!service) throw new NetError('disabled')
       return service
     }
+    const pairing: EnginePairing = new EnginePairing({
+      peers,
+      sessions,
+      helper: () => this.helper,
+      teardown: (node) => this.teardown(node),
+      changed: () => this.changed(),
+      crashAt: (step) => !!this.pairingCrash?.(step)
+    })
     const timer = setInterval(() => {
       try {
         this.renew()
@@ -281,7 +325,7 @@ export class NetEngineService implements EngineDirectoryPort {
       }
     }, engineLimits().renewIntervalMs)
     timer.unref?.()
-    this.started = { rt, peers, sessions, timer, revocations }
+    this.started = { rt, peers, sessions, timer, revocations, pairing }
     net.setEngineAuthorizer((method, caller, capability) =>
       this.authorizeEngine(method, caller, capability)
     )
@@ -368,8 +412,8 @@ export class NetEngineService implements EngineDirectoryPort {
     return this.helper
   }
 
-  /** Starts this build's helper: `init` first when there is no endpoint, then `serve --app`. */
-  async launchBuilt(): Promise<LaunchedHelper> {
+  /** Starts this build's helper: `init` first when there is no endpoint, then `serve --app` (on `port`, if given). */
+  async launchBuilt(options: { port?: number } = {}): Promise<LaunchedHelper> {
     const binary = findNetHelper()
     if (!binary) throw new HelperNotInBuild()
     // A profile folder copied from another profile carries that profile's endpoint: it is set aside.
@@ -388,7 +432,7 @@ export class NetEngineService implements EngineDirectoryPort {
         insecure
       )
     }
-    return launchHelper(binary, this.endpointPath, insecure)
+    return launchHelper(binary, this.endpointPath, insecure, options.port)
   }
 
   private writeSettings(enabled: boolean): void {
@@ -414,6 +458,7 @@ export class NetEngineService implements EngineDirectoryPort {
     if (!started) return
     this.started = undefined
     this.own = undefined
+    started.pairing.stop()
     this.helper?.close()
     this.helper = undefined
     clearInterval(started.timer)
@@ -468,20 +513,33 @@ export class NetEngineService implements EngineDirectoryPort {
       peers: {
         byIdentity: (identity) => {
           const row = started.peers.byEndpoint(identity)
-          return row && { node: row.localId, grant: row.grant, endpoint: row.endpoint }
+          // A joiner's connection waits until `join` answered and `joined` is written (§5.1 step 4).
+          if (!row || row.state === 'consented') return undefined
+          return { node: row.localId, grant: row.grant, endpoint: row.endpoint }
         }
       },
       attach: (connection) => this.attach(connection),
       name: () => this.selfName(),
-      profile: () => helperProfileId(this.options.profileId)
+      profile: () => helperProfileId(this.options.profileId),
+      // An inbound connection with a live grant and no row: the host may owe it one (§5.1 recovery).
+      unclaimed: (_identity, inbound) => {
+        if (!inbound || started.reconciling || this.started !== started) return
+        started.reconciling = started.pairing
+          .reconcileGrants()
+          .catch(() => undefined)
+          .finally(() => (started.reconciling = undefined))
+      }
     })
     this.helper = helper
+    helper.onEvent((event) => started.pairing.event(event))
     helper.onPaused(() => this.changed())
     helper.channel.onClose(() => {
       if (this.helper === helper) this.helper = undefined
     })
     await helper.hello()
     this.changed()
+    // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
+    if (this.helper === helper) void started.pairing.recover().catch(() => undefined)
     return helper
   }
 
@@ -509,6 +567,8 @@ export class NetEngineService implements EngineDirectoryPort {
   teardown(node: NodeId): void {
     const started = this.started
     if (!started) return
+    // The removal check's control keeps a removed pairing's handlers and subscriptions running.
+    if (engineControl('keep-engine-work')) return
     started.revocations.get(node)?.abort()
     started.revocations.delete(node)
     started.rt.rpc.abortCaller(node)

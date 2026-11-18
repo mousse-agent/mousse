@@ -20,6 +20,9 @@ export class EngineSessions {
   private readonly ready = new Map<NodeId, EngineClient>()
   private readonly clients = new Map<NodeId, Set<EngineClient>>()
   private readonly hosts = new Set<EngineHost>()
+  /** Each client's generation: the order its connection came up in, so the newest wins the slot. */
+  private readonly generations = new WeakMap<EngineClient, number>()
+  private generation = 0
   constructor(
     private readonly options: {
       host: EngineHostPort
@@ -39,14 +42,17 @@ export class EngineSessions {
     }
     const node = connection.peer
     const client = new EngineClient(connection, this.options.client)
+    this.generations.set(client, ++this.generation)
     const held = this.clients.get(node) ?? new Set<EngineClient>()
     held.add(client)
     this.clients.set(node, held)
     connection.onClose(() => {
       held.delete(client)
       if (this.ready.get(node) !== client) return
-      // The slot still holds this generation: hand it to the newest other open one, if any.
-      const next = [...held].reverse().find((other) => other.state() === 'open')
+      // The slot still holds this generation: hand it to the newest other open, handoff-ready one, if any.
+      const next = [...held]
+        .filter((other) => other.state() === 'open' && this.handoffReady.has(other))
+        .sort((a, b) => this.generationOf(b) - this.generationOf(a))[0]
       if (next) this.ready.set(node, next)
       else {
         this.ready.delete(node)
@@ -55,8 +61,22 @@ export class EngineSessions {
     })
     await client.hello(this.options.name())
     if (client.state() !== 'open') throw new NetError('peer_offline')
+    this.handoffReady.add(client)
+    // An older generation whose hello answered later does not take the slot from a newer one.
+    const current = this.ready.get(node)
+    if (
+      current &&
+      current.state() === 'open' &&
+      this.generationOf(current) > this.generationOf(client)
+    )
+      return
     this.ready.set(node, client)
     this.options.hooks.onClientReady(node)
+  }
+
+  private readonly handoffReady = new WeakSet<EngineClient>()
+  private generationOf(client: EngineClient): number {
+    return this.generations.get(client) ?? 0
   }
 
   client(node: NodeId): EngineClient {

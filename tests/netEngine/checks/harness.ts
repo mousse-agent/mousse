@@ -8,9 +8,8 @@
  * The helper is the fake one of `../fakeHelper` on a fake network, or with `MOUSSE_NET_HELPER` set, that real
  * helper: each computer's endpoint in its profile, its key in a file, listening on loopback.
  *
- * Computers pair as the helper pairs them: the caller joins the owner's invitation and the owner's window approves
- * it, then each records the other with the grant the helper named, and the owner pairs back (`grant.add` at the
- * caller, `peer.add` at the owner).
+ * Computers pair as their windows pair them (§5.1): the owner's window shows an invitation, the caller's joins it
+ * (`netEngine.join`), the owner's window says Yes, and the apps finish both directions themselves.
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -100,6 +99,8 @@ export interface Computer {
   fake?: FakeHelper
   /** Kills its helper now, as a crash does; its engine service starts another. */
   kill(): void
+  /** The port its next helper listens on (the real helper keeps its first one otherwise). */
+  port?: number
   /** Whether it had a `net.db` before its engine was switched on. */
   hadNetDb: boolean
   /** What its windows heard. */
@@ -121,6 +122,10 @@ export class Fabric {
   /** Decides each message an app sends; `drop` loses it before its helper (unset after it drops one, by the caller). */
   set decide(decide: Tap['decide']) {
     this.tap.decide = decide
+  }
+  /** Decides each event or reply a helper sends its app (`to` is the app's endpoint); `drop` loses it. */
+  set hold(hold: Tap['hold']) {
+    this.tap.hold = hold
   }
 
   async computer(name: string): Promise<Computer> {
@@ -149,13 +154,16 @@ export class Fabric {
       process.env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY = '1'
       process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP = '127.0.0.1'
       mms.netEngine.launcher = async () => {
-        const launched = await mms.netEngine.launchBuilt()
+        const launched = await mms.netEngine.launchBuilt(
+          computer.port === undefined ? {} : { port: computer.port }
+        )
         kill = () => launched.kill()
         return { ...launched, pipe: tapPipe(launched.pipe, () => endpoint, this.tap) }
       }
     } else {
       mms.netEngine.launcher = async () => {
-        const fake = this.network.helper(`endpoint-${name}`)
+        // Hex, as a real identity is: tickets carry it as bytes.
+        const fake = this.network.helper(Buffer.from(`endpoint-${name}`).toString('hex'))
         computer.fake = fake
         kill = () => fake.kill()
         const exited = new Promise<{ code: number; signal: null; stderr: string }>((resolve) =>
@@ -164,6 +172,7 @@ export class Fabric {
         return { pipe: tapPipe(fake.pipe, () => endpoint, this.tap), exited, kill: () => fake.kill() }
       }
     }
+    mms.netEngine.displayName = `${name} computer`
     await mms.netEngine.enable()
     await mms.netEngine.startHelper()
     const engine = await running(mms)
@@ -199,61 +208,33 @@ export class Fabric {
   }
 
   /**
-   * Pairs two computers both ways: `caller` joins an invitation of `owner`, whose window approves it; then the owner
-   * pairs back. The join's connection is the caller's first. Answers each one's local id for the other.
+   * Pairs two computers both ways through their windows: the owner's shows an invitation, the caller's joins it,
+   * the owner's says Yes; then each waits until its row reads Connected. Answers each one's local id for the other.
    */
   async pair(
     owner: Computer,
     caller: Computer
   ): Promise<{ callerOnOwner: NodeId; ownerOnCaller: NodeId; grant: string }> {
-    const invite = await owner.engine.request('invite.create')
-    const enrolled = new Promise<Record<string, unknown>>((resolve) => {
-      const stop = owner.engine.onEvent((event) => {
-        if (event.invitation !== invite.invitation) return
-        if (event.ev === 'approval')
-          void owner.engine.request('approval.answer', { request: event.request, yes: true })
-        if (event.ev === 'enrolled') {
-          stop()
-          resolve(event)
-        }
-      })
-    })
-    const joined = await caller.engine.request(
-      'join',
-      { ticket: invite.uri, pinned: false },
-      60_000
-    )
-    const { grant } = await enrolled
-    if (joined.identity !== owner.endpoint)
-      throw new Error(`Joined ${String(joined.identity)}, not ${owner.endpoint}`)
-    const back = await caller.engine.request('grant.add', {
-      identity: owner.endpoint,
-      name: `${owner.name} computer`
-    })
-    await owner.engine.request('peer.add', {
-      identity: caller.endpoint,
-      name: `${caller.name} computer`,
-      routes: caller.engine.info.routes ?? []
-    })
-    const callerOnOwner = owner.mms.netEngine.pair({
-      endpoint: caller.endpoint,
-      fingerprint: `sha256:${caller.endpoint}`,
-      grant: String(grant),
-      name: `${caller.name} computer`,
-      state: 'connected'
-    }).localId
-    const ownerOnCaller = caller.mms.netEngine.pair({
-      endpoint: owner.endpoint,
-      fingerprint: `sha256:${owner.endpoint}`,
-      grant: String(back.grant),
-      name: `${owner.name} computer`,
-      state: 'connected'
-    }).localId
-    // The join's connection, held until the caller recorded the pairing, attaches now.
-    await eventually(() => {
-      if (!caller.mms.netEngine.online(ownerOnCaller)) throw new Error('not connected yet')
-    })
-    return { callerOnOwner, ownerOnCaller, grant: String(grant) }
+    const invite = await owner.dispatch('netEngine.invite', {}, true)
+    const stopApproving = approveAll(owner)
+    let joined: { node: NodeId }
+    try {
+      joined = await caller.dispatch('netEngine.join', { ticket: invite.uri }, true)
+    } finally {
+      stopApproving()
+    }
+    const callerOnOwner = await connectedBothWays(owner, caller)
+    const grant = owner.mms.netEngine.peerRows().find((row) => row.localId === callerOnOwner)!.grant
+    return { callerOnOwner, ownerOnCaller: joined.node, grant }
+  }
+
+  /** The computer's daemon stops and starts again (its engine and its helper), as an app restart does. */
+  async restartEngine(computer: Computer): Promise<void> {
+    const before = computer.engine
+    await computer.mms.netEngine.stop()
+    await computer.mms.netEngine.enable()
+    await computer.mms.netEngine.startHelper()
+    computer.engine = await running(computer.mms, before)
   }
 
   /** `caller` connects to the pairing `node` (unless it is connected) and waits until its client is ready. */
@@ -298,6 +279,61 @@ export class Fabric {
     vi.useRealTimers()
     for (const close of this.cleanups.splice(0).reverse()) await close()
   }
+}
+
+/** Says Yes to every computer asking to join `owner`, as its window would, until stopped. */
+export function approveAll(owner: Computer): () => void {
+  const answered = new Set<string>()
+  const timer = setInterval(() => {
+    let approvals: Array<{ request: string }> = []
+    try {
+      approvals = owner.mms.netEngine.status().approvals
+    } catch {
+      return
+    }
+    for (const approval of approvals)
+      if (!answered.has(approval.request)) {
+        answered.add(approval.request)
+        void owner
+          .dispatch('netEngine.approve', { request: approval.request, yes: true }, true)
+          .catch(() => undefined)
+      }
+  }, 25)
+  return () => clearInterval(timer)
+}
+
+/** A computer's row for another (by its endpoint), in any state but removed. */
+export function rowFor(on: Computer, other: Computer) {
+  return on.mms.netEngine
+    .peerRows()
+    .find((row) => row.endpoint === other.endpoint && row.state !== 'removed')
+}
+
+/** What a computer's Devices list shows for `node`. */
+export function deviceState(on: Computer, node: NodeId): string | undefined {
+  return on.mms.netEngine.status().devices.find((row) => row.node === node)?.state
+}
+
+/** Waits until each computer's row for the other reads Connected; answers the caller's id on the owner. */
+export async function connectedBothWays(
+  owner: Computer,
+  caller: Computer,
+  timeout = 60_000
+): Promise<NodeId> {
+  let callerOnOwner: NodeId | undefined
+  await eventually(() => {
+    const onOwner = rowFor(owner, caller),
+      onCaller = rowFor(caller, owner)
+    if (!onOwner || !onCaller)
+      throw new Error(`rows: owner ${onOwner?.state}, caller ${onCaller?.state}`)
+    if (
+      deviceState(owner, onOwner.localId) !== 'connected' ||
+      deviceState(caller, onCaller.localId) !== 'connected'
+    )
+      throw new Error(`owner ${onOwner.state}, caller ${onCaller.state}`)
+    callerOnOwner = onOwner.localId
+  }, timeout)
+  return callerOnOwner!
 }
 
 /** The helper `mms` runs once it said hello (another than `before`). */

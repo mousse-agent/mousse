@@ -66,6 +66,12 @@ export interface EngineLimits {
   helperLockWaitMs: number
   /** How long `init` (a new endpoint, its key into the keystore) may take. */
   helperInitDeadlineMs: number
+  /** How long a join waits for the other computer's answer (its owner taps Yes or No there). */
+  joinDeadlineMs: number
+  /** How long the other direction of a pairing may take to come up once the joiner asked for it (`pairback`). */
+  pairbackDeadlineMs: number
+  /** The wait before a pairing step that failed (a grant not saved, a pairback not answered) is tried again. */
+  pairingRetryMs: number
 }
 
 export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
@@ -96,7 +102,10 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   helperFastExits: 3,
   helperShutdownGraceMs: 3_000,
   helperLockWaitMs: 5_000,
-  helperInitDeadlineMs: 60_000
+  helperInitDeadlineMs: 60_000,
+  joinDeadlineMs: 15 * 60_000,
+  pairbackDeadlineMs: 60_000,
+  pairingRetryMs: 5_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -127,7 +136,10 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   helperFastExits: 'MOUSSE_NET_ENGINE_HELPER_FAST_EXITS',
   helperShutdownGraceMs: 'MOUSSE_NET_ENGINE_HELPER_SHUTDOWN_GRACE_MS',
   helperLockWaitMs: 'MOUSSE_NET_ENGINE_HELPER_LOCK_WAIT_MS',
-  helperInitDeadlineMs: 'MOUSSE_NET_ENGINE_HELPER_INIT_DEADLINE_MS'
+  helperInitDeadlineMs: 'MOUSSE_NET_ENGINE_HELPER_INIT_DEADLINE_MS',
+  joinDeadlineMs: 'MOUSSE_NET_ENGINE_JOIN_DEADLINE_MS',
+  pairbackDeadlineMs: 'MOUSSE_NET_ENGINE_PAIRBACK_DEADLINE_MS',
+  pairingRetryMs: 'MOUSSE_NET_ENGINE_PAIRING_RETRY_MS'
 })
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
@@ -195,7 +207,14 @@ export const ENGINE_CONTROLS = [
   // phase1a.private-streams
   'second-reader',
   // phase1a.once-or-unknown
-  'no-host-dedupe'
+  'no-host-dedupe',
+  // phase1a.pair-both-ways
+  'no-consent-journal',
+  // phase1a.removal
+  'keep-engine-work',
+  'teardown-on-event-only',
+  // phase1a.path-switch
+  'abort-on-path-replaced'
 ] as const
 export type EngineControl = (typeof ENGINE_CONTROLS)[number]
 

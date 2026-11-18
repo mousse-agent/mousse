@@ -188,15 +188,29 @@ export function lastLine(text: string): string {
   return (lines[lines.length - 1] ?? '').replace(/^error:\s*/i, '')
 }
 
-/** Starts `serve --app` for `state` and wraps its stdin and stdout as the app channel's pipe. */
+/**
+ * Starts `serve --app` for `state` and wraps its stdin and stdout as the app channel's pipe. `port` fixes the port
+ * it listens on from then on (without it, the port of its first start is kept).
+ */
 export function launchHelper(
   binary: string,
   state: string,
-  insecureFileKey: boolean
+  insecureFileKey: boolean,
+  port?: number
 ): LaunchedHelper {
   const child = spawn(
     binary,
-    helperArgs(state, ['serve', '--app', '--listen-ip', helperListenIp()], insecureFileKey),
+    helperArgs(
+      state,
+      [
+        'serve',
+        '--app',
+        '--listen-ip',
+        helperListenIp(),
+        ...(port === undefined ? [] : ['--port', String(port)])
+      ],
+      insecureFileKey
+    ),
     {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: helperEnv(),

@@ -146,12 +146,8 @@ describe('phase1a.private-streams', () => {
   }, 120_000)
 
   it('nor after the first caller is removed', async () => {
-    // The removal ceremony lands with its slice; this is its effect on the owner: removing, torn down, removed.
-    const peers = (owner.mms.netEngine as unknown as { started: { peers: { setState(n: NodeId, s: string): void } } })
-      .started.peers
-    peers.setState(firstOnOwner, 'removing')
-    owner.mms.netEngine.teardown(firstOnOwner)
-    peers.setState(firstOnOwner, 'removed')
+    await step(undefined, () => owner.dispatch('netEngine.remove', { node: firstOnOwner }, true))
+    expect(owner.mms.netEngine.peerRows().find((row) => row.localId === firstOnOwner)?.state).toBe('removed')
     await nothingServed('after')
   }, 120_000)
 })

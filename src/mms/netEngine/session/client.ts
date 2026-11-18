@@ -100,6 +100,26 @@ export class EngineClient implements BridgeClient {
     return { name: String(reply.header.name ?? '') }
   }
 
+  /**
+   * Asks the other computer to pair back (§5.1 step 4): it records `routes` (this computer's addresses), connects
+   * here and answers `pairback.done` once its own hello was answered.
+   */
+  async pairback(
+    request: { routes: string[]; receipt?: string },
+    deadlineMs = engineLimits().pairbackDeadlineMs
+  ): Promise<void> {
+    await this.exchange(
+      'mousse.hello',
+      {
+        t: 'pairback',
+        routes: request.routes,
+        ...(request.receipt ? { receipt: request.receipt } : {})
+      },
+      [],
+      { deadlineMs, until: 'pairback.done' }
+    )
+  }
+
   rpc(
     method: string,
     params: unknown,

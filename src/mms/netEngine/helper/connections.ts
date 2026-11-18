@@ -208,6 +208,8 @@ export interface HelperPeers {
  */
 export class EngineHelper {
   private readonly connections = new Map<number, HelperConnection>()
+  /** The `conn.up` of each connection the helper holds up, by its number, until its `conn.down`. */
+  private readonly ups = new Map<number, Record<string, unknown>>()
   /** Connections up for an identity with no pairing here yet, by the helper's number. */
   private readonly unclaimed = new Map<number, Record<string, unknown>>()
   private readonly pausedListeners: Array<(reason: string | undefined) => void> = []
@@ -223,6 +225,8 @@ export class EngineHelper {
       name(): string
       /** The profile the endpoint belongs to: a helper started on another profile's endpoint refuses `hello`. */
       profile?(): string
+      /** A connection came up for an identity with no pairing here (the host may owe it a row, §5.1). */
+      unclaimed?(identity: string, inbound: boolean): void
     }
   ) {
     channel.onEvent((event) => this.event(event))
@@ -230,6 +234,7 @@ export class EngineHelper {
       for (const connection of [...this.connections.values()]) connection.close(reason)
       this.connections.clear()
       this.unclaimed.clear()
+      this.ups.clear()
     })
   }
 
@@ -246,9 +251,38 @@ export class EngineHelper {
     return answer
   }
 
-  /** Asks the helper to connect to a pairing; its `conn.up` attaches the connection. */
-  async dial(identity: string): Promise<void> {
-    await this.channel.request('dial', { identity })
+  /**
+   * Asks the helper to connect to a pairing; its `conn.up` attaches the connection. A connection the helper holds
+   * up already (`already`) whose use here ended (its hello was refused) is attached again.
+   */
+  async dial(identity: string): Promise<{ conn?: number; already: boolean }> {
+    const answer = await this.channel.request('dial', { identity })
+    this.reattach(identity)
+    return {
+      ...(typeof answer.conn === 'number' ? { conn: answer.conn } : {}),
+      already: answer.already === true
+    }
+  }
+
+  /**
+   * Attaches again each outbound connection to `identity` the helper still holds up but whose use here ended (a
+   * `mousse.hello` the other computer refused before it recorded the pairing).
+   */
+  reattach(identity: string): void {
+    for (const [conn, event] of [...this.ups]) {
+      if (event.identity !== identity || event.dir !== 'out' || this.unclaimed.has(conn)) continue
+      const connection = this.connections.get(conn)
+      if (connection?.isOpen()) continue
+      this.connections.delete(conn)
+      this.up(event)
+    }
+  }
+
+  /** Whether the helper holds a connection up with `identity` in that direction. */
+  holds(identity: string, dir: 'in' | 'out'): boolean {
+    for (const event of this.ups.values())
+      if (event.identity === identity && event.dir === dir) return true
+    return false
   }
 
   /** A pairing request (`invite.create`, `join`, `approval.answer`, `grant.add` and the rest), as the helper answers. */
@@ -294,6 +328,11 @@ export class EngineHelper {
     const peer = this.options.peers.byIdentity(identity)
     if (!peer) {
       this.unclaimed.set(conn, event)
+      try {
+        this.options.unclaimed?.(identity, event.dir === 'in')
+      } catch {
+        // The row is owed again at the next connection or start.
+      }
       return
     }
     const direction = event.dir === 'in' ? 'inbound' : 'outbound'
@@ -326,12 +365,14 @@ export class EngineHelper {
         (event.dir !== 'in' && event.dir !== 'out')
       )
         return
+      this.ups.set(event.conn, event)
       this.up(event)
       return
     }
     if (event.ev === 'conn.down') {
       if (typeof event.conn !== 'number') return
       this.unclaimed.delete(event.conn)
+      this.ups.delete(event.conn)
       const connection = this.connections.get(event.conn)
       if (!connection) return
       this.connections.delete(event.conn)

@@ -10,6 +10,7 @@
  *
  * Every engine message that crosses the fake network is decoded and recorded, and a test may drop one (`tap`).
  */
+import { randomBytes } from 'node:crypto'
 import {
   creditFrame,
   dataFrame,
@@ -95,6 +96,33 @@ export class FakeNetwork {
     held.set(caller, given)
     this.peer(caller, host)
     return { grant: given, already: false }
+  }
+
+  /** The grants callers hold at `host`, as `grants.list` answers. */
+  grantsAt(host: string): Array<{ caller: string; grant: number | string }> {
+    return [...(this.grants.get(host) ?? [])].map(([caller, grant]) => ({ caller, grant }))
+  }
+
+  /** `host` removes the grant `grant`: its connections with that caller go down; answers the caller, if any. */
+  revoke(host: string, grant: number | string): string | undefined {
+    const held = this.grants.get(host)
+    for (const [caller, given] of held ?? [])
+      if (String(given) === String(grant)) {
+        held!.delete(caller)
+        for (const conn of [...this.conns])
+          if (
+            (conn.a.identity === caller && conn.b.identity === host) ||
+            (conn.a.identity === host && conn.b.identity === caller)
+          )
+            this.down(conn, 'grant_revoked')
+        return caller
+      }
+    return undefined
+  }
+
+  /** `from` forgets `to` as a peer; answers whether it knew it. */
+  forget(from: string, to: string): boolean {
+    return !!this.peers.get(from)?.delete(to)
   }
 
   /** `from` knows `to` as a peer (it may dial it); answers whether it did already. */
@@ -212,6 +240,41 @@ export class FakeNetwork {
     const other = end.other
     if (other && !other.closed) other.helper.endGone(other, code)
   }
+}
+
+/**
+ * A ticket as the helper writes one: base64url of the CBOR map {1: 1, 2: 1, 3: host identity, 4: invitation id,
+ * 5: secret, 6: expires_at, 7: [routes]}. An identity that is not hex goes in as its UTF-8 bytes.
+ */
+function ticketOf(host: string, invitation: string): string {
+  const head = (major: number, value: number): Buffer => {
+    if (value < 24) return Buffer.from([(major << 5) | value])
+    if (value < 256) return Buffer.from([(major << 5) | 24, value])
+    if (value < 65536) return Buffer.from([(major << 5) | 25, value >> 8, value & 255])
+    const out = Buffer.alloc(5)
+    out[0] = (major << 5) | 26
+    out.writeUInt32BE(value, 1)
+    return out
+  }
+  const bytes = (value: Buffer): Buffer => Buffer.concat([head(2, value.byteLength), value])
+  const identity = /^(?:[0-9a-f]{2})+$/i.test(host) ? Buffer.from(host, 'hex') : Buffer.from(host)
+  return Buffer.concat([
+    head(5, 7),
+    head(0, 1),
+    head(0, 1),
+    head(0, 2),
+    head(0, 1),
+    head(0, 3),
+    bytes(identity),
+    head(0, 4),
+    bytes(Buffer.from(invitation, 'hex')),
+    head(0, 5),
+    bytes(randomBytes(32)),
+    head(0, 6),
+    head(0, Math.floor(Date.now() / 1000) + 600),
+    head(0, 7),
+    head(4, 0)
+  ]).toString('base64url')
 }
 
 /** The app's end of an in-memory pipe and the helper's. */
@@ -476,10 +539,10 @@ export class FakeHelper {
           return void setImmediate(() => this.kill())
         case 'dial':
           if (this.paused) return reply({ error: 'paused', reason: this.paused })
-          return reply({ conn: this.network.dial(this, String(message.identity)) })
+          return reply({ conn: this.network.dial(this, String(message.identity)), already: false })
         case 'invite.create': {
-          const invitation = `inv-${this.identity}-${this.nextRequest++}`
-          const uri = `fake#${invitation}`
+          const invitation = randomBytes(16).toString('hex')
+          const uri = ticketOf(this.identity, invitation)
           this.network.invitations.set(uri, { host: this.identity, invitation })
           return reply({
             invitation,
@@ -542,8 +605,30 @@ export class FakeHelper {
         }
         case 'grant.add':
           return reply(this.network.grant(this.identity, String(message.identity)))
+        case 'grants.list':
+          return reply({
+            grants: this.network.grantsAt(this.identity).map(({ caller, grant }) => ({
+              grant,
+              identity: caller,
+              name: '',
+              role: 'owner',
+              expires_at: null,
+              receipt: null
+            }))
+          })
+        case 'grant.remove': {
+          const caller = this.network.revoke(this.identity, message.grant)
+          reply({ removed: caller !== undefined })
+          if (caller !== undefined)
+            this.event({ ev: 'grant.closed', grant: message.grant, connections: 0 })
+          return
+        }
         case 'peer.add':
           return reply({ already: this.network.peer(this.identity, String(message.identity)) })
+        case 'peer.forget':
+          return reply({ forgotten: this.network.forget(this.identity, String(message.identity)) })
+        case 'join.cancel':
+          return reply()
         case 'stream.open': {
           const conn = this.conns.get(Number(message.conn))
           if (!conn || !conn.up) return reply({ error: 'peer_offline' })
