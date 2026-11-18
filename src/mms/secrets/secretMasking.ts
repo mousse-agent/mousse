@@ -42,11 +42,11 @@ function secretLines(value: string): string[] {
 }
 
 /** Match character by character: encoders may escape any subset, not just the whole value.
- * Unicode escape tokens cover UTF-16 surrogate pairs too. Include two enclosing JSON strings for stored tool history.
+ * Unicode escape tokens cover UTF-16 surrogate pairs too. Include two enclosing JSON strings for stored tool history, plus the container used by maskedCopy’s quick check.
  */
 function jsonEchoPatterns(value: string): RegExp[] {
   const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return [0, 1, 2].map(depth => new RegExp(Array.from(value).map(char => {
+  return [0, 1, 2, 3].map(depth => new RegExp(Array.from(value).map(char => {
     // Each JSON layer is consistent across the value. Tokens have distinct prefixes, including for
     // backslashes, so near-matching responses cannot trigger exponential regex backtracking.
     const forms = new Set([jsonEscaped(char)])
