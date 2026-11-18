@@ -3465,6 +3465,15 @@ it.each(['waiting', 'at_dispatch'] as const)('R2 accepted timeout is terminal at
 it.each(['work', 'schedule'] as const)('C11 parked %s survives startup and upkeep for days, admits chat and other work, and offers Stop', async kind => {
   const t = kind === 'work' ? await setup(true) : await scheduledCall(true, 60)
   const workId = 'run' in t ? t.id : t.workId
+  if (!('run' in t)) {
+    // Stored prior turns have already used the same wake three times.
+    for (let n = 0; n < 3; n++) {
+      const id = `c11-prior-wait-${n}`
+      f.store.insertReminder({ id, botId: t.botId, workId, dueAt: f.store.now(), createdAt: f.store.now(), text: 'Same check', work: null, replyTo: null, wake: true, chain: 100 + n })
+      f.store.settleReminder(id, 'cancelled')
+    }
+    await expect(f.bots.tools.wakes!.wait!(t.botId, workId, { brief: 'Same check', dueAt: new Date(f.clock.now + 3600_000).toISOString() })).rejects.toThrow('that is a loop')
+  }
   await t.call(); await finish(f, ('run' in t ? t.run : t.work).payload)
   const a = f.bots.actions.forWork(workId)!
   f.store.run('UPDATE bot_actions SET expires_at = ? WHERE id = ?', '9999-12-31T23:59:59.999Z', a.id)
