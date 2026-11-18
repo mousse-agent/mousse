@@ -259,3 +259,17 @@ it('does not overwrite unreadable binding data when storing another bound key', 
 it.each(['https://x.home.arpa','https://x.lan','https://127.0.0.1.nip.io','https://10-0-0-1.sslip.io'])('refuses private convention host %s', origin=>{
   expect(()=>resolveSecretBinding({origin})).toThrow()
 })
+it.each(['store', 'setKey'] as const)('keeps existing authority if %s cannot establish that the value is absent', method => {
+  const {home,vault,requests}=fixture()
+  const binding=resolveSecretBinding({service:'github'})
+  vault.store('KEY',VALUE,{threadId:'bot',keep:'saved',binding})
+  const path=join(home,'secrets/refs.json')
+  const original=readFileSync(path,'utf8')
+  writeFileSync(path,'{')
+  expect(()=>method==='store' ? vault.store('KEY','new-value',{threadId:'bot',keep:'saved'}) : vault.setKey('KEY','new-value')).toThrow()
+  writeFileSync(path,original)
+  expect(vault.bindingFor('KEY')).toEqual(binding)
+  expect(existsSync(join(home,'secrets/bound/KEY'))).toBe(true)
+  expect(()=>createProfileSecretAdapter({profileRoot:home,inheritProcessEnv:false}).resolveEnv('${secret:KEY}')).toThrow(/bound/)
+  requests.dispose()
+})
