@@ -44,20 +44,21 @@ function secretLines(value: string): string[] {
 /** Match character by character: encoders may escape any subset, not just the whole value.
  * UTF-16 code units also cover JSON surrogate pairs. Include two enclosing JSON strings for stored tool history.
  */
-function jsonEchoPattern(value: string): RegExp {
+function jsonEchoPatterns(value: string): RegExp[] {
   const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(value.split('').map(char => {
-    const forms = new Set([char, jsonEscaped(char)])
+  return [0, 1, 2].map(depth => new RegExp(value.split('').map(char => {
+    // Each JSON layer is consistent across the value. Tokens have distinct prefixes, including for
+    // backslashes, so near-matching responses cannot trigger exponential regex backtracking.
+    const forms = new Set([jsonEscaped(char)])
     if (char === '/') forms.add('\\/')
-    const alternatives = new Set<string>()
-    for (const form of forms) {
-      let nested = form
-      for (let depth = 0; depth <= 2; depth++) { alternatives.add(literal(nested)); nested = jsonEscaped(nested) }
-    }
+    const alternatives = [...forms].map(form => {
+      for (let n = 0; n < depth; n++) form = jsonEscaped(form)
+      return literal(form)
+    })
     const hex = char.charCodeAt(0).toString(16).padStart(4, '0').replace(/[a-f]/g, h => `[${h}${h.toUpperCase()}]`)
-    for (const slashes of [1, 2, 4]) alternatives.add(literal('\\'.repeat(slashes) + 'u') + hex)
-    return `(?:${[...alternatives].join('|')})`
-  }).join(''), 'g')
+    alternatives.push(literal('\\'.repeat(2 ** depth) + 'u') + hex)
+    return `(?:${alternatives.join('|')})`
+  }).join(''), 'g'))
 }
 
 /** A function that replaces every form of the given secrets in a text with `[secret NAME hidden]`; undefined when there is none. */
@@ -67,7 +68,7 @@ export function secretMasker(secrets: ReadonlyArray<{ name: string; value: strin
   pairs.sort((a, b) => b.form.length - a.form.length)
   const echoes = secrets.flatMap(({ name, value }) => [value, ...secretLines(value)]
     .filter(form => form.length >= MIN_SECRET_VALUE_LENGTH)
-    .map(form => ({ pattern: jsonEchoPattern(form), mask: secretMask(name) })))
+    .flatMap(form => jsonEchoPatterns(form).map(pattern => ({ pattern, mask: secretMask(name) }))))
   return (text) => {
     let out = text
     for (const { pattern, mask } of echoes) out = out.replace(pattern, () => mask)
