@@ -2278,19 +2278,19 @@ it.each(['paused', 'expired', 'withdrawn', 'binding'] as const)('R2-8 Send repor
   expect(t.calls).toEqual([])
 })
 
-it('R2-5 accepts Send before refreshing tools so the timer cannot overtake it', async () => {
+it('R2-5 keeps Send unapproved until its fresh listing is checked', async () => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   f.clock.now += 48 * 3600_000 - 1000
   let release!: () => void
   const refresh = new Promise<void>(resolve => { release = resolve })
-  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(() => refresh)
+  Object.assign(t.catalog, { refresh: () => refresh })
   const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   await flush()
-  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
   f.clock.now += 2000; await f.bots.deliverDueReminders()
-  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
   release(); await sending
   expect(t.calls).toEqual([t.args])
   expect(f.bots.actions.get(a.id)?.status).toBe('done')
@@ -3718,4 +3718,29 @@ it('does not dispatch a reading tool missing from its current listing', async ()
   t.server.tools.splice(0)
   await t.call()
   expect(t.calls).toEqual([])
+})
+
+it('Send re-lists a warm server before checking the held effective level', async () => {
+  const t = await setup(true, false, false, false, false, false, 'get_items', false, true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const refresh = vi.fn(async () => { t.descriptor.readOnlyHint = true })
+  Object.assign(t.catalog, { refresh })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('changed since')
+  expect(refresh).toHaveBeenCalled()
+  expect(t.calls).toEqual([])
+})
+it('Send refuses a bounded re-list that does not finish, keeping the card open', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  Object.assign(t.catalog, { refresh: () => new Promise<void>(() => {}) })
+  vi.useFakeTimers()
+  try {
+    const answer = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_unreachable' })
+    await vi.advanceTimersByTimeAsync(3001)
+    await answer
+    expect(f.bots.actions.get(a.id)?.status).toBe('open')
+    expect(t.calls).toEqual([])
+  } finally { vi.useRealTimers() }
 })
