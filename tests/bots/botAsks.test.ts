@@ -485,3 +485,18 @@ describe('a card for one of the bot\'s own tools', () => {
     expect(askAnsweredLine('Penny', message.ask!)).toBe('You said not now to Penny: change when it tells you')
   })
 })
+
+it('an unknown saved special ask is a plain permission card and Allow grants nothing', async () => {
+  const before = f.store.activeGrant(botId)!.digest
+  await f.bots.service.chatSend({ botId, text: 'Ask', clientRequestId: 'future' })
+  const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+  const { payload, prepared } = await start(f, activation.id)
+  prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'Ask' })
+  await finish(f, payload)
+  const ask = f.store.openAsks(botId)[0]!
+  f.store.run('UPDATE bot_escalations SET permission_json = ?, title = NULL WHERE id = ?', JSON.stringify({ ask: 'future_ask' }), ask.id)
+  expect(f.bots.chat.card(f.store.escalation(ask.id)!)).toMatchObject({ kind: 'permission' })
+  await f.bots.service.answer(botId, ask.id, 'allow')
+  expect(f.store.activeGrant(botId)!.digest).toBe(before)
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toEqual([])
+})

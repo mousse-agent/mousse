@@ -262,6 +262,21 @@ describe('bot methods on a real bot', () => {
     expect(missing.code).toBe('stream_unknown')
   })
 
+  it('refuses a let-alone answer on a phone without changing authority', async () => {
+    await f.bots.service.chatSend({ botId, text: 'Ask', clientRequestId: 'alone' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload, prepared } = await start(f, activation.id)
+    prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'Ask' })
+    await finish(f, payload)
+    const ask = f.store.openAsks(botId)[0]!
+    f.store.run('UPDATE bot_escalations SET permission_json = ? WHERE id = ?', JSON.stringify({ ask: 'let_alone', scheduleId: 's', serverId: 'mail', tool: 'send' }), ask.id)
+    const before = f.store.all('SELECT * FROM bot_memory_state')
+    const error = await refused(() => call(methods, 'bots.asks.answer', { botId, askId: ask.id, answer: 'allow' }))
+    expect(error).toMatchObject({ code: 'forbidden', message: 'Answer this on the computer.' })
+    expect(f.store.escalation(ask.id)?.status).toBe('open')
+    expect(f.store.all('SELECT * FROM bot_memory_state')).toEqual(before)
+  })
+
   it('"use your threads" from a device: its message holds the turn to its own limit, and only a Full access device may Allow the card', async () => {
     let limit: PermissionMode = 'ask'
     methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: (node) => (node === 'n' ? limit : 'full') })
