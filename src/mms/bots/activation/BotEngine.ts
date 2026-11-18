@@ -194,8 +194,6 @@ export interface BotEngineHost {
   quiesceTimeoutMs?: number
   /** Test seam: the most activations one lane keeps waiting (default `MAX_QUEUED_ACTIVATIONS`). */
   maxQueuedActivations?: number
-  /** Test seam: the most continuations after a runtime's turn cap (default `MAX_TURN_CAP_CONTINUATIONS`). */
-  maxTurnCapContinuations?: number
   /** The profile's run engine (null while it is not running). */
   runs(): RunEngine | null
   /**
@@ -458,13 +456,6 @@ export const OLD_MODEL_NAME_IGNORED = 'This automation had a model of its own sa
  * stopped goes on, schedules run), and pauses again for as long if the limit still holds.
  */
 export const USAGE_RECHECK_MS = 30 * 60_000
-/**
- * Continuations after a dispatch reached its runtime's cap on model turns, in total per activation (not in a row: a
- * note or an Allow in between does not start the count again). Each one worked up to the cap (300 turns on Claude
- * Code), so real work never gets near this: it only ends a runtime caught in a loop of reaching the cap. A turn that
- * reached the end of its window (`endWindow`) is not counted: it was working, not stuck.
- */
-export const MAX_TURN_CAP_CONTINUATIONS = 1000
 /** How often deleted bots are swept for the 30-day purge. */
 const SWEEP_EVERY_MS = 24 * 60 * 60_000
 /** The chat's one notice while an activation waits for the internet. */
@@ -5319,8 +5310,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * (`windowEnd`, `endWindow`): the activation carries on in the same thread, as after a restart, under its own limits.
    * Its turn budget, when the grant has one, is checked first, so a used-up budget ends it as any limit does (a run's
    * ask, a chat's wall), never as a failure. What the capped turn did (its chips and last words) goes into the activation's next
-   * message, so a continuation that runs out at once still posts it. After `MAX_TURN_CAP_CONTINUATIONS` in total, work
-   * ends as out of room with what it had (`endAtTurnCap`); any other activation fails as before.
+   * message, so a continuation that runs out at once still posts it. There is no count of continuations: work goes on
+   * for as many turns as it needs, as a coding agent session does; a hung turn ends by its no-progress check.
    */
   private async continueAfterTurnCap(row: BotActivationRow, main: BotDispatchRow, text?: string, windowEnd?: true): Promise<void> {
     // The ended turn's own message is not posted: its work goes on in the continuation, whose message carries it.
@@ -5330,8 +5321,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.carried.set(row.id, { chips: [...(before?.chips ?? []), ...(this.drained.get(key) ?? [])], ...(words ? { text: words } : before?.text ? { text: before.text } : {}) })
     this.drained.delete(key)
     this.lateTexts.delete(key)
-    if (this.store.dispatches(row.id).filter((dispatch) => dispatch.send.turnCap).length >= (this.host.maxTurnCapContinuations ?? MAX_TURN_CAP_CONTINUATIONS))
-      return row.lane === 'run' && row.trigger.kind === 'work' ? this.endAtTurnCap(row, main) : this.failActivation(row, 'turn_cap_repeated')
     const counters = this.store.counters(row.id)
     const maxTurns = counters.limits.maxTurns
     if (maxTurns !== undefined && counters.requests >= maxTurns) {
@@ -5340,28 +5329,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const allowed = this.allowedSinceRefused(row)
     await this.continueWith(row.id, ['running'], { turnCap: true, ...(windowEnd ? { windowEnd } : {}), ...(allowed.length ? { allowed } : {}) })
-  }
-
-  /**
-   * Work that kept reaching its runtime's turn cap ends as out of room, never as a failure: done, with its report saying
-   * it stopped short and what it had (the capped turns' words and chips), answering the message that asked for it.
-   */
-  private endAtTurnCap(row: BotActivationRow, main: BotDispatchRow): void {
-    const carried = this.carried.get(row.id)
-    const body = carried?.text ?? ''
-    const ended = this.recorded(row, () => {
-      if (!this.store.moveActivation(row.id, ['running'], 'done', { endReason: 'turn_cap_repeated', result: body })) return false
-      this.chat.post({
-        id: `bm_${row.id}_d${main.n}`, botId: row.botId, author: 'bot', kind: 'run_report', text: stoppedShortText(body), chips: carried?.chips ?? [],
-        ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}),
-        activationId: row.id, lane: 'run', threadId: main.threadId
-      })
-      this.journalEnd(row, 'turn_cap_repeated')
-      return true
-    }) ?? false
-    if (!ended) return
-    this.carried.delete(row.id)
-    this.afterEnd(this.store.activation(row.id) ?? row)
   }
 
   /** Every run of the activation (main and consult) has ended, so nothing of it is live. */
@@ -10367,12 +10334,6 @@ function stoppedByMousse(run: Pick<RunRecord, 'status' | 'outcome'>): boolean {
   return run.status === 'interrupted' && run.outcome?.interruptedBy === 'daemon_restart'
 }
 
-/** What work that kept reaching its runtime's turn cap reports as it ends: it stopped short, then what it had. */
-export function stoppedShortText(body: string): string {
-  const lead = 'I ran out of room before finishing, so I stopped here.'
-  return body.trim() ? `${lead} Here is what I have so far:\n\n${body.trim()}` : lead
-}
-
 /** A journal that cannot be written (bot-context.md §4): capture's `bot_journal_failed`, or a full disk. */
 function isJournalFailure(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code
@@ -10442,6 +10403,7 @@ function failureText(reason: string): string {
     case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
     case 'queue_full': return 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.'
     case 'no_progress': return 'I couldn\'t get anything done on this, so I stopped.'
+    // Older builds ended an activation after a count of turn-cap continuations; its record keeps the line.
     case 'turn_cap_repeated': return 'I kept going without finishing, so I stopped here.'
     default: return 'Something went wrong, so I stopped. Try again.'
   }

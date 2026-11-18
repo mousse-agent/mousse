@@ -1,4 +1,4 @@
-import { effectiveAgentLimits } from '../../../shared/agents/defaults'
+import { countLimited, effectiveAgentLimits, NO_COUNT_LIMIT } from '../../../shared/agents/defaults'
 import { AGENT_CAPABILITY_KINDS } from '../../../shared/agents/types'
 import type {
   AgentCapabilityKind,
@@ -799,9 +799,10 @@ export function AgentSettingsForm({
               id="max-turns-input"
               type="number"
               min={1}
-              value={limits.maxTurns}
+              placeholder="No limit"
+              value={countLimited(limits.maxTurns) ? limits.maxTurns : ''}
               onChange={(event) =>
-                onSettingsChange(patch(settings, 'limits', { ...limits, maxTurns: Number(event.target.value) }))
+                onSettingsChange(patch(settings, 'limits', { ...limits, maxTurns: Number(event.target.value) || NO_COUNT_LIMIT }))
               }
             />
           </Field>
@@ -810,9 +811,10 @@ export function AgentSettingsForm({
               id="max-tools-input"
               type="number"
               min={1}
-              value={limits.maxToolCalls}
+              placeholder="No limit"
+              value={countLimited(limits.maxToolCalls) ? limits.maxToolCalls : ''}
               onChange={(event) =>
-                onSettingsChange(patch(settings, 'limits', { ...limits, maxToolCalls: Number(event.target.value) }))
+                onSettingsChange(patch(settings, 'limits', { ...limits, maxToolCalls: Number(event.target.value) || NO_COUNT_LIMIT }))
               }
             />
           </Field>
@@ -820,10 +822,11 @@ export function AgentSettingsForm({
             <input
               id="max-elapsed-input"
               type="number"
-              min={1}
-              value={limits.maxElapsedMs}
+              min={0}
+              placeholder="No limit"
+              value={limits.maxElapsedMs || ''}
               onChange={(event) =>
-                onSettingsChange(patch(settings, 'limits', { ...limits, maxElapsedMs: Number(event.target.value) }))
+                onSettingsChange(patch(settings, 'limits', { ...limits, maxElapsedMs: Number(event.target.value) || 0 }))
               }
             />
           </Field>

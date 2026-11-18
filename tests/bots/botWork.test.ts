@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
-import { BOT_FAILURE_PAUSE_STREAK, BOT_JOURNAL_ERROR, BotEngine, roomText, sayOnce, stoppedShortText } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_FAILURE_PAUSE_STREAK, BOT_JOURNAL_ERROR, BotEngine, roomText, sayOnce } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
@@ -477,35 +477,19 @@ describe('long work', () => {
       expect(errors()).toEqual([])
     })
 
-    it('after the runaway ceiling of continuations in all (not in a row), work ends as out of room with what it had, never as a failure', async () => {
-      // Only a runtime caught in a loop reaches the ceiling (`MAX_TURN_CAP_CONTINUATIONS`); ten stand in for it.
-      const ceiling = 10
-      f.host.maxTurnCapContinuations = ceiling
-      const { workId, message } = await asked()
-      let n = 1
-      // Eleven turns reach the cap (ten continue it, the eleventh ends it), and one completes in between.
-      const turns = ceiling + 2
-      for (let step = 0; step < turns; step += 1) {
+    it('goes on past any number of turn caps, with no count of continuations', async () => {
+      const { workId } = await asked()
+      // Twelve capped turns: older builds ended the work after ten.
+      for (let n = 1; n <= 12; n += 1) {
         const turn = await start(f, workId, n)
         f.clock.now += MIN
         turn.prepared.authority.check(call)
-        f.chips.set(`${workId}:d${n}`, [{ icon: 'web', text: `Searched step ${step}` }])
-        if (step === 4) {
-          // Half way, a turn completes and the owner's note continues the work: the count goes on, it does not start again.
-          f.bots.tools.work.note(botId, workId, 'Cordless only.')
-          await finish(f, turn.payload, 'completed', { text: 'Five picks so far.' })
-          n += 1
-          continue
-        }
         await finish(f, turn.payload, 'failed', { text: `Words of turn ${n}.`, outcome: TURN_CAP })
-        n += 1
       }
-      expect(f.store.dispatches(workId).filter((dispatch) => dispatch.send.turnCap)).toHaveLength(ceiling)
-      expect(f.store.activation(workId)).toMatchObject({ status: 'done', endReason: 'turn_cap_repeated' })
+      expect(f.store.dispatches(workId).filter((dispatch) => dispatch.send.turnCap)).toHaveLength(12)
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      expect(f.store.dispatch(workId, 13)).toMatchObject({ kind: 'continue', send: { turnCap: true } })
       expect(errors()).toEqual([])
-      const report = chatOf(f, botId).at(-1)!
-      expect(report).toMatchObject({ kind: 'run_report', text: stoppedShortText(`Words of turn ${n - 1}.`), replyTo: { id: message.id } })
-      expect(report.chips.map((chip) => chip.text)).toContain(`Searched step ${turns - 1}`)
     })
 
     it('a continuation that runs out at once still posts what the capped turn said and did', async () => {

@@ -18,7 +18,7 @@ import { RunStore } from '../../src/mms/run/RunStore'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
-import { DEFAULT_AGENT_LIMITS, defaultAgentSettings } from '../../src/shared/agents/defaults'
+import { defaultAgentSettings } from '../../src/shared/agents/defaults'
 import type { AgentExecutionRequest, AgentRuntimeToolApprovalCallback } from '../../src/shared/agents/execution'
 import type { AgentRuntimeKind, ResolvedAgentDefinition } from '../../src/shared/agents/types'
 import { getDefaultSettings } from '../../src/shared/settings'
@@ -177,7 +177,9 @@ describe('definitions through the gateway', () => {
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ source: 'definition', status: 'completed' })
     expect(engine.bindingForRun(runs[0]!.runId)?.policy).toEqual({
-      mode: 'default', origin: 'definition', approvals: 'grants', tools: { allow: ['ask_user', 'read', 'write'] }, budget: { maxTurns: DEFAULT_AGENT_LIMITS.maxTurns, maxToolCalls: DEFAULT_AGENT_LIMITS.maxToolCalls },
+      mode: 'default', origin: 'definition', approvals: 'grants', tools: { allow: ['ask_user', 'read', 'write'] },
+      // The default limits are none, so the policy holds no count and any runtime can run it.
+      budget: {},
       authority: { kind: 'definition', digest: expect.stringMatching(/^[0-9a-f]{64}$/) },
       // The strictest permission mode: the definition's own approval rules decide its calls.
       permissionMode: 'ask'
@@ -193,7 +195,7 @@ describe('definitions through the gateway', () => {
     releaseExecutionLeaseHandle(lease!)
   })
 
-  it('a definition saved with the old default limits runs under the ceilings, and its published revision is untouched', async () => {
+  it('a definition saved with the old default limits runs with no limits, and its published revision is untouched', async () => {
     const stored = publish('claude-code', `pi:${PROVIDER}`, (settings) => {
       settings.limits = { ...settings.limits, maxTurns: 32, maxToolCalls: 64, maxElapsedMs: 10 * 60 * 1000, maxArtifactBytes: 10 * 1024 * 1024 }
     })
@@ -203,7 +205,7 @@ describe('definitions through the gateway', () => {
     const thread = store.createThread('old limits')
     defs.outputs.push(say('reviewed'))
     expect((await orch.runAgentDefinition(request(resolved, thread.id))).status).toBe('completed')
-    expect(engine.bindingForRun(engine.listRuns(thread.id)[0]!.runId)?.policy.budget).toEqual({ maxTurns: DEFAULT_AGENT_LIMITS.maxTurns, maxToolCalls: DEFAULT_AGENT_LIMITS.maxToolCalls })
+    expect(engine.bindingForRun(engine.listRuns(thread.id)[0]!.runId)?.policy.budget).toEqual({})
     expect(revisionBytes(stored.revision)).toEqual(before)
   })
 
@@ -413,8 +415,8 @@ describe('definitions through the gateway', () => {
     try {
       const pending = orch.runAgentDefinition(request(resolved, thread.id))
       await vi.waitFor(() => expect(blocked.turns).toHaveLength(1))
-      // Its one turn ran with the default limits on a first attempt of its own record.
-      expect(engine.bindingForRun(blocked.turns[0]!.input.runId)?.policy.budget).toEqual({ maxTurns: DEFAULT_AGENT_LIMITS.maxTurns, maxToolCalls: DEFAULT_AGENT_LIMITS.maxToolCalls })
+      // Its one turn ran with the default limits (none) on a first attempt of its own record.
+      expect(engine.bindingForRun(blocked.turns[0]!.input.runId)?.policy.budget).toEqual({})
       // The next daemon's boot: the record ends interrupted, and nothing is dispatched again.
       const rebooted = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })) })
       rebooted.reconcileOnBoot()

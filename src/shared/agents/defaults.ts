@@ -8,18 +8,30 @@ export const AGENT_BUNDLE_MAX_BYTES = 2 * 1024 * 1024
 export const AGENT_EXAMPLE_PROMPT_MAX_BYTES = 64 * 1024
 
 /**
- * A definition's run limits when its owner sets none: ceilings no real run reaches, there only to end a runaway one.
- * An owner who wants a tighter budget sets it on the definition.
+ * A turn or tool-call limit that is none. Kept as a number, so every runtime's arithmetic stays as it was (a budget of
+ * 0 turns still means none may run); only the run's policy leaves it out (`countLimited`).
+ */
+export const NO_COUNT_LIMIT = Number.MAX_SAFE_INTEGER
+
+/**
+ * A definition's run limits when its owner sets none. Turns, tool calls and time have no limit, as a coding agent
+ * session has none (`NO_COUNT_LIMIT`, and a time of 0, which already meant no deadline); an owner who wants a budget
+ * sets one on the definition. Artifact size keeps a ceiling no real run reaches: it bounds one file written into
+ * Mousse's own store, which a runaway could fill.
  */
 export const DEFAULT_AGENT_LIMITS = {
-  maxTurns: 10_000,
-  maxToolCalls: 100_000,
-  // 14 days: under the longest timer Node can set (about 24.8 days), so a timer on it never fires at once.
-  maxElapsedMs: 14 * 24 * 60 * 60 * 1000,
+  maxTurns: NO_COUNT_LIMIT,
+  maxToolCalls: NO_COUNT_LIMIT,
+  maxElapsedMs: 0,
   maxArtifactBytes: 1024 * 1024 * 1024
 } as const
 
-/** The defaults definitions were saved with before the ceilings above. */
+/** Whether a turn or tool-call limit is one (below `NO_COUNT_LIMIT`). */
+export function countLimited(value: number): boolean {
+  return value < NO_COUNT_LIMIT
+}
+
+/** The defaults definitions were saved with before the ones above. */
 const LEGACY_DEFAULT_AGENT_LIMITS = {
   maxTurns: 32,
   maxToolCalls: 64,
@@ -29,7 +41,7 @@ const LEGACY_DEFAULT_AGENT_LIMITS = {
 
 /**
  * The limits a definition runs under: its own, except that a definition still holding all four old defaults was never
- * given limits by its owner, so it runs under the ceilings. Read at run time and in the editor, never written back:
+ * given limits by its owner, so it runs under today's defaults. Read at run time and in the editor, never written back:
  * a published revision's bytes, and so its hash, stay as they were.
  */
 export function effectiveAgentLimits(limits: AgentLimitsSettings): AgentLimitsSettings {

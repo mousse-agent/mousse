@@ -2,7 +2,7 @@
 
 Commit `f7d7099306ed60d2f2cd7db255ca614b11d9ce56` introduced the profile-fenced `AgentExecutionService` and shared execution contract. The follow-up native qualification adds the real `LlmClient` provider seam and `createNativeAgentRuntime` in the current worktree.
 
-`AgentExecutionService.run()` accepts a resolved immutable definition plus `{ profileId, threadId, projectPath, input, signal, budget }`. It rejects profile mismatches, preserves input bytes after blank validation, clamps caller budgets to definition limits, starts no deadline timer when no adapter is registered, treats `maxElapsedMs: 0` as unlimited, and returns completed/failed/cancelled status with runtime history and usage. It does not manufacture a provider system message in history.
+`AgentExecutionService.run()` accepts a resolved immutable definition plus `{ profileId, threadId, projectPath, input, signal, budget }`. It rejects profile mismatches, preserves input bytes after blank validation, clamps caller budgets to definition limits, starts no deadline timer when no adapter is registered, treats `maxElapsedMs: 0` as unlimited and a turn or tool-call limit of `NO_COUNT_LIMIT` as none (the defaults of a new definition: turns, tool calls and time are unbounded unless the owner sets them; a request never widens a definition's limit, and the run's policy leaves out a count that is none, so a runtime that cannot count still runs it), and returns completed/failed/cancelled status with runtime history and usage. It does not manufacture a provider system message in history.
 
 The trusted native seam is `LlmChatOptions.trustedAgent` in `src/mms/orchestrator/LlmClient.ts`:
 

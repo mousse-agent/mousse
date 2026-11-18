@@ -1,5 +1,5 @@
 import type { AssistantMessage, Message } from '../../shared/transcript'
-import { effectiveAgentLimits } from '../../shared/agents/defaults'
+import { countLimited, effectiveAgentLimits } from '../../shared/agents/defaults'
 import { AgentDefinitionError, type AgentDefinitionIssue } from '../../shared/agents/errors'
 import { definitionAuthorityDigest, type DefinitionAuthority } from './definitionGate'
 import type {
@@ -217,8 +217,9 @@ export function definitionRunPolicy(
       digest: definitionAuthorityDigest({ policy: { definitionId: request.definition.id, definitionRevision: request.definition.revision }, grants: request.grants } as Pick<DefinitionAuthority, 'policy' | 'grants'>)
     },
     budget: {
-      maxTurns: budget.maxTurns,
-      maxToolCalls: budget.maxToolCalls,
+      // No limit is left out, so a runtime that cannot count turns or tool calls still runs the definition.
+      ...(countLimited(budget.maxTurns) ? { maxTurns: budget.maxTurns } : {}),
+      ...(countLimited(budget.maxToolCalls) ? { maxToolCalls: budget.maxToolCalls } : {}),
       ...(budget.maxInputTokens !== undefined ? { maxInputTokens: budget.maxInputTokens } : {}),
       ...(budget.maxOutputTokens !== undefined ? { maxOutputTokens: budget.maxOutputTokens } : {}),
       ...(budget.maxCostUsd !== undefined ? { maxUsd: budget.maxCostUsd } : {})
