@@ -693,7 +693,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (ended) this.store.db.afterCommit(() => this.afterEnd(ended))
     },
     schema: (tool) => this.host.mcp?.inputSchema?.(tool),
-    alone: (row, tool, place) => row.trigger.kind === 'schedule' ? this.alone.match(row.botId, row.trigger.scheduleId, tool.server, tool.tool, place) : undefined,
+    alone: (row, tool, place, args) => row.trigger.kind === 'schedule' ? this.alone.match(row.botId, row.trigger.scheduleId, tool.server, tool.tool, place, args) : undefined,
     binding: (row, tool) => {
       const pair = this.actionPair(row, tool)
       if (!pair) return undefined

@@ -1,4 +1,4 @@
-import { actionPlace } from './BotAlone'
+import { actionPlace, argumentContract } from './BotAlone'
 import { BOT_ALONE_HOURLY_CALLS, BOT_ALONE_DAILY_CALLS } from '../../../shared/bots/personal/definition'
 import { unmistakableCredential } from '../../../shared/secretShapes'
 import { botActionRefusalText, isBotActionRefusalCode, type BotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
@@ -199,7 +199,7 @@ interface Host {
   origin(row: BotActivationRow): 'owner' | 'unattended' | undefined
   schema(tool: BotMcpTool): unknown
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
-  alone?(row: BotActivationRow, tool: BotMcpTool, place: Record<string, unknown> | undefined): string | undefined
+  alone?(row: BotActivationRow, tool: BotMcpTool, place: Record<string, unknown> | undefined, args: Record<string, unknown>): string | undefined
   obsolete(action: ActionRow): boolean
   post(row: BotActivationRow, id: string, text: string): void
   sentAlone?(): void
@@ -364,7 +364,7 @@ export class BotActions {
     if (exact.length > ACTION_MAX_ARGUMENT_CHARS)
       return { text: 'These arguments exceed the 256,000-character limit for a complete review. Nothing was held or sent. Send less.', isError: true }
     const place = actionPlace(this.host.schema(tool), args)
-    const exception = this.host.alone?.(row, tool, place)
+    const exception = this.host.alone?.(row, tool, place, args)
     const now = Date.parse(this.host.store.now())
     const counts = exception ? this.host.store.get(`SELECT
       SUM(CASE WHEN target_json = ? AND ran_at >= ? THEN 1 ELSE 0 END) AS hour,
@@ -378,9 +378,9 @@ export class BotActions {
       const introduced = !alone && this.host.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, 'asks-first:introduced', '1')", row.botId)
       if (introduced) this.host.post(row, `bm_asks_first_${row.botId}`, `${this.host.name(row.botId)} asks you before using tools that may send or change things. Tools that say they only read don't ask.`)
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
-        args_json, args_digest, binding_json, place_json, card_json, status, message_id, expires_at, created_at, answered_at, answered_device)
-        VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
+        args_json, args_digest, binding_json, place_json, bot_note, card_json, status, message_id, expires_at, created_at, answered_at, answered_device)
+        VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, JSON.stringify(argumentContract(args)), alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
       // expires_at is retained for older settled rows; open rows have no deadline.
       '9999-12-31T23:59:59.999Z', this.host.store.now(), alone ? this.host.store.now() : null, alone ? `alone:${exception}` : null)
       if (alone) return
@@ -430,7 +430,7 @@ export class BotActions {
       const args: unknown = JSON.parse(action.exec_args)
       if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
       const target = JSON.parse(action.target_json)
-      if (action.card_json === null && (!action.answered_device?.startsWith('alone:') || `alone:${this.host.alone?.(row, target, actionPlace(this.host.schema(target), args as Record<string, unknown>))}` !== action.answered_device)) return undefined
+      if (action.card_json === null && (!action.answered_device?.startsWith('alone:') || `alone:${this.host.alone?.(row, target, actionPlace(this.host.schema(target), args as Record<string, unknown>), args as Record<string, unknown>)}` !== action.answered_device)) return undefined
       const binding = this.host.binding(row, target)
       // Admission may precede the first relay listing. Execution always requires the full binding.
       if (!binding && allowCold && !this.host.obsolete(action)) return row
