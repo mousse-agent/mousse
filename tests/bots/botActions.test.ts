@@ -122,6 +122,8 @@ it('switch off runs the same offered call directly and writes no action', async 
   expect((await t.call()).text).toContain('delivered')
   expect(t.calls).toEqual([t.args])
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(t.work.prepared.instructions).not.toContain('Some of your tools ask your owner first')
+  expect(f.store.message(`bm_asks_first_${t.botId}`)).toBeUndefined()
 })
 it('holds once, frees the slot, and Send executes exactly the stored arguments once', async () => {
   const t = await setup(true, true)
@@ -3582,6 +3584,7 @@ it.each(['work', 'schedule'] as const)('C6 classifies an existing %s grant at ca
   const manifest = masterGrant.manifest as typeof grant.manifest
   expect(botManifestDigest(manifest)).toBe(masterGrant.digest)
   f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+  expect(('run' in t ? t.run : t.work).prepared.instructions).toContain('Some of your tools ask your owner first')
   const before = structuredClone(f.store.activeGrant(t.botId))
   const revision = f.bots.definitionOf(t.botId).revision
   await t.call()
