@@ -3175,8 +3175,8 @@ describe('keeping a pasted key private', () => {
     await click(button('Send message'))
     expect(vi.mocked(fake.client.send).mock.calls[0]?.[1]).toBe(key)
   })
-  it('refuses without leaking an error or sending; removing the key cancels the offer', async () => {
-    window.mousse.platformRequest = { request: vi.fn(async () => { throw new Error(key) }) } as never
+  it('a forbidden save explains Use secrets without sending; removing the key cancels the offer', async () => {
+    window.mousse.platformRequest = { request: vi.fn(async () => { throw Object.assign(new Error('Allow Use secrets in About.'), {code:'forbidden'}) }) } as never
     await open(); await type(field(), key); await click(button('Keep as secret'))
     expect(host.textContent).toContain("Inbox helper can't keep secrets")
     expect(host.querySelector('[role="status"]')?.textContent).not.toContain(key)
@@ -3272,4 +3272,24 @@ it('keeps a late successful save visible even when the key was removed', async()
   await type(field,'sk-'+'N'.repeat(48));await click(button('Keep as secret'));await type(field,'Changed my mind')
   await act(async()=>answer({name:'OPENAI_API_KEY'}))
   expect(field.value).toBe('Changed my mind');expect(host.textContent).toContain('Kept as OPENAI_API_KEY')
+})
+
+it.each([
+  ['secret_store_failed','The secret could not be saved. Nothing was stored.'],
+  ['method_not_available','This method is unavailable.'],
+  ['invalid_params','A secret holds at most 16 KB.']
+])('shows the value-free %s failure instead of a permission instruction',async(code,message)=>{
+  window.mousse.platformRequest={request:vi.fn(async()=>{throw Object.assign(new Error(message),{code})})} as never
+  await open();const field=host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  await type(field,'sk-'+'F'.repeat(48));await click(button('Keep as secret'))
+  expect(host.textContent).toContain(message);expect(host.textContent).not.toContain("can't keep secrets")
+  expect(fake.client.send).not.toHaveBeenCalled()
+})
+it('uses a fixed message for an error that echoes the secret',async()=>{
+  const key='sk-'+'E'.repeat(48)
+  window.mousse.platformRequest={request:vi.fn(async()=>{throw new Error(key)})} as never
+  await open();const field=host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  await type(field,key);await click(button('Keep as secret'))
+  expect(host.textContent).toContain("Couldn't keep it. Nothing was saved.")
+  expect(host.querySelector('[role="status"]')?.textContent).not.toContain(key)
 })
