@@ -12,19 +12,6 @@
       ],
       "claimedAt": "2026-11-18T06:04:59.558Z",
       "expiresAt": "2026-11-18T08:04:59.558Z"
-    },
-    {
-      "task": "prune-redundant-test-assertions",
-      "session": "Animatrix-991502",
-      "machine": "Animatrix",
-      "branch": "prune-redundant-test-assertions",
-      "paths": [
-        "tests/bots/botActions.test.ts",
-        "tests/renderer/botChatView.test.ts",
-        "tests/gitDaemonMethods.test.ts"
-      ],
-      "claimedAt": "2026-11-18T05:56:36.991Z",
-      "expiresAt": "2026-11-18T08:00:07.196Z"
     }
   ]
 }
