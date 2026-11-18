@@ -134,9 +134,11 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-bubble-ask { display: flex; align-items: center; gap: 7px; margin: 6px 0 0; font-size: var(--bot-text); line-height: 1.5; }
 .bot-bubble-ask > svg { flex: none; color: var(--accent); }
 .bot-bubble .bot-error, .bot-bubble .bot-message-files { margin-top: 8px; }
-/* "Worked for 32s ›": quiet, as under a thread's prompt; the chevron turns while the steps show. */
-.bot-worked { display: inline-flex; align-items: center; gap: 2px; padding: 0; font-size: 11.5px; line-height: 16px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.bot-worked:hover { color: var(--text-primary); }
+/* "Worked for 32s ›": quiet, as under a thread's prompt, in the time's tone; the chevron turns while the steps show.
+   No fill at rest. Hover and keyboard focus give it a faint one in place of the app's focus fill, which would leave a
+   square grey box behind it; the negative margin keeps that box's padding out of the layout. */
+.bot-worked { display: inline-flex; align-items: center; gap: 2px; margin: -1px -5px; padding: 1px 5px; border-radius: 5px; font-size: 11.5px; line-height: 16px; color: color-mix(in srgb, var(--text-secondary) 80%, transparent); font-variant-numeric: tabular-nums; transition: color 150ms ease-out, background-color 150ms ease-out; }
+.bot-bubble .bot-worked:is(:hover, :focus-visible) { outline: none; color: var(--text-secondary); background-color: color-mix(in srgb, var(--text-secondary) 12%, transparent); background-image: none; }
 .bot-worked-chevron { transition: transform 150ms ease-out; }
 .bot-worked-chevron[data-open] { transform: rotate(90deg); }
 .bot-steps { list-style: none; margin: 8px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--bot-meta); line-height: 19px; color: var(--text-secondary); }
@@ -158,7 +160,7 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-typing-glint > span { position: absolute; inset: 0; color: var(--text-primary); transform: translateX(100%); }
 @media (forced-colors: active) { .bot-typing-glint { display: none; } }
 .bot-status-line { margin: 0; padding: 7px 13px; font-size: var(--bot-meta); color: var(--text-secondary); }
-@media (prefers-reduced-motion: reduce) { .bot-worked-chevron { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .bot-worked, .bot-worked-chevron { transition: none; } }
 /* An open ask: quick replies under the bubble, the details on demand. */
 .bot-ask-replies { display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
 .bot-ask-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
