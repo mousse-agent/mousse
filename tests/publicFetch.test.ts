@@ -71,3 +71,47 @@ describe('public GET limits', () => {
   })
   it.each(['2001:2::1','2001:20::1','3fff::1'])('refuses special IPv6 %s',address=>expect(isPublicAddress(address)).toBe(false))
 })
+
+// Boundary rows: before, first, last, after. null denotes the edge of the address space.
+it.each([
+  [null,'0.0.0.0','0.255.255.255','1.0.0.0'],
+  ['9.255.255.255','10.0.0.0','10.255.255.255','11.0.0.0'],
+  ['100.63.255.255','100.64.0.0','100.127.255.255','100.128.0.0'],
+  ['126.255.255.255','127.0.0.0','127.255.255.255','128.0.0.0'],
+  ['169.253.255.255','169.254.0.0','169.254.255.255','169.255.0.0'],
+  ['172.15.255.255','172.16.0.0','172.31.255.255','172.32.0.0'],
+  ['191.255.255.255','192.0.0.0','192.0.0.255','192.0.1.0'],
+  ['192.0.1.255','192.0.2.0','192.0.2.255','192.0.3.0'],
+  ['192.88.98.255','192.88.99.0','192.88.99.255','192.88.100.0'],
+  ['192.167.255.255','192.168.0.0','192.168.255.255','192.169.0.0'],
+  ['198.17.255.255','198.18.0.0','198.19.255.255','198.20.0.0'],
+  ['198.51.99.255','198.51.100.0','198.51.100.255','198.51.101.0'],
+  ['203.0.112.255','203.0.113.0','203.0.113.255','203.0.114.0'],
+  ['223.255.255.255','224.0.0.0','255.255.255.255',null],
+  ['2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff','2001::','2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff','2001:200::'],
+  ['2001:db7:ffff:ffff:ffff:ffff:ffff:ffff','2001:db8::','2001:db8:ffff:ffff:ffff:ffff:ffff:ffff','2001:db9::'],
+  ['2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff','2002::','2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff','2003::'],
+  ['3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff','3fff::','3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',null],
+])('checks both boundaries of %s / %s – %s / %s',(before,first,last,after)=>{
+  if(before) expect(isPublicAddress(before),before).toBe(true)
+  expect(isPublicAddress(first),first).toBe(false); expect(isPublicAddress(last),last).toBe(false)
+  if(after) expect(isPublicAddress(after),after).toBe(true)
+})
+it.each(['192.0.78.24','192.2.0.0','192.2.255.255','2000::','3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff'])('allows ordinary public %s',address=>expect(isPublicAddress(address)).toBe(true))
+it.each(['1fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff','4000::','ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'])('refuses outside global IPv6 %s',address=>expect(isPublicAddress(address)).toBe(false))
+
+it('tries the next checked pinned address after a connection failure without resolving again',async()=>{
+  vi.mocked(dns.lookup).mockResolvedValue([{address:'2606:4700::1111',family:6},{address:'8.8.8.8',family:4}] as never)
+  const connected:string[]=[]
+  vi.mocked(https.request).mockImplementation(((options:any,callback:any)=>{
+    options.lookup('example.com',{},(_error:any,address:string)=>connected.push(address))
+    const req=new EventEmitter() as any
+    req.end=()=>{
+      if(connected.length===1) { req.emit('error',new Error('ENETUNREACH')); return }
+      const res=new EventEmitter() as any; res.statusCode=200; res.headers={}; callback(res); res.emit('data',Buffer.from('ok')); res.emit('end')
+    }
+    return req
+  }) as any)
+  expect((await publicFetch('https://example.com')).body.toString()).toBe('ok')
+  expect(connected).toEqual(['2606:4700::1111','8.8.8.8']); expect(dns.lookup).toHaveBeenCalledTimes(1)
+})
