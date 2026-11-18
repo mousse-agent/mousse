@@ -156,3 +156,22 @@ export function rollUpActivities(threads: readonly LineageThread[], activity: Th
   }
   return rows
 }
+
+/**
+ * True for a thread kept out of the owner's sidebar by one of their bots (`Thread.hidden`), and for any subagent
+ * below one: a subagent takes its root's visibility. Such a thread notifies the owner only when they chose
+ * `notifications.botThreads`; Show in sidebar clears the mark and it notifies like any thread again.
+ */
+export function hiddenFromOwner(
+  threadId: string,
+  threadOf: (id: string) => Pick<Thread, 'id' | 'lineage' | 'hidden'> | undefined
+): boolean {
+  let current = threadOf(threadId)
+  if (current?.lineage?.rootThreadId && threadOf(current.lineage.rootThreadId)?.hidden) return true
+  for (let depth = 0; current && depth < 64; depth++) {
+    if (current.hidden) return true
+    const parentId = current.lineage?.parentThreadId
+    current = parentId ? threadOf(parentId) : undefined
+  }
+  return false
+}

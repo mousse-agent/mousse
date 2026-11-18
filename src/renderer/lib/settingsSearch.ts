@@ -58,6 +58,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Goal turn limit', section: 'general', anchor: 'general-goal-turns', keywords: ['goal', '/goal', 'turns', 'continue', 'keep working', 'limit', 'autonomous'] },
   { title: 'Archive private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto archive', 'auto delete', 'timer', 'incognito', 'chats'] },
   { title: 'All threads on my other devices', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote', 'computers'] },
+  { title: 'Notify for bot threads', section: 'general', anchor: 'general-bot-thread-notifications', keywords: ['notifications', 'bots', 'hidden', 'sidebar'] },
   { title: 'Updates', section: 'general', anchor: 'general-updates', keywords: ['version', 'check for updates', 'about', 'upgrade'] },
 
   { title: 'Mousse ID', section: 'connections', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },

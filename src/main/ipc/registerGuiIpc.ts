@@ -575,8 +575,9 @@ export function registerGuiIpc(
     profileSettings = settings.get(),
     profileId = currentProfileKey()
   ): void => {
-    // Subagents are quiet; one that asks a question is announced under its parent's name.
-    const about = notificationThreads.resolve(profileId, threadId, kind)
+    // Subagents are quiet; one that asks a question is announced under its parent's name. A thread a bot keeps out of
+    // the sidebar is quiet too, unless the person chose to hear about bot threads.
+    const about = notificationThreads.resolve(profileId, threadId, kind, profileSettings.notifications?.botThreads === true)
     if (!about) return
     const content = getThreadNotificationPresentation(kind, profileSettings)
     const win = targetWindow

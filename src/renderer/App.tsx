@@ -287,9 +287,10 @@ export default function App() {
 
 
 
-    // The bound profile's shortcut overrides and new-chat worktree default; later changes arrive through settings.onChanged below.
+    // The bound profile's shortcut overrides, bot-thread notifications and new-chat worktree default; later changes arrive through settings.onChanged below.
     window.mousse.settings.get().then(applyIfCurrent((settings) => {
       setShortcuts(settings.shortcuts ?? {})
+      useAppStore.getState().setNotifyBotThreads(settings.notifications?.botThreads === true)
       useAppStore.getState().setRunDefaults(normalizeRunSettings(settings.runs))
     })).catch(() => {})
     void window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
@@ -380,6 +381,7 @@ export default function App() {
         const llmProvider = settings?.provider?.llmProvider ?? ''
         if (info && info.llmProvider !== llmProvider) setAppInfo({ ...info, llmProvider })
         setShortcuts(settings?.shortcuts ?? {})
+        useAppStore.getState().setNotifyBotThreads(settings?.notifications?.botThreads === true)
         useAppStore.getState().setRunDefaults(normalizeRunSettings(settings?.runs))
       })),
       // A turn that ends shows with its last text, never a frame before it.

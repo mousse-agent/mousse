@@ -66,3 +66,15 @@ it('treats an omitted or undefined quiet-hours key as no change, and only null c
     expect(settings.get().notifications.quietHours).toBeUndefined()
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
+
+it('keeps Notify for bot threads off until it is turned on, and keeps it across a restart', () => {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-bot-threads-'))
+  try {
+    let settings = new SettingsStore(MousseConfigStore.load(home))
+    expect(settings.get().notifications.botThreads === true).toBe(false)
+    settings.set({ notifications: { botThreads: true } })
+    settings = new SettingsStore(MousseConfigStore.load(home))
+    expect(settings.get().notifications.botThreads).toBe(true)
+    expect(settings.get().notifications.allRemoteThreads).toBe(false)
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})

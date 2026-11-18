@@ -168,9 +168,18 @@ describe('landing on a search result', () => {
     expect(revealSettingsAnchor(host, 'providers-telemetry')).toBe(false)
   })
 
-  it('lands on each notification event\'s row, and on the remote threads row', () => {
+  it('offers Notify for bot threads off by default, and turning it on saves it', () => {
+    const onUpdate = vi.fn(async () => {})
+    act(() => root.render(createElement(NotificationSettingsGroup, { notifications: getDefaultSettings().notifications, onUpdate })))
+    const toggle = host.querySelector<HTMLElement>('[role="switch"][aria-label="Notify for bot threads"]')
+    expect(toggle?.getAttribute('aria-checked')).toBe('false')
+    act(() => toggle?.click())
+    expect(onUpdate).toHaveBeenCalledWith({ notifications: expect.objectContaining({ botThreads: true }) })
+  })
+
+  it('lands on each notification event\'s row, and on the remote and bot threads rows', () => {
     act(() => root.render(createElement(NotificationSettingsGroup, { notifications: getDefaultSettings().notifications, onUpdate: async () => {} })))
-    for (const anchor of ['general-notify-finished', 'general-notify-needs-you', 'general-notify-stopped', 'general-remote-notifications']) {
+    for (const anchor of ['general-notify-finished', 'general-notify-needs-you', 'general-notify-stopped', 'general-remote-notifications', 'general-bot-thread-notifications']) {
       expect(revealSettingsAnchor(host, anchor), anchor).toBe(true)
       expect(host.querySelector(`[data-settings-anchor="${anchor}"]`)?.contains(document.activeElement), anchor).toBe(true)
       // The result's title is the row's title, so the result and the row read the same.
