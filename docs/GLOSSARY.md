@@ -115,3 +115,5 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Contract version:** the version of a protocol, saved format or schema that other builds rely on, such as the daemon protocol or the Run Engine database. Bumped only on incompatible changes; listed in `src/mms/contractVersions.ts`.
 - **Primary checkout:** the first entry in `git worktree list`, normally the copy the user runs and reads.
 
+
+**Bound secret** — A secret the owner gave a bot for one HTTPS service. Mousse keeps the value and adds it only to that service’s fixed authentication header through a GET or HEAD read. Known services also fix the allowed path segments and version headers. Commands outside a sandbox can still read the owner’s secret-store files.

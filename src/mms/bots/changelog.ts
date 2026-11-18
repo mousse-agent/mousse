@@ -154,6 +154,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     text: 'Tools that send or change things now ask your owner first. End your turn when a call is held; carry on with its result and never try another way around it. A scheduled run waits for the card, with later occurrences skipped. Run now is an ordinary scheduled occurrence and waits too. If a call was not sent, say so plainly in your report.'
   },
   { id: 28, date: '2026-11-19', text: 'You can ask for a secret bound to one service with secret_request for: {service} or {origin}. These secrets are read only: Mousse keeps the value, gives no file, and refuses secret_run and MCP settings for them. secret_fetch comes later; until it is available, keep working without using a bound key.' },
+  { id: 29, date: '2026-11-19', text: 'To read from a service your owner gave you a key for, use secret_fetch with the key’s name in work or a scheduled run. You never see the key. GET and HEAD only, with masked responses and limits of 20 reads per key per hour and 100 per bot per day; hand service reads from chat to work.' },
 ]
 
 /** The newest entry's id: what a bot has seen once it is told everything. */

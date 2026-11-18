@@ -485,3 +485,7 @@ What an independent review changed (GPT-6.1-Sol, against `2e8a5b9ca`, after the 
 - **The interface:** tool names left About; a card has two buttons.
 
 Not taken from that review: switching commands off in unattended runs where no sandbox holds them (open question 1), and an approval for what a bot does in its browser, for which no bounded mechanism exists yet.
+
+## What phase 3 built
+
+Bound secrets use the private desktop card and vault bindings from E3. `secret_fetch` reads from that binding in work and scheduled runs; chat hands it to work. It checks decoded whole path segments, uses the table’s fixed headers, pins a public address, and follows no redirect. GET and HEAD only; writes remain in the [tool plan’s request service](tool-api.md). Calls have masked `secret_fetch` action rows without a card, and rolling limits of 20 reads per secret per hour and 100 per bot per day. Response bodies are masked before inline delivery or a file in the run’s `fetches/` folder; binary bodies are represented as masked UTF-8 text. No database version or wire contract changes.
