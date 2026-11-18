@@ -63,7 +63,7 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ threadProjectColors: value } as never).threadProjectColors).toBe(expected)
   })
 
-  it.each([[false, false], [true, true], [undefined, true], ['off', true]])('keeps reply previews %s as %s', (value, expected) => {
+  it.each([[false, false], [true, true], [undefined, false], ['off', false]])('keeps reply previews %s as %s', (value, expected) => {
     expect(normalizeAppearance({ replyPreviews: value } as never).replyPreviews).toBe(expected)
   })
 

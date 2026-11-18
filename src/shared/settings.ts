@@ -890,7 +890,7 @@ export function getDefaultSettings(): MousseSettings {
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
       threadProjectColors: 'fill',
-      replyPreviews: true,
+      replyPreviews: false,
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',

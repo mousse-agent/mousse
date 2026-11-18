@@ -1,8 +1,8 @@
 import { useSyncExternalStore } from 'react'
 
 // Mirrors Settings > Appearance > Reply previews so the threads sidebar and the Bots list can read it without loading
-// settings. useTheme feeds it from the open profile's settings. It stays on, the default, until they load.
-let enabled = true
+// settings. useTheme feeds it from the open profile's settings. It stays off, the default, until they load.
+let enabled = false
 const listeners = new Set<() => void>()
 
 export function setReplyPreviews(next: boolean): void {
