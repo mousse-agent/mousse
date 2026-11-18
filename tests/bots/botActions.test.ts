@@ -3420,7 +3420,7 @@ it.each(['send', 'not_now', 'expired'] as const)('C10 review inbox keeps a held 
   if (outcome === 'expired') { f.clock.now = Date.parse(a.expires_at); f.bots.actions.expireDue() }
   else await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: outcome })
   await flush()
-  const continuation = await start(f, t.id)
+  const continuation = await start(f, t.id, 2)
   await finish(f, continuation.payload, 'completed', { text: 'Finished the report.' })
   sync()
   expect(inbox().state).toBe('done')
