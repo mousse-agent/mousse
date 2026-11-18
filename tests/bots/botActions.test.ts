@@ -1,3 +1,4 @@
+import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
 import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
 import { foldChatSummary } from '../../src/mms/bots/memory/chatSummary'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
@@ -3318,4 +3319,19 @@ it('C9 rollback on restart waits for catch-up and activation reconciliation', as
   expect(f.store.lastMainDispatch(t.workId)!.n).toBe(2)
   expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
+})
+
+it('C9 an answered card is carrying on in the chat situation, while ordinary queued work keeps its wording', async () => {
+  const t = await setup(true, false, false, false, false, true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  const facts = (MmsProfileServices.prototype as any).botSituation.call({ personalBots: f.bots, botStore: f.store, settings: f.host.settings }, t.botId)
+  expect(facts.work.find((w: any) => w.workId === t.workId)?.status).toBe('carrying on')
+  const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
+  const journal = createBotJournal({ store: memory, readThread: () => ({ messages: [] }), listThreads: () => [] })
+  const packs = createBotContextProvider({ store: memory, journal, situation: () => ({ ...facts, work: [...facts.work, { workId: 'ordinary', title: 'Other queued job', status: 'queued', startedAt: f.store.now() }] }) })
+  const text = packs.chatPackNow({ botId: t.botId, activationId: 'read-situation' })
+  expect(text).toContain(`${t.workId}, carrying on`)
+  expect(text).toContain('ordinary, waiting its turn')
 })
