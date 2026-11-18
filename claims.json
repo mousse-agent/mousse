@@ -44,6 +44,19 @@
       "expiresAt": "2026-11-18T09:32:55.214Z"
     },
     {
+      "task": "fix-new-threads-stay-blank-after-send",
+      "session": "Animatrix-aacae6",
+      "machine": "Animatrix",
+      "branch": "mousse/fix-new-threads-stay-blank-after-send",
+      "paths": [
+        "src/renderer/components/OrchestratorChat.tsx",
+        "src/renderer/stores/appStore.ts",
+        "src/renderer/chat/components/agent-elements/turn-progress.tsx"
+      ],
+      "claimedAt": "2026-11-18T07:47:18.733Z",
+      "expiresAt": "2026-11-18T09:47:18.733Z"
+    },
+    {
       "task": "mousse/owner-request-in-a-personal-bot-chat",
       "session": "Animatrix-71802f",
       "machine": "Animatrix",
