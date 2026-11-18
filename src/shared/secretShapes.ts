@@ -2,10 +2,21 @@
 const PASTED_KEYS = /sk-(?:(?:ant|or|proj|svcacct|admin)-[A-Za-z0-9_-]{32,}|[A-Za-z0-9]{48,})|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|ya29\.[0-9A-Za-z_-]{20,}|(?:glpat-|whsec_|gsk_|GOCSPX-)[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}(?![A-Za-z0-9_])|hf_[A-Za-z0-9]{34,}(?![A-Za-z0-9_])|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,}|[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|-----BEGIN (?:[A-Z ]*PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----/
 export interface SecretShape { start: number; end: number; name: string }
 const awsId = /(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])/
-function awsSecret(text:string):RegExpExecArray|null {
-  const tokens=/(?<![A-Za-z0-9/+])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])/g
-  for(const token of text.matchAll(tokens)) if(!/^[a-f0-9]{40}$/.test(token[0])) return token as RegExpExecArray
-  return null
+interface AwsSecretToken { 0: string; index: number; labelStart?: number }
+function awsSecret(text:string):AwsSecretToken|null {
+  const id=awsId.exec(text)
+  const distance=(token:AwsSecretToken)=>id?Math.max(id.index-token.index-token[0].length,token.index-id.index-id[0].length,0):token.index
+  const closest=(tokens:Iterable<AwsSecretToken>):AwsSecretToken|null=>{
+    let found:AwsSecretToken|null=null
+    for(const token of tokens) {
+      if(/^[a-f0-9]{40}$/.test(token[0])) continue
+      if(!found || distance(token)<distance(found)) found=token
+    }
+    return found
+  }
+  // Keep the label in a selected pair span so the daemon makes the same choice on revalidation.
+  const labelled=Array.from(text.matchAll(/\b(?:aws_secret_access_key|SecretAccessKey)["']?\s*[=:]\s*["']?([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+])/gi),match=>({0:match[1],index:match.index!+match[0].lastIndexOf(match[1]),labelStart:match.index!}))
+  return closest(labelled) ?? closest(text.matchAll(/(?<![A-Za-z0-9/+])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])/g))
 }
 export function missingAwsSecret(text:string):boolean {
  return awsId.test(text) && !awsSecret(text) && !/the secret AWS_SECRET_ACCESS_KEY/.test(text)
@@ -71,9 +82,9 @@ export function pastedSecretShape(text: string): SecretShape | undefined {
     choose(start,key.startsWith('-----BEGIN')?pemEnd(text,start,key):start+key.length,keyName(key))
   }
   const id=awsId.exec(text),secret=awsSecret(text)
-  if(id && secret) choose(Math.min(id.index,secret.index),Math.max(id.index+id[0].length,secret.index+secret[0].length),'AWS_SECRET_ACCESS_KEY')
+  if(id && secret) choose(Math.min(id.index,secret.labelStart??secret.index),Math.max(id.index+id[0].length,secret.index+secret[0].length),'AWS_SECRET_ACCESS_KEY')
   const labelled=/aws_secret_access_key[ \t]*[=:][ \t]*["']?([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+])["']?/i.exec(text)
-  if(labelled && !/^[a-f0-9]{40}$/.test(labelled[1])) choose(labelled.index,labelled.index+labelled[0].length,'AWS_SECRET_ACCESS_KEY')
+  if(!id && labelled && !/^[a-f0-9]{40}$/.test(labelled[1])) choose(labelled.index,labelled.index+labelled[0].length,'AWS_SECRET_ACCESS_KEY')
   const bearer=/\bauthorization[ \t]*:[ \t]*(Bearer[ \t]+eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/i.exec(text)
   if (bearer) choose(bearer.index,bearer.index+bearer[0].length,'API_KEY')
   if (text.includes('://')) {
