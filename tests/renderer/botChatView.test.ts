@@ -3293,3 +3293,11 @@ it('uses a fixed message for an error that echoes the secret',async()=>{
   expect(host.textContent).toContain("Couldn't keep it. Nothing was saved.")
   expect(host.querySelector('[role="status"]')?.textContent).not.toContain(key)
 })
+
+it('explains the selected keep time beside the private paste offer',async()=>{
+  const {secretKeepLine}=await import('../../src/shared/secretRequests')
+  await open();await type(host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!,'sk-'+'K'.repeat(48))
+  expect(host.textContent).toContain(secretKeepLine('day'))
+  await click(button('This thread only'))
+  expect(host.textContent).toContain(secretKeepLine('thread'))
+})
