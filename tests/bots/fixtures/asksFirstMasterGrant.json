@@ -1,0 +1,41 @@
+{
+  "revision": "master-af87758c1",
+  "manifest": {
+    "tools": [
+      "edit",
+      "list",
+      "read",
+      "search",
+      "write"
+    ],
+    "appTools": [
+      "bot_schedule_add",
+      "bot_schedule_list",
+      "bot_schedule_remove",
+      "escalate",
+      "memory_forget",
+      "memory_list",
+      "memory_read",
+      "memory_save",
+      "memory_search",
+      "run_report",
+      "set_depth",
+      "set_profile",
+      "telling_set",
+      "use_model",
+      "web_fetch",
+      "web_search"
+    ],
+    "mcp": [
+      {
+        "serverId": "mail",
+        "tool": "send"
+      }
+    ],
+    "skills": [],
+    "workspace": null,
+    "budget": {},
+    "audience": "owner"
+  },
+  "digest": "9a91a8d46b8c7a40ee2db78f9789ebb717d6f408c08912fa799a8fec537524d9"
+}

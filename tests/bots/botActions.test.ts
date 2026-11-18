@@ -1,3 +1,4 @@
+import masterGrant from './fixtures/asksFirstMasterGrant.json'
 import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
 import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
 import { foldChatSummary } from '../../src/mms/bots/memory/chatSummary'
@@ -3578,7 +3579,8 @@ it.each(['stop', 'not_now', 'send', 'withdraw', 'forget', 'clear'] as const)('C1
 it.each(['work', 'schedule'] as const)('C6 classifies an existing %s grant at call time without rewriting it', async kind => {
   const t = kind === 'work' ? await setup(true) : await scheduledCall()
   const grant = f.store.activeGrant(t.botId)!
-  const manifest = { ...grant.manifest, mcp: grant.manifest.mcp.map(({ level: _level, ...pair }) => pair) }
+  const manifest = masterGrant.manifest as typeof grant.manifest
+  expect(botManifestDigest(manifest)).toBe(masterGrant.digest)
   f.store.approve(t.botId, botManifestDigest(manifest), manifest)
   const before = structuredClone(f.store.activeGrant(t.botId))
   const revision = f.bots.definitionOf(t.botId).revision
