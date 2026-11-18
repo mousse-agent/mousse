@@ -3317,3 +3317,12 @@ it('keeps two different keys one at a time before the message is sent',async()=>
   expect(JSON.stringify(fake.client.send.mock.calls)).not.toContain(first)
   expect(JSON.stringify(fake.client.send.mock.calls)).not.toContain(second)
 })
+
+it('checks a key added directly to the store before Send in the same event',async()=>{
+  await open();const field=host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  await type(field,'Hello')
+  const key='sk-'+'S'.repeat(48)
+  await act(async()=>{useBotsStore.getState().setDraft('inbox',key);button('Send message')!.click()})
+  expect(fake.client.send).not.toHaveBeenCalled()
+  expect(JSON.stringify(useBotsStore.getState())).not.toContain(key)
+})
