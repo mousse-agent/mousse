@@ -255,20 +255,30 @@ it('uses the development resolver only for secret reads', async () => {
   } finally { vi.unstubAllEnvs() }
 })
 it.each(['already stopped', 'during DNS', 'while connected'])('honours caller cancellation %s', async when => {
+  vi.useFakeTimers()
   const controller = new AbortController()
-  vi.mocked(dns.lookup).mockImplementation(() => when === 'during DNS' ? new Promise(() => {}) : Promise.resolve([{ address: '8.8.8.8', family: 4 }]) as never)
-  let connect!: () => void
-  const connected = new Promise<void>(resolve => { connect = resolve })
-  vi.mocked(https.request).mockImplementation(((options: any) => {
-    const req = new EventEmitter() as any
-    req.end = connect
-    options.signal.addEventListener('abort', () => req.emit('error', new Error('aborted')))
-    return req
-  }) as any)
-  if (when === 'already stopped') controller.abort()
-  const result = expect(publicFetch('https://example.com', { secretRead: true, signal: controller.signal })).rejects.toThrow('stopped')
-  if (when === 'while connected') await connected
-  controller.abort()
-  await result
-  if (when !== 'while connected') expect(https.request).not.toHaveBeenCalled()
+  try {
+    vi.mocked(dns.lookup).mockImplementation(() => when === 'during DNS' ? new Promise(() => {}) : Promise.resolve([{ address: '8.8.8.8', family: 4 }]) as never)
+    let connect!: () => void
+    const connected = new Promise<void>(resolve => { connect = resolve })
+    vi.mocked(https.request).mockImplementation(((options: any) => {
+      const req = new EventEmitter() as any
+      req.end = connect
+      options.signal.addEventListener('abort', () => req.emit('error', new Error('aborted')))
+      return req
+    }) as any)
+    if (when === 'already stopped') controller.abort()
+    let outcome: unknown
+    const result = publicFetch('https://example.com', { secretRead: true, signal: controller.signal }).then(value => { outcome = value }, error => { outcome = error })
+    if (when === 'while connected') await connected
+    controller.abort()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(outcome).toBeInstanceOf(Error)
+    await result
+    if (when !== 'while connected') expect(https.request).not.toHaveBeenCalled()
+  } finally {
+    // A broken cancellation guard must fail immediately without leaving a pending real timer.
+    await vi.advanceTimersByTimeAsync(30_000)
+    vi.useRealTimers()
+  }
 })
