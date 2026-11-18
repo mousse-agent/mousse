@@ -8,10 +8,10 @@ it('supplies the ledger only for work, and service reads never become held calls
  const chat=f.store.laneActivations(botId,'chat',['running'])[0]!
  expect((await start(f,chat.id)).prepared.authority.secretFetch).toBeUndefined()
  // A durable work activation, as the chat's work tool creates it.
- const work=await f.bots.startWork({botId,input:'Read models',clientRequestId:'work'})
- const started=await start(f,work.id)
+ const work=await f.bots.tools.work.start(botId,chat.id,{title:'Models',brief:'Read models',key:'work'})
+ const started=await start(f,work.workId)
  expect(started.prepared.authority.secretFetch).toBeTypeOf('function')
  await started.prepared.authority.secretFetch!({callKey:'read',secret:'KEY',service:'OpenAI',args:{path:'/v1/models'},mask:s=>s},async()=>({text:'data'}))
- expect(f.store.get("SELECT status FROM bot_actions WHERE activation_id = ?",work.id)?.status).toBe('done')
- expect(f.bots.actions.forWork(work.id)).toBeUndefined()
+ expect(f.store.get("SELECT status FROM bot_actions WHERE activation_id = ?",work.workId)?.status).toBe('done')
+ expect(f.bots.actions.forWork(work.workId)).toBeUndefined()
 })
