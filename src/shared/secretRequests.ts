@@ -121,14 +121,15 @@ export function secretNameInResult(text: string): string | undefined {
 }
 
 /** The card's one line on where the value is kept and for how long. */
-export function secretKeepLine(keep: SecretKeep): string {
+export function secretKeepLine(keep: SecretKeep, options: { bound?: string } = {}): string {
+  const access = options.bound ? `${options.bound} never sees it.` : 'The agent can use it but never shows it in the chat.'
   switch (keep) {
     case 'thread':
-      return "Kept in Mousse's secret store on this computer for this thread only, and deleted with the thread. The agent can use it but never shows it in the chat."
+      return `Kept in Mousse's secret store on this computer for this thread only, and deleted with the thread. ${access}`
     case 'day':
-      return "Kept in Mousse's secret store on this computer for 24 hours, then deleted. The agent can use it but never shows it in the chat."
+      return `Kept in Mousse's secret store on this computer for 24 hours, then deleted. ${access}`
     case 'saved':
-      return "Kept in Mousse's secret store on this computer until you remove it in Settings → Agents → Secrets. The agent can use it but never shows it in the chat."
+      return `Kept in Mousse's secret store on this computer until you remove it in Settings → Agents → Secrets. ${access}`
   }
 }
 

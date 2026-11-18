@@ -134,7 +134,7 @@ export function SecretRequestCard({ request, inline, botName, onSave, onUseSaved
             </button>
           ))}
         </div>
-        <p className="composer-question-reason secret-request-keep-line" id={keepLineId}>{request.binding ? secretKeepLine(keep).replace('The agent can use it but never shows it in the chat.', `${botName ?? 'The bot'} never sees it.`) : secretKeepLine(keep)}</p>
+        <p className="composer-question-reason secret-request-keep-line" id={keepLineId}>{secretKeepLine(keep, request.binding ? { bound: botName ?? 'The bot' } : undefined)}</p>
         {error && <p className="secret-request-error" role="alert">{error}</p>}
       </div>
       <div className="composer-question-modal-footer" data-mousse-decision="">
