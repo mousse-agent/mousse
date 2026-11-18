@@ -925,15 +925,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** An unchanged schedule that previously tried a call still needs it after Not now. */
   private scheduledCallNotSent(row: BotActivationRow): boolean {
     if (!botAsksFirst(this.host.settings?.get()) || row.trigger.kind !== 'schedule') return false
-    if (this.store.get("SELECT id FROM bot_actions WHERE activation_id = ? AND status IN ('done', 'failed', 'uncertain') LIMIT 1", row.id)) return false
-    const scheduleId = row.trigger.scheduleId
-    const revision = this.host.schedules?.get(row.botId, scheduleId)?.revision
+    const revision = this.host.schedules?.get(row.botId, row.trigger.scheduleId)?.revision
     if (!revision) return false
-    const last = this.store.all("SELECT activation_id, binding_json, status FROM bot_actions WHERE bot_id = ? AND status IN ('declined', 'done', 'failed', 'uncertain') AND args_digest != '[forgotten]' ORDER BY rowid DESC", row.botId).find(action => {
-      const earlier = this.store.activation(String(action.activation_id))
-      return earlier?.trigger.kind === 'schedule' && earlier.trigger.scheduleId === scheduleId && JSON.parse(String(action.binding_json)).scheduleRevision === revision
+    const ordinal = this.store.get('SELECT rowid AS n FROM bot_activations WHERE id = ?', row.id)?.n
+    const previous = this.store.all('SELECT id FROM bot_activations WHERE bot_id = ? AND rowid < ? ORDER BY rowid DESC', row.botId, Number(ordinal)).map(r => this.store.activation(String(r.id))).find(r => r?.trigger.kind === 'schedule' && r.trigger.scheduleId === row.trigger.scheduleId)
+    if (!previous) return false
+    return this.store.all("SELECT rowid AS n, target_json, args_digest, binding_json FROM bot_actions WHERE activation_id = ? AND status = 'declined' AND args_digest != '[forgotten]'", previous.id).some(action => {
+      if (JSON.parse(String(action.binding_json)).scheduleRevision !== revision) return false
+      return !this.store.get("SELECT id FROM bot_actions WHERE bot_id = ? AND rowid > ? AND target_json = ? AND args_digest = ? AND status IN ('done', 'failed', 'uncertain') LIMIT 1", row.botId, Number(action.n), String(action.target_json), String(action.args_digest))
     })
-    return last?.status === 'declined'
   }
 
   /** A skipped retry must stay visible instead of teaching the next run to skip silently. */
@@ -9863,7 +9863,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!row || row.trigger.kind !== 'schedule') return 'not kept: only a bot scheduled run keeps leftOff'
     if (!this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return 'not kept: the schedule was removed'
     if (!this.host.progress) return 'not kept: bot memory is unavailable'
-    const note = this.scheduledCallNotSent(row) ? `A call was not sent last time; ask again this run if needed. ${text}`.slice(0, 600) : text
+    const prefix = 'A call was not sent last time; ask again this run if needed. '
+    const plain = text.replace(/^(?:A call was not sent last time; ask again this run if needed\.\s*)+/, '')
+    const note = this.scheduledCallNotSent(row) ? `${prefix}${plain}`.slice(0, 600) : plain
     this.host.progress.stageProgress(row.botId, row.trigger.scheduleId, row.id, note)
     return 'pending: kept only when this run ends done'
   }

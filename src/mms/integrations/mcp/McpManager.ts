@@ -1010,6 +1010,7 @@ export class McpManager {
         let relisting: Promise<void> | undefined
         let listChanged = false
         connection.client.onToolsChanged?.(() => {
+          if (connection.closing || this.connections.get(key) !== connection) return Promise.resolve()
           listChanged = true
           relisting ??= (async () => {
             do {
@@ -1017,7 +1018,7 @@ export class McpManager {
               try { await this.listToolsForServer(server, projectPath) }
               catch (error) { logWarn('McpManager', `Tools changed but could not be listed: ${redactSensitiveText(formatError(error))}`) }
               this.invalidateDiscoveryCache()
-            } while (listChanged && !this.owned.stopping)
+            } while (listChanged && !this.owned.stopping && !connection.closing && this.connections.get(key) === connection)
           })().finally(() => { relisting = undefined })
           return relisting
         })

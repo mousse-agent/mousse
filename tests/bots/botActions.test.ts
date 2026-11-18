@@ -3897,7 +3897,7 @@ it('a declined schedule call frames leftOff as something to try again and a skip
   const resumed = await start(f, t.id, 2)
   f.bots.saveLeftOff(t.id, 'The email was declined.')
   await finish(f, resumed.payload)
-  expect.soft(memory.progress(t.botId, t.schedule.scheduleId)).toContain('not sent last time; ask again this run')
+  expect(memory.progress(t.botId, t.schedule.scheduleId)).not.toContain('not sent last time; ask again this run')
   f.clock.now += 60_000
   const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
   const next = await start(f, id)
