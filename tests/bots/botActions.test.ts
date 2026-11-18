@@ -1,3 +1,5 @@
+import { BOT_CHAT_INSTRUCTIONS, botInstructions } from '../../src/mms/bots/instructions'
+import { askProblem } from '../../src/shared/bots/personal/escalation'
 import masterGrant from './fixtures/asksFirstMasterGrant.json'
 import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
 import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
@@ -4277,4 +4279,90 @@ it('E1 an MCP tool name without ask points to the let-alone request shape', asyn
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const turn = await start(f, row.id)
   expect(turn.prepared.authority.escalate!({ permission: { tool: 'send' }, reason: 'Without asking' })).toBe("For an automation to use an MCP tool without asking, use {ask:'let_alone', scheduleId, serverId, tool}. Get scheduleId from bot_schedule_list, serverId from mcp_servers (id), and use the bare tool name.")
+})
+
+// Distinct histories pin the schedule, done and newest filters independently.
+function copyAloneSource(t: Awaited<ReturnType<typeof aloneAsk>>, id: string, place: unknown, status = 'done') {
+  const source = f.store.get('SELECT * FROM bot_actions WHERE activation_id = ?', t.id)!
+  const row = { ...source, id, call_key: id, place_json: JSON.stringify(place), status }
+  const keys = Object.keys(row)
+  f.store.run(`INSERT INTO bot_actions(${keys.join(',')}) VALUES(${keys.map(() => '?').join(',')})`, ...Object.values(row))
+}
+it('E1 consent uses only that automation’s newest sent call, skipping a newer declined call', async () => {
+  const t = await aloneAsk()
+  const other = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Another automation' }, 'owner')
+  expect(f.bots.alone.prepare(t.botId, 'other-ask', { ...t.request, ask: 'let_alone', scheduleId: other.scheduleId })).toContain('Let it ask once first')
+  copyAloneSource(t, 'newest-sent', { to: ['newest@example.test'] })
+  copyAloneSource(t, 'newest-declined', { to: ['declined@example.test'] }, 'declined')
+  expect(f.bots.alone.prepare(t.botId, 'history-ask', t.request as never)).toBeUndefined()
+  expect(f.bots.alone.pending(t.botId, 'history-ask', t.request as never)?.details.items).toEqual(['to: ["newest@example.test"]'])
+})
+it('E1 a prompt change is inert even when no pruning observer runs', async () => {
+  const t = await aloneAsk()
+  f.scheduler.updateJob(t.schedule.jobId, { prompt: 'Different task' })
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toHaveLength(1)
+  expect(f.bots.alone.items(t.botId)[0]?.mark).toBe('Changed')
+})
+it.each(['edit', 'remove', 'bot-remove'] as const)('E1 %s removes consent through the scheduler update path', async kind => {
+  const t = await aloneAsk()
+  if (kind === 'edit') {
+    f.scheduler.on('updated', () => f.bots.schedulesEdited(t.botId))
+    f.scheduler.updateJob(t.schedule.jobId, { prompt: 'New automation task' })
+  } else if (kind === 'remove') f.scheduler.removeJob(t.schedule.jobId)
+  else {
+    vi.spyOn(f.bots, 'scheduleRemoved').mockImplementation(() => {})
+    f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
+  }
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toEqual([])
+})
+it.each(['identity', 'switched-off'] as const)('E1 %s makes standing consent inert', async kind => {
+  const t = await aloneAsk()
+  if (kind === 'identity') vi.spyOn(t.mcp, 'binding').mockImplementation(() => ({ configDigest: 'config-1', schemaDigest: 'same', identity: 'another-server' }) as never)
+  else {
+    const id = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => !p.id.startsWith('alone:') && p.title.includes('Mail'))!.id
+    f.bots.service.setPermission(t.botId, id, false)
+  }
+  expect(f.bots.alone.items(t.botId)[0]?.mark).toBe('Changed')
+})
+it('E1 the legacy respond Allow path saves the standing consent', async () => {
+  const t = await aloneAsk('pending')
+  await f.bots.respond({ escalationId: t.consent.id, answer: 'allow_bot' })
+  expect((await aloneNext(t)).action.card_json).toBeNull()
+})
+it('E1 an MCP tool named browser still needs its own standing-consent card', async () => {
+  const t = await aloneAsk('pending', 'browser')
+  expect(f.store.escalation(t.consent.id)?.status).toBe('open')
+})
+it('E1 let-alone asks accept exactly their four fields', () => {
+  const request = { ask: 'let_alone', scheduleId: 's', serverId: 'mail', tool: 'send' }
+  expect(askProblem(request)).toBeUndefined()
+  expect(askProblem({ ...request, place: 'bot-selected' })).toBe('The automation ask is invalid.')
+  expect(askProblem({ ...request, tool: '' })).toBe('The automation ask is invalid.')
+})
+it.each([true, false])('E1 let-alone guidance follows the asks-first switch: %s', async on => {
+  const t = await setup(on)
+  f.host.instructions = botInstructions
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Hi', clientRequestId: 'alone-guidance' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.instructions?.includes("When your owner wants an automation to do one thing without asking")).toBe(on)
+  expect(BOT_CHAT_INSTRUCTIONS).not.toContain('let_alone')
+})
+it.each([true, false])('E1 let-alone guidance needs MCP allowed or askable: %s', async canAsk => {
+  const t = await setup(true)
+  f.host.instructions = botInstructions
+  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [], appTools: canAsk ? m.appTools : m.appTools.filter(tool => tool !== 'escalate') }))
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Hi', clientRequestId: 'alone-guidance-mcp' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.instructions?.includes('let_alone')).toBe(canAsk)
+})
+it('E1 automatic calls neither introduce asks first again nor publish a nonexistent card', async () => {
+  const t = await aloneAsk()
+  f.store.run("DELETE FROM bot_memory_state WHERE key = 'asks-first:introduced'")
+  f.store.run("DELETE FROM bot_messages WHERE id = ?", `bm_asks_first_${t.botId}`)
+  const published = vi.spyOn(f.bots.chat, 'republish')
+  const next = await aloneNext(t)
+  expect(f.store.message(`bm_asks_first_${t.botId}`)).toBeUndefined()
+  expect(published).not.toHaveBeenCalledWith(next.action.message_id)
 })
