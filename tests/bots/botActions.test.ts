@@ -4011,3 +4011,74 @@ it('sleep cannot keep an old listing fresh when the monotonic clock pauses', asy
     expect(t.calls).toEqual([])
   } finally { vi.useRealTimers() }
 })
+
+// E1: owner message, unattended schedule, exact destination, changed binding, rollback and caps.
+async function aloneAsk(answer: 'allow' | 'not_now' = 'allow') {
+  const t = await scheduledCall(true, 1)
+  t.descriptor.inputSchema.properties.to = { type: 'array' } as never
+  await t.call(); await finish(f, t.run.payload)
+  const first = f.bots.actions.forWork(t.id)!
+  expect(JSON.parse(String(f.store.get('SELECT place_json FROM bot_actions WHERE id = ?', first.id)?.place_json))).toEqual({ to: t.args.to })
+  await f.bots.actions.answer({ actionId: first.id, digest: first.args_digest, answer: 'send' })
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Let this automation send there without asking', clientRequestId: 'alone-owner' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const chat = await start(f, row.id)
+  const request = { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' }
+  chat.prepared.authority.escalate!({ permission: request as never, reason: 'Do it alone' })
+  await finish(f, chat.payload)
+  const ask = f.store.openAsks(t.botId).find(a => 'ask' in a.permission && a.permission.ask === 'let_alone')!
+  expect(ask).toBeDefined()
+  const card = f.bots.chat.card(ask)
+  expect(card).toMatchObject({ kind: 'permission', details: { items: [expect.stringContaining('one@example.test')] } })
+  expect(f.bots.service.askKind(t.botId, ask.id)).toBe('export_memory')
+  await f.bots.service.answer(t.botId, ask.id, answer)
+  return { ...t, request }
+}
+async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args) {
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const id = due.inserted[0]!
+  const turn = await start(f, id)
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'alone-next', signal: new AbortController().signal })
+  return { id, turn, result, action: f.bots.actions.forWork(id)! }
+}
+it('E1 Allow lets only the same schedule destination run on the action ledger without a card', async () => {
+  const t = await aloneAsk()
+  expect(f.bots.service.detail(t.botId).permissions.find(p => p.id.startsWith('alone:'))).toMatchObject({ enabled: undefined })
+  const next = await aloneNext(t)
+  expect(next.result.text).toContain('delivered')
+  expect(next.action).toMatchObject({ status: 'done', card_json: null, exec_args: null })
+  expect(t.calls).toHaveLength(2)
+  expect(f.store.message(next.action.message_id)).toBeUndefined()
+})
+it('E1 Not now saves no exception', async () => {
+  const t = await aloneAsk('not_now')
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key LIKE 'alone:%'")).toEqual([])
+  expect((await aloneNext(t)).action.status).toBe('open')
+})
+it.each(['place', 'schema', 'config', 'off', 'hour', 'day', 'removed'] as const)('E1 %s keeps asking', async change => {
+  const t = await aloneAsk()
+  let args = t.args
+  if (change === 'place') args = { ...args, to: ['elsewhere@example.test'] }
+  if (change === 'schema') t.descriptor.inputSchema.properties.extra = { type: 'string' } as never
+  if (change === 'config') t.server.configDigest = 'new-config'
+  if (change === 'removed') {
+    const item = f.bots.service.detail(t.botId).permissions.find(p => p.id.startsWith('alone:'))!
+    f.bots.service.revokePermission(t.botId, item.id)
+  }
+  if (change === 'off') f.host.settings!.get().experimental.botAsksFirstOff = true
+  if (change === 'hour' || change === 'day') {
+    const first = f.bots.actions.forWork(t.id)!
+    const total = change === 'hour' ? 20 : 100
+    for (let i = 1; i < total; i++) f.store.run(`INSERT INTO bot_actions SELECT ? , ?, bot_id, activation_id, lane, kind, target_json, NULL, args_json, args_digest, binding_json, place_json, card_json, bot_note, status, result_json, message_id, next_at, nudges, expires_at, answered_at, answered_device, created_at, ? FROM bot_actions WHERE id = ?`, `cap-${i}`, `cap-key-${i}`, new Date(f.clock.now - (change === 'day' ? 2 * 3600_000 : 0)).toISOString(), first.id)
+  }
+  const next = await aloneNext(t, args)
+  if (change === 'off') { expect(next.action).toBeUndefined(); return }
+  expect(next.action.status).toBe('open')
+  if (change === 'schema' || change === 'config') expect(f.bots.service.detail(t.botId).permissions.find(p => p.id.startsWith('alone:'))?.mark).toBe('Changed')
+  if (change === 'hour' || change === 'day') {
+    expect(next.action.card_json).toContain('too?')
+    await f.bots.actions.answer({ actionId: next.action.id, digest: next.action.args_digest, answer: 'send' })
+    expect(f.bots.actions.get(next.action.id)?.status).toBe('done')
+  }
+})
