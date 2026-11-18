@@ -325,10 +325,10 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
    * bot with no history yet has nothing to correct, so it is marked as having seen everything and told nothing.
    */
   const visibleChanges = () => BOT_CHANGELOG.filter(entry => !entry.asksFirst || options.asksFirstEnabled?.() !== false)
-  // The contiguous seen cursor cannot cross hidden advice. Later visible entries can repeat during support rollback.
-  const latestChange = () => {
+  // A cursor below hidden advice must wait; bots that already saw it can advance through later entries.
+  const latestChange = (seen?: number) => {
     const hidden = options.asksFirstEnabled?.() === false ? BOT_CHANGELOG.find(entry => entry.asksFirst) : undefined
-    return hidden ? hidden.id - 1 : BOT_CHANGELOG.at(-1)?.id ?? 0
+    return hidden && (seen ?? 0) < hidden.id ? hidden.id - 1 : BOT_CHANGELOG.at(-1)?.id ?? 0
   }
   const changes = (botId: string, chat: boolean, fresh = false): string => {
     const seen = store.getState<number>(botId, CHANGELOG_SEEN_KEY)
@@ -380,7 +380,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     const told = changes(botId, true, fresh)
     if (told) {
       store.write(() => {
-        store.setState(botId, `${CHANGELOG_CARRIED_KEY}${activationId}`, latestChange())
+        store.setState(botId, `${CHANGELOG_CARRIED_KEY}${activationId}`, latestChange(store.getState<number>(botId, CHANGELOG_SEEN_KEY)))
         store.pruneState(botId, CHANGELOG_CARRIED_KEY, 16)
       })
     }
