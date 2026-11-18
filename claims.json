@@ -2,6 +2,20 @@
   "version": 1,
   "claims": [
     {
+      "task": "bot-done-list-drops-archived-and-old",
+      "session": "Animatrix-5ccb01",
+      "machine": "Animatrix",
+      "branch": "bot-done-list-drops-archived-and-old",
+      "paths": [
+        "src/mms/bots/launchedThreads.ts",
+        "src/renderer/components/bots/BotPresence.tsx",
+        "src/renderer/components/bots/botChatShape.ts",
+        "src/shared/bots/personal/chat.ts"
+      ],
+      "claimedAt": "2026-11-18T11:57:31.437Z",
+      "expiresAt": "2026-11-18T13:57:31.437Z"
+    },
+    {
       "task": "bot-phase-two-followups",
       "session": "agibook-f42da1",
       "machine": "agibook",
