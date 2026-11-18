@@ -78,7 +78,7 @@ const refusals = [
   ['work_ended', 'This work ended. Nothing was sent.'],
   ['owner_paused', 'This bot was paused, so nothing was sent.'],
   ['permission_changed', 'This tool or its permission changed, so nothing was sent.'],
-  ['disabled', 'This could not wait for your owner after all, so nothing was sent.'],
+  ['disabled', 'Withdrawn when asks first was turned off. Nothing was sent.'],
   ['owner_removed', 'You removed this request, so nothing was sent.'],
   ['binding_changed', 'This changed since you saw it. Nothing was sent.'],
   ['schedule_changed', 'This changed since you saw it. Nothing was sent.'],
