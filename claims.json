@@ -145,6 +145,21 @@
       ],
       "claimedAt": "2026-11-18T07:21:34.144Z",
       "expiresAt": "2026-11-18T09:21:34.144Z"
+    },
+    {
+      "task": "usage-history",
+      "session": "Animatrix-20d61e",
+      "machine": "Animatrix",
+      "branch": null,
+      "paths": [
+        "src/mms/usageHistory",
+        "src/renderer/components/UsageHistorySection.tsx",
+        "src/renderer/components/SubscriptionUsagePage.tsx",
+        "src/renderer/styles/usage.css",
+        "src/shared/usageHistory.ts"
+      ],
+      "claimedAt": "2026-11-18T19:20:29.806Z",
+      "expiresAt": "2026-11-18T21:20:29.806Z"
     }
   ]
 }
