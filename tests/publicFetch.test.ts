@@ -153,3 +153,12 @@ it('returns redirects for secret HEAD reads with fixed headers and a port', asyn
  }) as any)
  expect((await publicFetch('https://example.com:8443/path',{method:'HEAD',headers:{Authorization:'Bearer private'},secretRead:true})).status).toBe(302)
 })
+
+it('keeps test address overrides unavailable in packaged builds and without explicit opt in', async () => {
+ const { secretFetchTestAddress } = await import('../src/mms/net-public/secretFetchTestAddress')
+ expect(secretFetchTestAddress('api.openai.com',{},false)).toBeUndefined()
+ const env={MOUSSE_TEST_SECRET_FETCH_RESOLVE:'api.openai.com=127.0.0.1'}
+ expect(secretFetchTestAddress('api.openai.com',env,true)).toBeUndefined()
+ expect(secretFetchTestAddress('api.openai.com',env,false)).toEqual({address:'127.0.0.1',family:4})
+ expect(secretFetchTestAddress('other.com',env,false)).toBeUndefined()
+})
