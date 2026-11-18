@@ -16,6 +16,20 @@
       "expiresAt": "2026-11-18T13:57:31.437Z"
     },
     {
+      "task": "bot-held-calls-wait",
+      "session": "agibook-3b1953",
+      "machine": "agibook",
+      "branch": "bot-held-calls-wait",
+      "paths": [
+        "src/mms/bots/actions/BotActions.ts",
+        "src/mms/bots/activation/BotEngine.ts",
+        "src/mms/bots/chat/projection.ts",
+        "docs/bots.md"
+      ],
+      "claimedAt": "2026-11-18T14:56:26.817Z",
+      "expiresAt": "2026-11-18T16:56:26.817Z"
+    },
+    {
       "task": "bot-live-trial-fixes",
       "session": "agibook-f42da1",
       "machine": "agibook",
