@@ -80,7 +80,7 @@
         "src/mms/lifecycle/threadDelete.ts"
       ],
       "claimedAt": "2026-11-18T07:06:23.219Z",
-      "expiresAt": "2026-11-18T10:04:23.947Z"
+      "expiresAt": "2026-11-18T13:06:38.379Z"
     },
     {
       "task": "steer-after-provider-ends",
