@@ -23,7 +23,7 @@ const VALUE = 'private-test-value-0123456789'
 function fixture(threadId = 'home', value = VALUE) {
   const home = mkdtempSync(join(tmpdir(), 'fetch-guards-'))
   homes.push(home)
-  const vault = new SecretVault({ profileRoot: home, threadAlive: () => true })
+  const vault = new SecretVault({ profileRoot: home, threadAlive: () => true, now: () => Date.parse('2026-11-19T00:00:00Z') })
   vault.store('KEY', value, { threadId, keep: 'saved', binding: resolveSecretBinding({ service: 'openai' }) })
   vi.mocked(publicFetch).mockClear().mockResolvedValue({ status: 200, headers: { 'content-type': 'text/plain' }, body: Buffer.from('ok') })
   const run = (args: Record<string, unknown> = {}) => fetchWithSecret(vault, { threadId: 'home', folder: home, args: { secret: 'KEY', path: '/v1/models', ...args }, signal: new AbortController().signal })
@@ -62,17 +62,16 @@ it.each(['line\rbreak-private-value', 'line\nbreak-private-value'])('refuses a k
 })
 it('records last use for an admitted service request', async () => {
   const { run, vault } = fixture()
-  const used = vi.spyOn(vault, 'markUsed')
+  expect(vault.list().find(entry => entry.name === 'KEY')?.lastUsedAt).toBeUndefined()
   expect((await run()).isError).not.toBe(true)
-  expect(used).toHaveBeenCalledOnce()
-  expect(used).toHaveBeenCalledWith('KEY')
+  expect(vault.list().find(entry => entry.name === 'KEY')?.lastUsedAt).toBe('2026-11-19T00:00:00.000Z')
 })
 it('creates private response files exclusively and preserves an existing file on collision', async () => {
   const { run } = fixture()
   vi.mocked(publicFetch).mockResolvedValue({ status: 200, headers: { 'content-type': 'text/plain' }, body: Buffer.alloc(70000, 'a') })
   const first = await run()
   const file = first.text.split('File: ')[1]!
-  expect(statSync(file).mode & 0o777).toBe(0o600)
+  if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600)
   vi.mocked(randomUUID).mockReturnValue(basename(file) as ReturnType<typeof randomUUID>)
   vi.mocked(publicFetch).mockResolvedValue({ status: 200, headers: { 'content-type': 'text/plain' }, body: Buffer.alloc(70000, 'b') })
   expect((await run()).isError).toBe(true)

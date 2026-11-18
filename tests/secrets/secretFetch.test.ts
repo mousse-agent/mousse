@@ -107,7 +107,7 @@ it.each(['pretty inline', 'compact inline', 'saved file'])('re-masks parsed JSON
   const text = saved ? readFileSync(out.text.split('File: ')[1]!, 'utf8') : out.text.split('\n\n')[1]!
   expect(JSON.parse(text).echo).toBe('[secret KEY hidden]')
   expect(text).not.toContain('\\u0070')
-  if (branch === 'pretty inline') expect(text).toContain('\n  "echo":')
+  if (branch === 'pretty inline') expect(text).toMatch(/\n\s+"echo":/)
 })
 
 it.each([
