@@ -256,3 +256,10 @@ describe("a bot's thread lists only tools a bot can hold", () => {
     for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_status']) expect(botMayBeOffered(name), name).toBe(false)
   })
 })
+
+it('tells granted work and scheduled runs how to use a bound key without seeing it',()=>{
+ const allowed={...botAllowedOf(botStarterManifest()),secrets:true}
+ const text=botInstructions({name:'Reader',description:'Read models',lane:'run',allowed})
+ expect(text).toContain("To read from a service your owner gave you a key for, use secret_fetch with the key's name. You never see the key.")
+ expect(botInstructions({name:'Reader',description:'Read models',lane:'chat',allowed})).not.toContain("use secret_fetch with the key's name")
+})
