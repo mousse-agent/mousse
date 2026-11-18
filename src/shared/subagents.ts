@@ -47,6 +47,8 @@ export interface SubagentTaskSummary {
   completedAt: string | null
   /** Why a `failed`, `stopped` or `interrupted` task ended, when known. */
   error?: string
+  /** The start of the task's result, on a removed subagent's tasks only (its thread, which holds the reply, is gone). */
+  summary?: string
 }
 
 export interface SubagentSummary {
@@ -75,6 +77,12 @@ export interface SubagentSummary {
   tasks: SubagentTaskSummary[]
   /** Set on a remote subagent (issue #469): the computer that runs it. */
   computer?: SubagentComputer
+  /**
+   * The subagent's thread is gone (deleted), so it has no name and nothing to open: only what its tasks left. Such
+   * rows come in `subagents.list`'s separate `removed` list, never in `subagents`, so a client that does not know
+   * them lists only live subagents.
+   */
+  removed?: true
 }
 
 /** The computer a remote subagent runs on, as its row shows it. */

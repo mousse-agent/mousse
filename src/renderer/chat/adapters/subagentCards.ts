@@ -1,12 +1,52 @@
 import type { UIMessage } from 'ai'
 import type { SubagentState, SubagentSummary, SubagentTaskSummary, SubagentWaitingOn } from '../../../shared/subagents'
-import { isRefusedSubagentResult, isSubagentStartTool, readSubagentResult, type SubagentStartTool } from '../../../shared/subagentTools'
+import { readSubagentNotice } from './subagentNotice'
+import { isRefusedSubagentResult, isSubagentStartTool, readSubagentResult, toolResultText, type SubagentStartTool } from '../../../shared/subagentTools'
 
 /**
  * A subagent card is one task a subagent was given, shown where the parent started it. The row that
- * starts a task (`delegate_task`, `continue_subagent`) says when it ran; the daemon's subagent list
- * (`subagents.list`) says what became of it. This joins the two.
+ * starts a task (`delegate_task`, `continue_subagent`, or a follow-up `thread_send` or `thread_update`) says when
+ * it ran; the daemon's subagent list (`subagents.list`) says what became of it. This joins the two.
  */
+
+/**
+ * The task a finished `thread_send` or `thread_update` row gave the caller's own subagent, read from its result:
+ * `thread_send` to one's own subagent (`subagent: true`) and `thread_update` with `apply: now` that restarted a
+ * subagent's turn both start a follow-up task and name it. Null for any other row, and for these tools when they
+ * started no task.
+ */
+export function subagentFollowUpTask(part: { type?: unknown; state?: unknown; output?: unknown }): { delegationId: string; childThreadId: string | null; title: string | null } | null {
+  if (part.state !== 'output-available' || typeof part.type !== 'string') return null
+  const tool = /^tool-mcp__mousse__(thread_send|thread_update)$/.exec(part.type)?.[1]
+  if (!tool) return null
+  const output = part.output
+  const text = typeof output === 'string' ? output : Array.isArray(output) ? toolResultText(output) : toolResultText(output ? [output] : undefined)
+  const result = readSubagentResult(text ?? output)
+  if (!result || typeof result.delegationId !== 'string' || !result.delegationId) return null
+  if (tool === 'thread_send' ? result.subagent !== true : result.applied !== 'now') return null
+  return {
+    delegationId: result.delegationId,
+    childThreadId: typeof result.threadId === 'string' ? result.threadId : null,
+    title: typeof result.title === 'string' && result.title.trim() ? result.title : null
+  }
+}
+
+/**
+ * Removed subagents (their thread is gone) named again. The daemon keeps no name once a thread is deleted, but the
+ * notices in the parent's transcript name the subagent they report on, as it was called then. A call that recorded
+ * only the subagent's title finds its task by that name. A row with a title, or with no notice naming it, is kept.
+ */
+export function nameRemovedSubagents(removed: readonly SubagentSummary[], messages: readonly UIMessage[]): SubagentSummary[] {
+  if (!removed.some((row) => !row.title)) return removed as SubagentSummary[]
+  const titles = new Map<string, string>()
+  for (const message of messages) {
+    for (const item of readSubagentNotice(message) ?? []) {
+      const title = item.title?.replace(/\s+/g, ' ').trim()
+      if (title) titles.set(item.childThreadId, title)
+    }
+  }
+  return removed.map((row) => (row.title || !titles.has(row.childThreadId) ? row : { ...row, title: titles.get(row.childThreadId)! }))
+}
 
 /** One start-a-task call in the parent's transcript. */
 export interface SubagentCall {
@@ -57,6 +97,13 @@ export interface SubagentCardModel {
    * thread has started for it. Its row stays hidden and the turn's progress line says "Starting subagent…".
    */
   spawning?: boolean
+  /**
+   * Set when the subagent's thread is gone (deleted): the id it had. The card shows what the daemon kept of the task
+   * and opens nothing (`childThreadId` is null); this id only matches the subagent's notices to the card.
+   */
+  removedThreadId?: string
+  /** The start of the result the daemon kept for the task, for a card whose thread is gone. */
+  summary?: string
   /** Set on a subagent the runtime started with its own tool (Claude Code's `Agent`): it has no thread to open. */
   native?: import('./nativeSubagents').NativeSubagentInfo
 }
@@ -78,8 +125,24 @@ export function collectSubagentCalls(messages: readonly UIMessage[]): SubagentCa
   for (const [messageIndex, message] of messages.entries()) {
     for (const raw of message.parts ?? []) {
       const part = raw as Part
-      if (part.type !== 'tool-Subagent' || !isSubagentStartTool(part.subagentTool)) continue
       if (typeof part.toolCallId !== 'string') continue
+      if (part.type !== 'tool-Subagent' || !isSubagentStartTool(part.subagentTool)) {
+        // A follow-up sent with a thread tool joins its task by the id its result names, like a recorded call.
+        const followUp = subagentFollowUpTask(part)
+        if (!followUp) continue
+        calls.push({
+          toolCallId: part.toolCallId,
+          tool: 'continue_subagent',
+          startedAt: timeOf((message as { createdAt?: unknown }).createdAt),
+          pending: false,
+          inLastTurn: messageIndex > lastUser,
+          recorded: true,
+          failed: false,
+          input: { subagent: followUp.title ?? followUp.childThreadId ?? '' },
+          output: { delegationId: followUp.delegationId, ...(followUp.childThreadId ? { childThreadId: followUp.childThreadId } : {}), ...(followUp.title ? { title: followUp.title } : {}) }
+        })
+        continue
+      }
       const state = part.state
       const input = part.input && typeof part.input === 'object' && !Array.isArray(part.input) ? (part.input as Record<string, unknown>) : {}
       calls.push({
@@ -143,12 +206,16 @@ function taskState(subagent: SubagentSummary, task: SubagentTaskSummary, latest:
 function modelOf(call: SubagentCall, entry: TaskEntry, exact: boolean): SubagentCardModel {
   const { subagent, task } = entry
   const latest = entry.index === subagent.tasks.length - 1
+  const removed = subagent.removed === true
   return {
     toolCallId: call.toolCallId,
     pending: false,
-    childThreadId: subagent.childThreadId,
+    childThreadId: removed ? null : subagent.childThreadId,
     delegationId: task.delegationId,
-    title: subagent.title,
+    // A deleted subagent's thread name is gone with it: the call names it.
+    title: subagent.title || callTitle(call),
+    ...(removed ? { removedThreadId: subagent.childThreadId } : {}),
+    ...(removed && task.summary ? { summary: task.summary } : {}),
     state: taskState(subagent, task, latest),
     provider: subagent.provider,
     model: subagent.model,
@@ -163,13 +230,24 @@ function modelOf(call: SubagentCall, entry: TaskEntry, exact: boolean): Subagent
   }
 }
 
+/** The subagent's name as the call gives it: the title its result names, the title it asked for, or the subagent it addressed. */
+function callTitle(call: SubagentCall): string {
+  const named = readSubagentResult(call.output)?.title
+  return (
+    (typeof named === 'string' && named.trim()) ||
+    (call.tool === 'delegate_task' && typeof call.input.title === 'string' && call.input.title.trim()) ||
+    (typeof call.input.subagent === 'string' && call.input.subagent.trim()) ||
+    'Subagent'
+  )
+}
+
 function pendingModel(call: SubagentCall, spawning: boolean): SubagentCardModel {
   return {
     toolCallId: call.toolCallId,
     pending: true,
     childThreadId: null,
     delegationId: null,
-    title: (call.tool === 'delegate_task' && typeof call.input.title === 'string' && call.input.title.trim()) || (typeof call.input.subagent === 'string' && call.input.subagent.trim()) || 'Subagent',
+    title: callTitle(call),
     state: 'starting',
     provider: null,
     model: null,

@@ -91,6 +91,34 @@ export function buildSubagentView(sources: SubagentViewSources, parentThreadId: 
   return buildView(sources, parentThreadId, new Set([parentThreadId]))
 }
 
+/** Longest start of a result a removed subagent's task keeps (`SubagentTaskSummary.summary`). */
+export const REMOVED_SUMMARY_CHARS = 400
+
+/**
+ * One row per subagent of `parentThreadId` whose thread is gone (deleted), oldest first: what its tasks left in the
+ * delegation records, so the parent's transcript still shows each task's card with its outcome and the start of its
+ * result. Each row is `removed`, has no title (the name went with the thread) and waits on nothing.
+ */
+export function buildRemovedSubagentView(sources: SubagentViewSources, parentThreadId: string): SubagentSummary[] {
+  const rows: SubagentSummary[] = []
+  for (const lineage of sources.delegations.listChildThreads(parentThreadId)) {
+    if (lineage.relationship !== 'subagent' || sources.thread(lineage.threadId)) continue
+    const delegations = sources.delegations.listForChildThread(lineage.threadId).filter((task) => task.parentThreadId === parentThreadId)
+    if (delegations.length === 0) continue
+    const row = summarize({ ...sources, remote: undefined }, lineage.threadId, '', delegations, new Set([parentThreadId, lineage.threadId]))
+    rows.push({
+      ...row,
+      removed: true,
+      tasks: row.tasks.map((task, index) => {
+        const text = delegations[index]?.result?.text?.replace(/\s+/g, ' ').trim()
+        if (!text) return task
+        return { ...task, summary: text.length > REMOVED_SUMMARY_CHARS ? `${text.slice(0, REMOVED_SUMMARY_CHARS - 1)}…` : text }
+      })
+    })
+  }
+  return rows
+}
+
 /** `visited` holds the threads on the path from the requested parent, so a lineage cycle ends. */
 function buildView(sources: SubagentViewSources, parentThreadId: string, visited: Set<string>): SubagentSummary[] {
   const summaries: SubagentSummary[] = []

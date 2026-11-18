@@ -341,6 +341,9 @@ interface AppState {
   threadActivity: ThreadActivitySnapshot
   /** Each thread's subagents as the daemon last reported them, by parent thread id. Not persisted. */
   subagentsByParent: Record<string, SubagentSummary[]>
+  /** Each thread's subagents whose thread is gone (`removed`), kept apart: only the transcript's cards read them. Not persisted. */
+  removedSubagentsByParent: Record<string, SubagentSummary[]>
+  /** Takes a thread's list as the daemon sent it: removed subagents go to `removedSubagentsByParent`, the rest to `subagentsByParent`. */
   setSubagents: (parentThreadId: string, subagents: SubagentSummary[]) => void
   turnStates: TurnStateSnapshot
   /** Stops shown before the daemon confirmed them, by thread (`lib/optimisticStop`). Not persisted. */
@@ -767,8 +770,17 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   threads: [],
   threadActivity: {},
   subagentsByParent: {},
-  setSubagents: (parentThreadId, subagents) =>
-    set((s) => ({ subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: subagents } })),
+  removedSubagentsByParent: {},
+  setSubagents: (parentThreadId, subagents) => {
+    const live = subagents.filter((row) => !row.removed)
+    const removed = subagents.filter((row) => row.removed)
+    set((s) => ({
+      subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: live },
+      ...(removed.length > 0 || s.removedSubagentsByParent[parentThreadId]
+        ? { removedSubagentsByParent: { ...s.removedSubagentsByParent, [parentThreadId]: removed } }
+        : {})
+    }))
+  },
   turnStates: {},
   stopRequests: {},
   mainView: DEFAULT_MAIN_VIEW,
@@ -1252,6 +1264,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       threads: [],
       threadActivity: {},
       subagentsByParent: {},
+      removedSubagentsByParent: {},
       turnStates: {},
       stopRequests: {},
       documentTabs: [],

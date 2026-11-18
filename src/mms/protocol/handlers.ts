@@ -110,7 +110,7 @@ import { ROUTED_AGENT_READ, ROUTED_MESSAGES_PAGE_BYTES, ROUTED_RUN_WAIT_MAX_MS, 
 import { waitOnRun } from '../run/runWait'
 import { messageRows, textOffsetProblem } from '../run/mcp/appTools/messageRows'
 import { THREAD_RESULT_MAX_CHARS } from '../run/mcp/appTools/thread'
-import { buildSubagentView } from '../run/delegation/subagentView'
+import { buildRemovedSubagentView, buildSubagentView } from '../run/delegation/subagentView'
 import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { threadFolderExpired } from '../data/expiredThreads'
@@ -3110,19 +3110,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['threadId'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const engine = ctx.mms.runEngine
-      return {
-        threadId,
-        subagents: buildSubagentView(
-          {
-            delegations: engine.delegations,
-            inbox: engine.inbox,
-            store: engine.store,
-            thread: (id) => ctx.mms.threads.getThread(id),
-            hasPendingQuestion: (id) => ctx.mms.questions.listPendingForThread(id).length > 0
-          },
-          threadId
-        )
+      const sources = {
+        delegations: engine.delegations,
+        inbox: engine.inbox,
+        store: engine.store,
+        thread: (id: string) => ctx.mms.threads.getThread(id),
+        hasPendingQuestion: (id: string) => ctx.mms.questions.listPendingForThread(id).length > 0
       }
+      // Subagents whose thread is gone come apart from `subagents`, so a client that does not know them lists only
+      // live ones; the transcript still draws their cards from them.
+      return { threadId, subagents: buildSubagentView(sources, threadId), removed: buildRemovedSubagentView(sources, threadId) }
     }
     case 'agents.list': {
       const p = isObject(params) ? params : {}
