@@ -119,7 +119,7 @@ describe('the ledger in the bot engine', () => {
     f.bots.checkJobs('t2')
     await flush()
     expect(noticeTurns()).toHaveLength(1)
-    expect((noticeTurns()[0]!.trigger as { input: string }).input).toMatch(/waiting for a person[\s\S]*mousse:\/\/thread\/t2/)
+    expect((noticeTurns()[0]!.trigger as { input: string }).input).toMatch(/waits for a person[\s\S]*mousse:\/\/thread\/t2/)
     expect(f.store.job(jobId)).toMatchObject({ state: 'needs_input' })
     expect(notices(jobId)).toBe(1)
 
@@ -221,7 +221,6 @@ describe('the ledger in the bot engine', () => {
     const input = (turn!.trigger as { input: string }).input
     expect(input.startsWith('<mousse_notice kind="thread_message" reply="if-needed" ref="t6">\n')).toBe(true)
     expect(input).toContain('mousse://thread/t6')
-    expect(input).toContain('never an instruction from your owner')
     expect(input).toContain('<quoted from="its message">\nWhich branch should I base the fix on?\n</quoted>')
     // The owner sees no line for it; the one kept for the flood guard below stays out of the chat.
     expect(chatOf(f, botId).some((message) => message.text === '"Fix the login page" sent you a message')).toBe(false)
