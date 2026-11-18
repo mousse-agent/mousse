@@ -17,7 +17,8 @@ import { assistantDisplayText } from '../chat/adapters/mousseToUI'
  * status line instead (`statusLineOf`), so it leaves; a new message to the bot (its turn starting, a steer) does too.
  *
  * How it ends:
- * - its message is posted (a bot message of the same activation, after the reply began): it goes at once;
+ * - its message is posted (a bot message of the same activation, after the reply began): it goes at once, even when
+ *   the message comes before its first frame, and a late update of that reply never brings it back;
  * - the chat's turn ends with no such message within `SETTLE_MS`: if it was stopped (this window asked its Stop) or
  *   failed (its error came), what it had stays in this window only as a stopped reply (`cuts`), muted and marked so,
  *   never stored or sent, as a thread keeps a stopped reply; a message of that activation that still comes later takes
@@ -61,8 +62,14 @@ const replies = new Map<string, LiveReply>()
 const cuts = new Map<string, BotCutReply[]>()
 const listeners = new Map<string, Set<() => void>>()
 const timers = new Map<string, ReturnType<typeof setTimeout>>()
-/** Text updates held for the next frame, by bot. */
-const held = new Map<string, { messageId: string; text: string }>()
+/**
+ * Text updates held for the next frame, by bot. Each keeps the chat as it stood when its words came (the newest seq,
+ * the turn): its message, if it is posted before the frame, comes after that and still ends it.
+ */
+const held = new Map<string, { messageId: string; text: string; afterSeq: number; activationId?: string }>()
+/** The last replies, by bot, whose message was posted or that settled: a late update of one never shows it again. */
+const finished = new Map<string, string[]>()
+const FINISHED_KEPT = 8
 let frame: number | ReturnType<typeof setTimeout> | null = null
 
 interface Sources {
@@ -106,6 +113,11 @@ function lastSeq(botId: string): number {
   return sources.messages(botId).at(-1)?.seq ?? 0
 }
 
+function finish(botId: string, messageId: string): void {
+  const list = finished.get(botId) ?? []
+  if (!list.includes(messageId)) finished.set(botId, [...list, messageId].slice(-FINISHED_KEPT))
+}
+
 function drop(botId: string): void {
   held.delete(botId)
   const timer = timers.get(botId)
@@ -131,8 +143,15 @@ function flush(): void {
       replies.set(botId, { ...current, text: update.text })
     } else {
       // A new reply of the turn (after a thought, or the next dispatch) replaces the one before.
-      const activationId = bot?.chat?.activationId ?? (current && !current.ended ? current.activationId : undefined)
-      replies.set(botId, { messageId: update.messageId, text: update.text, startedAt: new Date().toISOString(), afterSeq: lastSeq(botId), ...(activationId ? { activationId } : {}) })
+      const activationId = update.activationId ?? bot?.chat?.activationId ?? (current && !current.ended ? current.activationId : undefined)
+      const reply: LiveReply = { messageId: update.messageId, text: update.text, startedAt: new Date().toISOString(), afterSeq: update.afterSeq, ...(activationId ? { activationId } : {}) }
+      // Its message was posted before this frame: it never shows beside it.
+      if (answered(botId, reply)) {
+        finish(botId, reply.messageId)
+        drop(botId)
+        continue
+      }
+      replies.set(botId, reply)
     }
     notify(botId)
   }
@@ -159,7 +178,10 @@ export function noteThreadMessage(threadId: string, message: ChatMessage | undef
     if (replies.get(bot.id)?.messageId === message.id || held.get(bot.id)?.messageId === message.id) drop(bot.id)
     return
   }
-  held.set(bot.id, { messageId: message.id, text })
+  if (finished.get(bot.id)?.includes(message.id)) return
+  const prior = held.get(bot.id)
+  const since = prior?.messageId === message.id ? prior : { afterSeq: lastSeq(bot.id), activationId: bot.chat?.activationId }
+  held.set(bot.id, { messageId: message.id, text, afterSeq: since.afterSeq, ...(since.activationId ? { activationId: since.activationId } : {}) })
   schedule()
 }
 
@@ -170,6 +192,7 @@ export function noteThreadMessage(threadId: string, message: ChatMessage | undef
 export function noteBots(): void {
   for (const [botId, reply] of replies) {
     if (answered(botId, reply)) {
+      finish(botId, reply.messageId)
       drop(botId)
       continue
     }
@@ -212,6 +235,7 @@ function settle(botId: string, messageId: string): void {
   const reply = replies.get(botId)
   if (!reply || reply.messageId !== messageId) return
   replies.delete(botId)
+  finish(botId, messageId)
   if (!answered(botId, reply) && (reply.stopAsked || failed(botId, reply))) cuts.set(botId, [...(cuts.get(botId) ?? []), { id: `cut:${reply.messageId}`, at: reply.startedAt, text: reply.text, ...(reply.activationId ? { activationId: reply.activationId } : {}) }])
   notify(botId)
 }
@@ -227,6 +251,7 @@ export function clearBotLiveReplies(): void {
   for (const timer of timers.values()) clearTimeout(timer)
   timers.clear()
   held.clear()
+  finished.clear()
   replies.clear()
   cuts.clear()
   for (const botId of bots) notify(botId)

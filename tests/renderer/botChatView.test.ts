@@ -1113,6 +1113,29 @@ describe('a reply as it is written', () => {
     expect(stopped()).toBeNull()
   })
 
+  it('a reply whose message is posted before its first frame never shows beside it', async () => {
+    await openWriting()
+    // Its words and its posted message arrive within one frame.
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content: 'The first drive is faster.\n\n', timestamp: AT, streaming: true } }) })
+    await act(async () => fake.emit.message('inbox', message(2, { text: 'The first drive is faster.', activationId: 'act_c1' })))
+    await frame()
+    expect(live()).toBeNull()
+    expect(transcript().textContent?.match(/The first drive is faster\./g)).toHaveLength(1)
+  })
+
+  it('a late update of a reply already posted never brings its bubble back; the next reply still streams', async () => {
+    await openWriting()
+    await write('The first drive is faster.\n\n')
+    await act(async () => fake.emit.message('inbox', message(2, { text: 'The first drive is faster.', activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    await write('The first drive is faster.\n\n', { streaming: false })
+    expect(live()).toBeNull()
+    expect(transcript().textContent?.match(/The first drive is faster\./g)).toHaveLength(1)
+    // Another reply of the home thread is a new one.
+    await write('One more thing.\n\n', { id: 'r2' })
+    expect(live()?.textContent).toBe('One more thing.')
+  })
+
   it('says beside the dots what the turn is doing from its start; calls quicker than the hold never show; the bot’s own words win', async () => {
     await openWriting()
     const words = () => transcript().querySelector('.bot-typing .bot-typing-status')?.firstChild?.textContent
