@@ -1,9 +1,15 @@
 // Deliberately narrower than the memory heuristic: bare IDs, JWTs and prose are not credentials.
-export const UNMISTAKABLE_KEYS = /sk-(?:(?:ant|or|proj)-[A-Za-z0-9_-]{32,}|[A-Za-z0-9]{48,})|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|ya29\.[0-9A-Za-z_-]{20,}|(?:glpat-|npm_|hf_|whsec_|gsk_|GOCSPX-)[A-Za-z0-9_-]{20,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,}|[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|-----BEGIN (?:[A-Z ]*PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----/
+const PASTED_KEYS = /sk-(?:(?:ant|or|proj|svcacct|admin)-[A-Za-z0-9_-]{32,}|[A-Za-z0-9]{48,})|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|ya29\.[0-9A-Za-z_-]{20,}|(?:glpat-|whsec_|gsk_|GOCSPX-)[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}(?![A-Za-z0-9_])|hf_[A-Za-z0-9]{34,}(?![A-Za-z0-9_])|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,}|[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|-----BEGIN (?:[A-Z ]*PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----/
 export interface SecretShape { start: number; end: number; name: string }
-const awsTail = /^(?:[ \t]+|\r?\n[ \t]*)(?:aws_secret_access_key[ \t]*[=:][ \t]*)?([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+])/i
-const awsLabel = /aws_secret_access_key[ \t]*[=:][ \t]*[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])/gi
-const awsHead = /(?<![A-Za-z0-9/+])(?:aws_secret_access_key[ \t]*[=:][ \t]*)?([A-Za-z0-9/+]{40})(?:[ \t]+|\r?\n[ \t]*)$/i
+const awsId = /(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])/
+function awsSecret(text:string):RegExpExecArray|null {
+  const tokens=/(?<![A-Za-z0-9/+])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])/g
+  for(const token of text.matchAll(tokens)) if(!/^[a-f0-9]{40}$/.test(token[0])) return token as RegExpExecArray
+  return null
+}
+export function missingAwsSecret(text:string):boolean {
+ return awsId.test(text) && !awsSecret(text) && !/the secret AWS_SECRET_ACCESS_KEY/.test(text)
+}
 
 function keyName(key: string): string {
   if (key.startsWith('sk-ant-')) return 'ANTHROPIC_API_KEY'
@@ -44,8 +50,10 @@ function urlName(raw: string): string | undefined {
     if (url.protocol==='https:' && url.hostname==='hooks.slack.com' && /^\/services\/[^/]+\/[^/]+\/[^/]+/.test(url.pathname)) return 'SLACK_WEBHOOK_URL'
     if (url.protocol==='https:' && /^(?:(?:canary|ptb)\.)?discord(?:app)?\.com$/.test(url.hostname) && /^\/api(?:\/v\d+)?\/webhooks\/\d+\/[^/]+/.test(url.pathname)) return 'DISCORD_WEBHOOK_URL'
     if (url.password) return /^(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|mssql):$/.test(url.protocol)?'DATABASE_URL':'API_KEY'
-    for (const [key,value] of url.searchParams) {
-      if (value && (/^(?:api_key|apikey|access_token|token|key|secret|password|auth|client_secret)$/i.test(key) || /^(?:sig|signature)$/i.test(key) && value.length>=20)) return 'API_KEY'
+    if (/^(?:www\.)?google\.[a-z.]+$/.test(url.hostname) && url.pathname.startsWith('/maps/embed')) return undefined
+    for (const [key,value] of [...url.searchParams,...new URLSearchParams(url.hash.slice(1))]) {
+      const credential=value.length>=24 && new Set(value).size>=10
+      if (credential && /^(?:api_key|apikey|access_token|refresh_token|private_token|access_key|secret_key|token|key|secret|password|auth|client_secret|sig|signature|X-Amz-Signature|X-Goog-Signature)$/i.test(key)) return 'API_KEY'
     }
   } catch { /* Invalid URLs are left for the owner to judge. */ }
   return undefined
@@ -55,17 +63,17 @@ function urlName(raw: string): string | undefined {
 export function pastedSecretShape(text: string): SecretShape | undefined {
   let first: SecretShape | undefined
   const choose=(start:number,end:number,name:string) => { if (!first || start<first.start) first={start,end,name} }
-  const match=UNMISTAKABLE_KEYS.exec(text)
+  // A Maps embed API key is intentionally public; do not pick its AIza substring either.
+  const scanned=text.replace(/https:\/\/(?:www\.)?google\.[a-z.]+\/maps\/embed[^\s<>"'`]*/g,raw=>' '.repeat(raw.length))
+  const match=PASTED_KEYS.exec(scanned)
   if (match) {
-    const start=match.index, key=match[0]
-    const pair=/^(?:AKIA|ASIA)/.test(key)?awsTail.exec(text.slice(start+key.length)):null
-    const headStart=Math.max(0,start-512)
-    const preceding=/^(?:AKIA|ASIA)/.test(key)?awsHead.exec(text.slice(headStart,start)):null
-    choose(preceding?headStart+preceding.index:start, pair ? start+key.length+pair[0].length : key.startsWith('-----BEGIN') ? pemEnd(text,start,key) : start+key.length, pair||preceding?'AWS_SECRET_ACCESS_KEY':keyName(key))
+    const start=match.index,key=match[0]
+    choose(start,key.startsWith('-----BEGIN')?pemEnd(text,start,key):start+key.length,keyName(key))
   }
-  awsLabel.lastIndex=0
-  const labelled=awsLabel.exec(text)
-  if (labelled) choose(labelled.index,labelled.index+labelled[0].length,'AWS_SECRET_ACCESS_KEY')
+  const id=awsId.exec(text),secret=awsSecret(text)
+  if(id && secret) choose(Math.min(id.index,secret.index),Math.max(id.index+id[0].length,secret.index+secret[0].length),'AWS_SECRET_ACCESS_KEY')
+  const labelled=/aws_secret_access_key[ \t]*[=:][ \t]*["']?([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+])["']?/i.exec(text)
+  if(labelled && !/^[a-f0-9]{40}$/.test(labelled[1])) choose(labelled.index,labelled.index+labelled[0].length,'AWS_SECRET_ACCESS_KEY')
   const bearer=/\bauthorization[ \t]*:[ \t]*(Bearer[ \t]+eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/i.exec(text)
   if (bearer) choose(bearer.index,bearer.index+bearer[0].length,'API_KEY')
   if (text.includes('://')) {
@@ -84,19 +92,28 @@ export function pastedSecretShape(text: string): SecretShape | undefined {
   return first
 }
 
-export function unmistakableCredential(text: string): boolean { return pastedSecretShape(text)!==undefined }
+// Deliberately narrower than the memory heuristic: IDs, attachments and prose need review, not refusal.
+const ACTION_UNMISTAKABLE_KEYS = /\b(?:sk-[A-Za-z0-9_-]{16,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}\b|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}\b|ya29\.[0-9A-Za-z_-]{20,})|-----BEGIN [A-Z ]*PRIVATE KEY-----/
+export function unmistakableCredential(text: string): boolean {
+  if (ACTION_UNMISTAKABLE_KEYS.test(text)) return true
+  for (const match of text.matchAll(/\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"'`]+/gi)) {
+    try {
+      const url = new URL(match[0])
+      if (url.password || [...url.searchParams].some(([key, value]) => value && /(?:token|key|secret|signature|password|passwd|pwd|authorization|credentials?)$/i.test(key))) return true
+    } catch { /* Invalid addresses remain visible to the owner. */ }
+  }
+  return false
+}
+
 
 /** The pair's ID is public; only its secret half is kept. Labelled pastes have the same representation. */
 export function pastedSecretValue(text: string): string {
   const bearer=/^authorization[ \t]*:[ \t]*Bearer[ \t]+(eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/i.exec(text)
   if (bearer) return bearer[1]
-  const id=/^(?:AKIA|ASIA)[0-9A-Z]{16}/.exec(text)
-  if (id) return awsTail.exec(text.slice(id[0].length))?.[1] ?? text
-  const reverse=/^([A-Za-z0-9/+]{40})(?:[ \t]+|\r?\n[ \t]*)(?:AKIA|ASIA)[0-9A-Z]{16}$/.exec(text)
-  if (reverse) return reverse[1]
-  return /^aws_secret_access_key[ \t]*[=:][ \t]*([A-Za-z0-9/+]{40})$/i.exec(text)?.[1] ?? text
+  if(awsId.test(text) || /^aws_secret_access_key/i.test(text)) return awsSecret(text)?.[0]??text
+  return text
 }
 export function pastedSecretReplacement(text: string, name: string): string {
-  const id=/(?:AKIA|ASIA)[0-9A-Z]{16}/.exec(text)
-  return `${id && pastedSecretValue(text)!==text ? id[0]+' ' : ''}the secret ${name}`
+  const value=pastedSecretValue(text)
+  return value!==text && awsSecret(text)?.[0]===value ? text.replace(value,`the secret ${name}`) : `the secret ${name}`
 }
