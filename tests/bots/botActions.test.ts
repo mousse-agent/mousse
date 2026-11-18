@@ -3610,6 +3610,7 @@ it('C6 introduces asks first once before the first card, surviving restart', asy
   const messages = () => f.store.all('SELECT text FROM bot_messages WHERE bot_id = ? ORDER BY seq', t.botId).map(m => String(m.text))
   const introduction = `From now on ${f.bots.definitionOf(t.botId).name} asks you before it sends or changes anything with your tools. Tools that only read don't ask.`
   expect(messages().filter(text => text === introduction)).toHaveLength(1)
+  expect(f.bots.service.chatList(t.botId).messages.find(m => m.text === introduction)?.systemLine).toBe(true)
   expect(messages().indexOf(introduction)).toBeLessThan(messages().findIndex(text => text.startsWith('Mail · send')))
   f.bots.close(); f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup()
