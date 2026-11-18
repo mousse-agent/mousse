@@ -6,7 +6,7 @@
  * budget ask; when the internet is back the activation sends or continues its dispatch. A waiting
  * run survives a restart, and a schedule keeps at most one waiting run.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_OFFLINE_POLL_MAX_MS, BOT_OFFLINE_POLL_MS, BOT_OFFLINE_STALL_MS, BOT_OFFLINE_TEXT, BOT_OFFLINE_WATCH_MS, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { DEFAULT_BOT_ACTIVE_MS, OLD_DEFAULT_BOT_ACTIVE_MS } from '../../src/shared/bots/personal/definition'
@@ -14,7 +14,8 @@ import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type 
 
 let f: BotFixture
 let botId: string
-const net = { online: true, checks: 0 }
+/** `next` answers the next checks before `online` does; `fresh` counts the checks that asked for a fresh round. */
+const net = { online: true, checks: 0, fresh: 0, next: [] as boolean[] }
 let timers: Array<{ fn: () => void; ms: number; cleared: boolean }>
 
 const call: NormalisedCall = { kind: 'app', tool: 'memory_list', args: {} }
@@ -43,17 +44,51 @@ beforeEach(async () => {
   }
   net.online = true
   net.checks = 0
+  net.fresh = 0
+  net.next = []
   botId = (await createBot(f, { name: 'Noobesh', reply: 'Hello.' })).botId
-  f.host.connectivity = { online: async () => { net.checks += 1; return net.online } }
+  f.host.connectivity = {
+    online: async ({ fresh }) => {
+      net.checks += 1
+      if (fresh) net.fresh += 1
+      return net.next.shift() ?? net.online
+    },
+    lastProbes: () => [{ host: 'api.anthropic.com', outcome: net.online ? 'ok' : 'ENOTFOUND' }]
+  }
 })
 
-afterEach(() => f.close())
+afterEach(() => {
+  vi.restoreAllMocks()
+  f.close()
+})
 
 describe('offline before a dispatch starts', () => {
+  it('one failed check that a fresh round contradicts sends at once: no wait, no notice', async () => {
+    net.next = [false]
+    const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
+    await flush()
+    expect(net.fresh).toBe(1)
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'running', offline: false })
+    expect(f.store.dispatch(activation.id, 1)!.runId).not.toBeNull()
+    expect(notices()).toHaveLength(0)
+    expect(live(BOT_OFFLINE_POLL_MS)).toHaveLength(0)
+    expect(summary().waiting).toBeUndefined()
+    await runDispatch(f, activation.id, 1, { text: 'Three stories.' })
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'done' })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'Three stories.' })
+  })
+
   it('waits with one notice and no time charged, then sends the dispatch when the internet is back', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     net.online = false
     const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
     await flush()
+    // The failed check was confirmed by one fresh round, and the log says how each host's probe ended.
+    expect(net.fresh).toBe(1)
+    expect(warn.mock.calls.filter(([message]) => /waits for the internet/.test(String(message)))).toEqual([[
+      expect.any(String),
+      { activationId: activation.id, first: [{ host: 'api.anthropic.com', outcome: 'ENOTFOUND' }], fresh: [{ host: 'api.anthropic.com', outcome: 'ENOTFOUND' }] }
+    ]])
     const row = f.store.activation(activation.id)!
     expect(row).toMatchObject({ status: 'running', offline: true })
     expect(f.store.dispatch(activation.id, 1)).toMatchObject({ runId: null, startedAt: null })
