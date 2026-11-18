@@ -103,7 +103,7 @@ export function askOnlyNotice(message: BotChatMessage, botName: string): boolean
 
 /** The quiet line an answered ask leaves: "You let alpha use the browser". */
 export function askAnsweredLine(botName: string, ask: Pick<BotAskCard, 'title' | 'status'>): string | undefined {
-  if (ask.status === 'allowed') return `You let ${botName} ${ask.title}`
+  if (ask.status === 'allowed') return ask.title.startsWith('let ‘') ? `You let ${botName}’s automation ${ask.title.slice(4)}` : `You let ${botName} ${ask.title}`
   if (ask.status === 'not_now') return `You said not now to ${botName}: ${ask.title}`
   if (ask.status === 'withdrawn') return `${botName} no longer needs to ${ask.title}`
   return undefined

@@ -3925,7 +3925,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         // A Mousse tool no bot can hold is refused now, before the owner sees a card it can't grant.
         if (!isSpecialAsk(asked) && 'tool' in asked && !isNeutralTool(asked.tool) && !BOT_APP_TOOLS.has(asked.tool))
-          return `A bot can't be given the Mousse tool ${asked.tool}. Carry on without it.`
+          return this.host.mcp?.servers().some(server => server.tools.some(t => t.tool === asked.tool)) ? "For an automation to use an MCP tool without asking, use {ask:'let_alone', scheduleId, serverId, tool}. Get scheduleId from bot_schedule_list, serverId from mcp_servers (id), and use the bare tool name." : `A bot can't be given the Mousse tool ${asked.tool}. Carry on without it.`
         // Switched off by the owner for this bot: no card, whatever the grant holds; asking would not help.
         if (this.permissionOff(row.botId, asked)) return this.offText()
         // What the bot already holds is no ask: a card for it would grant nothing. In a chat turn its work holds more
@@ -4849,7 +4849,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, status, amount)) return false
       if (!special && (input.answer === 'allow_once' || input.answer === 'allow_more')) this.store.putOverlay(row.id, escalation.id, escalation.permission, amount)
-      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone') this.alone.answer(row.botId, row.id, status !== 'denied', escalation.permission)
+      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone' && !this.alone.answer(row.botId, row.id, status !== 'denied', escalation.permission)) this.withdrawChangedAloneAsk(escalation.id)
       this.journalAnswer(escalation, status === 'denied' ? 'not_now' : 'allow')
       // Work that waits on the same limit is settled with the answer: an overlay for this activation gives it no room.
       if (limit) settled = this.settleRoomInTx(row.botId, limit, status !== 'denied', waiting!)
@@ -4874,6 +4874,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Not now records a deny; on a run's ask no new ask follows for 24 hours. A chat wall continues
    * once its last open card is answered; a run's ask needs no follow-up (the next run uses it).
    */
+  private withdrawChangedAloneAsk(id: string): void {
+    this.store.run("UPDATE bot_escalations SET status = 'withdrawn', note = ? WHERE id = ?", 'This automation or tool changed. Nothing was allowed. Ask again.', id)
+  }
+
   async answerAsk(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage | undefined> {
     const escalation = this.store.escalation(askId)
     if (!escalation || escalation.botId !== botId) throw new BotEngineError('ask_not_found', 'No such ask.')
@@ -4902,7 +4906,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     let settled: RoomSettled | undefined
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, answer === 'allow' ? 'allowed_bot' : 'denied', amount, cooldown)) return false
-      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone') this.alone.answer(botId, escalation.activationId, answer === 'allow', escalation.permission)
+      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone' && !this.alone.answer(botId, escalation.activationId, answer === 'allow', escalation.permission)) this.withdrawChangedAloneAsk(escalation.id)
       this.journalAnswer(escalation, answer)
       // Work that waits for room goes on with the wider grant, or ends with what it posted, with the answer.
       if (limit) settled = this.settleRoomInTx(botId, limit, answer === 'allow', waiting!)
