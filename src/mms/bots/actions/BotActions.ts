@@ -326,7 +326,7 @@ export class BotActions {
     return this.host.store.ownerLastWroteSeq(action.bot_id) > Number((removed ? card.removedOwnerSeq : card.ownerSeq) ?? (action.status === 'open' ? this.host.store.message(action.message_id)?.seq : 0) ?? 0) || note > Number((removed ? card.removedNoteSeq : card.noteSeq) ?? 0)
   }
   private refuse(row: BotActivationRow, action: ActionRow, text: string): ToolOutcome {
-    this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner declined') ? 'repeat' : 'loop'}`, text)
+    this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner did not send') ? 'repeat' : 'loop'}`, text)
     return { text, isError: true }
   }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
@@ -360,7 +360,7 @@ export class BotActions {
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
     const refused = unanswered.find(action => action.args_digest === digest)
     if (refused)
-      return this.refuse(row, refused, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')
+      return this.refuse(row, refused, 'Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.')
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
