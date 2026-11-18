@@ -180,3 +180,9 @@ it('aborts secret reads at 30 seconds',async()=>{
   await vi.advanceTimersByTimeAsync(30_000);await result
  }finally{vi.useRealTimers()}
 })
+
+it('also refuses private DNS answers on authenticated reads',async()=>{
+ vi.mocked(dns.lookup).mockResolvedValue([{address:'127.0.0.1',family:4}] as never)
+ await expect(publicFetch('https://api.example.com',{secretRead:true,headers:{Authorization:'Bearer private'}})).rejects.toThrow('public')
+ expect(https.request).not.toHaveBeenCalled()
+})
