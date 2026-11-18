@@ -1014,3 +1014,11 @@ html[data-theme="high-contrast"] .permission-request-btn-primary {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The space between stacked tool and thinking rows: an open group's rows (tool-calls-group.tsx) and the live row's
+   two lines (turn-progress.tsx) share it, so a thought and the call under it sit apart the same way in both. */
+.an-row-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
