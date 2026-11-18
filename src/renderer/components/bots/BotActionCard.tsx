@@ -93,6 +93,33 @@ export function actionTitle(card: BotActionCardData): string {
   return actionText(card.title).replace(/\s+/g, ' ')
 }
 
+/** The compact label comes only from the same masked data the full review shows. */
+function identification(value: unknown, literal = false): string | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  if (Array.isArray(value)) {
+    for (const child of value) { const found = identification(child); if (found) return found }
+    return undefined
+  }
+  const object = value as Record<string, unknown>
+  if (!literal && object.$mousse === 'hidden') return undefined
+  if (!literal && object.$mousse === 'literal') return identification(object.value, true)
+  const visible = (child: unknown): string | undefined => {
+    if (typeof child === 'string') return child
+    if (typeof child === 'number' || typeof child === 'boolean') return String(child)
+    if (Array.isArray(child)) return child.map(visible).filter(Boolean).join(', ')
+    return undefined
+  }
+  for (const [name, child] of Object.entries(object)) {
+    if (/^(to|recipient|email|channel|subject|title)$/i.test(name)) {
+      const text = visible(child)?.replace(/\s+/g, ' ').trim()
+      if (text) return Array.from(actionText(text)).slice(0, 140).join('')
+    }
+    const nested = identification(child)
+    if (nested) return nested
+  }
+  return undefined
+}
+
 function reviewLabel(card: BotActionCardData): string {
   if (card.result?.notSentInTime) return 'What it would have sent'
   if (card.status === 'done' || card.status === 'failed' && card.result?.toolReportedError) return 'What it sent'
@@ -131,11 +158,13 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   const repeatedAt = previous && (new Date(previous.at).toDateString() === new Date().toDateString()
     ? botGroupTime(previous.at)
     : new Date(previous.at).toLocaleString([], { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))
+  const identity = !card.forgotten && !card.tooLarge && !['open', 'approved', 'running'].includes(card.status) ? identification(card.args) : undefined
   const argumentsView = <>
     {!card.tooLarge && <Arguments value={card.args} />}
   </>
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
     <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span>{!card.forgotten && <> · <span className="bot-action-server">{actionText(card.serverName)}</span></>}</p>
+    {identity && <blockquote className="bot-action-identification" aria-label="Request identification">{identity}</blockquote>}
     {actionStatus(card) && <p role="status" className="bot-action-outcome" data-find-text data-message-id={messageId} data-part-index="1">{card.at ? <>{outcomeLabel(card)} · <time dateTime={card.at}>{botGroupTime(card.at)}</time></> : actionStatus(card)}</p>}
     {card.status === 'expired' && !card.forgotten && card.askedAt && <p aria-label="Asked time">Asked <time dateTime={card.askedAt}>{botGroupTime(card.askedAt)}</time></p>}
     {!card.forgotten && card.result && !card.result.notSentInTime && card.result.text && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text ?? '')}</blockquote>}
