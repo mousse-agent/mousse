@@ -1102,8 +1102,8 @@ describe('a reply as it is written', () => {
       await step(null)
       await pass(DOING_HOLD_MS)
       expect(words()).toBe('Searching the web · ssd prices')
-      // Its words stream, none of them shown yet.
-      await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content: 'The first drive', timestamp: AT, streaming: true } }) })
+      // Its words stream, none of them whole yet, so none shown.
+      await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content: 'The', timestamp: AT, streaming: true } }) })
       await pass(DOING_HOLD_MS)
       expect(live()).toBeNull()
       expect(words()).toBe('Writing a reply')
