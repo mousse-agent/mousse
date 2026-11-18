@@ -439,7 +439,7 @@ export class BotActions {
     const action = this.get(id)
     if (action?.status === 'running' && this.approvedDeadline(action) <= Date.parse(this.host.store.now())) {
       this.sendTimeout(action)
-      throw new BotActionChanged(JSON.parse(this.get(id)!.result_json!).text, 'bot_action_unreachable')
+      throw new BotActionChanged(botActionRefusalText('bot_action_gone'), 'bot_action_gone')
     }
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
@@ -450,7 +450,7 @@ export class BotActions {
   private checked(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }, settle: boolean): ActionRow {
     const action = this.get(input.actionId)
     if (!action) throw new BotActionChanged("This can't be sent any more.", 'bot_action_gone')
-    if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(JSON.parse(action.result_json).text, 'bot_action_unreachable')
+    if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(botActionRefusalText('bot_action_gone'), 'bot_action_gone')
     if (action.status === 'expired') throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
     if (action.status === 'withdrawn') {
       const code = withdrawalCode(action)
@@ -474,7 +474,7 @@ export class BotActions {
       // Admission is synchronous at the bridge. Refuse before effects, then warm for a later tap.
       this.warming ??= Promise.resolve().then(() => this.host.refresh()).catch(() => {}).finally(() => { this.warming = undefined })
       const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'The service'
-      throw new BotActionChanged(`${service} couldn't be reached. Try again when it is available.`, 'bot_action_unreachable')
+      throw new BotActionChanged(botActionRefusalText('bot_action_unreachable', { serverName: service }), 'bot_action_unreachable')
     }
     return action
   }
