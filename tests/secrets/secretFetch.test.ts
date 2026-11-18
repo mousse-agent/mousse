@@ -49,3 +49,7 @@ it('keeps a custom HTTPS origin and port with its fixed Bearer format',async()=>
  const {run,vault}=fixture();vault.store('KEY',VALUE,{threadId:'home',keep:'saved',binding:resolveSecretBinding({origin:'https://api.example.com:8443'})})
  const out=await run({path:'/read'});expect(out.text).toContain('api.example.com:8443');expect(vi.mocked(publicFetch).mock.lastCall?.[0]).toBe('https://api.example.com:8443/read');expect(vi.mocked(publicFetch).mock.lastCall?.[1]?.headers).toEqual({Authorization:`Bearer ${VALUE}`})
 })
+it('treats replacement characters in a key as literal header bytes',async()=>{
+ const {run,vault}=fixture();const value='private-$&-key-0123456789';vault.store('KEY',value,{threadId:'home',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
+ await run();expect(vi.mocked(publicFetch).mock.lastCall?.[1]?.headers?.Authorization).toBe(`Bearer ${value}`)
+})
