@@ -18,6 +18,7 @@ import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
 import { resolveModelChoice } from "../../../lib/modelChoice";
 import { modelLabel, reasoningChange } from "../../../../shared/modelChoice";
 import type { TurnEnd } from "../../../../shared/types";
+import { providerRetryText, type ProviderRetryState } from "../../../../shared/providerRetry";
 
 import { agentOriginOfMessage, UserMessage } from "./user-message";
 import { CopyButton } from "./copy-button";
@@ -32,7 +33,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, MessageSquare, RowTools, Square } from "../../../lib/icons";
+import { ArrowShrink, CircleCheck, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, MessageSquare, RefreshCw, RowTools, Square } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -78,6 +79,7 @@ import {
   partitionTurnSegments,
   SUBAGENT_BURST_GAP_MS,
   isCompactionRow,
+  isProviderRetryRow,
   settleFinishedTurn,
   turnAnswerText,
   type AssistantToolItem,
@@ -266,7 +268,7 @@ function readEndedAt(message: UIMessage): number | null {
  * message has saved one (`completedAt`). Null while that message has none yet (still streaming, or not saved).
  */
 function savedWorkEndedAt(assistants: UIMessage[]): number | null {
-  const work = assistants.filter((message) => !isThreadNotice(message) && !isCompactionRow(message));
+  const work = assistants.filter((message) => !isThreadNotice(message) && !isCompactionRow(message) && !isProviderRetryRow(message));
   const newest = work.at(-1);
   const raw = newest ? (newest as { completedAt?: string }).completedAt : undefined;
   if (!raw || !Number.isFinite(Date.parse(raw))) return null;
@@ -2351,7 +2353,7 @@ function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boo
   if (toolsOnly) return { kind: "message", toolsOnly: true, keep: (msg.parts ?? []).some(isUnrecoveredFailure) };
   const metadata = (msg.metadata ?? {}) as Record<string, unknown>;
   if (
-    readSubagentNotice(msg) || readBackgroundNotice(msg) || readSettleNoticeMeta(msg) || isThreadNotice(msg) || isCompactionRow(msg) ||
+    readSubagentNotice(msg) || readBackgroundNotice(msg) || readSettleNoticeMeta(msg) || isThreadNotice(msg) || isCompactionRow(msg) || isProviderRetryRow(msg) ||
     metadata.contextHandoff != null || metadata.contextCleared || metadata.scheduledRun != null
   ) {
     return { kind: "message", keep: true };
@@ -3088,6 +3090,21 @@ function CompactionRow({ text, metadata }: { text: string; metadata: CompactionM
   /></div>;
 }
 
+/**
+ * A turn's retries of a failed provider request: a spinner and the count while they run (what failed in its tooltip),
+ * then that the provider recovered, or that a Stop ended them. When they run out the row becomes the turn's error.
+ */
+function ProviderRetryRow({ text, state }: { text: string; state: ProviderRetryState }) {
+  const retrying = state.status === "retrying";
+  const label = text || providerRetryText(state);
+  return <div role="status" title={state.cause ? `Last failure: ${state.cause}` : undefined}><ToolRowBase
+    icon={retrying ? <SpiralLoader size={12} /> : state.status === "recovered" ? <CircleCheck size={14} /> : <RefreshCw size={14} />}
+    shimmerLabel={label}
+    completeLabel={label}
+    isAnimating={retrying}
+  /></div>;
+}
+
 const AssistantParts = memo(function AssistantParts({
   msg,
   isLast,
@@ -3272,6 +3289,8 @@ const AssistantParts = memo(function AssistantParts({
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   if ((msg.metadata as { contextCleared?: boolean } | undefined)?.contextCleared)
     return <ContextClearedDivider text={parts.filter(isTextPart).map((part) => part.text).join('') || 'Context cleared'} />;
+  const providerRetry = (msg.metadata as { providerRetry?: ProviderRetryState } | undefined)?.providerRetry;
+  if (providerRetry) return <ProviderRetryRow text={parts.filter(isTextPart).map((part) => part.text).join('')} state={providerRetry} />;
   const compactionMetadata = msg.metadata as CompactionMetadata | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');

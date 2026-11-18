@@ -11,6 +11,8 @@ import { EffectOutbox } from '../src/mms/run/EffectOutbox'
 import { RunEngine } from '../src/mms/run/RunEngine'
 import { RunStore } from '../src/mms/run/RunStore'
 import { readUsageLimit } from '../src/mms/orchestrator/providerErrors'
+import { AppError } from '../src/shared/errors'
+import { providerFailureText } from '../src/shared/harness/types'
 import { parseModelCatalog, type ModelCatalog } from '../src/shared/modelCatalog'
 import { EMPTY_PREFS, modelsWithPrefs } from '../src/mms/harness/catalog'
 
@@ -1757,6 +1759,31 @@ describe('a plan usage limit (one-shot query)', () => {
     const { service, home } = fixture(() => fakeQuery([init, failure({ api_error_status: 400, errors: ['API Error: 400 messages.3.content.0: tool_use ids were found without tool_result blocks'] })]))
     const error = await service.chat(chatInput(home)).catch((caught: unknown) => caught)
     expect(error).toMatchObject({ code: 'provider_api_error', message: '400 · messages.3.content.0: tool_use ids were found without tool_result blocks', details: { provider: 'claude', status: 400 } })
+  })
+
+  // Hand-authored frames: the result's shape follows Claude Code's `API Error: <reason>` text for a request that got no
+  // HTTP answer, with the retries it made first (`api_retry`, `error_status: null`).
+  it('an unreachable provider fails the turn with what Claude Code said and the retries it made, never a generic line', async () => {
+    const retry = (attempt: number) => ({ type: 'system', subtype: 'api_retry', attempt, max_retries: 10, retry_delay_ms: 500, error_status: null, error: 'unknown', session_id: 'vendor-session' })
+    const said = 'API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)'
+    const { service, home } = fixture(() => fakeQuery([init, retry(1), retry(10), { type: 'result', subtype: 'success', is_error: true, result: said, session_id: 'vendor-session' }]))
+    const retries: unknown[] = []
+    const error = await service.chat({ ...chatInput(home), onRetry: (detail) => retries.push(detail) }).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({
+      code: 'provider_unavailable',
+      message: 'Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)',
+      errorInfo: { category: 'unavailable' },
+      details: { provider: 'claude', retries: { attempt: 10, max: 10 } }
+    })
+    expect(providerFailureText(error as AppError)).toBe('[provider_unavailable] Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED) (after 10/10 retries)')
+    expect(retries.at(-1)).toMatchObject({ attempt: 10, maxAttempts: 10, cause: 'connection error' })
+  })
+
+  it('a failure in Claude Code\'s own words keeps them as the message', async () => {
+    const { service, home } = fixture(() => fakeQuery([init, { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Stream closed unexpectedly'], session_id: 'vendor-session' }]))
+    const error = await service.chat(chatInput(home)).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(AppError)
+    expect(error).toMatchObject({ code: 'provider_api_error', message: 'Stream closed unexpectedly' })
   })
 
   it('a failure that is not a limit saves no session, even when a rejected window was seen earlier', async () => {

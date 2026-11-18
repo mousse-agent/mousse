@@ -71,6 +71,10 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
   if (refused) return refused
   if (kind === 'serverOverloaded')
     return fail('service_unavailable', 'ChatGPT is unavailable or busy right now. Try again in a moment.')
+  // The request got no answer after Codex's own retries (a refused or dropped connection): what Codex said, as the
+  // provider being unreachable.
+  if (kind === 'httpConnectionFailed' || kind === 'responseStreamConnectionFailed' || kind === 'responseStreamDisconnected')
+    return providerStatusError(undefined, error.message, { provider: 'codex', code: 'provider_unavailable', cause: error, errorInfo: { category: 'unavailable', retryable: true } })
   if (kind === 'badRequest') return fail('unsupported', 'ChatGPT did not accept this request.')
   return fail('protocol', `Codex ended the turn with an error: ${error.message}`)
 }

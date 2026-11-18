@@ -73,7 +73,8 @@ import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './ch
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
-import { providerApiError, readUsageLimit } from '../../../orchestrator/providerErrors'
+import { providerApiError, providerReportedError, providerStatusError, readUsageLimit } from '../../../orchestrator/providerErrors'
+import type { ProviderRetries } from '../../../../shared/providerRetry'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { ContinuationInfo, OneShotSpec, ProviderTaskEnd } from '../../driver'
@@ -306,7 +307,7 @@ export type ClaudeSubscriptionChatInput = {
   /** What Claude is doing while it shows nothing (`TurnFrameSink.onStatus`). */
   onStatus?: (status: 'waiting' | 'reasoning') => void
   /** Claude Code tries a failed request again. */
-  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean; cause?: string }) => void
   /** Claude Code compacts the session inside the turn (`TurnFrameSink.onCompaction`). */
   onCompaction?: (phase: 'start' | 'complete') => void
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
@@ -3641,7 +3642,7 @@ export class ClaudeSubscriptionProviderService {
           // Send now's interrupt cut the steer's own request (it landed after Claude Code took the steer): the person
           // asked for that, so the turn ends with what the model wrote, not as a failure. Only a usage limit still fails it.
           sendNowCut = result === liveRun.sendNowAbort
-          const failure = sendNowCut ? usageLimitFromResult(result, liveRun.rateLimits) : claudeResultFailure(result, liveRun.rateLimits)
+          const failure = sendNowCut ? usageLimitFromResult(result, liveRun.rateLimits) : claudeResultFailure(result, liveRun.rateLimits, frames.retries)
           if (failure) throw failure
           if (sendNowCut) input.onSendNowCut?.()
           const resultText = 'result' in result ? frames.resultText(result.result) : ''
@@ -3746,7 +3747,7 @@ export class ClaudeSubscriptionProviderService {
                   (message.subtype !== 'success' || message.is_error || frames.rateLimits.hold) &&
                   !(interruptRequested && steers.length)
                 )
-                  throw claudeResultFailure(message, frames.rateLimits)
+                  throw claudeResultFailure(message, frames.rateLimits, frames.retries)
                 const resultText = 'result' in message ? frames.resultText(message.result) : ''
                 if (frames.text.length === turnTextLength && resultText) {
                   frames.text += resultText
@@ -4057,12 +4058,16 @@ class CutRefused extends Error {
 }
 
 /** `resultFailure`, except that a plan usage limit (or a turn Mousse ended because Claude Code held it) is a `provider_usage_limit`. */
-function claudeResultFailure(message: SDKResultMessage, seen: RejectedWindows): Error | undefined {
-  return usageLimitFromResult(message, seen) ?? resultFailure(message)
+function claudeResultFailure(message: SDKResultMessage, seen: RejectedWindows, retries?: ProviderRetries): Error | undefined {
+  return usageLimitFromResult(message, seen) ?? resultFailure(message, retries)
 }
 
-/** The error a result frame stands for, or undefined when the turn succeeded. */
-function resultFailure(message: SDKResultMessage): Error | undefined {
+/**
+ * The error a result frame stands for, or undefined when the turn succeeded. Its text is Claude Code's or the
+ * provider's own words, so it is the error's message (redacted, see `providerMessageText`), never Mousse's generic
+ * failure; `retries` are the retries Claude Code made of the request before it gave up.
+ */
+export function resultFailure(message: SDKResultMessage, retries?: ProviderRetries): Error | undefined {
   if (message.subtype === 'success' && !message.is_error) return undefined
   // Only a bot's turn sets `maxTurns`: reaching it ends this turn, not the work, which a bot carries on in its next one.
   if (message.subtype === 'error_max_turns') return new AppError({ code: PROVIDER_TURN_CAP, message: 'Claude Code reached the most steps one turn may take.', errorInfo: { category: 'internal', retryable: false } })
@@ -4075,6 +4080,18 @@ function resultFailure(message: SDKResultMessage): Error | undefined {
       errorInfo: { category: 'unavailable', retryable: true }
     })
   }
+  const details = retries ? { retries } : undefined
   // The provider refused the request (`API Error: 400 …`): the transcript shows its status and message.
-  return providerApiError(failure, 'claude') ?? new Error(failure)
+  const refused = providerApiError(failure, 'claude', details)
+  if (refused) return refused
+  // The request got no answer at all (`API Error: Connection refused …`, a timeout): the provider is unreachable.
+  const unreachable = NO_STATUS_API_ERROR.exec(failure.trim())
+  if (unreachable)
+    return providerStatusError(undefined, unreachable[1]!, {
+      provider: 'claude', code: 'provider_unavailable', errorInfo: { category: 'unavailable', retryable: true }, ...(details ? { details } : {})
+    })
+  return providerReportedError(failure, { provider: 'claude', ...(details ? { details } : {}) })
 }
+
+/** Claude Code's report of a request that got no HTTP answer: `API Error: <reason>`, with no status first. */
+const NO_STATUS_API_ERROR = /^API Error:\s*(?![1-5]\d{2}\b)(\S[\s\S]*)$/

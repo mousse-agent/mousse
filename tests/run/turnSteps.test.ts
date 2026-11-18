@@ -131,8 +131,8 @@ describe('a running turn reports its step', () => {
     expect(byPoint.reasoning).toEqual({ phase: 'thinking', step: { kind: 'reasoning' } })
     // The wait goes as a duration, so a window on another computer counts it down on its own clock.
     expect(byPoint.retry).toEqual({ phase: 'thinking', step: { kind: 'retrying', attempt: 2, maxAttempts: 5, delayMs: 3000 } })
-    // The live line says it; nothing about the retry is saved to the transcript.
-    expect(orch.getMessages(thread.id).some((message) => /retrying/i.test(message.content))).toBe(false)
+    // The live line counts down to it; the transcript keeps one row, which the output after it turned recovered.
+    expect(orch.getMessages(thread.id).filter((message) => message.kind === 'provider_retry').map((message) => message.content)).toEqual(['Provider recovered after 2 retries'])
     // Output ends a step.
     expect(byPoint.progress).toEqual({ phase: 'thinking' })
     expect(byPoint.text).toEqual({ phase: 'streaming' })
@@ -195,16 +195,23 @@ describe("Claude's frames", () => {
   const retryFrame = (extra: Record<string, unknown> = {}) =>
     ({ type: 'system', subtype: 'api_retry', attempt: 2, max_retries: 10, retry_delay_ms: 4800, error_status: 529, error: 'overloaded', session_id: 's1', ...extra }) as unknown as SDKMessage
 
-  it('report a retry of a failed request with its attempts and delay', () => {
+  it('report a retry of a failed request with its attempts, delay and what failed', () => {
     const { frames, retries } = reader()
     frames.observe(retryFrame())
-    expect(retries).toEqual([{ attempt: 2, maxAttempts: 10, delayMs: 4800 }])
+    expect(retries).toEqual([{ attempt: 2, maxAttempts: 10, delayMs: 4800, cause: 'overloaded (529)' }])
+    // A request that got no HTTP answer at all.
+    frames.observe(retryFrame({ attempt: 3, error_status: null, error: 'unknown' }))
+    expect(retries.at(-1)).toMatchObject({ attempt: 3, cause: 'connection error' })
+    expect(frames.retries).toEqual({ attempt: 3, max: 10 })
+    // The provider answered: those retries got the request through.
+    frames.observe(stream({ type: 'message_start', message: {} }))
+    expect(frames.retries).toBeUndefined()
   })
 
   it('leave out the attempt count of a retry after no response, which has a cap of its own', () => {
     const { frames, retries } = reader()
     frames.observe(retryFrame({ attempt: 1, max_retries: 1, no_response: { waited_ms: 30000, retry_wait_ms: 60000 } }))
-    expect(retries).toEqual([{ attempt: 1, delayMs: 4800, noResponse: true }])
+    expect(retries).toEqual([{ attempt: 1, delayMs: 4800, noResponse: true, cause: 'no answer yet' }])
   })
 
   it("do not show a retry as the turn's while a subagent of the turn runs, or one a subagent names", () => {
@@ -216,6 +223,6 @@ describe("Claude's frames", () => {
     // The subagent's call ended: a retry now is the turn's own.
     frames.observe({ type: 'user', parent_tool_use_id: null, session_id: 's1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-call', content: 'done' }] } } as unknown as SDKMessage)
     frames.observe(retryFrame({ attempt: 3 }))
-    expect(retries).toEqual([{ attempt: 3, maxAttempts: 10, delayMs: 4800 }])
+    expect(retries).toEqual([{ attempt: 3, maxAttempts: 10, delayMs: 4800, cause: 'overloaded (529)' }])
   })
 })

@@ -187,7 +187,7 @@ export interface TurnSink {
    * A failed provider request is tried again; `detail` says how many attempts there are and how long until this one
    * starts, when the runtime says. `noResponse`: the provider answered nothing in time.
    */
-  retry(attempt: number, detail?: { maxAttempts?: number; delayMs?: number; noResponse?: boolean }): void
+  retry(attempt: number, detail?: { maxAttempts?: number; delayMs?: number; noResponse?: boolean; cause?: string }): void
   /** The provider produced output; a context-overflow retry is no longer safe. */
   progress(): void
   /**

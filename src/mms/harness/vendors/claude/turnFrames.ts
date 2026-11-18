@@ -10,6 +10,7 @@ import { recordSubagentCall, toolResultText } from '../../../../shared/subagentT
 import { claudeActivityComplete, claudeActivityStart, claudeCallContext, type ClaudeCallContext } from './claudeActivity'
 import type { ClaudeMetricsCollector } from './metrics'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
+import { retryCause, type ProviderRetries } from '../../../../shared/providerRetry'
 
 /**
  * Launch arguments every turn adds. Claude Code sends a headless session (as the SDK runs it) no
@@ -35,7 +36,7 @@ export interface TurnFrameSink {
    * Claude Code tries a failed request of this turn again (`api_retry`). `noResponse`: the API sent no headers in
    * time; that retry has its own small cap, so `maxAttempts` is left out.
    */
-  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean; cause?: string }) => void
   /**
    * Claude Code compacts the session inside the turn: `start` at its `compacting` status, `complete` at its compact
    * boundary (the conversation before it is now a summary).
@@ -95,6 +96,11 @@ export class TurnFrames {
   readonly rateLimits = new RejectedWindows()
   /** A frame of this turn arrived. */
   private heard = false
+  /**
+   * The retries Claude Code made of the turn's current request (`api_retry`), until the provider answers it: a result
+   * that fails after them failed after that many retries.
+   */
+  retries: ProviderRetries | undefined
 
   constructor(
     private readonly sink: TurnFrameSink,
@@ -133,11 +139,15 @@ export class TurnFrames {
   private observeRetry(frame: Record<string, unknown>): void {
     if (frame.parent_tool_use_id != null || this.subagentOpen()) return
     const noResponse = frame.no_response !== undefined && frame.no_response !== null
+    const attempt = typeof frame.attempt === 'number' && frame.attempt >= 1 ? Math.floor(frame.attempt) : 1
+    const maxAttempts = typeof frame.max_retries === 'number' && !noResponse ? frame.max_retries : undefined
+    this.retries = { attempt, ...(maxAttempts ? { max: maxAttempts } : {}) }
     this.sink.onRetry?.({
-      attempt: typeof frame.attempt === 'number' ? frame.attempt : 1,
-      ...(typeof frame.max_retries === 'number' && !noResponse ? { maxAttempts: frame.max_retries } : {}),
+      attempt,
+      ...(maxAttempts !== undefined ? { maxAttempts } : {}),
       ...(typeof frame.retry_delay_ms === 'number' ? { delayMs: frame.retry_delay_ms } : {}),
-      ...(noResponse ? { noResponse: true } : {})
+      ...(noResponse ? { noResponse: true } : {}),
+      cause: noResponse ? 'no answer yet' : retryCause(typeof frame.error_status === 'number' ? frame.error_status : null, typeof frame.error === 'string' ? frame.error : undefined)
     })
   }
 
@@ -223,6 +233,8 @@ export class TurnFrames {
       this.flushNextMessage()
     }
     this.waiting()
+    // The provider answered: the retries before were of a request that went through.
+    if (message.type === 'stream_event' && !message.parent_tool_use_id) this.retries = undefined
     if (message.type === 'system' && (message as { subtype?: unknown }).subtype === 'api_retry') this.observeRetry(message as unknown as Record<string, unknown>)
     if (message.type === 'system') {
       const subtype = (message as { subtype?: unknown }).subtype

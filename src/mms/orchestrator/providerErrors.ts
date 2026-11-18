@@ -90,7 +90,7 @@ function statusCategory(status: number | undefined): ErrorCategory {
 export function providerStatusError(
   status: number | undefined,
   text: string,
-  options: { provider?: string; code?: string; errorInfo?: ErrorInfo; cause?: unknown; secrets?: Iterable<string> } = {}
+  options: { provider?: string; code?: string; errorInfo?: ErrorInfo; cause?: unknown; secrets?: Iterable<string>; details?: Record<string, unknown> } = {}
 ): AppError {
   const body = providerMessageText(text, options.secrets)
   const message = status === undefined ? body || providerErrors.create('provider_api_error').message : body ? `${status} · ${body}` : String(status)
@@ -98,7 +98,7 @@ export function providerStatusError(
     code: options.code ?? 'provider_api_error',
     message,
     errorInfo: options.errorInfo ?? { category: statusCategory(status), retryable: false },
-    details: { ...(options.provider ? { provider: options.provider } : {}), ...(status !== undefined ? { status } : {}), supportId: globalThis.crypto.randomUUID() }
+    details: { ...options.details, ...(options.provider ? { provider: options.provider } : {}), ...(status !== undefined ? { status } : {}), supportId: globalThis.crypto.randomUUID() }
   }, options.cause ?? new Error(text))
 }
 
@@ -106,10 +106,10 @@ export function providerStatusError(
  * The provider's own refusal, as a runtime reported it (`API Error: 400 …`), as an error whose message is the status
  * and the provider's message (`providerStatusError`). Undefined for any other text.
  */
-export function providerApiError(text: string, provider?: string): AppError | undefined {
+export function providerApiError(text: string, provider?: string, details?: Record<string, unknown>): AppError | undefined {
   const match = API_ERROR.exec(text.trim())
   if (!match) return undefined
-  return providerStatusError(Number(match[1]), match[2]!, { ...(provider ? { provider } : {}) })
+  return providerStatusError(Number(match[1]), match[2]!, { ...(provider ? { provider } : {}), ...(details ? { details } : {}) })
 }
 
 /** How an ACP SDK labels an agent's error: `Internal error: <the agent's text>`. */
@@ -119,7 +119,7 @@ const RPC_LABEL = /^\s*Internal error:\s*/i
  * A failure a runtime reported in its own words (an agent's error, a run's end), as the transcript shows it: the status
  * the text starts with, or `status` when the runtime gave one, and the provider's message (`providerStatusError`).
  */
-export function providerReportedError(text: string, options: { status?: number; provider?: string; cause?: unknown; secrets?: Iterable<string> } = {}): AppError {
+export function providerReportedError(text: string, options: { status?: number; provider?: string; cause?: unknown; secrets?: Iterable<string>; details?: Record<string, unknown> } = {}): AppError {
   const stripped = text.replace(RPC_LABEL, '')
   const read = readProviderStatus(stripped)
   const own = read && read.status >= 400 && (options.status === undefined || options.status === read.status) ? read : undefined
@@ -127,7 +127,8 @@ export function providerReportedError(text: string, options: { status?: number; 
   return providerStatusError(status, own?.body ?? stripped, {
     ...(options.provider ? { provider: options.provider } : {}),
     ...(options.cause !== undefined ? { cause: options.cause } : {}),
-    ...(options.secrets ? { secrets: options.secrets } : {})
+    ...(options.secrets ? { secrets: options.secrets } : {}),
+    ...(options.details ? { details: options.details } : {})
   })
 }
 

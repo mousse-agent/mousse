@@ -10356,10 +10356,21 @@ function chatTurnEndRow(row: Pick<BotActivationRow, 'id' | 'botId' | 'threadId'>
 /** What a chat turn says when its reply was cut off twice and the owner's message is still unanswered. */
 export const UNANSWERED_REPLY = 'My reply got cut off before it reached you. Could you send that again?'
 
-/** Why an activation stopped, in plain words for its chat; never a provider's own message (it may name a model). */
+/** A turn's failure the provider reported (`providerFailureText`): its message, already redacted, after its code. */
+const PROVIDER_FAILURE = /^\[provider_[a-z_]+\]\s*(\S[\s\S]*)$/
+
+/**
+ * Why an activation stopped, in plain words for its chat. A provider's failure says what the provider said (redacted
+ * when the error was made, on one line and capped) and how many retries it had; Mousse's own failures keep a fixed line.
+ */
 function failureText(reason: string): string {
   // A runtime that can't run the bot's work says why in the bot's own words (a Codex whose tools Mousse hasn't checked).
   if (isCodexBotRefusal(reason)) return reason
+  const provider = PROVIDER_FAILURE.exec(reason)
+  if (provider) {
+    const said = provider[1]!.replace(/\s+/g, ' ').trim()
+    return `The provider failed, so I stopped: ${said.length > CHAT_TURN_ERROR_CHARS ? `${said.slice(0, CHAT_TURN_ERROR_CHARS - 1)}…` : said}`
+  }
   switch (reason) {
     case 'bot_grant_revoked': return 'My permissions changed, so I stopped.'
     case 'bot_context_failed': return 'I couldn\'t read my notes, so I stopped. Try again.'

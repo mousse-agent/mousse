@@ -179,6 +179,14 @@ export function isCompactionRow(message: SettleTurnMessage): boolean {
 }
 
 /**
+ * A provider retry row: Mousse's line counting a turn's retries of a failed request. Like a compaction row it is
+ * never the agent's answer, and it stays in place when the turn folds its activity.
+ */
+export function isProviderRetryRow(message: SettleTurnMessage): boolean {
+  return (message.metadata as { providerRetry?: unknown } | undefined)?.providerRetry != null;
+}
+
+/**
  * A model switch marker: Mousse's line naming the model that takes over, drawn where the turn starts. Like a
  * compaction row it is neither the answer nor a note, so a finished turn does not fold it into its activity.
  */
@@ -188,7 +196,7 @@ function isHandoffMarker(message: SettleTurnMessage): boolean {
 
 /** The text of a reply row, or "" when the message is not one. */
 function replyText(message: SettleTurnMessage): string {
-  if (message.role !== "assistant" || isCompactionRow(message) || isHandoffMarker(message)) return "";
+  if (message.role !== "assistant" || isCompactionRow(message) || isProviderRetryRow(message) || isHandoffMarker(message)) return "";
   return (message.parts ?? [])
     .filter(isTextPart)
     .map((part) => part.text.trim())

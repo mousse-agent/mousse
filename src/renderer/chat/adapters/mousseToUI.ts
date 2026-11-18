@@ -3,6 +3,7 @@ import type { ChatMessage, TurnEnd } from '../../../shared/types'
 import { agentMessageWords } from '../../../shared/agentMessageWords'
 import type { UIMessage } from 'ai'
 import { isToolTimelineMessage, RESTART_INTERRUPTED_TEXT, TURN_STOPPED_TEXT } from '../../../shared/types'
+import { retriesOf, retriesPhrase } from '../../../shared/providerRetry'
 import {
   filterImageAttachmentNames,
   guessMimeTypeFromFilename,
@@ -521,6 +522,16 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       continue
     }
 
+    // A turn's provider retries: one quiet row that counts them, then says the provider recovered.
+    if (msg.kind === 'provider_retry' && msg.providerRetry) {
+      base.metadata = { ...base.metadata as object, providerRetry: msg.providerRetry }
+      base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
+      base.role = 'assistant'
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
     if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction' || msg.kind === 'context_cleared') {
       if (msg.kind === 'context_cleared') base.metadata = { ...base.metadata as object, contextCleared: true }
       if (msg.kind === 'context_compaction') base.metadata = { ...base.metadata as object, compaction: true, compacting: msg.streaming === true,
@@ -693,11 +704,16 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
   return markRecoveredFailures(mergeConsecutiveThoughts(out))
 }
 
-/** The title of a failed turn's error: "Provider error" when the provider refused the request, else "Request failed". */
-export function errorTitle(error: { code?: unknown } | undefined): string {
+/**
+ * The title of a failed turn's error: "Provider error" when the provider refused the request (with the retries it had,
+ * "Provider error after 10/10 retries"), else "Request failed".
+ */
+export function errorTitle(error: { code?: unknown; details?: unknown } | undefined): string {
   const code = typeof error?.code === 'string' ? error.code : ''
   if (code === 'provider_usage_limit') return 'Usage limit reached'
-  return code.startsWith('provider_') ? 'Provider error' : 'Request failed'
+  const retries = retriesOf(error?.details)
+  if (code.startsWith('provider_')) return retries ? `Provider error ${retriesPhrase(retries)}` : 'Provider error'
+  return retries ? `Request failed ${retriesPhrase(retries)}` : 'Request failed'
 }
 
 /** A failed turn's error text: its message, then the reference it was logged under when the message does not name it. */
