@@ -52,6 +52,17 @@
       "expiresAt": "2026-11-18T09:06:23.219Z"
     },
     {
+      "task": "thread-journal-latest-index",
+      "session": "Animatrix-abde56",
+      "machine": "Animatrix",
+      "branch": "thread-journal-latest-index",
+      "paths": [
+        "src/mms/data/ThreadJournal.ts"
+      ],
+      "claimedAt": "2026-11-18T07:21:34.144Z",
+      "expiresAt": "2026-11-18T09:21:34.144Z"
+    },
+    {
       "task": "tray-quit-stops-at-once",
       "session": "Animatrix-0501bc",
       "machine": "Animatrix",
