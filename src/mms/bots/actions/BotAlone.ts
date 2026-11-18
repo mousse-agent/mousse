@@ -5,7 +5,7 @@ export interface ArgumentContract { keys: string[]; digests: Record<string, stri
 /** Addresses and nested destinations cannot gain authority through a content field. */
 function restricted(value: unknown, depth = 0): boolean {
   if (depth > 64) return true
-  if (typeof value === 'string') return /[a-z][a-z0-9+.-]*:\/\/|(?:[\w-]+\.)+[a-z]{2,}\b|@[\w-]+/i.test(value)
+  if (typeof value === 'string') return /[a-z][a-z0-9+.-]*:\/\/|(?:[\p{L}\p{N}_-]+\.)+[\p{L}]{2,}|@/iu.test(value)
   if (Array.isArray(value)) return value.some(v => restricted(v, depth + 1))
   return !!value && typeof value === 'object' && Object.entries(value).some(([k, v]) => PLACE_NAMES.has(normalizedKey(k)) || restricted(v, depth + 1))
 }
