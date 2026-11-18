@@ -9,7 +9,7 @@ export interface PrivateBotDraft {
   dismissed: boolean
   highlighted: boolean
   keep: SecretKeep
-  failed: boolean
+  error?: string
   notice?: string
   saved: readonly Saved[]
 }
@@ -21,7 +21,7 @@ const notify = () => { for (const listener of listeners) listener() }
 export const subscribePrivateBotDrafts = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } }
 export function privateBotDraft(botId: string): PrivateBotDraft {
   let entry=drafts.get(botId)
-  if (!entry) { entry={ busy:false, dismissed:false, highlighted:false, keep:DEFAULT_SECRET_KEEP, failed:false, saved:[] };drafts.set(botId,entry) }
+  if (!entry) { entry={ busy:false, dismissed:false, highlighted:false, keep:DEFAULT_SECRET_KEEP, error:undefined, saved:[] };drafts.set(botId,entry) }
   return entry
 }
 export function updatePrivateBotDraft(botId:string, patch:Partial<PrivateBotDraft>):void {
@@ -40,7 +40,7 @@ export function changePrivateBotDraft(botId:string,text:string):void {
   const entry=privateBotDraft(botId)
   text=replaceKnown(text,entry.saved)
   const privateText=pastedSecretShape(text)!==undefined
-  updatePrivateBotDraft(botId,{text:privateText?text:undefined,dismissed:false,highlighted:false,failed:false})
+  updatePrivateBotDraft(botId,{text:privateText?text:undefined,dismissed:false,highlighted:false,error:undefined})
   useBotsStore.getState().setDraft(botId,privateText?'':text)
 }
 export function savedPrivateBotDraft(botId:string,value:string,name:string):void {

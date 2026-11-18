@@ -3221,7 +3221,7 @@ it('keeping an AWS pair never leaves its secret half in the composer or send', a
 it.each(['edit', 'switch'])('announces a late save after an %s and replaces a retained key', async action => {
   const key='sk-'+ 'L'.repeat(48)
   let answer!: (value:{name:string})=>void
-  const request=vi.fn(()=>new Promise(resolve=>{answer=resolve}))
+  const request=vi.fn((method:string)=>method==='secrets.keepPasted'?new Promise(resolve=>{answer=resolve}):Promise.resolve({requests:[]}))
   window.mousse.platformRequest={request} as never
   await open()
   const field=()=>host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
@@ -3241,7 +3241,7 @@ it.each(['edit', 'switch'])('announces a late save after an %s and replaces a re
   expect(button('Keep as secret')).toBeUndefined()
   await type(field(), `Again ${key}`)
   expect(field().value).not.toContain(key)
-  expect(request).toHaveBeenCalledTimes(1)
+  expect(request.mock.calls.filter(([method])=>method==='secrets.keepPasted')).toHaveLength(1)
   await click(button('Send message'))
   expect(JSON.stringify(fake.client.send.mock.calls)).not.toContain(key)
 })
