@@ -1,10 +1,11 @@
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
+import { registerAutomationMethods } from '../../src/mms/automations/registerMethods'
 import { registerSecretMethods } from '../../src/mms/secrets/registerMethods'
 import { OldMetaReader } from './oldMetaReader'
 import { SECRET_SERVICES } from '../../src/shared/secretServices'
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync, renameSync, lstatSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveSecretBinding } from '../../src/mms/secrets/secretBinding'
@@ -272,13 +273,13 @@ it('does not overwrite unreadable binding data when storing another bound key', 
 it.each(['https://x.home.arpa','https://x.lan','https://127.0.0.1.nip.io','https://10-0-0-1.sslip.io'])('refuses private convention host %s', origin=>{
   expect(()=>resolveSecretBinding({origin})).toThrow()
 })
-it.each(['store', 'setKey'] as const)('keeps existing authority if %s cannot establish that the value is absent', method => {
+it.each((['store', 'setKey'] as const).flatMap(method => ['{', 'null', '[]'].map(contents => [method, contents] as const)))('keeps existing authority if %s cannot establish absence from %s', (method, contents) => {
   const {home,vault,requests}=fixture()
   const binding=resolveSecretBinding({service:'github'})
   vault.store('KEY',VALUE,{threadId:'bot',keep:'saved',binding})
   const path=join(home,'secrets/refs.json')
   const original=readFileSync(path,'utf8')
-  writeFileSync(path,'{')
+  writeFileSync(path,contents)
   expect(()=>method==='store' ? vault.store('KEY','new-value',{threadId:'bot',keep:'saved'}) : vault.setKey('KEY','new-value')).toThrow()
   writeFileSync(path,original)
   expect(vault.bindingFor('KEY')).toEqual(binding)
@@ -327,5 +328,74 @@ it('explains an unreadable binding to the owner without replacing it or saving t
   expect(readFileSync(path,'utf8')).toBe(broken)
   expect(vault.value('SECOND')).toBeUndefined()
   expect(requests.waiting('bot')).toBe(true)
+  requests.dispose()
+})
+
+it.each(['malformed', 'directory'] as const)('still expires keys and deletes in Settings with a %s bindings file', async state => {
+  const {home,requests} = fixture()
+  let now=Date.UTC(2026,10,19)
+  const vault=new SecretVault({profileRoot:home,threadAlive:()=>true,now:()=>now})
+  for (const name of ['A_KEY','B_KEY']) vault.store(name,VALUE,{threadId:'bot',keep:'day'})
+  const binding=resolveSecretBinding({service:'github'})
+  vault.store('EXPIRED_BOUND',VALUE,{threadId:'bot',keep:'day',binding})
+  for (const name of ['REMOVE_BOUND','KEEP_BOUND']) vault.store(name,VALUE,{threadId:'bot',keep:'saved',binding})
+  const path=join(home,'secrets/bindings.json')
+  const original=readFileSync(path,'utf8')
+  if(state==='malformed') writeFileSync(path,'{not json')
+  else {rmSync(path);mkdirSync(path)}
+  now+=25*60*60*1000
+  expect(vault.sweep()).toEqual(['A_KEY','B_KEY','EXPIRED_BOUND'])
+  const adapter=createProfileSecretAdapter({profileRoot:home,inheritProcessEnv:false})
+  for(const name of ['A_KEY','B_KEY','EXPIRED_BOUND']) {
+    expect(vault.value(name)).toBeUndefined()
+    expect(vault.usableIn(name,'bot')).toBe(false)
+    expect(adapter.resolveEnv('${secret:'+name+'}')).toBe('')
+  }
+  const domains=new DomainHandlerRegistry()
+  registerSecretMethods(domains,async()=>({requests,list:()=>vault.list(),delete:name=>vault.delete(name)}))
+  const gui={connection:{clientType:'gui',binding:{profileId:'p',epoch:1},capabilities:new Set<string>()}} as unknown as HandlerContext
+  await expect(domains.dispatch(gui,'secrets.delete',{name:'REMOVE_BOUND'})).resolves.toEqual({deleted:true})
+  expect(vault.value('REMOVE_BOUND')).toBeUndefined()
+  expect(existsSync(join(home,'secrets/bound/REMOVE_BOUND'))).toBe(false)
+  expect(existsSync(join(home,'secrets/bound/KEEP_BOUND'))).toBe(true)
+  expect(()=>adapter.resolveEnv('${secret:KEEP_BOUND}')).toThrow(/bound/)
+  expect(()=>vault.store('REMOVE_BOUND','fresh-value',{threadId:'bot',keep:'saved'})).toThrow(/unavailable|binding/i)
+  if(state==='malformed') expect(readFileSync(path,'utf8')).toBe('{not json')
+  else {expect(lstatSync(path).isDirectory()).toBe(true);rmSync(path)}
+  writeFileSync(path,original)
+  // An intact entry still denies the name after the unreadable file becomes readable again.
+  expect(vault.bindingFor('REMOVE_BOUND')).toEqual(binding)
+  requests.dispose()
+})
+it('keeps a live value guarded when deletion cannot read the value file', () => {
+  const {home,vault,requests}=fixture()
+  vault.store('KEY',VALUE,{threadId:'bot',keep:'saved',binding:resolveSecretBinding({service:'github'})})
+  writeFileSync(join(home,'secrets/bindings.json'),'{not json')
+  const refs=join(home,'secrets/refs.json'), original=readFileSync(refs,'utf8')
+  writeFileSync(refs,'{')
+  expect(()=>vault.delete('KEY')).toThrow()
+  expect(existsSync(join(home,'secrets/bound/KEY'))).toBe(true)
+  writeFileSync(refs,original)
+  expect(()=>createProfileSecretAdapter({profileRoot:home,inheritProcessEnv:false}).resolveEnv('${secret:KEY}')).toThrow(/bound/)
+  requests.dispose()
+})
+it.each([false,true])('keeps parser details out of the owner key-save error with a binding=%s', async bound => {
+  const {home,vault,requests}=fixture()
+  if(bound) vault.store('KEY',VALUE,{threadId:'bot',keep:'saved',binding:resolveSecretBinding({service:'github'})})
+  else {mkdirSync(join(home,'secrets'),{recursive:true})}
+  const path=join(home,'secrets/refs.json')
+  // An invalid prefix makes V8 quote a file excerpt in its SyntaxError.
+  const privatePart='private-file-fragment-abcdef'
+  const contents=privatePart+' {"OTHER":"'+VALUE+'"}'
+  writeFileSync(path,contents)
+  const domains=new DomainHandlerRegistry()
+  registerAutomationMethods(domains,async()=>({keys:{list:()=>vault.savedKeyNames(),set:(name,value)=>vault.setKey(name,value)}}))
+  const gui={connection:{clientType:'gui',binding:{profileId:'p',epoch:1},capabilities:new Set<string>()}} as unknown as HandlerContext
+  let error:unknown
+  try {await domains.dispatch(gui,'automations.keys.set',{name:'KEY',value:'new-value'})} catch(failure) {error=failure}
+  expect(error).toBeInstanceOf(Error)
+  expect((error as Error).message).toBe('The secret store could not be read. Nothing was stored.')
+  for(const part of [privatePart,privatePart.slice(0,10),VALUE,VALUE.slice(0,12),'OTHER','Unexpected','JSON','position','SyntaxError']) expect(String(error)).not.toContain(part)
+  expect(readFileSync(path,'utf8')).toBe(contents)
   requests.dispose()
 })
