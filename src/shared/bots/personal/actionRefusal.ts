@@ -25,7 +25,7 @@ export function botActionRefusalText(code: BotActionRefusalCode, names: BotActio
     case 'bot_action_settled': return 'This was already answered.'
     case 'bot_action_gone': return "This can't be sent any more."
     case 'bot_action_paused': return `Resume ${names.botName || 'this bot'} to send this.`
-    case 'bot_action_unreachable': return `${names.serverName || 'The service'} couldn't be reached, so nothing was sent.`
+    case 'bot_action_unreachable': return `${names.serverName || 'The service'} couldn't be reached. Nothing was sent. Try again when it is available.`
     case 'bot_action_too_large': return 'Open it on the computer to send.'
   }
 }
