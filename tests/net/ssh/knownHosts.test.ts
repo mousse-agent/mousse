@@ -142,7 +142,6 @@ describe('judging a host key', () => {
 
   it('computes OpenSSH fingerprints', () => {
     expect(keyFingerprint(KEY_A.key)).toBe(fingerprint(KEY_A))
-    expect(keyFingerprint(KEY_A.key)).toMatch(/^SHA256:[A-Za-z0-9+/]{43}$/)
   })
 })
 

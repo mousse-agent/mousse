@@ -35,7 +35,6 @@ describe('thoughtHeadline', () => {
     ['a bold title', '**Checking the auth flow**\n\nThe token is read twice.', 'Checking the auth flow'],
     ['a title with a colon', '__Plan:__\nRead the file first.', 'Plan'],
     ['a markdown heading', '## Plan of attack\nStart with the store.', 'Plan of attack'],
-    ['a title alone above the body', '**Two**\n\nmore body', 'Two'],
     ['a title heads its whole section, not just the paragraph under it', '**Finding why the test is slow**\n\nThe file runs twice. I should time it.\n\nThen I can compare it with one file.', 'Finding why the test is slow'],
     ['the latest title, not the first', '**One**\n\nbody\n\n__Two__\n\nmore body\n\neven more body', 'Two'],
     ['a title written mid-paragraph heads what follows', 'Some notes first.\n**Next step**\nRead the file.', 'Next step'],

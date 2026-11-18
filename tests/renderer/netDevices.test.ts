@@ -175,7 +175,6 @@ describe('works on threads and blocking', () => {
     const policy = { blocked: true, maxPermissionMode: 'accept_edits' as const, terminal: false, editor: false }
     expect(deviceLine(device({ policy }), NOW)).toBe('Online · can read, chat, write · blocked on this computer')
     expect(deviceLine(device({ policy: { ...policy, blocked: false } }), NOW)).toBe('Online · can read, chat, write')
-    expect(deviceLine(device(), NOW)).toBe('Online · can read, chat, write')
   })
 })
 

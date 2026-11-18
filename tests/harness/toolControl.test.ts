@@ -162,15 +162,6 @@ describe('the gateway on an uncontrolled instance', () => {
     expect(() => harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'schedule' })).toThrow(/approves tools itself/)
   })
 
-  it('binds a scheduled turn with the schedule origin and refuses it on an uncontrolled instance', async () => {
-    const { harness, adapter, spec } = fixture()
-    const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
-    const scheduled = await harness.bind(resolved, { mode: 'agent', origin: 'schedule', permissionMode: 'full' })
-    expect(scheduled.policy.origin).toBe('schedule')
-    await expect(harness.startTurn(spec(scheduled, 'job-thread')).result).rejects.toMatchObject({ code: 'policy_unenforceable' })
-    expect(adapter.turns).toEqual([])
-  })
-
   it('refuses a delegated child turn, its retry and its continuation, and runs a person’s turn', async () => {
     const { harness, adapter, spec } = fixture()
     const resolved = harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })

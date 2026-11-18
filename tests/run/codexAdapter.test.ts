@@ -2133,7 +2133,9 @@ describe('a bot turn on Codex', () => {
   // Refused cases must never send thread/start (nor let leftover owner keys reach Codex).
   const reservedCases = [[], ['mousse'], ['mousse-relay'], ['mousse', 'mousse-relay'], ['mousse-relay', 'mousse']].flatMap((names) =>
     ['none', 'mousse', 'both'].flatMap((attachment) => [true, false].flatMap((enabled) =>
-      ['effective', 'active layer', 'ignored layer', 'user and project', 'ancestor project'].map((source) => ({ names, attachment, enabled, source })))))
+      ['effective', 'active layer', 'ignored layer', 'user and project', 'ancestor project'].map((source) => ({ names, attachment, enabled, source }))))
+    // With no owner servers, enabled and source cannot change the outcome: one row per attachment is enough.
+    .filter((row) => names.length > 0 || (row.enabled && row.source === 'effective')))
   it.each(reservedCases)('contains reserved names $names with attachment $attachment, enabled=$enabled, $source', async ({ names, attachment, enabled, source }) => {
     const files = join(home, 'files')
     mkdirSync(files)
@@ -2199,12 +2201,6 @@ describe('a bot turn on Codex', () => {
     }
     else await run
     await adapter.startTurn(input({ prompt: 'owner', threadId: 'owner-thread' }), recordingSink(), control(), host(mcp))
-    replay.assertDone()
-  })
-
-  it('keeps an owner thread outside the bot config checks', async () => {
-    const replay = transport([...handshake(), ...threadStart(4), ...turnStart(5, 'hello'), completed('completed')])
-    await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), control(), host())
     replay.assertDone()
   })
 

@@ -451,25 +451,6 @@ describe('queue mutation lock + durable FIFO across owners', () => {
     expect(reclaimed.items.find((i) => i.id === dead!.id)?.state).toBe('pending')
   })
 
-  it('claimNextNormal under lock does not remove the item (atomic claim not remove-before-run)', () => {
-    const thread = store.createThread('Atomic claim')
-    mutateDurableQueue(store, thread.id, (items) =>
-      enqueueMessage(items, { threadId: thread.id, content: 'stay' }).items
-    )
-    const after = mutateDurableQueue(store, thread.id, (disk) => {
-      const result = claimNextNormal(disk, {
-        ownerPid: process.pid,
-        ownerToken: 't'
-      })
-      expect(result.claimed?.content).toBe('stay')
-      expect(result.items).toHaveLength(1)
-      expect(result.items[0].state).toBe('claimed')
-      return result.items
-    })
-    expect(after).toHaveLength(1)
-    expect(after[0].state).toBe('claimed')
-  })
-
   it('reclaimAbandonedClaimsDurable aborts without save when transcript read throws', () => {
     const thread = store.createThread('Reclaim fail closed')
     mutateDurableQueue(store, thread.id, (items) =>

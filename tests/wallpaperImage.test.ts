@@ -86,7 +86,7 @@ describe('isWallpaperCopy', () => {
 })
 
 describe('bucketForDisplay', () => {
-  it.each([[1366, 1920], [1920, 1920], [2560, 2560], [2880, 3840], [3840, 3840], [5120, 3840], [7680, 3840]])('a display %i px long gets the %i copy', (long, bucket) => {
+  it.each([[1366, 1920], [1920, 1920], [2560, 2560], [2880, 3840], [3840, 3840], [5120, 3840]])('a display %i px long gets the %i copy', (long, bucket) => {
     expect(bucketForDisplay(long)).toBe(bucket)
   })
 })

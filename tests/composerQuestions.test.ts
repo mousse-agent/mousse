@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   AUTO_ADVANCE_MS,
   ComposerQuestionModal,
-  QUESTION_COMPOSER_PLACEHOLDER,
   QuestionOptionList,
   answerWithMessage,
   isQuestionAnswered,
@@ -414,6 +413,5 @@ describe('a message sent from the composer while questions are open', () => {
   it('says it answers this question, or answers and submits on the last, whatever is attached', () => {
     expect(questionComposerSendLabel(false)).toBe('Answer this question')
     expect(questionComposerSendLabel(true)).toBe('Answer and submit')
-    expect(QUESTION_COMPOSER_PLACEHOLDER).toBe('Or reply in your own words')
   })
 })

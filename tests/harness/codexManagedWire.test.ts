@@ -366,7 +366,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
   }, 180_000)
 
   it('a helper that cannot get a token fails the turn', async () => {
-    const { turn, instanceId, runtime } = await setup()
+    const { turn, instanceId } = await setup()
     await turn('wire-helper', 'Hi.')
     // Every lease of the entry is dropped while its process runs: the next token request fails.
     broker.revokeInstance(instanceId)
@@ -374,7 +374,6 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     openai.answer = (request) => (request.authorization ? { status: 200, sse: reply('Never.') } : { status: 401, body: upstream('missing_authorization', 'No bearer.') })
     const result = await failure(turn('wire-helper', 'Again.'), instanceId)
     expect(result).toMatchSnapshot()
-    expect(runtime).toBeDefined()
   }, 120_000)
 
   it('model discovery: a turn on an explicit model, with and without the catalog URL and api_key_model_discovery', async () => {

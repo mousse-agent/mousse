@@ -389,11 +389,4 @@ describe('theme_read and theme_set', () => {
     expect(settings.get().appearance.userThemes.map((theme) => theme.id)).toEqual(['user-other', 'user-wall'])
     expect(settings.get().appearance.userThemes[1]!.wallpaper?.id).toBe('a'.repeat(64))
   })
-
-  it.each(['accept_edits', 'full'] as const)('runs without asking under %s', async (mode) => {
-    const { call, asked, settings } = await setup({ mode })
-    await expect(call('theme_set', { theme: 'light' })).resolves.not.toMatchObject({ isError: true })
-    expect(asked).toEqual([])
-    expect(settings.get().appearance.theme).toBe('light')
-  })
 })

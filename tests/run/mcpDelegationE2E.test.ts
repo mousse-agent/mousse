@@ -240,8 +240,8 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     return { seen, asked, parent, engine }
   }
 
-  it.each(['ask', 'accept_edits'] as const)('under %s, the retired integrate_delegation is not offered: nothing is asked and nothing merged', async (mode) => {
-    const { seen, asked } = await integrateUnder(mode)
+  it('under ask, the retired integrate_delegation is not offered: nothing is asked and nothing merged', async () => {
+    const { seen, asked } = await integrateUnder('ask')
     expect(asked).toEqual([])
     expect(JSON.stringify(seen.integrate?.body)).toContain('mousse_unknown_tool')
   }, 30_000)

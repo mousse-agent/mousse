@@ -217,7 +217,6 @@ describe.skipIf(!chrome.ok)('managed Chromium drain', () => {
       tree = await captureOwnedProcessTree(record.pid, { parentHandleAlive: true })
     }
     const descendantPids = [record.pid, ...tree.descendants.map((item) => item.pid), ...(record.descendants ?? []).map((item) => item.pid)]
-    expect(descendantPids.some((pid) => pid === record.pid)).toBe(true)
     await broker.shutdown({ timeoutMs: 20_000 })
     expect(broker.getActiveCount()).toBe(0)
     for (const pid of new Set(descendantPids)) {

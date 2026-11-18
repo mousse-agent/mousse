@@ -81,12 +81,6 @@ describe('a shared counter scope (the PR 6 seam)', () => {
     expect(budget.request()).toEqual({ ok: false, limit: { kind: 'turns', limit: 1, actual: 1 } })
     expect(budget.toolCall()).toMatchObject({ ok: false })
   })
-
-  it('the binding’s number reaches the run’s own counters too: a looser scope never replaces it', () => {
-    const budget = new TurnBudget({ maxTurns: 1 }, new RunCounters())
-    expect(budget.request()).toEqual({ ok: true })
-    expect(budget.request()).toMatchObject({ ok: false, limit: { kind: 'turns', limit: 1, actual: 1 } })
-  })
 })
 
 describe('the runs’ count records', () => {

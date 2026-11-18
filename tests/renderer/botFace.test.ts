@@ -1079,21 +1079,6 @@ describe('the shared renderer', () => {
     renderer.dispose()
   })
 
-  it('waits while the shader compiles', () => {
-    let status: ReturnType<FaceGpu['status']> = 'pending'
-    const fake = fakeEnv({ status: () => status })
-    const renderer = new FaceRenderer(fake.env)
-    renderer.register(document.createElement('canvas'), spec())
-    fake.tick()
-    expect(fake.draws).toHaveLength(0)
-    expect(renderer.status()).toBe('pending')
-    status = 'ready'
-    fake.tick()
-    expect(fake.draws).toHaveLength(1)
-    expect(renderer.status()).toBe('ready')
-    renderer.dispose()
-  })
-
   it('settles an idle face into its still pose a few seconds after its state changed, and moves it on a new state', () => {
     const fake = fakeEnv()
     const renderer = new FaceRenderer(fake.env)

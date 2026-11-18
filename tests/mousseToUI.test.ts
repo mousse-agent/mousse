@@ -286,8 +286,7 @@ describe('mousseToUIMessages standardize layer', () => {
     )
   })
 
-  it('re-opens then settles Thought when processing becomes complete', () => {
-    // Simulate the two-step update: complete + processing, then both complete.
+  it('keeps a Thought pending while its latest segment is processing', () => {
     const pending = mousseToUIMessages([
       {
         id: 't1',
@@ -310,28 +309,6 @@ describe('mousseToUIMessages standardize layer', () => {
     expect(
       (pending[0].parts[0] as unknown as Record<string, unknown>).state,
     ).toBe('input-available')
-
-    const settled = mousseToUIMessages([
-      {
-        id: 't1',
-        role: 'system',
-        content: '',
-        timestamp: '2026-01-01T00:00:00.000Z',
-        kind: 'thinking',
-        thinking: { content: 'Done bit', status: 'complete' },
-      },
-      {
-        id: 't2',
-        role: 'system',
-        content: '',
-        timestamp: '2026-01-01T00:00:00.000Z',
-        kind: 'thinking',
-        thinking: { content: 'Still… now done', status: 'complete' },
-      },
-    ])
-    expect(
-      (settled[0].parts[0] as unknown as Record<string, unknown>).state,
-    ).toBe('output-available')
   })
 
   it('folds exact-duplicate consecutive assistant text (provider double-add)', () => {

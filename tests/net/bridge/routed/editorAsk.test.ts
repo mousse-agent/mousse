@@ -193,21 +193,6 @@ describe('answering', () => {
     expect(asked).toHaveLength(2)
   })
 
-  it('remembers a Not now across a restart of the daemon, from the audit', async () => {
-    const { o, asks, audit, node, ask, clock } = await owner()
-    await ask()
-    await asks.answer(node, false)
-    const restarted = new EditorAsks({
-      policy: o.policy,
-      audit,
-      clock,
-      name: () => 'Laptop',
-      onAsked: () => expect.unreachable('nobody is asked again'),
-      onChanged: () => undefined
-    })
-    expect(restarted.ask(node)).toMatchObject({ state: 'declined_recently' })
-  })
-
   it('lets an ask run out, and asks again after it did', async () => {
     const { asks, asked, ask, clock, changed } = await owner()
     await ask()

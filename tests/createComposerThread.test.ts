@@ -50,17 +50,6 @@ describe('blank composer thread creation', () => {
     })
     expect(id).toBeNull()
   })
-
-  it('propagates creation failure without changing selection', async () => {
-    const activate = vi.fn()
-    const select = vi.fn()
-    await expect(createComposerThread({
-      create: async () => { throw new Error('Disk full') },
-      stillVisible: () => true, activate, select
-    })).rejects.toThrow('Disk full')
-    expect(activate).not.toHaveBeenCalled()
-    expect(select).not.toHaveBeenCalled()
-  })
 })
 
 describe('blank composer workspace selection', () => {

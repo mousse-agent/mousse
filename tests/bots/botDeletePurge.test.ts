@@ -92,31 +92,21 @@ describe('the 30-day purge', () => {
     expect(f.purged).toEqual([botId])
   })
 
-  it('a purge that fails is retried by the next sweep', async () => {
-    const { botId } = await workedBot()
-    await f.bots.service.delete(botId)
-    const trash = f.host.trashThread!
-    f.host.trashThread = async () => { throw new Error('busy') }
-    expect(await f.bots.sweepDeleted(f.clock.now + 31 * DAY)).toEqual([])
-    expect(f.host.definitions.get(botId)).toBeDefined()
-    expect(f.store.deletedRegistry().map((row) => row.botId)).toEqual([botId])
-    f.host.trashThread = trash
-    expect(await f.bots.sweepDeleted(f.clock.now + 31 * DAY)).toEqual([botId])
-    expect(f.store.deletedRegistry()).toEqual([])
-  })
-
-  it('a purge that stops at its threads leaves the memory: capture never copies a half-purged bot back in', async () => {
+  it('a purge that fails at its threads is retried by the next sweep and leaves the memory meanwhile: capture never copies a half-purged bot back in', async () => {
     const { botId } = await workedBot()
     await f.bots.service.delete(botId)
     const trash = f.host.trashThread!
     f.host.trashThread = async () => { throw new Error('busy') }
     expect(await f.bots.sweepDeleted(f.clock.now + 31 * DAY)).toEqual([])
     expect(f.purged).toEqual([])
+    expect(f.host.definitions.get(botId)).toBeDefined()
+    expect(f.store.deletedRegistry().map((row) => row.botId)).toEqual([botId])
     // Catch-up copies no thread of a deleted bot.
     expect(f.store.captureThreads().filter((thread) => thread.botId === botId)).toEqual([])
     f.host.trashThread = trash
     expect(await f.bots.sweepDeleted(f.clock.now + 31 * DAY)).toEqual([botId])
     expect(f.purged).toEqual([botId])
+    expect(f.store.deletedRegistry()).toEqual([])
   })
 
   it('two sweeps at once purge a bot once', async () => {

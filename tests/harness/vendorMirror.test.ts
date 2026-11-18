@@ -4,7 +4,7 @@
  * profile on disk started, stopped, edited the way an older build or a crash leaves it, and started
  * again. No CLI or agent runs: sign-in checks are fakes and PATH is empty.
  */
-import { readFileSync, readdirSync, rmSync } from 'node:fs'
+import { readFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
@@ -313,7 +313,6 @@ describe('sign-out across versions', () => {
     expect(next.harness.listedLlmProviders({ kind: 'device' }).some((entry) => entry.instanceId === 'claude')).toBe(false)
     expect(next.harness.configuredProviderIds()).not.toContain('claude-subscription')
     await expect(bindTurn(next, 'claude', 'claude-subscription')).rejects.toMatchObject({ code: 'signed_out' })
-    expect(profile).not.toBe(next)
   })
 })
 
@@ -411,7 +410,6 @@ describe('a vendor file the service cannot save', () => {
     expect(next.harness.launchFor('claude')).toEqual({ binaryPath: bin, args: ['--older'] })
     expect(readVendor(dir, 'claude')).toMatchObject({ binaryPath: bin, args: ['--older'] })
     expect((await snapshotOf(next, 'claude')).settingsNotice).toBeUndefined()
-    expect(profile).not.toBe(next)
   })
 
   it('the mirror throws the settings error before it assigns anything', () => {
@@ -505,7 +503,6 @@ describe('the marker is written at creation', () => {
     expect(storedConfig(store, 'claude').args).toBeNull()
     expect(next.harness.launchFor('claude')).toEqual({})
     expect((await snapshotOf(next, 'claude')).settingsNotice).toBeUndefined()
-    expect(profile).not.toBe(next)
   })
 })
 
@@ -539,10 +536,6 @@ describe('source guard: only the mirror assigns mirrored keys in a vendor servic
     join(root, 'vendors', 'codex', 'CodexProviderService.ts'),
     join(root, 'acp', 'presets', 'antigravity', 'AntigravityProviderService.ts')
   ]
-
-  it('scans the three vendor services', () => {
-    for (const file of SERVICES) expect(readdirSync(join(file, '..')).length).toBeGreaterThan(0)
-  })
 
   it.each(SERVICES)('%s assigns no mirrored key outside the mirror', (file) => {
     expect(violations(readFileSync(file, 'utf8'))).toEqual([])

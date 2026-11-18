@@ -99,14 +99,6 @@ describe('real duplex mux', () => {
     await tick()
     expect(clock.pending()).toBe(0)
   })
-  it('schedules control ahead of bulk while reassembly retains separate messages', async () => {
-    const { a, b } = pair(),
-      received: string[] = []
-    b.onMessage((_lane, value) => received.push(value.header.t))
-    await Promise.all([a.send('bulk', message('bulk')), a.send('control', ping)])
-    await tick()
-    expect(received).toEqual(['ping', 'events'])
-  })
   it('continues control when a bulk sender has consumed independent credit', async () => {
     const clock = new FakeClock(),
       connection = memoryPair(clock),

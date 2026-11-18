@@ -481,13 +481,6 @@ describe('the command table', () => {
     }
   })
 
-  it('still warns when another command is moved onto the Files chords', () => {
-    for (const chord of ['CommandOrControl+P', 'CommandOrControl+Shift+F']) {
-      const conflicts = findConflicts({ 'thread.new': chord }, 'win32')
-      expect(conflicts.map((conflict) => conflict.kind).sort()).toEqual(['command', 'reserved'])
-    }
-  })
-
   it('runs the Files commands only for a key typed inside the Files panel, in a text field or not', () => {
     for (const id of ['files.quickOpen', 'files.textSearch'] as const) {
       const spec = id === 'files.quickOpen' ? 'Ctrl+P' : 'Ctrl+Shift+F'

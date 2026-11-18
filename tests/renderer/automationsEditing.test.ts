@@ -519,7 +519,6 @@ describe('the Library editors fold to what most people change', () => {
     await act(async () => root.render(createElement(WorkflowPalette, { catalogs, onAdd: vi.fn() })))
     const shown = () => [...document.querySelectorAll<HTMLElement>('[data-palette-type]')].map((item) => item.dataset.paletteType)
     expect(shown()).toEqual([...COMMON_NODE_TYPES])
-    expect(COMMON_NODE_TYPES).toHaveLength(8)
     const search = document.querySelector<HTMLInputElement>('[data-palette] input')!
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, 'browser')

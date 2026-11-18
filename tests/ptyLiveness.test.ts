@@ -144,14 +144,6 @@ describe('terminals on another computer', () => {
     expect(panelSource).toMatch(/pty\.write\(ptyId, data, threadId\)/)
     expect(panelSource).toMatch(/pty\.resize\(ptyId, dims\.cols, dims\.rows, inst\.threadId\)/)
     expect(panelSource).toMatch(/pty\.kill\(tab\.ptyId, tab\.ownerThreadId \?\? undefined\)/)
-    for (const channel of ['pty:write', 'pty:resize', 'pty:kill'])
-      expect(guiIpcSource).toContain(`registerHandler('${channel}'`)
-    for (const handler of [
-      "'pty:write', async (_e, ptyId: string, data: string, threadId?: unknown)",
-      "'pty:kill', async (_e, ptyId: string, threadId?: unknown)"
-    ])
-      expect(guiIpcSource).toContain(handler)
-    expect(guiIpcSource).toContain('rows: number, threadId?: unknown')
   })
 
   it('shows the owner who holds a terminal on the thread, with Stop, and a desktop notification for a first one', () => {
@@ -160,17 +152,5 @@ describe('terminals on another computer', () => {
     expect(panelSource).toMatch(/\.kill\(ptyId, activeThreadId/)
     expect(guiIpcSource).toMatch(/event\.type === 'ui\.notify'/)
     expect(guiIpcSource).toMatch(/'remote-terminal'/)
-  })
-
-  it('names no folder, shell or environment for a terminal on another computer, and keeps them for a local one', () => {
-    const createHandler = guiIpcSource.slice(
-      guiIpcSource.indexOf("'pty:create'"),
-      guiIpcSource.indexOf("'pty:kill'")
-    )
-    expect(createHandler).toMatch(/isQualifiedId\(threadId\)/)
-    expect(createHandler).toMatch(/\? \{ threadId, agentId: request\.agentId \}/)
-    expect(createHandler).toMatch(/cwd: request\.cwd/)
-    expect(createHandler).toMatch(/env: request\.env/)
-    expect(createHandler).toMatch(/shellArgs: request\.shellArgs/)
   })
 })

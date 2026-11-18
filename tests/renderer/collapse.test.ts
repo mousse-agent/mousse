@@ -73,22 +73,13 @@ describe('Collapse', () => {
     expect(shell()?.dataset.motion).toBe('exit')
     expect(shell()?.hasAttribute('inert')).toBe(true)
     expect(shell()?.getAttribute('aria-hidden')).toBe('true')
-    advance(COLLAPSE_CLOSE_MS - 10)
-    expect(shell()).not.toBeNull()
-    advance(100)
-    expect(host.innerHTML).toBe('')
-  })
-
-  it('keeps the rows mounted and inert for the whole close, then unmounts them', () => {
-    draw({ open: true })
-    draw({ open: false })
-    expect(host.querySelectorAll('.ui-collapse > .ui-collapse-clip > ul.rows > li')).toHaveLength(3)
+    // The rows stay mounted, inside the inert shell, for the whole close.
     expect(host.querySelector('.ui-collapse ul.rows')?.closest('[inert]')).toBe(shell())
     advance(COLLAPSE_CLOSE_MS - 10)
-    expect(host.querySelectorAll('li')).toHaveLength(3)
-    expect(shell()?.hasAttribute('inert')).toBe(true)
+    expect(shell()).not.toBeNull()
+    expect(host.querySelectorAll('.ui-collapse > .ui-collapse-clip > ul.rows > li')).toHaveLength(3)
     advance(100)
-    expect(host.querySelectorAll('li')).toHaveLength(0)
+    expect(host.innerHTML).toBe('')
   })
 
   it('reopening while it closes keeps the content and turns back', () => {

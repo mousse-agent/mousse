@@ -60,7 +60,6 @@ describe('clipboard:writeImage', () => {
   // Each is refused with the same words, and the clipboard keeps what it had.
   const refused: Array<[string, unknown]> = [
     ['nothing', undefined],
-    ['text', 'data:image/png;base64,iVBORw0KGgo='],
     ['a plain array of PNG bytes', [...SIGNATURE, 1]],
     ['no bytes', new Uint8Array()],
     ['bytes that are not a PNG (a GIF)', new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0])],

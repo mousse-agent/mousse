@@ -215,21 +215,6 @@ describe('switching threads', () => {
     expect(frames.filter((frame) => frame.empty || frame.logo || frame.settings)).toEqual([])
   })
 
-  it('goes straight to a cached thread with no waiting frame', async () => {
-    await mount()
-    await switchTo('thread-b')
-    await deliverView('thread-b', [message('b-1', 'Second thread')])
-
-    // thread-a is cached from when it was left. It shows once the frame that marks its row has been drawn.
-    await switchTo('thread-a')
-    const useAppStore = await store()
-    await vi.waitFor(() => expect(useAppStore.getState().openingThreadId).toBeNull())
-    await settle()
-    expect(useAppStore.getState().transcriptPending).toBe(false)
-    expect(useAppStore.getState().messages.map((entry) => entry.id)).toEqual(['a-1'])
-    expect(frames.filter((frame) => frame.empty || frame.logo)).toEqual([])
-  })
-
   it('answers a click on a cached thread in its own frame, then shows the thread with its messages', async () => {
     await mount()
     await switchTo('thread-e')

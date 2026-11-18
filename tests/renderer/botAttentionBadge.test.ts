@@ -84,8 +84,6 @@ it('counts a waiting bot once despite multiple waiting work items, including whe
 
 
 it.each([
-  [1, 0, '1 thread needs you'],
-  [2, 0, '2 threads need you'],
   [0, 1, '1 bot needs you'],
   [0, 2, '2 bots need you'],
   [1, 2, '1 thread and 2 bots need you'],

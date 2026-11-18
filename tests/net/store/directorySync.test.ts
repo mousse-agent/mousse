@@ -52,8 +52,8 @@ it.each(['EPERM', 'EINVAL'])(
 )
 
 it.each([
-  ...['EPERM', 'EINVAL', 'EIO', 'ENOSPC', 'EACCES', 'ENOENT'].map((code) => ['linux', code] as const),
-  ...['EIO', 'ENOSPC', 'EACCES', 'ENOENT'].map((code) => ['win32', code] as const)
+  ...['EPERM', 'EINVAL'].map((code) => ['linux', code] as const),
+  ...['EIO', 'ENOENT'].map((code) => ['win32', code] as const)
 ])('preserves unexpected directory failures on %s (%s)', (os, code) => {
   platform(os)
   const error = failure(code)

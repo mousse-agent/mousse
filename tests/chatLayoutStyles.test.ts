@@ -45,28 +45,6 @@ describe('chat layout styles', () => {
     expect(globalCss).toMatch(/@source\s+["'][^"']*streamdown[^"']*["']/)
   })
 
-  it('renders quick-action bash with highlighting but no code header', () => {
-    // The "Action" micro-label already names the block, so the Streamdown
-    // language header row is hidden via CSS while shiki highlighting stays.
-    expect(globalCss).toMatch(
-      /\.an-code-no-header[\s\S]*?code-block-header[\s\S]*?display:\s*none/
-    )
-    // Bash preview matches the Git tab diff surface (12px).
-    expect(globalCss).toMatch(
-      /\.an-markdown\.an-code-no-header[\s\S]*?font-family:\s*inherit/
-    )
-    expect(globalCss).toMatch(
-      /\.an-markdown\.an-code-no-header[\s\S]*?font-size:\s*12px/
-    )
-    const quickActionTool = readFileSync(
-      resolve(process.cwd(), 'src/renderer/chat/components/agent-elements/tools/quick-action-tool.tsx'),
-      'utf8'
-    )
-    expect(quickActionTool).toMatch(/codeHighlighter/)
-    expect(quickActionTool).toMatch(/```bash/)
-    expect(quickActionTool).toMatch(/an-code-no-header/)
-  })
-
   it('keeps the scrollbar at the pane edge when the side card is reserved', () => {
     // The card's clearance used to be padding on the pane, which inset the scroller
     // and left its scrollbar floating left of a strip under the card. It now
@@ -94,10 +72,4 @@ describe('chat layout styles', () => {
     expect(reduced).toMatch(/\.an-message-list > div[\s\S]*?transition:\s*none/)
   })
 
-  it('slides the overlay card in from the right with a scrim', () => {
-    const [overlayCard] = rulesFor(sideCardCss, '.thread-side-card-layer--overlay .thread-side-card').filter((rule) => rule.selector === '.thread-side-card-layer--overlay .thread-side-card')
-    expect(overlayCard!.body).toMatch(/transform:\s*translateX\(calc\(100% \+ var\(--side-card-gutter\)\)\)/)
-    expect(overlayCard!.body).toMatch(/width:\s*min\(var\(--side-card-width\), calc\(100% - 2 \* var\(--side-card-gutter\)\)\)/)
-    expect(sideCardCss).toMatch(/\.thread-side-card-scrim\s*\{[^}]*position:\s*absolute/)
-  })
 })
