@@ -21,7 +21,7 @@ import { connect, createServer, type Socket } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Spawned } from '../../net/bridge/routed/terminalFixture'
-import { approveAll, codeOf, deviceState, type Computer, type Fabric } from './harness'
+import { approveAll, codeOf, deviceState, eventually, type Computer, type Fabric } from './harness'
 
 export type Role = 'host' | 'caller'
 
@@ -252,7 +252,7 @@ export function keepHostBuilds(hello: { host_build: string; host_app_build: stri
 }
 
 /** The row `on` keeps for the endpoint `endpoint`, in any state but removed. */
-function rowOf(on: Computer, endpoint: string) {
+export function rowOf(on: Computer, endpoint: string) {
   return on.mms.netEngine
     .peerRows()
     .find((row) => row.endpoint === endpoint && row.state !== 'removed')
@@ -298,6 +298,11 @@ export function hostSide(
       return (await computer.dispatch('netEngine.invite', {}, true)).uri
     },
     /** What `name`'s Devices list shows for `endpoint` (`none` without a row). */
+    /** The row `name` keeps for `endpoint`: its pairing state and what its Devices list shows. */
+    row: ({ name, endpoint }: { name: string; endpoint: string }) => {
+      const row = rowOf(get(name), endpoint)
+      return row ? { state: row.state, shown: deviceState(get(name), row.localId) ?? null } : null
+    },
     state: ({ name, endpoint }: { name: string; endpoint: string }) => {
       const row = rowOf(get(name), endpoint)
       return row ? (deviceState(get(name), row.localId) ?? row.state) : 'none'
@@ -337,4 +342,20 @@ function echo(shell: Spawned): void {
       if (line) shell.pty.say(`echo:${line}\r\n`)
     }
   }
+}
+
+/**
+ * Waits until `computer`'s row for the host's `name` and that row's own for `computer` both read Connected; else
+ * says what each reads.
+ */
+export function bothConnected(link: Link, computer: Computer, node: string, name: string) {
+  return eventually(async () => {
+    const here = computer.mms.netEngine.peerRows().find((row) => row.localId === node)
+    const shown = deviceState(computer, node as never)
+    const there = await link.ask('row', { name, endpoint: computer.endpoint })
+    if (shown !== 'connected' || there?.shown !== 'connected')
+      throw new Error(
+        `${computer.name}: ${here?.state}/${shown}; ${name}: ${there ? `${there.state}/${there.shown}` : 'no row'}`
+      )
+  }, 60_000)
 }

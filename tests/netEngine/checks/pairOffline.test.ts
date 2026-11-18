@@ -15,8 +15,6 @@
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   codeOf,
-  deviceState,
-  eventually,
   Fabric,
   REAL_HELPER,
   recordedReason,
@@ -24,6 +22,7 @@ import {
   type Computer
 } from './harness'
 import {
+  bothConnected,
   dialLink,
   hostSide,
   internetReached,
@@ -101,12 +100,7 @@ describe('phase1a.pair-offline', () => {
       })
     )
     const there = { name: 'mac', endpoint: pc.endpoint }
-    await step('one_way_stuck', () =>
-      eventually(async () => {
-        expect(deviceState(pc, joined.node)).toBe('connected')
-        expect(await link.ask('state', there)).toBe('connected')
-      }, 60_000)
-    )
+    await step('one_way_stuck', () => bothConnected(link, pc, joined.node, 'mac'))
     // Each computer dials the other.
     await step('one_way_stuck', () => fabric.connect(pc, joined.node))
     await step('one_way_stuck', () => link.ask('dial', there))

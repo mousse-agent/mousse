@@ -27,6 +27,7 @@ import {
   type Computer
 } from './harness'
 import {
+  bothConnected,
   dialLink,
   hostSide,
   keepHostBuilds,
@@ -103,12 +104,7 @@ describe('phase1a.shared-computer', () => {
     const joined = await step('not_paired', () =>
       computer.dispatch('netEngine.join', { ticket }, true)
     )
-    await step('one_way_stuck', () =>
-      eventually(async () => {
-        expect(deviceState(computer, joined.node)).toBe('connected')
-        expect(await link.ask('state', { name, endpoint: computer.endpoint })).toBe('connected')
-      }, 60_000)
-    )
+    await step('one_way_stuck', () => bothConnected(link, computer, joined.node, name))
     return joined.node
   }
 
