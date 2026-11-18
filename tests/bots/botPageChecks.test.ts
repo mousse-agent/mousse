@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { writePageChange } from '../../src/mms/bots/pageChangeFiles'
 import * as fetcher from '../../src/mms/net-public/publicFetch'
 import { botFixture, createBot, T0, flush, type BotFixture } from './botFixture'
 let f: BotFixture, botId: string
@@ -101,9 +103,9 @@ it('a late pre-edit fetch cannot overwrite the new generation snapshot',async ()
   f.book.update(f.scheduler.getJob(entry.jobId)!,{prompt:'Updated'})
   body='new baseline'; await f.tickSchedules(at); await flush()
   const current=JSON.parse(state(entry.scheduleId)!.value)
-  expect(current.result.file).toBeDefined()
+  expect(current.result.text).toBe('new baseline')
   old({status:200,headers:{},body:Buffer.from('stale response')}); await flush()
-  expect(readFileSync(current.result.file,'utf8')).toBe('new baseline')
+  expect(JSON.parse(state(entry.scheduleId)!.value).result.text).toBe('new baseline')
   expect(JSON.parse(state(entry.scheduleId)!.value).generation).toBe(current.generation)
 })
 it('ignores edits outside the 4000-character match window and keeps the whole compared text',async () => {
@@ -128,4 +130,33 @@ it('keeps the watched URL in the saved prompt for older builds',async()=>{
   const entry=await add('tickets')
   expect(f.scheduler.getJob(entry.jobId)!.prompt).toContain('https://example.com/tickets')
   expect(f.scheduler.getJob(entry.jobId)!.prompt).toContain('tickets')
+})
+
+it('six unchanged checks leave no page files and no inbox rows',async()=>{
+  await add()
+  for(let i=1;i<=6;i++) await check(i*5)
+  const files=readdirSync(f.bots.filesFolder(botId),{recursive:true})
+  expect(files.filter(p=>String(p).endsWith('.txt'))).toEqual([])
+  expect(f.automationRuns.list().runs).toEqual([])
+})
+it('change files belong to the run, disappear on run end, and are removed from Automations',async()=>{
+  const entry=await add(); await check(5); body='new page'; await check(10)
+  const row=runs()[0]!
+  const file=join(f.store.directory,'scratch',row.id,'page-change.txt')
+  expect(readFileSync(file,'utf8')).toBe('new page')
+  f.scheduler.removeJob(entry.jobId)
+  expect(existsSync(file)).toBe(false)
+  expect(state(entry.scheduleId)).toBeUndefined()
+})
+it('a symlink in the run directory cannot redirect the page write',()=>{
+  const root=join(f.store.directory,'scratch'), outside=join(f.store.directory,'outside')
+  mkdirSync(root,{recursive:true}); mkdirSync(outside)
+  symlinkSync(outside,join(root,'planted'),'dir')
+  expect(()=>writePageChange(root,'planted','hostile')).toThrow()
+  expect(readdirSync(outside)).toEqual([])
+  mkdirSync(join(root,'leaf'))
+  const target=join(outside,'target.txt')
+  symlinkSync(target,join(root,'leaf','page-change.txt'))
+  expect(()=>writePageChange(root,'leaf','hostile')).toThrow()
+  expect(existsSync(target)).toBe(false)
 })
