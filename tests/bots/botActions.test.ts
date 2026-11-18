@@ -3674,6 +3674,7 @@ it('C6 a second card after restart and a history wipe never repeats the introduc
   await f.bots.reconcileOnStartup()
   const memory = new BotMemoryStore({ db: f.store.db })
   memory.wipe(t.botId, true)
+  expect(memory.getState(t.botId, 'asks-first:introduced')).toBe(1)
   const turn = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'A different email' }, toolCallId: 'second-card', signal: new AbortController().signal })
   expect(f.store.all("SELECT id FROM bot_actions WHERE bot_id = ?", t.botId)).toHaveLength(2)
