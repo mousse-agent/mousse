@@ -3972,3 +3972,37 @@ it('a backwards wall clock cannot renew an old Send listing', async () => {
     expect(t.calls).toEqual([])
   } finally { vi.useRealTimers() }
 })
+
+it.each([false, true])('scheduled decline lookup is bounded and reused, declined=%s', async declined => {
+  const t = await scheduledCall(true, 1)
+  let id = t.id
+  if (declined) {
+    await t.call(); await finish(f, t.run.payload)
+    const card = f.bots.actions.forWork(id)!
+    await f.bots.actions.answer({ actionId: card.id, digest: card.args_digest, answer: 'not_now' }); await flush()
+    const resumed = await start(f, id, 2); await finish(f, resumed.payload)
+    f.clock.now += 60_000
+    id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+    await start(f, id)
+  }
+  const all = vi.spyOn(f.store, 'all'), get = vi.spyOn(f.store, 'get')
+  for (let n = 0; n < 3; n++) expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe(declined ? 'fyi' : 'quiet')
+  expect(all.mock.calls.filter(([sql]) => /FROM bot_activations/i.test(sql))).toHaveLength(0)
+  const previous = get.mock.calls.filter(([sql]) => /SELECT id FROM bot_activations/i.test(sql))
+  expect(previous).toHaveLength(declined ? 1 : 0)
+  if (previous.length) expect(previous[0]![0]).toMatch(/json_extract.*scheduleId.*LIMIT 1/s)
+})
+it('sleep cannot keep an old listing fresh when the monotonic clock pauses', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.useFakeTimers()
+  const monotonic = performance.now(), wall = Date.now()
+  Object.assign(t.catalog, { serverRefreshedAt: () => monotonic, serverRefreshedWallAt: () => wall, refreshServer: () => new Promise<void>(() => {}) })
+  vi.setSystemTime(wall + 60_000)
+  try {
+    const answer = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_unreachable' })
+    await vi.advanceTimersByTimeAsync(3001); await answer
+    expect(t.calls).toEqual([])
+  } finally { vi.useRealTimers() }
+})
