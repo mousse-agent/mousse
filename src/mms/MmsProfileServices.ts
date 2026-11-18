@@ -79,6 +79,7 @@ import { createProfileBotMemory } from './bots/memory/profileMemory'
 import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
 import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
+import { BOT_LAUNCHED_RECENT_MS } from '../shared/bots/personal/chat'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -782,13 +783,14 @@ export class MmsProfileServices {
         repository: async (folder) => (await this.gitService.codeHost.repositoryIdentity(folder)).nameWithOwner,
         pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
       }, repo, number),
-      // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works.
+      // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works. Of
+      // those done, only the ones not archived and updated in the last six hours ("Recent").
       launchedThreads: (creators) => launchedThreadsIn({
         threads: this.threads,
         engine: this.runEngine,
         asks: (id) => this.questions.listPendingForThread(id).length > 0,
         projectName: (id) => this.projects.getProject(id)?.name
-      }, creators),
+      }, creators, { doneSince: new Date(Date.now() - BOT_LAUNCHED_RECENT_MS).toISOString() }),
       // A thread a bot handed a job to, for its ledger: how it stands and its last answer.
       jobThread: (threadId) => jobThreadIn({
         threads: this.threads,

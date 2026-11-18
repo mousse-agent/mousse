@@ -32,6 +32,10 @@ import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
 import { ArchivedList } from './sidebar/ArchivedList'
+import { ThreadFilterBar, type BotOption, type ProjectOption } from './sidebar/ThreadFilterBar'
+import { useThreadFilterStore } from '../stores/threadFilterStore'
+import { useBotsStore } from '../stores/botsStore'
+import { filterNarrows, lastUsedBy, threadInFilter, type ThreadFilter } from '../lib/threadFilter'
 import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
 import { threadsForList, useArchiveMotionRows, usePendingArchives, withPendingArchives } from '../lib/archiveMotion'
 import { Collapse, COLLAPSE_LONG_LIST, motionAllowed } from './ui/Collapse'
@@ -354,11 +358,6 @@ function ThreadCardBody({
   )
 }
 
-/** The sidebar lists a thread unless a bot keeps it out (`Thread.hidden`); an archived one is listed under Archived. */
-function listsInSidebar(thread: Thread): boolean {
-  return !thread.hidden || Boolean(thread.settledAt)
-}
-
 export function ThreadsSidebar({ className = '' }: { className?: string }) {
   countRender('ThreadsSidebar')
 
@@ -444,7 +443,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // The Archived footer is not under Chats: it is hidden as Chats shows and unfolds as another view comes in,
   // so the list above it gives the room smoothly.
   const footerRef = useRef<HTMLDivElement>(null)
-  const footerHidden = contentView === 'chats'
+  // The filter's Archived lists archived threads in place of the others, so the footer has nothing to add.
+  const filterArchived = useThreadFilterStore((s) => s.archived)
+  const footerHidden = contentView === 'chats' || filterArchived
   const footerWasHidden = useRef(footerHidden)
   useLayoutEffect(() => {
     const footer = footerRef.current
@@ -499,16 +500,47 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
+  // A project that several computers hold for the same repository is one group; the others' projects that
+  // match none of this computer's stay groups of their own, named with their computer.
+  const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
+  const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
+
+  // The filter row's (ThreadFilterBar): Show, a bot, a project, Archived and what is typed; the Projects tab's unticked
+  // projects. Show and the unticked projects are this profile's.
+  const profileId = useAppStore((s) => s.profileId)
+  useEffect(() => { useThreadFilterStore.getState().load(profileId) }, [profileId])
+  const filterQuery = useThreadFilterStore((s) => s.query)
+  const filterShow = useThreadFilterStore((s) => s.show)
+  const filterProjectId = useThreadFilterStore((s) => s.projectId)
+  const filterBotId = useThreadFilterStore((s) => s.botId)
+  const hiddenProjectIds = useThreadFilterStore((s) => s.hiddenProjects)
+  const filter = useMemo<ThreadFilter>(
+    () => ({ query: filterQuery, show: filterShow, projectId: filterProjectId, botId: filterBotId, archived: filterArchived }),
+    [filterQuery, filterShow, filterProjectId, filterBotId, filterArchived]
+  )
+  const filtering = filterNarrows(filter)
+  const bots = useBotsStore((s) => s.bots)
+  const inFilter = useMemo(() => {
+    const projectById = new Map(projects.map((project) => [project.id, project]))
+    const botById = new Map(bots.map((bot) => [bot.id, bot]))
+    const context = {
+      groupOf: (projectId: string) => groupOf.get(projectId) ?? projectId,
+      projectName: (projectId: string) => projectById.get(projectId)?.name,
+      botName: (botId: string) => botById.get(botId)?.name
+    }
+    return (thread: Thread) => threadInFilter(thread, filter, context)
+  }, [filter, projects, bots, groupOf])
+
   // Subagent threads sit under their parent, not beside it: the list holds the threads people started. A thread one of
   // the owner's bots keeps out of the sidebar (`Thread.hidden`, how a bot's threads start) is listed in its chat instead,
-  // and under Archived once it is archived.
-  const listedThreads = useMemo(() => visibleThreads(threads).filter(listsInSidebar), [threads])
+  // and under Archived once it is archived; the filter's Bot threads, All or a bot lists it here too.
+  const listedThreads = useMemo(() => visibleThreads(threads), [threads])
   // A thread archived or unarchived, by any means, leaves its list and arrives in its new place with motion: for a
   // moment its old row stays in the old list (`threadsForList`) while it fades and closes (archiveMotion.ts).
   const asideRef = useRef<HTMLElement>(null)
   const { moves: archiveMoves, motionOf: archiveMotionOfRow } = useArchiveMotionRows(asideRef, listedThreads)
-  const unarchivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, false), [listedThreads, archiveMoves])
-  const archivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, true), [listedThreads, archiveMoves])
+  const unarchivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, false).filter(inFilter), [listedThreads, archiveMoves, inFilter])
+  const archivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, true).filter(inFilter), [listedThreads, archiveMoves, inFilter])
   // A parent row shows what its subagents are doing, however deep they are nested.
   const rolledUpActivity = useMemo(() => rollUpActivities(threads, threadActivity), [threads, threadActivity])
   // While a subagent's thread is open, the row it sits under is highlighted instead.
@@ -534,20 +566,25 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const projectListThreads = useMemo(() => withUnsentChats(availableThreads, unsentChats), [availableThreads, unsentChats])
   // The listed threads the owner's bots started, which the Threads tab's menu and a project's menu hide. Only this
   // computer's: a thread is hidden by the computer that runs it.
-  const shownBotThreads = useMemo(() => availableThreads.filter((thread) => thread.startedByBot && !thread.node), [availableThreads])
-  // The Threads tab: in the order its rows were dragged into, with threads started since on top, newest
-  // first. Later messages do not move a row.
-  const feedThreads = useMemo(() => sortThreadFeed(availableThreads, threadFeedOrder), [availableThreads, threadFeedOrder])
+  const shownBotThreads = useMemo(() => availableThreads.filter((thread) => thread.startedByBot && !thread.node && !thread.hidden), [availableThreads])
   const archivedThreads = useMemo(
     () => sortArchivedThreads(archivedListThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
     [archivedListThreads, agentThreadIds]
   )
+  // The Threads tab: in the order its rows were dragged into, with threads started since on top, newest
+  // first. Later messages do not move a row. With the filter's Archived on, both tabs list the archived threads instead.
+  const feedThreads = useMemo(
+    () => (filterArchived ? archivedThreads : sortThreadFeed(availableThreads, threadFeedOrder)),
+    [filterArchived, archivedThreads, availableThreads, threadFeedOrder]
+  )
+  const treeThreads = filterArchived ? archivedThreads : projectListThreads
   const attentionOf = (threadId: string) => threadAttention(rolledUpActivity[threadId] ?? threadActivity[threadId])
   // Threads that wait for an answer or an approval, from every project and computer, at the top of the list.
   const notifyBotThreads = useAppStore((s) => s.notifyBotThreads)
   const needsMe = useMemo(() => needsMeThreads(threads, threadActivity, agentThreadIds, notifyBotThreads), [threads, threadActivity, agentThreadIds, notifyBotThreads])
   // With one thread in all, its own row already says it: a group of it would only repeat it.
-  const showNeedsMe = needsMe.length > 0 && availableThreads.length > 1
+  // While the filter narrows the list, the threads it keeps list in it, Needs me or not.
+  const showNeedsMe = needsMe.length > 0 && availableThreads.length > 1 && !filtering
   // The Threads tab lists a thread in one place: while "Needs me" shows it, the list below leaves it out.
   // Dragging still arranges `feedThreads`, so the thread comes back where it was.
   const feedRows = useMemo(() => {
@@ -556,16 +593,28 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     return feedThreads.filter((thread) => !waiting.has(thread.id))
   }, [feedThreads, needsMe, showNeedsMe])
 
-  // A project that several computers hold for the same repository is one group; the others' projects that
-  // match none of this computer's stay groups of their own, named with their computer.
-  const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
-  const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
   const threadProjectColors = useThreadProjectColors()
   const replyPreviews = useReplyPreviews()
   const hueByGroup = useMemo(
     () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
     [projectGroups]
   )
+  // What the filter row offers: each project group with its icon or coloured folder, each bot with its face; "Recent"
+  // in their lists is by their newest thread.
+  const projectOptions = useMemo((): ProjectOption[] => {
+    const lastUsed = lastUsedBy(threads, (thread) => (thread.projectId ? groupOf.get(thread.projectId) ?? thread.projectId : undefined))
+    return projectGroups.map((group) => ({
+      id: group.id,
+      name: group.project.name,
+      project: group.project,
+      color: projectHueColor(hueByGroup.get(group.id)),
+      lastUsed: lastUsed.get(group.id)
+    }))
+  }, [threads, projectGroups, groupOf, hueByGroup])
+  const botOptions = useMemo((): BotOption[] => {
+    const lastUsed = lastUsedBy(threads, (thread) => thread.startedByBot?.botId)
+    return bots.map((bot) => ({ id: bot.id, name: bot.name, look: bot.look, lastUsed: lastUsed.get(bot.id) }))
+  }, [threads, bots])
   const hasRemoteProjects = projects.some((project) => project.node)
   const { byNode: computers, devices } = useComputers(hasRemoteProjects || archivedThreads.some((thread) => thread.node))
   const nameOfComputer = (node: string): string => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME
@@ -575,7 +624,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // This computer's home folder: its projects' paths read `~/…` in their tooltip.
   const homeFolder = thisHomeFolder()
   // The editors and file manager this computer has, for the project menu's "Open in" and "Show in" items.
-  const profileId = useAppStore((s) => s.profileId)
   const editors = useEditorsStore((s) => s.editors)
   const hasLocalProjects = projects.some((project) => !project.node)
   useEffect(() => {
@@ -588,11 +636,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const groupId = groupIdOf(projectId)
     return groupId && groupById.has(groupId) ? groupId : OTHER_THREADS_ID
   }
-  const otherThreads = projectListThreads.filter((thread) => listGroupOf(thread.projectId) === OTHER_THREADS_ID)
+  const otherThreads = treeThreads.filter((thread) => listGroupOf(thread.projectId) === OTHER_THREADS_ID)
   // The group in focus: the open thread's (a draft's project too), whose header stays bright while the other
   // groups dim (threads-sidebar.css). None for a Chats thread or with nothing open, and then nothing dims.
   const focusedThread = threads.find((thread) => thread.id === (openSubagentParentId ?? activeThreadId))
-  const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) && listsInSidebar(focusedThread) ? listGroupOf(focusedThread.projectId) : undefined
+  const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) && inFilter(focusedThread) ? listGroupOf(focusedThread.projectId) : undefined
   // The Threads tab dims its other cards only while the open thread has a card there.
   const feedHasActive = Boolean(focusedThread && feedRows.some((thread) => thread.id === focusedThread.id))
 
@@ -606,7 +654,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (!shownId || revealedRow.current === shownId) return
     const shown = threads.find((thread) => thread.id === shownId)
     // A hidden bot thread has no row to reveal.
-    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id) || !listsInSidebar(shown)) return
+    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id) || !inFilter(shown)) return
     revealedRow.current = shownId
     if (shown.settledAt) {
       setArchivedExpanded(true)
@@ -625,7 +673,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
     // listGroupOf reads groupOf and groupById, which are listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeThreadId, openSubagentParentId, threads, availableThreads, agentThreadIds, groupOf, groupById])
+  }, [activeThreadId, openSubagentParentId, threads, availableThreads, agentThreadIds, groupOf, groupById, inFilter])
 
   const toggleProject = (projectId: string) => {
     toggledProjectRef.current = projectId
@@ -720,11 +768,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   // The Projects tree's rows in order, as the keyboard walks them: each group (the projects, then "Other threads"
   // when it has threads), and the shown threads of an open one.
-  const projectThreadsOf = (groupId: string) => projectListThreads.filter((thread) => listGroupOf(thread.projectId) === groupId)
-  const treeGroupIds = [...projectGroups.map((group) => group.id), ...(otherThreads.length ? [OTHER_THREADS_ID] : [])]
+  const projectThreadsOf = (groupId: string) => treeThreads.filter((thread) => listGroupOf(thread.projectId) === groupId)
+  // The filter leaves out the projects unticked in its menu and, while it narrows to some threads, the projects with none
+  // of them; those it keeps show open.
+  const treeNarrowed = filtering && filter.show !== 'all'
+  const hiddenProjectSet = new Set(hiddenProjectIds)
+  const shownGroups = projectGroups.filter((group) => !hiddenProjectSet.has(group.id) &&
+    (filter.projectId === null || group.id === filter.projectId) &&
+    (!treeNarrowed || projectThreadsOf(group.id).length > 0))
+  const groupOpen = (groupId: string) => treeNarrowed || expandedProjects.has(groupId)
+  const treeGroupIds = [...shownGroups.map((group) => group.id), ...(otherThreads.length ? [OTHER_THREADS_ID] : [])]
   const treeKeys = treeGroupIds.flatMap((groupId) => {
     const key = `project:${groupId}`
-    if (!expandedProjects.has(groupId)) return [key]
+    if (!groupOpen(groupId)) return [key]
     const shown = projectThreadsOf(groupId)
     const visible = expandedProjectThreadLists.has(groupId) ? shown : shown.slice(0, PROJECT_THREAD_PREVIEW_LIMIT)
     return [key, ...visible.map((thread) => `thread:${thread.id}`)]
@@ -769,12 +825,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         break
       case 'ArrowRight':
         if (!isProject) break
-        if (!expandedProjects.has(id)) toggleProject(id)
+        if (!groupOpen(id)) toggleProject(id)
         else if (rows[index + 1]?.getAttribute('aria-level') === '2') focusRow(rows[index + 1])
         break
       case 'ArrowLeft':
         if (isProject) {
-          if (expandedProjects.has(id)) toggleProject(id)
+          if (groupOpen(id)) toggleProject(id)
         } else if (row.getAttribute('aria-level') === '2') {
           focusRow(rows.slice(0, index).reverse().find((item) => item.getAttribute('aria-level') === '1'))
         }
@@ -814,6 +870,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         dragged.type === target.type &&
         dragged.id !== target.id &&
         Boolean(dragged.feed) === Boolean(target.feed) &&
+        !(dragged.feed && filtering) &&
         // Threads drop only among threads of the same kind (pinned ones list first); a Threads tab row may cross projects.
         (dragged.type === 'project' || (Boolean(dragged.pinned) === Boolean(target.pinned) && (dragged.feed || dragged.projectId === target.projectId)))
     )
@@ -823,7 +880,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const dropFeedThread = (target?: string, after = false) => {
     const dragged = draggedItem.current
     setFeedDrop(null)
-    if (!dragged?.feed || dragged.id === target) return
+    // A filtered list holds only some threads: its order is not the tab's.
+    if (!dragged?.feed || dragged.id === target || filtering) return
     suppressClick.current = true
     window.setTimeout(() => { suppressClick.current = false }, 0)
     setThreadFeedOrder(arrangeThreadFeed(feedThreads.flatMap((thread) => (unmadeRows.has(thread.id) ? [] : [thread.id])), dragged.id, target, after))
@@ -1593,7 +1651,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   /** "Other threads", the Projects tree's last group: the threads of no project, with no project actions. */
   const renderOtherThreads = () => {
-    const expanded = expandedProjects.has(OTHER_THREADS_ID)
+    const expanded = groupOpen(OTHER_THREADS_ID)
     const treeKey = `project:${OTHER_THREADS_ID}`
     const childrenId = `${tabsId}-other-threads`
     return (
@@ -1651,6 +1709,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         <PillTabs tabs={SIDEBAR_TABS} value={sidebarView} onSelect={setSidebarView} onTabContextMenu={openTabMenu} ariaLabel="Sidebar" idPrefix={tabsId} />
       </div>
 
+      {contentView !== 'chats' && <ThreadFilterBar view={contentView} projects={projectOptions} bots={botOptions} />}
+
       <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-more-below={moreBelow || undefined}>
 
       <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={contentView !== 'projects'}>
@@ -1668,17 +1728,23 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         )}
 
+        {projectGroups.length > 0 && treeGroupIds.length === 0 && (
+          <div className="threads-sidebar-tree">
+            <div className="threads-sidebar-empty">{filtering ? 'No matching threads' : 'No projects shown'}</div>
+          </div>
+        )}
+
         {treeGroupIds.length > 0 && (
 
         <div className="threads-sidebar-tree" role="tree" aria-label="Projects" data-has-active={activeGroupId !== undefined || undefined} onKeyDown={onTreeKeyDown}>
 
-          {projectGroups.map((group) => {
+          {shownGroups.map((group) => {
 
               // The group is named by one project: this computer's when it has one.
               const project = group.project
               const alsoOn = groupComputers(group).filter((node) => node !== project.node)
 
-              const expanded = expandedProjects.has(project.id)
+              const expanded = groupOpen(project.id)
 
               const projectThreads = projectThreadsOf(group.id)
               const projectThreadCount = projectThreads.length
@@ -1926,7 +1992,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           data-has-active={feedHasActive || undefined}
           // Below the last row the dragged row goes last; in the gap between two rows, where the line shows.
           onDragOver={(event) => {
-            if (!draggedItem.current?.feed) return
+            if (!draggedItem.current?.feed || filtering) return
             event.preventDefault()
             const rows = event.currentTarget.querySelectorAll('.threads-sidebar-thread-container')
             const bottom = rows[rows.length - 1]?.getBoundingClientRect().bottom
@@ -1943,7 +2009,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         >
           {/* Cards render only while the tab shows (or is coming in), so a change to the list does not redraw a hidden copy of it. */}
           {contentView !== 'threads' && sidebarView !== 'threads' ? null : feedThreads.length === 0 ? (
-            <div className="threads-sidebar-empty">No threads</div>
+            <div className="threads-sidebar-empty">{filtering ? 'No matching threads' : 'No threads'}</div>
           ) : (
             <>
               {feedRows.map((thread) => renderThreadRow(thread, { root: true, layout: 'card' }))}

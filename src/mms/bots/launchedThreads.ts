@@ -59,7 +59,8 @@ export type RunStanding = 'goes' | 'waits' | 'held' | 'never'
  * below it moves until a person continues it (`on_hold`, `RunStanding` `held`): a pause only Resume now ends, messages
  * a Stop held, or a queue stopped at a message whose turn could not start (workspace recovery); or, with nothing going, it never ran (`idle`) or its last run finished (`done`), failed or was stopped
  * (`compareLaunched`). Those that work come first (oldest first), then those that wait on the owner (on hold too), then
- * idle ones, then ended ones (most recently updated first); of those not going, at most `BOT_LAUNCHED_ENDED_SHOWN`.
+ * idle ones, then ended ones (most recently updated first); of those not going, at most `BOT_LAUNCHED_ENDED_SHOWN`, and
+ * with `doneSince` (the bot's "Recent" list) only those not archived and updated at or after it (`BOT_LAUNCHED_RECENT_MS`).
  * `activeRuns`: the profile's runs not ended; `lastRun`: a thread's newest run; `standing`: how a run of a thread the bot
  * started, or of a subagent below one, stands (`runStanding`). A run nothing will start does not make its thread go, a
  * run waiting in the queue behind a run only a person moves on is on hold with it, and an archived thread (or subagent)
@@ -74,6 +75,8 @@ export function launchedThreadsOf(input: {
   asks(threadId: string): boolean
   standing(run: RunRecord): RunStanding
   projectName?(projectId: string): string | undefined
+  /** An ISO time: of the threads not going, only those not archived and updated since then are listed. Absent: every one. */
+  doneSince?: string
 }): BotLaunchedThread[] {
   if (!input.creators.size) return []
   const mine = input.threads.filter((thread) => thread.createdByThreadId !== undefined && input.creators.has(thread.createdByThreadId))
@@ -104,7 +107,9 @@ export function launchedThreadsOf(input: {
   const going = mine.filter(goes)
   // Of the rest only the most recently updated are shown: their runs are read, never every thread the bot ever started.
   const goingIds = new Set(going.map((thread) => thread.id))
-  const rest = mine.filter((thread) => !goingIds.has(thread.id))
+  const since = input.doneSince
+  const done = (thread: LaunchedThreadMeta) => since === undefined || (!thread.settledAt && (thread.updatedAt ?? thread.createdAt ?? '') >= since)
+  const rest = mine.filter((thread) => !goingIds.has(thread.id) && done(thread))
     .sort((a, b) => (b.updatedAt ?? b.createdAt ?? '').localeCompare(a.updatedAt ?? a.createdAt ?? ''))
     .slice(0, BOT_LAUNCHED_ENDED_SHOWN)
   const launched = [...going, ...rest].map((thread): BotLaunchedThread => {
@@ -185,7 +190,7 @@ export function launchedThreadsIn(profile: {
   engine: Pick<RunEngine, 'store' | 'outbox' | 'remoteSubagents'>
   asks(threadId: string): boolean
   projectName?(projectId: string): string | undefined
-}, creators: ReadonlySet<string>): BotLaunchedThread[] {
+}, creators: ReadonlySet<string>, options: { doneSince?: string } = {}): BotLaunchedThread[] {
   if (!creators.size) return []
   const queues = new Map<string, readonly QueuedMessage[]>()
   const queue = (threadId: string): readonly QueuedMessage[] => {
@@ -208,7 +213,8 @@ export function launchedThreadsIn(profile: {
     lastRun: (id) => profile.engine.store.listRuns(id, { limit: 1 })[0],
     asks: profile.asks,
     standing: (run) => runStanding(profile.engine, run, queue),
-    ...(profile.projectName ? { projectName: profile.projectName } : {})
+    ...(profile.projectName ? { projectName: profile.projectName } : {}),
+    ...(options.doneSince ? { doneSince: options.doneSince } : {})
   })
 }
 

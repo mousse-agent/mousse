@@ -1,0 +1,263 @@
+/* The sidebar's filter row (sidebar/ThreadFilterBar.tsx): a filled field and a square button, chips below them. */
+.thread-filter {
+  flex-shrink: 0;
+  margin: 0 var(--ui-gutter, 12px) 8px;
+}
+
+.thread-filter-row {
+  display: flex;
+  gap: 6px;
+}
+
+.thread-filter-field,
+.thread-filter-button {
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  color: var(--text-primary);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.thread-filter-field {
+  flex: 1;
+  min-width: 0;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.thread-filter-field::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
+.thread-filter-field:hover,
+.thread-filter-button:hover {
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+}
+
+.thread-filter-field:focus-visible,
+.thread-filter-button:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.45);
+  outline: none;
+}
+
+.thread-filter-button {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  padding: 0;
+  color: var(--text-secondary);
+}
+
+.thread-filter-button[aria-expanded='true'],
+.thread-filter-button.set {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 9%, transparent);
+}
+
+/* Projects and bots matching what was typed, above the list. */
+.thread-filter-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.thread-filter-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: var(--ui-row-radius, 7px);
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.thread-filter-suggestion.active {
+  background: var(--ui-hover);
+}
+
+.thread-filter-suggestion-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-filter-suggestion-enter {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Active filters, one chip each, wrapping under the field. */
+.thread-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.thread-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 2px 0 6px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.thread-filter-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-filter-chip-clear {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  color: var(--text-secondary);
+}
+
+.thread-filter-chip-clear:hover,
+.thread-filter-chip-clear:focus-visible {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+  outline: none;
+}
+
+/* A project's icon (its folder in the project's colour without one), or a bot's still face. */
+.thread-filter-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.thread-filter-chip .thread-filter-mark,
+.thread-filter-chip > svg {
+  color: var(--text-secondary);
+}
+
+.thread-filter-chip .thread-filter-mark[style] {
+  color: inherit;
+}
+
+.thread-filter-face {
+  width: 16px;
+  height: 16px;
+}
+
+/* The menu: the shared sidebar menu (threads-context-menu), with a check column. */
+.thread-filter-menu {
+  min-width: 200px;
+}
+
+.thread-filter-menu-label {
+  padding: 6px var(--ui-menu-row-x, 8px) 4px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.thread-filter-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--ui-line);
+}
+
+.thread-filter-menu-item[aria-checked='false'] {
+  color: var(--text-secondary);
+}
+
+.thread-filter-menu-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.thread-filter-check {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 14px;
+}
+
+.thread-filter-menu-value {
+  margin-left: auto;
+  max-width: 96px;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-filter-menu-value + .threads-context-submenu-chevron {
+  margin-left: 2px;
+}
+
+.thread-filter-option-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The Projects tab's project list in the menu scrolls past a handful. */
+.thread-filter-menu-projects {
+  max-height: 232px;
+  overflow-y: auto;
+}
+
+/* "Project ›" and "Bot ›": a search line, then a list that scrolls. */
+.thread-filter-sublist {
+  width: 232px;
+  white-space: normal;
+}
+
+.thread-filter-sublist-search {
+  width: 100%;
+  height: 30px;
+  margin-bottom: 4px;
+  padding: 0 var(--ui-menu-row-x, 8px);
+  border: none;
+  border-bottom: 1px solid var(--ui-line);
+  border-radius: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.thread-filter-sublist-search::placeholder {
+  color: var(--text-secondary);
+}
+
+.thread-filter-sublist-items {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.thread-filter-sublist-empty {
+  padding: 6px var(--ui-menu-row-x, 8px);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
