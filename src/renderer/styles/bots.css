@@ -646,8 +646,9 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
   -webkit-user-select: text;
 }
 
-.bot-about-permission > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bot-about-permission .bot-about-next { display: inline; margin-left: 6px; }
+.bot-about-permission > span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.bot-about-permission .bot-about-next { display: block; margin: 2px 0 0; }
+.bot-about-coverage { display: block; margin-top: 4px; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
 
 /* A held call uses the ask's controls; all outside data remains readable in place. */
 .bot-action-card { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }

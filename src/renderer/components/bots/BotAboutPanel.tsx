@@ -204,7 +204,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
     <h3>CAN USE</h3>
     {detail?.permissions.length
       ? detail.permissions.map((item) => <div className="bot-about-row bot-about-permission" key={item.id}>
-        <Shield size={14} aria-hidden /><span title={item.note || undefined}>{item.title.charAt(0).toUpperCase() + item.title.slice(1)}{(item.mark || item.gone) && <small className="bot-about-next" data-testid="bot-about-gone">{item.mark ?? 'Gone from Mousse'}</small>}</span>
+        <Shield size={14} aria-hidden /><span title={item.note || undefined}>{item.title.charAt(0).toUpperCase() + item.title.slice(1)}{(item.mark || item.gone) && <small className="bot-about-next" data-testid="bot-about-gone">{item.mark ?? 'Gone from Mousse'}</small>}{item.asksFirst && item.note && <small className="bot-about-coverage">{item.note}</small>}</span>
         {item.enabled !== undefined && <div title={item.note}><Switch label={item.title} checked={item.enabled} onChange={(enabled) => void store().setPermission(bot.id, item.id, enabled)} /></div>}
         <button type="button" aria-label={`Remove ${item.title}`} onClick={() => void store().revokePermission(bot.id, item.id)}>Remove</button>
       </div>)
