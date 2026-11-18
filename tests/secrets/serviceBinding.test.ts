@@ -1,3 +1,6 @@
+import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
+import type { HandlerContext } from '../../src/mms/protocol/handlers'
+import { registerSecretMethods } from '../../src/mms/secrets/registerMethods'
 import { OldMetaReader } from './oldMetaReader'
 import { SECRET_SERVICES } from '../../src/shared/secretServices'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -7,7 +10,7 @@ import { join } from 'node:path'
 import { resolveSecretBinding } from '../../src/mms/secrets/secretBinding'
 import { SecretVault } from '../../src/mms/secrets/SecretVault'
 import { SecretRequests, secretOutcomeText } from '../../src/mms/secrets/SecretRequests'
-import { createProfileSecretAdapter } from '../../src/mms/profiles/secrets'
+import { createProfileSecretAdapter, deleteProfileSecret } from '../../src/mms/profiles/secrets'
 import { createSecretToolHost } from '../../src/mms/secrets/secretToolHost'
 
 vi.mock('node:fs', async () => {
@@ -153,14 +156,24 @@ it.each(['store', 'grant', 'markUsed', 'delete', 'sweep'] as const)('keeps bindi
   expect(restarted.maskerFor('bot')!(VALUE)).not.toContain(VALUE)
   requests.dispose()
 })
-it.each(['valid', 'missing', 'unreadable', 'invalid JSON', 'invalid entry'] as const)('keeps bound keys closed with %s bindings without breaking an unbound key', async state => {
+it.each(['valid', 'missing', 'unreadable', 'invalid JSON', 'invalid entry', 'unknown service', 'non-object', 'custom header', 'custom format', 'custom extras'] as const)('keeps bound keys closed with %s bindings without breaking an unbound key', async state => {
   const {home, vault, requests} = fixture()
   vault.store('BOUND', VALUE, {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
   vault.store('PLAIN', 'plain-value', {threadId: 'bot', keep: 'saved'})
   const path = join(home, 'secrets/bindings.json')
   if (state === 'missing') rmSync(path, {force: true})
   else if (state === 'unreadable') { rmSync(path); mkdirSync(path) }
-  else if (state !== 'valid') writeFileSync(path, state === 'invalid JSON' ? '{' : '{"BOUND":{"origin":5}}')
+  else if (state !== 'valid') {
+    const badEntries = {
+      'invalid entry': {origin: 5},
+      'unknown service': {service: 'nope'},
+      'non-object': 5,
+      'custom header': {origin: 'https://api.example.com', header: 'X-Key', format: 'Bearer {}'},
+      'custom format': {origin: 'https://api.example.com', header: 'Authorization', format: '{}'},
+      'custom extras': {origin: 'https://api.example.com', header: 'Authorization', format: 'Bearer {}', paths: ['/admin']}
+    }
+    writeFileSync(path, state === 'invalid JSON' ? '{' : JSON.stringify({BOUND: badEntries[state]}))
+  }
   const copy = join(home, 'secrets/threads/bot/BOUND')
   mkdirSync(join(home, 'secrets/threads/bot'), {recursive: true}); writeFileSync(copy, VALUE)
   const restarted = new SecretVault({profileRoot: home, threadAlive: () => true})
@@ -271,5 +284,48 @@ it.each(['store', 'setKey'] as const)('keeps existing authority if %s cannot est
   expect(vault.bindingFor('KEY')).toEqual(binding)
   expect(existsSync(join(home,'secrets/bound/KEY'))).toBe(true)
   expect(()=>createProfileSecretAdapter({profileRoot:home,inheritProcessEnv:false}).resolveEnv('${secret:KEY}')).toThrow(/bound/)
+  requests.dispose()
+})
+
+it('keeps a fresh key unbound after an older delete, restart and sweep', () => {
+  const {home, vault, requests} = fixture()
+  vault.store('BOUND', VALUE, {threadId:'bot', keep:'saved', binding:resolveSecretBinding({service:'github'})})
+  new OldMetaReader({profileRoot:home, threadAlive:()=>true}).delete('BOUND')
+  const restarted = new SecretVault({profileRoot:home, threadAlive:()=>true})
+  restarted.sweep()
+  restarted.store('BOUND', 'fresh-unbound-value', {threadId:'bot', keep:'saved'})
+  expect(restarted.bindingFor('BOUND')).toBeUndefined()
+  expect(restarted.list().find(entry=>entry.name==='BOUND')).not.toHaveProperty('binding')
+  expect(createProfileSecretAdapter({profileRoot:home,inheritProcessEnv:false}).resolveEnv('${secret:BOUND}')).toBe('fresh-unbound-value')
+  requests.dispose()
+})
+it('sweeps the binding and guard when this build finds a value gone', () => {
+  const {home, vault, requests} = fixture()
+  vault.store('BOUND', VALUE, {threadId:'bot', keep:'saved', binding:resolveSecretBinding({service:'github'})})
+  deleteProfileSecret(home, 'BOUND')
+  const restarted = new SecretVault({profileRoot:home, threadAlive:()=>true})
+  expect(restarted.sweep()).toContain('BOUND')
+  expect(restarted.bindingFor('BOUND')).toBeUndefined()
+  expect(existsSync(join(home,'secrets/bound/BOUND'))).toBe(false)
+  expect(JSON.parse(readFileSync(join(home,'secrets/bindings.json'),'utf8'))).not.toHaveProperty('BOUND')
+  requests.dispose()
+})
+
+it('explains an unreadable binding to the owner without replacing it or saving the new value', async () => {
+  const {home, vault, requests} = fixture()
+  const binding=resolveSecretBinding({service:'github'})
+  vault.store('FIRST', VALUE, {threadId:'bot',keep:'saved',binding})
+  const path=join(home,'secrets/bindings.json')
+  const broken='{"FIRST":'
+  writeFileSync(path,broken)
+  void requests.request('bot',{label:'API key',reason:'Read updates',name:'SECOND',binding})
+  const request=requests.list('bot')[0]
+  const domains=new DomainHandlerRegistry()
+  registerSecretMethods(domains,async()=>({requests,list:()=>vault.list(),delete:name=>vault.delete(name)}))
+  const gui={connection:{clientType:'gui',binding:{profileId:'p',epoch:1},capabilities:new Set<string>()}} as unknown as HandlerContext
+  await expect(domains.dispatch(gui,'secrets.requests.answer',{threadId:'bot',requestId:request.requestId,value:VALUE,keep:'saved'})).rejects.toMatchObject({code:'secret_store_failed',message:expect.stringMatching(/bound, service unavailable/i)})
+  expect(readFileSync(path,'utf8')).toBe(broken)
+  expect(vault.value('SECOND')).toBeUndefined()
+  expect(requests.waiting('bot')).toBe(true)
   requests.dispose()
 })
