@@ -36,8 +36,10 @@ it.each(shapes)('selects the complete credential span and its service: %s', (tex
   expect(pastedSecretShape(text)).toEqual({ start, end: start+span.length, name })
 })
 it.each(['a'.repeat(64), '4fad019e-422c-4a1b-8f54-284951a51f37', 'a'.repeat(40), 'Please check the release', 'eyJabc.def.ghi', 'Bearer eyJabc.def.ghi', 'sk-learn-compatible-estimator', 'https://example.com/blog/sk-hynix-earnings-report-2026', ...['sort_key=price','pageToken=abc','favourite_monkey=bob','signature=short','sig=x'].map(query=>'https://example.com?'+query)])('does not offer for ordinary text: %s', text => expect(pastedSecretShape(text)).toBeUndefined())
-it('checks a pathological 64 KB draft within 50 ms', () => {
-  const text = 'a-'.repeat(32700)+'://example.com/?pageToken=abc'
+it.each([
+  'a-'.repeat(32700)+'://example.com/?pageToken=abc',
+  'https://example.com/'+'.'.repeat(65000)+'x'
+])('checks a pathological 64 KB draft within 50 ms', text => {
   const start=performance.now()
   expect(pastedSecretShape(text)).toBeUndefined()
   expect(performance.now()-start).toBeLessThan(50)
