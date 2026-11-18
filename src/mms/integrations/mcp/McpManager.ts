@@ -283,7 +283,7 @@ export class McpManager {
       servers: snapshot.servers,
       settings,
       actor
-    }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed' && (!options.installationId || mcpInstallationId(server) === options.installationId))
+    }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
 
     const toolLists = await Promise.all(
       eligibleServers.map(async (server) => {
@@ -317,7 +317,7 @@ export class McpManager {
       servers: snapshot.servers,
       settings,
       actor
-    }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
+    }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed' && (!options.installationId || mcpInstallationId(server) === options.installationId))
 
     const entryOf = (server: McpServerConfig, result: PromiseSettledResult<McpToolDescriptor[]>): McpServerTools => {
       const entry = {
