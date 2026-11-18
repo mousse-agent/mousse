@@ -1,5 +1,7 @@
 /** A service binding is metadata only. Methods are always GET/HEAD; E4 performs requests. */
 export interface SecretBinding {
+  /** Known services persist only this id; their current table entry supplies authority. */
+  serviceId?: string
   origin: string
   header: string
   format: string
@@ -9,7 +11,8 @@ export interface SecretBinding {
 }
 export interface SecretBindingView { service?: string; host: string; readOnly: true }
 
-/** Read prefixes are deliberately limited to documented API resources, never website or credential-management paths. */
+/** Paths match whole segments after decoding: `/user` must not match `/users`.
+ * Read prefixes are deliberately limited to documented API resources, never website or credential-management paths. */
 export const SECRET_SERVICES: Record<string, SecretBinding> = {
   openai: { service: 'OpenAI', origin: 'https://api.openai.com', header: 'Authorization', format: 'Bearer {}', paths: ['/v1/models', '/v1/files', '/v1/batches', '/v1/vector_stores'] },
   anthropic: { service: 'Anthropic', origin: 'https://api.anthropic.com', header: 'x-api-key', format: '{}', paths: ['/v1/models', '/v1/files', '/v1/messages/batches'], headers: { 'anthropic-version': '2023-06-01' } },
@@ -26,6 +29,8 @@ export function secretBindingView(binding: SecretBinding): SecretBindingView {
 /** Labels do not affect authority. Paths and fixed headers do. Order does not. */
 export function sameSecretBinding(a: SecretBinding | undefined, b: SecretBinding | undefined): boolean {
   if (!a || !b) return a === b
+  if (!a.header || !b.header) return false
+  if (a.serviceId && b.serviceId) return a.serviceId === b.serviceId
   const headers = (value: SecretBinding) => Object.entries(value.headers ?? {}).map(([k,v]) => [k.toLowerCase(),v]).sort(([a],[b]) => a.localeCompare(b))
   return a.origin === b.origin && a.header.toLowerCase() === b.header.toLowerCase() && a.format === b.format &&
     JSON.stringify(a.paths ? [...a.paths].sort() : null) === JSON.stringify(b.paths ? [...b.paths].sort() : null) && JSON.stringify(headers(a)) === JSON.stringify(headers(b))

@@ -1,3 +1,4 @@
+import { SecretBindings } from '../secrets/SecretBindings'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -18,6 +19,7 @@ export function createProfileSecretAdapter(options: {
   environment?: NodeJS.ProcessEnv
 }): IntegrationSecretAdapter {
   const filePath = join(options.profileRoot, 'secrets', 'refs.json')
+  const bindings = new SecretBindings(options.profileRoot)
   const environment: NodeJS.ProcessEnv = options.inheritProcessEnv ? options.environment ?? process.env : {}
 
   const readFileSecrets = (): Record<string, string> => {
@@ -41,13 +43,8 @@ export function createProfileSecretAdapter(options: {
     resolveEnv: (value) => value,
     resolveSecretRef: (ref) => {
       // Refuse before resolving, including an inherited environment fallback. Daemon-only reads remain available for masking.
-      const metaPath = join(options.profileRoot, 'secrets', 'meta.json')
-      if (existsSync(metaPath)) {
-        let meta: Record<string, { binding?: { service?: string; origin: string } }>
-        try { meta = JSON.parse(readFileSync(metaPath, 'utf8')) } catch { throw new Error('Secret metadata could not be read.') }
-        const binding = meta?.[ref]?.binding
-        if (binding) throw new Error(`${ref} is bound to ${binding.service ?? new URL(binding.origin).host}; use secret_fetch.`)
-      }
+      const binding = bindings.get(ref)
+      if (binding) throw new Error(`${ref} is bound to ${binding.service ?? new URL(binding.origin).host}; use secret_fetch.`)
       return (isKeyName(ref) ? readFileSecrets()[ref] : undefined) ?? environment[ref]
     }
   }
@@ -55,6 +52,7 @@ export function createProfileSecretAdapter(options: {
     resolveEnv(value: string): string {
       return resolveEnvValue(value, environment, toolSecrets)
     },
+    canUseSecretRef: (ref) => !bindings.get(ref),
     // The daemon's own lookups (a webhook's secret by its ref) read the whole store.
     resolveSecretRef(ref: string): string | undefined {
       const fromFile = readFileSecrets()[ref]

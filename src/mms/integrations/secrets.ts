@@ -12,6 +12,8 @@ export const REDACTED_VALUE = '[redacted]'
 export interface IntegrationSecretAdapter {
   resolveEnv(value: string): string
   resolveSecretRef?(ref: string): string | undefined
+  /** Whether a reference may be passed raw to external programs/settings. Daemon reads can still mask it. */
+  canUseSecretRef?(ref: string): boolean
 }
 
 export function createProcessEnvSecretAdapter(
@@ -92,7 +94,7 @@ export function missingReferences(
       if (!env[name]) missing.add(name)
     }
     for (const name of extractSecretReferences(value)) {
-      if (!secrets.resolveSecretRef?.(name)) missing.add(`secret:${name}`)
+      if (secrets.canUseSecretRef?.(name) === false || !secrets.resolveSecretRef?.(name)) missing.add(`secret:${name}`)
     }
   }
   return Array.from(missing).sort()

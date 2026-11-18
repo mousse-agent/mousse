@@ -1,8 +1,7 @@
 import { OldMetaReader } from './oldMetaReader'
-import fs from 'node:fs'
 import { SECRET_SERVICES } from '../../src/shared/secretServices'
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveSecretBinding } from '../../src/mms/secrets/secretBinding'
@@ -10,6 +9,11 @@ import { SecretVault } from '../../src/mms/secrets/SecretVault'
 import { SecretRequests, secretOutcomeText } from '../../src/mms/secrets/SecretRequests'
 import { createProfileSecretAdapter } from '../../src/mms/profiles/secrets'
 import { createSecretToolHost } from '../../src/mms/secrets/secretToolHost'
+
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
+  return {...actual, readFileSync: vi.fn(actual.readFileSync)}
+})
 
 const homes: string[] = []
 afterEach(() => homes.splice(0).forEach(home => rmSync(home, { recursive: true, force: true })))
@@ -124,13 +128,18 @@ it.each(['store', 'grant', 'markUsed', 'delete', 'sweep'] as const)('keeps bindi
   const {home, vault, requests} = fixture()
   const binding = resolveSecretBinding({service: 'github'})
   vault.store('BOUND', VALUE, {threadId: 'bot', keep: 'saved', binding})
-  const old = new OldMetaReader({profileRoot: home, threadAlive: () => false})
+  let oldNow = Date.now()
+  const old = new OldMetaReader({profileRoot: home, threadAlive: () => false, now: () => oldNow})
   old.store('OTHER', 'other-value', {threadId: 'old', keep: 'thread'})
   if (operation === 'store') old.store('NEW', 'new-value', {threadId: 'old', keep: 'saved'})
   if (operation === 'grant') old.grant('BOUND', 'old')
   if (operation === 'markUsed') old.markUsed('BOUND')
   if (operation === 'delete') old.delete('OTHER')
-  if (operation === 'sweep') old.sweep()
+  if (operation === 'sweep') {
+    old.store('EXPIRED', 'expiring-value', {threadId: 'old', keep: 'day'})
+    oldNow += 24 * 60 * 60 * 1000 + 1
+    expect(old.sweep()).toContain('EXPIRED')
+  }
   expect(JSON.parse(readFileSync(join(home, 'secrets/meta.json'), 'utf8')).BOUND).not.toHaveProperty('binding')
   const restarted = new SecretVault({profileRoot: home, threadAlive: () => true})
   expect(restarted.bindingFor('BOUND')).toEqual(binding)
@@ -200,14 +209,14 @@ it('caches binding file reads across references while observing atomic replaceme
   const {home, vault, requests} = fixture()
   vault.store('KEY', VALUE, {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
   const adapter = createProfileSecretAdapter({profileRoot: home, inheritProcessEnv: false})
-  const spy = vi.spyOn(fs, 'readFileSync')
+  const spy = vi.mocked(readFileSync).mockClear()
   try {
     for (let n = 0; n < 4; n++) expect(() => adapter.resolveEnv('${secret:KEY}')).toThrow(/GitHub/)
     expect(spy.mock.calls.filter(([path]) => String(path).endsWith('/bindings.json'))).toHaveLength(1)
     const path = join(home, 'secrets/bindings.json')
     const replacement = path + '.new'
-    writeFileSync(replacement, '{"KEY":{"service":"openai"}}'); fs.renameSync(replacement, path)
+    writeFileSync(replacement, '{"KEY":{"service":"openai"}}'); renameSync(replacement, path)
     expect(() => adapter.resolveEnv('${secret:KEY}')).toThrow(/OpenAI/)
     expect(spy.mock.calls.filter(([path]) => String(path).endsWith('/bindings.json'))).toHaveLength(2)
-  } finally { spy.mockRestore(); requests.dispose() }
+  } finally { spy.mockClear(); requests.dispose() }
 })

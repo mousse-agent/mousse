@@ -11,8 +11,8 @@ interface SecretMeta { label?: string; keep: SecretKeep; expiresAt?: string; thr
 type MetaFile = Record<string, SecretMeta>
 export class OldMetaReader {
   private readonly metaPath: string
-  private readonly now = () => Date.now()
-  constructor(private readonly options: {profileRoot: string; threadAlive(threadId: string): boolean; changed?(): void}) { this.metaPath = join(options.profileRoot, 'secrets/meta.json') }
+  private readonly now = () => this.options.now?.() ?? Date.now()
+  constructor(private readonly options: {profileRoot: string; threadAlive(threadId: string): boolean; changed?(): void; now?(): number}) { this.metaPath = join(options.profileRoot, 'secrets/meta.json') }
   private didChange(): void {}
   private syncFiles(): void {}
   readMeta(): MetaFile {

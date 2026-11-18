@@ -188,29 +188,33 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
         result.warnings.push(`MCP server ${server.name} is missing environment: ${(server.missingEnvVars ?? []).join(', ')}`)
         continue
       }
-      let entry: ClaudeUserMcpServer
-      if (server.transport === 'stdio') {
-        if (!server.command) {
-          result.warnings.push(`MCP server ${server.name} has no command.`)
-          continue
+      try {
+        let entry: ClaudeUserMcpServer
+        if (server.transport === 'stdio') {
+          if (!server.command) {
+            result.warnings.push(`MCP server ${server.name} has no command.`)
+            continue
+          }
+          const env = resolveValues(server.env)
+          entry = { type: 'stdio', command: server.command, ...(server.args?.length ? { args: server.args } : {}), ...(env ? { env } : {}) }
+        } else {
+          if (!server.url) {
+            result.warnings.push(`MCP server ${server.name} has no URL.`)
+            continue
+          }
+          const headers = resolveValues(server.headers)
+          entry = { type: server.transport, url: server.url, ...(headers ? { headers } : {}) }
         }
-        const env = resolveValues(server.env)
-        entry = { type: 'stdio', command: server.command, ...(server.args?.length ? { args: server.args } : {}), ...(env ? { env } : {}) }
-      } else {
-        if (!server.url) {
-          result.warnings.push(`MCP server ${server.name} has no URL.`)
-          continue
-        }
-        const headers = resolveValues(server.headers)
-        entry = { type: server.transport, url: server.url, ...(headers ? { headers } : {}) }
+        const name = claim(server)
+        result.mcpServers[name] = entry
+        if (server.enabledTools?.length || server.deniedTools?.length)
+          result.toolRules[`mcp__${name}__`] = {
+            ...(server.enabledTools?.length ? { enabled: server.enabledTools } : {}),
+            ...(server.deniedTools?.length ? { denied: server.deniedTools } : {})
+          }
+      } catch (error) {
+        result.warnings.push(`MCP server ${server.name} was not attached: ${message(error)}`)
       }
-      const name = claim(server)
-      result.mcpServers[name] = entry
-      if (server.enabledTools?.length || server.deniedTools?.length)
-        result.toolRules[`mcp__${name}__`] = {
-          ...(server.enabledTools?.length ? { enabled: server.enabledTools } : {}),
-          ...(server.deniedTools?.length ? { denied: server.deniedTools } : {})
-        }
     }
   }
 
