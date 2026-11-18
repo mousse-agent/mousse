@@ -86,3 +86,9 @@ it('times out a persisted in-flight check after restart and ignores its late res
   await f.tickSchedules(new Date(T0+5*60_000)); await f.tickSchedules(new Date(T0+8*60_000))
   expect(JSON.parse(state(entry.scheduleId)!.value).failures).toBe(1)
 })
+it('names the page in the returned and About labels',async () => {
+  const entry=await add()
+  expect(entry.label).toContain('runs when example.com changes')
+  expect(f.bots.listSchedules(botId)[0]!.label).toContain('runs when example.com changes')
+  expect(f.bots.service.automationFacts(botId,entry.scheduleId)?.whenText).toContain('runs when example.com changes')
+})
