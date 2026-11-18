@@ -3532,7 +3532,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const subagent = input.role === 'subagent'
     // Work that asked its owner a question in this dispatch ends its turn: every later call is refused (never a wall,
     // which would cut the turn as an interruption), and the answer continues it. It only refuses; it never allows.
-    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? (this.actions.pendingInTurn(row.id, input.mainN) ? 'The call is held for your owner. End your turn now.' : this.store.workWait(row.id)?.status === 'waiting' ? 'This work is waiting. End your turn now; it carries on here when the time or event comes.' : QUESTION_END_TURN_TEXT) : undefined)
+    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? (this.actions.pendingInTurn(row.id, input.mainN) ? 'Not sent: one call already waits for your owner in this turn, and this one was not held. End your turn now; ask for it again after your owner answers.' : this.store.workWait(row.id)?.status === 'waiting' ? 'This work is waiting. End your turn now; it carries on here when the time or event comes.' : QUESTION_END_TURN_TEXT) : undefined)
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
       const stop = endTurn()
