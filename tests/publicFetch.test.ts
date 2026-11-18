@@ -198,7 +198,7 @@ it.each([false,true])('uses the page/service Accept default for secretRead=%s',a
  await publicFetch('https://example.com',{secretRead})
 })
 
-it('allows 3 MiB for a service read while rejecting the same page response', async () => {
+it.each([3, 5])('allows %i MiB for a service read while rejecting the same page response', async mebibytes => {
   vi.mocked(dns.lookup).mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never)
   vi.mocked(https.request).mockImplementation(((_options: any, callback: any) => {
     const req = new EventEmitter() as any
@@ -208,12 +208,12 @@ it('allows 3 MiB for a service read while rejecting the same page response', asy
       res.statusCode = 200
       res.headers = {}
       callback(res)
-      res.emit('data', Buffer.alloc(3 * 1024 * 1024))
+      res.emit('data', Buffer.alloc(mebibytes * 1024 * 1024))
       res.emit('end')
     }
     return req
   }) as any)
-  expect((await publicFetch('https://example.com', { secretRead: true })).body.length).toBe(3 * 1024 * 1024)
+  expect((await publicFetch('https://example.com', { secretRead: true })).body.length).toBe(mebibytes * 1024 * 1024)
   await expect(publicFetch('https://example.com')).rejects.toThrow('2 MiB')
 })
 it('keeps service reads pending after the page deadline and aborts at the service deadline', async () => {
