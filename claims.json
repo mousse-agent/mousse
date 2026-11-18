@@ -2,6 +2,17 @@
   "version": 1,
   "claims": [
     {
+      "task": "mousse/owner-request-in-a-personal-bot-chat",
+      "session": "Animatrix-71802f",
+      "machine": "Animatrix",
+      "branch": "mousse/owner-request-in-a-personal-bot-chat",
+      "paths": [
+        "src/renderer/components/bots/BotChatView.tsx"
+      ],
+      "claimedAt": "2026-11-18T07:10:27.155Z",
+      "expiresAt": "2026-11-18T09:10:27.155Z"
+    },
+    {
       "task": "net-engine-phase0",
       "session": "Animatrix-f290b5",
       "machine": "Animatrix",
