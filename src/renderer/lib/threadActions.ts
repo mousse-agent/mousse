@@ -194,6 +194,21 @@ export function setThreadHidden(threadId: string, hidden: boolean): Promise<bool
   }, { retry: true })
 }
 
+/**
+ * Hide bot threads, Hide all bot threads: takes threads the owner's bots started out of the sidebar at once. Each bot's
+ * chat still lists them, with Show in sidebar. A failure shows as one toast with Retry. Resolves to whether all went through.
+ */
+export function hideThreads(threadIds: readonly string[]): Promise<boolean> {
+  return runWithToast(threadIds.length === 1 ? 'hide the thread' : 'hide the threads', async () => {
+    const results = await Promise.allSettled(threadIds.map((threadId) =>
+      window.mousse.platformRequest.request<{ thread?: Thread }>('threads.setHidden', { threadId, hidden: true })))
+    const store = useAppStore.getState()
+    for (const result of results) if (result.status === 'fulfilled' && result.value?.thread) store.upsertThread(result.value.thread)
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failed) throw failed.reason
+  }, { retry: true })
+}
+
 /** Archives the open thread, and opens the next one in its project (see `archiveThread`). */
 export async function archiveOpenThread(): Promise<void> {
   const thread = openStartedThread()
