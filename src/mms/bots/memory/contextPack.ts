@@ -325,7 +325,11 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
    * bot with no history yet has nothing to correct, so it is marked as having seen everything and told nothing.
    */
   const visibleChanges = () => BOT_CHANGELOG.filter(entry => !entry.asksFirst || options.asksFirstEnabled?.() !== false)
-  const latestChange = () => visibleChanges().at(-1)?.id ?? 0
+  // The contiguous seen cursor cannot cross hidden advice. Later visible entries can repeat during support rollback.
+  const latestChange = () => {
+    const hidden = options.asksFirstEnabled?.() === false ? BOT_CHANGELOG.find(entry => entry.asksFirst) : undefined
+    return hidden ? hidden.id - 1 : BOT_CHANGELOG.at(-1)?.id ?? 0
+  }
   const changes = (botId: string, chat: boolean, fresh = false): string => {
     const seen = store.getState<number>(botId, CHANGELOG_SEEN_KEY)
     if (seen === undefined && fresh) {
