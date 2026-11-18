@@ -136,6 +136,15 @@ describe('compileBotThread', () => {
     expect(chat.permissions.appTools).toContain('mcp_servers')
   })
 
+  it('offers secret_fetch in work with the secrets grant, independently excluding the chat', () => {
+    const grant = manifest({ appTools: ['secrets'] })
+    for (const frontDesk of [false, true]) {
+      const compiled = compile({ grant, botTools: { escalate: true, consult: false, memory: true, frontDesk } })
+      if (!compiled.ok) throw new Error(compiled.error.message)
+      expect(compiled.permissions.appTools.includes('secret_fetch')).toBe(!frontDesk)
+    }
+  })
+
   it('compiles the published revision held inside the grant: a narrower revision really narrows', () => {
     const grant = manifest({ budget: { maxTurns: 100 } })
     const revision = manifest({ tools: ['read'], appTools: [], budget: { maxTurns: 10 } })

@@ -197,3 +197,78 @@ it.each([false,true])('uses the page/service Accept default for secretRead=%s',a
  }) as any)
  await publicFetch('https://example.com',{secretRead})
 })
+
+it('allows 3 MiB for a service read while rejecting the same page response', async () => {
+  vi.mocked(dns.lookup).mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never)
+  vi.mocked(https.request).mockImplementation(((_options: any, callback: any) => {
+    const req = new EventEmitter() as any
+    req.destroy = (error: Error) => req.emit('error', error)
+    req.end = () => {
+      const res = new EventEmitter() as any
+      res.statusCode = 200
+      res.headers = {}
+      callback(res)
+      res.emit('data', Buffer.alloc(3 * 1024 * 1024))
+      res.emit('end')
+    }
+    return req
+  }) as any)
+  expect((await publicFetch('https://example.com', { secretRead: true })).body.length).toBe(3 * 1024 * 1024)
+  await expect(publicFetch('https://example.com')).rejects.toThrow('2 MiB')
+})
+it('keeps service reads pending after the page deadline and aborts at the service deadline', async () => {
+  vi.useFakeTimers()
+  try {
+    vi.mocked(dns.lookup).mockImplementation(() => new Promise(() => {}))
+    let settled = false
+    const result = publicFetch('https://example.com', { secretRead: true }).then(() => { settled = true }, error => { settled = true; return error })
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(14_999)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(settled).toBe(true)
+    expect(await result).toBeInstanceOf(Error)
+  } finally { vi.useRealTimers() }
+})
+it('uses the development resolver only for secret reads', async () => {
+  vi.stubEnv('MOUSSE_TEST_SECRET_FETCH_RESOLVE', 'example.com=127.0.0.1')
+  try {
+    vi.mocked(dns.lookup).mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never)
+    const connected: string[] = []
+    vi.mocked(https.request).mockImplementation(((options: any, callback: any) => {
+      options.lookup('example.com', {}, (_error: unknown, address: string) => connected.push(address))
+      const req = new EventEmitter() as any
+      req.end = () => {
+        const res = new EventEmitter() as any
+        res.statusCode = 200
+        res.headers = {}
+        callback(res)
+        res.emit('end')
+      }
+      return req
+    }) as any)
+    await publicFetch('https://example.com', { secretRead: true })
+    await publicFetch('https://example.com')
+    expect(connected).toEqual(['127.0.0.1', '8.8.8.8'])
+    expect(dns.lookup).toHaveBeenCalledOnce()
+  } finally { vi.unstubAllEnvs() }
+})
+it.each(['already stopped', 'during DNS', 'while connected'])('honours caller cancellation %s', async when => {
+  const controller = new AbortController()
+  vi.mocked(dns.lookup).mockImplementation(() => when === 'during DNS' ? new Promise(() => {}) : Promise.resolve([{ address: '8.8.8.8', family: 4 }]) as never)
+  let connect!: () => void
+  const connected = new Promise<void>(resolve => { connect = resolve })
+  vi.mocked(https.request).mockImplementation(((options: any) => {
+    const req = new EventEmitter() as any
+    req.end = connect
+    options.signal.addEventListener('abort', () => req.emit('error', new Error('aborted')))
+    return req
+  }) as any)
+  if (when === 'already stopped') controller.abort()
+  const result = expect(publicFetch('https://example.com', { secretRead: true, signal: controller.signal })).rejects.toThrow('stopped')
+  if (when === 'while connected') await connected
+  controller.abort()
+  await result
+  if (when !== 'while connected') expect(https.request).not.toHaveBeenCalled()
+})

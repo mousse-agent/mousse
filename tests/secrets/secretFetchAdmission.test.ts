@@ -56,7 +56,7 @@ it.each([
  if(patch.headers){const args=JSON.parse(String(store.get('SELECT args_json FROM bot_actions')?.args_json));expect(args.headers).toEqual(Object.keys(patch.headers));expect(JSON.stringify(args)).not.toContain('ghp_')}
 })
 
-it.each(['bad\x01key0123456789','bad🔐key0123456789'])('refuses a key that cannot form an HTTP header before counting it',async value=>{
+it.each(['bad\x01key0123456789','bad🔐key0123456789','bad\rkey0123456789','bad\nkey0123456789'])('refuses a key that cannot form an HTTP header before counting it',async value=>{
  const {store,invoke}=fixture(value)
  expect((await invoke('owner',{secret:'KEY',path:'/v1/models'})).isError).toBe(true)
  expect(store.get('SELECT ran_at FROM bot_actions')?.ran_at).toBeNull();expect(publicFetch).not.toHaveBeenCalled()
