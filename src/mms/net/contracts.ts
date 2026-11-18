@@ -5,6 +5,7 @@
  * each member and specified in docs/net/state-machines.md.
  */
 import type { Duplex } from 'node:stream'
+import { NetError } from '../../shared/net/errors'
 import type {
   Base64Url,
   BlobId,
@@ -863,11 +864,37 @@ export interface StreamAuthority {
   ): void
 }
 
+/** A caller over a v1 session: authenticated by its signed delegation on the roster. */
+export type V1Peer = SyncSession['peer']
+/**
+ * A caller over an engine session (Phase 1a): one of this profile's own pairings, named by the local id this
+ * computer minted for it. It acts as the owner from another of their computers, so `user` is this profile's own
+ * user id. It carries no delegation: the pinned channel and the grant are the proof.
+ */
+export interface EngineCaller {
+  source: 'engine'
+  node: NodeId
+  user: UserId
+  role: 'owner'
+  grant: string
+  endpoint: string
+}
+/** Who made a request: a v1 peer or an engine pairing. Narrow with {@link isEngineCaller} before reading `delegation`. */
+export type RpcCaller = V1Peer | EngineCaller
+export function isEngineCaller(caller: RpcCaller): caller is EngineCaller {
+  return (caller as Partial<EngineCaller>).source === 'engine'
+}
+/** The v1 peer behind a call, for methods only v1 callers can reach; an engine caller is refused. */
+export function v1Caller(caller: RpcCaller): V1Peer {
+  if (isEngineCaller(caller)) throw new NetError('forbidden')
+  return caller
+}
+
 export interface RpcContext {
   id: RpcId
   /** Executor-minted stable ledger identity, present only after durable admission. */
   execution?: ExecutionId
-  caller: SyncSession['peer']
+  caller: RpcCaller
   /** The inbound carrier the calling session arrived on (`plus-relay`, `phone-webrtc`…), when known. */
   carrier?: string
   signal: AbortSignal

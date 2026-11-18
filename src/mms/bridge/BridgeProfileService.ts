@@ -35,6 +35,7 @@ import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 import { OwnerRoutes } from './routed/OwnerRoutes'
+import { PeerDirectory } from './peers'
 import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
@@ -55,6 +56,8 @@ export class BridgeProfileService {
   readonly currentIdentity: SpaceCurrentIdentity
   readonly threads: ThreadStreamAdapter
   readonly artifacts: BridgeArtifacts
+  /** The other computers Bridge reaches, over v1 (while on) and engine pairings. */
+  readonly peers: PeerDirectory
   readonly hub: BridgeHub
   /** Sends the actions of a thread on another of the user's computers to that computer (behind `netBridgeThreads`). */
   readonly router: ThreadRouter
@@ -91,9 +94,12 @@ export class BridgeProfileService {
       nativeAdapters?: ReadonlyMap<string, NativeBotComposition>
       /** Tests only: scripted bot runtimes. Production never sets this. */
       trustedQaAdapters?: ReadonlyMap<string, BotRuntimeAdapter>
+      /** The profile's peer directory; without one only v1 is reached. */
+      peers?: PeerDirectory
     }
   ) {
     const { services, runtime: rt, net } = options
+    this.peers = options.peers ?? new PeerDirectory({ net, engine: () => undefined })
     raiseStreamListenerLimits(services)
     // "Share bots with other devices": the lists and the bot methods ask on every push and call.
     const botsSharing: BotsSharingPort = {
@@ -132,7 +138,7 @@ export class BridgeProfileService {
     const botReach: BotReachPort = {
       ...reach,
       devices: async () => {
-        const view = (await net.request('bridge.nodes', {})) as {
+        const view = (await this.peers.nodes()) as {
           nodes: Array<{
             node: NodeId
             name?: string
@@ -323,15 +329,16 @@ export class BridgeProfileService {
         const reader = readerOfListsKey(threadId)
         return reader ? { reader: reader as NodeId, subject: LISTS_STREAM_THREAD_ID } : undefined
       },
-      isSubscribed: (stream, holder) => net.streamSubscribed(stream, holder as NodeId | undefined),
+      // Served to v1 sessions and engine pairings alike, through the peer directory.
+      isSubscribed: (stream, holder) => this.peers.isSubscribed(stream, holder as NodeId | undefined),
       isTurnActive: (threadId) => services.orchestrator.isTurnActive(threadId),
-      onDelta: (stream, data, key) => net.publishDelta(stream, data, key),
-      onDeltaDiscard: (stream, matches) => net.discardDeltas(stream, matches),
+      onDelta: (stream, data, key) => this.peers.publishDelta(stream, data, key),
+      onDeltaDiscard: (stream, matches) => this.peers.discardDeltas(stream, matches),
       onRecord: (stream, record) => {
-        void this.track(net.publish(stream, record))
+        void this.track(this.peers.publish(stream, record))
       },
       onError: (_thread, error, stream) => {
-        void this.track(net.failStream(stream, error instanceof NetError ? error.code : 'internal'))
+        void this.track(this.peers.failStream(stream, error instanceof NetError ? error.code : 'internal'))
       }
     })
     this.remote = new RemoteApi(
@@ -384,14 +391,8 @@ export class BridgeProfileService {
       staging,
       streams: routedStreamsPort(this.threads),
       // A device that has been away from this computer for ten minutes has its terminals ended.
-      connected: (node) => {
-        try {
-          return net.session(node).state() === 'open'
-        } catch {
-          return false
-        }
-      },
-      deviceName: (node) => deviceNameOf(rt.identity, node),
+      connected: (node) => this.peers.online(node),
+      deviceName: (node) => this.peers.name(node, 'another computer'),
       // The first terminal a device opens: a desktop notification in the windows of this computer (none, for a
       // computer with no window, which has the audit row).
       onFirstTerminal: ({ name, threadId }) =>
@@ -444,7 +445,7 @@ export class BridgeProfileService {
       name: (node) => deviceLabelOf(rt.identity, node),
       // Read again when a person answers: a device that was revoked, or lost Works on threads, is not allowed here.
       stillAsking: async (node) => {
-        const view = (await net.request('bridge.nodes', {})) as {
+        const view = (await this.peers.nodes()) as {
           nodes: Array<{ node: NodeId; caps: string[]; revoked?: boolean }>
         }
         const found = view.nodes.find((entry) => entry.node === node)
@@ -523,11 +524,19 @@ export class BridgeProfileService {
       store: this.threads.store,
       clock: this.clock,
       session: (node) => net.session(node),
+      client: (node) => this.peers.client(node),
+      engine: {
+        isEngine: (node) => this.peers.isEngine(node),
+        bind: (stream, node) => this.peers.bind(stream, node),
+        verifyStream: (stream) => this.peers.verifyStream(stream)
+      },
       resolveResult: (...args) => this.artifacts.resolveResult(...args)
     })
     this.router = new ThreadRouter({
       services,
       net,
+      peers: this.peers,
+      enabled: () => this.bridgeThreadsOn(),
       hub: this.hub,
       signal: this.routerStop.signal
     })
@@ -608,7 +617,7 @@ export class BridgeProfileService {
       ownsRequest: (...args) => this.hub.ownsRequest(...args),
       canonicalRequest: (...args) => this.hub.canonicalRequest(...args),
       onPublished: (stream, record) => {
-        void this.track(net.publish(stream, record))
+        void this.track(this.peers.publish(stream, record))
       }
     })
     const concrete =
@@ -692,15 +701,17 @@ export class BridgeProfileService {
             ...this.staging.callers()
           ])
           const closed: StreamId[] = []
+          // Engine pairings are never on the v1 roster: one that is serving keeps what it holds.
+          const keeps = granted && ((node: NodeId) => granted(node) || this.peers.serving(node))
           for (const node of nodes) {
-            if (granted?.(node)) continue
+            if (keeps?.(node)) continue
             closed.push(...this.threads.closePrivate({ reader: node }))
             this.routes.pages.dropCaller(node)
             this.staging.dropCaller(node)
           }
           // The shells they opened here end with the permission that opened them: the owner's switch going off
           // (no `granted`) or a computer losing "Works on threads" (or being revoked).
-          if (granted) this.routes.terminals.endExcept('access_lost', granted)
+          if (keeps) this.routes.terminals.endExcept('access_lost', keeps)
           else this.routes.terminals.end('setting_off')
           return closed
         }
@@ -734,8 +745,8 @@ export class BridgeProfileService {
           this.currentIdentity.observeHistoryRoster(signed)
         },
         canReceive: (descriptor, peer) => {
-          const feature = descriptor.kind.startsWith('space.') ? 'netSpaces' : 'netBridge'
-          if (!this.options.net.featureEnabled(feature)) return false
+          if (descriptor.kind.startsWith('space.') ? !this.options.net.featureEnabled('netSpaces') : !this.bridgeOn())
+            return false
           if (descriptor.kind.startsWith('space.')) return session.canReceive!(descriptor, peer)
           return descriptor.kind === 'node.artifact'
             ? this.artifacts.canReceive(descriptor, peer)
@@ -752,7 +763,7 @@ export class BridgeProfileService {
       onSessionOpened: (session: SyncSession) => {
         if (
           !this.stopped &&
-          this.options.net.featureEnabled('netBridge') &&
+          this.bridgeOn() &&
           session.peer.user === this.options.runtime.identity.self()?.user
         ) {
           const node = session.peer.node
@@ -780,17 +791,59 @@ export class BridgeProfileService {
           this.bots.activate()
           this.spaces.local.resume()
         }
-        if (!this.activated && this.options.net.featureEnabled('netBridge')) {
-          this.activated = true
-          // A device blocked while Bridge was off, or before a restart, is cleaned up after now.
-          this.routes.cleanUpBlockedDevices()
-          void this.track(this.dispatch.recover())
-        }
+        this.activateBridge()
       },
       beginDisable: () => this.beginDisable(),
       close: () => this.close(),
       activeCount: () => this.activeCount()
     }
+  }
+
+  /** Bridge is on: v1 with its Bridge feature, or the engine. */
+  bridgeOn(): boolean {
+    return this.options.net.featureEnabled('netBridge') || this.peers.engineOn()
+  }
+  /** Threads route to other computers: v1 with both flags, or the engine. */
+  bridgeThreadsOn(): boolean {
+    return (
+      (this.options.net.featureEnabled('netBridge') &&
+        this.options.net.featureEnabled('netBridgeThreads')) ||
+      this.peers.engineOn()
+    )
+  }
+  /** Bridge's start once it is on (v1's activation or the engine's start); runs once per runtime. */
+  activateBridge(): void {
+    if (this.activated || this.stopped || !this.bridgeOn()) return
+    this.activated = true
+    // A device blocked while Bridge was off, or before a restart, is cleaned up after now.
+    this.routes.cleanUpBlockedDevices()
+    void this.track(this.dispatch.recover())
+  }
+  /** An engine pairing's client is ready: the Hub reattaches, then the router and the lists hear of it. */
+  peerOnline(node: NodeId): void {
+    if (this.stopped || !this.bridgeOn()) return
+    void this.track(
+      this.hub
+        .reconnect(node)
+        .catch(() => undefined)
+        .then(() => {
+          this.router.nodeOnline(node)
+          this.lists.nodeOnline(node)
+        })
+    )
+  }
+  /** An engine pairing's last client closed. */
+  peerOffline(node: NodeId): void {
+    if (this.stopped) return
+    this.lists.nodeOffline(node)
+  }
+  /** Everything held here for one computer ends: its private streams, pages, staged values and terminals. */
+  releaseNode(node: NodeId): void {
+    if (this.stopped) return
+    this.threads.closePrivate({ reader: node })
+    this.routes.pages.dropCaller(node)
+    this.staging.dropCaller(node)
+    this.routes.terminals.endExcept('access_lost', (other) => other !== node)
   }
 
   onClose(dispose: () => void | Promise<void>): () => void {

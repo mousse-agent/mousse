@@ -9,7 +9,8 @@ import {
   EDITOR_TUNNEL_LOCAL_METHODS,
   type EditorTunnelLocalMethod
 } from '../../shared/net/editorProxy'
-import { isId, NODE_CAPABILITIES, NET_ERRORS, NetError } from '../../shared/net'
+import { isId, NODE_CAPABILITIES, NET_ERRORS, NetError, type NodeId } from '../../shared/net'
+import type { NodePolicyChange } from './store/nodePolicy'
 import { isJoinVia } from '../../shared/net/via'
 import { AppError } from '../../shared/errors'
 import { isPermissionMode } from '../../shared/permissionMode'
@@ -17,6 +18,19 @@ import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol
 
 export interface NetLocalService {
   request(method: NetLocalMethod, params: Record<string, unknown>): unknown | Promise<unknown>
+}
+
+/**
+ * Where the profile answers the Bridge methods the engine shares with v1: `bridge.nodes` from the peer directory
+ * (v1's rows while v1 is on, then the engine's pairings), and `bridge.policy` for an engine pairing from the engine
+ * service. Without it both go to NetService, as before the engine.
+ */
+export interface NetBridgeRoutes {
+  peers: { nodes(): Promise<unknown> }
+  engine: {
+    isEngine(node: NodeId): boolean
+    setPolicy(node: NodeId, change: NodePolicyChange): unknown
+  }
 }
 const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.plus.discover': ['apiOrigin'],
@@ -482,7 +496,8 @@ function publicError(code: keyof typeof NET_ERRORS, cause?: unknown, details?: u
 /** Local owner IPC only. Remote peers cannot invoke this registry through Bridge. */
 export function registerNetMethods(
   registry: DomainHandlerRegistry,
-  forProfile: (id: string) => NetLocalService | Promise<NetLocalService>
+  forProfile: (id: string) => NetLocalService | Promise<NetLocalService>,
+  routes?: (id: string) => NetBridgeRoutes | Promise<NetBridgeRoutes>
 ): void {
   for (const method of NET_LOCAL_METHODS)
     registry.register({
@@ -508,6 +523,12 @@ export function registerNetMethods(
       },
       async handle(_context, params, binding) {
         try {
+          if (routes && method === 'bridge.nodes') return await (await routes(binding!.profileId)).peers.nodes()
+          if (routes && method === 'bridge.policy') {
+            const { engine } = await routes(binding!.profileId)
+            const { node, ...change } = params as { node: NodeId } & NodePolicyChange
+            if (engine.isEngine(node)) return engine.setPolicy(node, change)
+          }
           return await (await forProfile(binding!.profileId)).request(method, params)
         } catch (error) {
           if (error instanceof NetError)

@@ -18,7 +18,8 @@ import {
   type RoutedStreamOpened
 } from '../../../shared/bridge/routed'
 import { qualifyRoutedResult } from '../../../shared/bridge/routedIds'
-import type { SyncSession } from '../../net/contracts'
+import { engineLimits } from '../../netEngine/limits'
+import type { BridgeClient } from '../peers'
 import { DomainRpcError } from '../../protocol/domainRegistry'
 import {
   computerOffline,
@@ -59,7 +60,7 @@ const LONG_METHODS = new Set([
 
 export interface RoutedClientDeps {
   /** An open session with `node`; throws `peer_offline` when there is none. */
-  session(node: NodeId): SyncSession
+  session(node: NodeId): BridgeClient
   computer(node: NodeId): ComputerRef
   stager?: RoutedStager
   /** Ends every wait when the profile closes. */
@@ -115,7 +116,7 @@ const sizeOf = (value: unknown): number => Buffer.byteLength(JSON.stringify(valu
  * Every failure it raises is a `DomainRpcError` a window can show.
  */
 export class RoutedClient {
-  private readonly versionCache = new WeakMap<SyncSession, Promise<Record<string, number> | undefined>>()
+  private readonly versionCache = new WeakMap<BridgeClient, Promise<Record<string, number> | undefined>>()
   private readonly large = new Map<NodeId, { running: number; waiting: Array<() => void> }>()
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>
 
@@ -264,7 +265,7 @@ export class RoutedClient {
     }
   }
 
-  private sessionOrOffline(node: NodeId, computer: ComputerRef): SyncSession {
+  private sessionOrOffline(node: NodeId, computer: ComputerRef): BridgeClient {
     try {
       return this.deps.session(node)
     } catch (error) {
@@ -275,7 +276,7 @@ export class RoutedClient {
   /** Runs `work` and turns what it throws into the error a person sees. */
   private async guard<T>(
     node: NodeId,
-    session: SyncSession,
+    session: BridgeClient,
     computer: ComputerRef,
     work: () => Promise<T>
   ): Promise<T> {
@@ -332,7 +333,7 @@ export class RoutedClient {
   /** Moves a value too large for a request into a staged value the call names. */
   private async stageLarge(
     node: NodeId,
-    session: SyncSession,
+    session: BridgeClient,
     computer: ComputerRef,
     method: string,
     row: RoutedRow,
@@ -376,6 +377,10 @@ export class RoutedClient {
     const id = newId('rpc') as RpcId
     const idem = row.durable ? `${method}:${options.idem ?? id}`.slice(0, 256) : undefined
     const deadlineMs = deadlineOf(method)
+    // A result asked for again waits at most what is left of the call's own time, and no less than the result-wait
+    // floor (v1 owners answer at once anyway): an engine owner holds the answer while the handler still runs.
+    const deadlineAt = Date.now() + deadlineMs
+    const remaining = (): number => Math.max(engineLimits().resultWaitFloorMs, deadlineAt - Date.now())
     const signal = options.signal
     let session = this.sessionOrOffline(node, computer)
     let afterLoss = false
@@ -385,7 +390,7 @@ export class RoutedClient {
         if (afterLoss && row.durable) {
           // The owner may have run it already: its result is asked for before the request is repeated.
           try {
-            reply = await session.rpcResult(id, { deadlineMs: 15_000, signal })
+            reply = await session.rpcResult(id, { deadlineMs: remaining(), signal })
           } catch (error) {
             if (!(error instanceof NetError && error.code === 'outcome_uncertain')) throw error
             reply = await this.send(session, method, params, id, idem, deadlineMs, signal, options)
@@ -406,7 +411,7 @@ export class RoutedClient {
         if (error instanceof NetError && error.code === 'deadline_exceeded' && session.state() === 'open') {
           if (!row.durable) throw timedOut(computer)
           try {
-            const late = await session.rpcResult(id, { deadlineMs: 15_000, signal })
+            const late = await session.rpcResult(id, { deadlineMs: remaining(), signal })
             return await this.settle(node, session, computer, method, late, signal)
           } catch {
             throw mayHaveHappened(computer, method)
@@ -428,7 +433,7 @@ export class RoutedClient {
   }
 
   private send(
-    session: SyncSession,
+    session: BridgeClient,
     method: string,
     params: Record<string, unknown>,
     id: RpcId,
@@ -452,7 +457,7 @@ export class RoutedClient {
     giveUpAt: number,
     signal: AbortSignal,
     durable: boolean
-  ): Promise<SyncSession> {
+  ): Promise<BridgeClient> {
     for (;;) {
       if (signal.aborted) throw new DomainRpcError('cancelled', 'The request was cancelled.')
       try {
@@ -475,7 +480,7 @@ export class RoutedClient {
   /** A reply, or a paged reply followed to its end. */
   private async settle(
     node: NodeId,
-    session: SyncSession,
+    session: BridgeClient,
     computer: ComputerRef,
     method: string,
     reply: unknown,

@@ -35,7 +35,7 @@ import { RoutedClient } from './RoutedClient'
 import { RoutedStager } from './stager'
 import { AttachedThreads } from './attachedThreads'
 import { AttachedTerminals } from './attachedTerminals'
-import { deviceNameOf } from './deviceName'
+import type { PeerDirectory } from '../peers'
 
 /** Methods whose result on this computer carries the complete list of threads or projects. */
 const RESULT_WITH_THREADS = new Set([
@@ -78,7 +78,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 export interface ThreadRouterOptions {
   services: MmsProfileServices
-  net: Pick<NetService, 'session' | 'featureEnabled' | 'runtime'>
+  net: Pick<NetService, 'runtime'>
+  /** The other computers and a client for each, over v1 or an engine pairing. */
+  peers: Pick<PeerDirectory, 'client' | 'computers' | 'online' | 'name'>
+  /** Whether threads route to other computers (`bridgeThreadsOn`). */
+  enabled(): boolean
   hub: BridgeHub
   /** Ends every wait when the profile closes. */
   signal: AbortSignal
@@ -113,7 +117,7 @@ export class ThreadRouter implements ThreadRouterPort {
     this.client =
       options.client ??
       new RoutedClient({
-        session: (node) => net.session(node),
+        session: (node) => options.peers.client(node),
         computer: (node) => this.computer(node),
         signal: options.signal,
         stager: new RoutedStager({
@@ -142,10 +146,9 @@ export class ThreadRouter implements ThreadRouterPort {
   /** Window bindings whose end is already watched. */
   private readonly watched = new WeakSet<AbortSignal>()
 
-  /** Whether routing is on for this profile: Bridge is on and so is the routing flag. */
+  /** Whether routing is on for this profile: v1 Bridge with the routing flag, or the engine. */
   enabled(): boolean {
-    const { net } = this.options
-    return net.featureEnabled('netBridge') && net.featureEnabled('netBridgeThreads')
+    return this.options.enabled()
   }
 
   computer(node: NodeId): ComputerRef {
@@ -159,57 +162,20 @@ export class ThreadRouter implements ThreadRouterPort {
   private lists?: Pick<MergedLists, 'noteOpened' | 'noteSent' | 'applyMetadata'>
 
   /**
-   * The other computers of the user whose threads are listed: devices of the roster that are not this one, not
-   * revoked, connected here, not blocked here, and not phones. The kind the authority recorded wins; a device of unknown kind
-   * counts only if its signed delegation holds "Works on threads". `undefined` when the roster cannot be read.
+   * The other computers of the user whose threads are listed (see `PeerDirectory.computers`). `undefined` when
+   * v1 is the only source and its roster cannot be read.
    */
   pairedComputers(): ComputerRef[] | undefined {
-    try {
-      const rt = this.options.net.runtime()
-      const identity = rt.identity
-      const self = identity.self()
-      const root = self && identity.pinnedRootKey(self.user)
-      const signed = self && identity.roster(self.user)
-      if (!self || !root || !signed) return undefined
-      const roster = identity.verifySigned<Roster>(signed, root)
-      const latest = new Map<string, NodeDelegation>()
-      for (const row of roster.nodes) {
-        const found = identity.verifySigned<NodeDelegation>(row, root)
-        const known = latest.get(found.subject)
-        if (!known || found.keyEpoch > known.keyEpoch || (found.keyEpoch === known.keyEpoch && found.issuedAt > known.issuedAt))
-          latest.set(found.subject, found)
-      }
-      return [...latest.values()]
-        .filter(
-          (found) =>
-            found.subject !== self.node &&
-            !roster.revoked.some((row) => row.subject === found.subject && row.throughKeyEpoch >= found.keyEpoch) &&
-            rt.connections.connected(found.subject as NodeId) &&
-            !rt.policy.get(found.subject as NodeId).blocked &&
-            isListedComputer(rt.enrollment.nodeKind(found.subject as NodeId), found.caps)
-        )
-        .map((found) => ({ node: found.subject as NodeId, name: found.name || 'the other computer' }))
-    } catch {
-      return undefined
-    }
+    return this.options.peers.computers()
   }
 
-  /** Whether a session with `node` is open. */
+  /** Whether a client for `node` is open. */
   isOnline(node: NodeId): boolean {
-    try {
-      this.options.net.session(node)
-      return true
-    } catch {
-      return false
-    }
+    return this.options.peers.online(node)
   }
 
   private nameOf(node: NodeId): string {
-    try {
-      return deviceNameOf(this.options.net.runtime().identity, node, 'the other computer')
-    } catch {
-      return 'the other computer'
-    }
+    return this.options.peers.name(node, 'the other computer')
   }
 
   private selfNode(): string | undefined {

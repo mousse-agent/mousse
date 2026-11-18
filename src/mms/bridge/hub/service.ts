@@ -14,6 +14,7 @@ import type {
   RpcId,
   StreamDescriptor,
   StoredRecord,
+  StreamId,
   Signed
 } from '../../../shared/net'
 import type {
@@ -44,6 +45,8 @@ import type { NetIdentityService } from '../../net/identity/NetIdentityService'
 import { decodeBase64 } from '../../net/identity/crypto'
 import type { BridgeDisplayPosition } from '../../../shared/bridge'
 import { DispatchInputJournal } from './inputs'
+import { streamBoundElsewhere } from '../../netEngine/store'
+import type { BridgeClient } from '../peers'
 interface Request extends BridgeHubRequestStatus {
   caller: NodeId
   user: string
@@ -111,6 +114,21 @@ export interface BridgeHubOptions {
   store: StreamStore
   clock?: Clock
   session(target: NodeId): SyncSession
+  /**
+   * The client an attachment reads through (`directory.client(node)`): a v1 session, or an engine pairing's
+   * client. Without it attachments use `session`.
+   */
+  client?(target: NodeId): BridgeClient
+  /**
+   * Engine pairings (Phase 1a). Their streams are bound to the pairing (`net_engine_streams`) in the transaction
+   * that writes the descriptor, and their records are taken on the pinned channel's word (`verifyStream`), not v1
+   * author checks. `bridge.hub.*` local methods are not supported for them.
+   */
+  engine?: {
+    isEngine(node: NodeId): boolean
+    bind(stream: StreamId, node: NodeId): void
+    verifyStream(stream: StreamId): void
+  }
   resolveResult?(
     value: unknown,
     session: SyncSession,
@@ -255,6 +273,10 @@ export class BridgeHub {
   }
   private session(target: NodeId, method: BridgeMethod): SyncSession {
     this.guard()
+    if (this.isEngine(target))
+      throw new NetError('profile_unsupported', 'Not supported for this device.', {
+        details: { reason: 'not_supported' }
+      })
     const self = this.self(HUB_METHODS[method].capability),
       session = this.options.session(target)
     if (session.state() !== 'open') return fail('peer_offline')
@@ -265,6 +287,21 @@ export class BridgeHub {
     )
       return fail('bad_delegation')
     return session
+  }
+  private isEngine(node: NodeId): boolean {
+    return this.options.engine?.isEngine(node) === true
+  }
+  /**
+   * The client a private attachment reads through. An engine pairing's comes from the directory and is not held
+   * to v1's delegation checks; any other is the checked v1 session.
+   */
+  private attachClient(target: NodeId): BridgeClient {
+    if (!this.isEngine(target)) return this.session(target, 'bridge.thread.open')
+    this.guard()
+    this.self(HUB_METHODS['bridge.thread.open'].capability)
+    const client = this.options.client?.(target)
+    if (!client || client.state() !== 'open') return fail('peer_offline')
+    return client
   }
   private original(id: RpcId): RpcId {
     return (this.options.db.database
@@ -912,7 +949,7 @@ export class BridgeHub {
       listener: DisplayListener = { update, error, ...(delta ? { delta } : {}), ...(catchUp ? { catchUp } : {}) },
       existing = this.attachments.get(key)
     if (existing) {
-      this.session(ref.nodeId, 'bridge.thread.open')
+      this.attachClient(ref.nodeId)
       existing.listeners.add(listener)
       notifyCatchUp(listener, false)
       try {
@@ -960,14 +997,17 @@ export class BridgeHub {
             threadId: ref.entityId
           })) as BridgeThreadOpenResult)
       const opened = raw as BridgeThreadOpenResult,
-        session = this.session(ref.nodeId, 'bridge.thread.open')
+        engine = this.isEngine(ref.nodeId),
+        session = this.attachClient(ref.nodeId)
       this.guard()
       if (
         !opened ||
         Object.keys(opened).sort().join(',') !== 'descriptor,head' ||
         !validateStreamDescriptor(opened.descriptor) ||
         opened.descriptor.kind !== 'node.thread' ||
-        opened.descriptor.authority !== ref.nodeId ||
+        // An engine pairing names its own node, which this computer does not know it by: the stream's
+        // authority here is the pairing it is bound to.
+        (!engine && opened.descriptor.authority !== ref.nodeId) ||
         !opened.head ||
         Object.keys(opened.head).sort().join(',') !== 'epoch,seq' ||
         !Number.isSafeInteger(opened.head.epoch) ||
@@ -976,25 +1016,31 @@ export class BridgeHub {
         opened.head.seq < 0
       )
         return fail('forbidden')
-      const known = this.options.store.getStream(opened.descriptor.id)
-      if (known && !same(known, opened.descriptor)) return fail('conflict')
+      const descriptor: StreamDescriptor = engine
+        ? { ...opened.descriptor, authority: ref.nodeId }
+        : opened.descriptor
+      const known = this.options.store.getStream(descriptor.id)
+      if (known && !same(known, descriptor))
+        // One binding per stream: another pairing, or v1, already reads it.
+        throw engine && known.authority !== ref.nodeId ? streamBoundElsewhere() : new NetError('conflict')
       this.options.db.transaction(() => {
         const row = this.options.db.database
           .prepare('SELECT descriptor FROM net_bridge_hub_threads WHERE target=? AND entity=?')
           .get(ref.nodeId, this.attachmentEntity(ref, options))
-        if (row && !same(JSON.parse(row.descriptor as string), opened.descriptor))
+        if (row && !same(JSON.parse(row.descriptor as string), descriptor))
           return fail('conflict')
-        if (!known) this.options.store.createStream(opened.descriptor, opened.head.epoch)
-        this.options.db.charge(1, Buffer.byteLength(json(opened.descriptor)))
+        if (!known) this.options.store.createStream(descriptor, opened.head.epoch)
+        if (engine) this.options.engine!.bind(descriptor.id, ref.nodeId)
+        this.options.db.charge(1, Buffer.byteLength(json(descriptor)))
         this.options.db.database
           .prepare(
             'INSERT INTO net_bridge_hub_threads VALUES(?,?,?) ON CONFLICT(target,entity) DO UPDATE SET descriptor=excluded.descriptor'
           )
-          .run(ref.nodeId, this.attachmentEntity(ref, options), json(opened.descriptor))
+          .run(ref.nodeId, this.attachmentEntity(ref, options), json(descriptor))
       })
       const attachment: Attachment = {
         ref: { ...ref },
-        descriptor: opened.descriptor,
+        descriptor,
         projection: new ThreadDisplayProjection(ref.entityId, projectionTypes(options)),
         pending: Promise.resolve(),
         queued: 0,
@@ -1009,7 +1055,7 @@ export class BridgeHub {
         notifyCatchUp(listener, false)
         await this.rebuild(attachment)
         if (attachment.stopped) return fail('cancelled')
-        attachment.subscription = session.subscribe(opened.descriptor.id, {
+        attachment.subscription = session.subscribe(descriptor.id, {
           onRecord: (record) => this.enqueue(attachment, record),
           // After the records queued before it have been displayed.
           onCaughtUp: () => {
@@ -1060,7 +1106,7 @@ export class BridgeHub {
               }
             }
           })
-        return { descriptor: opened.descriptor, close: () => this.release(ref, listener, options) }
+        return { descriptor, close: () => this.release(ref, listener, options) }
       } catch (e) {
         this.detach(ref, options)
         throw e
@@ -1203,6 +1249,14 @@ export class BridgeHub {
   verifyRecord(record: StoredRecord, descriptor: StreamDescriptor): void {
     const env = decodeEnvelope(record.envelope).envelope,
       self = this.self('read')
+    // A stream read from an engine pairing: its records were taken on the pinned channel's word, and are read
+    // again only while the stream is bound to a pairing that is still serving.
+    if (this.isEngine(descriptor.authority)) {
+      if (descriptor.kind !== 'node.thread' || env.stream !== descriptor.id || env.minor > 0)
+        return fail('forbidden')
+      this.options.engine!.verifyStream(descriptor.id)
+      return
+    }
     if (
       descriptor.kind !== 'node.thread' ||
       env.stream !== descriptor.id ||
