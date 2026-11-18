@@ -39,7 +39,7 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
     return await new Promise<PublicResponse>((resolve, reject) => {
       const req = (url.protocol === 'https:' ? https : http).request({
         protocol: url.protocol, hostname, port: url.port || undefined, path: url.pathname + url.search,
-        method: 'GET', agent: false, autoSelectFamily: false, servername: isIP(hostname) ? undefined : hostname,
+        method: 'GET', agent: false, family: pinned.family, servername: isIP(hostname) ? undefined : hostname,
         headers: { host: url.host, 'user-agent': 'Mousse', accept: 'text/html, text/plain' },
         signal: controller.signal,
         lookup: (_host, _options, callback) => callback(null, pinned.address, pinned.family)

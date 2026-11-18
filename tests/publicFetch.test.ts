@@ -20,7 +20,7 @@ describe('public GET address boundary', () => {
     const lookup = vi.spyOn(dns,'lookup').mockResolvedValueOnce([{address:'8.8.8.8',family:4}] as never).mockResolvedValue([{address:'127.0.0.1',family:4}] as never)
     vi.spyOn(https,'request').mockImplementation(((options: any, callback: any) => {
       expect(options.hostname).toBe('example.com'); expect(options.servername).toBe('example.com')
-      expect(options.headers.host).toBe('example.com'); expect(options.agent).toBe(false)
+      expect(options.headers.host).toBe('example.com'); expect(options.agent).toBe(false); expect(options.family).toBe(4)
       options.lookup('example.com', {}, (_error: any, address: string) => expect(address).toBe('8.8.8.8'))
       const req = new EventEmitter() as any
       req.end = () => { const res = new EventEmitter() as any; res.statusCode=200; res.headers={}; callback(res); res.emit('data',Buffer.from('ok')); res.emit('end') }
