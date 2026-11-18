@@ -40,6 +40,8 @@ const LINK_PORT = Number(process.env.MOUSSE_NET_ENGINE_CHECK_LINK_PORT || 47190)
 /** How long a caller keeps trying to reach its host, and a host waits for its caller to finish. */
 const LINK_WAIT_MS = Number(process.env.MOUSSE_NET_ENGINE_CHECK_LINK_WAIT_MS || 30 * 60_000)
 const ASK_MS = Number(process.env.MOUSSE_NET_ENGINE_CHECK_ASK_MS || 120_000)
+/** How long `bothConnected` waits for both rows before it reports what each reads. */
+const CONNECT_WAIT_MS = Number(process.env.MOUSSE_NET_ENGINE_CHECK_CONNECT_WAIT_MS || 60_000)
 
 type Handlers = Record<string, (args: any) => Promise<unknown> | unknown>
 
@@ -371,7 +373,7 @@ export async function bothConnected(
       throw new Error(
         `${computer.name}: ${here?.state}/${shown}; ${name}: ${there ? `${there.state}/${there.shown}` : 'no row'}`
       )
-  }, 60_000).catch(async (error: Error) => {
+  }, CONNECT_WAIT_MS).catch(async (error: Error) => {
     const dial = await link
       .ask('tryDial', { name, endpoint: computer.endpoint })
       .catch((failed: Error) => failed.message)

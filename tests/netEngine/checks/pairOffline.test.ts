@@ -2,7 +2,7 @@
  * Owner check `phase1a.pair-offline`, a cross-machine cell (`pc-to-mac-lan`): with the internet unreachable from
  * both computers, the caller (the PC) joins the host's (the Mac's) invitation over the local network, the host's
  * Yes injected through the test link (`./link`), and both rows read Connected, each computer having dialed the
- * other, in under 10 s from the join.
+ * other, within the bound from the join: 10 s by default, `MOUSSE_NET_ENGINE_CHECK_PAIR_WITHIN_MS` to change it.
  *
  * Both computers look for the internet first: either one reaching a public address fails the run with
  * `internet_reachable`. Its control, `cable-plugged`, runs with the WAN cable in: the harness must see it.
@@ -13,14 +13,7 @@
  * on one fabric and nobody looks for the internet.
  */
 import { afterAll, describe, expect, it } from 'vitest'
-import {
-  codeOf,
-  Fabric,
-  REAL_HELPER,
-  recordedReason,
-  step,
-  type Computer
-} from './harness'
+import { codeOf, Fabric, REAL_HELPER, recordedReason, step, type Computer } from './harness'
 import {
   bothConnected,
   dialLink,
@@ -35,7 +28,7 @@ import {
 
 const ROLE = linkRole()
 /** The check's bound: connected both ways this soon after the join. */
-const WITHIN_MS = 10_000
+const WITHIN_MS = Number(process.env.MOUSSE_NET_ENGINE_CHECK_PAIR_WITHIN_MS || 10_000)
 const RUN_MS = 40 * 60_000
 
 const fail = (reason: string, message: string) =>
@@ -62,7 +55,7 @@ describe('phase1a.pair-offline', () => {
   )
 
   it.runIf(ROLE !== 'host')(
-    'pairs over the local network, connected both ways in under 10 s',
+    `pairs over the local network, connected both ways in under ${WITHIN_MS} ms`,
     async () => {
       if (ROLE && !REAL_HELPER)
         await fail('no_helper', 'a cross-machine cell runs with MOUSSE_NET_HELPER')
