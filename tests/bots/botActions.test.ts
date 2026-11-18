@@ -1524,7 +1524,8 @@ it('C4 service projects the complete stored review and settled results behind th
   const a = f.bots.actions.forWork(t.workId)!
   f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', 'Please review this', a.id)
   const card = () => f.bots.service.chatList(t.botId).messages.find(m => m.id === a.message_id)!.action
-  expect(card()).toMatchObject({ actionId: a.id, digest: a.args_digest, title: 'Send', serverName: 'Mail', args: JSON.parse(a.args_json), hasHiddenValues: true, hiddenPaths: [['password']], note: 'Please review this', status: 'open' })
+  expect(card()).toMatchObject({ actionId: a.id, digest: a.args_digest, title: 'Send', serverName: 'Mail', args: JSON.parse(a.args_json), hasHiddenValues: true, hiddenPaths: [['password']], status: 'open' })
+  expect(card()).not.toHaveProperty('note')
   expect(JSON.stringify(card())).not.toContain('hidden-password')
   for (const status of ['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn']) {
     f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ?, result_json = ?, ran_at = ? WHERE id = ?', status, JSON.stringify({ text: 'masked answer', toolReportedError: true }), f.store.now(), a.id)
@@ -3395,7 +3396,9 @@ it('C10 only the first call in a multi-call turn says it was held', async () => 
   expect((await call('mail_send', t.args, 'first')).text).toBe('This call is held for your owner. End your turn now.')
   for (const name of ['mail_send', 'mail_other', 'memory_list']) {
     const result = await call(name, { ...t.args, body: name }, `later-${name}`)
-    expect(result).toMatchObject({ isError: true, text: 'Not sent: one call already waits for your owner in this turn, and this one was not held. End your turn now; ask for it again after your owner answers.' })
+    expect(result.isError).toBe(true)
+    const text = name === 'memory_list' ? JSON.parse(result.text).refused.message : result.text
+    expect(text).toBe('Not sent: one call already waits for your owner in this turn, and this one was not held. End your turn now; ask for it again after your owner answers.')
   }
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
   expect(t.calls).toEqual([])
