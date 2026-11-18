@@ -64,7 +64,7 @@ function setup(options: { servers?: McpServerConfig[] } = {}) {
       return () => listeners.delete(listener)
     }
   }
-  const catalog = new RelayCatalog({ manager, settings: () => settings, now: () => clock })
+  const catalog = new RelayCatalog({ manager, settings: () => settings, now: () => clock, monotonic: () => clock })
   return {
     catalog, manager, settings, state, listeners,
     advance: (ms: number) => { clock += ms },

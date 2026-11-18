@@ -18,6 +18,7 @@ export interface RelayCatalogDeps {
   manager: RelayCatalogManager
   settings: () => MousseIntegrationsSettings['mcp']
   now?: () => number
+  monotonic?: () => number
   /**
    * Whether the profile's own servers (the scope with no project) are listed even while no runtime has the relay on:
    * personal bots reach them through Mousse whatever the relay settings of the owner's threads (`BotMcp`).
@@ -60,6 +61,7 @@ interface Scope {
 export class RelayCatalog {
   private readonly scopes = new Map<string, Scope>()
   private readonly now: () => number
+  private readonly monotonic: () => number
   private readonly unsubscribe: () => void
   private readonly listeners = new Set<(projectPath: string | undefined) => void>()
   private invalidations = 0
@@ -67,6 +69,7 @@ export class RelayCatalog {
 
   constructor(private readonly deps: RelayCatalogDeps) {
     this.now = deps.now ?? Date.now
+    this.monotonic = deps.monotonic ?? (() => performance.now())
     this.unsubscribe = deps.manager.onDiscoveryInvalidated(() => this.invalidate())
   }
 
@@ -286,7 +289,7 @@ export class RelayCatalog {
       if (eligible.length) {
         const heard = (entry: RelayServerTools): void => {
           answered.set(entry.installationId, entry)
-          if (!entry.error) scope.serverTimes.set(entry.installationId, this.now())
+          if (!entry.error) scope.serverTimes.set(entry.installationId, this.monotonic())
           if (entry.error) logWarn('McpRelay', `Listing MCP server "${entry.serverName}" failed; its last good tools are kept: ${redactSensitiveText(entry.error)}`)
         }
         try {

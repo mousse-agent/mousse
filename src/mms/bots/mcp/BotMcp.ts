@@ -256,7 +256,7 @@ export class BotMcp implements BotMcpHost {
       if (done) return true
       const refreshedAt = this.deps.catalog.serverRefreshedAt?.(installationOf(serverId))
       const current = where.server.tools.find(t => t.tool === toolName)
-      return Boolean(offered && current && current.readOnlyHint === hint && refreshedAt !== undefined && Date.now() - refreshedAt <= 30_000)
+      return Boolean(offered && current && current.readOnlyHint === hint && refreshedAt !== undefined && performance.now() - refreshedAt <= 30_000)
     } catch { return false }
     finally { clearTimeout(timer) }
   }
