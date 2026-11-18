@@ -34,6 +34,17 @@
       "expiresAt": "2026-11-18T14:54:45.325Z"
     },
     {
+      "task": "bot-pane-thread-view-and-hover-card",
+      "session": "Animatrix-c03f0f",
+      "machine": "Animatrix",
+      "branch": "bot-pane-thread-view-and-hover-card",
+      "paths": [
+        "src/renderer/components/bots/BotChatView.tsx"
+      ],
+      "claimedAt": "2026-11-18T13:54:56.446Z",
+      "expiresAt": "2026-11-18T15:54:56.446Z"
+    },
+    {
       "task": "bot-phase-two-followups",
       "session": "agibook-f42da1",
       "machine": "agibook",
