@@ -253,7 +253,7 @@ export interface BotEngineHost {
    * The bots' schedules, in the shared scheduled-job store (`BotScheduleBook`): automations whose Who is the bot. The
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
-  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended' | 'setTelling'>>
+  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended' | 'setTelling' | 'pageCheckExists'>>
   /** Per-schedule progress in bot memory; pending reports are published only on successful completion. */
   progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
@@ -1760,7 +1760,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.closed) return
     this.checkOpenJobs()
     this.retryCompletedScheduleRemovals()
-    new PageChecks(this.store).sweep((botId, id) => Boolean(this.host.schedules?.get(botId, id)))
     if (this.removedScheduleSweepPending) this.tryDropRemovedScheduleRuns()
     let endedSchedules: ReturnType<BotScheduleBook['ended']> = []
     try { endedSchedules = this.host.schedules?.ended?.() ?? [] } catch (error) {
@@ -6978,7 +6977,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async reconcileOnStartup(): Promise<void> {
     try {
-      new PageChecks(this.store).sweep((botId, id) => Boolean(this.host.schedules?.get(botId, id)))
+      try { new PageChecks(this.store).recoverFlights() } catch (error) { console.warn('interrupted page checks could not be recovered', error) }
+      try { new PageChecks(this.store).sweep((botId, id) => this.host.schedules?.pageCheckExists?.(botId, id)) } catch (error) {
+        console.warn('orphan page checks could not be removed at startup', error)
+      }
       try { this.quietHoursChanged() } catch (error) {
         console.warn('bot quiet hours could not be checked at startup', error)
       }

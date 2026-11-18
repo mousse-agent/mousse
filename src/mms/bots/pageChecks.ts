@@ -36,9 +36,17 @@ export class PageChecks {
   remove(botId: string, id: string): void {
     for (const row of this.store.listActivations(botId)) if (row.trigger.kind === 'schedule' && row.trigger.scheduleId === id) removePageChange(join(this.store.directory, 'scratch'), row.id)
     this.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?',botId,`pagecheck:${id}`) }
-  sweep(exists: (botId: string, id: string) => boolean): void {
+  sweep(exists: (botId: string, id: string) => boolean | undefined): void {
     for (const row of this.store.all("SELECT bot_id,key FROM bot_memory_state WHERE key LIKE 'pagecheck:%'"))
-      if (!exists(String(row.bot_id),String(row.key).slice(10))) this.remove(String(row.bot_id),String(row.key).slice(10))
+      if (exists(String(row.bot_id),String(row.key).slice(10)) === false) this.remove(String(row.bot_id),String(row.key).slice(10))
+  }
+  recoverFlights(): void {
+    for (const row of this.store.all("SELECT bot_id,key,value FROM bot_memory_state WHERE key LIKE 'pagecheck:%'")) {
+      const state = JSON.parse(String(row.value)) as State
+      if (!state.inFlight) continue
+      state.inFlight = undefined
+      this.save(String(row.bot_id), String(row.key).slice(10), state)
+    }
   }
   check(botId: string, id: string, generation: string, key: string, now: number, folder: string):
     | { kind:'not_ready' } | { kind:'checked'; failure?: string } | { kind:'changed'; text:string; url:string; commit: () => void } | undefined {
@@ -48,7 +56,7 @@ export class PageChecks {
     if (state.result && (state.result.flight.key !== key || state.result.flight.generation !== generation)) state.result = undefined
     if (state.inFlight && (state.inFlight.key !== key || state.inFlight.generation !== generation)) state.inFlight = undefined
     if (state.inFlight && now - state.inFlight.startedAt > 120_000) {
-      state.result = { flight:state.inFlight, error:'The page check did not finish within two minutes.' }; state.inFlight = undefined
+      state.inFlight = undefined
     }
     if (state.result) {
       const result = state.result
