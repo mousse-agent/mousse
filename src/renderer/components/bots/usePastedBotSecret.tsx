@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { pastedSecretShape, pastedSecretValue } from '../../../shared/secretShapes'
-import { SECRET_KEEPS, secretKeepLabel } from '../../../shared/secretRequests'
+import { SECRET_KEEPS, secretKeepLabel, secretKeepLine } from '../../../shared/secretRequests'
 import { privateBotDraft, subscribePrivateBotDrafts, updatePrivateBotDraft, changePrivateBotDraft, savedPrivateBotDraft, admitPrivateBotDraft } from './privateBotDrafts'
 
 /** A private paste survives unmounts, but lives only in this window's in-memory draft map. */
@@ -37,15 +37,18 @@ export function usePastedBotSecret(bot: BotSummary, storedDraft: string) {
   }
   const offer=<>
     {held.notice && <p role="status" className="secret-request-keep-line">{held.notice}</p>}
-    {shape && !held.dismissed && <div className="bot-pasted-secret secret-request-card" role={held.highlighted?'alert':'status'}>
+    {shape && !held.dismissed && <div className="composer-question-modal bot-pasted-secret secret-request-card is-inline" role={held.highlighted?'alert':'status'}>
       <p className="composer-question-prompt">This looks like a key. {held.error??'Keep it as a secret?'}</p>
+      <div className="bot-pasted-secret-controls">
       <div className="secret-request-keep" role="radiogroup" aria-label="Keep it for">
         {SECRET_KEEPS.map(option=><button key={option} type="button" role="radio" aria-checked={held.keep===option} className={`secret-request-keep-option${held.keep===option?' is-selected':''}`} disabled={held.busy} onClick={()=>updatePrivateBotDraft(bot.id,{keep:option})}>{secretKeepLabel(option)}</button>)}
       </div>
       <div className="bot-pasted-secret-actions">
-        <button type="button" className="composer-question-btn" disabled={held.busy} onClick={()=>void save()}>Keep as secret</button>
+        <button type="button" className="composer-question-btn is-primary" disabled={held.busy} onClick={()=>void save()}>Keep as secret</button>
         <button type="button" className="composer-question-btn is-quiet" disabled={held.busy} onClick={()=>updatePrivateBotDraft(bot.id,{dismissed:true})}>Send as text</button>
       </div>
+      </div>
+      <p className="composer-question-reason secret-request-keep-line">{secretKeepLine(held.keep)}</p>
     </div>}
   </>
   return {draft,change,beforeSend,offer}

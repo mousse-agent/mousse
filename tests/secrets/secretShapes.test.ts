@@ -17,7 +17,7 @@ const shapes: Array<[string, string, string]> = [
   ...Object.entries({ 'glpat-':'GITLAB_TOKEN','npm_':'NPM_TOKEN','hf_':'HUGGING_FACE_TOKEN','whsec_':'STRIPE_WEBHOOK_SECRET','gsk_':'GROQ_API_KEY','GOCSPX-':'GOOGLE_CLIENT_SECRET' }).map(([prefix,name]) => [prefix+a,prefix+a,name] as [string,string,string]),
   ['SG.'+'A'.repeat(22)+'.'+a,'SG.'+'A'.repeat(22)+'.'+a,'SENDGRID_API_KEY'],
   ['123456789:AA'+'A'.repeat(30),'123456789:AA'+'A'.repeat(30),'TELEGRAM_BOT_TOKEN'],
-  ['Authorization: Bearer eyJabc.def.ghi','Bearer eyJabc.def.ghi','API_KEY'],
+  ['Authorization: Bearer eyJabc.def.ghi','Authorization: Bearer eyJabc.def.ghi','API_KEY'],
   ['https://hooks.slack.com/services/T123/B456/abc123','https://hooks.slack.com/services/T123/B456/abc123','SLACK_WEBHOOK_URL'],
   ['https://discord.com/api/webhooks/123456/abc123','https://discord.com/api/webhooks/123456/abc123','DISCORD_WEBHOOK_URL'],
   ['postgres://me:password@example.com/db','postgres://me:password@example.com/db','DATABASE_URL'],

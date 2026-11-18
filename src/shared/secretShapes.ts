@@ -64,7 +64,7 @@ export function pastedSecretShape(text: string): SecretShape | undefined {
   const labelled=awsLabel.exec(text)
   if (labelled) choose(labelled.index,labelled.index+labelled[0].length,'AWS_SECRET_ACCESS_KEY')
   const bearer=/\bauthorization[ \t]*:[ \t]*(Bearer[ \t]+eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/i.exec(text)
-  if (bearer) { const start=bearer.index+bearer[0].length-bearer[1].length;choose(start,start+bearer[1].length,'API_KEY') }
+  if (bearer) choose(bearer.index,bearer.index+bearer[0].length,'API_KEY')
   if (text.includes('://')) {
     for (const token of text.matchAll(/[^\s<>"'`]+/g)) {
       const separator=token[0].indexOf('://')
@@ -83,6 +83,8 @@ export function unmistakableCredential(text: string): boolean { return pastedSec
 
 /** The pair's ID is public; only its secret half is kept. Labelled pastes have the same representation. */
 export function pastedSecretValue(text: string): string {
+  const bearer=/^authorization[ \t]*:[ \t]*Bearer[ \t]+(eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/i.exec(text)
+  if (bearer) return bearer[1]
   const id=/^(?:AKIA|ASIA)[0-9A-Z]{16}/.exec(text)
   if (id) return awsTail.exec(text.slice(id[0].length))?.[1] ?? text
   return /^aws_secret_access_key[ \t]*[=:][ \t]*([A-Za-z0-9/+]{40})$/i.exec(text)?.[1] ?? text
