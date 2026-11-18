@@ -1678,7 +1678,7 @@ export class ScheduledJobStore {
 
       // Bot handover commits its activation separately. Replay the same occurrence so findOccurrence
       // can recover it before admission or a new fetch; never turn that handover into an interrupted run.
-      if (job.bot && claim?.occurrenceKey) {
+      if (job.bot && claim?.occurrenceKey && Number.isFinite(Date.parse(claim.occurrenceKey)) && webhookIdOfOccurrence(claim.occurrenceKey) === undefined && !threadEventsOfOccurrence(claim.occurrenceKey)) {
         job.runClaim = undefined
         job.state = 'scheduled'
         job.nextRunAt = claim.occurrenceKey
