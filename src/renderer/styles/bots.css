@@ -134,11 +134,13 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-bubble-ask { display: flex; align-items: center; gap: 7px; margin: 6px 0 0; font-size: var(--bot-text); line-height: 1.5; }
 .bot-bubble-ask > svg { flex: none; color: var(--accent); }
 .bot-bubble .bot-error, .bot-bubble .bot-message-files { margin-top: 8px; }
-/* "Worked for 32s ›": quiet, as under a thread's prompt, in the time's tone; the chevron turns while the steps show.
-   No fill at rest. Hover and keyboard focus give it a faint one in place of the app's focus fill, which would leave a
-   square grey box behind it; the negative margin keeps that box's padding out of the layout. */
-.bot-worked { display: inline-flex; align-items: center; gap: 2px; margin: -1px -5px; padding: 1px 5px; border-radius: 5px; font-size: 11.5px; line-height: 16px; color: color-mix(in srgb, var(--text-secondary) 80%, transparent); font-variant-numeric: tabular-nums; transition: color 150ms ease-out, background-color 150ms ease-out; }
-.bot-bubble .bot-worked:is(:hover, :focus-visible) { outline: none; color: var(--text-secondary); background-color: color-mix(in srgb, var(--text-secondary) 12%, transparent); background-image: none; }
+/* "Worked for 32s ›": quiet, as under a thread's prompt, a step dimmer than the time; the chevron turns while the steps
+   show. Never a fill: not the app's focus fill (a square grey box), not on hover or after a click. Hover only lightens
+   the words; keyboard focus alone draws a thin ring, which takes no room. */
+.bot-worked { display: inline-flex; align-items: center; gap: 2px; padding: 0; border-radius: 3px; font-size: 11.5px; line-height: 16px; color: color-mix(in srgb, var(--text-secondary) 64%, transparent); font-variant-numeric: tabular-nums; transition: color 150ms ease-out; }
+.bot-bubble .bot-worked:is(:hover, :focus, :focus-visible) { outline: none; background: none; }
+.bot-bubble .bot-worked:hover { color: color-mix(in srgb, var(--text-secondary) 80%, transparent); }
+.bot-bubble .bot-worked:focus-visible { outline: 1px solid color-mix(in srgb, var(--text-secondary) 45%, transparent); outline-offset: 2px; }
 .bot-worked-chevron { transition: transform 150ms ease-out; }
 .bot-worked-chevron[data-open] { transform: rotate(90deg); }
 .bot-steps { list-style: none; margin: 8px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--bot-meta); line-height: 19px; color: var(--text-secondary); }
