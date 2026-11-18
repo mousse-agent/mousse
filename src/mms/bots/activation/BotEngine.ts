@@ -57,8 +57,7 @@ import { isNeutralTool } from '../../../shared/harness/tools'
 import {
   ACTIVE_TIME_CHUNK_MS,
   BOT_DELETE_PURGE_MS,
-  DEFAULT_BOT_ACTIVE_MS,
-  OLD_DEFAULT_BOT_ACTIVE_MS,
+  BOT_TURN_WINDOW_MS,
   BOT_DEPTHS,
   BOT_MODEL_SLOT_KEYS,
   ENDED_ACTIVATION_STATUSES,
@@ -458,7 +457,7 @@ export const MAX_ROOM_WAIT_MS = 24 * 60 * 60_000
 /**
  * Continuations after a dispatch reached its runtime's cap on model turns, in total per activation (not in a row: a
  * note or an Allow in between does not start the count again). Each one worked up to the cap (300 turns on Claude
- * Code), so with the activation's own work time this only bounds a runtime that keeps reaching the cap.
+ * Code, or a day's window), so this only bounds a runtime that keeps reaching the cap.
  */
 export const MAX_TURN_CAP_CONTINUATIONS = 10
 /** How often deleted bots are swept for the 30-day purge. */
@@ -544,14 +543,8 @@ interface LiveDispatch {
    * the turn runs reaches its subagents with its next turn, as it reaches the turn.
    */
   held: BotManifest
-  /** The work time the dispatch was given (its prepaid allowance): its own and its subagents' running time draw on it. */
-  allowanceMs: number
   /** Its subagents running now, by dispatch number: when each started, on the monotonic clock. */
   subagentStarts: Map<number, number>
-  /** The running time its subagents that ended have used of `allowanceMs`. */
-  subagentMs: number
-  /** What its deadline does: a budget wall, or a wait for the internet when it made no progress. */
-  fire: () => void
 }
 
 /**
@@ -814,6 +807,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * activation: each goes on in a new turn without it (`advance`), told why.
    */
   private readonly switchCuts = new Set<string>()
+  /** Activations whose live turn reached the end of its window (`endWindow`): its run's end carries the work on. */
+  private readonly windowEnds = new Set<string>()
   /**
    * What each subagent turn ended with, by `<activationId>:<n>`: its final message, or why it has none. Kept in memory:
    * after a restart the work is told its subagents were stopped, and their results are gone.
@@ -1374,7 +1369,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       scratch: join(this.store.directory, 'scratch', '_check'),
       profileHome: this.host.profileHome,
       nativeNames: (tools) => ({ ok: true, names: [...tools] }),
-      remaining: { ...countLimits(grant), deadlineMs: grant.budget.maxActiveMs },
+      remaining: { ...countLimits(grant), deadlineMs: BOT_TURN_WINDOW_MS },
       ...(botTools ? { botTools } : {})
     })
   }
@@ -2706,13 +2701,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const effective = this.effectiveManifest(row, definition.permissions, grant.manifest)
     const problem = manifestProblem(effective)
     if (problem) return this.block(row, 'bot_permissions_invalid', problem)
-    const counters = this.store.counters(row.id)
-    const remainingMs = effective.budget.maxActiveMs - counters.activeMs
-    if (remainingMs < ACTIVE_TIME_CHUNK_MS) {
-      // Under one 15-second slice left: a budget wall, so the owner can allow more time.
-      this.raiseWall(row.id, this.timeWall(dispatch.n, effective))
-      return refuse('active_time_exhausted', 'This bot used up its work time.')
-    }
+    // Work time has no limit: each turn gets the same window, and one that reaches it goes on in a fresh turn.
+    const remainingMs = BOT_TURN_WINDOW_MS
     const scratch = row.scratch ?? join(this.store.directory, 'scratch', row.id)
     const compileWith = (manifest: BotManifest, digest: string) => compileBotThread({
       grant: manifest,
@@ -2751,8 +2741,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return this.block(row, 'bot_context_not_cleared', error instanceof Error ? error.message : String(error))
       }
     }
-    // Active time is charged before it is used: the whole remaining allowance at the start, so a
-    // crash can never leave it under-charged; settlement refunds what the dispatch did not use.
+    // Active time is counted before it is used: the whole window at the start, so a crash can never leave it
+    // under-counted; settlement refunds what the dispatch did not use. It is a count, never a limit.
     const startedAt = this.now()
     const started = this.store.db.transaction(() => {
       const changed = this.store.run(
@@ -2777,20 +2767,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.forgetRefused(row.id, effective)
     const controller = new AbortController()
     const deadline = startedAt + remainingMs
-    // At the deadline the dispatch ends at a budget wall: the owner may allow more time. The timer
-    // runs on the daemon loop; the supervisor (outside it) kills what is left of the process group.
-    // A dispatch that made no progress for a while is checked first: with no internet it waits
-    // instead, as its time went on waiting, not on work.
+    // At the end of its window the turn ends and the work goes on in a fresh turn (`endWindow`), asking nobody. The
+    // timer runs on the daemon loop; the supervisor (outside it) kills what is left of the process group. A dispatch
+    // that made no progress for a while is checked first: with no internet it waits instead.
     const fire = (): void => {
       const live = this.live.get(row.id)
       if (this.host.connectivity && live?.n === dispatch.n && this.monotonic() - live.lastProgressMono >= BOT_OFFLINE_STALL_MS) {
-        void this.deadlineOffline(row.id, dispatch.n, effective).catch((error: unknown) => {
+        void this.deadlineOffline(row.id, dispatch.n).catch((error: unknown) => {
           console.warn('a bot dispatch\'s internet check failed at its deadline', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
-          this.raiseWall(row.id, this.timeWall(dispatch.n, effective))
+          this.endWindow(row.id, dispatch.n)
         })
         return
       }
-      this.raiseWall(row.id, this.timeWall(dispatch.n, effective))
+      this.endWindow(row.id, dispatch.n)
     }
     const timer = (this.host.setTimer ?? defaultTimer)(fire, remainingMs)
     // Armed before the runtime starts: a process reported on a thread with nothing armed is refused.
@@ -2807,7 +2796,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId,
       lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0, steering: new Map(), steerSeq: 0, compactions: 0, regiven: 0,
       powers: powersOf(compiled.permissions), consultPowers: new Map(),
-      held: effective, allowanceMs: remainingMs, subagentStarts: new Map(), subagentMs: 0, fire
+      held: effective, subagentStarts: new Map()
     })
     this.liveRuns.set(payload.runId, row.id)
     this.watchOffline(row.id, dispatch.n)
@@ -2968,7 +2957,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * What goes into the live turn next, if anything: the pack and brief again when a compaction since the last re-give
    * has not been answered (once per compaction, several in a row given once), then the owner's notes not taken yet. Notes
-   * wait for the dispatch's end with under 30 seconds of its time left, as they did before.
+   * wait for the dispatch's end with under 30 seconds of its window left, as they did before.
    */
   private steerNext(row: BotActivationRow, live: LiveDispatch): { text: string; ids: number[]; regiveFor?: number; subagents?: string[] } | undefined {
     const outstanding = [...live.steering.values()]
@@ -3040,17 +3029,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
-  /** The time wall of an activation's dispatch, from its current limits. */
-  private timeWallAt(row: BotActivationRow, dispatchN: number): { dispatchN: number; kind: BotWallKind; permission: BotPermissionRequest; reason: string } {
-    const definition = this.host.definitions.revision(row.botId, row.revision)
-    const grant = this.store.activeGrant(row.botId)
-    const amount = definition && grant ? this.effectiveManifest(row, definition.permissions, grant.manifest).budget.maxActiveMs : undefined
-    return { dispatchN, kind: 'budget', permission: { budget: { key: 'maxActiveMs', ...(amount ? { amount } : {}) } }, reason: 'This bot used up its work time.' }
-  }
-
-  /** The time wall of a dispatch: its card offers twice the work time (the owner's Allow). */
-  private timeWall(dispatchN: number, effective: BotManifest): { dispatchN: number; kind: BotWallKind; permission: BotPermissionRequest; reason: string } {
-    return { dispatchN, kind: 'budget', permission: { budget: { key: 'maxActiveMs', amount: effective.budget.maxActiveMs } }, reason: 'This bot used up its work time.' }
+  /**
+   * The live dispatch `n` reached the end of its window (`BOT_TURN_WINDOW_MS`): its turn ends, and once its run has
+   * ended the work goes on in a fresh turn of the same thread, as at its runtime's step cap (`continueAfterTurnCap`).
+   * Nobody is asked: work time has no limit.
+   */
+  private endWindow(activationId: string, n: number): void {
+    const live = this.live.get(activationId)
+    if (!live || live.n !== n || live.controller.signal.aborted) return
+    this.windowEnds.add(activationId)
+    live.controller.abort(new BotWallAbort())
   }
 
   /**
@@ -3124,7 +3112,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!selection) return refuse('bot_model_missing', 'No model was chosen for this activation.')
     const effective = this.effectiveManifest(row, definition.permissions, grant.manifest)
     const remainingMs = main.deadline - this.now()
-    if (remainingMs <= 0) return refuse('active_time_exhausted', 'This bot used up its work time.')
+    if (remainingMs <= 0) return refuse('bot_consult_orphaned', 'The dispatch this consult belongs to has ended.')
     const scratch = row.scratch ?? join(this.store.directory, 'scratch', row.id)
     const compileWith = (manifest: BotManifest, digest: string) => compileBotThread({
       grant: manifest,
@@ -3486,7 +3474,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return undefined
       },
       counters: input.counters,
-      // The main dispatch's deadline as it stands now: its subagents' running time brings it closer (`rearmDeadline`).
+      // The main dispatch's deadline: the end of its window.
       time: { deadline: () => (this.live.get(row.id)?.n === input.mainN ? this.live.get(row.id)!.deadline : input.deadline), signal: controller.signal },
       spend: input.spend,
       // What the owner switched off for the bot, on every call: a switch turned off refuses this turn's next call.
@@ -3852,21 +3840,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.stopForInternet(row, live)
   }
 
-  /** The deadline of a dispatch that made no progress: with no internet it waits; otherwise the time wall. */
-  private async deadlineOffline(activationId: string, n: number, effective: BotManifest): Promise<void> {
+  /** The deadline of a dispatch that made no progress: with no internet it waits; otherwise its window ends. */
+  private async deadlineOffline(activationId: string, n: number): Promise<void> {
     const row = this.store.activation(activationId)
     const live = this.live.get(activationId)
     if (!row || row.status !== 'running' || !live || live.n !== n || live.controller.signal.aborted) return
     const online = await this.online(row)
     if (this.live.get(activationId) !== live || live.controller.signal.aborted) return
     if (online) {
-      // A run that made no call at all in its whole time was stuck, not working: it ends without
-      // asking for more time. One that worked asks, as before.
+      // A run that made no call at all in its whole window was stuck, not working: it ends failed, with no ask (the
+      // limit named is only the ask it never makes). One that worked goes on in a fresh turn.
       if (row.lane === 'run' && live.lastProgressMono === live.startedMono) {
-        this.budgetEnd(row, { ...this.timeWall(n, effective), reason: 'This bot made no progress.' }, { stuck: true })
+        this.budgetEnd(row, { dispatchN: n, kind: 'budget', permission: { budget: { key: 'maxTurns' } }, reason: 'This bot made no progress.' }, { stuck: true })
         return
       }
-      this.raiseWall(activationId, this.timeWall(n, effective))
+      this.endWindow(activationId, n)
       return
     }
     this.stopForInternet(this.store.activation(activationId) ?? row, live)
@@ -4036,28 +4024,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A time wall found while no turn runs (the startup pass): a run ends failed with its ask; a chat
-   * waits for the owner, its card posted now.
-   */
-  private wallAtRest(row: BotActivationRow, input: { dispatchN: number; kind: BotWallKind; permission: BotPermissionRequest; reason: string }): void {
-    if (row.lane === 'run') {
-      this.budgetEnd(row, input)
-      return
-    }
-    const raised = this.store.db.transaction(() => this.wallInTransaction(row.id, ['running'], input))
-    if (raised.kind === 'none') return
-    this.afterWall(row.id, raised)
-    if (raised.kind === 'wall') this.announceWall(raised.escalation)
-  }
-
-  /**
    * A run reached a limit (§5.7): nobody is there to allow more now. Work the owner asked for (`work`, a reminder's
    * work) waits for the answer: it is `blocked` with `budget_exhausted`, which frees the run lane, and what it had so far
    * is posted with the ask that lets it go on (by its dispatch's reply when the turn ends, else at once). Allow carries
    * it on in the same thread (`settleRoomInTx`, `resumeWork`); Not now ends it with what was posted. After
    * a Not now in the last day, and for any other run, the run ends failed (a schedule's counts toward the failure
-   * streak) with one ask that offers the higher limit for later runs ("work for up to 2 hours per run"). `stuck`: the run
-   * made no call in its whole time, with the internet there; it ends failed with an error row and no ask (more time
+   * streak) with one ask that offers the higher limit for later runs ("take up to 400 steps per run"). `stuck`: the run
+   * made no call in its whole window, with the internet there; it ends failed with an error row and no ask (more room
    * would not help). The dispatch ends now; its scratch goes once its run has stopped.
    */
   private budgetEnd(row: BotActivationRow, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string }, options: { stuck?: boolean } = {}): WallReason {
@@ -4301,7 +4274,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!definition || !grant) return undefined
     const budget = this.effectiveManifest(row, definition.permissions, grant.manifest).budget
     const counters = this.store.counters(row.id)
-    if (budget.maxActiveMs - counters.activeMs < ACTIVE_TIME_CHUNK_MS) return 'maxActiveMs'
     if (budget.maxTurns !== undefined && counters.requests >= budget.maxTurns) return 'maxTurns'
     if (budget.maxToolCalls !== undefined && counters.toolCalls >= budget.maxToolCalls) return 'maxToolCalls'
     if (budget.maxInputTokens === undefined && budget.maxOutputTokens === undefined && budget.maxUsd === undefined) return undefined
@@ -4765,7 +4737,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const answers = this.store.pendingAnswers(activationId)
     // Only a continuation that was sent carries the message. One that paused, ended blocked (its grant changed while
-    // it waited) or met a time wall did not: the caller then gives the message a turn of its own.
+    // it waited) or met a limit did not: the caller then gives the message a turn of its own.
     return (await this.continueWith(activationId, ['waiting_grant'], { answers, ownerText: text })) === 'sent'
   }
 
@@ -5015,6 +4987,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const stopped = run.status === 'interrupted' && run.outcome?.interruptedBy === 'bot_wall'
       const reload = (row.reloadPending || switchCut) && stopped
       if (switchCut && stopped) this.acknowledgeCut(row, main, run.runId)
+      // The turn reached the end of its window: the turn ended, not the work, which goes on in a fresh turn.
+      const windowEnded = this.windowEnds.delete(row.id)
+      if (windowEnded && stopped && !reload) return this.continueAfterTurnCap(row, main, text, true)
       // The work reported while subagents still ran: it ends done, and its report names the ones it stopped.
       if (run.status === 'completed') this.acknowledgeReportStops(row, main)
       else this.reportStops.delete(row.id)
@@ -5044,7 +5019,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // for no answer: its cut is not one.
       const cut = Boolean(placeholder?.cut) || (this.cutReplies.get(row.id) === main.n && this.steeredChats.get(row.id) === main.n)
       const unanswered = cut && row.lane === 'chat' && !reload && run.status === 'completed' && memoryLaneOf(row) === 'chat'
-      const retryUnanswered = unanswered && !this.store.dispatches(row.id).some((dispatch) => dispatch.send.unanswered) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
+      const retryUnanswered = unanswered && !this.store.dispatches(row.id).some((dispatch) => dispatch.send.unanswered)
       const hold = this.canHoldChatDraft(row, main, text, retryUnanswered)
       // The executor can deliver its final words, and whether a steer cut them, after the terminal event. Wait before
       // making the continuation, so its request and the durable draft contain those words too; and before posting the
@@ -5071,12 +5046,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       let heldDraft = false
       let noted = false
       const next = this.recorded(row, () => {
-        // A chat turn the owner wrote to again while it answered, and that never read it, answers it now in its thread;
-        // without the time for it the turn ends and the message gets a turn of its own (`requeueChatNotes`).
-        // Too little time left to go on with notes: an answer to a question asked without waiting that this turn never read
-        // becomes the work's unread answer again, so the work goes on with it below (`question_answered`), once.
-        if (!reload && run.status === 'completed' && row.lane === 'run' && (this.remainingMs(row) ?? 0) < 2 * ACTIVE_TIME_CHUNK_MS) this.returnUnreadAnswersInTx(row.id)
-        noted = retryUnanswered || (!reload && run.status === 'completed' && (this.store.pendingWorkNotes(row.id).length > 0 || allowed.length > 0) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS)
+        // A chat turn the owner wrote to again while it answered, and that never read it, answers it now in its thread.
+        noted = retryUnanswered || (!reload && run.status === 'completed' && (this.store.pendingWorkNotes(row.id).length > 0 || allowed.length > 0))
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         // Work that asked its owner a question (`ask_owner`) waits for the answer, holding no run slot, and never reports
         // now: its question's bubble is what the owner sees. Answered while its turn was ending, it goes on at once.
@@ -5334,14 +5305,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A main dispatch that reached its runtime's cap on model turns (`provider_turn_cap`): the activation carries on in
-   * the same thread, as after a restart, under its own limits. Its turn budget, when the grant has one, is checked
-   * first, and `continueWith` checks its work time, so a used-up budget ends it as any limit does (a run's ask, a chat's
-   * wall), never as a failure. What the capped turn did (its chips and last words) goes into the activation's next
+   * A main dispatch that reached its runtime's cap on model turns (`provider_turn_cap`), or the end of its window
+   * (`windowEnd`, `endWindow`): the activation carries on in the same thread, as after a restart, under its own limits.
+   * Its turn budget, when the grant has one, is checked first, so a used-up budget ends it as any limit does (a run's
+   * ask, a chat's wall), never as a failure. What the capped turn did (its chips and last words) goes into the activation's next
    * message, so a continuation that runs out at once still posts it. After `MAX_TURN_CAP_CONTINUATIONS` in total, work
    * ends as out of room with what it had (`endAtTurnCap`); any other activation fails as before.
    */
-  private async continueAfterTurnCap(row: BotActivationRow, main: BotDispatchRow, text?: string): Promise<void> {
+  private async continueAfterTurnCap(row: BotActivationRow, main: BotDispatchRow, text?: string, windowEnd?: true): Promise<void> {
     // The ended turn's own message is not posted: its work goes on in the continuation, whose message carries it.
     const key = `${row.id}:${main.n}`
     const before = this.carried.get(row.id)
@@ -5358,7 +5329,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const allowed = this.allowedSinceRefused(row)
-    await this.continueWith(row.id, ['running'], { turnCap: true, ...(allowed.length ? { allowed } : {}) })
+    await this.continueWith(row.id, ['running'], { turnCap: true, ...(windowEnd ? { windowEnd } : {}), ...(allowed.length ? { allowed } : {}) })
   }
 
   /**
@@ -5509,7 +5480,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean; unanswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; windowEnd?: true; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean; unanswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     if (this.cancelRemovedScheduleRun(row)) return 'none'
@@ -5521,7 +5492,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const previousRun = previous?.runId ? runs.getRun(previous.runId) : undefined
     const uncertain = previousRun?.status === 'uncertain'
     const effective = definition && grant ? this.effectiveManifest(row, definition.permissions, grant.manifest) : undefined
-    const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' | 'question' | 'approval' | 'gone' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
+    const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'none' | 'question' | 'approval' | 'gone' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
       const durableWork = current.trigger.kind === 'work' || current.trigger.kind === 'schedule' && Boolean(this.actions.forWork(current.id))
@@ -5564,27 +5535,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (unknown || (uncertain && !input.acknowledgeUncertain)) {
         this.store.moveActivation(row.id, [current.status], 'paused', { endReason: unknown ? 'unknown_calls' : 'uncertain' })
         return { kind: 'paused' }
-      }
-      const remaining = effective.budget.maxActiveMs - this.store.counters(row.id).activeMs
-      if (remaining < ACTIVE_TIME_CHUNK_MS) {
-        if (!readAtStart && !input.usageRetry) for (const answer of answers) this.store.markApplied(answer.id)
-        // A run has nobody to allow more: it ends with its ask (after this transaction).
-        if (current.lane === 'run' && current.status === 'running') return { kind: 'budget' }
-        // Work that waited for room and still has none (its grant narrowed meanwhile) waits for the next answer; work
-        // that waited for a usage limit's reset with no time left ends at its limit with its ask.
-        if (input.moreRoom) {
-          const parked = this.park(current, 'budget_exhausted')
-          if (!parked) return { kind: 'none' }
-          return { kind: 'none' }
-        }
-        // Work answered with no time left ends at its limit with its ask, as above; the answer waits, unread, for the
-        // continuation that more room brings.
-        if (input.usageReset || input.questionAnswered) {
-          this.store.moveActivation(row.id, [current.status], 'running', { endReason: null })
-          return { kind: 'budget' }
-        }
-        const wall = this.wallInTransaction(row.id, [current.status], this.timeWall(previous?.n ?? 0, effective))
-        return { kind: wall.kind === 'wall' ? 'wall' : wall.kind === 'blocked' ? 'blocked' : 'none' }
       }
       // The existing continuation guards above decide whether work can go on. Admit it before
       // reading updates: a failed previous turn is not a permanent ending once this path accepts it.
@@ -5649,10 +5599,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (input.network) this.store.setOffline(row.id, false)
       return { kind: 'sent', dispatch: this.store.dispatch(row.id, n)! }
     })
-    if (decided.kind === 'budget') {
-      this.budgetEnd(this.store.activation(row.id) ?? row, this.timeWall(previous?.n ?? 0, effective!))
-      return 'none'
-    }
     if (decided.kind === 'fail') {
       this.failActivation(this.store.activation(row.id) ?? row, decided.reason)
       return 'none'
@@ -5687,7 +5633,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; actionCaused?: string; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; answerCaused?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string; unanswered?: boolean }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; actionCaused?: string; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; answerCaused?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; windowEnd?: true; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string; unanswered?: boolean }, neverRan?: string): string {
     // A chat turn whose reply was the runtime's placeholder: nothing reached the owner, so it answers them now.
     if (input.unanswered && row.lane === 'chat') {
       const draft = this.chatDraft(row)
@@ -5728,6 +5674,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       : input.switchCut ? 'Your owner switched off a permission while you worked. Your turn stopped; carry on without it and do not ask for it.'
       : input.reload ? (depth === 'deep' ? 'You now have more time to think.' : depth === 'quick' ? 'You now answer more quickly.' : 'Your settings changed.')
         : input.restart ? 'Mousse restarted while you were working.'
+          : input.windowEnd ? 'Your turn ran as long as one turn may; what you did so far is kept.'
           : input.turnCap ? 'You reached the most steps one turn may take; what you did so far is kept.'
           : input.moreRoom ? 'You have more room now; what you had so far was already sent to the owner.'
           : input.usageReset ? 'A usage limit stopped you while you were working; it has reset now.'
@@ -5774,7 +5721,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (updates) return `[Mousse] ${lead}${interrupted}\n\n${updates}\n\n${neverRan !== undefined ? `${neverRan}\n\n` : ''}${input.afterReport ? 'Update your work for it. Your last message is your updated report: lead with what changed, in plain words.' : `Take it into account as you continue. ${BOT_RUN_REPORT_LINE}`}`
     // The owner's message is the next input.
     if (input.ownerText !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${input.ownerText}`
-    // The walled dispatch never ran (a time wall before it started): its own prompt is sent now.
+    // The walled dispatch never ran (a wall before it started): its own prompt is sent now.
     if (neverRan !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${neverRan}`
     return `[Mousse] ${lead} ${carryOn ? 'Carry on where you left off.' : input.switchCut ? 'Continue where you left off, without it.' : input.reload || input.usageReset ? 'Continue where you left off.' : 'Continue.'}${interrupted}`
   }
@@ -6048,17 +5995,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Why no new subagent can start now, or undefined: its title is taken, or too little of the work's time is left for
-   * one. There is no count of subagents at once, per work or per day: each one's running time counts against the work's.
+   * Why no new subagent can start now, or undefined: its title is taken, or the work's turn is about to end (its window,
+   * `BOT_TURN_WINDOW_MS`). There is no count of subagents at once, per work or per day, and no limit on their time.
    */
   private subagentCapped(activationId: string, title?: string): string | undefined {
     const records = this.subagentRecords(activationId)
     if (title !== undefined && records.some((record) => record.spec.title.toLowerCase() === title.toLowerCase()))
       return `You already have a subagent called "${title}". Give this one another title, or send that one more work with subagent_send.`
-    // A subagent's running time counts against the work's: one more makes what is left go faster still.
     const live = this.live.get(activationId)
     if (live && live.deadline - this.now() < 2 * ACTIVE_TIME_CHUNK_MS)
-      return 'Too little of this work\'s time is left to start a subagent: each one\'s running time counts against yours. Finish the rest yourself.'
+      return 'Your turn is about to end, so no subagent can start now. Start it after your work goes on.'
     return undefined
   }
 
@@ -6312,22 +6258,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { compiled, effective, definition, grant, hold }
   }
 
-  /**
-   * The main dispatch's deadline on its work time, with its subagents' running time counted against it as they run (as
-   * its spend is): with `n` subagents running, what is left goes `n + 1` times as fast. Re-armed when one starts or ends;
-   * at it the dispatch ends at a budget wall, as at its own deadline, and its subagents with it.
-   */
-  private rearmDeadline(live: LiveDispatch): void {
-    const now = this.monotonic()
-    const running = [...live.subagentStarts.values()]
-    const at = (live.allowanceMs + live.startedMono - live.subagentMs + running.reduce((sum, started) => sum + started, 0)) / (1 + running.length)
-    const left = Math.max(0, Math.floor(at - now))
-    live.timer?.clear()
-    live.deadline = this.now() + left
-    live.timer = (this.host.setTimer ?? defaultTimer)(live.fire, left)
-  }
-
-  /** A subagent's running time, charged to its work's time once (`used_ms` of its dispatch). */
+  /** A subagent's running time, counted in its work's time once (`used_ms` of its dispatch): a count, never a limit. */
   private chargeSubagent(activationId: string, n: number, ms: number): void {
     const used = Math.max(0, Math.ceil(ms))
     try {
@@ -6367,7 +6298,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A subagent's turn (`prepare`): compiled from what the work's turn holds now, for its own runtime, less what that
    * runtime holds less tightly than the work's, with none of the bot's own tools; under the work's
    * main dispatch's counts, spend, deadline and stop, which it shares. It attaches only while that dispatch is unsettled,
-   * and its running time counts against the work's (`rearmDeadline`, `chargeSubagent`).
+   * and its running time is counted in the work's (`chargeSubagent`).
    */
   private prepareSubagent(row: BotActivationRow, dispatch: BotDispatchRow, definition: BotDefinition, grant: { digest: string; manifest: BotManifest }, payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
     const refuse = (code: string, refused: string) => ({ code, refused })
@@ -6375,7 +6306,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const spec = dispatch.prompt.subagent
     if (row.lane !== 'run' || !spec) return refuse('bot_subagent_unknown', 'This is not a subagent of a bot\'s work.')
     if (!main || main.n !== dispatch.mainN || main.controller.signal.aborted) return refuse('bot_subagent_orphaned', 'The work this subagent belongs to has ended its turn.')
-    if (main.deadline - this.now() <= 0) return refuse('active_time_exhausted', 'This bot used up its work time.')
+    if (main.deadline - this.now() <= 0) return refuse('bot_subagent_orphaned', 'The work this subagent belongs to has ended its turn.')
     const held = this.compileSubagent(row, spec.selection, main.deadline)
     if ('refused' in held) return refuse('policy_unenforceable', held.hold ? 'Its entry would now hold it less tightly than its work, and it can\'t run without that there.' : held.refused)
     const { compiled, effective } = held
@@ -6396,9 +6327,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.liveRuns.set(payload.runId, row.id)
     // What it holds for the whole of its turn, like a consult's: a switch turned off stops the work and its subagents.
     main.consultPowers.set(dispatch.n, powersOf(compiled.permissions))
-    // Its running time counts against the work's from now: the work's deadline comes closer while it runs.
+    // Its running time is counted in the work's from now.
     main.subagentStarts.set(dispatch.n, this.monotonic())
-    this.rearmDeadline(main)
     const authority = this.authorityFor({
       row, mainN: main.n, role: 'subagent', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
@@ -6444,14 +6374,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const main = this.live.get(row.id)
     if (main?.n === dispatch.mainN) {
       main.consultPowers.delete(dispatch.n)
-      // Its running time is charged to the work's, and the work's deadline moves back to what is left.
+      // Its running time is counted in the work's.
       const startedMono = main.subagentStarts.get(dispatch.n)
       if (startedMono !== undefined) {
         main.subagentStarts.delete(dispatch.n)
-        const used = Math.max(0, this.monotonic() - startedMono)
-        main.subagentMs += used
-        this.chargeSubagent(row.id, dispatch.n, used)
-        if (!main.controller.signal.aborted) this.rearmDeadline(main)
+        this.chargeSubagent(row.id, dispatch.n, Math.max(0, this.monotonic() - startedMono))
       }
     }
     // The executor's settle carries the final message; the terminal event settles one it never ran.
@@ -7355,15 +7282,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         runs.outbox.enqueue({ threadId: main.threadId, runId: run.runId, kind: 'turn.start', payload: { kind: 'bot', runId: run.runId, threadId: main.threadId, activationId: row.id, dispatchN: main.n } satisfies BotTurnPayload })
         return
       }
-      // Its time window was already settled (up to its last working moment): too little left is a budget wall, as for an
-      // interrupted run.
-      const left = this.remainingMs(row)
-      if (left !== undefined && left < ACTIVE_TIME_CHUNK_MS) {
-        runs.markTerminal(run.runId, 'cancelled', { error: 'bot_dispatch_restarted' })
-        this.wallAtRest(row, this.timeWallAt(row, main.n))
-        return
-      }
-      // Otherwise a new dispatch with the same prompt, never the old row again. The new intent is
+      // A new dispatch with the same prompt, never the old row again. The new intent is
       // written first; the old run is cancelled after, so a crash between them is a plain resend (row 6).
       const n = this.store.nextDispatchN(row.id)
       this.store.insertDispatch({ activationId: row.id, n, kind: 'continue', clientRequestId: `${row.id}:d${n}`, threadId: main.threadId, prompt: main.prompt, policyDigest: row.grantDigest, send: main.send })
@@ -7408,13 +7327,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.parkForQuestion(this.store.activation(row.id) ?? row, main)
       return
     }
-    // Row 10: under 15 s of work time left after P3 (it worked up to its deadline): a budget wall, as at a
-    // deadline (work the owner asked for waits for the answer with what it had).
-    const remaining = this.remainingMs(row)
-    if (remaining !== undefined && remaining < ACTIVE_TIME_CHUNK_MS) {
-      this.wallAtRest(row, this.timeWallAt(row, main.n))
-      return
-    }
     // Rows 11 and 12: one automatic continuation, then the owner decides.
     if (row.autoRestarts >= 1) {
       this.store.moveActivation(row.id, ['running'], 'paused', { endReason: 'restarted_twice' })
@@ -7429,13 +7341,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const grant = this.store.activeGrant(row.botId)
     const definition = this.host.definitions.revision(row.botId, row.revision)
     return Boolean(grant && definition && grant.digest === row.grantDigest && manifestSubset(definition.permissions, grant.manifest))
-  }
-
-  private remainingMs(row: BotActivationRow): number | undefined {
-    const grant = this.store.activeGrant(row.botId)
-    const definition = this.host.definitions.revision(row.botId, row.revision)
-    if (!grant || !definition) return undefined
-    return this.effectiveManifest(row, definition.permissions, grant.manifest).budget.maxActiveMs - this.store.counters(row.id).activeMs
   }
 
   // -- Threads ----------------------------------------------------------------------------------
@@ -8244,24 +8149,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * counts as read, so the work does not stop on it at the turn's end and no continuation carries it again. Inside the
    * caller's transaction. False when the answer goes the usual way: the work waits on the question, or is not running.
    */
-  /**
-   * The answers `deliverToRunningWorkInTx` sent to work as notes that the work never read: each note goes, and its
-   * question is unread again, so the usual way on carries the answer (a continuation with it, or the one more room brings
-   * when the work is out of time). Inside the caller's transaction.
-   */
-  private returnUnreadAnswersInTx(activationId: string): void {
-    const pending = this.store.pendingWorkNotes(activationId)
-    for (const question of this.store.activationQuestions(activationId)) {
-      if (question.lane !== 'run' || !keepsWorking(question.spec) || question.readAt === null) continue
-      if (question.status !== 'answered' && question.status !== 'defaulted') continue
-      const line = question.answer?.sent?.line
-      const note = line ? pending.find((entry) => entry.text === openQuestionAnswerNote(question.id, line)) : undefined
-      if (!note) continue
-      this.store.applyWorkNotes([note.id])
-      this.store.markQuestionsUnread([question.id])
-    }
-  }
-
   private deliverToRunningWorkInTx(questionId: string, messageId?: string): boolean {
     const question = this.store.question(questionId)
     if (!question || question.lane !== 'run' || !keepsWorking(question.spec) || question.readAt !== null) return false
@@ -9969,44 +9856,28 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The base work time went from 15 minutes to an hour: a bot whose grant still holds the old
-   * default gets the new one, once, when the profile opens (a grant the owner raised stays). Like
-   * Allow, a revision with the longer time is published and its grant approved; unfinished
-   * activations move to it. Only the old default is changed, so this runs again harmlessly.
+   * Work time has no limit any more: an ask for more of it that an older build left open is answered for the owner once,
+   * when the profile opens, so what waited on it goes on. A chat's wall counts as allowed this time, and the startup pass
+   * carries its turn on (`reconcileActivation`, answered before a restart); a run's ask is withdrawn, and work that waited
+   * on it has room again and goes on when its lane is free. The grant is left as it is, so no digest changes.
    */
-  upgradeWorkTime(): string[] {
-    const upgraded: string[] = []
-    for (const botId of this.host.definitions.ids()) {
-      try {
-        if (this.store.registry(botId)?.deletedAt) continue
-        const grant = this.store.activeGrant(botId)
-        if (grant?.manifest.budget.maxActiveMs !== OLD_DEFAULT_BOT_ACTIVE_MS) continue
-        const entry = this.host.definitions.get(botId)
-        const published = entry?.published
-        if (!entry || !published) continue
-        const longer = (manifest: BotManifest): BotManifest => manifest.budget.maxActiveMs <= OLD_DEFAULT_BOT_ACTIVE_MS
-          ? { ...manifest, budget: { ...manifest.budget, maxActiveMs: DEFAULT_BOT_ACTIVE_MS } }
-          : manifest
-        const wider = longer(grant.manifest)
-        const revision = this.host.definitions.publishRevision({ ...published, permissions: longer(published.permissions) })
-        const digest = botManifestDigest(wider)
-        this.store.db.transaction(() => {
-          this.store.setPublished(botId, revision.revision!)
-          this.store.approve(botId, digest, wider)
-          this.store.regrant(botId, grant.digest, digest, revision.revision!)
-        })
-        try {
-          const draft = entry.draftHash === published.revision ? revision : { ...entry.draft, permissions: longer(entry.draft.permissions) }
-          this.host.definitions.save(draft, entry.draftHash)
-        } catch (error) {
-          console.warn('the bot draft was left as it was', { botId, error: error instanceof Error ? error.message : String(error) })
-        }
-        upgraded.push(botId)
-      } catch (error) {
-        console.warn('a bot\'s work time could not be upgraded', { botId, error: error instanceof Error ? error.message : String(error) })
-      }
-    }
-    return upgraded
+  releaseWorkTimeAsks(): void {
+    const open = this.store.escalations({ status: 'open' }).filter((row) => 'budget' in row.permission && row.permission.budget.key === 'maxActiveMs')
+    if (!open.length) return
+    // What waits on which limit is read before the asks are answered, as an Allow reads it (`waitingOn` reads open asks).
+    const waiting = new Map([...new Set(open.map((row) => row.botId))].map((botId) => [botId, this.waitingKeys(botId)] as const))
+    const settled: Array<[string, RoomSettled]> = []
+    const answered = this.store.db.transaction(() => {
+      const done = open.filter((row) => {
+        if (!this.store.answerEscalation(row.id, row.mode === 'wall' ? 'allowed_once' : 'withdrawn')) return false
+        if (row.mode === 'wall') this.journalAnswer(row, 'allow')
+        return true
+      })
+      for (const [botId, keys] of waiting) settled.push([botId, this.settleRoomInTx(botId, 'maxActiveMs', true, keys)])
+      return done
+    })
+    for (const row of answered) this.republishAsk(row.id)
+    for (const [botId, room] of settled) this.afterRoom(botId, room)
   }
 
   private upgradeOne(botId: string): void {
@@ -10145,7 +10016,7 @@ const MAX_SUBAGENT_BRIEF_CHARS = 32 * 1024
 const SUBAGENT_RESULT_LINE = 'End with your result for the work that started you: what you found or did, in plain words. Your last message is your result.'
 const SUBAGENT_NOTHING_STARTED = 'Nothing was started.'
 const SUBAGENT_TURN_ENDED_TEXT = 'Your turn has ended, so nothing was started.'
-const SUBAGENT_STARTED_NOTE = 'It runs now, beside you, and its running time counts against your work time. You are told when it finishes; read its result with subagent_result, or wait for it with subagent_wait. Before you report, wait for the ones you need and stop the rest: one still running when you report is stopped.'
+const SUBAGENT_STARTED_NOTE = 'It runs now, beside you. You are told when it finishes; read its result with subagent_result, or wait for it with subagent_wait. Before you report, wait for the ones you need and stop the rest: one still running when you report is stopped.'
 /** The Mousse app tools that are the web: a turn without either has no web. */
 const BOT_WEB_TOOLS: ReadonlySet<string> = new Set(['web_search', 'web_fetch'])
 
@@ -10510,7 +10381,7 @@ function failureText(reason: string): string {
     case 'bot_context_failed': return 'I couldn\'t read my notes, so I stopped. Try again.'
     case 'bot_context_not_cleared': return 'I couldn\'t start fresh, so I stopped. Try again.'
     case 'bot_home_trashed': return 'My chat is in the trash. Restore it to keep going.'
-    case 'budget_denied': return 'I stopped here: I ran out of time for this.'
+    case 'budget_denied': return 'I stopped here: I ran out of room for this.'
     case 'asked_too_often': return 'I stopped: I asked too many times in one go.'
     case 'bot_permissions_invalid': return 'My permissions are broken, so I stopped.'
     case 'bots_unavailable': return 'Mousse isn\'t ready to run me yet. Try again in a moment.'

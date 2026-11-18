@@ -167,18 +167,6 @@ describe('work that was running when the owner pressed Allow', () => {
     expect(f.store.activation(work.workId)!.status).toBe('done')
   })
 
-  it('with too little work time left it reports what it has, and does not continue', async () => {
-    const work = await workStarted('Is cua-driver installed?', 'm1')
-    work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To check.' })
-    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-    expect(work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Again.' })).toBe(BOT_ASK_HELD_NEXT_TEXT)
-    f.clock.now += f.store.activeGrant(botId)!.manifest.budget.maxActiveMs - 20_000
-    await finish(f, work.payload, 'completed', { text: 'I could not check: no commands yet.' })
-    expect(f.store.dispatch(work.workId, 2)).toBeUndefined()
-    expect(f.store.activation(work.workId)!.status).toBe('done')
-    expect(chatOf(f, botId).filter((message) => message.kind === 'run_report').map((message) => message.text)).toEqual(['I could not check: no commands yet.'])
-  })
-
   it('on a runtime that would not offer commands, it is told it can\'t use them on this turn, and does not continue', async () => {
     f.host.harness.botWithheldTools = () => ['shell']
     const work = await workStarted('Is cua-driver installed?', 'm1')

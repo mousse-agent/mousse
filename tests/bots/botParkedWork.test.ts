@@ -18,6 +18,7 @@ beforeEach(async () => {
 afterEach(() => f.close())
 
 async function parked(reason: string) {
+  if (reason === 'budget_exhausted') f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxTurns: 3 } }))
   const { message } = await f.bots.service.chatSend({ botId, text: 'Compare flats', clientRequestId: 'request' })
   const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
   const { workId } = await f.bots.tools.work.start(botId, chat.id, { title: 'Flats', brief: 'Compare flats', key: 'flats' })
@@ -27,9 +28,9 @@ async function parked(reason: string) {
     f.bots.askOwner(botId, workId, { question: 'Which flat?', choices: ['A', 'B'] })
     await finish(f, turn.payload, 'completed', { text: 'Unsent draft.' })
   } else if (reason === 'budget_exhausted') {
-    f.clock.now += HOUR
+    // Its 3 model requests used up: the 4th is over the limit, a wall.
     turn.prepared.authority.check({ kind: 'app', tool: 'web_fetch', args: {} })
-    f.timers.filter((timer) => timer.ms === HOUR).at(-1)!.fn()
+    for (let i = 0; i < 4; i += 1) turn.prepared.authority.counters.charge('request')
     await finish(f, turn.payload, 'interrupted', { text: 'Partial comparison.', outcome: { interruptedBy: 'bot_wall' } })
   } else {
     f.problem = { problem: 'all_limited', until: new Date(f.clock.now + HOUR).toISOString(), instanceId: 'claude:main' }

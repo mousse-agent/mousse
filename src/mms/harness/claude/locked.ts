@@ -41,8 +41,8 @@ import { LINUX_RUN_KEPT_OPEN, LINUX_SYSTEM_FOLDERS } from '../linuxFolders'
 export const CLAUDE_LOCKED_PROFILE = 'locked'
 
 /**
- * One `query` is one dispatch: a backstop on its model turns, not a policy claim. A bot's budget is its work time
- * (and its turn budget, when its grant has one); a dispatch that reaches this cap ends with `provider_turn_cap` and
+ * One `query` is one dispatch: a backstop on its model turns, not a policy claim. A bot's only budget is what its
+ * grant sets (turns, tool calls, tokens or spend), when it sets one; a dispatch that reaches this cap ends with `provider_turn_cap` and
  * the bot carries the work on in its next dispatch, so the cap only bounds one query, never the work.
  */
 export const CLAUDE_LOCKED_MAX_TURNS = 300

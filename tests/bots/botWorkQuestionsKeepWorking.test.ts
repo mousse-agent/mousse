@@ -131,22 +131,6 @@ describe('work that asks without waiting', () => {
     expect(mainDispatches(workId)).toHaveLength(2)
   })
 
-  it('an answer note the turn never read, with too little time left to go on with notes, still carries the work on, once', async () => {
-    const { workId, work, questionId } = await workThatAsks(true)
-    f.clock.now += f.store.activeGrant(botId)!.manifest.budget.maxActiveMs - 20_000
-    await tap(questionId, 'Flat B')
-    // Offered to the turn but never read before it ended.
-    work.prepared.steer!.take()
-    await finish(f, work.payload, 'completed', { text: 'Two flats found.' })
-    await flush()
-    expect(f.store.activation(workId)!.status).not.toBe('done')
-    const next = mainDispatches(workId)[1]!
-    expect(next.prompt.text).toBe(`[Mousse] Your owner answered your question "${FLATS.question}": Flat B. Carry on where you left off.`)
-    // The note went with it: nothing hands the answer over a second time.
-    expect(f.store.pendingWorkNotes(workId)).toEqual([])
-    expect(f.store.question(questionId)?.readAt).not.toBeNull()
-  })
-
   it('a turn that ends with the question still open waits for it, and the answer carries it on', async () => {
     const { workId, work, questionId } = await workThatAsks(true)
     await finish(f, work.payload, 'completed', { text: 'Everything else is done.' })

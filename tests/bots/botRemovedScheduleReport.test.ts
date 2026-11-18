@@ -22,14 +22,20 @@ async function scheduled() {
 function syncInbox() {
   MmsProfileServices.prototype.syncBotRuns.call({ automationRuns: f.automationRuns, botStore: f.store } as never)
 }
+/** The activation has made as many model requests as it may. */
+function useUpRequests(activationId: string) {
+  const counters = f.store.counters(activationId)
+  f.store.setLimits(activationId, { ...counters.limits, maxTurns: counters.requests })
+}
+
 function rebuildEngine() {
   f.bots.close()
   f.bots = new BotEngine(f.host)
 }
 
-// End triggers: requests exhausted, work time exhausted at a turn cap, work time exhausted at restart.
-// Words arrive with settlement or late; replayed settlement, startup and inbox reads must stay idempotent.
-it.each(['request limit', 'time limit', 'restart'] as const)('%s posts the removed schedule report once, also after late settlement and startup', async end => {
+// The end: requests exhausted at a turn cap. Words arrive with settlement or late; replayed settlement, startup and inbox
+// reads must stay idempotent.
+it('a request limit posts the removed schedule report once, also after late settlement and startup', async () => {
   const s = await scheduled()
   const ordinary = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Check price.' }, 'owner')
   const started = f.bots.runScheduledOccurrence({ botId, scheduleId: ordinary.scheduleId, prompt: 'Check price.', occurrenceAt: f.store.now() })
@@ -41,23 +47,8 @@ it.each(['request limit', 'time limit', 'restart'] as const)('%s posts the remov
   const ordinaryClass = f.store.message(control.id)!.tell
   expect(ordinaryClass).toBe('soon')
   f.bots.removeSchedule(botId, s.schedule.scheduleId)
-  if (end === 'request limit') {
-    const counters = f.store.counters(s.row.id)
-    f.store.setLimits(s.row.id, { ...counters.limits, maxTurns: counters.requests })
-    await finish(f, s.payload, 'failed', { text: 'Checked the price.', outcome: CAP })
-  } else {
-    f.clock.now = s.prepared.authority.time.deadline() - 10_000
-    s.prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} })
-    if (end === 'time limit') await finish(f, s.payload, 'failed', { text: 'Checked the price.', outcome: CAP })
-    else {
-      // The last durable result is what startup has, without a live executor or an in-memory carried reply.
-      f.store.run('UPDATE bot_activations SET result = ? WHERE id = ?', 'Checked the price.', s.row.id)
-      f.runs.markTerminal(s.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-      rebuildEngine()
-      await f.bots.reconcileOnStartup()
-      await flush()
-    }
-  }
+  useUpRequests(s.row.id)
+  await finish(f, s.payload, 'failed', { text: 'Checked the price.', outcome: CAP })
   const reports = () => chatOf(f, botId).filter(message => message.activationId === s.row.id && message.kind === 'run_report')
   expect(f.store.activation(s.row.id)).toMatchObject({ status: 'done', endReason: 'schedule_removed' })
   expect(reports().map(message => message.text)).toEqual(['Checked the price.'])
@@ -81,23 +72,11 @@ it.each(['request limit', 'time limit', 'restart'] as const)('%s posts the remov
   expect(inbox().endedAt).toBe(endedAt)
 })
 
-it.each(['request limit', 'time limit', 'restart'] as const)('%s takes final words arriving after its removed run ended', async end => {
+it('a request limit takes final words arriving after its removed run ended', async () => {
   const s = await scheduled()
   f.bots.removeSchedule(botId, s.schedule.scheduleId)
-  if (end === 'request limit') {
-    const counters = f.store.counters(s.row.id)
-    f.store.setLimits(s.row.id, { ...counters.limits, maxTurns: counters.requests })
-    await finish(f, s.payload, 'failed', { outcome: CAP })
-  } else {
-    f.clock.now = s.prepared.authority.time.deadline() - 10_000
-    s.prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} })
-    if (end === 'time limit') await finish(f, s.payload, 'failed', { outcome: CAP })
-    else {
-      f.runs.markTerminal(s.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-      rebuildEngine()
-      await f.bots.reconcileOnStartup()
-    }
-  }
+  useUpRequests(s.row.id)
+  await finish(f, s.payload, 'failed', { outcome: CAP })
   expect(f.store.activation(s.row.id)!.status).toBe('done')
   f.bots.settle(s.payload, { text: 'Checked the price.' })
   await flush()
@@ -108,7 +87,7 @@ it.each(['request limit', 'time limit', 'restart'] as const)('%s takes final wor
 it('keeps an empty scheduled report quiet when no final words arrive', async () => {
   const s = await scheduled()
   f.bots.removeSchedule(botId, s.schedule.scheduleId)
-  f.clock.now = s.prepared.authority.time.deadline() - 10_000
+  useUpRequests(s.row.id)
   await finish(f, s.payload, 'failed', { outcome: CAP })
   for (const timer of [...f.timers]) timer.fn()
   await flush()

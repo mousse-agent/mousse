@@ -30,11 +30,8 @@ describe('askText', () => {
 
   it('limits as their new totals when the current ones are known', () => {
     const budget = { maxActiveMs: 15 * 60_000, maxTurns: 40, maxUsd: 1 }
-    expect(askText({ budget: { key: 'maxActiveMs', amount: 15 * 60_000 } }, { budget }).title).toBe('work for up to 30 minutes per run')
-    // Whole hours read as hours.
-    expect(askText({ budget: { key: 'maxActiveMs', amount: 60 * 60_000 } }, { budget: { maxActiveMs: 60 * 60_000 } }).title).toBe('work for up to 2 hours per run')
-    expect(askText({ budget: { key: 'maxActiveMs', amount: 30 * 60_000 } }, { budget: { maxActiveMs: 60 * 60_000 } }).title).toBe('work for up to 90 minutes per run')
-    expect(askText({ budget: { key: 'maxActiveMs' } }, { budget }).title).toBe('work longer on each run')
+    // An older build's ask for work time, kept on an answered card, names no time.
+    expect(askText({ budget: { key: 'maxActiveMs', amount: 15 * 60_000 } }, { budget })).toEqual({ title: 'keep working', note: '' })
     expect(askText({ budget: { key: 'maxTurns', amount: 20 } }, { budget }).title).toBe('take up to 60 steps per run')
     expect(askText({ budget: { key: 'maxUsd', amount: 0.5 } }, { budget }).title).toBe('spend up to $1.5 per run')
     expect(askText({ budget: { key: 'maxOutputTokens', amount: 1000 } }, { budget }).title).toBe('read and write more on each run')

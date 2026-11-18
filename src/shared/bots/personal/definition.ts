@@ -67,8 +67,11 @@ export function foldersOf(workspace: BotWorkspace | null): Array<[string, 'read'
 }
 
 export interface BotBudget {
-  /** Active work time per activation (required; enforced on every runtime). */
-  maxActiveMs: number
+  /**
+   * Work time per activation, no longer used: work time has no limit. A grant approved before keeps it only so its
+   * digest, and the activations made under it, still hold; nothing reads it.
+   */
+  maxActiveMs?: number
   /** Model requests per run, retries included (only on runtimes with hard budgets). */
   maxTurns?: number
   maxToolCalls?: number
@@ -345,15 +348,17 @@ export interface BotWorkModelName {
   effort?: string
 }
 
-/** The default active time of one activation: an hour. */
-export const DEFAULT_BOT_ACTIVE_MS = 60 * 60_000
-/** The default active time before it became an hour: grants that still hold it are upgraded (`BotEngine.upgradeWorkTime`). */
-export const OLD_DEFAULT_BOT_ACTIVE_MS = 15 * 60_000
+/**
+ * The longest one turn of a bot's work runs before it goes on in a fresh turn of the same thread, as at its runtime's
+ * step cap (`BotEngine.continueAfterTurnCap`). Not a limit on the work: it guards a runtime that hangs, and keeps each
+ * turn's timer, supervisor and runtime wall time finite.
+ */
+export const BOT_TURN_WINDOW_MS = 24 * 60 * 60_000
 /** Most context threads one bot may have. */
 export const MAX_BOT_CONTEXT_THREADS = 8
 /** Most activations one bot keeps queued; the oldest is dropped beyond this. */
 export const MAX_QUEUED_ACTIVATIONS = 20
-/** The smallest active-time slice a dispatch starts with; less than this left is a budget wall. */
+/** A slice of a turn's window: a steer or a subagent needs at least two of them left in the turn to start. */
 export const ACTIVE_TIME_CHUNK_MS = 15_000
 
 export type BotActivationStatus = 'queued' | 'running' | 'waiting_grant' | 'paused' | 'blocked' | 'done' | 'failed' | 'cancelled'

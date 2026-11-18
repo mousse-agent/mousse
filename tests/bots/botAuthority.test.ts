@@ -46,7 +46,7 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   mcp: [],
   skills: ['release-notes'],
   workspace: null,
-  budget: { maxActiveMs: 15 * 60_000, maxTurns: 40 },
+  budget: { maxTurns: 40 },
   audience: 'owner',
   ...patch
 })
@@ -137,8 +137,8 @@ describe('compileBotThread', () => {
   })
 
   it('compiles the published revision held inside the grant: a narrower revision really narrows', () => {
-    const grant = manifest({ budget: { maxActiveMs: 60 * 60_000, maxTurns: 100 } })
-    const revision = manifest({ tools: ['read'], appTools: [], budget: { maxActiveMs: 5 * 60_000, maxTurns: 10 } })
+    const grant = manifest({ budget: { maxTurns: 100 } })
+    const revision = manifest({ tools: ['read'], appTools: [], budget: { maxTurns: 10 } })
     const compiled = compile({ grant, revision })
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read', 'running_list'] })

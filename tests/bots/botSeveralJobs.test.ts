@@ -10,7 +10,7 @@ import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { SteerHold } from '../../src/mms/orchestrator/steerHold'
-import { BOT_SCHEDULE_SKIP_TEXT, MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
+import { BOT_SCHEDULE_SKIP_TEXT, BOT_TURN_WINDOW_MS, MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
@@ -65,10 +65,10 @@ describe('several pieces of work at once', () => {
     const next = await chat('What time is it in Tokyo?', 'm2')
     expect(summaryOf().chat).toEqual({ activationId: next.activation.id })
     await finish(f, next.payload, 'completed', { text: 'It is 18:00 there.' })
-    // Each runs its own dispatch at once, each with its own deadline and thread.
+    // Each runs its own dispatch at once, each with its own window and thread.
     const live = await Promise.all(work.map((item) => start(f, item.workId)))
     expect(new Set(live.map((entry) => entry.payload.threadId)).size).toBe(titles.length)
-    for (const entry of live) expect(entry.prepared.authority.time.deadline() - f.clock.now).toBe(60 * MIN)
+    for (const entry of live) expect(entry.prepared.authority.time.deadline() - f.clock.now).toBe(BOT_TURN_WINDOW_MS)
     // The quick one ends first while the others go on.
     await finish(f, live[1]!.payload, 'completed', { text: 'Sunny.' })
     expect(f.store.activation(work[0]!.workId)!.status).toBe('running')
