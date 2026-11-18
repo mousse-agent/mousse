@@ -12,6 +12,17 @@
       ],
       "claimedAt": "2026-11-18T06:04:59.558Z",
       "expiresAt": "2026-11-18T08:04:59.558Z"
+    },
+    {
+      "task": "tray-quit-stops-at-once",
+      "session": "Animatrix-0501bc",
+      "machine": "Animatrix",
+      "branch": "tray-quit-stops-at-once",
+      "paths": [
+        "src/main/index.ts"
+      ],
+      "claimedAt": "2026-11-18T06:59:11.851Z",
+      "expiresAt": "2026-11-18T08:59:11.851Z"
     }
   ]
 }
