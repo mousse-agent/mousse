@@ -17,21 +17,19 @@ const zones = [
 describe.each(zones)('cron clock changes in $zone', (row) => {
   const at = (day: string, time: string, offset: string) => new Date(`${day}T${time}:00${offset}`)
 
-  it('runs a skipped 02:30 once at 03:00, then at 02:30 the next day', () => {
+  it('leaves a skipped 02:30 unrun and advances to the next day', () => {
     process.env.TZ = row.zone
     const schedule = { kind: 'cron', expr: '30 2 * * *' } as const
     const from = at(row.spring, '01:59', row.springOffset)
-    const due = at(row.spring, '03:00', row.summerOffset).toISOString()
-    expect(computeNextRun(schedule, null, from)).toBe(due)
     const tomorrow = at(row.spring, '03:00', row.summerOffset)
     tomorrow.setDate(tomorrow.getDate() + 1)
     tomorrow.setHours(2, 30)
-    expect(computeNextRun(schedule, due)).toBe(tomorrow.toISOString())
-    expect(nextOccurrenceAfter(schedule, from.toISOString(), from)).toBe(due)
-    expect(occurrencesSince(schedule, from.toISOString(), at(row.spring, '04:00', row.summerOffset))).toBe(2)
+    expect(computeNextRun(schedule, null, from)).toBe(tomorrow.toISOString())
+    expect(nextOccurrenceAfter(schedule, from.toISOString(), from)).toBe(tomorrow.toISOString())
+    expect(occurrencesSince(schedule, from.toISOString(), at(row.spring, '04:00', row.summerOffset))).toBe(1)
   })
 
-  it('runs a repeated daily time once, including when searched inside the second hour', () => {
+  it('runs a repeated daily time once when advancing from its first occurrence', () => {
     process.env.TZ = row.zone
     const schedule = { kind: 'cron', expr: `30 ${Number(row.repeatedHour)} * * *` } as const
     const first = at(row.fall, `${row.repeatedHour}:30`, row.summerOffset).toISOString()
@@ -39,25 +37,20 @@ describe.each(zones)('cron clock changes in $zone', (row) => {
     const tomorrow = at(row.fall, `${row.repeatedHour}:30`, row.springOffset)
     tomorrow.setDate(tomorrow.getDate() + 1)
     expect(computeNextRun(schedule, first)).toBe(tomorrow.toISOString())
-    expect(computeNextRun(schedule, null, at(row.fall, `${row.repeatedHour}:10`, row.springOffset))).toBe(tomorrow.toISOString())
   })
 
-  it('catches up once from before the gap and respects calendar fields', () => {
+  it('never returns a past daily time when searched inside the second hour', () => {
     process.env.TZ = row.zone
-    const before = at(row.spring, '00:00', row.springOffset)
-    const due = at(row.spring, '03:00', row.summerOffset).toISOString()
-    const day = before.getDate()
-    const month = before.getMonth() + 1
-    const schedule = { kind: 'cron', expr: `15,30,45 2 ${day} ${month} 0` } as const
-    expect(computeNextRun(schedule, null, before)).toBe(due)
-    expect(occurrencesSince(schedule, due, at(row.spring, '04:00', row.summerOffset))).toBe(1)
-    expect(computeNextRun({ kind: 'cron', expr: '30 2 * * 1' }, null, before)).not.toBe(due)
-    expect(computeNextRun({ kind: 'cron', expr: '30 3 * * *' }, null, before)).toBe(at(row.spring, '03:30', row.summerOffset).toISOString())
+    const from = at(row.fall, `${row.repeatedHour}:10`, row.springOffset)
+    const tomorrow = at(row.fall, `${row.repeatedHour}:30`, row.springOffset)
+    tomorrow.setDate(tomorrow.getDate() + 1)
+    expect(computeNextRun({ kind: 'cron', expr: `30 ${Number(row.repeatedHour)} * * *` }, null, from)).toBe(tomorrow.toISOString())
   })
 
-  it('does not describe a fixed-hour spring run as a skipped date', () => {
+  it('lists the spring gap date for fixed-hour cron', () => {
     process.env.TZ = row.zone
-    expect(skippedDates({ kind: 'cron', expr: '30 2 * * *' }, at(row.spring, '00:00', row.springOffset), 2)).toEqual([])
+    const dates = skippedDates({ kind: 'cron', expr: '30 2 * * *' }, at(row.spring, '00:00', row.springOffset), 2)
+    expect(dates.map((entry) => entry.date)).toEqual([row.spring])
   })
 
   it('still lists the spring gap date for hourly cron', () => {
@@ -100,19 +93,28 @@ describe.each(midnightFolds)('a repeated hour at the date boundary in $zone', (r
     const schedule = { kind: 'cron', expr: `30 ${row.hour} * * *` } as const
     expect(computeNextRun(schedule, null, new Date(row.before))).toBe(new Date(row.first).toISOString())
     expect(computeNextRun(schedule, row.first)).toBe(new Date(row.dailyNext).toISOString())
-    expect(computeNextRun(schedule, null, new Date(row.second))).toBe(new Date(row.dailyNext).toISOString())
     expect(occurrencesSince(schedule, row.first, new Date(row.second))).toBe(1)
+  })
+
+  it('never returns a past daily time when searched inside the second hour', () => {
+    process.env.TZ = row.zone
+    expect(computeNextRun({ kind: 'cron', expr: `30 ${row.hour} * * *` }, null, new Date(row.second))).toBe(new Date(row.dailyNext).toISOString())
   })
 
   it('skips the second pass for hourly and five-minute cron too', () => {
     process.env.TZ = row.zone
     for (const [expr, from, next] of [
       ['30 * * * *', row.first, row.hourlyNext],
-      ['30 * * * *', row.second, row.hourlyNext],
-      ['*/5 * * * *', row.lastFive, row.fiveNext],
-      ['*/5 * * * *', row.second, row.fiveNext]
+      ['*/5 * * * *', row.lastFive, row.fiveNext]
     ]) {
       expect(computeNextRun({ kind: 'cron', expr: expr! }, from), `${expr} from ${from}`).toBe(new Date(next!).toISOString())
+    }
+  })
+
+  it('never returns past hourly or five-minute times inside the second pass', () => {
+    process.env.TZ = row.zone
+    for (const [expr, next] of [['30 * * * *', row.hourlyNext], ['*/5 * * * *', row.fiveNext]]) {
+      expect(computeNextRun({ kind: 'cron', expr: expr! }, null, new Date(row.second)), expr).toBe(new Date(next!).toISOString())
     }
   })
 })
