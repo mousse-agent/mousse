@@ -11,6 +11,7 @@ import { botTools, USE_MODEL_REFUSED, type BotAppToolDeps } from '../../src/mms/
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotLane, BotModelSlots, BotSchedule } from '../../src/shared/bots/personal/definition'
+import { MAX_BOT_SCHEDULES } from '../../src/shared/bots/personal/definition'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { botScheduleLabel } from '../../src/shared/scheduleLabel'
@@ -138,12 +139,12 @@ describe('schedule tools', () => {
     expect(bots.activity.drain('d1')).toEqual([])
   })
 
-  it('refuses a ninth schedule, an interval under a minute, and a bad time', async () => {
+  it('refuses a schedule past the ceiling, an interval under a minute, and a bad time', async () => {
     const bots = fakeBots()
-    for (let n = 0; n < 8; n += 1) expect((await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 + n }, prompt: `task ${n}` })).isError).toBeFalsy()
-    const ninth = await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, prompt: 'one more' })
-    expect(ninth).toMatchObject({ isError: true, text: expect.stringContaining('8 schedules') })
-    expect(bots.schedules).toHaveLength(8)
+    for (let n = 0; n < MAX_BOT_SCHEDULES; n += 1) expect((await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 + n }, prompt: `task ${n}` })).isError).toBeFalsy()
+    const past = await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, prompt: 'one more' })
+    expect(past).toMatchObject({ isError: true, text: expect.stringContaining(`${MAX_BOT_SCHEDULES} schedules`) })
+    expect(bots.schedules).toHaveLength(MAX_BOT_SCHEDULES)
     const fresh = fakeBots()
     expect(await fresh.call('bot_schedule_add', { when: { kind: 'interval', minutes: 0 }, prompt: 'x' })).toMatchObject({ isError: true, text: expect.stringContaining('at least 1') })
     expect(await fresh.call('bot_schedule_add', { when: { kind: 'cron', expr: '0 9 * *' }, prompt: 'x' })).toMatchObject({ isError: true })
