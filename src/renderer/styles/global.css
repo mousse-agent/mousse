@@ -314,6 +314,20 @@ html[data-theme='light'] {
     opacity: 0;
   }
 }
+/* A bot's live reply (reply-flow.ts): each word that shows fades in from a slight blur. Only new
+   words are new elements, so words already shown never fade again. Animation speed scales it, and
+   Off or reduced motion makes it instant. */
+.an-markdown[data-reveal-words] .an-word {
+  transition:
+    opacity calc(380ms * var(--ui-motion-scale, 1)) ease-out,
+    filter calc(380ms * var(--ui-motion-scale, 1)) ease-out;
+}
+@starting-style {
+  .an-markdown[data-reveal-words] .an-word {
+    opacity: 0;
+    filter: blur(2px);
+  }
+}
 
 /* Universal reset lives in `base` (with Tailwind preflight) so `utilities`
    still win: unlayered author CSS would otherwise beat every layered
