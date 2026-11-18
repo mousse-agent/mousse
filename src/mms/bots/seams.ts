@@ -172,6 +172,12 @@ export interface BotToolHost {
    */
   jobs?: {
     open(botId: string, from: string, input: { threadId: string; title: string; project?: string; sent: string }): { jobId: string }
+    /**
+     * A message thread `threadId`, which bot `botId` started, sends the bot while it works (`message_parent`): a notice
+     * turn in the bot's chat, keyed by `requestKey` so a retry replays. Throws, with why in words for the thread, when
+     * it can't be sent. Absent: threads here can't message their bot.
+     */
+    message?(botId: string, threadId: string, input: { message: string; title: string; requestKey: string; maxWaiting: number }): Promise<{ bot: string; replayed: boolean }>
   }
   /**
    * Background commands (`watch_start`, `watch_list`, `watch_stop`): a command that runs beside the bot and wakes it in its

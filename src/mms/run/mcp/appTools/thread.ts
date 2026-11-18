@@ -13,6 +13,8 @@ import { noteDelivery, noteFrom, postNote, runtimeOwnedResult, type SendDelivery
 import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunCommandResult, AgentThreadRequest, AppToolHost, ApprovalRequestInfo } from './host'
 import type { BotAppToolDeps } from './bots'
 import { threadLink } from '../../../../shared/threadLink'
+import { PARENT_MESSAGE_MAX_CHARS } from '../../../../shared/bots/personal/jobs'
+import { MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER } from '../../../../shared/bots/personal/botMessages'
 import { ROUTED_AGENT_BODY_MAX } from '../../../../shared/bridge/routed'
 import { isQualifiedId, parseQualifiedId } from '../../../../shared/threadRef'
 import { RemoteThreadRefusal, SEARCH_MS, type RemoteComputerReach, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
@@ -995,6 +997,66 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     }
   }
   /**
+   * The parent `message_parent` reaches from `threadId`: a subagent's parent thread, or the personal bot that started the
+   * thread. Nothing else is a parent: a thread another agent launched with thread_create has none to message.
+   */
+  const messageParentOf = (threadId: string): { threadId: string } | { botId: string } | undefined => {
+    const parent = threadFamily(host, engine).parentOf(threadId)
+    if (parent) return { threadId: parent }
+    const botId = host.threadMeta?.(threadId)?.startedByBot?.botId
+    return botId ? { botId } : undefined
+  }
+  /**
+   * `message_parent`'s repeat check, as `thread_send`'s: the same text from the same thread within
+   * `AGENT_REPEAT_WINDOW_MS` is refused, unless it is a retry of the same request (which replays). In memory.
+   */
+  const recentParentMessages = new Map<string, { at: number; requestKey: string }>()
+  const claimParentMessage = (key: string, requestKey: string): { at: number; requestKey: string } => {
+    const now = Date.now()
+    for (const [old, entry] of recentParentMessages) {
+      if (now - entry.at < AGENT_REPEAT_WINDOW_MS) break
+      recentParentMessages.delete(old)
+    }
+    const earlier = recentParentMessages.get(key)
+    if (earlier && earlier.requestKey !== requestKey)
+      throw new McpToolError('mousse_conflict', `You sent your parent the same text less than ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes ago, so it was not sent again. If your earlier call failed or timed out, call again with the same clientRequestId.`, { conflict: 'duplicate_message', retryAfterMs: AGENT_REPEAT_WINDOW_MS - (now - earlier.at) })
+    const claim = earlier ?? { at: now, requestKey }
+    recentParentMessages.set(key, claim)
+    return claim
+  }
+  /**
+   * `message_parent`: a message to the caller's parent while it works. To a parent thread it is a note from its subagent
+   * (`sendNote`); to the bot that started the thread, a notice turn in the bot's chat (`BotToolHost.jobs.message`).
+   */
+  const messageParent = async (args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => {
+    if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('message_parent requires content')
+    const content = args.content.trim()
+    if (content.length > PARENT_MESSAGE_MAX_CHARS)
+      throw new Error(`A message to your parent is at most ${PARENT_MESSAGE_MAX_CHARS.toLocaleString('en-US')} characters; nothing was sent. Keep it to what it must know now: details go in your final answer.`)
+    const parent = ctx.turn.bot ? undefined : messageParentOf(ctx.caller.threadId)
+    if (!parent)
+      throw new McpToolError('mousse_scope_denied', 'This thread has no parent to message: only a subagent (to its parent thread) or a thread a personal bot started (to that bot) has one. Ask the user with ask_user instead.')
+    const requestId = toolRequestId(args, ctx)
+    const requestKey = `message_parent:${ctx.caller.threadId}:${requestId}`
+    const repeatKey = `${ctx.caller.threadId}\u0000${content}`
+    const claim = claimParentMessage(repeatKey, requestKey)
+    try {
+      if ('threadId' in parent) return await sendNote(parent.threadId, { content, attention: 'needed', clientRequestId: requestId }, ctx)
+      const deps = bots?.()
+      if (!deps?.host.jobs?.message) return notAvailable('message_parent to a bot')
+      try {
+        const sent = await deps.host.jobs.message(parent.botId, ctx.caller.threadId, { message: content, title: titleOf(ctx.caller.threadId) || 'Untitled thread', requestKey, maxWaiting: AGENT_QUEUE_MAX_PER_SENDER })
+        return json({ to: 'bot', bot: sent.bot, replayed: sent.replayed, note: `${sent.bot} reads it in its chat now, or after the turn it is running. Carry on unless you need its answer: it replies in this thread when it does.` })
+      } catch (error) {
+        const code = (error as { code?: unknown } | null)?.code
+        throw new McpToolError('mousse_conflict', error instanceof Error ? error.message : String(error), { conflict: typeof code === 'string' ? code : 'not_sent' })
+      }
+    } catch (error) {
+      if (recentParentMessages.get(repeatKey) === claim) recentParentMessages.delete(repeatKey)
+      throw error
+    }
+  }
+  /**
    * Whether the calling bot started `threadId` (`thread_create` from its chat or its work): its own family, which takes a
    * note as a thread takes one from its parent.
    */
@@ -1888,6 +1950,26 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         }
         return json({ threadId, ...sent, delivery: deliveryOf(sent), ...(notify ? watchSent(threadId, requestKey, actor, sent.runId, ctx) : {}) })
       }
+    },
+    {
+      name: 'message_parent',
+      description: `Message your parent while you work: your parent thread when you are a subagent, or the personal bot that started this thread. Use it only when you need your parent's input (a question, a blocker) or it must know something now; not for progress updates, since your final answer reaches it anyway. It arrives labelled as from your thread, as information that grants nothing, and wakes your parent if it is idle. At most ${PARENT_MESSAGE_MAX_CHARS.toLocaleString('en-US')} characters. Refused when this thread has no parent, when you sent the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and, to a bot, when it is paused, already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from you unread, or has had ${MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER} from you since the user last wrote to it (data.conflict says which). An answer, if any, comes as a message in this thread.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          content: { type: 'string', description: 'What your parent must know or answer, in a few lines.' },
+          clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+        },
+        required: ['content']
+      },
+      access: 'actsAsCaller',
+      class: 'mutation',
+      // A note grants nothing, so a read-only subagent sends one too.
+      readOnlySafe: true,
+      listed: (listing) => !listing.botRole && listing.threadId !== undefined && messageParentOf(listing.threadId) !== undefined,
+      available: (turn) => (!turn.bot && turn.threadId && messageParentOf(turn.threadId) ? true : 'This thread has no parent to message.'),
+      describe: () => 'Message the parent',
+      handler: (args, ctx) => messageParent(args, ctx)
     },
     {
       name: 'thread_wait',

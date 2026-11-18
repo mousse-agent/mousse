@@ -2438,6 +2438,11 @@ export class BotStore {
     return num(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND substr(id, 1, 10) = 'bm_botmsg_' AND seq > ?", botId, afterSeq)?.n) ?? 0
   }
 
+  /** How many of bot `botId`'s chat rows whose id starts with `prefix` came after row `afterSeq`. */
+  chatRowsAfter(botId: string, prefix: string, afterSeq: number): number {
+    return num(this.get('SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND substr(id, 1, ?) = ? AND seq > ?', botId, prefix.length, prefix, afterSeq)?.n) ?? 0
+  }
+
   /**
    * Whether bot `botId`'s chat got a message from another bot reading exactly `text` (`botMessageRowText`: the sender's
    * name and the message) after row `afterSeq` (loop detection).
