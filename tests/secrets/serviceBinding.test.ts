@@ -96,3 +96,23 @@ it('accepts bindings through the bot tool only, while threads keep their origina
   expect((await request.handler({ label: 'Key', reason: 'Read', for: { service: 'openai' } }, context(false))).isError).toBe(true)
   requests.dispose()
 })
+
+it('never advertises local secret cards as remote methods', async () => {
+  const { METHOD_ACCESS } = await import('../../src/shared/net/accessClasses')
+  const { ROUTED_METHODS } = await import('../../src/shared/bridge/routed')
+  const { SECRET_METHODS } = await import('../../src/shared/secretRequests')
+  for (const method of SECRET_METHODS) {
+    expect(METHOD_ACCESS[method]).toBeUndefined()
+    expect(METHOD_ACCESS[`routed.${method}`]).toBeUndefined()
+    expect(ROUTED_METHODS[method]).toBeUndefined()
+  }
+})
+it('returns the binding refusal through the tool before starting a command', async () => {
+  const { secretTools } = await import('../../src/mms/run/mcp/appTools/secrets')
+  const { home, vault, requests } = fixture()
+  vault.store('KEY', VALUE, { keep: 'saved', threadId: 'bot', binding: resolveSecretBinding({service:'github'}) })
+  const [,run] = secretTools({ secrets: () => createSecretToolHost({vault, requests, scratchRoot:home}) } as never)
+  const output = await run.handler({command:'echo forbidden',secrets:[{name:'KEY'}]}, {turn:{threadId:'bot',projectPath:home},transport:'mcp',caller:{threadId:'bot'},signal:new AbortController().signal} as never)
+  expect(output).toEqual({text:'KEY is bound to GitHub; use secret_fetch.',isError:true})
+  requests.dispose()
+})
