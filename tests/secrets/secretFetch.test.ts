@@ -93,3 +93,19 @@ it('refuses a linked fetch folder and writes nothing through it',async()=>{
  vi.mocked(publicFetch).mockResolvedValue({status:200,headers:{'content-type':'text/plain'},body:Buffer.from('x'.repeat(70000))})
  expect((await run()).isError).toBe(true);expect(readdirSync(outside)).toEqual([])
 })
+
+it.each(['pretty inline', 'compact inline', 'saved file'])('re-masks parsed JSON in the %s branch', async branch => {
+  const { run, vault } = fixture()
+  // Pin the parse/remask boundary independently of the vault's raw-encoding recognition.
+  vi.spyOn(vault, 'maskerFor').mockReturnValue(text => text.replaceAll(VALUE, '[secret KEY hidden]'))
+  const padding = branch === 'pretty inline' ? [] : Array(branch === 'compact inline' ? 12000 : 40000).fill(0)
+  const raw = JSON.stringify({ echo: VALUE, padding }).replace(VALUE, '\\u0070' + VALUE.slice(1))
+  vi.mocked(publicFetch).mockResolvedValue({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(raw) })
+  const out = await run()
+  const saved = out.text.includes('File: ')
+  expect(saved).toBe(branch === 'saved file')
+  const text = saved ? readFileSync(out.text.split('File: ')[1]!, 'utf8') : out.text.split('\n\n')[1]!
+  expect(JSON.parse(text).echo).toBe('[secret KEY hidden]')
+  expect(text).not.toContain('\\u0070')
+  if (branch === 'pretty inline') expect(text).toContain('\n  "echo":')
+})
