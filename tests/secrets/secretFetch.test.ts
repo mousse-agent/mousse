@@ -53,3 +53,19 @@ it('treats replacement characters in a key as literal header bytes',async()=>{
  const {run,vault}=fixture();const value='private-$&-key-0123456789';vault.delete('KEY');vault.store('KEY',value,{threadId:'home',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
  await run();expect(vi.mocked(publicFetch).mock.lastCall?.[1]?.headers?.Authorization).toBe(`Bearer ${value}`)
 })
+
+// Each response crosses the vault -> answer/file boundary; decoding an echo must never recover the key.
+const ESCAPED_KEY = 'sk-proj-AbC/dEf+GhIj0123456789'
+const escapedEchoes = [
+ ['PHP slash', ESCAPED_KEY.replaceAll('/', '\\/')],
+ ['Unicode', ESCAPED_KEY.split('').map(c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')).join('')],
+ ['mixed .NET', ESCAPED_KEY.split('').map((c,i) => c === '/' ? '\\/' : c === '+' || i % 3 === 0 ? '\\u' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4,'0') : c).join('')]
+]
+it.each(escapedEchoes.flatMap(([encoding, echo]) => ['application/x-ndjson', 'text/plain', 'application/json'].map(type => ({encoding,echo,type}))))('masks $encoding echoes in $type answers and saved files', async ({echo,type}) => {
+ const {run,vault}=fixture();vault.delete('KEY');vault.store('KEY',ESCAPED_KEY,{threadId:'home',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
+ const body = type === 'application/json' ? `{"padding":"${'x'.repeat(70000)}","echo":"${echo}"}` : `{"echo":"${echo}"}\n{}`
+ vi.mocked(publicFetch).mockResolvedValue({status:200,headers:{'content-type':type},body:Buffer.from(body)})
+ const out=await run();expect(out.isError).not.toBe(true)
+ const text=out.text.includes('File: ') ? readFileSync(out.text.split('File: ')[1]!, 'utf8') : out.text
+ expect(text).not.toContain(echo);expect(text).not.toContain(ESCAPED_KEY);expect(text).toContain('[secret KEY hidden]')
+})

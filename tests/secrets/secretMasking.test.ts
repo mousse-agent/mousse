@@ -52,3 +52,19 @@ describe('a multiline JSON secret read with numbered lines', () => {
     expect(text).toContain('[secret GCP_KEY hidden]')
   })
 })
+
+const TOKEN = 'token/a+B<&\'0123456789'
+const unicode = (c: string) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')
+const mixed = TOKEN.split('').map((c,i) => c === '/' ? '\\/' : i % 2 ? unicode(c).replace(/[a-f]/g, h=>h.toUpperCase()) : c).join('')
+it.each([
+ ['mixed printable Unicode and PHP escapes',mixed],
+ ['nested JSON escapes',JSON.stringify(mixed).slice(1,-1)],
+ ['whole base64',Buffer.from(TOKEN).toString('base64')],
+ ['whole URL encoding',encodeURIComponent(TOKEN)],
+ ['lowercase URL encoding',encodeURIComponent(TOKEN).replace(/%[0-9A-F]{2}/g,h=>h.toLowerCase())]
+])('masks %s in saved rows and provider history',(_label,form)=>{
+ const masker=secretMasker([{name:'TOKEN',value:TOKEN}])!
+ expect(masker(`echo: ${form}`)).toBe('echo: [secret TOKEN hidden]')
+ const holder={role:'tool',content:`echo: ${form}`}
+ expect(maskedCopy(holder,masker).content).toBe('echo: [secret TOKEN hidden]')
+})
