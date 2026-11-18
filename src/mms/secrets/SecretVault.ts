@@ -143,7 +143,9 @@ export class SecretVault {
     // listProfileKeyNames deliberately hides read failures. Authority removal needs proof of absence instead.
     let entries: unknown
     try { entries = JSON.parse(readFileSync(join(this.options.profileRoot, 'secrets/refs.json'), 'utf8')) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('The secret store could not be read. Nothing was stored.')
+    }
     if (entries !== undefined) {
       if (!entries || typeof entries !== 'object' || Array.isArray(entries)) throw new Error('The secret store could not be read.')
       if (Object.hasOwn(entries, name)) throw new Error(`${name} is bound to a service and cannot be replaced as an ordinary key.`)
