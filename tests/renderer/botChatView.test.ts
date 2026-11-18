@@ -3215,3 +3215,59 @@ it('keeping an AWS pair never leaves its secret half in the composer or send', a
   await click(button('Send message'))
   expect(JSON.stringify(fake.client.send.mock.calls)).not.toContain(secret)
 })
+
+it.each(['edit', 'switch'])('announces a late save after an %s and replaces a retained key', async action => {
+  const key='sk-'+ 'L'.repeat(48)
+  let answer!: (value:{name:string})=>void
+  const request=vi.fn(()=>new Promise(resolve=>{answer=resolve}))
+  window.mousse.platformRequest={request} as never
+  await open()
+  const field=()=>host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  await type(field(), `Use ${key} please`)
+  await click(button('Keep as secret'))
+  if(action==='edit') await type(field(), `Actually use ${key} tomorrow`)
+  else {
+    fake.bots.push(summary('other'))
+    await act(async()=>useBotsStore.setState({bots:[...fake.bots]}))
+    await act(async()=>useChatsStore.getState().openBot('other'))
+  }
+  await act(async()=>answer({name:'OPENAI_API_KEY'}))
+  if(action==='switch') await act(async()=>useChatsStore.getState().openBot('inbox'))
+  expect(host.textContent).toContain('Kept as OPENAI_API_KEY')
+  expect(field().value).toContain('the secret OPENAI_API_KEY')
+  expect(field().value).not.toContain(key)
+  expect(button('Keep as secret')).toBeUndefined()
+  await type(field(), `Again ${key}`)
+  expect(field().value).not.toContain(key)
+  expect(request).toHaveBeenCalledTimes(1)
+  await click(button('Send message'))
+  expect(JSON.stringify(fake.client.send.mock.calls)).not.toContain(key)
+})
+it('keeps a private draft across bot switches and merges applet text and memory quotes', async()=>{
+  const key='sk-'+'D'.repeat(48)
+  await open()
+  const field=()=>host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  await type(field(), `Please use ${key} tomorrow`)
+  const {botAppletConversation}=await import('../../src/renderer/components/bots/BotApplets')
+  await act(async()=>{botAppletConversation('inbox','home').addToDraft('Add the report');useBotsStore.getState().askAboutMemory('inbox','A remembered preference')})
+  expect(field().value).toContain('Add the report')
+  fake.bots.push(summary('other'))
+  await act(async()=>useBotsStore.setState({bots:[...fake.bots]}))
+  await act(async()=>useChatsStore.getState().openBot('other'))
+  await act(async()=>useChatsStore.getState().openBot('inbox'))
+  expect(field().value).toContain(key)
+  expect(field().value).toContain('Add the report')
+  expect(JSON.stringify(useBotsStore.getState())).not.toContain(key)
+  window.mousse.platformRequest={request:vi.fn(async()=>({name:'OPENAI_API_KEY'}))} as never
+  await click(button('Keep as secret'));await click(button('Send message'))
+  const sent=vi.mocked(fake.client.send).mock.calls[0]![1]
+  expect(sent).toContain('Add the report');expect(sent).toContain('A remembered preference');expect(sent).not.toContain(key)
+})
+it('keeps a late successful save visible even when the key was removed', async()=>{
+  let answer!:(v:{name:string})=>void
+  window.mousse.platformRequest={request:vi.fn(()=>new Promise(r=>{answer=r}))} as never
+  await open();const field=host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  await type(field,'sk-'+'N'.repeat(48));await click(button('Keep as secret'));await type(field,'Changed my mind')
+  await act(async()=>answer({name:'OPENAI_API_KEY'}))
+  expect(field.value).toBe('Changed my mind');expect(host.textContent).toContain('Kept as OPENAI_API_KEY')
+})
