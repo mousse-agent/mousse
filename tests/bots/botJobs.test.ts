@@ -97,7 +97,8 @@ describe('the ledger in the bot engine', () => {
     // The answer is held to the report cap, with where to read the rest.
     expect(input).toMatch(new RegExp(`cut at ${BOT_REPORT_MAX_CHARS.toLocaleString('en-US')} characters: read the rest with thread_read`))
     expect(input.length).toBeLessThan(BOT_REPORT_MAX_CHARS + 1_500)
-    expect(chatOf(f, botId).some((message) => message.kind === 'notice' && message.text === '"Fix the login page" finished')).toBe(true)
+    // The owner sees nothing of the notice itself: only what the bot says about it.
+    expect(chatOf(f, botId).some((message) => message.text.includes('"Fix the login page" finished'))).toBe(false)
     expect(f.store.job(jobId)).toMatchObject({ state: 'done', line: 'Fixed the login redirect.', endedAt: expect.any(String) })
     expect(notices(jobId)).toBe(1)
 
@@ -242,6 +243,119 @@ describe('the ledger in the bot engine', () => {
     await f.bots.service.pause(botId)
     await expect(f.bots.threadMessage(botId, 't7', { message: 'Hello?', title: 'Other', requestKey: 'p1', maxWaiting: 3 })).rejects.toMatchObject({ code: 'bot_paused' })
     expect(messageTurns()).toHaveLength(6)
+  })
+})
+
+describe('events that arrive together reach the bot as one turn', () => {
+  let f: BotFixture
+  let botId: string
+  const threads = new Map<string, JobThreadView>()
+  const eventTurns = () => f.store.listActivations(botId).filter((row) => row.lane === 'chat' && /^(job|wake):/.test(row.idempotencyKey))
+  const inputOf = (row: { trigger: unknown }) => (row.trigger as { input: string }).input
+  /** The engine's timers fire at the fixture's clock, as they would when it reaches them. */
+  const fireTimers = async () => {
+    for (const timer of f.timers.splice(0)) timer.fn()
+    await flush()
+  }
+
+  async function setUp(eventSettleMs?: number) {
+    // Without a number: the app's own wait (20 seconds after the last event, two minutes at most).
+    f = botFixture({ eventSettleMs })
+    threads.clear()
+    f.host.jobThread = (threadId) => threads.get(threadId)
+    await f.bots.reconcileOnStartup()
+    botId = (await createBot(f, { name: 'Alpha', reply: 'Hello.' })).botId
+  }
+  afterEach(() => f.close())
+
+  /** The owner asks; the turn hands the job to `threadId` and ends. */
+  async function handOff(threadId: string, n: number) {
+    await f.bots.service.chatSend({ botId, text: `Fix part ${n} in project Web`, clientRequestId: `m${n}` })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload } = await start(f, activation.id)
+    f.bots.openJob(botId, activation.id, { threadId, title: `Part ${n}`, project: 'Web', sent: `Fix part ${n}.` })
+    threads.set(threadId, { status: 'running', title: `Part ${n}` })
+    await finish(f, payload, 'completed', { text: 'Started a thread for it.' })
+  }
+
+  async function ends(threadId: string) {
+    threads.set(threadId, { status: 'done', title: threads.get(threadId)!.title, result: `${threadId} is done.` })
+    f.bots.threadRunEnded(threadId)
+    await flush()
+  }
+
+  it('threads that finish while the bot answers its owner are one turn after it, and nothing shows in the chat', async () => {
+    await setUp(0)
+    await handOff('t1', 1)
+    await handOff('t2', 2)
+    await f.bots.service.chatSend({ botId, text: 'How is it going?', clientRequestId: 'm3' })
+    const busy = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload } = await start(f, busy.id)
+    const before = chatOf(f, botId).length
+    await ends('t1')
+    await ends('t2')
+    const [turn, ...more] = eventTurns()
+    expect(more).toEqual([])
+    expect(turn).toMatchObject({ status: 'queued' })
+    expect(inputOf(turn!)).toMatch(/mousse:\/\/thread\/t1[\s\S]*mousse:\/\/thread\/t2/)
+    expect(chatOf(f, botId)).toHaveLength(before)
+    await finish(f, payload, 'completed', { text: 'Both are running.' })
+    expect(f.store.activation(turn!.id)?.status).toBe('running')
+    const { prepared } = await start(f, turn!.id)
+    expect(prepared.prompt.match(/<mousse_notice kind="job_update"/g)).toHaveLength(2)
+  })
+
+  it('a notice waits for the ones after it, at most two minutes in all; the owner\'s message does not wait behind it', async () => {
+    await setUp()
+    for (let n = 1; n <= 9; n++) await handOff(`t${n}`, n)
+    await ends('t1')
+    const [turn] = eventTurns()
+    expect(turn).toMatchObject({ status: 'queued' })
+    f.clock.now += 10_000
+    await ends('t2')
+    expect(eventTurns()).toHaveLength(1)
+    // 25 seconds after the first, 15 after the second: still waiting for more.
+    f.clock.now += 15_000
+    await fireTimers()
+    expect(f.store.activation(turn!.id)?.status).toBe('queued')
+    // The owner writes meanwhile: their turn starts at once.
+    await f.bots.service.chatSend({ botId, text: 'Anything new?', clientRequestId: 'ask' })
+    const owner = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(owner.idempotencyKey.startsWith('job:')).toBe(false)
+    const { payload } = await start(f, owner.id)
+    await finish(f, payload, 'completed', { text: 'Still on it.' })
+    // 20 seconds after the last notice, it starts with both.
+    f.clock.now += 5_000
+    await fireTimers()
+    expect(f.store.activation(turn!.id)?.status).toBe('running')
+    expect(inputOf(f.store.activation(turn!.id)!)).toMatch(/mousse:\/\/thread\/t1[\s\S]*mousse:\/\/thread\/t2/)
+    const { payload: noticePayload } = await start(f, turn!.id)
+    await finish(f, noticePayload, 'completed', { text: '[SILENT]' })
+    // Notices that keep coming start a turn two minutes after the first, however close together they are.
+    await ends('t3')
+    const next = eventTurns().find((row) => row.id !== turn!.id)!
+    for (let n = 4; n <= 9; n++) {
+      f.clock.now += 19_000
+      await fireTimers()
+      await ends(`t${n}`)
+    }
+    expect(f.store.activation(next.id)?.status).toBe('queued')
+    f.clock.now += 6_000
+    await fireTimers()
+    expect(f.store.activation(next.id)?.status).toBe('running')
+    expect(eventTurns()).toHaveLength(2)
+  })
+
+  it('lines older versions posted for wake-ups and thread notices no longer show, nor count as unread', async () => {
+    await setUp(0)
+    const shown = chatOf(f, botId).length
+    const unread = f.store.unread(botId, 0)
+    f.store.db.transaction(() => {
+      f.bots.chat.post({ id: 'bm_wake_w1', botId, author: 'bot', kind: 'notice', text: 'Following up', lane: 'chat' })
+      f.bots.chat.post({ id: 'bm_wake_job_j1_a1', botId, author: 'bot', kind: 'notice', text: '"Part 1" finished', lane: 'chat' })
+    })
+    expect(chatOf(f, botId)).toHaveLength(shown)
+    expect(f.store.unread(botId, 0)).toBe(unread)
   })
 })
 

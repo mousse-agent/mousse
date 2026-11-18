@@ -1068,6 +1068,12 @@ function jobOf(row: Row): BotJob {
 }
 type Param = string | number | null
 
+/**
+ * The chat rows the owner sees: every one but the quiet lines older versions posted for a wake-up or a thread's notice
+ * (`bm_wake_…`). Those events are the bot's to act on, not the owner's to read; only what the bot says shows.
+ */
+const SHOWN_MESSAGE = String.raw`NOT (kind = 'notice' AND id LIKE 'bm\_wake\_%' ESCAPE '\')`
+
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null)
 const num = (value: unknown): number | null => (typeof value === 'number' ? value : typeof value === 'bigint' ? Number(value) : null)
 const json = <T>(value: unknown): T | null => (typeof value === 'string' ? (JSON.parse(value) as T) : null)
@@ -1467,6 +1473,17 @@ export class BotStore {
     const held = row.trigger.owner?.limit
     const trigger = { ...row.trigger, owner: { limit: held ? narrowPermissionMode(held, limit) : limit } }
     return this.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify(trigger), id) > 0
+  }
+
+  /**
+   * One more notice joins a chat activation that still waits to start (inside the caller's transaction): its request
+   * gains `text` after a blank line. False when it has started, ended or is not a manual chat one.
+   */
+  appendQueuedChatInput(id: string, text: string): boolean {
+    const row = this.activation(id)
+    if (!row || row.lane !== 'chat' || row.status !== 'queued' || row.trigger.kind !== 'manual') return false
+    const trigger = { ...row.trigger, input: `${row.trigger.input}\n\n${text}` }
+    return this.run("UPDATE bot_activations SET trigger_json = ? WHERE id = ? AND status = 'queued'", JSON.stringify(trigger), id) > 0
   }
 
   /** A running activation waits for the internet, or no longer does. False when it is not running (or did not wait). */
@@ -2070,25 +2087,25 @@ export class BotStore {
   /** A page of a bot's chat, oldest first: the `limit` rows before `beforeSeq` (the newest without it). */
   messages(botId: string, options: { beforeSeq?: number; limit: number }): BotMessageRow[] {
     const rows = options.beforeSeq === undefined
-      ? this.all('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT ?', botId, options.limit)
-      : this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?', botId, options.beforeSeq, options.limit)
+      ? this.all(`SELECT * FROM bot_messages WHERE bot_id = ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT ?`, botId, options.limit)
+      : this.all(`SELECT * FROM bot_messages WHERE bot_id = ? AND seq < ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT ?`, botId, options.beforeSeq, options.limit)
     return rows.map(messageOf).reverse()
   }
 
   lastMessage(botId: string): BotMessageRow | undefined {
-    const row = this.get('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT 1', botId)
+    const row = this.get(`SELECT * FROM bot_messages WHERE bot_id = ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT 1`, botId)
     return row ? messageOf(row) : undefined
   }
 
   /** The bot's latest message with text, for the preview of its row in the Bots list. */
   lastBotReply(botId: string): BotMessageRow | undefined {
-    const row = this.get("SELECT * FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND COALESCE(text, '') != '' ORDER BY seq DESC LIMIT 1", botId)
+    const row = this.get(`SELECT * FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND COALESCE(text, '') != '' AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT 1`, botId)
     return row ? messageOf(row) : undefined
   }
 
   /** The bot's messages after the owner's read marker. */
   unread(botId: string, readSeq: number): number {
-    return Number(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ?", botId, readSeq)?.n ?? 0)
+    return Number(this.get(`SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ? AND ${SHOWN_MESSAGE}`, botId, readSeq)?.n ?? 0)
   }
 
   /** The 30-day purge: every row of a bot's asks, activations (with their dispatches, counts and spend), grants and context generations. */

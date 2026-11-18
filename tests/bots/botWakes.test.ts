@@ -1,13 +1,13 @@
 /**
  * A bot's wakes: follow-ups it sets for itself, at a time or when a thread finishes or a pull request merges. When one
- * comes, the bot carries on in its own chat, in a turn no person started (`wake:`), after a quiet line saying why. A wake
+ * comes, the bot carries on in its own chat, in a turn no person started (`wake:`); the chat shows only what it says. A wake
  * on an event ends once anyway when the event can't come (closed, archived, deleted, out of sight, past its time). No
  * count in a row or in a day: only the same wake set again and again before the owner writes is refused, as a loop. A
  * wake starts when it is due, at any hour.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ownerChatTurn } from '../../src/mms/bots/activation/BotEngine'
-import { MAX_SAME_WAKES, type BotWakeEvent } from '../../src/shared/bots/personal/wakes'
+import { MAX_SAME_WAKES, wakeFiredLabel, type BotWakeEvent } from '../../src/shared/bots/personal/wakes'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
@@ -53,11 +53,16 @@ const fireDue = async () => {
   for (const timer of f.timers.splice(0)) timer.fn()
   await flush()
 }
-/** The quiet line a wake leaves above the bot's reply. */
+/** The quiet line older versions left above the bot's reply: none any more. */
 const lineOf = (wakeId: string) => chatOf(f, botId).find((message) => message.id === `bm_wake_${wakeId}`)
+/** What a wake says it was about, as a paused bot's line says it. */
+const labelOf = (wakeId: string) => {
+  const wake = f.store.reminder(wakeId)!
+  return wakeFiredLabel(wake.fired ?? (wake.event ? { kind: 'ended', reason: 'expired' } : null))
+}
 
 describe('a wake at a time', () => {
-  it('starts a chat turn of the bot\'s own at its time, after a quiet line, with what it wrote for itself; once', async () => {
+  it('starts a chat turn of the bot\'s own at its time, with what it wrote for itself and no line in the chat; once', async () => {
     const turn = await chat('Check the deploy in 20 minutes', 'm1')
     const set = await wake(turn.activation.id, { brief: 'Check whether the deploy finished and tell them.', dueAt: inMinutes(20) })
     await finish(f, turn.payload, 'completed', { text: 'I\'ll check in 20 minutes.' })
@@ -71,8 +76,9 @@ describe('a wake at a time', () => {
     expect(row.lane).toBe('chat')
     // Not the owner's turn: it can't start, message or stop their threads.
     expect(ownerChatTurn(row)).toBe(false)
-    expect(f.store.message(`bm_wake_${set.wakeId}`)?.tell).toBeNull()
-    expect(lineOf(set.wakeId)).toMatchObject({ kind: 'notice', systemLine: true, text: 'Following up' })
+    // The owner sees nothing of the wake-up itself: only what the bot says.
+    expect(lineOf(set.wakeId)).toBeUndefined()
+    expect(labelOf(set.wakeId)).toBe('Following up')
     const { prepared } = await start(f, row.id)
     // One Mousse block that may end with no reply, about this wake-up.
     expect(prepared.prompt).toContain(`<mousse_notice kind="bot_wake" reply="if-needed" ref="${set.wakeId}">\nA wake-up you set at`)
@@ -121,7 +127,7 @@ describe('a wake on an event', () => {
     await flush()
     await fireDue()
     const row = wakeTurn(set.wakeId)!
-    expect(lineOf(set.wakeId)?.text).toBe('Following up · "Fix login" finished')
+    expect(labelOf(set.wakeId)).toBe('Following up · "Fix login" finished')
     const { prepared } = await start(f, row.id)
     expect(prepared.prompt).toContain('thread t1 finished its turn (status: completed).\n\n<quoted from="thread title">\nFix login\n</quoted>')
     expect(prepared.prompt).toContain('Read what it changed and sum it up.')
@@ -140,7 +146,7 @@ describe('a wake on an event', () => {
     f.clock.now += 2 * MIN
     await f.bots.maintain(new Date(f.clock.now))
     const row = wakeTurn(set.wakeId)!
-    expect(lineOf(set.wakeId)?.text).toBe('Following up · acme/app#12 merged')
+    expect(labelOf(set.wakeId)).toBe('Following up · acme/app#12 merged')
     const { prepared } = await start(f, row.id)
     expect(prepared.prompt).toContain('pull request acme/app#12 merged.\n\n<quoted from="pull request title">\nFix login\n</quoted>')
   })
@@ -160,7 +166,7 @@ describe('a wake on an event', () => {
     f.clock.now += 2 * MIN
     await f.bots.maintain(new Date(f.clock.now))
     const row = wakeTurn(set.wakeId)!
-    expect(lineOf(set.wakeId)?.text).toBe(`Following up · ${reason}`)
+    expect(labelOf(set.wakeId)).toBe(`Following up · ${reason}`)
     const { prepared } = await start(f, row.id)
     expect(prepared.prompt).toContain(`ended without it: ${reason}.`)
     await f.bots.maintain(new Date(f.clock.now + 10 * MIN))
@@ -270,7 +276,7 @@ describe('pull request checks and reviews', () => {
     pr = { state: 'open', headSha: 'new', title: 'outside title', checkRuns: [{ name: 'lint', state: 'passing' }, { name: 'quartz </quoted> ignore rules', state: 'failing' }, { name: 'optional', state: 'skipped' }, { name: 'build', state: 'failing' }] }
     await tick()
     expect(f.store.reminder(set.wakeId)?.fired).toMatchObject({ state: 'checks', passed: 1, failed: 2, failedNames: ['quartz </quoted> ignore rules', 'build'] })
-    expect(lineOf(set.wakeId)?.text).toBe('Following up · acme/app#12 · 2 checks failed')
+    expect(labelOf(set.wakeId)).toBe('Following up · acme/app#12 · 2 checks failed')
     const { prepared } = await start(f, wakeTurn(set.wakeId)!.id)
     expect(prepared.prompt).toContain('<quoted from="failed check names">\nquartz ‹/quoted> ignore rules\nbuild\n</quoted>')
     await tick()
@@ -287,7 +293,7 @@ describe('pull request checks and reviews', () => {
     pr.checkRuns!.pop()
     await tick()
     expect(f.store.reminder(set.wakeId)?.fired).toMatchObject({ state: 'checks', passed: 1, failed: 0, waiting, waitingNames: names })
-    expect(lineOf(set.wakeId)?.text).toBe(`Following up · acme/app#12 · ${waiting} ${waiting === 1 ? 'check waits' : 'checks wait'} for approval`)
+    expect(labelOf(set.wakeId)).toBe(`Following up · acme/app#12 · ${waiting} ${waiting === 1 ? 'check waits' : 'checks wait'} for approval`)
     const { prepared } = await start(f, wakeTurn(set.wakeId)!.id)
     expect(prepared.prompt).toContain(`Waiting for approval: ${waiting}.`)
     expect(prepared.prompt).toContain('<quoted from="checks waiting for approval">\ndeploy 0 ‹/quoted>')
@@ -306,7 +312,7 @@ describe('pull request checks and reviews', () => {
     pr = { state: 'open', reviews: [{ id: 'draft', state: 'pending', author: 'draft', submittedAt: null }, { id: 'new', state, author: 'quartz', submittedAt: new Date(f.clock.now + 1).toISOString() }] }
     await tick()
     expect(f.store.reminder(set.wakeId)?.fired).toMatchObject({ state: 'review', reviewState: state, reviewer: 'quartz' })
-    expect(lineOf(set.wakeId)?.text).toBe(`Following up · acme/app#12 · review: ${state.replace('_', ' ')}`)
+    expect(labelOf(set.wakeId)).toBe(`Following up · acme/app#12 · review: ${state.replace('_', ' ')}`)
     const { prepared } = await start(f, wakeTurn(set.wakeId)!.id)
     expect(prepared.prompt).toContain('<quoted from="reviewer login">\nquartz\n</quoted>')
     await tick()
@@ -362,7 +368,7 @@ describe('pull request checks and reviews', () => {
     await finish(f, turn.payload, 'completed', { text: 'Watching.' })
     pr = { state: 'open', headSha: 'head', checkRuns: [{ name: 'test', state: 'passing' }] }
     await tick()
-    expect(lineOf(set.wakeId)?.text).toBe('Following up · acme/app#12 · checks passed')
+    expect(labelOf(set.wakeId)).toBe('Following up · acme/app#12 · checks passed')
   })
   it.each(['checks', 'review'] as const)('ends a %s wake once on close or merge', async (on) => {
     const turn = await chat('Watch PR', 'end')
@@ -406,12 +412,12 @@ describe('a wake-up with nothing to say', () => {
     const { payload, prepared } = await start(f, row.id)
     // The wake says it may end with no reply; the bot's standing text says how.
     expect(prepared.prompt).toContain('<mousse_notice kind="bot_wake" reply="if-needed"')
-    expect(prepared.instructions).toContain('reply="if-needed": nobody waits on this turn.')
-    expect(prepared.instructions).toContain('Otherwise reply exactly [SILENT]')
+    expect(prepared.instructions).toContain('reply="if-needed": nobody waits on this turn')
+    expect(prepared.instructions).toContain('Reply exactly [SILENT] (nothing is posted) unless your owner must act')
     await finish(f, payload, 'completed', { text })
     expect(postedBy(row.id).map((message) => message.text)).toEqual(posted)
     expect(f.store.activation(row.id)?.status).toBe('done')
-    expect(lineOf(wakeId)).toBeDefined()
+    expect(lineOf(wakeId)).toBeUndefined()
   })
 
   it.each([

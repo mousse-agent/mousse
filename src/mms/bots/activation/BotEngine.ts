@@ -98,7 +98,7 @@ import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WA
 import { lockedEnv } from '../../harness/env'
 import { MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowId, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
 import { message as mousseMessage, notice as mousseNotice } from '../../../shared/mousseContext'
-import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, SILENT_REPLY, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, SILENT_REPLY, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { BOT_THREADS_READ_ONLY_TURN_NOTE, botAllowedOf, namedPowerOf, type BotAllowed, type BotNamedPower } from '../instructions'
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
@@ -262,6 +262,8 @@ export interface BotEngineHost {
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
   monotonic?(): number
   setTimer?(fn: () => void, ms: number): { clear(): void }
+  /** How long an event turn waits for more events before it starts (default `EVENT_TURN_SETTLE_MS`). */
+  eventSettleMs?: number
 
   // -- Bot Phase 1 seams (docs/plans/bot-architecture.md §7.1); each is optional so a package can land alone.
 
@@ -442,6 +444,13 @@ const PR_WAKE_READ_MS = 2 * 60_000
 const HOUR_MS = 60 * 60_000
 /** How long a dispatch's reply waits for the executor's final message before it is posted without it. */
 const REPLY_WAIT_MS = 5_000
+/**
+ * An event turn (a wake-up or a thread's notice, `EVENT_CHAT_KEYS`) waits this long after its last event before it
+ * starts, so events that arrive together (threads finishing one after another) reach the bot as one turn.
+ */
+export const EVENT_TURN_SETTLE_MS = 20_000
+/** The longest an event turn waits to start while more events keep joining it. */
+export const EVENT_TURN_SETTLE_MAX_MS = 2 * 60_000
 /** Retries on another model after usage limits, per activation. */
 const MAX_USAGE_RETRIES = 2
 /** The end reason and stuck-error code of a picked model that can't run (#673). */
@@ -580,6 +589,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly expiryTimers = new Map<string, { clear(): void }>()
   /** Each waiting activation's next internet check. */
   private readonly offlineTimers = new Map<string, { clear(): void }>()
+  /** Each bot's next look at an event turn that waits for its events to settle (`eventSettlesAt`). */
+  private readonly settleTimers = new Map<string, { clear(): void }>()
+  /** When the last event joined each event turn that waits to start: it starts once they stop arriving. */
+  private readonly eventJoined = new Map<string, number>()
   /**
    * Work a usage limit stopped while the bot was under its owner's own pause (no usage pause to end): when it may try
    * again. Not kept across a restart, where it tries once at the start (`usageResumable`).
@@ -1944,13 +1957,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return live?.botId === botId && live.lane === 'chat' && ENDED_ACTIVATION_STATUSES.has(live.status)
       })
       if (!chatHeld) {
+        let settles: number | undefined
         const next = this.store.db.transaction((): BotActivationRow | undefined => {
           if (!this.slotFree(botId, 'chat')) return undefined
-          const queued = this.store.laneActivations(botId, 'chat', ['queued'])[0]
-          if (!queued) return undefined
+          // An event turn whose events still arrive waits for them; anything else waiting goes first meanwhile.
+          const now = this.now()
+          const waiting = this.store.laneActivations(botId, 'chat', ['queued'])
+          const queued = waiting.find((row) => this.eventSettlesAt(row) <= now)
+          if (!queued) {
+            if (waiting.length) settles = Math.min(...waiting.map((row) => this.eventSettlesAt(row)))
+            return undefined
+          }
           this.store.moveActivation(queued.id, ['queued'], 'running')
+          this.eventJoined.delete(queued.id)
           return this.store.activation(queued.id)!
         })
+        if (settles !== undefined) this.pumpAt(botId, settles)
         if (next) await this.startActivation(next)
       }
     }
@@ -5214,8 +5236,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // its report is not posted, so the chat shows nothing; the run and its line stay in Automations. Open asks and
     // cards it made still show, without the marker. Work the owner asked for and chat replies are posted as written.
     // A chat turn nobody started or waits on (a wake-up, a thread's notice, another bot's message), and work such a turn
-    // started, may say `[SILENT]` when nothing finished and nothing needs the owner: nothing is
-    // posted and nobody is notified; the wake's quiet line and the work list still show it happened. An empty reply
+    // started, may say `[SILENT]` (the default it is told) unless the owner must act or their request is all done: nothing
+    // is posted and nobody is notified; the event itself never shows in the chat, and the work list shows the work. An empty reply
     // stays as it is (a chat turn that only handed work off still shows it).
     // Its marker is a line of its own: a reply that also says something posts what it says, without the marker.
     const quietTurn = unattendedChatTurn(row) || (report && row.trigger.kind === 'work' && unattendedChatTurn(this.store.activation(row.trigger.from) ?? { lane: 'run', idempotencyKey: '' }))
@@ -6811,6 +6833,45 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.settle({ kind: 'bot', runId, threadId: dispatch.threadId, activationId: dispatch.activationId, dispatchN: dispatch.n }, {})
   }
 
+  /**
+   * When chat activation `row` may start: at once (0) unless it is an event turn (`EVENT_CHAT_KEYS`), which waits
+   * `EVENT_TURN_SETTLE_MS` after the last event that joined it, and never longer than `EVENT_TURN_SETTLE_MAX_MS` in all.
+   * After a restart the time of the last join is gone, so it counts from when the turn was queued.
+   */
+  private eventSettlesAt(row: Pick<BotActivationRow, 'id' | 'idempotencyKey' | 'createdAt'>): number {
+    if (!eventChatTurn(row)) return 0
+    const queuedAt = Date.parse(row.createdAt)
+    if (!Number.isFinite(queuedAt)) return 0
+    const settle = this.host.eventSettleMs ?? EVENT_TURN_SETTLE_MS
+    return Math.min(Math.max(queuedAt, this.eventJoined.get(row.id) ?? 0) + settle, queuedAt + Math.max(settle, EVENT_TURN_SETTLE_MAX_MS))
+  }
+
+  /** The bot's chat lane looks again at `at` (an event turn's settle time), one timer per bot. */
+  private pumpAt(botId: string, at: number): void {
+    if (this.closed) return
+    this.settleTimers.get(botId)?.clear()
+    const timer = (this.host.setTimer ?? defaultTimer)(() => {
+      if (this.settleTimers.get(botId) === timer) this.settleTimers.delete(botId)
+      this.pumpLater(botId)
+    }, Math.max(0, at - this.now()))
+    this.settleTimers.set(botId, timer)
+  }
+
+  /**
+   * An event (a wake-up or a thread's notice) for the bot's chat, inside the caller's transaction: it joins the event
+   * turn that still waits to start, when there is one, so a burst of events is one turn; else it queues a turn of its
+   * own (`queueChatInTx`). The activation that will read it, and why the bot can't run now when it can't.
+   */
+  private queueEventInTx(botId: string, key: string, input: string, activationId: string): { activationId: string; refused?: BotEngineError } {
+    const waiting = this.store.laneActivations(botId, 'chat', ['queued']).filter(eventChatTurn).at(-1)
+    if (waiting && this.store.appendQueuedChatInput(waiting.id, input)) {
+      this.store.db.afterCommit(() => this.eventJoined.set(waiting.id, this.now()))
+      return { activationId: waiting.id }
+    }
+    const refused = this.queueChatInTx(botId, key, input, activationId)
+    return refused ? { activationId, refused } : { activationId }
+  }
+
   /** The bot's lanes start what waits; the run lane picks across the profile's bots (`nextRun`). */
   private pumpLater(botId: string): void {
     void this.pump(botId).catch((error) => console.warn('next bot activation could not start', { botId, error: error instanceof Error ? error.message : String(error) }))
@@ -7470,9 +7531,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A job's notice: a chat turn of the bot's own (`job:<id>:<activation>`) that starts with the report (`jobNoticeInput`:
-   * state, the thread's title and link, who asked, and its answer held to the report cap), after a quiet line in the chat
-   * saying why the bot speaks. It may act on the owner's threads (`threadsActOf`). A bot that is paused, or can't run now,
-   * has it said as a line with the link instead. The job moves in the transaction that queues the turn: one notice per change.
+   * state, the thread's title and link, who asked, and its answer held to the report cap). Nothing shows in the chat but
+   * what the bot says. A notice that arrives while an event turn still waits to start joins it (`queueEventInTx`), so
+   * threads finishing together are one turn. It may act on the owner's threads (`threadsActOf`). A bot that is paused, or
+   * can't run now, has it said as a line with the link instead. The job moves in the transaction that queues the turn: one
+   * notice per change.
    */
   private async deliverJobNotice(job: BotJob, state: BotJobState, line: string | undefined, seen: JobThreadView): Promise<void> {
     const registry = this.store.registry(job.botId)
@@ -7483,16 +7546,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const next: BotJob = { ...job, state, ...(line ? { line } : {}), ...(seen.title?.trim() ? { title: jobLine(seen.title, 200) } : {}) }
     const input = jobNoticeInput(next, BOT_JOB_ENDED.has(state) ? seen.result : undefined)
     const paused = Boolean(registry.pausedReason)
-    const activationId = newActivationId()
+    let activationId = newActivationId()
     let refused: BotEngineError | undefined
     const started = this.store.db.transaction(() => {
       if (!this.store.moveJob(job.id, job.state, state, { ...(line ? { line } : {}), notice: true })) return undefined
-      const id = `${WAKE_LINE_PREFIX}job_${job.id}_${activationId}`
-      if (!paused) refused = this.queueChatInTx(job.botId, `job:${job.id}:${activationId}`, input, activationId)
-      if (!paused && !refused) {
-        this.chat.post({ id, botId: job.botId, author: 'bot', kind: 'notice', text: jobNoticeLabel(next), external: true, lane: 'chat' })
-        return true
-      }
+      if (!paused) ({ activationId, refused } = this.queueEventInTx(job.botId, `job:${job.id}:${activationId}`, input, activationId))
+      // Nothing shows in the chat: the notice is the bot's to act on, and only what it says reaches the owner.
+      if (!paused && !refused) return true
       this.chat.post({ id: `bm_job_${job.id}_${activationId}`, botId: job.botId, author: 'bot', kind: 'run_report', text: `${jobNoticeLabel(next)}: ${threadLink(job.threadId)}. I didn't follow up on this: ${paused ? 'I\'m paused.' : refused!.message}`, external: true, lane: 'chat' })
       return false
     })
@@ -9224,8 +9284,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A wake that is due, at any hour: a chat turn of the bot's own (`wake:<id>`, not the owner's, though it may act on
-   * their threads: `threadsActOf`) starts with what the bot wrote for itself and what happened, after a quiet line in the chat saying why the
-   * bot speaks. A wake on an event whose time came first ended without it, and says so. A bot that is paused, or can't
+   * their threads: `threadsActOf`) starts with what the bot wrote for itself and what happened; nothing shows in the chat
+   * but what the bot says, and it joins an event turn that still waits to start (`queueEventInTx`). A wake on an event
+   * whose time came first ended without it, and says so. A bot that is paused, or can't
    * run now, has the wake said as a line instead, so it is never lost and never retried forever. Marked delivered in the
    * transaction that queues the turn: it wakes once.
    */
@@ -9252,16 +9313,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const paused = Boolean(this.store.registry(wake.botId)?.pausedReason)
-    const activationId = newActivationId()
+    let activationId = newActivationId()
     let refused: BotEngineError | undefined
     const started = this.store.db.transaction(() => {
       // Cancelled or forgotten since the pass read it: nothing happens.
       if (this.store.reminder(wake.id)?.status !== 'waiting') return undefined
-      if (!paused) refused = this.queueChatInTx(wake.botId, `wake:${wake.id}`, input, activationId)
+      if (!paused) ({ activationId, refused } = this.queueEventInTx(wake.botId, `wake:${wake.id}`, input, activationId))
+      // Nothing shows in the chat: the wake-up is the bot's to act on, and only what it says reaches the owner.
       if (!paused && !refused) {
         this.store.settleReminder(wake.id, 'delivered', { activationId })
-        // A quiet line says why the bot speaks unasked.
-        this.chat.post({ id: `${WAKE_LINE_PREFIX}${wake.id}`, botId: wake.botId, author: 'bot', kind: 'notice', text: wakeFiredLabel(fired), external, lane: 'chat' })
         return true
       }
       const id = `bm_${wake.id}`
@@ -10002,6 +10062,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.expiryTimers.clear()
     for (const timer of this.offlineTimers.values()) timer.clear()
     this.offlineTimers.clear()
+    for (const timer of this.settleTimers.values()) timer.clear()
+    this.settleTimers.clear()
     for (const reply of this.pendingReplies.values()) reply.timer.clear()
     this.pendingReplies.clear()
     this.closed = true
@@ -10338,6 +10400,17 @@ export function withoutSilentMarker(text: string): { text: string; marked: boole
  * (`question:`) always says what it went with, so it is not one of them.
  */
 const UNATTENDED_CHAT_KEYS = ['wake:', 'job:', 'botmsg:', THREAD_MESSAGE_KEY_PREFIX] as const
+
+/**
+ * The chat turns an event started, which wait for the events that arrive with them and take them in as one turn: a
+ * wake-up (`wake:`) and a thread's notice (`job:`).
+ */
+const EVENT_CHAT_KEYS = ['wake:', 'job:'] as const
+
+/** Whether `row` is a chat turn an event started (`EVENT_CHAT_KEYS`). */
+function eventChatTurn(row: Pick<BotActivationRow, 'idempotencyKey'>): boolean {
+  return EVENT_CHAT_KEYS.some((key) => row.idempotencyKey.startsWith(key))
+}
 
 export function unattendedChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
   return row.lane === 'chat' && UNATTENDED_CHAT_KEYS.some((key) => row.idempotencyKey.startsWith(key))

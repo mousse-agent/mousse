@@ -3,8 +3,9 @@ import { expect, it } from 'vitest'
 import { BotMemoryStore } from '../../../src/mms/bots/memory/BotMemoryStore'
 import { botFixture, chatOf, createBot, finish, flush, start } from '../botFixture'
 
-// Service lines keep their chat wording for normal delivery and for paused/refused delivery.
-it.each(['running', 'paused', 'refused'] as const)('journals a real thread wake title as data when %s', async (state) => {
+// A bot that follows up shows no line at all (botWakes.test.ts); one that can't says the wake as a line, and keeps its
+// outside words as data.
+it.each(['paused', 'refused'] as const)('journals a real thread wake title as data when %s', async (state) => {
   const f = botFixture()
   try {
     const memory = new BotMemoryStore({ db: f.store.db })
@@ -26,13 +27,13 @@ it.each(['running', 'paused', 'refused'] as const)('journals a real thread wake 
     f.bots.threadRunEnded('deploy')
     await flush()
     await f.bots.deliverDueReminders()
-    const chat = chatOf(f, botId).find((m) => m.id === (state === 'running' ? `bm_wake_${wake.wakeId}` : `bm_${wake.wakeId}`))!
+    const chat = chatOf(f, botId).find((m) => m.id === `bm_${wake.wakeId}`)!
     expect(chat.text).toContain('Following up · "quartz deploy" finished')
     const hits = memory.search(botId, { query: 'quartz' })
     expect(hits.length).toBeGreaterThan(0)
     expect(hits.every((h) => h.who === 'tool')).toBe(true)
     expect(memory.journal(botId).filter((r) => r.text.includes('quartz')).every((r) => r.external)).toBe(true)
-    if (state !== 'running') {
+    {
       f.store.setOwnerReaction(chat.id, '👍', f.store.now())
       const packs = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} },
         reactions: () => [{ messageId: chat.id, emoji: '👍', at: f.store.now(), text: chat.text, fromWork: true }] })
@@ -55,7 +56,7 @@ it.each(['running', 'paused', 'refused'] as const)('journals a real thread wake 
   } finally { f.close() }
 })
 
-it.each([false, true])('keeps a failed command service line unchanged and external (paused: %s)', async (paused) => {
+it("keeps a paused bot's failed command line unchanged and external", async () => {
   const f = botFixture()
   try {
     const memory = new BotMemoryStore({ db: f.store.db })
@@ -66,9 +67,9 @@ it.each([false, true])('keeps a failed command service line unchanged and extern
     const id = 'failed-command'
     f.store.insertReminder({ id, botId, dueAt: f.store.now(), text: 'Report the build', work: null, replyTo: null, createdAt: f.store.now(), wake: true, event: { kind: 'watcher', title: 'Build', command: 'build', minutes: 1 } })
     f.store.fireWake(id, { kind: 'watcher', title: 'Build', how: 'failed', message: 'quartz failure', tail: '' }, f.store.now())
-    if (paused) f.bots.pauseBot(botId)
+    f.bots.pauseBot(botId)
     await f.bots.deliverDueReminders()
-    const chat = chatOf(f, botId).find((m) => m.id === (paused ? `bm_${id}` : `bm_wake_${id}`))!
+    const chat = chatOf(f, botId).find((m) => m.id === `bm_${id}`)!
     expect(chat.text).toContain('Following up · "Build" could not run: quartz failure')
     expect(memory.search(botId, { query: 'quartz' })).toMatchObject([{ who: 'tool' }])
     expect(memory.journal(botId).find((r) => r.text.includes('quartz'))?.external).toBe(true)
