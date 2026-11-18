@@ -113,15 +113,19 @@ describe('the sidebar filter', () => {
     expect(listed()).toEqual(['t1', 't2'])
   })
 
-  it('Show lists bot threads, hidden ones too, and its chip puts My threads back', () => {
+  it('Show lists bot threads, hidden ones too, and its chip puts My threads back', async () => {
     show()
     openMenu()
+    // The menu takes focus once placed, so the arrow keys work straight away.
+    await act(async () => { await new Promise((done) => requestAnimationFrame(() => done(undefined))) })
+    expect(document.activeElement?.textContent).toContain('My threads')
     expect(ticked('My threads')).toBe('true')
     click(item('Bot threads'))
     expect(listed().sort()).toEqual(['a1', 'a2'])
     expect(chips()).toEqual(['Bot threads'])
     click(host.querySelector('button[aria-label^="Clear show filter"]'))
     expect(listed()).toEqual(['t1', 't2'])
+    expect(document.activeElement).toBe(field())
   })
 
   it('Bot › searches the bots; the picked one lists its threads, hidden ones too, with its face on the chip', () => {
@@ -146,6 +150,8 @@ describe('the sidebar filter', () => {
     expect(listed().sort()).toEqual(['a3', 't3'])
     expect(chips()).toEqual(['Archived'])
     expect(host.querySelector<HTMLElement>('.threads-sidebar-footer')!.hidden).toBe(true)
+    // With no footer the list fills the sidebar, so the profile stays at the bottom.
+    expect(host.querySelector<HTMLElement>('.threads-sidebar-scroll')!.dataset.fill).toBe('true')
   })
 
   it('in the Projects tab the menu lists the projects ticked; unticking one leaves it out until its chip is cleared', () => {

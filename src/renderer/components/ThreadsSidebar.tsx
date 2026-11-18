@@ -1711,7 +1711,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       {contentView !== 'chats' && <ThreadFilterBar view={contentView} projects={projectOptions} bots={botOptions} />}
 
-      <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-more-below={moreBelow || undefined}>
+      <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-fill={footerHidden || undefined} data-more-below={moreBelow || undefined}>
 
       <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={contentView !== 'projects'}>
 

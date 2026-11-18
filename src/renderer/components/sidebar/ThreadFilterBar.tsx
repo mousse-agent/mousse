@@ -182,7 +182,7 @@ export function ThreadFilterBar({ view, projects, bots }: { view: 'projects' | '
             <span key={chip.key} className="thread-filter-chip" role="listitem" title={chip.title}>
               {chip.icon}
               <span className="thread-filter-chip-label">{chip.label}</span>
-              <button type="button" className="thread-filter-chip-clear" aria-label={`Clear ${chip.title.toLowerCase()} filter: ${chip.label}`} onClick={chip.clear}>
+              <button type="button" className="thread-filter-chip-clear" aria-label={`Clear ${chip.title.toLowerCase()} filter: ${chip.label}`} onClick={() => { chip.clear(); fieldRef.current?.focus() }}>
                 <X size={11} strokeWidth={2.2} aria-hidden="true" />
               </button>
             </span>
@@ -223,7 +223,11 @@ function FilterMenu({ view, anchorRef, projects, bots, projectOption, botOption,
   const style = useFloatingPosition({ open: true, anchorRef, contentRef: menuRef, placement: 'below-end', gap: 6, deps: [view, projects.length] })
   const onMenuKeyDown = useMenuKeyboard(menuRef, () => onClose(true))
 
-  useEffect(() => { focusInitialMenuItem(menuRef.current) }, [])
+  // The menu is placed (and made visible) by useFloatingPosition after it mounts; a hidden item cannot take focus, so wait a frame.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => focusInitialMenuItem(menuRef.current))
+    return () => cancelAnimationFrame(frame)
+  }, [])
   useEffect(() => {
     const away = (event: MouseEvent) => {
       const target = event.target as Node
