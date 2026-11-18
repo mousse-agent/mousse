@@ -133,7 +133,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 24,
     date: '2026-11-18',
-    text: 'Use bot_schedule_add with onlyIfChanged: { url, contains? } to watch a public page. Mousse checks it without a model run; your first check records it and only changed text starts work. Give prompt, never say, with this setting.'
+    text: 'Use bot_schedule_add with onlyIfChanged: { url, contains? } to watch a public page. Mousse checks it without a model run; the first check records it and only changed text starts work. Give prompt, never say, with this setting.'
   }
 ]
 

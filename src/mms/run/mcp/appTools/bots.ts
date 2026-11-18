@@ -134,7 +134,7 @@ export const BOT_TOOLS: Tool[] = [
     description: `Run yourself on a schedule: each time, you get the prompt as your task. At most once a minute. A line you only need to say needs no run: use say instead of prompt. A schedule that should stop on a date takes until. Use onlyIfChanged to check a public page without a model run until its text changes. Returns the schedule's id and its label; confirm it to the owner in words.`,
     parameters: Type.Object({
       when: WHEN,
-      onlyIfChanged: Type.Optional(Type.Object({ url: Type.String(), contains: Type.Optional(Type.String({ maxLength: 200 })) })),
+      onlyIfChanged: Type.Optional(Type.Object({ url: Type.String({ description: 'The public http or https page to check, without credentials. Redirects are not followed.' }), contains: Type.Optional(Type.String({ maxLength: 200, description: 'Optional plain text to match case-insensitively; compare a 4,000-character window around its first match. Missing text compares as empty.' })) })),
       prompt: Type.Optional(Type.String({ description: 'What to do on each run, in your own words. Give prompt or say. If it has an end condition, state it here.' })),
       say: Type.Optional(Type.String({ maxLength: 500, description: 'A fixed line to say with no model run, in place of prompt. say is only available in a turn your owner’s message or tap started.' })),
       until: Type.Optional(Type.String({ description: 'A local date (through that day) or date and time on this computer, such as 2026-11-21 or 2026-11-21T18:00.' }))

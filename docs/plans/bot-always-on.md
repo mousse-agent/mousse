@@ -157,13 +157,14 @@ ScheduledJob {
   tellMe?: TellMe
   bot: { botId, scheduleId, createdBy,
          ownerAsked?: true,                  // added in a turn the owner's own message started
-         say?: string,                       // a fixed line, posted with no model run
-         onlyIfChanged?: { url, contains? }  // a check with no model call before each run
+         say?: string                        // a fixed line, posted with no model run
   }
 }
 ```
 
-Everything new sits under `bot`, because `jobs-kept.json` keeps that field whole when an older build's save drops what it does not know (`ScheduledJobStore.ts:229`); `restoreDroppedFields` must also merge missing keys into a `bot` that survived. An older build runs a `say` job as a prompt that says it, and ends an `until` job at its time. The "where I left off" line and the page's last hash live in `bots.db`, never in `jobs.json`, so Forget and search reach them and a file rewritten every tick stays small.
+The page-check setting `onlyIfChanged: { url, contains? }` and its state live in `bot_memory_state`, never on `ScheduledJob` or `ScheduledJob.bot`.
+
+The new fixed-line fields sit under `bot`, because `jobs-kept.json` keeps that field whole when an older build's save drops what it does not know (`ScheduledJobStore.ts:229`); `restoreDroppedFields` must also merge missing keys into a `bot` that survived. An older build runs a `say` job as a prompt that says it, and ends an `until` job at its time. The "where I left off" line and the page's last hash live in `bots.db`, never in `jobs.json`, so Forget and search reach them and a file rewritten every tick stays small.
 
 About → Runs and the automation card word each combination: "Inbox check · every weekday 09:00", "Says “Take your pills” · every day 08:00", "Tickets page · checks every 15 min · tells you when it changes", with " · until Fri 21 Nov" appended.
 
@@ -342,7 +343,7 @@ It does not cover:
 
 All `bot_actions` columns are TEXT except `nudges` (INTEGER, NOT NULL, default 0). `id` is the primary key. `call_key`, `bot_id`, `activation_id`, `lane`, `kind`, `target_json`, `args_json`, `args_digest`, `binding_json`, `status` and `created_at` are NOT NULL: each call needs its identity, target, masked arguments, approval binding, state and creation time. `lane` is checked as `chat` or `run`; `kind` and `status` are checked against the sets above. Checks require `exec_args` to be NULL outside `open`, `approved` and `running`, and an `open` card to have `expires_at`. Other fields are nullable: exact arguments are cleared on settlement; place, card and bot note need not exist for counted calls; result, message, follow-up, expiry, answer and execution fields exist only when applicable. There are no foreign keys. Only the 30-day purge deletes actions; withdrawal when their work or cards end is defined by the later approval implementation. Memory export includes a masked `actions.jsonl`, excluding `exec_args`; whole-database migration copies include the table automatically. Every column except `exec_args` holds only masked text, ids and digests, with one deliberate exception: `place_json` holds exact values for phase 3 comparisons and is exported as such; `binding_json` holds the server’s id and a digest of its configuration, never the configuration itself.
 
-Outside `bots.db`: `ScheduledJob.bot` gains `ownerAsked` and `say`, and in phase 3 `onlyIfChanged` (its state is in `bots.db`); the grant gains the asks-first level and, in phase 3, an automation's exception (automation, tool, place); a secret's record gains the bots that use it and its binding (a request for one is an ordinary escalation row whose permission names the secret, so `bots.db` needs nothing for it); the profile's settings gain `notifications.quietHours`.
+Outside `bots.db`: `ScheduledJob.bot` gains `ownerAsked` and `say`; phase 3 keeps `onlyIfChanged` and its state entirely in `bot_memory_state`, with no shared-job field; the grant gains the asks-first level and, in phase 3, an automation's exception (automation, tool, place); a secret's record gains the bots that use it and its binding (a request for one is an ordinary escalation row whose permission names the secret, so `bots.db` needs nothing for it); the profile's settings gain `notifications.quietHours`.
 
 ## Phases
 
