@@ -6,8 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
-import { EFFECT_KIND_SPEC } from '../../src/mms/run/types'
-import { BOT_FAILURE_PAUSE_STREAK, BOT_JOURNAL_ERROR, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomText, sayOnce, stoppedShortText } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_FAILURE_PAUSE_STREAK, BOT_JOURNAL_ERROR, BotEngine, roomText, sayOnce } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
@@ -437,8 +436,6 @@ describe('long work', () => {
     })
 
     it('a turn that reaches the end of its window goes on in a fresh turn, and nobody is asked', async () => {
-      // The window ends before the run engine cuts a turn (six hours), so a long turn goes on instead of failing there.
-      expect(BOT_TURN_WINDOW_MS).toBeLessThan(EFFECT_KIND_SPEC['turn.start'].timeoutMs)
       const { workId, message } = await asked()
       const first = await start(f, workId)
       first.prepared.authority.check(call)
@@ -480,32 +477,19 @@ describe('long work', () => {
       expect(errors()).toEqual([])
     })
 
-    it('after the cap is reached 10 times in all (not in a row), work ends as out of room with what it had, never as a failure', async () => {
-      const { workId, message } = await asked()
-      let n = 1
-      // Eleven turns reach the cap (ten continue it, the eleventh ends it), and one completes in between.
-      const turns = MAX_TURN_CAP_CONTINUATIONS + 2
-      for (let step = 0; step < turns; step += 1) {
+    it('goes on past any number of turn caps, with no count of continuations', async () => {
+      const { workId } = await asked()
+      // Twelve capped turns: older builds ended the work after ten.
+      for (let n = 1; n <= 12; n += 1) {
         const turn = await start(f, workId, n)
         f.clock.now += MIN
         turn.prepared.authority.check(call)
-        f.chips.set(`${workId}:d${n}`, [{ icon: 'web', text: `Searched step ${step}` }])
-        if (step === 4) {
-          // Half way, a turn completes and the owner's note continues the work: the count goes on, it does not start again.
-          f.bots.tools.work.note(botId, workId, 'Cordless only.')
-          await finish(f, turn.payload, 'completed', { text: 'Five picks so far.' })
-          n += 1
-          continue
-        }
         await finish(f, turn.payload, 'failed', { text: `Words of turn ${n}.`, outcome: TURN_CAP })
-        n += 1
       }
-      expect(f.store.dispatches(workId).filter((dispatch) => dispatch.send.turnCap)).toHaveLength(MAX_TURN_CAP_CONTINUATIONS)
-      expect(f.store.activation(workId)).toMatchObject({ status: 'done', endReason: 'turn_cap_repeated' })
+      expect(f.store.dispatches(workId).filter((dispatch) => dispatch.send.turnCap)).toHaveLength(12)
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      expect(f.store.dispatch(workId, 13)).toMatchObject({ kind: 'continue', send: { turnCap: true } })
       expect(errors()).toEqual([])
-      const report = chatOf(f, botId).at(-1)!
-      expect(report).toMatchObject({ kind: 'run_report', text: stoppedShortText(`Words of turn ${n - 1}.`), replyTo: { id: message.id } })
-      expect(report.chips.map((chip) => chip.text)).toContain(`Searched step ${turns - 1}`)
     })
 
     it('a continuation that runs out at once still posts what the capped turn said and did', async () => {
@@ -950,22 +934,22 @@ describe('long work', () => {
       expect(chatOf(f, botId).some((message) => message.text.includes('waited too long'))).toBe(false)
     })
 
-    it('waiting work counts toward the run lane\'s 20 queued: the oldest is dropped with a line when more is queued', async () => {
+    it('waiting work counts toward the queue\'s runaway ceiling but is never dropped: the newest run is refused, with a line', async () => {
       const { workId } = await outOfRoom()
-      // Nothing starts while the bot's journal cannot be written, so what is asked for queues.
+      // Nothing starts while the bot's journal cannot be written, so what is asked for queues. Only a runaway fills the
+      // queue; a ceiling of three stands in for it.
       f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
-      for (let i = 0; i < 19; i += 1) {
+      f.host.maxQueuedActivations = 3
+      for (let i = 0; i < 3; i += 1) {
         f.clock.now += 1_000
         await f.bots.activate({ botId, input: `Run ${i}`, clientRequestId: `q${i}` })
       }
-      // Nineteen wait in the queue, and the waiting work is the twentieth.
-      expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(19)
+      // Two wait in the queue beside the waiting work; the third run is one over and is refused.
+      expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(2)
       expect(f.store.activation(workId)).toMatchObject({ status: 'blocked' })
-      f.clock.now += 1_000
-      await f.bots.activate({ botId, input: 'Run 19', clientRequestId: 'q19' })
-      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'queue_full' })
-      expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(20)
-      expect(chatOf(f, botId).at(-1)!.text).toBe('I had too much waiting, so I dropped "Vacuums". Ask me again when I\'m less busy.')
+      const refused = f.store.activationByKey('manual:q2')!
+      expect(refused).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', activationId: refused.id })
     })
 
     it('the owner\'s Continue is refused with a plain message: the work goes on through its ask, and never holds the lane', async () => {

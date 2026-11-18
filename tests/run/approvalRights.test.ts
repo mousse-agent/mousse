@@ -128,6 +128,16 @@ describe('canAnswerApproval for an agent with access beyond its subagents', () =
     expect(answers(manager('stranger', 'full', { answerApprovals: false }), 'unrelated')).toEqual({ ok: false, code: 'approvals_disabled' })
   })
 
+  it('lets the bot that started a thread answer it without the switch, and nothing else of the rule changes', () => {
+    const starter = (mode: PermissionMode) => manager('bot-chat', mode, { answerApprovals: false, startedThread: true })
+    expect(answers(starter('full'), 'unrelated')).toEqual({ ok: true })
+    // Still no subagent's request, no wider than its mode, never "always", never what the provider keeps for a person.
+    expect(answers(starter('full'), 'child')).toEqual({ ok: false, code: 'not_parent' })
+    expect(answers(starter('accept_edits'), 'unrelated', 'command')).toEqual({ ok: false, code: 'mode_forbids' })
+    expect(answers(starter('full'), 'unrelated', 'edit', { decision: 'allow', scope: 'always' })).toEqual({ ok: false, code: 'agent_no_standing_grant' })
+    expect(canAnswerApproval(request('unrelated', 'command', 'safety check'), starter('full'), once, lineage)).toEqual({ ok: false, code: 'person_only' })
+  })
+
   it('never answers its own thread, with every switch on', () => {
     expect(answers(manager('stranger', 'full'), 'stranger')).toEqual({ ok: false, code: 'own_request' })
   })

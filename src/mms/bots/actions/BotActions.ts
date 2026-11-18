@@ -2,7 +2,6 @@ import { botActionRefusalText, isBotActionRefusalCode, type BotActionRefusalCode
 import { notice, quoted } from '../../../shared/mousseContext'
 /** Longest an accepted Send may wait before transport dispatch, counted from the owner's tap. */
 export const APPROVED_SEND_WINDOW_MS = 10 * 60_000
-import { MAX_SAME_WAKES } from '../../../shared/bots/personal/wakes'
 import { registerHeldCalls } from './lifecycle'
 import { randomUUID } from 'node:crypto'
 import type { MousseSettings } from '../../../shared/settings'
@@ -206,7 +205,6 @@ interface Host {
   name(botId: string): string
   refresh(): Promise<void>
   park(row: BotActivationRow): void
-  lifetime(row: BotActivationRow): number
   origin(row: BotActivationRow): 'owner' | 'unattended' | undefined
   schema(tool: BotMcpTool): unknown
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
@@ -288,8 +286,8 @@ export class BotActions {
     return action.answered_at ? Date.parse(action.answered_at) + APPROVED_SEND_WINDOW_MS : 0
   }
   nextDueAt(botId?: string): number | undefined {
-    const times = (this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null) as unknown as ActionRow[])
-      .map(action => action.status === 'approved' ? this.approvedDeadline(action) : Date.parse(action.expires_at))
+    const times = (this.host.store.all("SELECT * FROM bot_actions WHERE status = 'approved' AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null) as unknown as ActionRow[])
+      .map(action => this.approvedDeadline(action))
     return times.length ? Math.min(...times) : undefined
   }
   private sendTimeout(action: ActionRow): boolean {
@@ -299,9 +297,6 @@ export class BotActions {
     return moved
   }
   expireDue(): void {
-    for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'open' AND expires_at <= ?", this.host.store.now())) {
-      if (this.transition(String(a.id), String(a.status), 'expired', { text: EXPIRED_WORK_TEXT })) this.finish(a as unknown as ActionRow)
-    }
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'approved'") as unknown as ActionRow[])
       if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) this.sendTimeout(action)
   }
@@ -331,7 +326,7 @@ export class BotActions {
     return this.host.store.ownerLastWroteSeq(action.bot_id) > Number((removed ? card.removedOwnerSeq : card.ownerSeq) ?? (action.status === 'open' ? this.host.store.message(action.message_id)?.seq : 0) ?? 0) || note > Number((removed ? card.removedNoteSeq : card.noteSeq) ?? 0)
   }
   private refuse(row: BotActivationRow, action: ActionRow, text: string): ToolOutcome {
-    this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner declined') ? 'repeat' : 'loop'}`, text)
+    this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner did not send') ? 'repeat' : 'loop'}`, text)
     return { text, isError: true }
   }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
@@ -359,12 +354,13 @@ export class BotActions {
     const history = scope as unknown as ActionRow[]
     const removed = history.find(action => JSON.parse(action.card_json ?? '{}').ownerRemoved && !this.ownerWroteAfter(action, true))
     if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
+    const open = history.filter(action => action.status === 'open')
+    if (origin === 'unattended' && open.length >= 3)
+      return this.refuse(row, open[0], 'Not sent: three requests for this tool already wait for your owner. Say in your report what you would have sent; do not ask again until one is answered.')
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
-    if (unanswered.length >= MAX_SAME_WAKES)
-      return this.refuse(row, unanswered[0], row.trigger.kind === 'schedule' ? 'Three requests for this tool are waiting or were not sent. Say what you need in your report.' : 'Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
     const refused = unanswered.find(action => action.args_digest === digest)
     if (refused)
-      return this.refuse(row, refused, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')
+      return this.refuse(row, refused, 'Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.')
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
@@ -379,7 +375,8 @@ export class BotActions {
         args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
       id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: readableActionTitle(tool.tool), serverName: tool.serverName }), messageId,
-      new Date(Date.parse(this.host.store.now()) + this.host.lifetime(row)).toISOString(), this.host.store.now())
+      // expires_at is retained for older settled rows; open rows have no deadline.
+      '9999-12-31T23:59:59.999Z', this.host.store.now())
       this.host.park(row)
       this.host.post(row, messageId, `${tool.serverName} · ${tool.tool}\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)
     })
@@ -420,7 +417,7 @@ export class BotActions {
 
   private valid(action: ActionRow, allowCold = false): BotActivationRow | undefined {
     const row = this.host.store.activation(action.activation_id)
-    if (!row || !action.exec_args || action.exec_args.length > ACTION_MAX_ARGUMENT_CHARS || (action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now()))) return undefined
+    if (!row || !action.exec_args || action.exec_args.length > ACTION_MAX_ARGUMENT_CHARS) return undefined
     try {
       const args: unknown = JSON.parse(action.exec_args)
       if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
@@ -457,10 +454,6 @@ export class BotActions {
       throw new BotActionChanged(botActionRefusalText(code), code)
     }
     if (action.status !== 'open') throw new BotActionChanged('This was already answered.', 'bot_action_settled')
-    if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
-      if (settle) this.expireDue()
-      throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
-    }
     if (action && input.answer === 'send' && this.host.store.registry(action.bot_id)?.pausedReason === 'owner') throw new BotActionChanged(`Resume ${this.host.name(action.bot_id)} to send this.`, 'bot_action_paused')
     const row = this.host.store.activation(action.activation_id)
     if (row?.trigger.kind === 'schedule' && this.host.obsolete(action)) {

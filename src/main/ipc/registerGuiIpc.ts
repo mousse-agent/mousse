@@ -111,6 +111,7 @@ import {
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
 import {
+  SIDE_CHAT_QUESTION_BODY,
   SUBAGENT_QUESTION_BODY,
   automationRunBody,
   bodyWithProject,
@@ -342,6 +343,14 @@ function registerHandler(
 /** An activity event the service marked as a turn a person stopped (theirs, or the one that launched it). */
 function stoppedByPerson(data: unknown): boolean {
   return (data as { stoppedByPerson?: unknown } | null)?.stoppedByPerson === true
+}
+
+/**
+ * An activity or question event the service marked as a wait the bot that started the thread answers: no one is
+ * pinged for it (the card still shows in the thread).
+ */
+export function supervisedWait(data: unknown): boolean {
+  return (data as { supervised?: unknown } | null)?.supervised === true
 }
 
 function withThreadId<T extends object>(params: T, threadId: unknown): T & { threadId?: string } {
@@ -595,7 +604,7 @@ export function registerGuiIpc(
         kind,
         ...(threadName ? { threadName } : {}),
         ...(about.projectName ? { projectName: about.projectName } : {}),
-        ...(about.viaThreadId ? { subagent: true } : {})
+        ...(about.sideChat ? { sideChat: true } : about.viaThreadId ? { subagent: true } : {})
       }
       win.webContents.send('notifications:threadToast', payload)
     }
@@ -610,7 +619,7 @@ export function registerGuiIpc(
     const notification = new Notification({
       title: about.threadName ?? about.parentName ?? 'Mousse',
       ...content,
-      body: bodyWithProject(about.viaThreadId ? SUBAGENT_QUESTION_BODY : content.body, about.projectName),
+      body: bodyWithProject(about.sideChat ? SIDE_CHAT_QUESTION_BODY : about.viaThreadId ? SUBAGENT_QUESTION_BODY : content.body, about.projectName),
       // Unpackaged Windows Electron notifications do not reliably play their toast
       // sound. Play Mousse's softer completion chime below and avoid a double sound.
       silent: useWindowsCompletionSound ? true : content.silent
@@ -1008,7 +1017,7 @@ export function registerGuiIpc(
           if (state === 'completed') {
             notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
-            notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
+            if (!supervisedWait(event.data)) notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
           } else if ((state === 'idle' && !stoppedByPerson(event.data)) || state === 'paused') {
             // A run that hit a usage limit stopped and waits for the person (or the reset). A turn a person stopped is not news.
             notifyThread(event.threadId, 'idle', currentPresentation().getActiveThreadId())
@@ -1023,7 +1032,7 @@ export function registerGuiIpc(
       if (isThreadActivityActive(activityTrackerFor().getState(event.threadId))) {
         // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
         if ((event.data as { wait?: unknown } | null)?.wait !== false) setThreadActivity(event.threadId, 'awaiting_input')
-        notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
+        if (!supervisedWait(event.data)) notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
       }
     }
     // Daemon-wide snapshots describe runtime state, not unread state. Reconcile
@@ -1210,7 +1219,7 @@ export function registerGuiIpc(
       // automation's to announce (`scheduled.runEnded`, as its Tell me says), unless it stopped to ask.
       const scheduledTurn = (event.data as { scheduled?: unknown } | null)?.scheduled === true
       // A turn a person stopped (theirs, or the thread that launched it) is not announced to them as stopped.
-      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input') && !(state === 'idle' && stoppedByPerson(event.data))) {
+      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input') && !(state === 'idle' && stoppedByPerson(event.data)) && !(state === 'awaiting_input' && supervisedWait(event.data))) {
         const kind: ThreadNotificationKind = state === 'completed'
           ? 'completed'
           : state === 'awaiting_input'
@@ -1235,7 +1244,7 @@ export function registerGuiIpc(
         tracker.setState(event.threadId, 'awaiting_input')
         target('threads:activity', tracker.getSnapshot())
       }
-      if (!replay) notifyThread(
+      if (!replay && !supervisedWait(event.data)) notifyThread(
         event.threadId,
         'question',
         presentationForSender(senderId).getActiveThreadId(),
@@ -2502,6 +2511,19 @@ export function registerGuiIpc(
       broadcast('threads:updated', threadListPayload(threads))
     }
     await selectThread(forked.threadId)
+    return { threadId: forked.threadId }
+  })
+
+  // A side chat: a fork of the thread as it is now, kept in its side panel. The open thread stays open.
+  registerHandler('threads:newSideChat', async (_e, threadId: string) => {
+    if (isQualifiedId(threadId)) throw new Error('Side chats are for threads on this computer.')
+    const forked = await guiMms.request<{ threadId: string }>('thread.fork', {
+      sourceThreadId: threadId,
+      atRunOrdinal: 'latest_stable',
+      seedFrom: 'current_head',
+      sideChat: true,
+      clientRequestId: randomUUID()
+    })
     return { threadId: forked.threadId }
   })
 

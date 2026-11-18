@@ -145,6 +145,10 @@ interface MousseAgentChatShellProps {
   turnActions?: TurnActions | null
   /** The thread's queued messages, drawn after the last turn. */
   queue?: ThreadQueue
+  /** Drawn above the first turn (a side chat's fork line). */
+  beforeTurns?: ReactNode
+  /** Ctrl/Cmd+F finds in this transcript; off for a second chat on screen (a side chat), so the main one keeps it. */
+  enableFind?: boolean
 }
 
 export function MousseAgentChatShell({
@@ -161,6 +165,8 @@ export function MousseAgentChatShell({
   permissionRequests,
   turnActions,
   queue,
+  beforeTurns,
+  enableFind = true,
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
@@ -200,9 +206,10 @@ export function MousseAgentChatShell({
           slots={slots}
           lastTurnNotice={lastTurnNotice}
           afterTurns={queued}
+          beforeTurns={beforeTurns}
           showCopyToolbar
           enableImagePreview
-          enableFind
+          enableFind={enableFind}
           threadId={threadId}
         />
       </HeldSteerProvider>

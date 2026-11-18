@@ -13,7 +13,7 @@ import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { keptCardOf, type BotCard } from '../../../shared/bots/personal/cards'
-import type { BotWakeEvent, BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { WAKE_LINE_PREFIX, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import { BOT_JOB_ENDED, type BotJob, type BotJobAsker, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
@@ -490,6 +490,9 @@ CREATE INDEX bot_jobs_open ON bot_jobs(thread_id) WHERE ended_at IS NULL;
   }
 ]
 
+/** The `end_reason` of a queued notice a chat turn took in and answered (`BotDispatchRow.prompt.merged`): it never ran. */
+export const MERGED_END_REASON = 'merged'
+
 /** The `end_reason` of a running activation that waits for the internet. */
 export const BOT_OFFLINE_REASON = 'waiting_for_internet'
 
@@ -864,6 +867,11 @@ export interface BotDispatchRow {
     workRefusalIds?: string[]
     /** Carried ids for replay; existing read/applied markers remain independent of confirmation. */
     workDelivery?: { answers: string[]; notes: number[]; question?: string }
+    /**
+     * A chat turn's first dispatch: the queued notices it took in with its own input (`BotEngine.noticeBatchInTx`). They
+     * stay queued while it runs, and end as `merged` when it ends done (`moveActivation`); else they run after it.
+     */
+    merged?: string[]
   }
   policyDigest: string
   deadlineMs: number | null
@@ -1067,6 +1075,18 @@ function jobOf(row: Row): BotJob {
   }
 }
 type Param = string | number | null
+
+/**
+ * The chat rows the owner sees: every one but an event's line (`outOfSightRow`): a thread's message to the bot, kept
+ * for its guard, and the lines older versions posted for a wake-up or a thread's notice. Those events are the bot's to
+ * act on, not the owner's to read; only what the bot says shows.
+ */
+const SHOWN_MESSAGE = String.raw`NOT (kind = 'notice' AND id LIKE 'bm\_wake\_%' ESCAPE '\')`
+
+/** Whether a chat row is one the owner never sees (`SHOWN_MESSAGE`): a notice whose id starts `bm_wake_`. */
+export function outOfSightRow(kind: string, id: string): boolean {
+  return kind === 'notice' && id.startsWith(WAKE_LINE_PREFIX)
+}
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null)
 const num = (value: unknown): number | null => (typeof value === 'number' ? value : typeof value === 'bigint' ? Number(value) : null)
@@ -1404,10 +1424,10 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, ...statuses).map(activationOf)
   }
 
-  /** Activations of a bot's lane in `statuses`, oldest first. */
+  /** Activations of a bot's lane in `statuses`, oldest first (two made in the same millisecond in the order they were made). */
   laneActivations(botId: string, lane: BotLane, statuses: readonly BotActivationStatus[]): BotActivationRow[] {
     const marks = statuses.map(() => '?').join(', ')
-    return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND lane = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, lane, ...statuses).map(activationOf)
+    return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND lane = ? AND status IN (${marks}) ORDER BY created_at, rowid`, botId, lane, ...statuses).map(activationOf)
   }
 
   /** A lane's newest activation, in the order they were made (two made in the same millisecond keep it). */
@@ -1416,9 +1436,9 @@ export class BotStore {
     return row ? activationOf(row) : undefined
   }
 
-  /** The bot's most recent activation that ended, if any. */
+  /** The bot's most recent activation that ended, if any; a notice another turn took in (`merged`) never ran, and is not one. */
   lastEndedActivation(botId: string): BotActivationRow | undefined {
-    const row = this.get("SELECT * FROM bot_activations WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') ORDER BY ended_at DESC, created_at DESC LIMIT 1", botId)
+    const row = this.get("SELECT * FROM bot_activations WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') AND end_reason IS NOT 'merged' ORDER BY ended_at DESC, created_at DESC LIMIT 1", botId)
     return row ? activationOf(row) : undefined
   }
 
@@ -1480,12 +1500,14 @@ export class BotStore {
    * Compare-and-set of an activation's status; false when it was not in `from`. Only a running activation waits for the
    * internet. One that fails or is cancelled (a Stop, a failure, the bot deleted) withdraws the questions it asked and never
    * posted, in the same statement's transaction: no reply carries them now. Work that ends, however it ends, withdraws
-   * the question it still waited on: nothing would carry on with its answer.
+   * the question it still waited on: nothing would carry on with its answer. A chat turn that ends done ends the queued
+   * notices its first dispatch took in (`merged`) with it, in the same transaction: they were answered.
    */
   moveActivation(id: string, from: readonly BotActivationStatus[], to: BotActivationStatus, patch: { endReason?: string | null; result?: string | null; threadId?: string; scratch?: string } = {}): boolean {
     if (to === 'failed' || to === 'cancelled' || to === 'done') return this.db.transaction(() => {
       const moved = this.moveActivationRow(id, from, to, patch)
       if (moved && to !== 'done') this.withdrawUnpostedQuestions(id)
+      if (moved && to === 'done') for (const merged of this.dispatch(id, 1)?.prompt.merged ?? []) this.moveActivation(merged, ['queued'], 'cancelled', { endReason: MERGED_END_REASON })
       if (moved) {
         this.withdrawWorkQuestions(id)
         heldCalls(this.db)?.endWork(id)
@@ -1669,6 +1691,11 @@ export class BotStore {
   job(id: string): BotJob | undefined {
     const row = this.get('SELECT * FROM bot_jobs WHERE id = ?', id)
     return row ? jobOf(row) : undefined
+  }
+
+  /** The bot's jobs whose thread still works or waits for a person, oldest first. */
+  openJobsOf(botId: string): BotJob[] {
+    return this.all("SELECT * FROM bot_jobs WHERE bot_id = ? AND ended_at IS NULL AND state IN ('running', 'needs_input') ORDER BY created_at, rowid", botId).map(jobOf)
   }
 
   /** The jobs not ended on `threadId`, of any bot. */
@@ -2070,25 +2097,25 @@ export class BotStore {
   /** A page of a bot's chat, oldest first: the `limit` rows before `beforeSeq` (the newest without it). */
   messages(botId: string, options: { beforeSeq?: number; limit: number }): BotMessageRow[] {
     const rows = options.beforeSeq === undefined
-      ? this.all('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT ?', botId, options.limit)
-      : this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?', botId, options.beforeSeq, options.limit)
+      ? this.all(`SELECT * FROM bot_messages WHERE bot_id = ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT ?`, botId, options.limit)
+      : this.all(`SELECT * FROM bot_messages WHERE bot_id = ? AND seq < ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT ?`, botId, options.beforeSeq, options.limit)
     return rows.map(messageOf).reverse()
   }
 
   lastMessage(botId: string): BotMessageRow | undefined {
-    const row = this.get('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT 1', botId)
+    const row = this.get(`SELECT * FROM bot_messages WHERE bot_id = ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT 1`, botId)
     return row ? messageOf(row) : undefined
   }
 
   /** The bot's latest message with text, for the preview of its row in the Bots list. */
   lastBotReply(botId: string): BotMessageRow | undefined {
-    const row = this.get("SELECT * FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND COALESCE(text, '') != '' ORDER BY seq DESC LIMIT 1", botId)
+    const row = this.get(`SELECT * FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND COALESCE(text, '') != '' AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT 1`, botId)
     return row ? messageOf(row) : undefined
   }
 
   /** The bot's messages after the owner's read marker. */
   unread(botId: string, readSeq: number): number {
-    return Number(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ?", botId, readSeq)?.n ?? 0)
+    return Number(this.get(`SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ? AND ${SHOWN_MESSAGE}`, botId, readSeq)?.n ?? 0)
   }
 
   /** The 30-day purge: every row of a bot's asks, activations (with their dispatches, counts and spend), grants and context generations. */

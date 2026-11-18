@@ -217,7 +217,13 @@ export const TERMINAL_EFFECT_STATUSES: ReadonlySet<EffectStatus> = new Set<Effec
 
 export interface EffectKindSpec {
   class: EffectClass
+  /** How long one attempt may run, and the lease it holds while it runs (renewed every third of it). */
   timeoutMs: number
+  /**
+   * `false`: `timeoutMs` is the lease only, never a deadline on the work. A turn runs as long as it makes progress; what
+   * ends a hung one is its own no-progress check (`TURN_STALL_MS`), not its total time.
+   */
+  deadline?: false
   /**
    * SPEC §12.2: a kind with no producer yet. Enqueueing one fails at once (`bad_request`); the
    * worker has no executor for it either.
@@ -261,7 +267,7 @@ export function effectLaneClass(kind: EffectKind): EffectLaneClass {
  * replay-safe kinds use the default retry budget.
  */
 export const EFFECT_KIND_SPEC: Record<EffectKind, EffectKindSpec> = {
-  'turn.start': { class: 'process_bound', timeoutMs: 6 * 60 * 60_000, maxAttempts: 1 },
+  'turn.start': { class: 'process_bound', timeoutMs: 6 * 60 * 60_000, deadline: false, maxAttempts: 1 },
   'turn.interrupt': { class: 'process_bound', timeoutMs: 30_000, lane: 'control' },
   'turn.steer': { class: 'process_bound', timeoutMs: 30_000, maxAttempts: 1, lane: 'control' },
   // Delivers a saved approval request's answer to the provider callback waiting in this process (SPEC §17.4).

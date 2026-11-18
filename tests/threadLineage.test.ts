@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isSubagentThread, nearestVisibleAncestor, openSubagentParentRow, rollUpActivities, rollUpActivity, subagentDescendants, visibleThreads } from '../src/shared/threadLineage'
+import { isSubagentThread, nearestVisibleAncestor, openSubagentParentRow, rollUpActivities, rollUpActivity, sideChatsOf, subagentDescendants, visibleThreads } from '../src/shared/threadLineage'
 import type { ThreadActivitySnapshot, ThreadLineage } from '../src/shared/types'
 
 const sub = (id: string, parent: string, root = parent): { id: string; lineage: ThreadLineage } => ({
@@ -7,11 +7,16 @@ const sub = (id: string, parent: string, root = parent): { id: string; lineage: 
   lineage: { parentThreadId: parent, rootThreadId: root, relationship: 'subagent' }
 })
 const main = (id: string): { id: string; lineage?: ThreadLineage } => ({ id })
+const side = (id: string, parent: string): { id: string; lineage: ThreadLineage } => ({
+  id,
+  lineage: { parentThreadId: parent, rootThreadId: parent, relationship: 'side' }
+})
 
 describe('isSubagentThread', () => {
   it.each([
     ['a thread without lineage', main('a'), false],
-    ['a subagent thread', sub('b', 'a'), true]
+    ['a subagent thread', sub('b', 'a'), true],
+    ['a side chat', side('c', 'a'), false]
   ])('%s', (_name, thread, expected) => {
     expect(isSubagentThread(thread)).toBe(expected)
   })
@@ -101,6 +106,11 @@ describe('visibleThreads', () => {
     expect(ids(visibleThreads([inventory[1], inventory[2]]))).toEqual(['child', 'orphan'])
   })
 
+  it('never shows a side chat, whether or not its parent is listed', () => {
+    const list = [main('root'), side('aside', 'root'), side('orphan-aside', 'trashed')]
+    expect(ids(visibleThreads(list))).toEqual(['root'])
+  })
+
   it('returns a new array and leaves the input alone', () => {
     const list = [main('a'), sub('b', 'a')]
     const shown = visibleThreads(list)
@@ -135,5 +145,20 @@ describe('rollUpActivities', () => {
 
   it('leaves out threads without subagents and keeps a quiet parent quiet', () => {
     expect(rollUpActivities(list, { lone: 'processing', child: 'completed' })).toEqual({ parent: 'idle', child: 'completed' })
+  })
+})
+
+describe('sideChatsOf', () => {
+  it("lists a thread's side chats that are not archived, newest first", () => {
+    const at = (thread: { id: string; lineage?: ThreadLineage }, updatedAt: string, settledAt?: string) => ({ ...thread, updatedAt, ...(settledAt ? { settledAt } : {}) })
+    const list = [
+      at(side('old', 'root'), '2026-01-01'),
+      at(side('new', 'root'), '2026-01-03'),
+      at(side('ended', 'root'), '2026-01-04', '2026-01-05'),
+      at(sub('helper', 'root'), '2026-01-06'),
+      at(side('elsewhere', 'other'), '2026-01-07')
+    ]
+    expect(sideChatsOf('root', list).map((thread) => thread.id)).toEqual(['new', 'old'])
+    expect(sideChatsOf(null, list)).toEqual([])
   })
 })

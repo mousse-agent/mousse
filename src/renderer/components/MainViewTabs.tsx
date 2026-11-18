@@ -7,7 +7,8 @@ import { useActiveFileWorkspace } from '../hooks/useActiveFileWorkspace'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { MainView } from '../../shared/types'
-import { BrowserTab, FileText, FolderOpen, GitCompare, GitPullRequest, Globe, Plus, Terminal, X } from '../lib/icons'
+import { BrowserTab, ChevronLeft, FileText, FolderOpen, GitCompare, GitPullRequest, Globe, MessagesSquare, Plus, Terminal, X } from '../lib/icons'
+import { sideChatTitle, useOpenSideChat, useSideChatsStore } from '../stores/sideChatsStore'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
@@ -22,6 +23,7 @@ const TAB_ICONS = {
   files: FolderOpen,
   git: GitCompare,
   pullRequest: GitPullRequest,
+  sideChats: MessagesSquare,
   documents: FileText
 } as const
 
@@ -39,6 +41,7 @@ export function MainViewTabs() {
   const activeTerminalId = useAppStore((state) => state.activeProjectTerminalTabByThread[state.activeThreadId ?? '__standalone__'])
   const activeBrowserId = useAppStore((state) => state.browserActiveTabByThread[state.activeThreadId ?? '__standalone__'])
   const activeDocumentId = useAppStore((state) => state.activeDocumentTabId)
+  const openSideChat = useOpenSideChat(activeThreadId)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 })
   const addRef = useRef<HTMLDivElement>(null)
@@ -70,6 +73,7 @@ export function MainViewTabs() {
     terminals: visibleTerminals,
     browsers: visibleBrowsers,
     documents,
+    ...(openSideChat ? { openSideChat: sideChatTitle(openSideChat) } : {}),
     terminalLocations: terminalLocations(terminalNodes.map(({ tab, node }) => ({
       id: tab.id,
       cwd: tab.cwd,
@@ -109,6 +113,11 @@ export function MainViewTabs() {
   if (items.length === 0) return null
 
   const select = async (item: SurfaceTabItem) => {
+    // The open side chat's tab, shown: back to the list.
+    if (item.back && item.view === useAppStore.getState().mainView && activeThreadId) {
+      useSideChatsStore.getState().open(activeThreadId, null)
+      return
+    }
     // Leaving the current view may discard an unsaved agent draft.
     if (item.view !== useAppStore.getState().mainView && !await confirmNavigation()) return
     const store = useAppStore.getState()
@@ -189,14 +198,14 @@ export function MainViewTabs() {
     <div className="header">
     <nav className="main-view-tabs" aria-label="Main area view">
       {items.map((item) => {
-        const Icon = item.everyThread ? BrowserTab : item.view === 'files' && item.resourceId ? FileText : TAB_ICONS[item.view]
+        const Icon = item.everyThread ? BrowserTab : item.back ? ChevronLeft : item.view === 'files' && item.resourceId ? FileText : TAB_ICONS[item.view]
         const dirty = item.view === 'files' && item.resourceId && dirtyPaths?.includes(item.resourceId)
         const selected = active(item)
         const name = item.detail ? `${item.label} · ${item.detail}` : item.label
         return (
           <div
             key={item.key}
-            className={`main-view-tab${selected ? ' active' : ''}`}
+            className={`main-view-tab${selected ? ' active' : ''}${item.back ? ' is-side-chat' : ''}`}
             onKeyDown={(event) => {
               if (item.view === 'files' && item.resourceId && event.key === 'Delete') {
                 event.preventDefault()

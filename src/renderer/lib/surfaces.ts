@@ -17,7 +17,8 @@ export const SURFACE_CHOICES: SurfaceChoice[] = [
   { id: 'terminal', label: 'Terminal', commandId: 'surface.terminal' },
   { id: 'files', label: 'Files', commandId: 'surface.files' },
   { id: 'git', label: 'Changes', commandId: 'surface.git' },
-  { id: 'pullRequest', label: 'Pull request', commandId: 'surface.pullRequest' }
+  { id: 'pullRequest', label: 'Pull request', commandId: 'surface.pullRequest' },
+  { id: 'sideChats', label: 'Side chats', commandId: 'surface.sideChats' }
 ]
 
 export interface SurfaceTabItem {
@@ -32,6 +33,8 @@ export interface SurfaceTabItem {
   detail?: string
   /** The tab's tooltip: the label and the full folder (and computer) it works in. */
   title?: string
+  /** Side chats with one open: the tab reads its title, and a click on the shown tab goes back to the list. */
+  back?: boolean
 }
 
 /** A terminal title the app gave it, rather than a quick action's name. Older builds stored "Terminal N". */
@@ -45,6 +48,8 @@ export function surfaceTabItems(input: {
   files?: readonly string[]
   /** Each terminal's folder, by tab id (see `terminalLocations`). */
   terminalLocations?: Record<string, TerminalLocation>
+  /** The title of the side chat the Side chats tab shows, when one is open. */
+  openSideChat?: string
 }): SurfaceTabItem[] {
   const items: SurfaceTabItem[] = []
   const appendFiles = () => input.files?.forEach((path) => items.push({
@@ -88,6 +93,9 @@ export function surfaceTabItems(input: {
       items.push({ key: 'git', view: 'git', label: 'Changes', closable: true })
     } else if (kind === 'pullRequest') {
       items.push({ key: 'pullRequest', view: 'pullRequest', label: 'Pull request', closable: true })
+    } else if (kind === 'sideChats') {
+      const open = input.openSideChat
+      items.push({ key: 'sideChats', view: 'sideChats', label: open ?? 'Side chats', closable: true, ...(open ? { back: true, title: `${open} (back to side chats)` } : {}) })
     }
   }
   if (!input.opened.includes('files')) appendFiles()

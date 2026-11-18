@@ -38,14 +38,14 @@ describe('EffectWorker', () => {
 
   const setup = (
     executors: Partial<Record<EffectKind, EffectExecutor>>,
-    options: { timeoutMs?: number; fibres?: number; laneFibres?: Partial<EffectWorkerFibres>; pollMs?: number } = {}
+    options: { timeoutMs?: number; deadline?: false; fibres?: number; laneFibres?: Partial<EffectWorkerFibres>; pollMs?: number } = {}
   ) => {
     profileHome = mkdtempSync(join(tmpdir(), 'mousse-worker-'))
     db = new ProfileDatabase({ profileHome })
     const store = new RunStore(db)
     const outbox = new EffectOutbox(store, {
       kindSpec: {
-        'turn.steer': { class: 'process_bound', timeoutMs: options.timeoutMs ?? 30_000 }
+        'turn.steer': { class: 'process_bound', timeoutMs: options.timeoutMs ?? 30_000, ...(options.deadline === false ? { deadline: false as const } : {}) }
       }
     })
     const worker = new EffectWorker({
@@ -98,6 +98,25 @@ describe('EffectWorker', () => {
     expect(calls).toBe(2)
     // The abandoned first attempt is still tracked; stop() waits for it (H5).
     hung.resolve()
+  })
+
+  it('a kind without a deadline (a turn) runs past its timeout on a renewed lease, and settles once', async () => {
+    let aborted = false
+    const { outbox, worker } = setup(
+      {
+        'turn.steer': async (_effect, ctx) => {
+          // Several timeouts long: only a deadline would cut it.
+          await new Promise((resolve) => setTimeout(resolve, 300))
+          aborted = ctx.signal.aborted
+        }
+      },
+      { timeoutMs: 60, deadline: false }
+    )
+    const effect = outbox.enqueue({ threadId: 't', kind: 'turn.steer' })
+    worker.start()
+    await waitFor(() => outbox.get(effect.effectId)!.status === 'succeeded', 'success')
+    expect(aborted).toBe(false)
+    expect(outbox.get(effect.effectId)).toMatchObject({ attempts: 1, lastError: null })
   })
 
   it('an executor that defers puts its effect back to pending later, without counting the attempt', async () => {

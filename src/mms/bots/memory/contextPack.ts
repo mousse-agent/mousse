@@ -58,7 +58,7 @@ export interface BotSituation {
 
 /**
  * The chat situation's line on the owner's custom slots: each by name and what it is for, and how to route work to one.
- * At most 12 slots, each description cut to 80 characters, so the line stays within about 400 tokens.
+ * Each description is cut to 80 characters, so a dozen slots stay within about 400 tokens.
  */
 export function customSlotsLine(slots: ReadonlyArray<{ name: string; description?: string }>): string {
   const listed = slots.map((slot) => (slot.description ? `${slot.name} (${cut(slot.description, 80)})` : slot.name)).join('; ')

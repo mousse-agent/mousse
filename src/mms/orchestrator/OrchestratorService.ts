@@ -377,6 +377,7 @@ import {
 } from '../queue/durableQueue'
 import { ThreadSession, isReadOnlyShared, steerImages, type ActiveTurnControl, type SharedWorkspace, type SteerEntry } from './ThreadSession'
 import { SteerHold, type PendingSteerFacts } from './steerHold'
+import { TURN_STALL_MS, TurnStalledError, watchTurnProgress, type TurnProgressWatch } from './turnStall'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { AppError, errorCauseText, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
@@ -397,7 +398,7 @@ import {
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
-import { isLocalOnlyThread, subagentDescendants } from '../../shared/threadLineage'
+import { isLocalOnlyThread, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
 import { isThreadExpired } from '../../shared/threadExpiry'
 
 /** What an agent in a private thread is told when it asks for work on another computer. */
@@ -830,6 +831,9 @@ type AgentSender = AgentActor & Pick<AgentOrigin, 'body' | 'title' | 'bot'>
 export function botSenderHops(actor: AgentActor): AgentActor {
   return { ...actor, hops: 1 }
 }
+
+/** How many plain-question answers of bots this process keeps for a retry of the same call (`answerQuestionAsBot`). */
+const BOT_ANSWERED_QUESTIONS_KEPT = 500
 
 /** The tools with which the owner's bot acts on their threads ("use your threads"), as `botSenderOf` holds them. */
 type BotThreadActTool =
@@ -1954,6 +1958,16 @@ export class OrchestratorService extends EventEmitter {
 
   setBotNames(names: ((botId: string) => string | undefined) | null): void {
     this.botNames = names
+  }
+
+  /**
+   * Whether a personal bot answers for the threads it started now (`supervisorOf`): it exists, is not paused and holds
+   * "use your threads"; with its name now. Null: no bots, so no thread is supervised.
+   */
+  private botSupervision: ((botId: string) => { name: string } | undefined) | null = null
+
+  setBotSupervision(supervision: ((botId: string) => { name: string } | undefined) | null): void {
+    this.botSupervision = supervision
   }
 
   /** A command an agent's tool call runs, noted for the running list: its process may outlive the call. */
@@ -3734,6 +3748,8 @@ export class OrchestratorService extends EventEmitter {
   private readonly folderWaits = new Map<string, Set<AbortController>>()
   /** {@link STOPPED_TURN_CHECKPOINT_WAIT_MS}; tests shorten it. */
   private stoppedTurnCheckpointWaitMs = STOPPED_TURN_CHECKPOINT_WAIT_MS
+  /** {@link TURN_STALL_MS} and how often it is checked; tests shorten them. */
+  private turnStall: { stallMs: number; tickMs?: number } = { stallMs: TURN_STALL_MS }
 
   /**
    * Waits until the volumes of the folders a thread's request or turn works in answer (see `folderAccess`),
@@ -4681,12 +4697,21 @@ export class OrchestratorService extends EventEmitter {
   ): AgentApprovalResult {
     const engine = this.requireRunEngine()
     const request = this.questions.getRequest(requestId)
-    if (!request || request.threadId !== threadId) return { ok: false, reason: 'unknown' }
+    if (!request || request.threadId !== threadId) {
+      // A plain question keeps no record once answered: a retry of the bot's call that answered it replays.
+      if (this.botAnsweredQuestions.get(options.clientRequestId) === requestId) return { ok: true, answered: 'question', replayed: true }
+      return { ok: false, reason: 'unknown' }
+    }
     const { actor } = options
     // The owner's bot answers with "use your threads" (`botSenderOf`), as the owner's delegate: held to Full access, or to
     // the device its owner wrote from, and to every other part of the rule an agent is (the switch, a person's turn, the
     // provider's own checks, never "always").
     const bot = actor.remote ? undefined : this.botSenderOf(actor, 'approval_respond')
+    // The bot that started this thread answers its requests, whoever started the turn (`supervisorOf`): only from its own
+    // turn (never a subagent of its work), and only while it supervises the thread now.
+    const supervisor = bot && this.botRoleOf(actor.threadId) === 'activation' ? this.supervisorOf(threadId, requestId) : undefined
+    const supervising = supervisor !== undefined && supervisor.botId === bot?.botId ? supervisor : undefined
+    if (!request.approval) return this.answerQuestionAsBot(threadId, requestId, answers, options, supervising)
     const key = options.clientRequestId
     const earlier = engine.store.getReceipt(key)
     if (earlier) {
@@ -4697,10 +4722,13 @@ export class OrchestratorService extends EventEmitter {
       // other receipts of a command a thread's run issued; the approval it names is in `result`.
       engine.store.putReceipt({ clientRequestId: key, threadId: actor.threadId, commandKind: 'approval_respond', status: 'accepted', result: { requestId, threadId, runId: actor.runId }, createdAt: new Date().toISOString() })
     }
-    // A turn a person started is the person's to answer: they may be reading the card. A request that is already
-    // answered or closed is settled below so the loser learns who won.
+    // A turn a person started is the person's to answer (they may be reading the card), except in a thread the answering
+    // bot started. A request that is already answered or closed is settled below so the loser learns who won.
     const asking = engine.approvals.get(requestId)
-    if (asking?.status === 'pending' && this.askedInPersonTurn(asking.runId)) return { ok: false, reason: 'person_turn' }
+    if (!supervising && asking?.status === 'pending' && this.askedInPersonTurn(asking.runId)) return { ok: false, reason: 'person_turn' }
+    const answerApprovals = this.agentAccessSettings().answerApprovals
+    // Without the switch, the bot that started the thread answers there, no wider than the thread's own mode now.
+    const startedThread = !answerApprovals && supervising !== undefined
     const answerer: Answerer = {
       kind: 'agent',
       threadId: actor.threadId,
@@ -4708,12 +4736,12 @@ export class OrchestratorService extends EventEmitter {
       toolCallId: actor.toolCallId,
       // The mode of the run, and of its thread now when that is stricter: a tighter mode applies to the next turn, but an
       // answer for another thread acts like a rule and stops at once, as a rule does.
-      permissionMode: bot ? bot.limit ?? 'full' : this.answeringMode(actor),
-      access: { answerApprovals: this.agentAccessSettings().answerApprovals }
+      permissionMode: bot ? (startedThread ? this.narrowedOrAsk(bot.limit ?? 'full', threadId) : bot.limit ?? 'full') : this.answeringMode(actor),
+      access: { answerApprovals, ...(startedThread ? { startedThread: true } : {}) }
     }
     const settled = this.questions.settle(requestId, answers, answerer)
     if (settled.ok) {
-      this.showApprovalAnswer(threadId, actor, settled.decision ?? 'reject', requestId, answers)
+      this.showApprovalAnswer(threadId, actor, settled.decision ?? 'reject', requestId, answers, supervising?.name)
       return { ok: true, decision: settled.decision ?? 'reject', replayed: false }
     }
     switch (settled.reason) {
@@ -4733,6 +4761,114 @@ export class OrchestratorService extends EventEmitter {
       default:
         return { ok: false, reason: settled.reason }
     }
+  }
+
+  /**
+   * A plain question answered with `approval_respond`: only by the bot that started its thread, only for a question the
+   * thread waits on (`supervisorOf`). Text that names no option reaches the agent labelled
+   * as the bot's, never as the user's; the transcript gets one system row, for the answer that won.
+   */
+  private answerQuestionAsBot(
+    threadId: string,
+    requestId: string,
+    answers: UserQuestionAnswers,
+    options: { clientRequestId: string; actor: AgentActor },
+    supervising: { botId: string; name: string } | undefined
+  ): AgentApprovalResult {
+    const engine = this.requireRunEngine()
+    const { actor, clientRequestId: key } = options
+    const earlier = engine.store.getReceipt(key)
+    if (earlier) {
+      const named = (earlier.result as { requestId?: unknown } | null)?.requestId
+      if (earlier.commandKind !== 'approval_respond' || named !== requestId) return { ok: false, reason: 'client_request_id_conflict' }
+    }
+    if (!supervising) return { ok: false, reason: 'question_for_user' }
+    const pending = this.questions.getPending(requestId)
+    if (!pending || pending.threadId !== threadId) return { ok: false, reason: 'already_answered' }
+    // Answers are keyed by question id. One answer to a one-question request is that question's, whatever its key.
+    const questionIds = pending.questions.map((question) => question.id)
+    const keys = Object.keys(answers)
+    if (keys.length === 1 && questionIds.length === 1 && keys[0] !== questionIds[0]) answers = { [questionIds[0]!]: answers[keys[0]!]! }
+    if (Object.keys(answers).some((id) => !questionIds.includes(id))) return { ok: false, reason: 'unknown_question', questionIds }
+    if (!earlier)
+      engine.store.putReceipt({ clientRequestId: key, threadId: actor.threadId, commandKind: 'approval_respond', status: 'accepted', result: { requestId, threadId, runId: actor.runId }, createdAt: new Date().toISOString() })
+    const label = `From ${supervising.name}, the bot that started this thread (not the user): `
+    const labelled: UserQuestionAnswers = {}
+    for (const [id, value] of Object.entries(answers)) {
+      const offered = pending.questions.find((question) => question.id === id)?.options ?? []
+      const mark = (entry: string) => (offered.some((option) => option.id === entry) ? entry : `${label}${entry}`)
+      labelled[id] = Array.isArray(value) ? value.map(mark) : mark(value)
+    }
+    const answerer: Answerer = { kind: 'agent', threadId: actor.threadId, runId: actor.runId, permissionMode: 'ask', ...(actor.toolCallId ? { toolCallId: actor.toolCallId } : {}) }
+    const settled = this.questions.settle(requestId, labelled, answerer)
+    if (!settled.ok) {
+      // Closed by someone else meanwhile: whoever answered first won. An approval the view did not name is refused by the rule.
+      if (settled.reason === 'cancelled') return { ok: false, reason: 'cancelled' }
+      if (settled.reason === 'unknown' || settled.reason === 'already_answered' || settled.reason === 'answerer_required') return { ok: false, reason: 'already_answered' }
+      return { ok: false, reason: settled.reason }
+    }
+    this.botAnsweredQuestions.set(key, requestId)
+    if (this.botAnsweredQuestions.size > BOT_ANSWERED_QUESTIONS_KEPT) this.botAnsweredQuestions.delete(this.botAnsweredQuestions.keys().next().value!)
+    try {
+      const said = formatQuestionAnswersMessage(pending.questions, answers).replace(/\s+/g, ' ').trim()
+      const session = this.getOrCreateSession(threadId)
+      this.sessionAls.run(session, () => this.addSystemMessage(`Answered by ${supervising.name} (the bot that started this thread): ${said.length > 300 ? `${said.slice(0, 299)}…` : said}`))
+    } catch (error) {
+      console.warn('the transcript row of a bot\'s answer could not be written', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+    return { ok: true, answered: 'question', replayed: false }
+  }
+
+  /** `clientRequestId` → request, of the plain questions a bot answered in this process: a retry of the same call replays. */
+  private readonly botAnsweredQuestions = new Map<string, string>()
+
+  /** The role of a bot's thread, or undefined for any other thread; a failed read is no role. */
+  private botRoleOf(threadId: string): string | undefined {
+    try {
+      return this.botThreads?.roleOf(threadId)
+    } catch {
+      return undefined
+    }
+  }
+
+  /** `mode` narrowed by `threadId`'s own mode now; `ask` when that cannot be read. */
+  private narrowedOrAsk(mode: PermissionMode, threadId: string): PermissionMode {
+    try {
+      return narrowPermissionMode(mode, this.requestedPermissionMode(threadId))
+    } catch {
+      return 'ask'
+    }
+  }
+
+  /**
+   * The personal bot that supervises request `requestId` of `threadId`, with its name now; undefined when the request is
+   * the owner's. Supervised: the bot started that thread (`Thread.startedByBot`; a subagent's requests are its parent's),
+   * it exists, is not paused and holds "use your threads" (`setBotSupervision`), and the thread waits on the request (not
+   * a question asked without waiting), whoever started the turn: the bot owns the thread. Only such a request may the bot
+   * answer without the switch, and only such a request pings no one and stays out of Needs me. Anything that cannot be
+   * read is not supervised: the owner keeps it.
+   */
+  supervisorOf(threadId: string, requestId: string): { botId: string; name: string } | undefined {
+    try {
+      const thread = this.threadStore?.getThread(threadId)
+      const botId = thread?.startedByBot?.botId
+      if (!thread || !botId || thread.runsOn || thread.lineage || this.isSubagentThread(threadId)) return undefined
+      if (!this.questions.listPendingForThread(threadId).some((entry) => entry.requestId === requestId)) return undefined
+      const bot = this.botSupervision?.(botId)
+      return bot ? { botId, name: bot.name } : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Whether everything `threadId` waits on is supervised (`supervisorOf`): at least one request, each its bot's, and no
+   * secret request (only the owner types a secret). Such a wait pings no one and is not in Needs me.
+   */
+  waitSupervised(threadId: string, secretWaiting = false): boolean {
+    if (secretWaiting) return false
+    const pending = this.questions.listPendingForThread(threadId)
+    return pending.length > 0 && pending.every((entry) => this.supervisorOf(threadId, entry.requestId) !== undefined)
   }
 
   /** The mode an answering agent is held to: its run's, narrowed by its thread's own mode now; `ask` when that cannot be read. */
@@ -4766,15 +4902,17 @@ export class OrchestratorService extends EventEmitter {
    * the person reads who decided, in which thread, and what about. The `approval.answered` event (with the agent's
    * thread, run and call) is the record.
    */
-  private showApprovalAnswer(threadId: string, actor: AgentActor, decision: 'allow' | 'reject', requestId: string, answers: UserQuestionAnswers): void {
+  private showApprovalAnswer(threadId: string, actor: AgentActor, decision: 'allow' | 'reject', requestId: string, answers: UserQuestionAnswers, startedBy?: string): void {
     try {
       const record = this.requireRunEngine().approvals.get(requestId)
       // What was approved, as the card showed it (the command or the path): redacted, on one line and capped.
       const asked = record ? describeApproval(record) : ''
       const note = record && decision === 'reject' ? agentNoteOf(record.questions, answers) : ''
+      // The bot that started the thread is named as itself (`startedBy`), never as "an agent in" its chat thread.
+      const by = startedBy ? `${startedBy} (the bot that started this thread)` : `an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId})`
       const session = this.getOrCreateSession(threadId)
       this.sessionAls.run(session, () => this.addSystemMessage(
-        `${decision === 'allow' ? 'Approved' : 'Rejected'} by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId})${asked ? `: ${asked}` : ''}${note ? ` Its note: "${note}"` : ''}`
+        `${decision === 'allow' ? 'Approved' : 'Rejected'} by ${by}${asked ? `: ${asked}` : ''}${note ? ` Its note: "${note}"` : ''}`
       ))
     } catch (error) {
       console.warn('the transcript row of an agent\'s approval answer could not be written', { threadId, error: error instanceof Error ? error.message : String(error) })
@@ -5551,6 +5689,8 @@ export class OrchestratorService extends EventEmitter {
       })
       // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
       this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
+      // Its side chats end with it, and stay ended when it comes back.
+      for (const side of sideChatsOf(threadId, this.threadStore.listAllThreads())) await this.settleThread(side.id, true)
     }
     return thread
   }
@@ -7508,6 +7648,14 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     if (!engine || session.sharedWorkspace) return
     try {
+      // A side chat keeps the parent's checkout it was made in (`createForkThread`).
+      const thread = this.threadStore?.getThread(session.threadId)
+      if (thread?.lineage?.relationship === 'side') {
+        const binding = thread.workspaceBinding
+        if (binding?.policy === 'shared' && binding.sharedPath)
+          session.sharedWorkspace = { path: binding.sharedPath, parentThreadId: thread.lineage.parentThreadId, access: binding.access === 'write' ? 'write' : 'read-only' }
+        return
+      }
       const lineage = engine.delegations.getLineage(session.threadId)
       if (lineage?.relationship !== 'subagent') return
       // A child created with a recorded binding keeps exactly that; older children fall back to the
@@ -7558,9 +7706,21 @@ export class OrchestratorService extends EventEmitter {
     const sourceThread = this.threadStore.getThread(creation.sourceThreadId)
     if (!sourceThread) throw new Error(`Thread not found: ${creation.sourceThreadId}`)
     const source = this.getOrCreateSession(creation.sourceThreadId)
-    const title = creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
+    // A side chat lives in its parent's side panel: a child of it (so archiving, deleting and expiring the parent
+    // take it along) that works in the parent's checkout as it is now, never in a worktree of its own. It is named
+    // from its first message like a new thread.
+    const sideChat = creation.sideChat === true
+    const sideFolder = sideChat ? this.threadCheckoutOf(sourceThread.id) : undefined
+    const title = sideChat ? 'New chat' : creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
-      ...(sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
+      ...(sideFolder || sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
+      ...(sideChat ? {
+        // Started from the first write, so "New chat" never reuses it as an empty draft.
+        started: true,
+        lineage: { parentThreadId: sourceThread.id, rootThreadId: sourceThread.lineage?.rootThreadId ?? sourceThread.id, relationship: 'side' as const },
+        ownerThreadId: sourceThread.id,
+        ...(sideFolder ? { workspaceBinding: { policy: 'shared' as const, sharedPath: sideFolder, access: 'write' as const } } : {})
+      } : {}),
       // A fork carries the conversation, so a private thread's fork is private too.
       localOnly: this.isLocalOnly(sourceThread.id)
     })
@@ -13745,6 +13905,8 @@ export class OrchestratorService extends EventEmitter {
       pendingSteer: [] as SteerEntry[],
       ...(engineRunId ? { runId: engineRunId } : {})
     }
+    // A turn has no limit on its total time; one whose runtime says nothing for `TURN_STALL_MS` is hung and ends as failed.
+    let stallWatch: TurnProgressWatch | undefined
     const turnAuthority = session.executionLease ? new TaskWriterAuthority(session.executionLease) : undefined
     const turnWriter = turnAuthority?.issue(turnId, { version: 1, workspace: 'shared', access: 'write' })
     // The external signal's reason (a profile shutdown) travels with the abort.
@@ -14200,7 +14362,18 @@ export class OrchestratorService extends EventEmitter {
         try { opts.bot.modelOutput() }
         catch (error) { console.warn('A bot work update could not be confirmed; it will be carried again.', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) }) }
       }
-      const turnSink = this.inTurn<TurnSink>(session, turn, turnId, 'sink', {
+      // Calls that wait for a person's answer (an approval inside the runtime): no progress is due meanwhile.
+      const awaitingPerson = new Set<string>()
+      stallWatch = watchTurnProgress({
+        ...this.turnStall,
+        waiting: () => awaitingPerson.size > 0 || this.questions.listPendingForThread(session.threadId).length > 0,
+        onStall: (stalledMs) => {
+          console.warn('a turn made no progress and was stopped', { threadId: session.threadId, turnId, stalledMs })
+          turn.abort.abort(new TurnStalledError(stalledMs))
+        }
+      })
+      const watched = stallWatch
+      const sinkCalls = this.inTurn<TurnSink>(session, turn, turnId, 'sink', {
         text: (event) => {
           if (event.content) confirmBotOutput()
           hold.modelOutput(event.phase)
@@ -14221,7 +14394,11 @@ export class OrchestratorService extends EventEmitter {
           // restart it (§2.3): a subagent's or a background call's events say nothing about the turn's next tool.
           if (assembler.ownsForegroundCall(event.callId)) hold.toolEvent()
         },
-        toolAwaiting: (callId, waiting) => hold.awaiting(callId, waiting),
+        toolAwaiting: (callId, waiting) => {
+          if (waiting) awaitingPerson.add(callId)
+          else awaitingPerson.delete(callId)
+          hold.awaiting(callId, waiting)
+        },
         boundary: (at) => hold.boundary(at),
         providerTurn: () => hold.providerTurn(),
         nativeMessages: (nativeMessages, checkpoint) => {
@@ -14364,6 +14541,10 @@ export class OrchestratorService extends EventEmitter {
         },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }, { dropLate: true })
+      // Every word from the runtime is progress.
+      const turnSink = Object.fromEntries(Object.entries(sinkCalls).map(([key, call]) => [key, typeof call === 'function'
+        ? (...args: unknown[]): unknown => { watched.progress(); return (call as (...params: unknown[]) => unknown)(...args) }
+        : call])) as unknown as TurnSink
       const drainEntry = (drainOpts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut: boolean; forced?: boolean; images?: ChatImageAttachment[] } | undefined => {
         // An adapter on the hold takes only what it can deliver now: nothing while a steer is held.
         let forced = false
@@ -14621,10 +14802,20 @@ export class OrchestratorService extends EventEmitter {
       // A helper whose end the runtime never reported reads unknown, never done.
       mirroredRun?.end()
       if (compactionNote) onCompaction('unchanged')
+      stallWatch?.stop()
       if (turn.abort.signal.aborted) aborted = true
       opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)
       // The turn remains active until post-stream persistence/actions finish, but its model reads no more steers.
       this.closeTurnInput(session, turn, aborted)
+    }
+
+    // A turn its no-progress check ended failed: it was hung, not stopped by anyone, and says so.
+    const stalled = turn.abort.signal.reason instanceof TurnStalledError ? turn.abort.signal.reason : undefined
+    if (stalled && !providerError) {
+      aborted = false
+      executionFailed = true
+      providerError = serializeAppError(stalled)
+      assistantText = providerFailureText(providerError)
     }
 
     // The retry row ends with the provider's turn: stopped, or the provider got the request in the end. A failure turns

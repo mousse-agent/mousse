@@ -1,12 +1,14 @@
 import { botDayLabel, botGroupTime } from './messageGroups'
 import { Fragment, memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
-import { Activity, AppWindow, Brain, ChevronDown, ChevronRight, Circle, CircleAlert, CircleCheck, CircleDotDashed, CircleX, Clock, Eye, EyeOff, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
+import { Activity, AppWindow, ArrowRight, Brain, ChevronDown, Circle, CircleAlert, CircleCheck, CircleDotDashed, CircleX, Clock, Eye, EyeOff, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
 import type { BotChip, BotLaunchedThread, BotSummary, BotWatcherItem, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { formatAgo } from '../../lib/formatAgo'
 import { setThreadHidden } from '../../lib/threadActions'
+import { openBotThread } from '../../lib/botThread'
 import { useBotsStore } from '../../stores/botsStore'
+import { useAppStore } from '../../stores/appStore'
+import { botThreadCount, showBotThreads } from '../../lib/showBotThreads'
 import { launchedGroups, launchedLook, presenceOf, stickerOf, type BotStickerKind, type LaunchedTone } from './botChatShape'
-import { openThread } from './BotSteps'
 import { runningFor } from './BotStartedCards'
 
 /** How long work has run, in plain words: "just now", "4 min", "1 h 20 min". */
@@ -83,10 +85,11 @@ const TONE_ICONS: Record<LaunchedTone, typeof Circle> = { working: CircleDotDash
 
 /**
  * A thread the bot started, in the header's list: its title, where it stands (an icon and a word, the row tinted to
- * match), its project and when it last changed. The whole row opens it. Rows that no longer work are dimmed. A thread the
- * bot keeps out of the sidebar says "Hidden", and has Show in sidebar beside it.
+ * match), its project and when it last changed. The whole row opens it in the bot's chat pane (`openBotThread`). Rows
+ * that no longer work are dimmed. A thread the bot keeps out of the sidebar says "Hidden", and has Show in sidebar beside it.
+ * `tooltip: false` (the hover card): no "Open …" tooltip, which would cover the row above.
  */
-const ThreadLine = memo(function ThreadLine({ thread, now, onOpen }: { thread: BotLaunchedThread; now: number; onOpen(): void }) {
+export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, onOpen, tooltip = true }: { botId: string; thread: BotLaunchedThread; now: number; onOpen(): void; tooltip?: boolean }) {
   const { tone, label } = launchedLook(thread.status)
   const Icon = TONE_ICONS[tone]
   const ago = formatAgo(Date.parse(thread.updatedAt), now)
@@ -97,8 +100,8 @@ const ThreadLine = memo(function ThreadLine({ thread, now, onOpen }: { thread: B
     ...(ago ? [`updated ${ago}`] : [])
   ]
   return <li className="bot-thread-item">
-    <button type="button" className="bot-thread-line" data-tone={tone} data-hidden={thread.hidden || undefined} data-nav title={`Open ${thread.title}`}
-      onClick={() => { onOpen(); openThread(thread.threadId) }}>
+    <button type="button" className="bot-thread-line" data-tone={tone} data-hidden={thread.hidden || undefined} data-nav title={tooltip ? `Open ${thread.title}` : undefined}
+      onClick={() => { onOpen(); void openBotThread(botId, thread.threadId) }}>
       <span className="bot-thread-top">
         <span className="bot-thread-title">{thread.title}</span>
         <span className="bot-thread-state"><Icon size={12} aria-hidden />{label}</span>
@@ -153,26 +156,25 @@ export function BotActivitySticker({ bot, typing, offline }: { bot: BotSummary; 
 /**
  * Under the bot's name in the header: "typing…", "System check +1", "Managing 2 threads", "paused", "free". While it has
  * work, or has started threads, the line opens their list: work with Stop (queued pieces last), then the threads it
- * started that still go (working, then waiting on you), then the rest under "Done", folded while anything goes. A row
- * opens its thread. Arrow keys move along the list; Escape or a click away closes it.
+ * started that still go (working, then waiting on you), then under "Recent" those that finished in the last six hours,
+ * and "See all" at the bottom: the sidebar's Threads tab, filtered to this bot. A row opens its thread. Arrow keys move
+ * along the list; Escape or a click away closes it.
  */
 export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typing: boolean; offline: boolean }) {
   const presence = presenceOf(bot, { typing, offline })
   const work = bot.work ?? []
   const watchers = bot.watchers ?? []
-  const { going, ended } = launchedGroups(bot.threads ?? [])
-  const listed = work.length + watchers.length + going.length + ended.length
-  const quiet = !work.length && !going.length
-  const [open, setOpen] = useState(false)
-  const [doneOpen, setDoneOpen] = useState<boolean | undefined>(undefined)
   const [now, setNow] = useState(() => Date.now())
+  const { going, ended } = launchedGroups(bot.threads ?? [], now)
+  // Its threads not archived, listed in the sidebar by "See all".
+  const allThreads = useAppStore((s) => botThreadCount(s.threads, bot.id))
+  const listed = work.length + watchers.length + going.length + ended.length + allThreads
+  const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const list = useRef<HTMLDivElement>(null)
   // Opened from the keyboard, focus goes to the first row.
   const focusFirst = useRef(false)
-  // "Done" stays as the owner left it; until then it is open only while nothing else is listed.
-  const showDone = doneOpen ?? quiet
   useEffect(() => { if (!listed) setOpen(false) }, [listed])
   useEffect(() => {
     if (!open) return
@@ -206,13 +208,15 @@ export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typ
         <p className="bot-work-heading">Background work</p>
         <ul className="bot-work-list" aria-label="Background work">{watchers.map((item) => <WatcherLine key={item.id} botId={bot.id} item={item} now={now} />)}</ul>
       </>}
-      {going.length > 0 && <ul className="bot-work-list" aria-label="Threads it started">{going.map((thread) => <ThreadLine key={thread.threadId} thread={thread} now={now} onOpen={close} />)}</ul>}
+      {going.length > 0 && <ul className="bot-work-list" aria-label="Threads it started">{going.map((thread) => <BotThreadLine key={thread.threadId} botId={bot.id} thread={thread} now={now} onOpen={close} />)}</ul>}
       {ended.length > 0 && <>
-        <button type="button" className="bot-thread-fold" data-nav aria-expanded={showDone} onClick={() => setDoneOpen(!showDone)}>
-          <ChevronRight size={12} aria-hidden data-open={showDone || undefined} />Done<span className="bot-thread-count">{ended.length}</span>
-        </button>
-        {showDone && <ul className="bot-work-list" aria-label="Done">{ended.map((thread) => <ThreadLine key={thread.threadId} thread={thread} now={now} onOpen={close} />)}</ul>}
+        <p className="bot-work-heading bot-thread-recent">Recent<span className="bot-thread-count">{ended.length}</span></p>
+        <ul className="bot-work-list" aria-label="Recent">{ended.map((thread) => <BotThreadLine key={thread.threadId} botId={bot.id} thread={thread} now={now} onOpen={close} />)}</ul>
       </>}
+      {allThreads > 0 && <button type="button" className="bot-thread-all" data-nav
+        onClick={() => { close(); void showBotThreads(bot.id) }}>
+        See all {allThreads === 1 ? '1 thread' : `${allThreads} threads`}<ArrowRight size={13} aria-hidden />
+      </button>}
     </div>}
   </div>
 }

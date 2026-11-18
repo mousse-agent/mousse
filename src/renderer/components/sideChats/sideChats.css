@@ -1,0 +1,156 @@
+/* Side chats: forks of the open thread, in its side panel. Rows follow the lineage list; a row lights its background only. */
+
+.side-chats-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  color: var(--text-primary);
+}
+
+.side-chats-note {
+  margin: 24px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.side-chats-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+
+.side-chats-empty > p:first-child {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.side-chats-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--ui-hover);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.side-chats-error {
+  margin: 8px 18px 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.side-chats-empty .side-chats-error {
+  margin: 0;
+}
+
+.lineage-list.side-chats-list {
+  gap: 2px;
+  margin: 10px 10px 0;
+}
+
+.side-chats-list .lineage-row {
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 44px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.side-chats-list .lineage-row.side-chats-new-row {
+  align-items: center;
+  min-height: 36px;
+}
+
+.side-chats-icon {
+  display: flex;
+  flex: none;
+  margin-top: 2px;
+  color: var(--ui-faint);
+}
+
+.side-chats-new-row .side-chats-icon {
+  margin-top: 0;
+  color: var(--text-secondary);
+}
+
+.side-chats-list .lineage-name {
+  color: var(--text-primary);
+  line-height: 1.35;
+}
+
+.side-chats-list .side-chats-new-row .lineage-name {
+  color: var(--text-secondary);
+}
+
+.side-chats-list .lineage-model {
+  margin-top: 1px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.side-chats-list .lineage-status {
+  margin-top: 2px;
+}
+
+/* An open side chat: the chat column, under a tab that carries its title. */
+.side-chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.side-chat-fork {
+  margin: 2px 0 6px;
+  color: var(--ui-faint);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+/* Its composer stays quiet until focus is in it, then takes the main composer's own look (polish.css). */
+.app .side-chat:not(:focus-within) .chat-input-area .composer {
+  border-color: transparent;
+  background-color: color-mix(in srgb, var(--ui-raised) 72%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 6px 18px rgba(0, 0, 0, 0.16);
+  --ui-glint: transparent;
+  --ui-sheen: none;
+}
+
+.app .side-chat:not(:focus-within) .composer-input::placeholder {
+  opacity: 0.7;
+}
+
+/* The open side chat's tab: its title, cut to fit, behind a back chevron. A narrow panel drops tab labels, but this
+   one is the only place the title shows, so it stays. */
+.main-view-tab.is-side-chat .main-view-tab-label {
+  display: inline;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@container main-area (max-width: 360px) {
+  .main-view-tab.is-side-chat .main-view-tab-label {
+    max-width: 110px;
+  }
+}
+
+.main-view-tab.is-side-chat .main-view-tab-icon {
+  color: var(--text-secondary);
+}

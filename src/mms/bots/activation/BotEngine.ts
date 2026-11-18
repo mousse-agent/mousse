@@ -1,4 +1,5 @@
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
+import { fastNotice, noticeClass, unattendedChatTurn, type NoticeClass } from './unattended'
 import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours, settingCompactionPoint } from '../../../shared/settings'
@@ -28,7 +29,7 @@ import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHo
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import { launchedActive, type BotChatMessage, type BotChip, type BotError, type BotLaunchedThread } from '../../../shared/bots/personal/chat'
 import { jobAskerOf, jobStateOf, jobStep, resultLine, type JobThreadView } from '../jobs'
-import { BOT_JOB_ENDED, jobLine, jobNoticeInput, jobNoticeLabel, THREAD_MESSAGE_KEY_PREFIX, threadMessageInput, threadMessageLabel, type BotJob, type BotJobState } from '../../../shared/bots/personal/jobs'
+import { BOT_JOB_ENDED, jobLine, jobNoticeInput, jobNoticeLabel, noticeAsData, OWNER_TURN_NOTICES_HEADING, relatedJobsLine, THREAD_MESSAGE_KEY_PREFIX, threadMessageInput, threadMessageLabel, type BotJob, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { threadLink } from '../../../shared/threadLink'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import {
@@ -116,11 +117,11 @@ import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import { BOT_CHAT_TURN_END_KEY, BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TEXT } from '../../../shared/bots/personal/memory'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
-import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
+import { MERGED_END_REASON, workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
-import { computeNextRun, isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
+import { isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
 import { tellMeNotifies } from '../../../shared/automations'
 import type { RunLevel } from '../../../shared/automationInbox'
 import { statusLineOf } from '../activity/statusLine'
@@ -191,6 +192,8 @@ export interface BotEngineHost {
   trashThread?(threadId: string): Promise<unknown>
   /** How long stopping a bot's runs may take before a trash or delete gives up (default 15 s). */
   quiesceTimeoutMs?: number
+  /** Test seam: the most activations one lane keeps waiting (default `MAX_QUEUED_ACTIVATIONS`). */
+  maxQueuedActivations?: number
   /** The profile's run engine (null while it is not running). */
   runs(): RunEngine | null
   /**
@@ -262,6 +265,10 @@ export interface BotEngineHost {
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
   monotonic?(): number
   setTimer?(fn: () => void, ms: number): { clear(): void }
+  /** How long notices wait for more after the newest before one turn takes them in (default `NOTICE_SETTLE_MS`). */
+  noticeSettleMs?: number
+  /** The longest the oldest notice waits while more keep arriving (default `NOTICE_SETTLE_MAX_MS`). */
+  noticeSettleMaxMs?: number
 
   // -- Bot Phase 1 seams (docs/plans/bot-architecture.md §7.1); each is optional so a package can land alone.
 
@@ -442,6 +449,18 @@ const PR_WAKE_READ_MS = 2 * 60_000
 const HOUR_MS = 60 * 60_000
 /** How long a dispatch's reply waits for the executor's final message before it is posted without it. */
 const REPLY_WAIT_MS = 5_000
+/**
+ * Notices (`unattendedChatTurn`: wake-ups, a thread's notice or message, another bot's message) wait this long after
+ * the newest of their kind before one chat turn takes them all in, so a burst (threads finishing one after another)
+ * reaches the bot as one input.
+ */
+export const NOTICE_SETTLE_MS = 4_000
+/** The longest the oldest notice waits while more keep arriving. */
+export const NOTICE_SETTLE_MAX_MS = 30_000
+/** Most characters of notices one turn takes in, whole notices oldest first; the rest start the next turn at once. */
+export const NOTICE_BATCH_MAX_CHARS = 24_000
+/** What a notice turn still running is told when its owner writes (`steerNext`): their message is next. */
+export const OWNER_WAITS_STEER = 'Your owner just wrote to you. Wrap this up now; their message is next.'
 /** Retries on another model after usage limits, per activation. */
 const MAX_USAGE_RETRIES = 2
 /** The end reason and stuck-error code of a picked model that can't run (#673). */
@@ -453,13 +472,6 @@ export const OLD_MODEL_NAME_IGNORED = 'This automation had a model of its own sa
  * stopped goes on, schedules run), and pauses again for as long if the limit still holds.
  */
 export const USAGE_RECHECK_MS = 30 * 60_000
-/**
- * Continuations after a dispatch reached its runtime's cap on model turns, in total per activation (not in a row: a
- * note or an Allow in between does not start the count again). Each one worked up to the cap (300 turns on Claude
- * Code), so this only bounds a runtime that keeps reaching the cap. A turn that reached the end of its window
- * (`endWindow`) is not counted: it was working, not stuck.
- */
-export const MAX_TURN_CAP_CONTINUATIONS = 10
 /** How often deleted bots are swept for the 30-day purge. */
 const SWEEP_EVERY_MS = 24 * 60 * 60_000
 /** The chat's one notice while an activation waits for the internet. */
@@ -488,6 +500,8 @@ interface RoomSettled {
 }
 
 interface LiveDispatch {
+  /** A chat turn no person started or waits on (`unattendedChatTurn`): the chat shows none of its activity. */
+  outOfSight?: true
   controller: AbortController
   timer: { clear(): void } | undefined
   /** When the dispatch started, on the monotonic clock: what settlement measures from. */
@@ -524,7 +538,7 @@ interface LiveDispatch {
    * What the turn took (`BotTurnSteer.take`) and has not read yet, by token: the notes, the compaction it re-gives for,
    * and the subagents whose end it tells (by thread).
    */
-  steering: Map<string, { ids: number[]; regiveFor?: number; subagents?: string[] }>
+  steering: Map<string, { ids: number[]; regiveFor?: number; subagents?: string[]; wrapUp?: true }>
   steerSeq: number
   /** Compactions of the turn's context the runtime reported, and the last one whose pack and brief the model read. */
   compactions: number
@@ -644,14 +658,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A reminder's work starts automatically, rather than in an owner's chat turn.
       if (this.store.reminder(row.trigger.from)?.botId === row.botId) return 'unattended'
       return undefined
-    },
-    lifetime: row => {
-      if (row.trigger.kind !== 'schedule') return 48 * 3600_000
-      const schedule = this.host.schedules?.get(row.botId, row.trigger.scheduleId)
-      if (!schedule) return 3600_000
-      const at = new Date(row.trigger.occurrenceAt)
-      const next = computeNextRun(schedule.when, at.toISOString(), at)
-      return Math.max(3600_000, next ? Date.parse(next) - at.getTime() : 3600_000)
     },
     name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
@@ -822,6 +828,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly subagentWaiters = new Map<string, Set<() => void>>()
   /** Per work, the subagents that ended since it last looked, by thread: told to its running turn as a steer. */
   private readonly subagentNotices = new Map<string, Map<string, string>>()
+  /** Notice turns running when their owner wrote (`queueChatInTx`): told once to wrap up (`OWNER_WAITS_STEER`). In memory only. */
+  private readonly wrapUps = new Set<string>()
+  /** Each bot's next look at notices that wait to settle (`nextChat`). */
+  private readonly settleTimers = new Map<string, { clear(): void }>()
+  /**
+   * Notice classes of a bot (`<botId>:<class>`) whose last batch was cut at `NOTICE_BATCH_MAX_CHARS`: what stayed queued
+   * starts at once. In memory only: after a restart it settles from when it was queued.
+   */
+  private readonly noticeOverflow = new Set<string>()
   /** Per work, the subagents still running when its turn reported (`settle`): its own end stopped them. */
   private readonly reportStops = new Map<string, { mainN: number; dispatches: Set<number> }>()
   /** The chip a report carries for the subagents it stopped, by `<activationId>:<n>` of its dispatch (`postReply`). */
@@ -1387,8 +1402,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A manual activation. A repeat of `clientRequestId` returns the same activation. The chat lane
-   * runs one at a time, and later ones wait, at most 20 (the oldest waiting one is dropped); the run lane
-   * runs everything side by side.
+   * runs one at a time, and later ones wait; the run lane runs everything side by side. Only a runaway that has
+   * `MAX_QUEUED_ACTIVATIONS` waiting has a new one refused, with a line in the chat (`refuseOverQueue`).
    */
   async activate(input: { botId: string; input: string; clientRequestId: string }): Promise<BotActivationSummary> {
     return this.enqueue(input.botId, `manual:${input.clientRequestId}`, { kind: 'manual', input: input.input })
@@ -1452,7 +1467,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.activationSummary(this.store.activation(id)!)
   }
 
-  /** Inserts a queued activation (inside a transaction) and drops what waits beyond the queue; how many were dropped. */
+  /** Inserts a queued activation (inside a transaction), refused at once when its lane is full; how many were refused. */
   private insertQueued(botId: string, id: string, key: string, trigger: BotActivationTrigger, lane: BotLane, admitted: ReturnType<BotEngine['admissible']>): number {
     const { published, grant } = admitted
     this.store.insertActivation({
@@ -1466,7 +1481,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       createdAt: this.store.now(),
       lane
     }, limitsOf(intersectManifest(published.permissions, grant.manifest)))
-    return this.dropOverQueue(botId, lane)
+    return this.refuseOverQueue(botId, lane)
   }
 
   /**
@@ -1475,7 +1490,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Why the bot cannot run is returned, not thrown, so the message is still kept; `startQueuedChat`
    * starts the activation after the commit.
    */
-  queueChatInTx(botId: string, key: string, input: string, activationId: string, owner?: BotOwnerTurn, fromBot?: BotMessageSender): BotEngineError | undefined {
+  queueChatInTx(botId: string, key: string, input: string, activationId: string, owner?: BotOwnerTurn, fromBot?: BotMessageSender, fast?: boolean): BotEngineError | undefined {
     if (this.store.activationByKey(key)) return undefined
     let admitted: ReturnType<BotEngine['admissible']>
     try {
@@ -1487,8 +1502,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // A message from another device holds what the turn starts or messages to that device's limit (`BotOwnerTurn`).
     // One another bot's message started says who sent it, and which turn in a row without the owner it is.
-    const trigger: BotActivationTrigger = { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit, ...(owner.node ? { node: owner.node } : {}) } } : {}), ...(fromBot ? { fromBot } : {}) }
+    const trigger: BotActivationTrigger = { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit, ...(owner.node ? { node: owner.node } : {}) } } : {}), ...(fromBot ? { fromBot } : {}), ...(fast ? { fast: true as const } : {}) }
     if (this.insertQueued(botId, activationId, key, trigger, 'chat', admitted)) this.store.db.afterCommit(() => this.changed({ botId }))
+    // The owner wrote while a notice turn runs: it is told to wrap up, without their words; their message runs next.
+    if (/^(chat|answer):/.test(key)) {
+      const running = this.store.laneActivations(botId, 'chat', ['running']).find(unattendedChatTurn)
+      if (running) this.store.db.afterCommit(() => this.wrapUps.add(running.id))
+    }
     return undefined
   }
 
@@ -1525,28 +1545,27 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Cancels the oldest waiting activations of a lane beyond the queue's size (inside a transaction); how many. In the run
-   * lane, the size counts work that waits to go on too, except work waiting on a card. Running work
-   * is never dropped, nor counted.
+   * Cancels the newest waiting activations of a lane beyond `MAX_QUEUED_ACTIVATIONS` (inside a transaction): how many. A
+   * ceiling no real bot reaches, there only for a runaway (a loop queueing work), so what already waits is never
+   * dropped; what came last is refused, and its owner told. In the run lane, work that waits to go on counts too, except
+   * work waiting on a card. Running work is never refused, nor counted.
    */
-  private dropOverQueue(botId: string, lane: BotLane = 'run'): number {
+  private refuseOverQueue(botId: string, lane: BotLane = 'run'): number {
     const queued = this.store.laneActivations(botId, lane, ['queued'])
     const waiting = lane === 'run' ? this.store.laneActivations(botId, 'run', ['blocked']).filter(row => workWaits(row) && workWaitRule(row) !== WORK_WAIT_RULES.approval) : []
-    const all = [...queued, ...waiting].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
-    const over = all.slice(0, Math.max(0, all.length - MAX_QUEUED_ACTIVATIONS))
+    const ceiling = this.host.maxQueuedActivations ?? MAX_QUEUED_ACTIVATIONS
+    if (queued.length + waiting.length <= ceiling) return 0
+    // Only queued rows are refused: work that waits to go on was taken on already.
+    const newest = [...queued].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+    const over = newest.slice(0, queued.length + waiting.length - ceiling)
     for (const activation of over) {
-      if (activation.status === 'blocked') {
-        const ended = this.endWaitingInTx(activation, 'queue_full', `I had too much waiting, so I dropped "${this.workTitle(activation)}". Ask me again when I'm less busy.`)
-        if (ended) this.store.db.afterCommit(() => this.afterEnd(ended))
-        continue
-      }
       if (!this.store.moveActivation(activation.id, ['queued'], 'cancelled', { endReason: 'queue_full' })) continue
-      // The owner's message is never dropped without a word: its chat says so. Nor is work the chat took on.
-      if (lane === 'chat')
-        this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: failureText('queue_full') }, activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
-      else if (activation.trigger.kind === 'work')
-        this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: `I had too much waiting, so I dropped "${activation.trigger.title}". Ask me again when I'm less busy.` }, ...(activation.trigger.replyTo ? { replyTo: activation.trigger.replyTo } : {}), activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
+      // Nothing is refused without a word: work the chat took on answers its message, a scheduled run is noted on its
+      // automation, and anything else (the owner's message) says so in the chat.
+      if (activation.trigger.kind === 'work')
+        this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: queueFullWorkText(activation.trigger.title) }, ...(activation.trigger.replyTo ? { replyTo: activation.trigger.replyTo } : {}), activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
       else if (activation.trigger.kind === 'schedule') this.droppedScheduledRun(botId, activation.trigger)
+      else this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: failureText('queue_full') }, activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
     }
     return over.length
   }
@@ -1678,7 +1697,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Said once per automation, with its first run on the bot's Work row (a fixed id: a later run posts nothing).
       if (inserted && ignoredName)
         this.chat.post({ id: `bm_${botId}_${scheduleId}_named_model`, botId, author: 'bot', kind: 'notice', text: OLD_MODEL_NAME_IGNORED, activationId: id, lane: 'run', hidden: true })
-      if (inserted) this.dropOverQueue(botId, 'run')
+      if (inserted) this.refuseOverQueue(botId, 'run')
       return inserted
     })
     if (skip) {
@@ -1827,7 +1846,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   listActivations(botId?: string): BotActivationSummary[] {
-    return this.store.listActivations(botId).map((row) => this.activationSummary(row))
+    // A notice another turn took in and answered never ran: it is not listed (`MERGED_END_REASON`).
+    return this.store.listActivations(botId).filter((row) => row.endReason !== MERGED_END_REASON).map((row) => this.activationSummary(row))
   }
 
   getActivation(activationId: string): BotActivationSummary {
@@ -1944,17 +1964,141 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return live?.botId === botId && live.lane === 'chat' && ENDED_ACTIVATION_STATUSES.has(live.status)
       })
       if (!chatHeld) {
+        let settles: number | undefined
         const next = this.store.db.transaction((): BotActivationRow | undefined => {
           if (!this.slotFree(botId, 'chat')) return undefined
-          const queued = this.store.laneActivations(botId, 'chat', ['queued'])[0]
-          if (!queued) return undefined
-          this.store.moveActivation(queued.id, ['queued'], 'running')
-          return this.store.activation(queued.id)!
+          const { row, at } = this.nextChat(botId)
+          settles = at
+          if (!row) return undefined
+          this.store.moveActivation(row.id, ['queued'], 'running')
+          return this.store.activation(row.id)!
         })
+        if (settles !== undefined) this.pumpAt(botId, settles)
         if (next) await this.startActivation(next)
       }
     }
     await this.pumpRuns()
+  }
+
+  /**
+   * The chat lane's next turn, inside the pump's transaction: the oldest owner's turn (`ownerChatTurn`), then any other
+   * that is not a notice (a question's default, a tap), then the oldest notice of a class whose notices settled
+   * (`NOTICE_SETTLE_MS` after the newest, `NOTICE_SETTLE_MAX_MS` after the oldest), one with a fast notice first. `at`:
+   * when the notices that wait settle, when none may start yet. Times come from `createdAt`, so a restart keeps them.
+   */
+  private nextChat(botId: string): { row?: BotActivationRow; at?: number } {
+    const queued = this.store.laneActivations(botId, 'chat', ['queued'])
+    const first = queued.find(ownerChatTurn) ?? queued.find((row) => !unattendedChatTurn(row))
+    if (first) return { row: first }
+    const now = this.now()
+    const settle = this.host.noticeSettleMs ?? NOTICE_SETTLE_MS
+    const max = Math.max(settle, this.host.noticeSettleMaxMs ?? NOTICE_SETTLE_MAX_MS)
+    const at = (iso: string) => { const ms = Date.parse(iso); return Number.isFinite(ms) ? ms : 0 }
+    let pick: { row: BotActivationRow; fast: boolean } | undefined
+    let settles: number | undefined
+    for (const kind of ['acting', 'botmsg'] as const) {
+      const notices = queued.filter((row) => noticeClass(row) === kind)
+      if (!notices.length) continue
+      const fast = notices.some(fastNotice) || this.noticeOverflow.has(`${botId}:${kind}`)
+      const due = fast ? -Infinity : Math.min(at(notices.at(-1)!.createdAt) + settle, at(notices[0]!.createdAt) + max)
+      if (due > now) { settles = Math.min(settles ?? Infinity, due); continue }
+      const row = notices[0]!
+      if (!pick || (fast && !pick.fast) || (fast === pick.fast && at(row.createdAt) < at(pick.row.createdAt))) pick = { row, fast }
+    }
+    if (pick) {
+      this.noticeOverflow.delete(`${botId}:${noticeClass(pick.row)}`)
+      return { row: pick.row }
+    }
+    return settles !== undefined ? { at: settles } : {}
+  }
+
+  /** The bot's chat lane looks again at `at` (when notices that wait settle), one timer per bot. */
+  private pumpAt(botId: string, at: number): void {
+    if (this.closed) return
+    this.settleTimers.get(botId)?.clear()
+    const timer = (this.host.setTimer ?? defaultTimer)(() => {
+      if (this.settleTimers.get(botId) === timer) this.settleTimers.delete(botId)
+      this.pumpLater(botId)
+    }, Math.max(0, at - this.now()))
+    this.settleTimers.set(botId, timer)
+  }
+
+  /**
+   * What a chat turn takes in with its own input, inside the transaction that writes its first dispatch: the notices
+   * that wait in the lane, so a burst is one input and an owner's reply is never stale. A notice turn takes the other
+   * queued notices of its class (`noticeClass`) after its own, oldest first; an owner's turn on this computer's limit
+   * takes the acting ones as data after their words (`noticeAsData`); another device's turn (`owner.limit`) and any
+   * other turn take none. Whole notices up to `NOTICE_BATCH_MAX_CHARS`; the rest start the next turn at once. After the
+   * job notices of each request, one line says which of its other jobs still go (`relatedJobsLine`).
+   * The notices taken stay queued: they end `merged` when this turn ends done (`BotStore.moveActivation`), else they
+   * run after it as they were.
+   */
+  private noticeBatchInTx(row: BotActivationRow): { input: string; after?: string; merged: string[] } | undefined {
+    const kind = noticeClass(row)
+    const owner = !kind && ownerChatTurn(row) && row.trigger.kind === 'manual' && !row.trigger.owner?.limit
+    if (!kind && !owner) return undefined
+    const want: NoticeClass = kind ?? 'acting'
+    const waiting = this.store.laneActivations(row.botId, 'chat', ['queued']).filter((other) => other.id !== row.id && noticeClass(other) === want)
+    const blocks: Array<{ row: BotActivationRow; text: string }> = kind ? [{ row, text: row.trigger.input }] : []
+    let total = kind ? row.trigger.input.length : 0
+    for (const other of waiting) {
+      const text = kind ? other.trigger.input : noticeAsData(other.trigger.input)
+      if (total + text.length > NOTICE_BATCH_MAX_CHARS) {
+        this.noticeOverflow.add(`${row.botId}:${want}`)
+        break
+      }
+      total += text.length
+      blocks.push({ row: other, text })
+    }
+    const merged = blocks.filter((block) => block.row.id !== row.id).map((block) => block.row.id)
+    if (!kind && !merged.length) return undefined
+    const text = this.withRelatedJobs(row.botId, blocks)
+    return kind ? { input: text, merged } : { input: row.trigger.input, after: `${OWNER_TURN_NOTICES_HEADING}\n\n${text}`, merged }
+  }
+
+  /**
+   * `blocks` joined, each request's job notices followed by one line on its other jobs that still go
+   * (`relatedJobsLine`): the bot's open jobs with the same root request (`jobRoot`), less those this batch tells of. A
+   * follow-up job no turn handed off has no request to name, and no line.
+   */
+  private withRelatedJobs(botId: string, blocks: ReadonlyArray<{ row: BotActivationRow; text: string }>): string {
+    const jobOf = (row: BotActivationRow) => row.idempotencyKey.startsWith('job:') ? this.store.job(row.idempotencyKey.slice(4).split(':')[0]!) : undefined
+    const told = new Map<number, BotJob>()
+    blocks.forEach((block, index) => { const job = jobOf(block.row); if (job) told.set(index, job) })
+    if (!told.size) return blocks.map((block) => block.text).join('\n\n')
+    const roots = new Map<number, string>()
+    const memo = new Map<string, string>()
+    for (const [index, job] of told) if (job.activationId) roots.set(index, this.jobRoot(job.activationId, memo))
+    const toldIds = new Set([...told.values()].map((job) => job.id))
+    const open = this.store.openJobsOf(botId).filter((job) => job.activationId && !toldIds.has(job.id))
+    const last = new Map<string, number>()
+    for (const [index, root] of roots) last.set(root, index)
+    return blocks.map((block, index) => {
+      const root = roots.get(index)
+      if (root === undefined || last.get(root) !== index) return block.text
+      return `${block.text}\n${relatedJobsLine(open.filter((job) => this.jobRoot(job.activationId, memo) === root).map((job) => job.title))}`
+    }).join('\n\n')
+  }
+
+  /**
+   * The request a job's turn `activationId` answers: a notice turn of a job (or that took one in) answers that job's
+   * request, work answers the turn that started it, and any other turn is its own request.
+   */
+  private jobRoot(activationId: string, memo: Map<string, string>, depth = 0): string {
+    const known = memo.get(activationId)
+    if (known !== undefined) return known
+    const row = depth < 16 ? this.store.activation(activationId) : undefined
+    let root = activationId
+    if (row) {
+      // An owner's turn that took notices in as data is still a request of its own.
+      const merged = unattendedChatTurn(row) ? this.store.dispatch(row.id, 1)?.prompt.merged ?? [] : []
+      const notice = [row.idempotencyKey, ...merged.map((id) => this.store.activation(id)?.idempotencyKey ?? '')].find((key) => key.startsWith('job:'))
+      const job = notice ? this.store.job(notice.slice(4).split(':')[0]!) : undefined
+      if (job?.activationId) root = this.jobRoot(job.activationId, memo, depth + 1)
+      else if (!job && row.trigger.kind === 'work' && row.trigger.from) root = this.jobRoot(row.trigger.from, memo, depth + 1)
+    }
+    memo.set(activationId, root)
+    return root
   }
 
   /** The run lane of the profile's bots: what waits starts, in one order (`nextRun`). */
@@ -2004,12 +2148,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // A chat turn takes the owner's messages that joined it while it waited to start (`joinChatTurnInTx`).
           const notes = this.workNotes(row)
           if (notes) this.store.applyWorkNotes(notes.ids)
+          // A chat turn takes in the notices that wait (`noticeBatchInTx`), listed with its dispatch so they end with it.
+          const batch = row.lane === 'chat' ? this.noticeBatchInTx(row) : undefined
           const skipped = row.trigger.kind === 'schedule' && row.trigger.missed ? Math.max(0, row.trigger.missed.count - 1) : 0
           const capped = row.trigger.kind === 'schedule' && (row.trigger.missed?.count ?? 0) >= MISSED_OCCURRENCES_CAP
           const late = row.trigger.kind === 'schedule' && row.trigger.missed
             ? `\n\nThis run was due at ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}; this computer was off or asleep${skipped ? `, and ${capped ? 'over ' : ''}${skipped} ${skipped === 1 ? 'run was' : 'runs were'} skipped` : ''}.` : ''
-          const text = row.lane === 'run' ? `${row.trigger.input}${late}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}`
-          this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text, ...(notes && row.trigger.kind === 'work' ? { workDelivery: { answers: [], notes: notes.ids } } : {}) }, policyDigest: row.grantDigest })
+          const text = row.lane === 'run' ? `${row.trigger.input}${late}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${batch?.input ?? row.trigger.input}${notes ? `\n\n${notes.text}` : ''}${batch?.after ? `\n\n${batch.after}` : ''}`
+          this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text, ...(notes && row.trigger.kind === 'work' ? { workDelivery: { answers: [], notes: notes.ids } } : {}), ...(batch?.merged.length ? { merged: batch.merged } : {}) }, policyDigest: row.grantDigest })
           if (row.lane === 'run') this.journalInTx({
             botId: row.botId, kind: 'run_start', lane: 'run', activationId: row.id, threadId, sourceKey: `act:${row.id}:start`, who: 'mousse',
             text: row.trigger.input,
@@ -2796,7 +2942,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId,
       lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0, steering: new Map(), steerSeq: 0, compactions: 0, regiven: 0,
       powers: powersOf(compiled.permissions), consultPowers: new Map(),
-      held: effective, subagentStarts: new Map()
+      held: effective, subagentStarts: new Map(),
+      ...(unattendedChatTurn(row) ? { outOfSight: true as const } : {})
     })
     this.liveRuns.set(payload.runId, row.id)
     this.watchOffline(row.id, dispatch.n)
@@ -2899,7 +3046,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const next = live ? this.steerNext(row, live) : undefined
         if (!live || !next) return undefined
         const token = `${row.id}:d${n}:s${++live.steerSeq}`
-        live.steering.set(token, { ids: next.ids, ...(next.regiveFor !== undefined ? { regiveFor: next.regiveFor } : {}), ...(next.subagents?.length ? { subagents: next.subagents } : {}) })
+        live.steering.set(token, { ids: next.ids, ...(next.regiveFor !== undefined ? { regiveFor: next.regiveFor } : {}), ...(next.subagents?.length ? { subagents: next.subagents } : {}), ...(next.wrapUp ? { wrapUp: true as const } : {}) })
         if (next.ids.length) {
           const offered = this.offeredNotes.get(row.id) ?? new Set<number>()
           for (const id of next.ids) offered.add(id)
@@ -2916,6 +3063,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // The work read that these subagents ended: it is not told again.
         const notices = this.subagentNotices.get(row.id)
         for (const thread of taken.subagents ?? []) notices?.delete(thread)
+        if (taken.wrapUp) this.wrapUps.delete(row.id)
         if (!taken.ids.length) return
         if (row.lane === 'chat') this.steeredChats.set(row.id, n)
         this.notOffered(row.id, taken.ids)
@@ -2961,7 +3109,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * has not been answered (once per compaction, several in a row given once), then the owner's notes not taken yet. Notes
    * wait for the dispatch's end with under 30 seconds of its window left, as they did before.
    */
-  private steerNext(row: BotActivationRow, live: LiveDispatch): { text: string; ids: number[]; regiveFor?: number; subagents?: string[] } | undefined {
+  private steerNext(row: BotActivationRow, live: LiveDispatch): { text: string; ids: number[]; regiveFor?: number; subagents?: string[]; wrapUp?: true } | undefined {
     const outstanding = [...live.steering.values()]
     const taken = new Set(outstanding.flatMap((entry) => entry.ids))
     const regive = live.compactions > live.regiven && !outstanding.some((entry) => entry.regiveFor !== undefined) ? this.regiveText(row) : undefined
@@ -2972,10 +3120,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Its subagents that ended since it last looked, each told once.
     const told = new Set(outstanding.flatMap((entry) => entry.subagents ?? []))
     const ended = [...(this.subagentNotices.get(row.id) ?? new Map<string, string>()).entries()].filter(([thread]) => !told.has(thread))
-    if (!regive && !notes.length && !ended.length) return undefined
+    // A notice turn whose owner wrote meanwhile: told once to wrap up (`queueChatInTx`).
+    const wrapUp = this.wrapUps.has(row.id) && !outstanding.some((entry) => entry.wrapUp)
+    if (!regive && !notes.length && !ended.length && !wrapUp) return undefined
     const noteText = row.lane === 'chat' ? chatSteerText(notes.map((note) => note.text)) : noteSteerText(notes.map((note) => note.text))
-    const parts = [...(regive ? [regive] : []), ...(notes.length ? [noteText] : []), ...ended.map(([, text]) => text)]
-    return { text: parts.join('\n\n'), ids: notes.map((note) => note.id), ...(regive ? { regiveFor: live.compactions } : {}), ...(ended.length ? { subagents: ended.map(([thread]) => thread) } : {}) }
+    const parts = [...(regive ? [regive] : []), ...(notes.length ? [noteText] : []), ...ended.map(([, text]) => text), ...(wrapUp ? [OWNER_WAITS_STEER] : [])]
+    return { text: parts.join('\n\n'), ids: notes.map((note) => note.id), ...(regive ? { regiveFor: live.compactions } : {}), ...(ended.length ? { subagents: ended.map(([thread]) => thread) } : {}), ...(wrapUp ? { wrapUp: true as const } : {}) }
   }
 
   /**
@@ -5214,8 +5364,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // its report is not posted, so the chat shows nothing; the run and its line stay in Automations. Open asks and
     // cards it made still show, without the marker. Work the owner asked for and chat replies are posted as written.
     // A chat turn nobody started or waits on (a wake-up, a thread's notice, another bot's message), and work such a turn
-    // started, may say `[SILENT]` when nothing finished and nothing needs the owner: nothing is
-    // posted and nobody is notified; the wake's quiet line and the work list still show it happened. An empty reply
+    // started, may say `[SILENT]` (the default it is told) unless the owner must act or their request is all done: nothing
+    // is posted and nobody is notified; the event itself never shows in the chat, and the work list shows the work. An empty reply
     // stays as it is (a chat turn that only handed work off still shows it).
     // Its marker is a line of its own: a reply that also says something posts what it says, without the marker.
     const quietTurn = unattendedChatTurn(row) || (report && row.trigger.kind === 'work' && unattendedChatTurn(this.store.activation(row.trigger.from) ?? { lane: 'run', idempotencyKey: '' }))
@@ -5312,8 +5462,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * (`windowEnd`, `endWindow`): the activation carries on in the same thread, as after a restart, under its own limits.
    * Its turn budget, when the grant has one, is checked first, so a used-up budget ends it as any limit does (a run's
    * ask, a chat's wall), never as a failure. What the capped turn did (its chips and last words) goes into the activation's next
-   * message, so a continuation that runs out at once still posts it. After `MAX_TURN_CAP_CONTINUATIONS` in total, work
-   * ends as out of room with what it had (`endAtTurnCap`); any other activation fails as before.
+   * message, so a continuation that runs out at once still posts it. There is no count of continuations: work goes on
+   * for as many turns as it needs, as a coding agent session does; a hung turn ends by its no-progress check.
    */
   private async continueAfterTurnCap(row: BotActivationRow, main: BotDispatchRow, text?: string, windowEnd?: true): Promise<void> {
     // The ended turn's own message is not posted: its work goes on in the continuation, whose message carries it.
@@ -5323,8 +5473,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.carried.set(row.id, { chips: [...(before?.chips ?? []), ...(this.drained.get(key) ?? [])], ...(words ? { text: words } : before?.text ? { text: before.text } : {}) })
     this.drained.delete(key)
     this.lateTexts.delete(key)
-    if (this.store.dispatches(row.id).filter((dispatch) => dispatch.send.turnCap).length >= MAX_TURN_CAP_CONTINUATIONS)
-      return row.lane === 'run' && row.trigger.kind === 'work' ? this.endAtTurnCap(row, main) : this.failActivation(row, 'turn_cap_repeated')
     const counters = this.store.counters(row.id)
     const maxTurns = counters.limits.maxTurns
     if (maxTurns !== undefined && counters.requests >= maxTurns) {
@@ -5333,28 +5481,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const allowed = this.allowedSinceRefused(row)
     await this.continueWith(row.id, ['running'], { turnCap: true, ...(windowEnd ? { windowEnd } : {}), ...(allowed.length ? { allowed } : {}) })
-  }
-
-  /**
-   * Work that kept reaching its runtime's turn cap ends as out of room, never as a failure: done, with its report saying
-   * it stopped short and what it had (the capped turns' words and chips), answering the message that asked for it.
-   */
-  private endAtTurnCap(row: BotActivationRow, main: BotDispatchRow): void {
-    const carried = this.carried.get(row.id)
-    const body = carried?.text ?? ''
-    const ended = this.recorded(row, () => {
-      if (!this.store.moveActivation(row.id, ['running'], 'done', { endReason: 'turn_cap_repeated', result: body })) return false
-      this.chat.post({
-        id: `bm_${row.id}_d${main.n}`, botId: row.botId, author: 'bot', kind: 'run_report', text: stoppedShortText(body), chips: carried?.chips ?? [],
-        ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}),
-        activationId: row.id, lane: 'run', threadId: main.threadId
-      })
-      this.journalEnd(row, 'turn_cap_repeated')
-      return true
-    }) ?? false
-    if (!ended) return
-    this.carried.delete(row.id)
-    this.afterEnd(this.store.activation(row.id) ?? row)
   }
 
   /** Every run of the activation (main and consult) has ended, so nothing of it is live. */
@@ -6719,6 +6845,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     else this.liveChips.delete(event.activationId)
     // Every event carries the activation's status as it is now: an event without one clears it.
     const status = this.liveStatuses.get(event.activationId)
+    // A turn out of sight (a wake-up, a thread's notice) shows no chip and no status line in any window.
+    if (this.live.get(event.activationId)?.outOfSight) return
     try { this.events.emit('activity', { ...event, ...(status ? { status } : {}) }) } catch { /* a listener never stops a call */ }
   }
 
@@ -6742,9 +6870,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.publishActivity({ botId: at.botId, activationId: at.activationId, chip: this.liveChips.get(at.activationId)?.chip ?? null })
   }
 
-  /** The bot's working activation, its live chip and its status, chat lane first (each piece of work's come as `activity`). */
+  /**
+   * The bot's working activation, its live chip and its status, chat lane first (each piece of work's come as `activity`).
+   * A chat turn no person started or waits on (`unattendedChatTurn`) is out of sight, so it is never the one.
+   */
   liveActivity(botId: string): { activationId: string; chip?: BotChip; status?: string } | undefined {
-    const working = [...this.store.laneActivations(botId, 'chat', ['running']), ...this.store.laneActivations(botId, 'run', ['running'])][0]
+    const working = [...this.store.laneActivations(botId, 'chat', ['running']).filter((row) => !unattendedChatTurn(row)), ...this.store.laneActivations(botId, 'run', ['running'])][0]
     if (!working) return undefined
     const chip = this.liveChips.get(working.id)?.chip
     const status = this.liveStatuses.get(working.id)
@@ -6833,6 +6964,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Its subagents ended with it: what they returned is no one's to read any more.
     this.heldAdvance.delete(row.id)
     this.subagentNotices.delete(row.id)
+    this.wrapUps.delete(row.id)
     this.reportStops.delete(row.id)
     for (const key of this.reportChips.keys()) if (key.startsWith(`${row.id}:`)) this.reportChips.delete(key)
     for (const key of this.subagentEnds.keys()) if (key.startsWith(`${row.id}:`)) this.subagentEnds.delete(key)
@@ -7395,7 +7527,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (state !== 'running' && state !== 'needs_input') return
       const earlier = this.store.latestJobOn(botId, threadId)
       const title = jobLine(seen?.title?.trim() || earlier?.title || 'Untitled thread', 200)
-      const request = jobLine(earlier ? `More work after "${earlier.request}"` : 'Work in a thread you started')
+      // A follow-up of a follow-up keeps the first request's line instead of quoting it again.
+      const request = jobLine(earlier ? (earlier.request.startsWith('More work after "') ? earlier.request : `More work after "${earlier.request}"`) : 'Work in a thread you started')
       this.store.openJob({ id: `job_${randomUUID()}`, botId, activationId: '', threadId, title, request, askedBy: 'owner', ...(earlier?.project ? { project: earlier.project } : {}) })
       this.changed({ botId })
     } catch (error) {
@@ -7470,9 +7603,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A job's notice: a chat turn of the bot's own (`job:<id>:<activation>`) that starts with the report (`jobNoticeInput`:
-   * state, the thread's title and link, who asked, and its answer held to the report cap), after a quiet line in the chat
-   * saying why the bot speaks. It may act on the owner's threads (`threadsActOf`). A bot that is paused, or can't run now,
-   * has it said as a line with the link instead. The job moves in the transaction that queues the turn: one notice per change.
+   * state, the thread's title and link, who asked, and its answer held to the report cap). Nothing shows in the chat but
+   * what the bot says. It may act on the owner's threads (`threadsActOf`). A bot that is paused, or can't run now, has it
+   * said as a line with the link instead. The job moves in the transaction that queues the turn: one notice per change.
    */
   private async deliverJobNotice(job: BotJob, state: BotJobState, line: string | undefined, seen: JobThreadView): Promise<void> {
     const registry = this.store.registry(job.botId)
@@ -7481,18 +7614,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const next: BotJob = { ...job, state, ...(line ? { line } : {}), ...(seen.title?.trim() ? { title: jobLine(seen.title, 200) } : {}) }
-    const input = jobNoticeInput(next, BOT_JOB_ENDED.has(state) ? seen.result : undefined)
+    const input = jobNoticeInput(next, BOT_JOB_ENDED.has(state) ? { result: seen.result } : { asks: seen.asks, onHold: seen.status === 'on_hold' })
     const paused = Boolean(registry.pausedReason)
     const activationId = newActivationId()
     let refused: BotEngineError | undefined
     const started = this.store.db.transaction(() => {
       if (!this.store.moveJob(job.id, job.state, state, { ...(line ? { line } : {}), notice: true })) return undefined
-      const id = `${WAKE_LINE_PREFIX}job_${job.id}_${activationId}`
-      if (!paused) refused = this.queueChatInTx(job.botId, `job:${job.id}:${activationId}`, input, activationId)
-      if (!paused && !refused) {
-        this.chat.post({ id, botId: job.botId, author: 'bot', kind: 'notice', text: jobNoticeLabel(next), external: true, lane: 'chat' })
-        return true
-      }
+      // A thread that waits on a person is fast: its turn starts without waiting for other notices to settle.
+      if (!paused) refused = this.queueChatInTx(job.botId, `job:${job.id}:${activationId}`, input, activationId, undefined, undefined, state === 'needs_input')
+      // Nothing shows in the chat: the notice is the bot's to act on, and only what it says reaches the owner.
+      if (!paused && !refused) return true
       this.chat.post({ id: `bm_job_${job.id}_${activationId}`, botId: job.botId, author: 'bot', kind: 'run_report', text: `${jobNoticeLabel(next)}: ${threadLink(job.threadId)}. I didn't follow up on this: ${paused ? 'I\'m paused.' : refused!.message}`, external: true, lane: 'chat' })
       return false
     })
@@ -7503,9 +7634,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A message from a thread the bot started (`message_parent`), sent while it works: a question, a blocker, a finding
-   * the bot must know now. It arrives as a job's notice does: a quiet line in the chat and a chat turn of the bot's own
+   * the bot must know now. It arrives as a job's notice does, out of sight: a chat turn of the bot's own
    * (`threadmsg:<thread>:<request>`) that starts with the message framed as data from that thread, with its link, and it
-   * wakes an idle bot. The same request again replays. Refused, in words for the thread: a deleted or paused bot, or one
+   * wakes an idle bot. A line the owner never sees (`outOfSightRow`) is kept per message for the flood guard below. The same request again replays. Refused, in words for the thread: a deleted or paused bot, or one
    * that can't run now; `maxWaiting` of the thread's messages still waiting for the bot to read them; or
    * `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER` of its messages since the owner last wrote, with no person in between.
    */
@@ -9224,8 +9355,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A wake that is due, at any hour: a chat turn of the bot's own (`wake:<id>`, not the owner's, though it may act on
-   * their threads: `threadsActOf`) starts with what the bot wrote for itself and what happened, after a quiet line in the chat saying why the
-   * bot speaks. A wake on an event whose time came first ended without it, and says so. A bot that is paused, or can't
+   * their threads: `threadsActOf`) starts with what the bot wrote for itself and what happened; nothing shows in the chat
+   * but what the bot says. A wake on an event whose time came first ended without it, and says so. A bot that is paused, or can't
    * run now, has the wake said as a line instead, so it is never lost and never retried forever. Marked delivered in the
    * transaction that queues the turn: it wakes once.
    */
@@ -9258,10 +9389,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Cancelled or forgotten since the pass read it: nothing happens.
       if (this.store.reminder(wake.id)?.status !== 'waiting') return undefined
       if (!paused) refused = this.queueChatInTx(wake.botId, `wake:${wake.id}`, input, activationId)
+      // Nothing shows in the chat: the wake-up is the bot's to act on, and only what it says reaches the owner.
       if (!paused && !refused) {
         this.store.settleReminder(wake.id, 'delivered', { activationId })
-        // A quiet line says why the bot speaks unasked.
-        this.chat.post({ id: `${WAKE_LINE_PREFIX}${wake.id}`, botId: wake.botId, author: 'bot', kind: 'notice', text: wakeFiredLabel(fired), external, lane: 'chat' })
         return true
       }
       const id = `bm_${wake.id}`
@@ -9297,7 +9427,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** Durable nudge rows carry the count; telling receipts carry the clock, never executable arguments. */
   private actionNudgeFollowUps(botId?: string, now = this.now()): ActionNudgeFollowUp[] {
     if (!botAsksFirst(this.host.settings?.get())) return []
-    const rows = this.store.all(`SELECT a.id, a.bot_id, a.activation_id, a.message_id, a.expires_at FROM bot_actions a
+    const rows = this.store.all(`SELECT a.id, a.bot_id, a.activation_id, a.message_id FROM bot_actions a
       JOIN bot_registry b ON b.bot_id = a.bot_id JOIN bot_messages m ON m.id = a.message_id
       WHERE a.status = 'open' AND a.args_digest <> '[forgotten]' AND b.deleted_at IS NULL
       AND (? IS NULL OR a.bot_id = ?)`, botId ?? null, botId ?? null)
@@ -9315,7 +9445,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       let history = budgets.get(bot)
       if (!history) { history = this.nudgeTimes(bot, now); budgets.set(bot, history) }
       const at = this.followUpTime(bot, nudgeSlot(due, history))
-      if (!Number.isFinite(at) || at >= Date.parse(String(row.expires_at))) return []
+      if (!Number.isFinite(at)) return []
       return [{ id, actionId: id, botId: bot, activationId: String(row.activation_id), messageId, count: first ? 2 : 1, at }]
     })
   }
@@ -9509,8 +9639,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A schedule (§5.5): an automation whose Who is the bot, in the shared store. At most 8 per bot, at least a minute
-   * apart. The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
+   * A schedule (§5.5): an automation whose Who is the bot, in the shared store. At least a minute apart, and at most
+   * `MAX_BOT_SCHEDULES` per bot (a ceiling only a runaway reaches). The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
    * (schedules are not permissions) and changes no revision.
    */
   addSchedule(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot', ownerAsked = false): BotScheduleEntry {
@@ -10002,6 +10132,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.expiryTimers.clear()
     for (const timer of this.offlineTimers.values()) timer.clear()
     this.offlineTimers.clear()
+    for (const timer of this.settleTimers.values()) timer.clear()
+    this.settleTimers.clear()
     for (const reply of this.pendingReplies.values()) reply.timer.clear()
     this.pendingReplies.clear()
     this.closed = true
@@ -10333,17 +10465,6 @@ export function withoutSilentMarker(text: string): { text: string; marked: boole
 }
 
 /**
- * The chat turns no person started and no person waits on: a wake-up (`wake:`), a thread's notice (`job:`) or message
- * (`threadmsg:`), and another bot's message (`botmsg:`). They may end silently (`[SILENT]`). A question's default answer
- * (`question:`) always says what it went with, so it is not one of them.
- */
-const UNATTENDED_CHAT_KEYS = ['wake:', 'job:', 'botmsg:', THREAD_MESSAGE_KEY_PREFIX] as const
-
-export function unattendedChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
-  return row.lane === 'chat' && UNATTENDED_CHAT_KEYS.some((key) => row.idempotencyKey.startsWith(key))
-}
-
-/**
  * The owner's messages as they reach a chat turn while it answers (sent quickly, one after another): part of the same
  * conversation, answered in the one reply the turn is writing, never as a separate request.
  */
@@ -10368,12 +10489,6 @@ export function roomText(body: string): string {
 /** A run Mousse itself ended by stopping (a profile closing, or the boot after a crash): never the bot's own end. */
 function stoppedByMousse(run: Pick<RunRecord, 'status' | 'outcome'>): boolean {
   return run.status === 'interrupted' && run.outcome?.interruptedBy === 'daemon_restart'
-}
-
-/** What work that kept reaching its runtime's turn cap reports as it ends: it stopped short, then what it had. */
-export function stoppedShortText(body: string): string {
-  const lead = 'I ran out of room before finishing, so I stopped here.'
-  return body.trim() ? `${lead} Here is what I have so far:\n\n${body.trim()}` : lead
 }
 
 /** A journal that cannot be written (bot-context.md §4): capture's `bot_journal_failed`, or a full disk. */
@@ -10418,6 +10533,11 @@ const PROVIDER_FAILURE = /^\[provider_[a-z_]+\]\s*(\S[\s\S]*)$/
  * Why an activation stopped, in plain words for its chat. A provider's failure says what the provider said (redacted
  * when the error was made, on one line and capped) and how many retries it had; Mousse's own failures keep a fixed line.
  */
+/** The line for work refused because the bot already has `MAX_QUEUED_ACTIVATIONS` waiting. */
+function queueFullWorkText(title: string): string {
+  return `I had too much waiting, so I couldn't take on "${title}". Ask me again when I'm less busy.`
+}
+
 function failureText(reason: string): string {
   // A runtime that can't run the bot's work says why in the bot's own words (a Codex whose tools Mousse hasn't checked).
   if (isCodexBotRefusal(reason)) return reason
@@ -10440,6 +10560,7 @@ function failureText(reason: string): string {
     case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
     case 'queue_full': return 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.'
     case 'no_progress': return 'I couldn\'t get anything done on this, so I stopped.'
+    // Older builds ended an activation after a count of turn-cap continuations; its record keeps the line.
     case 'turn_cap_repeated': return 'I kept going without finishing, so I stopped here.'
     default: return 'Something went wrong, so I stopped. Try again.'
   }

@@ -6,7 +6,7 @@ import type { PermissionMode } from './permissionMode'
 import type { ProviderRetryState } from './providerRetry'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
-export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'sideChats' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
@@ -652,6 +652,11 @@ export interface PendingUserQuestions {
    * open until it is answered, dismissed or withdrawn; a new message does not close it.
    */
   wait?: false
+  /**
+   * Set when the personal bot that started the thread answers this request (whoever started the turn): the
+   * owner is not pinged for it and it is not in Needs me. The card still shows, and the owner may answer first.
+   */
+  supervised?: true
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
@@ -1460,8 +1465,10 @@ export interface ThreadLineage {
    * `subagent`: a Mousse subagent (`delegate_task`). `native`: a watch-only mirror of a helper the provider runtime
    * started on its own (`Thread.native`); the parent is the thread whose run hosts it. Only the thread record says
    * `native`: the run store's `thread_lineage` has no row for a mirror, so no delegation rule ever applies to one.
+   * `side`: a side chat, a fork of the parent made from its side panel (`thread.fork` with `sideChat`). The run store
+   * keeps it as a `fork`; only the thread record says `side`. No list shows it: only its parent's Side chats panel does.
    */
-  relationship: 'subagent' | 'native'
+  relationship: 'subagent' | 'native' | 'side'
 }
 
 /** The runtimes whose own helpers Mousse mirrors as threads. */

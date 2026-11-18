@@ -102,7 +102,11 @@ it.each(['question answer', 'note and answer'] as const)('N3 a live wait plus a 
 
 
 it.each([false, true].flatMap(hasWaited => [
+  'Not sent: three requests for this tool already wait for your owner. Say in your report what you would have sent; do not ask again until one is answered.',
+  'Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.',
   'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.',
+  'An identical call is already waiting for your owner on an earlier card. If your owner sends that card, the call goes out once. Say that in your report; do not say it was not sent. Do not ask again.',
+  'Your owner removed this request. Do not ask for it again unless they write.',
   'Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.'
 ].map(refusal => ({ hasWaited, refusal }))))('refusal joins ordered updates with wait history=$hasWaited: $refusal', ({ hasWaited, refusal }) => {
   const input = matrixInput('turn cap', 'note and answer', hasWaited)

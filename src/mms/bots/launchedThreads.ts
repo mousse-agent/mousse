@@ -4,7 +4,9 @@ import type { EffectRecord, RunRecord, ThreadEvent } from '../run/types'
 import type { RunEngine } from '../run/RunEngine'
 import { subagentDescendantsIn } from '../../shared/threadLineage'
 import { listPendingQueue } from '../queue/ThreadMessageQueue'
-import type { QueuedMessage, ThreadLineage } from '../../shared/types'
+import type { ChatMessage, PendingUserQuestions, QueuedMessage, ThreadLineage } from '../../shared/types'
+import { withoutStandingRules } from '../orchestrator/UserQuestionService'
+import type { BotThreadAsk } from '../../shared/bots/personal/jobs'
 import type { JobThreadView } from './jobs'
 
 /** What the launched-thread lookup reads of a thread: its title, project, times and the thread that started it. */
@@ -59,7 +61,8 @@ export type RunStanding = 'goes' | 'waits' | 'held' | 'never'
  * below it moves until a person continues it (`on_hold`, `RunStanding` `held`): a pause only Resume now ends, messages
  * a Stop held, or a queue stopped at a message whose turn could not start (workspace recovery); or, with nothing going, it never ran (`idle`) or its last run finished (`done`), failed or was stopped
  * (`compareLaunched`). Those that work come first (oldest first), then those that wait on the owner (on hold too), then
- * idle ones, then ended ones (most recently updated first); of those not going, at most `BOT_LAUNCHED_ENDED_SHOWN`.
+ * idle ones, then ended ones (most recently updated first); of those not going, at most `BOT_LAUNCHED_ENDED_SHOWN`, and
+ * with `doneSince` (the bot's "Recent" list) only those not archived and updated at or after it (`BOT_LAUNCHED_RECENT_MS`).
  * `activeRuns`: the profile's runs not ended; `lastRun`: a thread's newest run; `standing`: how a run of a thread the bot
  * started, or of a subagent below one, stands (`runStanding`). A run nothing will start does not make its thread go, a
  * run waiting in the queue behind a run only a person moves on is on hold with it, and an archived thread (or subagent)
@@ -74,6 +77,8 @@ export function launchedThreadsOf(input: {
   asks(threadId: string): boolean
   standing(run: RunRecord): RunStanding
   projectName?(projectId: string): string | undefined
+  /** An ISO time: of the threads not going, only those not archived and updated since then are listed. Absent: every one. */
+  doneSince?: string
 }): BotLaunchedThread[] {
   if (!input.creators.size) return []
   const mine = input.threads.filter((thread) => thread.createdByThreadId !== undefined && input.creators.has(thread.createdByThreadId))
@@ -104,7 +109,9 @@ export function launchedThreadsOf(input: {
   const going = mine.filter(goes)
   // Of the rest only the most recently updated are shown: their runs are read, never every thread the bot ever started.
   const goingIds = new Set(going.map((thread) => thread.id))
-  const rest = mine.filter((thread) => !goingIds.has(thread.id))
+  const since = input.doneSince
+  const done = (thread: LaunchedThreadMeta) => since === undefined || (!thread.settledAt && (thread.updatedAt ?? thread.createdAt ?? '') >= since)
+  const rest = mine.filter((thread) => !goingIds.has(thread.id) && done(thread))
     .sort((a, b) => (b.updatedAt ?? b.createdAt ?? '').localeCompare(a.updatedAt ?? a.createdAt ?? ''))
     .slice(0, BOT_LAUNCHED_ENDED_SHOWN)
   const launched = [...going, ...rest].map((thread): BotLaunchedThread => {
@@ -185,7 +192,7 @@ export function launchedThreadsIn(profile: {
   engine: Pick<RunEngine, 'store' | 'outbox' | 'remoteSubagents'>
   asks(threadId: string): boolean
   projectName?(projectId: string): string | undefined
-}, creators: ReadonlySet<string>): BotLaunchedThread[] {
+}, creators: ReadonlySet<string>, options: { doneSince?: string } = {}): BotLaunchedThread[] {
   if (!creators.size) return []
   const queues = new Map<string, readonly QueuedMessage[]>()
   const queue = (threadId: string): readonly QueuedMessage[] => {
@@ -208,18 +215,44 @@ export function launchedThreadsIn(profile: {
     lastRun: (id) => profile.engine.store.listRuns(id, { limit: 1 })[0],
     asks: profile.asks,
     standing: (run) => runStanding(profile.engine, run, queue),
-    ...(profile.projectName ? { projectName: profile.projectName } : {})
+    ...(profile.projectName ? { projectName: profile.projectName } : {}),
+    ...(options.doneSince ? { doneSince: options.doneSince } : {})
   })
 }
 
 /**
+ * The reply a thread's turn ended on: its last message to or from the person, when that is the agent's text; undefined
+ * when the turn ended without one (the person's message is the last).
+ */
+export function lastReplyOf(messages: readonly ChatMessage[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!
+    if (message.role === 'user') return undefined
+    if (message.role === 'assistant' && typeof message.content === 'string' && message.content.trim()) return message.content
+  }
+  return undefined
+}
+
+/** A request the thread waits on, as its job view lists it: an approval without the "Always" option, which is the owner's. */
+function threadAsk(pending: PendingUserQuestions): BotThreadAsk {
+  const entry = withoutStandingRules(pending)
+  return {
+    requestId: entry.requestId,
+    approval: entry.approval !== undefined,
+    questions: entry.questions.map((question) => ({ id: question.id, text: question.prompt, options: question.options.map((option) => ({ id: option.id, label: option.label })) }))
+  }
+}
+
+/**
  * One thread a bot handed a job to, as the ledger reads it (`JobThreadView`): how it stands, by the same rules as the
- * bot's list (`launchedThreadsOf`, its subagents rolled up), its title, and its last run's answer (`result`) once its
- * turn ended. `gone` when the thread no longer exists (deleted, or in the trash: `trashed`).
+ * bot's list (`launchedThreadsOf`, its subagents rolled up), its title, its last run's answer (`result`) once its turn
+ * ended, and what it waits on (`asks`). `gone` when the thread no longer exists (deleted, or in the trash: `trashed`).
  */
 export function jobThreadIn(profile: Parameters<typeof launchedThreadsIn>[0] & {
   trashed?(threadId: string): boolean
   result?(threadId: string, runId: string): string | undefined
+  /** The thread's own requests it waits on (not its subagents'): `UserQuestionService.listPendingForThread`. */
+  pending?(threadId: string): ReadonlyArray<PendingUserQuestions & { threadId: string }>
 }, threadId: string): JobThreadView {
   const all = profile.threads.listAllThreads()
   const thread = all.find((candidate) => candidate.id === threadId)
@@ -234,7 +267,8 @@ export function jobThreadIn(profile: Parameters<typeof launchedThreadsIn>[0] & {
   const ended = listed.status === 'done' || listed.status === 'failed' || listed.status === 'stopped'
   const run = ended ? profile.engine.store.listRuns(threadId, { limit: 1 })[0] : undefined
   const result = run ? profile.result?.(threadId, run.runId) : undefined
-  return { status: listed.status, ...(title ? { title } : {}), ...(result?.trim() ? { result } : {}) }
+  const asks = listed.status === 'needs_input' ? profile.pending?.(threadId).map(threadAsk) : undefined
+  return { status: listed.status, ...(title ? { title } : {}), ...(result?.trim() ? { result } : {}), ...(asks?.length ? { asks } : {}) }
 }
 
 /**

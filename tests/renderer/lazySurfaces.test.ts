@@ -61,6 +61,7 @@ vi.mock('../../src/renderer/components/BrowserPanel', () => ({ BrowserPanel: stu
 vi.mock('../../src/renderer/components/changes/ChangesPanel', () => ({ ChangesPanel: stub('changes') }))
 vi.mock('../../src/renderer/components/PullRequestPanel', () => ({ PullRequestPanel: stub('pull-request') }))
 vi.mock('../../src/renderer/components/DocumentPanel', () => ({ DocumentPanel: stub('documents') }))
+vi.mock('../../src/renderer/components/sideChats/SideChatsPanel', () => ({ SideChatsPanel: stub('side-chats') }))
 
 /** Every bridge call stays pending and every subscription returns a no-op unsubscribe. */
 function pendingBridge(): unknown {
@@ -129,7 +130,7 @@ describe('split-out surfaces', () => {
   it('each resolves to the component it names', async () => {
     const lazy = [surfaces.SettingsPage, surfaces.AutomationsPage, surfaces.SubscriptionUsagePage, surfaces.ChatWorkspace,
       surfaces.NewBotDialogHost, surfaces.FilesPanel, surfaces.ProjectTerminalPanel, surfaces.BrowserPanel,
-      surfaces.ChangesPanel, surfaces.PullRequestPanel, surfaces.DocumentPanel]
+      surfaces.ChangesPanel, surfaces.PullRequestPanel, surfaces.DocumentPanel, surfaces.SideChatsPanel]
     for (const component of lazy) {
       const loaded = await component.preload() as Record<string, unknown>
       expect(Object.values(loaded).some((value) => typeof value === 'function')).toBe(true)

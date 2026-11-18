@@ -6,6 +6,7 @@ import { useAppStore } from '../../stores/appStore'
 import { useChatsStore } from '../../stores/chatsStore'
 import { botFaceState, useBotsPolling, useBotsStore } from '../../stores/botsStore'
 import { BotFace } from '../bots/face/BotFace'
+import { BotHoverCard } from '../bots/BotHoverCard'
 import { botRowLine } from '../bots/botChatShape'
 import { formatMessageTime } from '../../chat/components/agent-elements/utils/message-time'
 import { Collapse } from '../ui/Collapse'
@@ -104,7 +105,7 @@ export function ChatsSidebar() {
     <section aria-label="Bots"><SectionHeading title="Bots" open={botsOpen} onToggle={toggleBots}><button aria-label="New bot" title="New bot" onClick={newBot}><Plus size={15} /></button></SectionHeading>
       <Collapse open={botsOpen} itemCount={shownBots.length}>
         {bots.length
-          ? <div className="bot-list">{shownBots.map((bot) => <BotRow key={bot.id} bot={bot} active={bot.id === activeBotId} happyUntil={happy[bot.id]} onOpen={() => void openBot(bot.id)} />)}</div>
+          ? <div className="bot-list">{shownBots.map((bot) => <BotHoverCard key={bot.id} bot={bot}><BotRow bot={bot} active={bot.id === activeBotId} happyUntil={happy[bot.id]} onOpen={() => void openBot(bot.id)} /></BotHoverCard>)}</div>
           : <p className="chat-empty-hint">No bots yet. Press + to make one.</p>}
       </Collapse>
     </section>
