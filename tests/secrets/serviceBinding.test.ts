@@ -153,13 +153,14 @@ it.each(['store', 'grant', 'markUsed', 'delete', 'sweep'] as const)('keeps bindi
   expect(restarted.maskerFor('bot')!(VALUE)).not.toContain(VALUE)
   requests.dispose()
 })
-it.each(['missing', 'invalid JSON', 'invalid entry'] as const)('fails closed with %s bindings without breaking an unbound key', state => {
+it.each(['valid', 'missing', 'unreadable', 'invalid JSON', 'invalid entry'] as const)('keeps bound keys closed with %s bindings without breaking an unbound key', async state => {
   const {home, vault, requests} = fixture()
   vault.store('BOUND', VALUE, {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
   vault.store('PLAIN', 'plain-value', {threadId: 'bot', keep: 'saved'})
   const path = join(home, 'secrets/bindings.json')
   if (state === 'missing') rmSync(path, {force: true})
-  else writeFileSync(path, state === 'invalid JSON' ? '{' : '{"BOUND":{"origin":5}}')
+  else if (state === 'unreadable') { rmSync(path); mkdirSync(path) }
+  else if (state !== 'valid') writeFileSync(path, state === 'invalid JSON' ? '{' : '{"BOUND":{"origin":5}}')
   const copy = join(home, 'secrets/threads/bot/BOUND')
   mkdirSync(join(home, 'secrets/threads/bot'), {recursive: true}); writeFileSync(copy, VALUE)
   const restarted = new SecretVault({profileRoot: home, threadAlive: () => true})
@@ -169,6 +170,8 @@ it.each(['missing', 'invalid JSON', 'invalid entry'] as const)('fails closed wit
   const adapter = createProfileSecretAdapter({profileRoot: home, inheritProcessEnv: false})
   expect(() => adapter.resolveEnv('${secret:BOUND}')).toThrow(/bound/)
   expect(adapter.resolveEnv('${secret:PLAIN}')).toBe('plain-value')
+  const host = createSecretToolHost({vault: restarted, requests, scratchRoot: home})
+  await expect(host.run({threadId: 'bot', cwd: home, command: 'echo forbidden', secrets: [{name: 'BOUND'}], timeoutMs: 1000, signal: new AbortController().signal})).rejects.toThrow(/bound/)
   writeFileSync(join(home, 'secrets/meta.json'), '{')
   expect(adapter.resolveEnv('${secret:PLAIN}')).toBe('plain-value')
   requests.dispose()

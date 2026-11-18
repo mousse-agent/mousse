@@ -1,4 +1,4 @@
-// Historical reader from v0.1.3 (unknown metadata fields are ignored).
+// v0.1.3 metadata reader and writer bodies; copy/mask notifications are no-ops in this fixture.
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../../src/mms/data/AtomicFs'
