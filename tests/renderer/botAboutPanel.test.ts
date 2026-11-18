@@ -448,7 +448,7 @@ it('formats stored telling hours in the window’s clock format', async () => {
 })
 
 it.each([true, false])('keeps whole-service controls with asks-first projection %s', async (asking) => {
-  fake.details.b1.permissions = [{ id: 'mail', title: 'use Mail', enabled: true, grantedAt: AT, note: asking ? 'Asks first holds this bot’s own tool calls. What it does through threads, commands or secrets you gave it does not wait for a card.' : 'Use the connected Mail service.', ...(asking ? { mark: 'Asks first' } : {}) }]
+  fake.details.b1.permissions = [{ id: 'mail', title: 'use Mail', enabled: true, grantedAt: AT, note: asking ? 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.' : 'Use the connected Mail service.', ...(asking ? { mark: 'Asks first' } : {}) }]
   await show()
   expect(host.textContent?.includes('Asks first')).toBe(asking)
   const title = [...host.querySelectorAll('span')].find((item) => item.title.includes(asking ? 'Asks first holds' : 'connected Mail'))
@@ -465,7 +465,7 @@ it.each([true, false])('keeps whole-service controls with asks-first projection 
 
 it('keeps chat usage and the service asks-first row together with whole-service controls', async () => {
   fake.details.b1 = { ...fake.details.b1, usage: { turns: 12, inputPerTurn: 18_400, outputPerTurn: 640, cachedShare: 0.72 }, permissions: [{
-    id: 'mail', title: 'use your Mail tools', note: 'Asks first holds this bot’s own tool calls. What it does through threads, commands or secrets you gave it does not wait for a card.', enabled: true, mark: 'Asks first', asksFirst: true, grantedAt: AT
+    id: 'mail', title: 'use your Mail tools', note: 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.', enabled: true, mark: 'Asks first', asksFirst: true, grantedAt: AT
   }] }
   await show()
   const usage = () => host.querySelector<HTMLElement>('[data-testid="bot-about-usage"]')!
