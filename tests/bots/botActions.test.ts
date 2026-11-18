@@ -378,8 +378,8 @@ it('a catalogue turn still refuses a tool it was not offered through use_tool', 
   expect(result).toEqual(refused('unknown_tool', 'You have no tool named mail_other. tool_catalogue lists each group\'s tools.'))
   expect(t.calls).toEqual([])
 })
-async function scheduledCall(on = true, minutes = 5, untilMinutes?: number) {
-  const t = await setup(on, false, false, true)
+async function scheduledCall(on = true, minutes = 5, untilMinutes?: number, toolName = 'send', unstamped = false) {
+  const t = await setup(on, false, false, true, false, false, toolName, undefined, unstamped)
   await finish(f, t.work.payload)
   const at = untilMinutes === undefined ? undefined : new Date(f.clock.now + untilMinutes * 60_000)
   const until = at ? `${at.getFullYear()}-${String(at.getMonth()+1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}T${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` : undefined
@@ -388,7 +388,7 @@ async function scheduledCall(on = true, minutes = 5, untilMinutes?: number) {
   const due = await f.tickSchedules(new Date(f.clock.now))
   const id = due.inserted[0]!
   const run = await start(f, id)
-  const call = (args = t.args) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
+  const call = (args = t.args) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: `Mail__${toolName}`, args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
   return { ...t, schedule, id, run, call }
 }
 it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route => ({ on, route }))))('a scheduled $route call holds once and fences every later tool with asks first $on', async ({ on, route }) => {
@@ -3743,4 +3743,27 @@ it('Send refuses a bounded re-list that does not finish, keeping the card open',
     expect(f.bots.actions.get(a.id)?.status).toBe('open')
     expect(t.calls).toEqual([])
   } finally { vi.useRealTimers() }
+})
+
+it('Not now on a fixed-text minute schedule allows a fresh card next occurrence', async () => {
+  const t = await scheduledCall(true, 1)
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
+  const resumed = await start(f, t.id, 2); await finish(f, resumed.payload)
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const id = due.inserted[0]!, turn = await start(f, id)
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'next-occurrence', signal: new AbortController().signal })
+  expect(result.isError).not.toBe(true)
+  expect(f.bots.actions.forWork(id)?.status).toBe('open')
+  expect(f.bots.actions.forWork(id)?.id).not.toBe(a.id)
+  expect(t.calls).toEqual([])
+})
+it.each(['work', 'schedule'].flatMap(lane => ['get_items', 'get_and_send'].map(tool => ({ lane, tool }))))('no-hint $tool in $lane uses the name rule', async ({ lane, tool }) => {
+  const t = lane === 'schedule' ? await scheduledCall(true, 1, undefined, tool, true) : await setup(true, false, false, false, false, false, tool, undefined, true)
+  await t.call()
+  const id = 'id' in t ? t.id : t.workId
+  expect(f.bots.actions.forWork(id)?.status).toBe(tool === 'get_items' ? undefined : 'open')
+  expect(t.calls).toEqual(tool === 'get_items' ? [t.args] : [])
 })
