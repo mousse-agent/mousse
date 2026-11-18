@@ -85,7 +85,7 @@ it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reaso
   if (input.notes) expect(prompt.split(NOTE)).toHaveLength(2)
   if (input.answered) expect(prompt.split(ANSWER)).toHaveLength(2)
   for (const answer of input.answers) expect(prompt.split(answer.status === 'denied' ? 'The owner wrote instead of answering' : 'The owner allowed: run commands.')).toHaveLength(2)
-  if (cause) expect(prompt.startsWith(`[Mousse] ${line}`)).toBe(true)
+  if (cause) expect(prompt.startsWith(`[Mousse] ${status === 'declined' ? 'Your owner chose Not now; nothing was sent. Carry on without it and say what you skipped.' : line}`)).toBe(true)
   else if (input.notes) expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(actionText))
   expect(prompt).not.toContain('Continue where you left off. Continue.')
 })
@@ -150,7 +150,7 @@ it.each(actionLines)('schedule stored outcome %s shares the ordered continuation
   await f.bots.maintain(new Date(f.clock.now)); await flush()
   const prompt = f.store.lastMainDispatch(id)!.prompt
   expect(prompt.workActionIds).toEqual([action.id])
-  expect(prompt.text.split(line)).toHaveLength(2)
+  expect(prompt.text.split(status === 'declined' ? 'Your owner chose Not now; nothing was sent. Carry on without it and say what you skipped.' : line)).toHaveLength(2)
   expect(prompt.text).toContain('<mousse_notice kind="bot_action"')
   const resumed = await start(f, id, 2)
   await finish(f, resumed.payload)

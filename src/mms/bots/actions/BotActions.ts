@@ -191,7 +191,7 @@ export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_js
   const card = JSON.parse(action.card_json ?? '{}')
   if (result?.notSentInTime) return `${result.text} Nothing left Mousse. Decide whether a new request is needed.`
   const line = action.status === 'done' ? forgotten ? 'Your owner sent it.' : 'Your owner sent it. The tool answered:'
-    : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
+    : action.status === 'declined' ? 'Your owner chose Not now; nothing was sent. Carry on without it and say what you skipped.'
       : action.status === 'expired' ? 'This expired, so nothing was sent.'
       : action.status === 'uncertain' ? 'It could not be confirmed whether this went through: check before trying again.'
         : result?.toolReportedError || card.toolReportedError ? 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'
@@ -361,7 +361,7 @@ export class BotActions {
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
     const refused = unanswered.find(action => action.args_digest === digest && (row.trigger.kind !== 'schedule' || action.activation_id === row.id))
     if (refused)
-      return this.refuse(row, refused, refused.status === 'expired' ? 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' : 'Your owner chose Not now for this same request. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
+      return this.refuse(row, refused, refused.status === 'expired' ? 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' : 'Your owner chose Not now; nothing was sent. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
@@ -491,7 +491,7 @@ export class BotActions {
     const action = this.checked(input, true)
     if (input.answer === 'not_now') {
       this.host.store.db.transaction(() => {
-        if (!this.transition(action.id, 'open', 'declined', { text: 'Your owner chose not to send this: carry on without it and say what you skipped.' })) throw changed()
+        if (!this.transition(action.id, 'open', 'declined', { text: 'Your owner chose Not now; nothing was sent. Carry on without it and say what you skipped.' })) throw changed()
         this.host.ownerAnswered(this.host.store.activation(action.activation_id)!)
       })
       this.finish(action)

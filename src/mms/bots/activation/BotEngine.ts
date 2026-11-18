@@ -925,10 +925,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** An unchanged schedule that previously tried a call still needs it after Not now. */
   private scheduledCallNotSent(row: BotActivationRow): boolean {
     if (!botAsksFirst(this.host.settings?.get()) || row.trigger.kind !== 'schedule') return false
-    const revision = this.host.schedules?.get(row.botId, row.trigger.scheduleId)?.revision
+    const scheduleId = row.trigger.scheduleId
+    const revision = this.host.schedules?.get(row.botId, scheduleId)?.revision
     if (!revision) return false
     const ordinal = this.store.get('SELECT rowid AS n FROM bot_activations WHERE id = ?', row.id)?.n
-    const previous = this.store.all('SELECT id FROM bot_activations WHERE bot_id = ? AND rowid < ? ORDER BY rowid DESC', row.botId, Number(ordinal)).map(r => this.store.activation(String(r.id))).find(r => r?.trigger.kind === 'schedule' && r.trigger.scheduleId === row.trigger.scheduleId)
+    const previous = this.store.all('SELECT id FROM bot_activations WHERE bot_id = ? AND rowid < ? ORDER BY rowid DESC', row.botId, Number(ordinal)).map(r => this.store.activation(String(r.id))).find(r => r?.trigger.kind === 'schedule' && r.trigger.scheduleId === scheduleId)
     if (!previous) return false
     return this.store.all("SELECT rowid AS n, target_json, args_digest, binding_json FROM bot_actions WHERE activation_id = ? AND status = 'declined' AND args_digest != '[forgotten]'", previous.id).some(action => {
       if (JSON.parse(String(action.binding_json)).scheduleRevision !== revision) return false
