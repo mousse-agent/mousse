@@ -3137,7 +3137,7 @@ it.each(['none', 'open', 'approved', 'running'] as const)('C9 startup warms tool
   const warm = vi.spyOn(t.mcp, 'warm')
   f.bots.close(); f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup()
-  expect(warm).toHaveBeenCalledTimes(state === 'approved' || state === 'running' ? 1 : 0)
+  expect(warm).toHaveBeenCalledTimes(state === 'open' || state === 'approved' || state === 'running' ? 1 : 0)
 })
 it('C9 a failed action startup reconciliation still reconciles other activations', async () => {
   const t = await setup(false)
