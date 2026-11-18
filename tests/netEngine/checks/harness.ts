@@ -6,7 +6,8 @@
  * failed step gives).
  *
  * The helper is the fake one of `../fakeHelper` on a fake network, or with `MOUSSE_NET_HELPER` set, that real
- * helper: each computer's endpoint in its profile, its key in a file, listening on loopback.
+ * helper: each computer's endpoint in its profile, its key in a file, listening on loopback, or on the address
+ * `MOUSSE_NET_ENGINE_HELPER_LISTEN_IP` names (a release helper dials private-range addresses only, never loopback).
  *
  * Computers pair as their windows pair them (§5.1): the owner's window shows an invitation, the caller's joins it
  * (`netEngine.join`), the owner's window says Yes, and the apps finish both directions themselves.
@@ -152,7 +153,7 @@ export class Fabric {
     const computer = {} as Computer
     if (REAL_HELPER) {
       process.env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY = '1'
-      process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP = '127.0.0.1'
+      process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= '127.0.0.1'
       mms.netEngine.launcher = async () => {
         const launched = await mms.netEngine.launchBuilt(
           computer.port === undefined ? {} : { port: computer.port }
@@ -169,7 +170,11 @@ export class Fabric {
         const exited = new Promise<{ code: number; signal: null; stderr: string }>((resolve) =>
           fake.pipe.onClose(() => resolve({ code: 0, signal: null, stderr: '' }))
         )
-        return { pipe: tapPipe(fake.pipe, () => endpoint, this.tap), exited, kill: () => fake.kill() }
+        return {
+          pipe: tapPipe(fake.pipe, () => endpoint, this.tap),
+          exited,
+          kill: () => fake.kill()
+        }
       }
     }
     mms.netEngine.displayName = `${name} computer`
@@ -343,7 +348,9 @@ async function running(mms: MousseMainService, before?: EngineHelper): Promise<E
     const status = mms.netEngine.helperStatus()
     engine = mms.netEngine.currentHelper()
     if (status.state !== 'running' || !engine || engine === before || !engine.info.identity)
-      throw new Error(`helper ${status.state}${'text' in status && status.text ? `: ${status.text}` : ''}`)
+      throw new Error(
+        `helper ${status.state}${'text' in status && status.text ? `: ${status.text}` : ''}`
+      )
   }, 30_000)
   return engine!
 }

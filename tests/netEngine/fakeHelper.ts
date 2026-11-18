@@ -66,6 +66,8 @@ interface Conn {
 
 export class FakeNetwork {
   private readonly helpers = new Map<string, FakeHelper>()
+  /** The addresses each identity's helper says it listens on (`hello`'s `routes`); none unless a test sets them. */
+  readonly routes = new Map<string, string[]>()
   /** For each host identity, the grant each caller identity holds there (the helper's numbers; tests may name one). */
   private readonly grants = new Map<string, Map<string, number | string>>()
   /** For each identity, the identities it may dial (its peers). */
@@ -535,7 +537,7 @@ export class FakeHelper {
           return reply({
             proto: [1, 0],
             identity: this.identity,
-            routes: [],
+            routes: this.network.routes.get(this.identity) ?? [],
             paused: this.paused ?? null
           })
         }
@@ -633,8 +635,15 @@ export class FakeHelper {
             this.event({ ev: 'grant.closed', grant: message.grant, connections: 0 })
           return
         }
-        case 'peer.add':
+        case 'peer.add': {
+          // As the helper: the whole list is refused for one address outside a private range.
+          const bad = ((message.routes as unknown[] | undefined) ?? [])
+            .map(String)
+            .find((route) => !fakePrivate(route))
+          if (bad)
+            return reply({ error: 'bad_route', reason: `${bad} is not a private-range address` })
           return reply({ already: this.network.peer(this.identity, String(message.identity)) })
+        }
         case 'peer.forget':
           return reply({ forgotten: this.network.forget(this.identity, String(message.identity)) })
         case 'join.cancel':
@@ -642,12 +651,7 @@ export class FakeHelper {
         case 'peer.addresses.set': {
           // As the helper: private ranges only (RFC 1918, link-local, ULA).
           const routes = (message.routes as unknown[]).map(String)
-          const bad = routes.find(
-            (route) =>
-              !/^tcp:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[f[cd])/i.test(
-                route
-              )
-          )
+          const bad = routes.find((route) => !fakePrivate(route))
           if (bad)
             return reply({ error: 'bad_route', reason: `${bad} is not a private-range address` })
           this.addresses.set(String(message.identity), routes)
@@ -679,4 +683,9 @@ export class FakeHelper {
       reply({ error: (error as { code?: string }).code ?? 'internal' })
     }
   }
+}
+
+/** As the helper reads a route: private ranges only (RFC 1918, link-local, ULA). */
+function fakePrivate(route: string): boolean {
+  return /^tcp:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[f[cd])/i.test(route)
 }

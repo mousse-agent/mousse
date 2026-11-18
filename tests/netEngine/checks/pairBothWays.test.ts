@@ -16,6 +16,7 @@ import {
   connectedBothWays,
   deviceState,
   Fabric,
+  REAL_HELPER,
   rowFor,
   step,
   type Computer
@@ -59,6 +60,21 @@ describe('phase1a.pair-both-ways', () => {
       expect(await grantHeld(caller, owner)).toBe(true)
     })
   }, 120_000)
+
+  // A real helper lists the addresses of the computer it runs on; this one has a tailnet's too.
+  it.skipIf(REAL_HELPER)(
+    'pairs both ways when the caller also listens on an address outside a private range',
+    async () => {
+      fabric.network.routes.set(Buffer.from('endpoint-tailnet-caller').toString('hex'), [
+        'tcp://100.89.27.27:52862',
+        'tcp://192.168.0.59:52862'
+      ])
+      const owner = await fabric.computer('tailnet-owner'),
+        caller = await fabric.computer('tailnet-caller')
+      await step('one_way_stuck', () => fabric.pair(owner, caller))
+    },
+    120_000
+  )
 
   it('pairs both ways again after the owner removed the caller', async () => {
     const owner = await fabric.computer('owner-again'),

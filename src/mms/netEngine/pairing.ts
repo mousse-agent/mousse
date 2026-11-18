@@ -6,6 +6,7 @@ import type { EngineCaller } from '../net/contracts'
 import { helperCode } from './helper/appChannel'
 import type { EngineHelper } from './helper/connections'
 import { engineControl, engineLimits } from './limits'
+import { privateRoute } from './routes'
 import type { EngineSessions } from './sessions'
 import type { EnginePeerRow, EnginePeerStore } from './store'
 import { pairingLink, readTicket } from './ticket'
@@ -371,7 +372,7 @@ export class EnginePairing {
 
   /**
    * `pairback` from the joiner (§5.1 step 5): the caller holds the grant this computer made (the session checked
-   * it); its addresses are recorded (private ranges only, the helper refuses others), this computer dials back, and
+   * it); its addresses in private ranges are recorded (the helper refuses others), this computer dials back, and
    * its own hello answering marks the pairing `connected`.
    */
   async pairback(caller: EngineCaller, request: { routes: string[] }): Promise<void> {
@@ -380,12 +381,19 @@ export class EnginePairing {
     if (!row) throw new NetError('forbidden')
     if (row.state === 'connected' && this.port.sessions.online(row.localId)) return
     this.at('pairback')
+    const add = (routes: string[]) =>
+      this.helper().request('peer.add', { identity: row.endpoint, name: row.name, routes })
     try {
-      await this.helper().request('peer.add', {
-        identity: row.endpoint,
-        name: row.name,
-        routes: request.routes
-      })
+      try {
+        await add(request.routes)
+      } catch (error) {
+        // The helper refuses the whole list for one address outside a private range (a tailnet's, say), which
+        // the other computer's helper lists too: the private ones are kept.
+        const usable = request.routes.filter(privateRoute)
+        if (helperCode(error) !== 'bad_route' || usable.length === request.routes.length)
+          throw error
+        await add(usable)
+      }
     } catch (error) {
       if (helperCode(error) === 'bad_route')
         throw new NetError('bad_request', 'Those addresses are not on a private network.', {
