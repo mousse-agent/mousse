@@ -8,6 +8,7 @@ export function secretForms(value: string): string[] {
   forms.add(base64)
   forms.add(base64.replace(/=+$/, ''))
   forms.add(encodeURIComponent(value))
+  forms.add(encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, hex => hex.toLowerCase()))
   forms.add(Buffer.from(value, 'utf8').toString('hex'))
   forms.add(Buffer.from(value, 'utf8').toString('hex').toUpperCase())
   return [...forms].filter((form) => form.length >= MIN_SECRET_VALUE_LENGTH).sort((a, b) => b.length - a.length)
@@ -40,13 +41,36 @@ function secretLines(value: string): string[] {
   return [...out]
 }
 
+/** Match character by character: encoders may escape any subset, not just the whole value.
+ * UTF-16 code units also cover JSON surrogate pairs. Include two enclosing JSON strings for stored tool history.
+ */
+function jsonEchoPattern(value: string): RegExp {
+  const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(value.split('').map(char => {
+    const forms = new Set([char, jsonEscaped(char)])
+    if (char === '/') forms.add('\\/')
+    const alternatives = new Set<string>()
+    for (const form of forms) {
+      let nested = form
+      for (let depth = 0; depth <= 2; depth++) { alternatives.add(literal(nested)); nested = jsonEscaped(nested) }
+    }
+    const hex = char.charCodeAt(0).toString(16).padStart(4, '0').replace(/[a-f]/g, h => `[${h}${h.toUpperCase()}]`)
+    for (const slashes of [1, 2, 4]) alternatives.add(literal('\\'.repeat(slashes) + 'u') + hex)
+    return `(?:${[...alternatives].join('|')})`
+  }).join(''), 'g')
+}
+
 /** A function that replaces every form of the given secrets in a text with `[secret NAME hidden]`; undefined when there is none. */
 export function secretMasker(secrets: ReadonlyArray<{ name: string; value: string }>): SecretMasker | undefined {
   const pairs = secrets.flatMap(({ name, value }) => [...secretForms(value), ...secretLines(value)].map((form) => ({ form, mask: secretMask(name) })))
   if (pairs.length === 0) return undefined
   pairs.sort((a, b) => b.form.length - a.form.length)
+  const echoes = secrets.flatMap(({ name, value }) => [value, ...secretLines(value)]
+    .filter(form => form.length >= MIN_SECRET_VALUE_LENGTH)
+    .map(form => ({ pattern: jsonEchoPattern(form), mask: secretMask(name) })))
   return (text) => {
     let out = text
+    for (const { pattern, mask } of echoes) out = out.replace(pattern, () => mask)
     for (const { form, mask } of pairs) {
       if (out.includes(form)) out = out.split(form).join(mask)
     }
