@@ -34,3 +34,40 @@ describe('public GET address boundary', () => {
     await expect(publicFetch(url)).rejects.toThrow()
   })
 })
+
+describe('public GET limits', () => {
+  function respond(status: number, headers: Record<string,string>, chunks: Buffer[] = []) {
+    vi.mocked(dns.lookup).mockResolvedValue([{address:'8.8.8.8',family:4}] as never)
+    vi.mocked(https.request).mockImplementation(((options: any, callback: any) => {
+      const req=new EventEmitter() as any
+      req.destroy=(error: Error) => req.emit('error',error)
+      req.end=()=> {const res=new EventEmitter() as any; res.statusCode=status; res.headers=headers; res.destroy=vi.fn(); callback(res); for(const chunk of chunks) res.emit('data',chunk); res.emit('end')}
+      return req
+    }) as any)
+  }
+  it('refuses redirects without requesting their target',async () => {
+    respond(302,{location:'http://127.0.0.1/private'})
+    await expect(publicFetch('https://example.com')).rejects.toThrow('it moved to 127.0.0.1')
+    expect(https.request).toHaveBeenCalledTimes(1)
+  })
+  it.each([401,404,500])('refuses status %s',async status=> {
+    respond(status,{}); await expect(publicFetch('https://example.com')).rejects.toThrow(`HTTP ${status}`)
+  })
+  it('refuses streamed bodies over 2 MiB even without Content-Length',async () => {
+    respond(200,{},[Buffer.alloc(2*1024*1024),Buffer.from('x')])
+    await expect(publicFetch('https://example.com')).rejects.toThrow('2 MiB')
+  })
+  it('accepts exactly 2 MiB',async () => {
+    respond(200,{},[Buffer.alloc(2*1024*1024)])
+    expect((await publicFetch('https://example.com')).body.length).toBe(2*1024*1024)
+  })
+  it('bounds DNS resolution itself to 15 seconds',async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(dns.lookup).mockImplementation(() => new Promise(()=>{}))
+      const result=expect(publicFetch('https://example.com')).rejects.toThrow('15 seconds')
+      await vi.advanceTimersByTimeAsync(15_000); await result
+    } finally {vi.useRealTimers()}
+  })
+  it.each(['2001:2::1','2001:20::1','3fff::1'])('refuses special IPv6 %s',address=>expect(isPublicAddress(address)).toBe(false))
+})
