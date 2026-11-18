@@ -351,3 +351,15 @@ it('a targeted refresh does not make other stale server listings fresh', async (
   await t.catalog.refresh()
   t.catalog.dispose()
 })
+
+it('timestamps only successful server answers, including targeted refreshes', async () => {
+  const t = setup()
+  await t.catalog.refresh()
+  expect(t.catalog.serverRefreshedAt('inst-echo')).toBe(1000)
+  t.advance(10_000)
+  await t.catalog.refreshServer('inst-echo')
+  expect(t.catalog.serverRefreshedAt('inst-echo')).toBe(11_000)
+  t.advance(10_000); t.state.failing.add('inst-echo')
+  await t.catalog.refreshServer('inst-echo')
+  expect(t.catalog.serverRefreshedAt('inst-echo')).toBe(11_000)
+})

@@ -3841,3 +3841,31 @@ it.each([false, undefined])('asks when the offered reading hint is taken away mi
   expect(t.calls).toEqual([])
   expect(f.bots.actions.forWork(t.workId)?.status).toBe('open')
 })
+
+it.each([0, 26_999, 27_001, 31_000])('Send with a slow listing uses only recent matching evidence, age=%s', async age => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const refreshedAt = Date.now() - age
+  Object.assign(t.catalog, { serverRefreshedAt: () => refreshedAt, refreshServer: () => new Promise<void>(() => {}) })
+  vi.useFakeTimers()
+  try {
+    const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+    const outcome = age <= 26_999 ? expect(sending).resolves.toBeDefined() : expect(sending).rejects.toMatchObject({ code: 'bot_action_unreachable' })
+    await vi.advanceTimersByTimeAsync(3001)
+    await outcome
+    expect(t.calls).toEqual(age <= 26_999 ? [t.args] : [])
+  } finally { vi.useRealTimers() }
+})
+it('a slow listing cannot reuse a recent hint that changed during the check', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  Object.assign(t.catalog, { serverRefreshedAt: () => Date.now(), refreshServer: () => { t.descriptor.readOnlyHint = true; return new Promise<void>(() => {}) } })
+  vi.useFakeTimers()
+  try {
+    const answer = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
+    await vi.advanceTimersByTimeAsync(3001); await answer
+    expect(t.calls).toEqual([])
+  } finally { vi.useRealTimers() }
+})
