@@ -74,7 +74,9 @@ export function pastedSecretShape(text: string): SecretShape | undefined {
       if (separator<0) continue
       let offset=separator
       while (offset>0 && /[A-Za-z0-9+.-]/.test(token[0][offset-1])) offset--
-      const raw=token[0].slice(offset).replace(/[),.;\]]+$/, '')
+      let end=token[0].length
+      while(end>offset && '),.;]'.includes(token[0][end-1])) end--
+      const raw=token[0].slice(offset,end)
       const name=urlName(raw)
       if (name) choose(token.index!+offset,token.index!+offset+raw.length,name)
     }
