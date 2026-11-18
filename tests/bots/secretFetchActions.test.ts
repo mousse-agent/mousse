@@ -21,3 +21,9 @@ it('refuses the 21st read per secret in a rolling hour and records failure',asyn
  expect((await run(21,'OTHER')).isError).not.toBe(true);expect(store.all('SELECT * FROM bot_actions')).toHaveLength(22)
 })
 it('enforces the per-bot daily cap across secrets',async()=>{const store=setup();for(let i=0;i<100;i++)await secretFetchAction(store,{botId:'b',activationId:'a',callKey:String(i),secret:String(i),service:'OpenAI',args:{},mask:s=>s},async()=>({text:'ok'}));expect((await secretFetchAction(store,{botId:'b',activationId:'a',callKey:'limit',secret:'new',service:'OpenAI',args:{},mask:s=>s},async()=>({text:'should not run'}))).isError).toBe(true)})
+it('shares the hourly allowance for one secret across bots',async()=>{
+ const store=setup();const run=(i:number,botId:string,secret='KEY')=>secretFetchAction(store,{botId,activationId:'a',callKey:String(i),secret,service:'OpenAI',args:{},mask:s=>s},async()=>({text:'ok'}))
+ for(let i=0;i<20;i++)await run(i,'first')
+ expect((await run(20,'second')).isError).toBe(true)
+ expect((await run(21,'second','OTHER')).isError).not.toBe(true)
+})
