@@ -314,7 +314,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
     const noticeTurns = (w: { adapter: { turns: Array<{ threadId: string; prompt: string }> }; parent: { id: string } }) =>
       w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith(RESULT_NOTICE))
 
-    it('a crash after the run ended but before its follow-up was queued: the rows are delivered again after restart, once', async () => {
+    it('a crash after the run ended but before the turn settled loses nothing: the follow-up was queued as the provider finished, and the result arrives once', async () => {
       const w = await held()
       // The run's terminal write comes first and the turn's settlement after it; the process dies in between.
       let statusAtSettlement = ''
@@ -324,15 +324,15 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       })
       await w.finish()
       expect(statusAtSettlement).toBe('completed')
-      expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: w.steer.effectId })
-      expect(noticeTurns(w)).toEqual([])
-      // Boot: the steer was never read and its run is over, so nothing carries the rows; they are pending again.
-      w.d.engine.store.db.transaction(() => recoverWakesOnBoot(w.d.engine.store, w.d.engine.outbox, new Date().toISOString()))
-      expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'pending', deliveredBy: null })
-      const wakeRunId = w.reconciler.runOnce().wakes.wakes[0]
-      await waitFor(() => w.d.engine.getRun(wakeRunId)?.status === 'completed', 'the wake')
+      // The unread steer was handed to its follow-up turn before the run's terminal write: the rows are its, not the steer's.
+      expect(w.d.engine.inbox.get(w.row.inboxId)!.deliveredBy).not.toBe(w.steer.effectId)
+      await waitFor(() => w.d.engine.inbox.get(w.row.inboxId)!.status === 'acknowledged', 'the follow-up to deliver the result')
       expect(noticeTurns(w)).toHaveLength(1)
-      expect(w.d.engine.inbox.get(w.row.inboxId)!.status).toBe('acknowledged')
+      // Boot finds nothing to deliver again.
+      w.d.engine.store.db.transaction(() => recoverWakesOnBoot(w.d.engine.store, w.d.engine.outbox, new Date().toISOString()))
+      expect(w.reconciler.runOnce().wakes.wakes).toEqual([])
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(noticeTurns(w)).toHaveLength(1)
       expect(w.d.engine.delegations.get(w.out.first.delegationId)!.status).toBe('acknowledged')
     })
 
