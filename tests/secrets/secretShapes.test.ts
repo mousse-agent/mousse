@@ -80,3 +80,10 @@ it.each(['#access_token=','?X-Amz-Signature=','?X-Goog-Signature='])('keeps the 
  const text='https://example.com/path'+part+'aB3dE5fG7hI9jK1mN2pQ4rS6tU8vW0xY'
  expect(pastedSecretShape(text)).toEqual({start:0,end:text.length,name:'API_KEY'})
 })
+
+it('scales the long URL token walk across two sizes',()=>{
+ const measure=(n:number)=>{const text='https://example.com/'+'.'.repeat(n)+'x';const start=performance.now();for(let i=0;i<5;i++) pastedSecretShape(text);return performance.now()-start}
+ const small=measure(32000),large=measure(64000)
+ expect(large).toBeLessThan(1000)
+ expect(large).toBeLessThan(small*6+100)
+})

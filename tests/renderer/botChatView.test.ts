@@ -3215,12 +3215,21 @@ it('holds Send while a key is being kept and does not overwrite edits with a lat
   expect(fake.client.send).not.toHaveBeenCalled()
 })
 
-it('keeping an AWS pair never leaves its secret half in the composer or send', async () => {
+it.each([
+ 'Use AKIAIOSFODNN7EXAMPLE SECRET please',
+ 'Access key ID,Secret access key\nAKIAIOSFODNN7EXAMPLE,SECRET',
+ '{"AccessKeyId":"AKIAIOSFODNN7EXAMPLE","SecretAccessKey":"SECRET"}',
+ 'AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE"\nAWS_SECRET_ACCESS_KEY="SECRET"',
+ 'AWS Access Key ID [None]: AKIAIOSFODNN7EXAMPLE\nAWS Secret Access Key [None]: SECRET',
+ 'id is AKIAIOSFODNN7EXAMPLE and secret is SECRET',
+ 'SECRET  \n  AKIAIOSFODNN7EXAMPLE',
+ 'aws_secret_access_key = SECRET\nAKIAIOSFODNN7EXAMPLE'
+])('keeping an AWS format removes its secret and permits Send: %s', async format => {
   const secret='wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
   window.mousse.platformRequest={request:vi.fn(async()=>({name:'AWS_SECRET_ACCESS_KEY'}))} as never
   await open()
   const field=host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
-  await type(field, 'Use AKIAIOSFODNN7EXAMPLE '+secret+' please')
+  await type(field, format.replace(/(?<!_)SECRET(?!_)/,secret))
   await click(button('Keep as secret'))
   expect(field.value).toContain('AKIAIOSFODNN7EXAMPLE')
   expect(field.value).toContain('the secret AWS_SECRET_ACCESS_KEY')

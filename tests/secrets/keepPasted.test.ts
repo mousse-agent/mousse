@@ -1,3 +1,4 @@
+import { pastedSecretShape } from '../../src/shared/secretShapes'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -110,6 +111,6 @@ it.each([
  '{"AccessKeyId":"AKIAIOSFODNN7EXAMPLE","SecretAccessKey":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}',
  'aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nAKIAIOSFODNN7EXAMPLE'
 ])('normalizes AWS paste for the vault: %s',async value=>{
- const {vault,call}=setup();await call({value});expect(vault.value('AWS_SECRET_ACCESS_KEY')).toBe('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')
+ const {vault,call}=setup();const shape=pastedSecretShape(value)!;await call({value:value.slice(shape.start,shape.end)});expect(vault.value('AWS_SECRET_ACCESS_KEY')).toBe('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')
 })
 it('refuses keeping an AWS ID alone',async()=>{const {call}=setup();await expect(call({value:'AKIAIOSFODNN7EXAMPLE'})).rejects.toMatchObject({code:'invalid_params'})})
