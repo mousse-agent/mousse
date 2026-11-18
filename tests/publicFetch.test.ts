@@ -143,3 +143,13 @@ it.each([
 ])('does not diagnose a certificate from %s or its message', (code,message)=>{
  expect(pageFailureReason(Object.assign(new Error(message),{code}))).toBe('it could not be reached')
 })
+
+// Secret reads opt in; page checks retain their defaults above.
+it('returns redirects for secret HEAD reads with fixed headers and a port', async () => {
+ vi.mocked(dns.lookup).mockResolvedValue([{address:'8.8.8.8',family:4}] as never)
+ vi.mocked(https.request).mockImplementation(((options:any, callback:any)=>{
+  expect(options.method).toBe('HEAD'); expect(options.port).toBe('8443'); expect(options.headers.Authorization).toBe('Bearer private')
+  const req=new EventEmitter() as any; req.end=()=>{const res=new EventEmitter() as any;res.statusCode=302;res.headers={location:'/next'};callback(res);res.emit('end')};return req
+ }) as any)
+ expect((await publicFetch('https://example.com:8443/path',{method:'HEAD',headers:{Authorization:'Bearer private'},secretRead:true})).status).toBe(302)
+})
