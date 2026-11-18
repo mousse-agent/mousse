@@ -1,6 +1,6 @@
 import { secretMasker } from './secretMasking'
 import { randomUUID } from 'node:crypto'
-import { lstatSync, mkdirSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isKeyName } from '../../shared/automationKeys'
 import { pastedSecretShape } from '../../shared/secretShapes'
@@ -72,13 +72,19 @@ export function prepareSecretFetch(vault: SecretVault, input: SecretFetchInput):
     if (/json/i.test(type)) { try { const pretty = mask(JSON.stringify(JSON.parse(body), null, 2)); if (Buffer.byteLength(pretty) <= 65536) body = pretty } catch { /* Plain response. */ } }
     if (textual && Buffer.byteLength(body) <= 65536) return {text: `${prefix}\n\n${body}`}
     const folder = join(input.folder, 'fetches'); mkdirSync(folder, {recursive:true, mode:0o700})
-    if (!lstatSync(folder).isDirectory() || lstatSync(folder).isSymbolicLink()) return refuse('The fetch folder is unavailable.')
+    const directory = lstatSync(folder)
+    if (!directory.isDirectory() || directory.isSymbolicLink()) return refuse('The fetch folder is unavailable.')
     // Latin-1 is a reversible byte mapping. Supplement the home masker with the UTF-8
     // key's byte form so non-ASCII keys are hidden without decoding unrelated binary bytes.
     const byteMask = secretMasker([{name, value:Buffer.from(key).toString('latin1')}]) ?? ((s: string) => s)
     const bytes = textual ? Buffer.from(body) : Buffer.from(byteMask(mask(response.body.toString('latin1'))), 'latin1')
     const file = join(folder, randomUUID()); writeFileSync(file, bytes, {mode:0o600, flag:'wx'})
-    return {text:`${prefix}\nFile: ${file}`}
+    const older = readdirSync(folder).filter(name => join(folder, name) !== file).flatMap(name => {
+      const path = join(folder, name), stat = lstatSync(path)
+      return stat.isFile() && !stat.isSymbolicLink() ? [{path, modified:stat.mtimeMs}] : []
+    }).sort((a,b) => b.modified - a.modified)
+    for (const entry of older.slice(19)) unlinkSync(entry.path)
+    return {text:`${prefix}\nThis file lasts only for this work; save any needed result before the work ends.\nFile: ${file}`}
   } catch { return refuse('The service read could not finish. Check the service or try again later.') }
   }}
 }
