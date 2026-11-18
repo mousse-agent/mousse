@@ -18,7 +18,7 @@ it('lists a bound secret by service and removes it through the ordinary Settings
     expect(host.textContent).toContain('for OpenAI, read only')
     const button = host.querySelector<HTMLButtonElement>('button[aria-label="Remove KEY"]')!
     await act(async () => button.click())
-    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Confirm remove KEY"]')!.click())
+    await act(async () => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Confirm remove')!.click())
     expect(removed).toEqual(['KEY'])
     expect(host.textContent).not.toContain('for OpenAI, read only')
   } finally { act(() => root.unmount()); host.remove() }

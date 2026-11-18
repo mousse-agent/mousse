@@ -3380,11 +3380,11 @@ it.each([
   [{ host: 'api.example.com', readOnly: true }, 'api.example.com', true]
 ] as const)('names the service on a private bound card above the bot composer: %s', async (binding, name, warning) => {
   const calls: string[] = []
-  window.mousse.platformRequest.request = (async (method: string) => {
+  installPreload(fake, { platformRequest: { request: async (method: string) => {
     calls.push(method)
     if (method === 'secrets.requests.list') return { requests: [{ requestId: 'bound', threadId: 'home-key', label: 'API key', reason: 'Read updates', name: 'KEY', binding, savedExists: false }] }
     return {}
-  }) as never
+  } } })
   await open(summary('inbox', { name: 'Kai', homeThreadId: 'home-key' }))
   await settle()
   const card = host.querySelector('.bot-secret-requests .secret-request-card')!
