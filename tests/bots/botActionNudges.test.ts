@@ -169,7 +169,7 @@ it('uses legacy telling receipts and never schedules a second nudge before the f
   f.clock.now += HOUR
   await f.bots.deliverDueReminders()
   expect(t.nudges()).toHaveLength(1)
-  expect(f.bots.nextDueAt(t.botId)).toBe(t.action.expires_at)
+  expect(f.bots.nextDueAt(t.botId)).toBeUndefined()
   f.clock.now += 5 * 60_000
   const nudge = f.bots.chat.toMessage(f.store.message(`bm_${t.action.id}_n1`)!)
   f.bots.noteLegacyTelling({ botId: t.botId, message: nudge })

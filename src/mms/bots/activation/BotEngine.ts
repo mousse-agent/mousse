@@ -121,7 +121,7 @@ import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagent
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
-import { computeNextRun, isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
+import { isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
 import { tellMeNotifies } from '../../../shared/automations'
 import type { RunLevel } from '../../../shared/automationInbox'
 import { statusLineOf } from '../activity/statusLine'
@@ -642,14 +642,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A reminder's work starts automatically, rather than in an owner's chat turn.
       if (this.store.reminder(row.trigger.from)?.botId === row.botId) return 'unattended'
       return undefined
-    },
-    lifetime: row => {
-      if (row.trigger.kind !== 'schedule') return 48 * 3600_000
-      const schedule = this.host.schedules?.get(row.botId, row.trigger.scheduleId)
-      if (!schedule) return 3600_000
-      const at = new Date(row.trigger.occurrenceAt)
-      const next = computeNextRun(schedule.when, at.toISOString(), at)
-      return Math.max(3600_000, next ? Date.parse(next) - at.getTime() : 3600_000)
     },
     name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
@@ -9272,7 +9264,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** Durable nudge rows carry the count; telling receipts carry the clock, never executable arguments. */
   private actionNudgeFollowUps(botId?: string, now = this.now()): ActionNudgeFollowUp[] {
     if (!botAsksFirst(this.host.settings?.get())) return []
-    const rows = this.store.all(`SELECT a.id, a.bot_id, a.activation_id, a.message_id, a.expires_at FROM bot_actions a
+    const rows = this.store.all(`SELECT a.id, a.bot_id, a.activation_id, a.message_id FROM bot_actions a
       JOIN bot_registry b ON b.bot_id = a.bot_id JOIN bot_messages m ON m.id = a.message_id
       WHERE a.status = 'open' AND a.args_digest <> '[forgotten]' AND b.deleted_at IS NULL
       AND (? IS NULL OR a.bot_id = ?)`, botId ?? null, botId ?? null)
@@ -9290,7 +9282,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       let history = budgets.get(bot)
       if (!history) { history = this.nudgeTimes(bot, now); budgets.set(bot, history) }
       const at = this.followUpTime(bot, nudgeSlot(due, history))
-      if (!Number.isFinite(at) || at >= Date.parse(String(row.expires_at))) return []
+      if (!Number.isFinite(at)) return []
       return [{ id, actionId: id, botId: bot, activationId: String(row.activation_id), messageId, count: first ? 2 : 1, at }]
     })
   }

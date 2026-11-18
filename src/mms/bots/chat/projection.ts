@@ -722,7 +722,7 @@ export class BotChatProjection {
         if (where?.state === 'mcp_off') return { id, title, note: `MCP is turned off in Settings → Skills & MCP, so this gives nothing while it is. Turn it on there to use it again, or remove it.`, grantedAt, mark: 'MCP is off' }
         if (where?.state === 'changed') return { id, title, note: `${name} was changed since you allowed it (it runs from another address or command now), so this gives nothing until ${name} is allowed again. The bot asks when it needs it; you can also remove it.`, grantedAt, mark: 'Changed' }
         if (this.options.asksFirst?.() && manifest.mcp.some(tool => tool.serverId === permission.mcp.serverId && tool.level === 'asks_first'))
-          return { id, title, note: 'Asks you first before actions that can send or change things.', grantedAt, mark: 'Asks first', asksFirst: true }
+          return { id, title, note: 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.', grantedAt, mark: 'Asks first', asksFirst: true }
         const shown = tools.slice(0, 6).join(', ')
         const unusable = live?.unusable.length ? ` (${live.unusable.length} more of its tools can't be used by a bot)` : ''
         return { id, title, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}${unusable}`, grantedAt }
