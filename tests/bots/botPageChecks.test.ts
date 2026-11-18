@@ -1,3 +1,4 @@
+import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
 import type { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
 import { splitDataFrames } from '../../src/shared/bots/personal/dataFrames'
@@ -7,7 +8,7 @@ import { join } from 'node:path'
 import { PageChecks } from '../../src/mms/bots/pageChecks'
 import { writePageChange } from '../../src/mms/bots/pageChangeFiles'
 import * as fetcher from '../../src/mms/net-public/publicFetch'
-import { botFixture, createBot, T0, flush, runDispatch, type BotFixture } from './botFixture'
+import { botFixture, createBot, T0, flush, runDispatch, start, finish, type BotFixture } from './botFixture'
 let f: BotFixture, botId: string
 let body = 'old page'
 beforeEach(async () => {
@@ -291,4 +292,56 @@ it('startup removes a change file left before its activation transaction committ
   const file=writePageChange(root,'act_crash_before_commit','orphaned page')
   await f.bots.reconcileOnStartup()
   expect(existsSync(file)).toBe(false)
+  expect(existsSync(join(root,'act_crash_before_commit'))).toBe(false)
+  expect(existsSync(join(root,'act_crash_before_commit'))).toBe(false)
+})
+
+it.each(['removed','ended'])('a %s schedule keeps a running run file until its run ends',async how=>{
+  const entry=await add(); await check(5); body='changed'; await check(10)
+  const row=runs()[0]!,file=join(f.store.directory,'scratch',row.id,'page-change.txt')
+  const {payload}=await start(f,row.id)
+  if(how==='removed') f.scheduler.deleteJob(entry.jobId)
+  else {f.scheduler.updateJob(entry.jobId,{state:'completed',expiresAt:new Date(T0+11*60_000).toISOString()});await f.bots.maintain(new Date(T0+12*60_000))}
+  expect(existsSync(file)).toBe(true)
+  await finish(f,payload); expect(existsSync(file)).toBe(false)
+})
+it('ended schedules without watches do not scan activation history on later upkeep',async()=>{
+  const entry=await add(); f.scheduler.updateJob(entry.jobId,{state:'completed',expiresAt:new Date(T0).toISOString()})
+  await f.bots.maintain(new Date(T0+60_000))
+  const list=vi.spyOn(f.store,'listActivations')
+  await f.bots.maintain(new Date(T0+120_000))
+  expect(list).not.toHaveBeenCalled()
+})
+it('forget history with the real memory store keeps page watch settings and its quiet baseline',async()=>{
+  const entry=await add(); await check(5)
+  const saved=state(entry.scheduleId)!.value
+  new BotMemoryStore({db:f.store.db}).wipe(botId,true)
+  expect(state(entry.scheduleId)?.value).toBe(saved)
+  await check(10); expect(runs()).toEqual([])
+})
+it('a full queue does not consume a page change',async()=>{
+  const entry=await add(); await check(5)
+  const hash=JSON.parse(state(entry.scheduleId)!.value).handedHash
+  f.host.maxQueuedActivations=0; body='changed'; await check(10)
+  expect(JSON.parse(state(entry.scheduleId)!.value).handedHash).toBe(hash)
+  const cancelled=runs()[0]!
+  expect(existsSync(join(f.store.directory,'scratch',cancelled.id,'page-change.txt'))).toBe(false)
+  f.host.maxQueuedActivations=10; await check(15)
+  expect(runs().filter(r=>r.status!=='cancelled')).toHaveLength(1)
+})
+it.each([
+ ['The page response was interrupted.','the response was interrupted'],
+ ['getaddrinfo ENOTFOUND example.com','it could not be reached'],
+ ['connect ECONNREFUSED 93.184.216.34:443','it could not be reached'],
+ ['self-signed certificate',"its certificate isn't valid"],
+])('reports %s in plain words',async(error,clause)=>{
+ await add();vi.mocked(fetcher.publicFetch).mockRejectedValue(new Error(error))
+ for(let i=1;i<=6;i++) await check(i*5)
+ expect(f.store.messages(botId,{limit:100}).find(m=>m.text.includes("I can't read"))?.text).toBe(`I can't read example.com any more: ${clause}.`)
+})
+it.each(['webhook:delivery-1','event:2026-11-18T10:00:00.000Z=checks_passed'])('never replays non-time bot claim %s as nextRunAt',async key=>{
+ const entry=await add(), jobs=(f.scheduler as unknown as {store:ScheduledJobStore}).store
+ jobs.updateJob(entry.jobId,{state:'running',runClaim:{occurrenceKey:key,pid:2_147_000_090,processInstanceId:'dead',token:'dead',claimedAt:new Date(T0).toISOString(),heartbeatAt:new Date(T0).toISOString()}})
+ jobs.reconcileStaleRunningJobs(new Date(T0+60_000))
+ expect(jobs.getJob(entry.jobId)?.nextRunAt).not.toBe(key)
 })

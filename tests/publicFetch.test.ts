@@ -116,3 +116,17 @@ it('tries the next checked pinned address after a connection failure without res
   expect((await publicFetch('https://example.com')).body.toString()).toBe('ok')
   expect(connected).toEqual(['2606:4700::1111','8.8.8.8']); expect(dns.lookup).toHaveBeenCalledTimes(1)
 })
+
+it('reports the deadline reason when a connected request aborts',async()=>{
+ vi.useFakeTimers()
+ try {
+  vi.mocked(dns.lookup).mockResolvedValue([{address:'8.8.8.8',family:4}] as never)
+  vi.mocked(https.request).mockImplementation(((options:any)=>{
+   const req=new EventEmitter() as any; req.end=()=>{}
+   options.signal.addEventListener('abort',()=>req.emit('error',new Error('The operation was aborted')))
+   return req
+  }) as any)
+  const result=expect(publicFetch('https://example.com')).rejects.toThrow('15 seconds')
+  await vi.advanceTimersByTimeAsync(15_000);await result
+ } finally {vi.useRealTimers()}
+})
