@@ -895,14 +895,18 @@ export class BotChatService {
     const runs = this.store.all(
       "SELECT * FROM bot_activations WHERE bot_id = ? AND json_extract(trigger_json, '$.kind') = 'schedule' AND json_extract(trigger_json, '$.scheduleId') = ? ORDER BY created_at DESC, id DESC LIMIT ?",
       botId, scheduleId, runsPerSchedule
-    ).map((row) => ({
+    ).map((row) => {
+      // Send can be accepted while the activation still waits for its service.
+      const sending = row.end_reason === 'approval' && ['approved', 'running'].includes(this.engine.actions.forWork(String(row.id))?.status ?? '')
+      return {
       id: row.id as string,
       status: row.status as BotAutomationRunStatus,
       at: row.created_at as string,
       ...(typeof row.ended_at === 'string' ? { endedAt: row.ended_at } : {}),
-      ...(typeof row.end_reason === 'string' ? { endReason: row.end_reason } : {}),
+      ...(typeof row.end_reason === 'string' ? { endReason: sending ? 'approval_answered' : row.end_reason } : {}),
       ...(typeof row.thread_id === 'string' ? { threadId: row.thread_id } : {})
-    }))
+      }
+    })
     const ask = this.store.openAsks(botId).find((entry) => entry.messageId !== null && runs.some((run) => run.id === entry.activationId))
     return {
       botName: definition.name,

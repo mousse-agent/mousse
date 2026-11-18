@@ -110,7 +110,7 @@ function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> 
   const runs = facts.runs.map(run => {
     const held = run.status === 'blocked' && ['approval', 'approval_answered'].includes(run.endReason ?? '')
     if (!held) return botRun(run)
-    return { ...botRun({ ...run, status: 'running' }), detail: job.botSkip?.reason === 'bot_waiting_for_owner'
+    return { ...botRun({ ...run, status: 'running' }), detail: run.endReason === 'approval_answered' ? 'Carrying on with your answer' : job.botSkip?.reason === 'bot_waiting_for_owner'
       ? 'Later runs skipped: the bot is waiting for your answer'
       : run.endReason === 'approval' ? 'Waiting for your answer' : 'Carrying on with your answer' }
   })
