@@ -3849,7 +3849,8 @@ it.each([0, 26_999, 27_001, 31_000])('Send with a slow listing uses only recent 
   const a = f.bots.actions.forWork(t.workId)!
   vi.useFakeTimers()
   const refreshedAt = performance.now() - age
-  Object.assign(t.catalog, { serverRefreshedAt: () => refreshedAt, refreshServer: () => new Promise<void>(() => {}) })
+  const wallAt = Date.now() - age
+  Object.assign(t.catalog, { serverRefreshedAt: () => refreshedAt, serverRefreshedWallAt: () => wallAt, refreshServer: () => new Promise<void>(() => {}) })
   vi.useFakeTimers()
   try {
     const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
@@ -3942,6 +3943,7 @@ it.each(['none', 'different', 'same'])('only the first successor reports an uncl
     const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
     let turn = await start(f, id)
     if (n === 0 && retry !== 'none') {
+      expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe('fyi')
       await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: retry === 'same' ? t.args : { ...t.args, body: 'Another call' }, toolCallId: 'retry', signal: new AbortController().signal })
       await finish(f, turn.payload)
       const card = f.bots.actions.forWork(id)!
@@ -3988,6 +3990,9 @@ it.each([false, true])('scheduled decline lookup is bounded and reused, declined
   const all = vi.spyOn(f.store, 'all'), get = vi.spyOn(f.store, 'get')
   for (let n = 0; n < 3; n++) expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe(declined ? 'fyi' : 'quiet')
   expect(all.mock.calls.filter(([sql]) => /FROM bot_activations/i.test(sql))).toHaveLength(0)
+  const probes = get.mock.calls.filter(([sql]) => /SELECT a.id FROM bot_actions/i.test(sql))
+  expect(probes).toHaveLength(1)
+  expect(probes[0]![0]).toContain('INDEXED BY bot_actions_bot')
   const previous = get.mock.calls.filter(([sql]) => /SELECT id FROM bot_activations/i.test(sql))
   expect(previous).toHaveLength(declined ? 1 : 0)
   if (previous.length) expect(previous[0]![0]).toMatch(/json_extract.*scheduleId.*LIMIT 1/s)

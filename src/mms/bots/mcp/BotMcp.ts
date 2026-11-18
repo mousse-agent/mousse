@@ -114,7 +114,7 @@ export interface BotMcpHost {
 }
 
 export interface BotMcpDeps {
-  catalog: Pick<RelayCatalog, 'ensure' | 'servers' | 'listing'> & Partial<Pick<RelayCatalog, 'listed' | 'configured' | 'onPublished' | 'refreshServer' | 'serverRefreshedAt'>>
+  catalog: Pick<RelayCatalog, 'ensure' | 'servers' | 'listing'> & Partial<Pick<RelayCatalog, 'listed' | 'configured' | 'onPublished' | 'refreshServer' | 'serverRefreshedAt' | 'serverRefreshedWallAt'>>
   manager: { callTool(providerName: string, args: Record<string, unknown>, projectPath: string | undefined, signal: AbortSignal | undefined, actor: ReturnType<typeof defaultIntegrationActor>, expected: McpToolExecutionPin | undefined, options: McpCallOptions): Promise<McpToolCallResult> }
   /** MCP is on in Settings. */
   enabled(): boolean
@@ -255,8 +255,9 @@ export class BotMcp implements BotMcpHost {
       if (where?.state !== 'on' || where.server.failing || where.server.starting) return false
       if (done) return true
       const refreshedAt = this.deps.catalog.serverRefreshedAt?.(installationOf(serverId))
+      const wallAt = this.deps.catalog.serverRefreshedWallAt?.(installationOf(serverId))
       const current = where.server.tools.find(t => t.tool === toolName)
-      return Boolean(offered && current && current.readOnlyHint === hint && refreshedAt !== undefined && performance.now() - refreshedAt <= 30_000)
+      return Boolean(offered && current && current.readOnlyHint === hint && refreshedAt !== undefined && performance.now() - refreshedAt <= 30_000 && wallAt !== undefined && Date.now() - wallAt <= 30_000)
     } catch { return false }
     finally { clearTimeout(timer) }
   }

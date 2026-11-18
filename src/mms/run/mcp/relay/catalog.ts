@@ -29,7 +29,7 @@ export interface RelayCatalogDeps {
 /** One project scope's catalogue. */
 interface Scope {
   /** Each enabled installation's last good tools. */
-  serverTimes: Map<string, number>
+  serverTimes: Map<string, { monotonic: number; wall: number }>
   servers: Map<string, RelayServerTools>
   /** Installations whose last listing failed (their last good tools are kept). */
   failing: Set<string>
@@ -101,7 +101,12 @@ export class RelayCatalog {
 
   /** Last successful answer from this server, never the time a refresh merely started. */
   serverRefreshedAt(installationId: string, projectPath?: string): number | undefined {
-    return this.scopes.get(scopeKey(projectPath))?.serverTimes.get(installationId)
+    return this.scopes.get(scopeKey(projectPath))?.serverTimes.get(installationId)?.monotonic
+  }
+
+  /** Wall time accompanies monotonic time so sleep also ages Send evidence. */
+  serverRefreshedWallAt(installationId: string, projectPath?: string): number | undefined {
+    return this.scopes.get(scopeKey(projectPath))?.serverTimes.get(installationId)?.wall
   }
 
   /** Every configured installation of the scope, switched on or off, by its last read; empty while the scope is cold. */
@@ -289,7 +294,7 @@ export class RelayCatalog {
       if (eligible.length) {
         const heard = (entry: RelayServerTools): void => {
           answered.set(entry.installationId, entry)
-          if (!entry.error) scope.serverTimes.set(entry.installationId, this.monotonic())
+          if (!entry.error) scope.serverTimes.set(entry.installationId, { monotonic: this.monotonic(), wall: this.now() })
           if (entry.error) logWarn('McpRelay', `Listing MCP server "${entry.serverName}" failed; its last good tools are kept: ${redactSensitiveText(entry.error)}`)
         }
         try {
