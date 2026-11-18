@@ -42,7 +42,11 @@ export const MAX_EVENT_WAKE_HOURS = 7 * 24
 /** Most characters of the brief a bot writes for its wake. */
 export const MAX_WAKE_BRIEF_CHARS = 2_000
 
-/** The id of a wake's quiet line in the chat (`bm_wake_<wakeId>`): the chat shows it as a service line. */
+/**
+ * The id of the quiet line older versions posted in the chat for a wake-up or a thread's notice (`bm_wake_<wakeId>`,
+ * `bm_wake_job_…`). Only a thread's message still writes one, for its flood guard; the chat shows none of them
+ * (`BotStore`'s `SHOWN_MESSAGE`).
+ */
 export const WAKE_LINE_PREFIX = 'bm_wake_'
 
 /** How a watcher ended, in words: "exited with code 0", "printed a line that matched", "reached its time limit". */

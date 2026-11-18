@@ -1037,6 +1037,14 @@ describe('a reply as it is written', () => {
     await add({ id: 'u1', role: 'user', content: 'Compare the two drives.', timestamp: AT })
   }
 
+  it('shows nothing of a turn the chat does not show (a wake-up or a thread\'s notice): no typing, no streaming words', async () => {
+    await openWriting(summary('inbox', { name: 'Inbox helper', state: 'idle', homeThreadId: 'home1' }))
+    await write('Checking the job that just finished.\n\n')
+    expect(live()).toBeNull()
+    expect(transcript().querySelector('.bot-typing')).toBeNull()
+    expect(transcript().textContent).not.toContain('Checking the job')
+  })
+
   it('keeps a stored action card single while another chat reply streams and the card settles', async () => {
     await openWriting()
     await write('The comparison is ready.\n\n')

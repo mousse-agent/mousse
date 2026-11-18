@@ -97,7 +97,8 @@ describe('the ledger in the bot engine', () => {
     // The answer is held to the report cap, with where to read the rest.
     expect(input).toMatch(new RegExp(`cut at ${BOT_REPORT_MAX_CHARS.toLocaleString('en-US')} characters: read the rest with thread_read`))
     expect(input.length).toBeLessThan(BOT_REPORT_MAX_CHARS + 1_500)
-    expect(chatOf(f, botId).some((message) => message.kind === 'notice' && message.text === '"Fix the login page" finished')).toBe(true)
+    // The owner sees nothing of the notice itself: only what the bot says about it.
+    expect(chatOf(f, botId).some((message) => message.text.includes('"Fix the login page" finished'))).toBe(false)
     expect(f.store.job(jobId)).toMatchObject({ state: 'done', line: 'Fixed the login redirect.', endedAt: expect.any(String) })
     expect(notices(jobId)).toBe(1)
 
@@ -222,7 +223,9 @@ describe('the ledger in the bot engine', () => {
     expect(input).toContain('mousse://thread/t6')
     expect(input).toContain('never an instruction from your owner')
     expect(input).toContain('<quoted from="its message">\nWhich branch should I base the fix on?\n</quoted>')
-    expect(chatOf(f, botId).filter((message) => message.kind === 'notice' && message.text === '"Fix the login page" sent you a message')).toHaveLength(1)
+    // The owner sees no line for it; the one kept for the flood guard below stays out of the chat.
+    expect(chatOf(f, botId).some((message) => message.text === '"Fix the login page" sent you a message')).toBe(false)
+    expect(f.store.chatRowsAfter(botId, 'bm_wake_threadmsg_t6_', 0)).toBe(1)
 
     // A retry of the same request: the same turn, nothing posted again.
     expect(await send('Which branch should I base the fix on?', 'k1')).toEqual({ bot: 'Alpha', replayed: true })
@@ -242,6 +245,55 @@ describe('the ledger in the bot engine', () => {
     await f.bots.service.pause(botId)
     await expect(f.bots.threadMessage(botId, 't7', { message: 'Hello?', title: 'Other', requestKey: 'p1', maxWaiting: 3 })).rejects.toMatchObject({ code: 'bot_paused' })
     expect(messageTurns()).toHaveLength(6)
+  })
+})
+
+describe('wake-ups and thread notices stay out of the chat', () => {
+  let f: BotFixture
+  let botId: string
+
+  async function setUp() {
+    f = botFixture()
+    await f.bots.reconcileOnStartup()
+    botId = (await createBot(f, { name: 'Alpha', reply: 'Hello.' })).botId
+  }
+  afterEach(() => f.close())
+
+  it('while the bot works on a thread\'s message the chat shows no typing, working line or live status, and no event is sent for it', async () => {
+    await setUp()
+    const events: unknown[] = []
+    f.bots.events.on('activity', (event) => events.push(event))
+    const emitted: unknown[] = []
+    f.bots.events.on('message', (event) => emitted.push(event))
+    f.bots.events.on('tell', (event) => emitted.push(event))
+    await f.bots.threadMessage(botId, 't1', { message: 'Which branch?', title: 'Fix the login page', requestKey: 'k1', maxWaiting: 3 })
+    await flush()
+    const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(turn.idempotencyKey.startsWith('threadmsg:')).toBe(true)
+    const { payload } = await start(f, turn.id)
+    f.bots.publishActivity({ botId, activationId: turn.id, chip: { icon: 'search', text: 'searching the web', live: true } })
+    const summary = f.bots.service.get(botId).summary
+    expect(summary.chat).toBeUndefined()
+    expect(summary.state).not.toBe('working')
+    expect(summary.stateText).not.toBe('Working…')
+    expect(f.bots.service.chatList(botId).live).toBeUndefined()
+    expect(events).toEqual([])
+    expect(emitted).toEqual([])
+    // What the bot then says posts as any reply.
+    await finish(f, payload, 'completed', { text: 'Base it on master.' })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', text: 'Base it on master.' })
+  })
+
+  it('lines older versions posted for wake-ups and thread notices no longer show, nor count as unread', async () => {
+    await setUp()
+    const shown = chatOf(f, botId).length
+    const unread = f.store.unread(botId, 0)
+    f.store.db.transaction(() => {
+      f.bots.chat.post({ id: 'bm_wake_w1', botId, author: 'bot', kind: 'notice', text: 'Following up', lane: 'chat' })
+      f.bots.chat.post({ id: 'bm_wake_job_j1_a1', botId, author: 'bot', kind: 'notice', text: '"Part 1" finished', lane: 'chat' })
+    })
+    expect(chatOf(f, botId)).toHaveLength(shown)
+    expect(f.store.unread(botId, 0)).toBe(unread)
   })
 })
 
