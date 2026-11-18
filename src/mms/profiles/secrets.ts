@@ -75,14 +75,24 @@ export function listProfileKeyNames(profileRoot: string): string[] {
   }
 }
 
+/** Mutations must never return parser excerpts from a file containing credentials. */
+function readSecretStoreForWrite(filePath: string): Record<string, string> {
+  if (!existsSync(filePath)) return {}
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error()
+    return parsed as Record<string, string>
+  } catch {
+    throw new Error('The secret store could not be read. Nothing was stored.')
+  }
+}
+
 export function writeProfileSecret(profileRoot: string, name: string, value: string): void {
   const dir = join(profileRoot, 'secrets')
   // Private to this account on Windows too, before any secret is written into it.
   ensurePrivateDirectory(dir)
   const filePath = join(dir, 'refs.json')
-  const current = existsSync(filePath)
-    ? (JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, string>)
-    : {}
+  const current = readSecretStoreForWrite(filePath)
   current[name] = value
   atomicWriteJsonSync(filePath, current, { mode: 0o600 })
 }
@@ -91,7 +101,7 @@ export function writeProfileSecret(profileRoot: string, name: string, value: str
 export function deleteProfileSecret(profileRoot: string, name: string): void {
   const filePath = join(profileRoot, 'secrets', 'refs.json')
   if (!existsSync(filePath)) return
-  const current = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, string>
+  const current = readSecretStoreForWrite(filePath)
   if (!Object.prototype.hasOwnProperty.call(current, name)) return
   delete current[name]
   atomicWriteJsonSync(filePath, current, { mode: 0o600 })

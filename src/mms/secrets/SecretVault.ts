@@ -137,11 +137,15 @@ export class SecretVault {
 
   /** A fresh value must never inherit authority approved for a deleted value. Existing bound values stay refused. */
   private prepareUnbound(name: string): void {
+    // A deleted guard cannot identify a stale entry in unreadable JSON, so new stores wait until it can be read.
+    this.bindings.requireReadable()
     if (!this.bindingFor(name)) return
     // listProfileKeyNames deliberately hides read failures. Authority removal needs proof of absence instead.
     let entries: unknown
     try { entries = JSON.parse(readFileSync(join(this.options.profileRoot, 'secrets/refs.json'), 'utf8')) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('The secret store could not be read. Nothing was stored.')
+    }
     if (entries !== undefined) {
       if (!entries || typeof entries !== 'object' || Array.isArray(entries)) throw new Error('The secret store could not be read.')
       if (Object.hasOwn(entries, name)) throw new Error(`${name} is bound to a service and cannot be replaced as an ordinary key.`)
