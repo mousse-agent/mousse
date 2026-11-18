@@ -3407,3 +3407,23 @@ it('C10 only the first call in a multi-call turn says it was held', async () => 
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
   expect(t.calls).toEqual([])
 })
+
+it.each(['send', 'not_now', 'expired'] as const)('C10 review inbox keeps a held schedule live through %s', async outcome => {
+  const t = await scheduledCall()
+  const sync = () => MmsProfileServices.prototype.syncBotRuns.call({ automationRuns: f.automationRuns, botStore: f.store } as never)
+  const inbox = () => f.automationRuns.list().runs.find(r => r.jobId === t.schedule.jobId)!
+  await t.call(); await finish(f, t.run.payload)
+  sync()
+  expect(inbox().state).toBe('running')
+  expect(inbox().endedAt).toBeUndefined()
+  const a = f.bots.actions.forWork(t.id)!
+  if (outcome === 'expired') { f.clock.now = Date.parse(a.expires_at); f.bots.actions.expireDue() }
+  else await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: outcome })
+  await flush()
+  const continuation = await start(f, t.id)
+  await finish(f, continuation.payload, 'completed', { text: 'Finished the report.' })
+  sync()
+  expect(inbox().state).toBe('done')
+  expect(inbox().error).toBeUndefined()
+  expect(t.calls).toEqual(outcome === 'send' ? [t.args] : [])
+})
