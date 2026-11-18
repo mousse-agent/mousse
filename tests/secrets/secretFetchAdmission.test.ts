@@ -29,7 +29,7 @@ function fixture(value='sk-test-private/a+B0123456789'){
  let call=0
  const invoke=(botId:string,args:Record<string,unknown>)=>{
   const secretFetch:NonNullable<BotAuthority['secretFetch']>=(input,send)=>secretFetchAction(store,{...input,botId,activationId:botId},send)
-  const turn=appTurn({threadId:botId,runId:'run',bot:{secretFetch,workspace:{scratch:home}} as never})
+  const turn=appTurn({threadId:botId,runId:'run',bot:{secretFetch,appTools:new Set(['secret_fetch']),role:'activation',workspace:{scratch:home}} as never})
   return tool.handler(args,{turn,transport:'in_process',toolCallId:String(call++),signal:new AbortController().signal} as ToolCallContext)
  }
  return {store,invoke}
@@ -60,4 +60,14 @@ it.each(['bad\x01key0123456789','bad🔐key0123456789','bad\rkey0123456789','bad
  const {store,invoke}=fixture(value)
  expect((await invoke('owner',{secret:'KEY',path:'/v1/models'})).isError).toBe(true)
  expect(store.get('SELECT ran_at FROM bot_actions')?.ran_at).toBeNull();expect(publicFetch).not.toHaveBeenCalled()
+})
+
+it.each(['foreign-credential', ['foreign-credential'], null])('keeps malformed header values out of refused action history: %#', async headers => {
+  const { store, invoke } = fixture()
+  expect((await invoke('owner', { secret: 'KEY', path: '/v1/models', headers })).isError).toBe(true)
+  const row = store.get('SELECT args_json, ran_at FROM bot_actions')!
+  expect(row.ran_at).toBeNull()
+  expect(JSON.parse(String(row.args_json)).headers).toEqual([])
+  expect(String(row.args_json)).not.toContain('foreign-credential')
+  expect(publicFetch).not.toHaveBeenCalled()
 })
