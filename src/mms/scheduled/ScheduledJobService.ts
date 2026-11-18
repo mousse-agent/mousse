@@ -47,6 +47,7 @@ export interface ScheduledBotRunner {
   /** The run already inserted for this claim, before a crash interrupted the hand-over. */
   findOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { messageId: string; occurrenceAt: string } | { kind: 'skipped'; reason: string } | undefined
   runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; say?: string; ownerAsked?: boolean; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
+    | { kind: 'checked'; failure?: string }
     | { kind: 'said'; messageId: string }
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
@@ -943,7 +944,11 @@ export class ScheduledJobService extends EventEmitter {
       const activationId = outcome.activationId
       this.record('bot run', (ledger) => ledger.begin({ jobId: job.id, jobName: job.name, occurrenceKey: claim.occurrenceKey, botId: job.bot.botId, activationId, state: 'queued', ...(job.projectId ? { projectId: job.projectId } : {}) }))
     }
-    if (this.store.finishBotClaim(job.id, claim.token, { occurrenceAt, ...(outcome.kind === 'skipped' ? { skipped: outcome.reason } : {}) }, now)) this.ownedRunClaims.delete(job.id)
+    if (outcome.kind === 'checked' && outcome.failure) this.record('page check failed', ledger => {
+      ledger.begin({ jobId: job.id, jobName: job.name, occurrenceKey: claim.occurrenceKey, botId: job.bot!.botId, state: 'running' })
+      ledger.finish({ jobId: job.id, occurrenceKey: claim.occurrenceKey, failed: true, error: outcome.failure })
+    })
+    if (this.store.finishBotClaim(job.id, claim.token, { occurrenceAt, checked: outcome.kind === 'checked', ...(outcome.kind === 'skipped' ? { skipped: outcome.reason } : {}) }, now)) this.ownedRunClaims.delete(job.id)
     // A skip that every later occurrence would repeat pauses it once, with why, instead of skipping it forever.
     const lasting = outcome.kind === 'skipped' ? LASTING_BOT_SKIPS[outcome.reason] : undefined
     if (lasting && this.store.pauseJob(job.id, lasting)) this.emitUpdated()

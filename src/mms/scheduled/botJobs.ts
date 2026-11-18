@@ -170,6 +170,12 @@ export class BotScheduleBook {
     now?(): Date
   }) {}
 
+  /** Raw saved jobs: an unsupported When is still present, and a read failure must propagate. */
+  pageCheckExists(botId: string, scheduleId: string): boolean {
+    const job = this.options.jobs.listJobs().find(job => job.bot?.botId === botId && job.bot.scheduleId === scheduleId)
+    return Boolean(job && job.state !== 'completed')
+  }
+
   setTelling(botId: string, change: { tellMe?: TellMe; canWakeMe?: boolean; scheduleId?: string }): void {
     const jobs = this.options.jobs.listJobs().filter(job => job.bot?.botId === botId && (!change.scheduleId || job.bot.scheduleId === change.scheduleId))
     if (change.scheduleId && !jobs.length) throw new BotScheduleError('schedule_not_found', 'No automation of yours has that id. Use bot_schedule_list first.')
