@@ -74,6 +74,19 @@
       "expiresAt": "2026-11-18T12:35:24.569Z"
     },
     {
+      "task": "mousse/owner-request-allow-threads-to-message",
+      "session": "Animatrix-b37da8",
+      "machine": "Animatrix",
+      "branch": "mousse/owner-request-allow-threads-to-message",
+      "paths": [
+        "src/mms/run/mcp/appTools/thread.ts",
+        "src/mms/bots/activation/BotEngine.ts",
+        "src/shared/bots/personal/jobs.ts"
+      ],
+      "claimedAt": "2026-11-18T12:22:26.330Z",
+      "expiresAt": "2026-11-18T14:22:26.330Z"
+    },
+    {
       "task": "mousse/owner-request-in-a-personal-bot-chat",
       "session": "Animatrix-71802f",
       "machine": "Animatrix",
