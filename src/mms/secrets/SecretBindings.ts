@@ -25,17 +25,18 @@ export class SecretBindings {
   }
 
   private read(): Record<string, unknown> {
+    let signature: string | undefined
     try {
       const stat = lstatSync(this.path)
-      const signature = `${stat.dev}:${stat.ino}:${stat.ctimeMs}:${stat.mtimeMs}:${stat.size}`
+      signature = `${stat.dev}:${stat.ino}:${stat.ctimeMs}:${stat.mtimeMs}:${stat.size}`
       if (signature === this.signature) return this.entries
-      this.signature = signature
       const parsed: unknown = JSON.parse(readFileSync(this.path, 'utf8'))
       this.entries = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : Object.create(null)
     } catch {
-      this.signature = undefined
       this.entries = Object.create(null)
     }
+    // Cache parse/read failures too, until this file changes; guards still deny every affected name.
+    this.signature = signature
     return this.entries
   }
 
