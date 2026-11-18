@@ -3820,14 +3820,16 @@ it('a successful fresh check retains the accepted-call recovery window', async (
   expect(t.calls).toEqual([])
 })
 
-it('a permission card with read-only and unhinted reading tools acknowledges both', async () => {
+it.each([true, undefined])('a past unknown hint never claims current reading tools lack hints: %s', async hint => {
   const t = await setup(true, false, true)
   t.descriptor.readOnlyHint = true
   t.server.tools[1]!.toolName = 'get_items'
+  t.server.tools[1]!.readOnlyHint = hint
   const row = f.store.escalation(String(f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]!.id))!
   const permission = structuredClone(row.permission) as any
   permission.mcp.changes = 'unknown'; permission.mcp.tools = ['send', 'get_items']
   const note = f.bots.chat.card({ ...row, permission, title: null, note: null }).note
   expect(note).not.toContain("doesn't say whether these tools")
-  expect(note).toContain('Some tools do not provide a read-only hint')
+  expect(note).toContain('Mousse decides which calls ask at each use')
+  expect(note).not.toContain('Some tools do not provide a read-only hint')
 })
