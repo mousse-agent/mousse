@@ -4262,6 +4262,10 @@ it('E1 changed consent settles without granting or leaving an Allow card', async
   t.server.configDigest = 'changed'
   await expect(f.bots.service.answer(t.botId, t.consent.id, 'allow')).resolves.toBeDefined()
   expect(f.store.escalation(t.consent.id)?.status).toBe('withdrawn')
+  const continued = await start(f, t.consentActivation, 2)
+  expect(f.store.lastMainDispatch(t.consentActivation)?.prompt.text).toContain('Nothing was allowed')
+  await finish(f, continued.payload)
+  expect(f.store.activation(t.consentActivation)?.status).toBe('done')
   expect(f.bots.chat.card(f.store.escalation(t.consent.id)!).note).toContain('changed')
   expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*' OR key GLOB 'alone-ask:*'")).toEqual([])
 })
