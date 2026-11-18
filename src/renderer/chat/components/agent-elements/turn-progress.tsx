@@ -552,7 +552,7 @@ export function TurnProgressRow({
       data-until-text={untilText || undefined} hidden={!headline && !progress && !open}>
       <div className="turn-live-lines flex items-start gap-1 min-w-0 max-w-full select-none"
         data-toggles={chevron ? "" : undefined} onClick={chevron ? toggle : undefined}>
-      <div className="turn-live-text flex flex-col min-w-0 max-w-full">
+      <div className="turn-live-text an-row-stack min-w-0 max-w-full">
       {headline && (
         <div className="turn-live-thought flex items-center gap-2 min-w-0" title={liveThoughtText(thoughtText) || headline}>
           <span className="turn-progress-icon" aria-hidden="true">
@@ -598,7 +598,7 @@ export function TurnProgressRow({
               atEndRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
             }}
           >
-            <div ref={rowsRef} className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
+            <div ref={rowsRef} className="an-tool-group-rows ui-collapse-items an-row-stack ml-1.5 pl-3">
               <LiveRunBodyContext.Provider value>{run.rows}</LiveRunBodyContext.Provider>
             </div>
           </div>

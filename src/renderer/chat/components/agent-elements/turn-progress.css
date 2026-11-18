@@ -55,10 +55,6 @@
   cursor: pointer;
 }
 
-.turn-live-text {
-  gap: 2px;
-}
-
 .turn-live-toggle {
   display: inline-flex;
   align-items: center;

@@ -3729,15 +3729,41 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
   }
 
-  /** Whether the internet is there for the activation's provider; always, without `connectivity`. Never throws. */
-  private async online(row: BotActivationRow): Promise<boolean> {
+  /**
+   * Whether the internet is there for the activation's provider; always, without `connectivity`. Never throws.
+   * `fresh` probes again instead of reusing a recent result.
+   */
+  private async online(row: BotActivationRow, options: { fresh?: boolean } = {}): Promise<boolean> {
     const connectivity = this.host.connectivity
     if (!connectivity) return true
     try {
-      return await connectivity.online({ ...(row.selection ? { instanceId: row.selection.instanceId } : {}) })
+      return await connectivity.online({ ...(row.selection ? { instanceId: row.selection.instanceId } : {}), ...(options.fresh ? { fresh: true } : {}) })
     } catch {
       return false
     }
+  }
+
+  /**
+   * The check before a dispatch is sent. One failed round may be a blip (a slow DNS answer, a
+   * result kept from a moment ago), so it is confirmed by a fresh round before the activation is
+   * shown waiting for the internet; when both fail, how each host's probe ended is logged.
+   */
+  private async onlineBeforeSend(row: BotActivationRow): Promise<boolean> {
+    if (await this.online(row)) return true
+    // An activation already waiting has just been checked by its own timer: no second round.
+    if (row.offline) return false
+    const instanceId = row.selection?.instanceId
+    const probesOf = () => {
+      try {
+        return this.host.connectivity?.lastProbes?.({ ...(instanceId ? { instanceId } : {}) }) ?? []
+      } catch {
+        return []
+      }
+    }
+    const first = probesOf()
+    if (await this.online(row, { fresh: true })) return true
+    console.warn('a bot waits for the internet: its check failed twice before sending', { activationId: row.id, first, fresh: probesOf() })
+    return false
   }
 
   /** Looks at the live main dispatch `n` once a watch from now (`BOT_OFFLINE_WATCH_MS`), as long as it runs. */
@@ -5716,7 +5742,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // With no internet the dispatch is not sent: the activation waits, charged nothing, and
       // sends it once the internet is back. A consult runs inside its live main dispatch.
       if (!sideDispatch(dispatch) && this.host.connectivity) {
-        const online = await this.online(current)
+        const online = await this.onlineBeforeSend(current)
         current = this.store.activation(row.id) ?? current
         if (current.status !== 'running') return
         if (!online) return this.awaitInternet(current)

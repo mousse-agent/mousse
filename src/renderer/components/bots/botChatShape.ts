@@ -210,6 +210,38 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
   return { rows, marks }
 }
 
+/**
+ * One step as a line of plain words: "Searched the web · vacuum prices", "Started thread: Fix the login page". Mousse
+ * writes these from the calls it allowed (shared/bots/personal/chips.ts), never from model text.
+ */
+export function stepText(chip: BotChip): string {
+  const text = chip.text.charAt(0).toUpperCase() + chip.text.slice(1)
+  return chip.highlight ? `${text}${chip.thread ? ': ' : ' · '}${chip.highlight}` : text
+}
+
+/** Beside the typing dots while the bot has only the owner's message before it: nothing of its turn has shown yet. */
+export const BOT_READING_TEXT = 'Reading your message'
+/** Beside the typing dots while the bot writes words that are not shown yet. */
+export const BOT_WRITING_TEXT = 'Writing a reply'
+/** Beside the typing dots when nothing says what the bot does. */
+export const BOT_WORKING_TEXT = 'Working'
+
+/**
+ * The line beside a bot's typing dots: what its chat turn is doing now, from what the turn has sent so far.
+ * - `own`: the bot's own words (its latest line before a step). They win over everything Mousse would say.
+ * - Otherwise Mousse's words: "Writing a reply" while its words stream and none are shown yet, else its live step as a
+ *   settled step reads ("Searching the web · vacuum prices", from shared/bots/personal/chips.ts, the one place a call
+ *   gets its words; a call with none reads "Working", never its tool's name).
+ * - `idle`: nothing says what it does now: "Reading your message" while the owner's message is the newest row
+ *   (`unanswered`), else "Working".
+ */
+export function botDoingLine(now: { status?: string; writing: boolean; chip?: BotChip; unanswered: boolean }): { text: string; own?: true; idle?: true } {
+  if (now.status) return { text: now.status, own: true }
+  if (now.writing) return { text: BOT_WRITING_TEXT }
+  if (now.chip) return { text: stepText(now.chip) }
+  return { text: now.unanswered ? BOT_READING_TEXT : BOT_WORKING_TEXT, idle: true }
+}
+
 /** What the header says under the bot's name, and how it reads. `lead`: the work the line names, whose activity the sticker shows. */
 export type BotPresence = { kind: 'typing' | 'busy' | 'free' | 'offline' | 'paused'; text: string; lead?: BotWorkItem }
 
