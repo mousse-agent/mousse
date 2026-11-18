@@ -3579,6 +3579,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           if (row.trigger.kind === 'schedule' && !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return { text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent.", isError: true }
           const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]))
           if (!existing) {
+            const stop = endTurn()
+            if (stop) return { text: stop, isError: true }
             const allowed = base.check({ kind: 'mcp', server: tool.server, tool: tool.tool, args })
             if (!allowed.ok) return { text: checkMessage(allowed), isError: true }
           }
