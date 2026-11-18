@@ -145,7 +145,8 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     id: 26,
     date: '2026-11-18',
     text: 'Your owner can keep a pasted key as a secret in the desktop composer. You receive its name, never its value. Use that name with secret_run in your work, under your existing permissions; never ask your owner to paste a key into a message.'
-  }
+  },
+  { id: 28, date: '2026-11-19', text: 'You can ask for a secret bound to one service with secret_request for: {service} or {origin}. These secrets are read only: Mousse keeps the value, gives no file, and refuses secret_run and MCP settings for them. secret_fetch comes later; until it is available, keep working without using a bound key.' },
 ]
 
 /** The newest entry's id: what a bot has seen once it is told everything. */
