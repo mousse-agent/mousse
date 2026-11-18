@@ -156,20 +156,19 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   expect(next).not.toContain('Tools that send or change things now ask your owner first')
 })
 
-it('C6 support rollback advances a bot that already saw entry 27 after delivering entry 28 once', async () => {
+it('C6 support rollback keeps E1 entry 28 pending after entry 27 was seen', async () => {
   existingBot()
   memory.write(() => memory.setState('ada', 'changelog_seen', 27))
-  const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false })
-  const laterAdvice = BOT_CHANGELOG.find(entry => entry.id === 28)!.text
-  for (let turn = 0; turn < 3; turn++) {
-    const activationId = `c6-already-seen-${turn}`
-    const pack = await provider.chatPreamble({ botId: 'ada', activationId })
-    expect(pack).not.toContain('Tools that send or change things now ask your owner first')
-    if (turn === 0) expect(pack).toContain(laterAdvice)
-    else expect(pack).not.toContain(laterAdvice)
-    await settled(provider, activationId)
-    expect(memory.getState<number>('ada', 'changelog_seen')).toBe(BOT_CHANGELOG_LATEST)
-  }
+  const later = { id: 29, date: '2026-11-19', text: 'Later independent advice.' }
+  const changelog = [...BOT_CHANGELOG, later]
+  const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false, changelog })
+  expect(await provider.chatPreamble({ botId: 'ada', activationId: 'c6-seen-off' })).toContain(later.text)
+  await settled(provider, 'c6-seen-off')
+  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(27)
+  const on = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => true, changelog })
+  expect(await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-on' })).toContain(BOT_CHANGELOG.find(e => e.id === 28)!.text)
+  await settled(on, 'c6-seen-on')
+  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(29)
 })
 
 it('tells existing bots that a pasted secret arrives by name', async () => {
@@ -196,4 +195,32 @@ it('rollback delivers later independent advice without marking hidden advice see
     expect(text).toContain(BOT_CHANGELOG.find(e => e.id === 27)!.text)
     expect(text).toContain(BOT_CHANGELOG.find(e => e.id === 28)!.text)
   } finally { changes.pop() }
+})
+
+it('C6 support rollback stops before the next unseen hidden entry when there are two', async () => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', 27))
+  const changelog = [
+    {id:27, date:'2026-11-19', asksFirst:true, text:'First hidden advice.'},
+    {id:28, date:'2026-11-19', text:'Visible advice before the next hidden entry.'},
+    {id:29, date:'2026-11-19', asksFirst:true, text:'Second hidden advice.'},
+    {id:30, date:'2026-11-19', text:'Later visible advice.'}
+  ] as const
+  let on = false
+  const options = {store:memory, journal:{syncThread:async()=>{}}, asksFirstEnabled:()=>on, changelog}
+  const provider = createBotContextProvider(options)
+  for (let turn = 0; turn < 2; turn++) {
+    const activationId = `two-hidden-off-${turn}`
+    const pack = await provider.chatPreamble({botId:'ada', activationId})
+    expect(pack).toContain(changelog[3].text)
+    expect(pack).not.toContain(changelog[2].text)
+    await settled(provider, activationId)
+    expect(memory.getState<number>('ada','changelog_seen')).toBe(28)
+  }
+  on = true
+  const restarted = createBotContextProvider(options)
+  expect(await restarted.chatPreamble({botId:'ada',activationId:'two-hidden-on'})).toContain(changelog[2].text)
+  await settled(restarted,'two-hidden-on')
+  expect(memory.getState<number>('ada','changelog_seen')).toBe(30)
+  expect(await restarted.chatPreamble({botId:'ada',activationId:'two-hidden-after'})).not.toContain(HEADER)
 })
