@@ -11,11 +11,12 @@ import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdm
 import { createHash } from 'node:crypto'
 import { legacyAbortRefAsync } from './support/legacyAbortRef'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
-import { getExternalResourceClaims, unverifiedOwnerOver } from '../src/mms/lifecycle/LifecycleClaims'
+import { getExternalResourceClaims, getExternalResourceClaimsFromFacts, unverifiedOwnerOver } from '../src/mms/lifecycle/LifecycleClaims'
 import { ProfileManager } from '../src/mms/profiles/ProfileManager'
 import { createInstallationPaths } from '../src/mms/profiles/paths'
 import { unverifiableThread } from './support/unverifiableThread'
 import { canonicalPathAsync } from '../src/mms/lifecycle/canonicalPath'
+import { OwnershipFacts } from '../src/mms/lifecycle/ResourceInventory'
 
 const roots: string[] = []
 const owned: Array<() => void> = []
@@ -495,6 +496,39 @@ test('a broken thread whose repository moved without its worktrees repaired keep
   expect(existsSync(f.worktree)).toBe(false); expect(ours()).toBe('')
 }, 60_000)
 
+test('a thread no record owns, in an old data folder inside a project, refuses a delete before any worktree is read with Git', async () => {
+  const f = fixture({ git: true })
+  const project = join(f.root, 'project')
+  mkdirSync(project)
+  writeFileSync(join(f.home, 'projects.json'), JSON.stringify([{ path: project }]))
+  // Control: with nothing unowned there, the proof reads the worktree.
+  const control = new OwnershipFacts()
+  await getExternalResourceClaims(f.store, new Set(), control)
+  expect(control.worktrees.size).toBe(1)
+  // An older build's thread folder that no lifecycle record owns.
+  mkdirSync(join(project, '.mousse', '.data', 'threads', 'old-thread'), { recursive: true })
+  writeFileSync(join(project, '.mousse', '.data', 'threads', 'old-thread', 'meta.json'), JSON.stringify({ id: 'old-thread' }))
+  const facts = new OwnershipFacts()
+  await expect(getExternalResourceClaims(f.store, new Set(), facts)).rejects.toThrow(/Unregistered task metadata/)
+  expect(facts.legacy.size).toBe(1)
+  expect(facts.worktrees.size).toBe(0)
+})
+test('an old data folder found clean before the worktrees were read is read again, so a thread that appeared there meanwhile still refuses', async () => {
+  const f = fixture({ git: true })
+  const project = join(f.root, 'project')
+  mkdirSync(project)
+  writeFileSync(join(f.home, 'projects.json'), JSON.stringify([{ path: project }]))
+  // Facts as a slow Git check leaves them: the old data folder was scanned clean before the worktree was read.
+  const facts = new OwnershipFacts()
+  await getExternalResourceClaims(f.store, new Set(), facts)
+  expect(facts.worktrees.size).toBe(1)
+  // An older build's thread folder that no lifecycle record owns appears afterwards.
+  mkdirSync(join(project, '.mousse', '.data', 'threads', 'late-thread'), { recursive: true })
+  writeFileSync(join(project, '.mousse', '.data', 'threads', 'late-thread', 'meta.json'), JSON.stringify({ id: 'late-thread' }))
+  await expect(getExternalResourceClaims(f.store, new Set(), facts)).rejects.toThrow(/Unregistered task metadata/)
+  // The check a purge makes right before it removes anything answers from those facts, and refuses too.
+  expect(() => getExternalResourceClaimsFromFacts(f.store, new Set(), facts)).toThrow(/Unregistered task metadata/)
+})
 test('profile storage the installation does not list still blocks every permanent delete, broken thread or not', async () => {
   const f = fixture({ git: true })
   unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
