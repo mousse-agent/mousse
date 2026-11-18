@@ -49,7 +49,6 @@ const { useChatsStore, OPEN_BOT_HOLD_MS } = await import('../../src/renderer/sto
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
-const { SelectionReplyButton } = await import('../../src/renderer/components/SelectionReplyButton')
 const { botMessageScroller, DOING_HOLD_MS } = await import('../../src/renderer/components/bots/BotChatView')
 const { SETTLE_MS, clearBotLiveReplies } = await import('../../src/renderer/stores/botLiveReplies')
 
@@ -1392,49 +1391,6 @@ describe('the composer', () => {
     expect(box().value).toBe('Do this every weekday at 9.')
   })
 
-  it('Reply on text selected in a bot message puts a pill in the box at the caret; the bot gets it in quotes in its own paragraph', async () => {
-    fake.chats.inbox = [message(1, { id: 'b1', text: 'Your flight leaves at 9:40 from gate 12.' })]
-    await act(async () => { createRoot(document.body.appendChild(document.createElement('div'))).render(createElement(SelectionReplyButton)) })
-    await open()
-    // jsdom has no layout: the selection is given a place on screen.
-    Range.prototype.getClientRects = () => [{ top: 10, bottom: 30, left: 10, right: 80 }] as unknown as DOMRectList
-    transcript().getBoundingClientRect = () => ({ top: 0, bottom: 500, left: 0, right: 500 }) as DOMRect
-    await type(box(), 'Which gate? ')
-    // Selects "gate 12" in the bot's message, as a drag would, and lets the button find it.
-    const frame = () => act(async () => { await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined))) })
-    const select = async () => {
-      // The box takes the focus a frame after an edit, which would end a selection made before it.
-      await frame()
-      const walker = document.createTreeWalker(transcript().querySelector('.bot-bubble')!, NodeFilter.SHOW_TEXT)
-      let textNode = walker.nextNode()
-      while (textNode && !textNode.textContent!.includes('gate 12')) textNode = walker.nextNode()
-      const at = textNode!.textContent!.indexOf('gate 12')
-      const range = document.createRange()
-      range.setStart(textNode!, at)
-      range.setEnd(textNode!, at + 'gate 12'.length)
-      window.getSelection()!.removeAllRanges()
-      window.getSelection()!.addRange(range)
-      document.dispatchEvent(new Event('selectionchange'))
-      await frame()
-    }
-    await select()
-    await click(document.querySelector('.selection-reply-button'))
-    expect(box().value).toMatch(/^Which gate\? \u2068\u2003\u00a0“gate\u00a012”\u2069 $/)
-    // The pill goes like one character.
-    box().setSelectionRange(box().value.length - 1, box().value.length - 1)
-    await press('Backspace')
-    expect(box().value).toBe('Which gate?  ')
-    await select()
-    await click(document.querySelector('.selection-reply-button'))
-    await press('Enter')
-    expect(vi.mocked(fake.client.send).mock.calls.at(-1)?.[1]).toBe('Which gate?\n\n"gate 12"')
-    // The bubble shows the quote as a pill, not the quote marks and blank lines the bot got.
-    await settle()
-    const bubble = [...transcript().querySelectorAll('.bot-you-bubble')].at(-1)!
-    expect(bubble.querySelector('.sent-quote-pill')?.textContent).toBe('Replying to: gate 12')
-    expect(bubble.textContent).not.toContain('"gate 12"')
-  })
-
   it('two identical messages on their way are two bubbles, and each confirmation clears only its own', async () => {
     await open()
     const releases: Array<() => void> = []
@@ -2203,6 +2159,11 @@ describe('memory', () => {
     expect(fake.calls.some(([name]) => name === 'send')).toBe(false)
     await press('Enter')
     expect(vi.mocked(fake.client.send).mock.calls.at(-1)?.[1]).toBe('Why?\n\n"The owner reads mail at 8."')
+    // The bubble shows the quote as a pill, not the quote marks and blank lines the bot got.
+    await settle()
+    const bubble = [...transcript().querySelectorAll('.bot-you-bubble')].at(-1)!
+    expect(bubble.querySelector('.sent-quote-pill')?.textContent).toBe('Replying to: The owner reads mail at 8.')
+    expect(bubble.textContent).not.toContain('"The owner reads mail at 8."')
   })
 
   it('a reply whose turn saved a memory has a "Saved to memory" tag that opens Memory at that entry', async () => {

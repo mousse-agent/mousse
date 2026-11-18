@@ -845,7 +845,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         <BotMenu bot={bot} {...(find.openFind ? { onFind: () => { composerField()?.focus({ preventScroll: true }); find.openFind!() } } : {})} />
       </header>
       {find.barProps && <div className="bot-find-anchor"><FindInThreadBar {...find.barProps} /></div>}
-      <div className="chat-transcript" data-applet-scroller data-quote-source ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
+      <div className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
         const down = element.scrollTop >= (anchor.current.top ?? 0)
         anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
