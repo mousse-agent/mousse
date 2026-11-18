@@ -233,11 +233,11 @@ export function stepSeenAt(state: TurnProgressState | null | undefined, now = Da
   return now;
 }
 
-/** The steps that read "Thinking…": they show the thinking icon. */
+/** The steps that show the thinking icon: those that read "Thinking…", and the turn's start. */
 const THINKING_KINDS: ReadonlySet<TurnProgressKind> = new Set(["thinking", "starting", "waiting", "finishing"]);
 
-/** The turn's start and the wait for the model's first output say nothing more than that it thinks: the tooltip says which. */
-const STARTING: TurnProgress = { kind: "starting", label: "Thinking…", title: "Starting the agent and its tools" };
+/** A turn not started yet reads "Starting…"; the wait for the model's first output says only that it thinks. */
+const STARTING: TurnProgress = { kind: "starting", label: "Starting…", title: "Starting the agent and its tools" };
 const WAITING: TurnProgress = { kind: "waiting", label: "Thinking…", title: "Waiting for the model's first output" };
 const WRITING: TurnProgress = { kind: "writing", label: "Writing…" };
 
@@ -267,8 +267,8 @@ function textOnScreen(messages: readonly UIMessage[]): boolean {
  * What a running turn does now, in a few words: the second line of the turn's live row. Null where something else in
  * the turn already says it (an approval waiting, a compaction running, an answer the agent waits for, which the header
  * shows, or text being written, which is on screen). A call that just finished is said in the past tense until
- * something new starts. Starting, waiting for the model and finishing all read "Thinking…", with what it is in the
- * tooltip.
+ * something new starts. A turn sent and not started yet (its thread, workspace, agent and tools being set up) reads
+ * "Starting…"; waiting for the model and finishing read "Thinking…", with what it is in the tooltip.
  */
 export function describeTurnProgress(input: TurnProgressInput): TurnProgress | null {
   const progress = describeProgress(input);
@@ -373,6 +373,7 @@ export function announcementOf(progress: TurnProgress | null): string {
   if (!progress) return "";
   switch (progress.kind) {
     case "starting":
+      return "Starting";
     case "waiting":
     case "thinking":
     case "finishing":

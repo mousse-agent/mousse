@@ -30,7 +30,7 @@ describe('a turn right after sending', () => {
   it.each(['submitted', 'streaming'] as const)('shows a live line under the timer while %s', (status) => {
     const html = render([user], status)
     const working = html.indexOf('Working · ')
-    const starting = html.indexOf('Thinking…')
+    const starting = html.indexOf('Starting…')
     expect(working).toBeGreaterThan(-1)
     expect(starting).toBeGreaterThan(working)
     // The line sits where the answer's first row will, so the handover does not move it.
@@ -40,7 +40,7 @@ describe('a turn right after sending', () => {
   it('shows no live line once the turn settled', () => {
     const html = render([user], 'ready')
     expect(html).not.toContain('data-turn-progress')
-    expect(html).not.toContain('Thinking…')
+    expect(html).not.toContain('Starting…')
   })
 
   it('heads the one live row with the thought being written, and shows it nowhere else', () => {
