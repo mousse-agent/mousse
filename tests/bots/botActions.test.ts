@@ -3714,6 +3714,10 @@ it('keeps the offered false hint when a reading tool changes its listing mid-tur
   await t.call()
   expect(f.bots.actions.forWork(t.workId)?.status).toBe('open')
   expect(t.calls).toEqual([])
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('changed since')
+  expect(t.calls).toEqual([])
 })
 it('does not dispatch a reading tool missing from its current listing', async () => {
   const t = await setup(true, false, false, false, false, false, 'get_items', true, true)

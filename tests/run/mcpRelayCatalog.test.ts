@@ -325,3 +325,17 @@ describe('relayTurnContext (completeAppTurn)', () => {
     expect(manager.getEnabledToolsByServer).not.toHaveBeenCalled()
   })
 })
+
+it('refreshes only the Send server and keeps other listings and hints', async () => {
+  const t = setup({ servers: [echo, two] })
+  t.manager.getEnabledToolsByServer.mockImplementation(async (_project?: string, _actor?: unknown, options?: { installationId?: string }) => t.state.servers.filter(server => !options?.installationId || server.installationId === options.installationId).map(server => ({ installationId: server.installationId!, serverName: server.name, tools: t.state.tools.get(server.installationId!) ?? [] })))
+  await t.catalog.refresh()
+  const other = t.catalog.servers().find(server => server.installationId === 'inst-two')!
+  t.state.tools.set('inst-echo', [tool(echo, 'say', { readOnlyHint: false })])
+  t.state.tools.set('inst-two', [])
+  await t.catalog.refreshServer('inst-echo')
+  expect(t.catalog.servers().find(server => server.installationId === 'inst-echo')!.tools[0]!.readOnlyHint).toBe(false)
+  expect(t.catalog.servers().find(server => server.installationId === 'inst-two')!.tools).toEqual(other.tools)
+  expect(t.catalog.listing().map(tool => tool.toolName).sort()).toEqual(['add', 'say'])
+  t.catalog.dispose()
+})
