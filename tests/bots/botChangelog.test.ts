@@ -137,3 +137,15 @@ it('all memory wish instructions route telling wishes to settings', () => {
     expect(text).toContain('(how or when to be told: telling_set instead)')
   }
 })
+
+it('C6 support rollback omits the switch-on advice and still delivers it after re-enabling', async () => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', 23))
+  let on = false
+  const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => on })
+  const off = await provider.chatPreamble({ botId: 'ada', activationId: 'c6-off' })
+  expect(off).not.toContain('Tools that send or change things now ask your owner first')
+  await settled(provider, 'c6-off')
+  on = true
+  expect(await provider.chatPreamble({ botId: 'ada', activationId: 'c6-on' })).toContain('Tools that send or change things now ask your owner first')
+})
