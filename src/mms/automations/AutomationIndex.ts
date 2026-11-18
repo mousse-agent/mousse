@@ -107,7 +107,13 @@ export function jobEffectiveMay(job: ScheduledJob, threadMode: PermissionMode): 
  * run lane made (the bot's activations). Its May is the bot's grant. Undefined for a bot that is gone or deleted.
  */
 function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts: BotAutomationFacts, computer: AutomationItem['computer']): AutomationItem {
-  const runs = facts.runs.map(botRun)
+  const runs = facts.runs.map(run => {
+    const held = run.status === 'blocked' && ['approval', 'approval_answered'].includes(run.endReason ?? '')
+    if (!held) return botRun(run)
+    return { ...botRun({ ...run, status: 'running' }), detail: job.botSkip?.reason === 'bot_waiting_for_owner'
+      ? 'Later runs skipped: the bot is waiting for your answer'
+      : run.endReason === 'approval' ? 'Waiting for your answer' : 'Carrying on with your answer' }
+  })
   const active = runs[0] && !isRunEnded(runs[0].state) ? runs[0] : undefined
   const last = runs.find((run) => isRunEnded(run.state))
   const jobPaused = job.state === 'paused' || (!job.enabled && job.state !== 'running')
