@@ -3522,3 +3522,10 @@ it.each(['work', 'schedule'].flatMap(kind => [false, true].map(legacy => ({ kind
   await expect(f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('already answered')
   expect(t.calls).toEqual([t.args])
 })
+
+it('C11 new open cards have a rollback-safe distant deadline', async () => {
+  const t = await setup(true)
+  await t.call()
+  expect(f.bots.actions.forWork(t.workId)?.expires_at).toBe('9999-12-31T23:59:59.999Z')
+  expect(f.bots.actions.nextDueAt()).toBeUndefined()
+})
