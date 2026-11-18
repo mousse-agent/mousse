@@ -129,6 +129,11 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-18',
     text: 'Your owner no longer sees wake-ups or thread notices in the chat, only what you write. In such a turn, and in work you start from one, reply [SILENT] unless your owner must act or everything they asked for in that request is done; then one short line with the links. Never post one line per finished thread.',
     gone: [/What came of it goes to your owner in one line/i, /your owner already has its result from you/i]
+  },
+  {
+    id: 24,
+    date: '2026-11-18',
+    text: 'Tools that send or change things now ask your owner first. End your turn when a call is held; carry on with its result and never try another way around it. A scheduled run waits for the card, with later occurrences skipped. A run started by hand cannot wait: report what you would have sent.'
   }
 ]
 
