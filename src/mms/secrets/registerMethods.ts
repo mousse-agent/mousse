@@ -1,4 +1,4 @@
-import { pastedSecretShape } from '../../shared/secretShapes'
+import { pastedSecretShape, pastedSecretValue } from '../../shared/secretShapes'
 import { SECRET_KEEPS, secretValueProblem, type SecretKeep } from '../../shared/secretRequests'
 import type { SecretVault } from './SecretVault'
 import { isKeyName } from '../../shared/automationKeys'
@@ -71,7 +71,7 @@ export function registerSecretMethods(domains: DomainHandlerRegistry, domainFor:
         const home = domain.homeFor(params.botId as string)
         if (!home.allowed) throw new DomainRpcError('forbidden', 'Allow Use secrets in About before keeping a key.')
         const name = domain.vault.freeName(pastedSecretShape(params.value as string)!.name)
-        domain.vault.store(name, params.value as string, { keep: params.keep as SecretKeep, threadId: home.threadId })
+        domain.vault.store(name, pastedSecretValue(params.value as string), { keep: params.keep as SecretKeep, threadId: home.threadId })
         return { name }
       } catch (error) { refusal(error) }
     }

@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
-import { pastedSecretShape } from '../../../shared/secretShapes'
+import { pastedSecretShape, pastedSecretReplacement } from '../../../shared/secretShapes'
 import { DEFAULT_SECRET_KEEP, SECRET_KEEPS, secretKeepLabel, type SecretKeep } from '../../../shared/secretRequests'
 import { useBotsStore } from '../../stores/botsStore'
 
@@ -36,7 +36,7 @@ export function usePastedBotSecret(bot: BotSummary, storedDraft: string) {
     try {
       const { name } = await window.mousse.platformRequest.request<{ name: string }>('secrets.keepPasted', { botId: bot.id, value: draft.slice(shape.start, shape.end), keep })
       // No old answer may rewrite another bot's composer or text edited while saving.
-      if (revision.current === version && currentBot.current === bot.id) change(`${draft.slice(0, shape.start)}the secret ${name}${draft.slice(shape.end)}`)
+      if (revision.current === version && currentBot.current === bot.id) change(`${draft.slice(0, shape.start)}${pastedSecretReplacement(draft.slice(shape.start, shape.end), name)}${draft.slice(shape.end)}`)
     } catch {
       if (revision.current === version && currentBot.current === bot.id) setFailed(true)
     } finally { setBusy(false) }
