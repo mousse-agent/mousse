@@ -8,11 +8,15 @@ import type { AppPipe } from './appChannel'
 
 const BINARY = process.platform === 'win32' ? 'mousse-helper.exe' : 'mousse-helper'
 
-/** Where this code sits in a checkout of Mousse: its source, or the bundle in `out/main` (and its `chunks`). */
+/**
+ * Where this code sits in a checkout of Mousse: its source, the app's bundle in `out/main` (and its `chunks`), or
+ * the daemon's bundle in `out/cli`, which a development app starts.
+ */
 const CHECKOUT_LAYOUTS = [
   ['src', 'mms', 'netEngine', 'helper'],
   ['out', 'main'],
-  ['out', 'main', 'chunks']
+  ['out', 'main', 'chunks'],
+  ['out', 'cli']
 ]
 
 function checkoutRoot(moduleFolder: string): string | undefined {
