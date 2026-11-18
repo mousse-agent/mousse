@@ -61,7 +61,7 @@ export async function publicFetch(value: string, options: PublicFetchOptions = {
       const req = (url.protocol === 'https:' ? https : http).request({
         protocol: url.protocol, hostname, port: url.port || undefined, path: url.pathname + url.search,
         method: options.method ?? 'GET', agent: false, family: pinned.family, servername: isIP(hostname) ? undefined : hostname,
-        headers: { host: url.host, 'user-agent': 'Mousse', accept: 'text/html, text/plain', ...options.headers },
+        headers: { host: url.host, 'user-agent': 'Mousse', accept: options.secretRead ? 'application/json, text/plain;q=0.9, */*;q=0.8' : 'text/html, text/plain', ...options.headers },
         signal: controller.signal,
         lookup: (_host, _options, callback) => callback(null, pinned.address, pinned.family)
       }, res => {
