@@ -4150,3 +4150,17 @@ it('E1 replaying an automatic call returns its recorded result without sending t
   expect(f.store.activation(next.id)?.status).toBe('running')
   expect(t.calls).toHaveLength(2)
 })
+
+it.each([
+  ['added bcc', (a: Record<string, unknown>) => ({ ...a, bcc: ['attacker@evil.test'] }), 'open'],
+  ['missing key', (a: Record<string, unknown>) => ({ to: a.to, body: a.body }), 'open'],
+  ['nested destination', (a: Record<string, unknown>) => ({ ...a, nested: { options: [{ path: '/elsewhere' }] } }), 'open'],
+  ['changed non-content', (a: Record<string, unknown>) => ({ ...a, nested: { n: 2 } }), 'open'],
+  ['address in body', (a: Record<string, unknown>) => ({ ...a, body: 'Read https://evil.test now' }), 'open'],
+  ['body alone', (a: Record<string, unknown>) => ({ ...a, body: 'A new plain message' }), 'done']
+] as const)('E1 argument contract: %s', async (_name, change, status) => {
+  const t = await aloneAsk()
+  const next = await aloneNext(t, change(t.args) as typeof t.args)
+  expect(next.action.status).toBe(status)
+  expect(t.calls).toHaveLength(status === 'done' ? 2 : 1)
+})

@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import { actionPlace } from '../../src/mms/bots/actions/BotAlone'
 
-const names = 'folder folderid parent parentid path dir directory channel channelid repo repository owner project projectid calendar calendarid list listid board to recipient recipients email space spaceid database databaseid drive driveid'.split(' ')
+const names = 'folder folderid parent parentid path dir directory channel channelid repo repository owner project projectid calendar calendarid list listid board to recipient recipients email space spaceid database databaseid drive driveid cc bcc from sender replyto url uri link webhook endpoint host domain account accountid address destination target remote branch'.split(' ')
 it.each(names)('reads exact top-level %s place values from the schema', name => {
   const key = name.toUpperCase().replace('ID', '_ID')
   expect(actionPlace({ properties: { [key]: {}, body: {} } }, { [key]: ['one', { id: 2 }], body: 'ignored' })).toEqual({ [key]: ['one', { id: 2 }] })
