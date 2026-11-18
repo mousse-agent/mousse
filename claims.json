@@ -87,6 +87,20 @@
       "expiresAt": "2026-11-18T09:11:07.367Z"
     },
     {
+      "task": "bot-secret-fetch",
+      "session": "agibook-d8ef9c",
+      "machine": "agibook",
+      "branch": "bot-secret-fetch",
+      "paths": [
+        "src/mms/secrets",
+        "src/mms/net-public",
+        "src/mms/run/mcp/appTools/secrets.ts",
+        "src/shared/bots/personal"
+      ],
+      "claimedAt": "2026-11-18T21:20:44.630Z",
+      "expiresAt": "2026-11-18T23:20:44.630Z"
+    },
+    {
       "task": "bot-service-bound-secrets",
       "session": "agibook-fbd710",
       "machine": "agibook",
