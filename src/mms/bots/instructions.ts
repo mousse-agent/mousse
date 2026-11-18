@@ -333,6 +333,7 @@ export function botInstructions(bot: { name: string; description: string; filesF
   if (bot.promptChanged) who.push(BOT_PROMPT_CHANGED_NOTE)
   if (bot.filesFolder) who.push(`Your files folder is ${bot.filesFolder}.`)
   if (bot.homeFolder) who.push(`Your owner's home folder is ${bot.homeFolder}. Always write paths in full, never with ~ or variables like $HOME.`)
+  if (bot.lane === 'run' && bot.allowed?.secrets) who.push("To read from a service your owner gave you a key for, use secret_fetch with the key's name. You never see the key.")
   const lane = bot.lane === 'run' ? BOT_RUN_INSTRUCTIONS : bot.lane === 'chat' ? chatInstructionsWithout(bot.allowed?.off) : undefined
   const allowed = bot.allowed ? botAllowedText(bot.allowed, bot.lane, bot.browserOffline) : undefined
   // A main turn's tool catalogue, one line a group (docs/plans/bot-context.md §15): each group's guidance, the applet
