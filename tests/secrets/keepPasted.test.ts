@@ -28,8 +28,8 @@ it('keeps a pasted key for the bot home, uses a free name, and makes it usable b
   expect(vault.usableIn('OPENAI_API_KEY', 'home')).toBe(true)
   expect(vault.usableIn('OPENAI_API_KEY', 'other')).toBe(false)
   const host = createSecretToolHost({ vault, requests: new SecretRequests(vault), scratchRoot: join(home, 'run') })
-  const result = await host.run({ threadId: 'home', command: 'printf "%s" "$OPENAI_API_KEY"', secrets: [{ name: 'OPENAI_API_KEY' }], cwd: home, signal: new AbortController().signal })
-  expect(result.text).toContain('[secret OPENAI_API_KEY hidden]')
+  const result = await host.run({ threadId: 'home', command: 'printf "%s" "$OPENAI_API_KEY"', secrets: [{ name: 'OPENAI_API_KEY', as: 'env' }], cwd: home, signal: new AbortController().signal })
+  expect(result.output).toContain('[secret OPENAI_API_KEY hidden]')
   expect(JSON.stringify(result)).not.toContain(value)
 })
 // Actors and invalid inputs: no refusal may store or repeat the supplied text.
