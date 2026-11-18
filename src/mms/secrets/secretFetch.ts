@@ -31,10 +31,11 @@ export function prepareSecretFetch(vault: SecretVault, input: SecretFetchInput):
   if (!binding.header || !binding.origin) return reject('The service binding is unavailable. Ask for the secret again.')
   const method = args.method ?? 'GET'
   if (method !== 'GET' && method !== 'HEAD') return reject('Only GET and HEAD reads are allowed.')
+  const allowedPaths = binding.paths ? ` Allowed path prefixes: ${binding.paths.join(', ')}.` : ''
   const unbounded = boundReadPath(args.path)
-  if (!unbounded) return reject('Use a path without ambiguous segments or encodings.')
+  if (!unbounded) return reject(`Use a path without ambiguous segments or encodings.${allowedPaths}`)
   const path = boundReadPath(args.path, binding.paths)
-  if (!path) return reject(`That path is outside the service binding. Allowed path prefixes: ${binding.paths!.join(', ')}.`)
+  if (!path) return reject(`That path is outside the service binding.${allowedPaths}`)
   const mask = vault.maskerFor(threadId) ?? ((s: string) => s)
   const safe = (s: string) => mask(s) === s && !pastedSecretShape(s)
   const url = new URL(path, binding.origin)
