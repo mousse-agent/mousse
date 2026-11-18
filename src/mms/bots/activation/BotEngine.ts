@@ -1685,7 +1685,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         createdAt: this.store.now(),
         lane: 'run'
       }, limitsOf(intersectManifest(admitted.published.permissions, admitted.grant.manifest)))
-      if (inserted && page?.kind === 'changed') {
+      if (inserted) this.refuseOverQueue(botId, 'run')
+      if (inserted && this.store.activation(id)?.status === 'queued' && page?.kind === 'changed') {
         writePageChange(pageRoot, id, dataFrame('the watched web page', page.text))
         this.store.run('UPDATE bot_activations SET scratch = ? WHERE id = ?', join(pageRoot,id), id)
         page.commit()
@@ -1694,7 +1695,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Said once per automation, with its first run on the bot's Work row (a fixed id: a later run posts nothing).
       if (inserted && ignoredName)
         this.chat.post({ id: `bm_${botId}_${scheduleId}_named_model`, botId, author: 'bot', kind: 'notice', text: OLD_MODEL_NAME_IGNORED, activationId: id, lane: 'run', hidden: true })
-      if (inserted) this.refuseOverQueue(botId, 'run')
       return inserted
     })
     } catch (error) {
