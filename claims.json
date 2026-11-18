@@ -107,20 +107,6 @@
       "expiresAt": "2026-11-18T08:04:59.558Z"
     },
     {
-      "task": "side-chats",
-      "session": "Animatrix-4dffd4",
-      "machine": "Animatrix",
-      "branch": "side-chats",
-      "paths": [
-        "src/renderer/lib/surfaces.ts",
-        "src/renderer/components/MainViewTabs.tsx",
-        "src/renderer/components/sideChats",
-        "src/shared/types.ts"
-      ],
-      "claimedAt": "2026-11-18T13:42:36.927Z",
-      "expiresAt": "2026-11-18T18:26:47.598Z"
-    },
-    {
       "task": "thread-journal-latest-index",
       "session": "Animatrix-abde56",
       "machine": "Animatrix",
