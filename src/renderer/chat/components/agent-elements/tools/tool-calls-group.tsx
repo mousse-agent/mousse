@@ -104,7 +104,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
           atEndRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
         }}
       >
-        <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
+        <div className="an-tool-group-rows ui-collapse-items an-row-stack ml-1.5 pl-3">
           {children}
         </div>
       </div>
