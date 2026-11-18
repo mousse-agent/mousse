@@ -87,8 +87,9 @@ const TONE_ICONS: Record<LaunchedTone, typeof Circle> = { working: CircleDotDash
  * A thread the bot started, in the header's list: its title, where it stands (an icon and a word, the row tinted to
  * match), its project and when it last changed. The whole row opens it in the bot's chat pane (`openBotThread`). Rows
  * that no longer work are dimmed. A thread the bot keeps out of the sidebar says "Hidden", and has Show in sidebar beside it.
+ * `tooltip: false` (the hover card): no "Open …" tooltip, which would cover the row above.
  */
-export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, onOpen }: { botId: string; thread: BotLaunchedThread; now: number; onOpen(): void }) {
+export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, onOpen, tooltip = true }: { botId: string; thread: BotLaunchedThread; now: number; onOpen(): void; tooltip?: boolean }) {
   const { tone, label } = launchedLook(thread.status)
   const Icon = TONE_ICONS[tone]
   const ago = formatAgo(Date.parse(thread.updatedAt), now)
@@ -99,7 +100,7 @@ export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, o
     ...(ago ? [`updated ${ago}`] : [])
   ]
   return <li className="bot-thread-item">
-    <button type="button" className="bot-thread-line" data-tone={tone} data-hidden={thread.hidden || undefined} data-nav title={`Open ${thread.title}`}
+    <button type="button" className="bot-thread-line" data-tone={tone} data-hidden={thread.hidden || undefined} data-nav title={tooltip ? `Open ${thread.title}` : undefined}
       onClick={() => { onOpen(); void openBotThread(botId, thread.threadId) }}>
       <span className="bot-thread-top">
         <span className="bot-thread-title">{thread.title}</span>

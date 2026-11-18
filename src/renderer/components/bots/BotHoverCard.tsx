@@ -46,7 +46,7 @@ export function BotHoverCard({ bot, children }: { bot: BotSummary; children: Rea
     return () => { document.removeEventListener('keydown', escape); window.removeEventListener('scroll', scroll, true); window.removeEventListener('blur', close) }
   }, [at, close])
   useEffect(() => () => window.clearTimeout(timer.current), [])
-  return <div ref={anchor} className="bot-hover-anchor" onPointerEnter={enter} onPointerLeave={leave} onClickCapture={(event) => { if (anchor.current?.contains(event.target as Node)) close() }}>
+  return <div ref={anchor} className="bot-hover-anchor" data-open={at ? true : undefined} onPointerEnter={enter} onPointerLeave={leave} onClickCapture={(event) => { if (anchor.current?.contains(event.target as Node)) close() }}>
     {children}
     {at && threads.length > 0 && createPortal(
       <div className="bot-work bot-hover-card" role="dialog" aria-label={`What ${bot.name} is working on`} style={{ top: at.top, left: at.left }}
@@ -56,7 +56,7 @@ export function BotHoverCard({ bot, children }: { bot: BotSummary; children: Rea
           <span className="bot-hover-status">{botCardStatus(bot)}</span>
         </div>
         <ul className="bot-work-list" aria-label="Threads it works on">
-          {threads.map((thread) => <BotThreadLine key={thread.threadId} botId={bot.id} thread={thread} now={now} onOpen={close} />)}
+          {threads.map((thread) => <BotThreadLine key={thread.threadId} botId={bot.id} thread={thread} now={now} onOpen={close} tooltip={false} />)}
         </ul>
       </div>,
       document.body
