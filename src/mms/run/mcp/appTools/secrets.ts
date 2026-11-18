@@ -25,6 +25,14 @@ export interface SecretToolHost {
   masker(threadId: string): SecretMasker | undefined
 }
 
+const REQUEST_PARAMETERS = Type.Object({
+    label: Type.String({ description: 'What the secret is, shown as the card\'s title, e.g. "Hugging Face write token".' }),
+    reason: Type.String({ description: 'Why you need it, in one sentence the user reads before giving it.' }),
+    link: Type.Optional(Type.String({ description: 'Where the user can create it (an https URL).' })),
+    format: Type.Optional(Type.String({ description: 'What it looks like, e.g. "starts with hf_".' })),
+    name: Type.Optional(Type.String({ description: 'The name to keep it under, in capitals, e.g. HF_TOKEN. Default: made from the label.' }))
+  })
+
 const REQUEST_DEFINITION: Tool = {
   name: 'secret_request',
   description: [
@@ -37,13 +45,7 @@ const REQUEST_DEFINITION: Tool = {
     'Never print or echo the value into the chat.',
     'Blocks until the user answers (at most one hour) or your turn ends.'
   ].join(' '),
-  parameters: Type.Object({
-    label: Type.String({ description: 'What the secret is, shown as the card\'s title, e.g. "Hugging Face write token".' }),
-    reason: Type.String({ description: 'Why you need it, in one sentence the user reads before giving it.' }),
-    link: Type.Optional(Type.String({ description: 'Where the user can create it (an https URL).' })),
-    format: Type.Optional(Type.String({ description: 'What it looks like, e.g. "starts with hf_".' })),
-    name: Type.Optional(Type.String({ description: 'The name to keep it under, in capitals, e.g. HF_TOKEN. Default: made from the label.' }))
-  })
+  parameters: REQUEST_PARAMETERS
 }
 
 const RUN_DEFINITION: Tool = {
@@ -180,7 +182,7 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       inputSchema: plainSchema(REQUEST_DEFINITION),
       definition: () => REQUEST_DEFINITION,
       botInputSchema: plainSchema({ ...REQUEST_DEFINITION, parameters: Type.Object({
-        ...REQUEST_DEFINITION.parameters.properties,
+        ...REQUEST_PARAMETERS.properties,
         for: Type.Optional(Type.Union([
           Type.Object({ service: Type.String({ description: 'Known service: openai, anthropic, github, stripe, notion, huggingface.' }) }, { additionalProperties: false }),
           Type.Object({ origin: Type.String({ description: 'Public https origin only, without a path or user name.' }) }, { additionalProperties: false })
