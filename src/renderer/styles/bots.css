@@ -108,6 +108,12 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-message.is-menu-open .bot-message-tools { visibility: hidden; }
 .bot-bubble { position: relative; min-width: 0; max-width: 100%; padding: 9px 12px 7px; border-radius: 16px 16px 16px 5px; color: var(--text-primary); background: color-mix(in srgb, var(--text-primary) 7%, var(--bg-primary, transparent)); }
 .bot-message:not(.is-group-start) .bot-bubble { border-top-left-radius: 6px; }
+/* A message from another of the owner's bots, as in a group chat: that bot's face at the foot of its bubble, its name on
+   the bubble's first line in its colour, and the bubble lightly tinted with it (--from-colour, set on the message). */
+.bot-from-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.bot-from-face { flex: none; margin-bottom: 2px; }
+.bot-message.is-from-bot .bot-bubble { background: color-mix(in srgb, var(--from-colour) 13%, var(--bg-primary, transparent)); }
+.bot-from-name { display: block; margin-bottom: 1px; font-size: var(--bot-meta); font-weight: 600; line-height: 18px; color: color-mix(in srgb, var(--from-colour) 62%, var(--text-primary)); }
 /* The thread's Markdown (an-md-*), at the bubble's size. Inline code keeps a short piece whole: it moves to the next line
    as one, and breaks only when it is wider than the bubble. Tables keep the thread's padding inside the bubble's own. */
 .bot-bubble > .bot-markdown, .bot-bubble > .bot-find-text > .bot-markdown { margin: 0; }
@@ -128,9 +134,13 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-bubble-ask { display: flex; align-items: center; gap: 7px; margin: 6px 0 0; font-size: var(--bot-text); line-height: 1.5; }
 .bot-bubble-ask > svg { flex: none; color: var(--accent); }
 .bot-bubble .bot-error, .bot-bubble .bot-message-files { margin-top: 8px; }
-/* "Worked for 32s ›": quiet, as under a thread's prompt; the chevron turns while the steps show. */
-.bot-worked { display: inline-flex; align-items: center; gap: 2px; padding: 0; font-size: 11.5px; line-height: 16px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.bot-worked:hover { color: var(--text-primary); }
+/* "Worked for 32s ›": quiet, as under a thread's prompt, a step dimmer than the time; the chevron turns while the steps
+   show. Never a fill: not the app's focus fill (a square grey box), not on hover or after a click. Hover only lightens
+   the words; keyboard focus alone draws a thin ring, which takes no room. */
+.bot-worked { display: inline-flex; align-items: center; gap: 2px; padding: 0; border-radius: 3px; font-size: 11.5px; line-height: 16px; color: color-mix(in srgb, var(--text-secondary) 64%, transparent); font-variant-numeric: tabular-nums; transition: color 150ms ease-out; }
+.bot-bubble .bot-worked:is(:hover, :focus, :focus-visible) { outline: none; background: none; }
+.bot-bubble .bot-worked:hover { color: color-mix(in srgb, var(--text-secondary) 80%, transparent); }
+.bot-bubble .bot-worked:focus-visible { outline: 1px solid color-mix(in srgb, var(--text-secondary) 45%, transparent); outline-offset: 2px; }
 .bot-worked-chevron { transition: transform 150ms ease-out; }
 .bot-worked-chevron[data-open] { transform: rotate(90deg); }
 .bot-steps { list-style: none; margin: 8px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--bot-meta); line-height: 19px; color: var(--text-secondary); }
@@ -152,7 +162,7 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-typing-glint > span { position: absolute; inset: 0; color: var(--text-primary); transform: translateX(100%); }
 @media (forced-colors: active) { .bot-typing-glint { display: none; } }
 .bot-status-line { margin: 0; padding: 7px 13px; font-size: var(--bot-meta); color: var(--text-secondary); }
-@media (prefers-reduced-motion: reduce) { .bot-worked-chevron { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .bot-worked, .bot-worked-chevron { transition: none; } }
 /* An open ask: quick replies under the bubble, the details on demand. */
 .bot-ask-replies { display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
 .bot-ask-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -542,12 +552,12 @@ html[data-theme] .bot-prompt-card textarea.bot-prompt-field { background: transp
 .bot-thread-show { position: absolute; right: 4px; bottom: 3px; display: grid; place-items: center; width: 22px; height: 20px; border-radius: 6px; color: var(--text-secondary); opacity: .75; }
 .bot-thread-show:hover:not(:disabled) { opacity: 1; background: color-mix(in srgb, var(--text-secondary) 14%, transparent); color: var(--text-primary); }
 .bot-thread-show:disabled { opacity: .4; cursor: default; }
-.bot-thread-fold { display: flex; align-items: center; gap: 4px; width: 100%; padding: 4px 8px 2px; border-radius: 6px; font-size: 11px; color: var(--text-secondary); text-align: left; }
-.bot-thread-fold:hover { color: var(--text-primary); }
-.bot-thread-fold svg { flex: none; transition: transform 150ms ease-out; }
-.bot-thread-fold svg[data-open] { transform: rotate(90deg); }
+/* "Recent": the threads that finished in the last six hours; "See all" lists every one in the sidebar. */
+.bot-thread-recent { display: flex; gap: 5px; margin-top: 8px; }
 .bot-thread-count { font-variant-numeric: tabular-nums; opacity: .8; }
-@media (prefers-reduced-motion: reduce) { .bot-thread-fold svg { transition: none; } }
+/* "See all" stays at the panel's bottom edge while a long Recent list scrolls under it (5px: the panel's padding). */
+.bot-thread-all { position: sticky; bottom: -5px; flex: none; display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; margin: 4px 0 -5px; padding: 7px 8px 10px; border-top: 1px solid var(--ui-line); border-radius: 0 0 7px 7px; background: var(--ui-raised, var(--surface-soft)); font-size: var(--bot-meta); color: var(--text-secondary); }
+.bot-thread-all:hover { color: var(--text-primary); }
 
 /* What waits on the owner (an open ask, the bot's error), pinned above the composer as one line each; a click shows
    the full message. */
@@ -642,7 +652,7 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 /* A held call uses the ask's controls; all outside data remains readable in place. */
 .bot-action-card { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .bot-action-title { font-weight: 600; margin: 0 0 4px; }
-.bot-action-server, .bot-action-note { color: var(--text-secondary); }
+.bot-action-server { color: var(--text-secondary); }
 .bot-action-arguments { overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
 .bot-action-arguments:has(details[open]) { max-height: 360px; }
 .bot-action-arguments dl { margin: 8px 0; }
@@ -654,7 +664,7 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-action-card blockquote { margin: 12px 0; padding: 8px 12px; border-left: 2px solid var(--border); max-height: 240px; overflow: auto; }
 
 .bot-action-arguments .bot-action-text { max-height: none; overflow: visible; white-space: pre-wrap; margin: 4px 0; padding: 4px 8px; border-left: 2px solid var(--border); }
-.bot-action-note { white-space: normal; }
+.bot-action-card .bot-action-identification { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 4px 0; padding: 4px 8px; }
 .bot-action-notice { display: flex; align-items: baseline; gap: 6px; }
 .bot-action-notice > svg { flex: 0 0 14px; }
 
@@ -674,3 +684,21 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 
 .bot-expired-actions { margin-top: 14px; }
 .bot-expired-actions > summary { width: fit-content; max-width: 100%; margin-inline: auto; padding: 2px 10px; font-size: 12px; line-height: 18px; color: var(--text-secondary); border-radius: 999px; background: color-mix(in srgb, var(--text-secondary) 7%, transparent); cursor: pointer; }
+
+/* A bot's hover card in the sidebar: to the right of its row, top edges aligned, its status and the threads it works on. */
+/* Its row stays tinted while the card is open. */
+.bot-hover-anchor[data-open] > .bot-row:not([aria-current='true']) { background: color-mix(in srgb, var(--text-secondary) 11%, transparent); }
+.bot-hover-card { --bot-meta: 12.5px; position: fixed; top: auto; width: min(340px, 60vw); max-height: min(360px, 60vh); padding: 6px; z-index: 60; }
+.bot-hover-head { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 6px; min-width: 0; }
+.bot-hover-name { font-size: 13px; font-weight: 600; line-height: 1.3; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-hover-status { font-size: 12px; line-height: 1.35; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A bot's thread in the bot's chat pane: back, the face, "bot / thread", and the thread's project and state under it. */
+.bot-thread-header { gap: 6px; padding-block: 12px; padding-left: 12px; }
+.bot-thread-back { flex: none; }
+.bot-thread-header .bot-header-who { margin-left: 8px; }
+.app .bot-thread-crumbs { display: flex; align-items: baseline; gap: 6px; min-width: 0; max-width: 100%; margin: 0; font-size: 14px; line-height: 18px; font-weight: 600; }
+.bot-thread-crumb-bot { flex: none; min-height: 0; padding: 0; border: 0; background: none; font: inherit; color: var(--text-secondary); cursor: pointer; }
+.bot-thread-crumb-bot:hover { color: var(--text-primary); }
+.bot-thread-crumb-sep { flex: none; font-weight: 400; color: var(--text-secondary); opacity: .7; }
+.bot-thread-crumb-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

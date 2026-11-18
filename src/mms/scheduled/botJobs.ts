@@ -10,8 +10,9 @@ import { computeNextRun, cronProblem } from './computeNextRun'
 /**
  * Bots' schedules in the shared scheduled-job store (Path step 3, "One scheduler"). A bot's schedule is an automation
  * whose Who is the bot (`ScheduledJob.bot`): the one `ScheduledJobService` claims it, and the bot engine runs each
- * occurrence in the bot's run lane. What stays a bot's own: at most 8 schedules, at most once a minute, only a
- * repeating time (an interval or cron), and Who, Where and May are the bot's (its grant), never the job's fields.
+ * occurrence in the bot's run lane. What stays a bot's own: at most once a minute (and `MAX_BOT_SCHEDULES`, a ceiling
+ * only a runaway reaches), only a repeating time (an interval or cron), and Who, Where and May are the bot's (its
+ * grant), never the job's fields.
  */
 
 export { MAX_BOT_SCHEDULES }
@@ -239,7 +240,7 @@ export class BotScheduleBook {
   }
 
   /**
-   * An occurrence the bot took but never ran (a full queue dropped it): the automation shows why, as for an occurrence
+   * An occurrence the bot took but never ran (a full queue refused it): the automation shows why, as for an occurrence
    * skipped when it was due (`botSkip`), until the next one is handed over.
    */
   skipped(botId: string, scheduleId: string, skip: { at: string; reason: string }): void {
@@ -248,11 +249,11 @@ export class BotScheduleBook {
   }
 
   /**
-   * Adds a schedule: at most 8 per bot, at least a minute apart. It needs no approval (a schedule is not a permission)
+   * Adds a schedule: at least a minute apart, and at most `MAX_BOT_SCHEDULES` per bot (only a runaway reaches it). It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
   add(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string; ownerAsked?: boolean } = {}): BotScheduleEntry {
-    if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
+    if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules, a ceiling only a runaway reaches. Remove some first.`)
     const ownerAsked = options.ownerAsked === true || (input.say !== undefined && createdBy === 'owner')
     if (input.say !== undefined && !ownerAsked) throw new BotScheduleError('schedule_invalid', 'Only the owner’s message or tap can set a fixed line. Use prompt instead of say.')
     const prompt = schedulePrompt(input)

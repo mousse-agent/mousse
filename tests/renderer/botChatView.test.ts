@@ -41,13 +41,19 @@ vi.mock('../../src/renderer/chat/components/agent-elements/markdown', async (imp
 const opened = vi.hoisted(() => ({ ids: [] as string[] }))
 vi.mock('../../src/renderer/lib/threadActions', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/renderer/lib/threadActions')>()
-  return { ...actual, selectThread: (threadId: string, ...rest: unknown[]) => { opened.ids.push(threadId); return (actual.selectThread as (...args: unknown[]) => Promise<unknown>)(threadId, ...rest) } }
+  return {
+    ...actual,
+    selectThread: (threadId: string, ...rest: unknown[]) => { opened.ids.push(threadId); return (actual.selectThread as (...args: unknown[]) => Promise<unknown>)(threadId, ...rest) },
+    // A thread opened in the bot's chat pane (lib/botThread.ts).
+    openAndSelect: (threadId: string, ...rest: unknown[]) => { opened.ids.push(threadId); return (actual.openAndSelect as (...args: unknown[]) => Promise<unknown>)(threadId, ...rest) }
+  }
 })
 
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
 const { useChatsStore, OPEN_BOT_HOLD_MS } = await import('../../src/renderer/stores/chatsStore')
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useThreadFilterStore } = await import('../../src/renderer/stores/threadFilterStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { botMessageScroller, DOING_HOLD_MS } = await import('../../src/renderer/components/bots/BotChatView')
 const { SETTLE_MS, clearBotLiveReplies } = await import('../../src/renderer/stores/botLiveReplies')
@@ -1036,6 +1042,14 @@ describe('a reply as it is written', () => {
     await add({ id: 'u1', role: 'user', content: 'Compare the two drives.', timestamp: AT })
   }
 
+  it('shows nothing of a turn the chat does not show (a wake-up or a thread\'s notice): no typing, no streaming words', async () => {
+    await openWriting(summary('inbox', { name: 'Inbox helper', state: 'idle', homeThreadId: 'home1' }))
+    await write('Checking the job that just finished.\n\n')
+    expect(live()).toBeNull()
+    expect(transcript().querySelector('.bot-typing')).toBeNull()
+    expect(transcript().textContent).not.toContain('Checking the job')
+  })
+
   it('keeps a stored action card single while another chat reply streams and the card settles', async () => {
     await openWriting()
     await write('The comparison is ready.\n\n')
@@ -1823,25 +1837,24 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     const rows = () => [...host.querySelectorAll('.bot-thread-line')].map((row) => [row.querySelector('.bot-thread-title')!.textContent, row.querySelector('.bot-thread-state')!.textContent, row.getAttribute('data-tone')])
     const keydown = async (key: string) => { await act(async () => { (document.activeElement as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })) }); await act(async () => {}) }
 
-    it('lists working threads first, then those waiting on you, each with its state, project and last update; the rest fold under Done', async () => {
+    const recent = () => host.querySelector('.bot-thread-recent')?.textContent
+
+    it('lists working threads first, then those waiting on you, each with its state, project and last update; the rest under Recent', async () => {
       await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })
       expect(presence().textContent).toBe('Managing 2 threads')
       await click(presence())
-      expect(rows()).toEqual([['Dictation', 'working', 'working'], ['Typing dots', 'waiting on you', 'waiting']])
+      expect(rows().slice(0, 2)).toEqual([['Dictation', 'working', 'working'], ['Typing dots', 'waiting on you', 'waiting']])
       expect(host.querySelector('.bot-thread-meta')!.textContent).toBe('Mousse · updated 1m ago')
-      const fold = host.querySelector<HTMLButtonElement>('.bot-thread-fold')!
-      expect([fold.textContent, fold.getAttribute('aria-expanded')]).toEqual(['Done4', 'false'])
-      await click(fold)
+      expect(recent()).toBe('Recent4')
       expect(rows().slice(2)).toEqual([['Never ran', 'idle', 'idle'], ['Broken', 'failed', 'failed'], ['Halted', 'stopped', 'failed'], ['Old run', 'done', 'done']])
     })
 
-    it('a thread on hold for the owner is listed as waiting on you while the bot reads free, and the rest fold under Done', async () => {
+    it('a thread on hold for the owner is listed as waiting on you while the bot reads free, and the rest under Recent', async () => {
       await open({ ...inbox, state: 'idle', stateText: 'Done.', threads: [thread('t8', 'Fix login', 'on_hold', 20), thread('t3', 'Old run', 'done', 90)] })
       expect(presence().textContent).toBe('free')
       await click(presence())
-      expect(rows()).toEqual([['Fix login', 'waiting on you', 'waiting']])
-      const fold = host.querySelector<HTMLButtonElement>('.bot-thread-fold')!
-      expect([fold.textContent, fold.getAttribute('aria-expanded')]).toEqual(['Done1', 'false'])
+      expect(rows()).toEqual([['Fix login', 'waiting on you', 'waiting'], ['Old run', 'done', 'done']])
+      expect(recent()).toBe('Recent1')
     })
 
     it('opens a thread from its row, moves along the list with the arrow keys, and closes on Escape or a click away', async () => {
@@ -1864,6 +1877,9 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       await click(presence())
       await click(host.querySelector('.bot-thread-line[data-tone="waiting"]'))
       expect(opened.ids).toEqual(['t2'])
+      // In the bot's chat pane: the sidebar stays on Chats.
+      expect(useChatsStore.getState().botThread).toEqual({ botId: inbox.id, threadId: 't2' })
+      expect(useAppStore.getState().sidebarMode).toBe('chats')
       expect(host.querySelector('.bot-work')).toBeNull()
     })
 
@@ -1884,11 +1900,47 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(opened.ids).toEqual(['t7'])
     })
 
-    it('a free bot whose threads all ended still opens their list, Done unfolded', async () => {
+    it('a free bot whose threads all ended still opens their list', async () => {
       await open({ ...inbox, threads: threads.filter((item) => item.status === 'done' || item.status === 'failed') })
       expect(presence().textContent).toBe('free')
       await click(presence())
       expect(rows().map(([title]) => title)).toEqual(['Broken', 'Old run'])
+    })
+
+    it('Recent lists only threads updated in the last six hours, counts just those, and one drops off while the list is open', async () => {
+      const hours = 6 * 60
+      await open({ ...inbox, threads: [thread('t1', 'Fresh', 'done', 10), thread('t2', 'Turning stale', 'failed', hours - 1), thread('t3', 'This morning', 'done', hours + 5)] })
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+      try {
+        await click(presence())
+        expect(recent()).toBe('Recent2')
+        expect(rows().map(([title]) => title)).toEqual(['Fresh', 'Turning stale'])
+        // Two minutes on, the list's clock ticks and the thread that turned six hours old leaves; the count follows.
+        await act(async () => { vi.advanceTimersByTime(120_000) })
+        expect(recent()).toBe('Recent1')
+        expect(rows().map(([title]) => title)).toEqual(['Fresh'])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("See all counts the threads it started that are not archived, and opens the sidebar's Threads tab filtered to it", async () => {
+      const started = (id: string, over: Record<string, unknown> = {}) => ({ id, name: id, createdAt: ago(600), updatedAt: ago(600), startedByBot: { botId: inbox.id, name: inbox.name }, hidden: true as const, ...over })
+      useAppStore.setState({ threads: [started('s1'), started('s2'), started('s3', { settledAt: ago(500) }), started('s4', { lineage: { parentThreadId: 's1' } })] as never, threadsSidebarView: 'projects', sidebarMode: 'threads' })
+      try {
+        // Nothing works and nothing is recent, yet the line opens: See all is there.
+        await open({ ...inbox, threads: [] })
+        await click(presence())
+        const all = host.querySelector<HTMLButtonElement>('.bot-thread-all')!
+        expect(all.textContent).toBe('See all 2 threads')
+        await click(all)
+        expect(host.querySelector('.bot-work')).toBeNull()
+        expect(useThreadFilterStore.getState().botId).toBe(inbox.id)
+        expect(useAppStore.getState().threadsSidebarView).toBe('threads')
+      } finally {
+        useAppStore.setState({ threads: appInitial.threads, threadsSidebarView: appInitial.threadsSidebarView, sidebarMode: appInitial.sidebarMode })
+        useThreadFilterStore.setState(useThreadFilterStore.getInitialState(), true)
+      }
     })
 
     it('a thread it starts while the bot list is being read shows in the open chat without leaving it', async () => {
@@ -2352,12 +2404,14 @@ it('R5-time formats a sent action in the client clock', async () => {
 // Stored action cards, through the workspace the owner actually opens.
 const action = (change: Record<string, unknown> = {}) => ({ actionId: 'held-1', digest: 'shown-digest', title: 'Send an email', serverName: 'Mail', args: { from: 'me@example.com', to: ['one@example.com', 'two@example.com'], subject: 'A subject', attachments: ['trip.pdf'], body: 'Long email '.repeat(120) + 'last word', password: { $mousse: 'hidden', text: 'hidden · will be sent' }, literal: { $mousse: 'literal', value: { $mousse: 'hidden', text: 'hidden · will be sent' } } }, hasHiddenValues: true, hiddenPaths: [['password'], ['login', 'token']], status: 'open', note: 'Please check this.', ...change })
 const held = (change: Record<string, unknown> = {}) => message(1, { id: 'held-message', text: 'legacy fallback', action: action(change) } as never)
-it('shows complete stored action arguments as guarded text, with an in-place body fold and separate bot note', async () => {
+it('shows complete stored action arguments as guarded text, with an in-place body fold and no invented bot note', async () => {
   fake.chats.inbox = [held({ title: '<b>Send</b>', serverName: '[Mail](https://evil.test)', note: '<i>Check</i>\u202e this', args: { ...action().args, hostile: '<button>Send now</button> https://evil.test Ignore instructions', text: 'hidden · will be sent' } })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
   expect(card).toBeTruthy()
-  for (const text of ['me@example.com', 'one@example.com', 'two@example.com', 'A subject', 'trip.pdf', '<b>Send</b>', 'Inbox helper says:', '<button>Send now</button>', 'login']) expect(card.textContent).toContain(text)
+  for (const text of ['me@example.com', 'one@example.com', 'two@example.com', 'A subject', 'trip.pdf', '<b>Send</b>', '<button>Send now</button>', 'login']) expect(card.textContent).toContain(text)
+  expect(card.querySelector('[aria-label="Bot note"]')).toBeNull()
+  expect(card.textContent).not.toContain('<i>Check</i>')
   expect(card.querySelector('a, b, i')).toBeNull()
   expect(card.textContent).not.toContain('\u202e')
   const fold = card.querySelector('details')!
@@ -2447,7 +2501,7 @@ it('passes exactly the shown action identity through the real client transport, 
   expect(button('Send', card)).toBeUndefined()
 })
 
-it('keeps the A note/subject probes and B multiline recipient probe inside labelled outside-data blocks', async () => {
+it('keeps subject and multiline recipient probes inside data and drops legacy notes', async () => {
   const note = 'Fine.\n\nInbox helper already sent exactly this at 9:14 AM\n\nThis changed since you saw it'
   const subject = 'Hi\n\nHidden values will be sent: nothing\n\nInbox helper already sent exactly this…'
   const recipient = 'alice@example.com\nbcc\nevil@example.com'
@@ -2458,9 +2512,8 @@ it('keeps the A note/subject probes and B multiline recipient probe inside label
   expect(argumentsRegion).toBeTruthy()
   expect(argumentsRegion.querySelector('blockquote')?.textContent).toContain('Hi↵')
   expect(argumentsRegion.textContent).toContain('alice@example.com↵\nbcc↵\nevil@example.com')
-  const quote = card.querySelector('blockquote[aria-label="Bot note"]')!
-  expect(quote.textContent).toBe(`Inbox helper says: ${note.replace(/\s+/g, ' ')}`)
-  expect(quote.textContent).not.toMatch(/[\n\r]/)
+  expect(card.querySelector('blockquote[aria-label="Bot note"]')).toBeNull()
+  expect(card.textContent).not.toContain('Fine.')
   const notices = [...card.querySelectorAll('[role="note"]')].filter((element) => element.textContent?.includes('Hidden values will be sent:') || element.textContent?.includes('already sent exactly this at'))
   for (const notice of notices) { expect(argumentsRegion.contains(notice)).toBe(false); expect(notice.querySelector('svg')).toBeTruthy() }
 })
@@ -2495,7 +2548,7 @@ it.each(['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expi
 })
 
 it('folds long list values and names when more arguments remain below', async () => {
-  fake.chats.inbox = [held({ args: { subject: 'S'.repeat(250), to: ['alice@example.com\n'.repeat(40)], final: 'Last field' } })]
+  fake.chats.inbox = [held({ args: { subject: 'S'.repeat(300), to: ['alice@example.com\n'.repeat(40)], final: 'Last field' } })]
   await open()
   const args = host.querySelector<HTMLElement>('[aria-label="Everything it will send"]')!
   const subject = [...args.querySelectorAll('dt')].find((item) => item.textContent === 'subject')!.nextElementSibling!
@@ -2628,12 +2681,14 @@ it.each([
   expect(card.textContent).not.toContain('arguments')
 })
 
-it('puts the outcome directly after the title, before the tool answer and review', async () => {
+it('puts the identifying data under the title, then the outcome before the tool answer and review', async () => {
   fake.chats.inbox = [held({ status: 'failed', at: AT, result: { text: 'Partly delivered', toolReportedError: true } })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
   const status = card.querySelector('[role="status"]')!
-  expect(card.querySelector('[aria-label="Action summary"]')?.nextElementSibling).toBe(status)
+  const identity = card.querySelector('[aria-label="Request identification"]')!
+  expect(card.querySelector('[aria-label="Action summary"]')?.nextElementSibling).toBe(identity)
+  expect(identity.nextElementSibling).toBe(status)
   expect(status.nextElementSibling).toBe(card.querySelector('[aria-label="Tool result"]'))
   expect(status.nextElementSibling?.nextElementSibling).toBe(card.querySelector('details'))
 })
@@ -2672,7 +2727,7 @@ it('keeps a curly-quoted arrow name in one unquoted hidden-path segment', async 
 })
 
 it.each(['approved', 'running', 'unreachable'])('C4 integration waiting distinguishes %s from an actual send', async (state) => {
-  const sentence = "Stored Mail couldn't be reached, so nothing was sent."
+  const sentence = "Stored Mail couldn't be reached. Nothing was sent. Try again when it is available."
   fake.chats.inbox = [held({ status: state === 'unreachable' ? 'failed' : state, serverName: 'Stored Mail', at: AT, result: state === 'unreachable' ? { text: sentence, notSentInTime: true } : undefined })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
@@ -2710,12 +2765,12 @@ it.each([
   ['work_ended', 'This work ended. Nothing was sent.', 'withdrawn'],
   ['owner_paused', 'This bot was paused, so nothing was sent.', 'withdrawn'],
   ['permission_changed', 'This tool or its permission changed, so nothing was sent.', 'withdrawn'],
-  ['disabled', 'This could not wait for your owner after all, so nothing was sent.', 'withdrawn'],
+  ['disabled', 'Withdrawn when asks first was turned off. Nothing was sent.', 'withdrawn'],
   ['owner_removed', 'You removed this request, so nothing was sent.', 'withdrawn'],
   ['binding_changed', 'This changed since you saw it. Nothing was sent.', 'withdrawn'],
   ['settled', 'This was already answered.', 'done'],
   ['gone', "This can't be sent any more.", 'gone'],
-  ['unreachable', "Mail couldn't be reached, so nothing was sent.", 'failed']
+  ['unreachable', "Mail couldn't be reached. Nothing was sent. Try again when it is available.", 'open']
 ])('C4 integration renderer preserves the exact %s service refusal through the real client', async (reason, text, status) => {
   fake.chats.inbox = [held()]
   const { createPersonalBotsClient } = await import('../../src/renderer/services/personalBotsClient')
@@ -2737,7 +2792,7 @@ it.each([
 })
 
 it('C4 integration bridge timeout stub has its outcome and computer explanation without an empty review fold', async () => {
-  const text = "Mail couldn't be reached, so nothing was sent."
+  const text = "Mail couldn't be reached. Nothing was sent. Try again when it is available."
   fake.chats.inbox = [held({ status: 'failed', at: AT, tooLarge: true, args: null, hiddenPaths: [], result: { text, notSentInTime: true } })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
@@ -2835,7 +2890,7 @@ it('keeps empty and unusual field names injective and reserves the non-ASCII not
 })
 
 it('shows a settled card time once, trims timeout punctuation and avoids repeating an expired refusal', async () => {
-  const sentence = "Mail couldn't be reached, so nothing was sent."
+  const sentence = "Mail couldn't be reached. Nothing was sent. Try again when it is available."
   fake.chats.inbox = [held({ status: 'failed', at: '2026-11-07T10:24:00.000Z', result: { text: sentence, notSentInTime: true } })]
   await open()
   const row = host.querySelector('[data-message-id="held-message"]')!
@@ -2943,7 +2998,7 @@ it('keeps the cached service name for a device refusal after its card disappears
   }) })
   await open()
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
-  expect(host.textContent).toContain("Mail couldn't be reached, so nothing was sent.")
+  expect(host.textContent).toContain("Mail couldn't be reached. Nothing was sent. Try again when it is available.")
   expect(host.textContent).not.toContain('WIRE SERVICE MUST NOT APPEAR')
   expect(host.querySelector('[aria-label="Action to review"]')).toBeNull()
 })
@@ -2958,4 +3013,123 @@ it.each(['local', 'device'])('keeps the changed-schedule sentence and closes but
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
   expect(host.textContent).toContain('This changed since you saw it. Nothing was sent.')
   expect(button('Send', transcript())).toBeUndefined()
+})
+
+describe('a message from another of the owner\'s bots', () => {
+  const alpha = summary('bot-alpha', { name: 'Alpha', look: { colour: 'green', accessory: 'beret' } })
+  const text = '**Message from your bot Alpha**\n\n> The Mac nightly passed.\n>\n> The DMG is in `nightly/`.'
+  async function openWith(row: { id: string; text: string }, sender = alpha) {
+    fake.bots = [inbox, sender]
+    fake.chats[inbox.id] = [
+      message(1, { author: 'owner', text: 'Ask Alpha about the nightly.' }),
+      message(2, { id: row.id, kind: 'notice', text: row.text }),
+      message(3, { text: 'Alpha says the nightly passed.' })
+    ]
+    await act(async () => useChatsStore.getState().activate('p1'))
+    await act(async () => root.render(createElement(ChatWorkspace)))
+    await act(async () => useChatsStore.getState().openBot(inbox.id))
+  }
+  const sent = (id: string) => host.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+
+  it('reads as that bot\'s own message: its name on top and its words, with no header or quote, and Copy takes the words alone', async () => {
+    const id = 'bm_botmsg_bot-alpha_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+    await openWith({ id, text })
+    expect(sent(id).textContent).toContain('Alpha')
+    expect(sent(id).textContent).toContain('The Mac nightly passed.')
+    expect(sent(id).textContent).not.toContain('Message from your bot')
+    expect(sent(id).querySelector('blockquote')).toBeNull()
+    const writeText = vi.fn(async () => undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    await click(button('Copy', sent(id)))
+    expect(writeText).toHaveBeenCalledWith('The Mac nightly passed.\n\nThe DMG is in `nightly/`.')
+  })
+
+  it('names the sender as it is called now', async () => {
+    const id = 'bm_botmsg_bot-alpha_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+    await openWith({ id, text }, { ...alpha, name: 'Alpha Two' })
+    expect(sent(id).textContent).toContain('Alpha Two')
+  })
+
+  it('draws a message kept before the sender\'s id was, by the name it holds', async () => {
+    const id = 'bm_botmsg_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+    await openWith({ id, text })
+    expect(sent(id).textContent).toContain('Alpha')
+    expect(sent(id).textContent).toContain('The DMG is in')
+    expect(sent(id).textContent).not.toContain('Message from your bot')
+  })
+})
+
+// Settled identifiers use the first visible recipient/subject field, never hidden content.
+it.each([
+  [{ to: 'alex@example.test', subject: 'Later subject' }, 'alex@example.test'],
+  [{ recipient: ['a@example.test', 'b@example.test'] }, 'a@example.test, b@example.test'],
+  [{ email: 'a@example.test' }, 'a@example.test'],
+  [{ channel: '#team' }, '#team'],
+  [{ subject: 'One\nline' }, 'One line'],
+  [{ title: 'A title' }, 'A title'],
+  [{ to: { $mousse: 'hidden', text: 'hidden · will be sent' }, subject: 'Visible subject' }, 'Visible subject'],
+  [{ nested: { subject: '<b>Plain</b>' } }, '<b>Plain</b>'],
+  [{ body: 'No identifying field' }, undefined]
+])('C10 settled cards identify their stored call: %j', async (args, expected) => {
+  fake.chats.inbox = [held({ status: 'done', args })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const identity = card.querySelector('[aria-label="Request identification"]')
+  if (expected === undefined) expect(identity).toBeNull()
+  else {
+    expect(identity?.textContent).toBe(expected)
+    expect(identity?.closest('details')).toBeNull()
+    expect(identity?.querySelector('b, a')).toBeNull()
+  }
+})
+it.each(['open', 'approved', 'running', 'forgotten'])('C10 no compact identifier for %s cards', async state => {
+  fake.chats.inbox = [held(state === 'forgotten' ? { status: 'done', forgotten: true, args: null } : { status: state })]
+  await open()
+  expect(host.querySelector('[aria-label="Request identification"]')).toBeNull()
+})
+
+// Short body-like fields and any other short strings stay in place; either length bound folds.
+it.each([
+  ['body', 'See you at noon.', false], ['text', 'Short text', false],
+  ['content', 'Short content', false], ['message', 'Short message', false],
+  ['body', 'x'.repeat(280), false], ['body', 'x'.repeat(281), true],
+  ['body', 'a\nb\nc\nd', false], ['body', 'a\nb\nc\nd\ne', true],
+  ['subject', 'x'.repeat(281), true]
+])('C10 folds %s only when its value is long (%s)', async (name, value, folds) => {
+  fake.chats.inbox = [held({ args: { [name]: value } })]
+  await open()
+  const region = host.querySelector('[aria-label="Everything it will send"]')!
+  expect(region.querySelector('details') !== null).toBe(folds)
+  expect(region.textContent).toContain(value.replaceAll('\n', '↵\n'))
+})
+
+it('C10 review cold Send gives a local retry sentence and leaves both buttons live', async () => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: async () => { throw Object.assign(new Error('not owner-facing'), { code: 'bot_action_unreachable' }) } })
+  await open()
+  await click(button('Send'))
+  expect(host.textContent).toContain("Mail couldn't be reached. Nothing was sent. Try again when it is available.")
+  expect(button('Send')?.disabled).toBe(false)
+  expect(button('Not now')?.disabled).toBe(false)
+})
+it('C10 review compact recipient carries the full review look-alike warning', async () => {
+  fake.chats.inbox = [held({ status: 'done', args: { to: 'аlex@example.test' } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const warning = [...card.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')].find(el => !el.closest('details'))
+  expect(warning?.textContent).toContain('Contains letters or digits outside A–Z and 0–9')
+})
+
+it('R2 a timed-out Send is terminal while the card retains its stored timeout outcome', async () => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: async () => {
+    fake.chats.inbox = [held({ status: 'failed', at: AT, result: { text: "Mail couldn't be reached, so nothing was sent.", notSentInTime: true } })]
+    throw Object.assign(new Error('not owner-facing'), { code: 'bot_action_gone' })
+  } })
+  await open(); await click(button('Send'))
+  expect(host.textContent).toContain("This can't be sent any more.")
+  expect(host.textContent).not.toContain('Try again when it is available.')
+  expect(button('Send')).toBeUndefined()
+  expect(button('Not now')).toBeUndefined()
+  expect(host.textContent).toContain("Mail couldn't be reached, so nothing was sent")
 })

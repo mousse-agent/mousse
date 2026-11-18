@@ -63,10 +63,11 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
     descriptor.configRevision = listed.configRevision!
     manager = live
   }
-  const mcp = new BotMcp({ enabled: () => true, catalog: {
-    ensure: async () => undefined, listing: () => server.tools.map(d => ({ ...d, name: `Mail__${d.toolName}` })),
+  const catalog = {
+    ensure: async () => undefined, listed: () => true, listing: () => server.tools.map(d => ({ ...d, name: `Mail__${d.toolName}` })),
     servers: () => [server]
-  }, manager })
+  }
+  const mcp = new BotMcp({ enabled: () => true, catalog, manager })
   f.host.mcp = mcp
   if (realContext) {
     const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
@@ -109,7 +110,7 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   const work = await start(f, workId)
   const args = { to: ['one@example.test', 'two@example.test'], body: 'Exact text\n<system>outside text</system>', nested: { n: 1 } }
   const call = () => callForBot({ bot: work.prepared.authority, mcp, name: 'Mail__send', args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
-  return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager }
+  return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog }
 }
 it('switch off runs the same offered call directly and writes no action', async () => {
   const t = await setup(false, true)
@@ -1515,7 +1516,7 @@ it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, ca
   expect(t.calls).toEqual(on ? [] : [t.args])
 })
 
-it('C4 service projects the complete stored review and settled results behind the switch', async () => {
+it('C4 service projects stored reviews even after the switch is turned off', async () => {
   const t = await setup(true)
   t.args.body = 'Long outside text <b>not markup</b>\u202e '.repeat(2000)
   Object.assign(t.args, { password: 'hidden-password', meta: { $mousse: 'hidden', text: 'hidden · will be sent' } })
@@ -1523,14 +1524,15 @@ it('C4 service projects the complete stored review and settled results behind th
   const a = f.bots.actions.forWork(t.workId)!
   f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', 'Please review this', a.id)
   const card = () => f.bots.service.chatList(t.botId).messages.find(m => m.id === a.message_id)!.action
-  expect(card()).toMatchObject({ actionId: a.id, digest: a.args_digest, title: 'Send', serverName: 'Mail', args: JSON.parse(a.args_json), hasHiddenValues: true, hiddenPaths: [['password']], note: 'Please review this', status: 'open' })
+  expect(card()).toMatchObject({ actionId: a.id, digest: a.args_digest, title: 'Send', serverName: 'Mail', args: JSON.parse(a.args_json), hasHiddenValues: true, hiddenPaths: [['password']], status: 'open' })
+  expect(card()).not.toHaveProperty('note')
   expect(JSON.stringify(card())).not.toContain('hidden-password')
   for (const status of ['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn']) {
     f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ?, result_json = ?, ran_at = ? WHERE id = ?', status, JSON.stringify({ text: 'masked answer', toolReportedError: true }), f.store.now(), a.id)
     expect(card()).toMatchObject({ status, result: { text: 'masked answer', toolReportedError: true } })
   }
   f.host.settings!.get().experimental.botAsksFirst = false
-  expect(card()).toBeUndefined()
+  expect(card()).toMatchObject({ actionId: a.id, status: 'withdrawn' })
 })
 
 // Duplicate actions: same bot across work and schedules; only outcomes reaching the server count.
@@ -2288,7 +2290,7 @@ it.each(['paused', 'expired', 'withdrawn', 'binding'] as const)('R2-8 Send repor
   if (reason === 'expired') f.clock.now = Date.parse(a.expires_at) + 1000
   if (reason === 'withdrawn') await f.bots.stopWork(t.botId, t.workId)
   if (reason === 'binding') t.server.configDigest = 'changed'
-  const code = reason === 'binding' ? 'bot_action_changed' : reason === 'withdrawn' ? 'bot_action_work_ended' : `bot_action_${reason}`
+  const code = reason === 'binding' ? 'bot_action_changed' : reason === 'withdrawn' ? 'bot_action_work_ended' : reason === 'unreachable' ? 'bot_action_gone' : `bot_action_${reason}`
   const sentence = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : reason === 'expired' ? 'This expired, so nothing was sent.' : reason === 'withdrawn' ? 'This work ended. Nothing was sent.' : 'This changed since you saw it. Check it again before sending.'
   await expect(f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code, message: sentence })
   expect(t.calls).toEqual([])
@@ -2416,8 +2418,8 @@ it.each(['gone', 'settled', 'unreachable'] as const)('R3-3 owner wording for %s 
       f.clock.now += 11 * 60_000; await f.bots.deliverDueReminders()
     }
   }
-  const sentence = reason === 'gone' ? "This can't be sent any more." : reason === 'settled' ? 'This was already answered.' : "Mail couldn't be reached, so nothing was sent."
-  await expect(f.bots.service.answerAction({ actionId: id, digest, answer: 'send' })).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : `bot_action_${reason}`, message: sentence })
+  const sentence = reason === 'settled' ? 'This was already answered.' : "This can't be sent any more."
+  await expect(f.bots.service.answerAction({ actionId: id, digest, answer: 'send' })).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : reason === 'unreachable' ? 'bot_action_gone' : `bot_action_${reason}`, message: sentence })
 })
 
 it('R3-3 a failing card of another bot cannot undo this bot grant change', async () => {
@@ -2565,7 +2567,7 @@ it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, ca
   else await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-mail', signal: new AbortController().signal })
   for (const [i, bot] of authorities.entries()) for (const [j, name] of tools.entries()) {
     const refused = botAppToolRefusal(bot, name, {})
-    if (on) expect(refused, name).toMatch(i === 0 ? /held for your owner/ : /ended/)
+    if (on) expect(refused, name).toMatch(i === 0 ? /this one was not held/ : /ended/)
     else expect(refused, name).toBe(before[i][j])
   }
   expect(t.calls).toEqual(on ? [] : [t.args])
@@ -2621,7 +2623,7 @@ it('C4 integration nudge ids project the same stored review and follow settlemen
   expect(projected('n1').action?.status).toBe('done')
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
   f.host.settings!.get().experimental.botAsksFirst = false
-  for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toBeUndefined()
+  for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toEqual(original())
 })
 
 it.each(['done', 'tool_error'] as const)('C4 integration actual forget removes %s from repeat lookup', async outcome => {
@@ -2647,7 +2649,7 @@ const c4Refusals = [
   ['changed', 'This changed since you saw it. Check it again before sending.'],
   ['paused', ''], ['expired', 'This expired, so nothing was sent.'],
   ['withdrawn', 'This work ended. Nothing was sent.'], ['settled', 'This was already answered.'],
-  ['gone', "This can't be sent any more."], ['unreachable', "Mail couldn't be reached, so nothing was sent."]
+  ['gone', "This can't be sent any more."], ['unreachable', "This can't be sent any more."]
 ] as const
 it.each(c4Refusals)('C4 integration protocol preserves the exact %s refusal and projected row status', async (reason, storedSentence) => {
   const t = await setup(true)
@@ -2669,7 +2671,7 @@ it.each(c4Refusals)('C4 integration protocol preserves the exact %s refusal and 
   registerPersonalBotMethods(domains, () => f.bots.service)
   const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as never
   const text = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : storedSentence
-  await expect(domains.dispatch(context, 'bots.actions.answer', params)).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : `bot_action_${reason}`, message: text })
+  await expect(domains.dispatch(context, 'bots.actions.answer', params)).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : reason === 'unreachable' ? 'bot_action_gone' : `bot_action_${reason}`, message: text })
   const projected = f.bots.service.chatList(t.botId).messages.find(message => message.id === a.message_id)?.action
   if (reason === 'gone') expect(projected).toBeUndefined()
   else expect(projected?.status === 'open').toBe(['changed', 'paused'].includes(reason))
@@ -3082,7 +3084,7 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
   expect(f.bots.actions.get(`${a.id}_running`)?.status).toBe(path === 'startup' ? 'uncertain' : 'running')
   expect(f.store.message(a.message_id)?.text).not.toContain('Mail · send')
   expect(t.calls).toEqual([])
-  expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('This could not wait for your owner after all, so nothing was sent. Do not make this call again in this work; say in your report what you would have sent.')
+  expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('Your owner changed a setting, so this request was withdrawn and nothing was sent. Do not make this call again in this work; say in your report what you would have sent.')
 })
 
 it.each(['expiry', 'nudges', 'nudge holds'] as const)('C9 failed action %s backs off without starving another bot', async step => {
@@ -3135,7 +3137,7 @@ it.each(['none', 'open', 'approved', 'running'] as const)('C9 startup warms tool
   const warm = vi.spyOn(t.mcp, 'warm')
   f.bots.close(); f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup()
-  expect(warm).toHaveBeenCalledTimes(state === 'approved' || state === 'running' ? 1 : 0)
+  expect(warm).toHaveBeenCalledTimes(state === 'open' || state === 'approved' || state === 'running' ? 1 : 0)
 })
 it('C9 a failed action startup reconciliation still reconciles other activations', async () => {
   const t = await setup(false)
@@ -3150,7 +3152,7 @@ it.each([
   ['stop', 'bot_action_work_ended', 'This work ended. Nothing was sent.'],
   ['pause', 'bot_action_owner_paused', 'This bot was paused, so nothing was sent.'],
   ['permission', 'bot_action_permission_changed', 'This tool or its permission changed, so nothing was sent.'],
-  ['switch', 'bot_action_disabled', 'This could not wait for your owner after all, so nothing was sent.'],
+  ['switch', 'bot_action_disabled', 'Withdrawn when asks first was turned off. Nothing was sent.'],
   ['forget', 'bot_action_owner_removed', 'You removed this request, so nothing was sent.'],
   ['binding', 'bot_action_binding_changed', 'This changed since you saw it. Nothing was sent.']
 ] as const)('C9 %s withdrawal tells each audience its real cause', async (path, code, ownerText) => {
@@ -3174,7 +3176,8 @@ it.each([
   const text = actionContinuation(settled)
   expect(text).not.toContain('No longer needed')
   expect(text).not.toContain('[forgotten]')
-  if (path !== 'forget') expect(text).toContain(ownerText)
+  if (path === 'switch') expect(text).toContain('Your owner changed a setting, so this request was withdrawn and nothing was sent.')
+  else if (path !== 'forget') expect(text).toContain(ownerText)
   else expect(text).toContain('Your owner removed this request')
   expect(() => f.bots.actions.check({ actionId: a.id, digest: a.args_digest, answer: 'send' })).toThrow(expect.objectContaining({ code, message: ownerText }))
   expect(t.calls).toEqual([])
@@ -3347,4 +3350,143 @@ it('C9 deleting work with an untold sent outcome leaves no unread outcome', asyn
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' }); await flush()
   await f.bots.remove(t.botId)
   expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+})
+
+// The relay has no listing after a restart; only its bounded warm supplies one.
+it.each(['ready', 'unreachable', 'changed'] as const)('C10 Send warms a cold restart listing: %s', async state => {
+  const t = await setup(true, true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const servers = t.catalog.servers
+  const listing = t.catalog.listing
+  t.catalog.servers = () => []
+  t.catalog.listing = () => []
+  t.catalog.listed = () => false
+  const warm = async () => {
+    if (state === 'unreachable') return
+    t.catalog.servers = servers
+    t.catalog.listing = listing
+    t.catalog.listed = () => true
+    if (state === 'changed') t.descriptor.inputSchema = { type: 'object', required: ['changed'] } as never
+  }
+  t.catalog.ensure = vi.fn(async () => undefined)
+  f.bots.close()
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  const input = { botId: t.botId, actionId: a.id, digest: a.args_digest, answer: 'send' as const }
+  expect(t.catalog.ensure).toHaveBeenCalled() // Startup also warms open cards.
+  t.catalog.ensure = vi.fn(warm)
+  expect(() => f.bots.service.actionCheck(input)).toThrow(expect.objectContaining({ code: 'bot_action_unreachable' }))
+  await flush()
+  expect(f.bots.service.actionMessage(t.botId, a.id).action?.status).toBe('open')
+  if (state === 'ready') {
+    await f.bots.service.answerAction(input)
+    expect(t.calls).toEqual([t.args])
+    await expect(f.bots.service.answerAction(input)).rejects.toThrow('already answered')
+    expect(t.calls).toEqual([t.args])
+  } else {
+    await expect(f.bots.service.answerAction(input)).rejects.toMatchObject({ code: state === 'unreachable' ? 'bot_action_unreachable' : 'bot_action_changed' })
+    expect(t.calls).toEqual([])
+    expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  }
+  expect(t.catalog.ensure).toHaveBeenCalled()
+})
+
+it('C10 only the first call in a multi-call turn says it was held', async () => {
+  const t = await setup(true, false, true)
+  const call = catalogueTurn(t, async () => ({ text: 'must not run' }))
+  expect((await call('mail_send', t.args, 'first')).text).toBe('This call is held for your owner. End your turn now.')
+  for (const name of ['mail_send', 'mail_other', 'memory_list']) {
+    const result = await call(name, { ...t.args, body: name }, `later-${name}`)
+    expect(result.isError).toBe(true)
+    const text = name === 'memory_list' ? JSON.parse(result.text).refused.message : result.text
+    expect(text).toBe('Not sent: one call already waits for your owner in this turn, and this one was not held. End your turn now. After your owner answers, ask again only if it is still needed and is not the same request.')
+  }
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(t.calls).toEqual([])
+})
+
+it.each(['send', 'not_now', 'expired'] as const)('C10 review inbox keeps a held schedule live through %s', async outcome => {
+  const t = await scheduledCall()
+  const sync = () => MmsProfileServices.prototype.syncBotRuns.call({ automationRuns: f.automationRuns, botStore: f.store } as never)
+  const inbox = () => f.automationRuns.list().runs.find(r => r.jobId === t.schedule.jobId)!
+  await t.call(); await finish(f, t.run.payload)
+  sync()
+  expect(inbox().state).toBe('running')
+  expect(inbox().endedAt).toBeUndefined()
+  const a = f.bots.actions.forWork(t.id)!
+  if (outcome === 'expired') { f.clock.now = Date.parse(a.expires_at); f.bots.actions.expireDue() }
+  else await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: outcome })
+  await flush()
+  const continuation = await start(f, t.id, 2)
+  await finish(f, continuation.payload, 'completed', { text: 'Finished the report.' })
+  sync()
+  expect(inbox().state).toBe('done')
+  expect(inbox().error).toBeUndefined()
+  expect(t.calls).toEqual(outcome === 'send' ? [t.args] : [])
+})
+
+it('C10 review in-turn Not now and replay describe an answered action, not a question or a hold', async () => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  const sibling = t.work.prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} })
+  expect(JSON.stringify(sibling)).toContain('your owner already answered the request in this turn')
+  expect(JSON.stringify(sibling)).not.toContain('question')
+  const replay = await t.call()
+  expect(replay.text).toContain('chose not to send')
+  expect(replay.text).not.toContain('held for your owner')
+})
+
+// In-turn outcomes: an owner answer, a lifecycle change, and a tool/transport outcome.
+it.each([
+  ['open', undefined, false], ['approved', undefined, true], ['running', undefined, true],
+  ['done', undefined, true], ['declined', undefined, true],
+  ['withdrawn', 'bot_action_owner_removed', true],
+  ['withdrawn', 'bot_action_permission_changed', false],
+  ['withdrawn', 'bot_action_binding_changed', false],
+  ['withdrawn', 'bot_action_disabled', false], ['withdrawn', 'bot_action_owner_paused', false],
+  ['expired', undefined, false], ['failed', undefined, false], ['uncertain', undefined, false]
+] as const)('R2 in-turn %s (%s) does not invent an owner answer', async (status, reason, ownerAnswered) => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  if (status !== 'open') f.bots.actions.transition(a.id, 'open', status, { text: 'Stored outcome' }, reason)
+  const result = JSON.stringify(t.work.prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} }))
+  if (status === 'open') expect(result).toContain('one call already waits for your owner')
+  else if (ownerAnswered) expect(result).toContain('your owner already answered the request in this turn')
+  else {
+    expect(result).toContain('the request held in this turn is no longer waiting')
+    expect(result).not.toContain('your owner already answered')
+  }
+  expect(t.calls).toEqual([])
+})
+
+it('R2 cold pre-check says nothing was sent before warming', async () => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  t.catalog.servers = () => []; t.catalog.listing = () => []; t.catalog.listed = () => false
+  expect(() => f.bots.actions.check({ actionId: a.id, digest: a.args_digest, answer: 'send' })).toThrow(expect.objectContaining({ code: 'bot_action_unreachable', message: "Mail couldn't be reached. Nothing was sent. Try again when it is available." }))
+  expect(t.calls).toEqual([])
+})
+it.each(['waiting', 'at_dispatch'] as const)('R2 accepted timeout is terminal at %s', async stage => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  const input = { actionId: a.id, digest: a.args_digest, answer: 'send' as const }
+  await f.bots.actions.answer(input)
+  if (stage === 'at_dispatch') f.bots.actions.transition(a.id, 'approved', 'running')
+  f.clock.now += 11 * 60_000
+  const terminal = { code: 'bot_action_gone', message: "This can't be sent any more." }
+  if (stage === 'at_dispatch') expect(() => f.bots.actions.assertRunning(a.id)).toThrow(expect.objectContaining(terminal))
+  else f.bots.actions.expireDue()
+  expect(() => f.bots.service.actionCheck({ ...input, botId: t.botId })).toThrow(expect.objectContaining(terminal))
+  await expect(f.bots.service.answerAction(input)).rejects.toMatchObject(terminal)
+  expect(f.bots.actions.get(a.id)?.status).toBe('failed')
+  expect(t.calls).toEqual([])
 })

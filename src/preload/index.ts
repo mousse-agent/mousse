@@ -1032,6 +1032,8 @@ const api = {
     /** `/fork`: a new thread from the thread's latest finished turn, selected. */
     /** Forks after the thread's latest finished turn, or after the turn `atRunId` names (a message's `turnId`). */
     fork: (threadId: string, options?: { atRunId?: string }): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:fork', threadId, options),
+    /** A side chat of the thread: a fork of it as it is now, not selected (`Thread.lineage.relationship: 'side'`). */
+    newSideChat: (threadId: string): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:newSideChat', threadId),
     setModel: (
       threadId: string,
       model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }

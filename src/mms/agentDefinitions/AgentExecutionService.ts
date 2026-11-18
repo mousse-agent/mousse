@@ -1,5 +1,6 @@
 import Ajv from 'ajv'
 import { appendProjectAgentInstructions } from '../orchestrator/projectInstructions'
+import { effectiveAgentLimits } from '../../shared/agents/defaults'
 import { AgentDefinitionError, isAgentDefinitionError } from '../../shared/agents/errors'
 import type {
   AgentExecutionBindings,
@@ -65,16 +66,22 @@ function clampLimit(requested: number | undefined, definition: number): number {
   return Math.min(definition, requested)
 }
 
+/** The tighter of two times, where 0 is no deadline: a request never widens the definition's. */
+function clampElapsed(requested: number | undefined, definition: number): number {
+  if (requested === undefined || requested <= 0) return definition
+  return definition > 0 ? Math.min(definition, requested) : requested
+}
+
 function resolveBudget(
   settings: ResolvedAgentDefinition['settings'],
   requested: Partial<AgentExecutionBudget> | undefined
 ): AgentExecutionBudget {
   assertRequestedBudget(requested)
-  const limits = settings.limits
+  const limits = effectiveAgentLimits(settings.limits)
   return {
     maxTurns: clampLimit(requested?.maxTurns, limits.maxTurns),
     maxToolCalls: clampLimit(requested?.maxToolCalls, limits.maxToolCalls),
-    maxElapsedMs: clampLimit(requested?.maxElapsedMs, limits.maxElapsedMs),
+    maxElapsedMs: clampElapsed(requested?.maxElapsedMs, limits.maxElapsedMs),
     maxInputTokens: requested?.maxInputTokens === undefined
       ? limits.maxInputTokens
       : clampLimit(requested.maxInputTokens, limits.maxInputTokens ?? requested.maxInputTokens),

@@ -1,3 +1,4 @@
+import { workWaits } from './bots/store/BotStore'
 import { tellMeOf } from '../shared/types'
 import { OwnerQuietHours } from './notifications/OwnerQuietHours'
 import { onSettingsSaved } from './settings/SettingsStore'
@@ -78,6 +79,7 @@ import { createProfileBotMemory } from './bots/memory/profileMemory'
 import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
 import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
+import { BOT_LAUNCHED_RECENT_MS } from '../shared/bots/personal/chat'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -788,13 +790,14 @@ export class MmsProfileServices {
         repository: async (folder) => (await this.gitService.codeHost.repositoryIdentity(folder)).nameWithOwner,
         pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
       }, repo, number),
-      // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works.
+      // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works. Of
+      // those done, only the ones not archived and updated in the last six hours ("Recent").
       launchedThreads: (creators) => launchedThreadsIn({
         threads: this.threads,
         engine: this.runEngine,
         asks: (id) => this.questions.listPendingForThread(id).length > 0,
         projectName: (id) => this.projects.getProject(id)?.name
-      }, creators),
+      }, creators, { doneSince: new Date(Date.now() - BOT_LAUNCHED_RECENT_MS).toISOString() }),
       // A thread a bot handed a job to, for its ledger: how it stands and its last answer.
       jobThread: (threadId) => jobThreadIn({
         threads: this.threads,
@@ -2089,7 +2092,7 @@ export class MmsProfileServices {
       try {
         const row = store.activation(open.activationId)
         if (!row || row.botId !== open.botId || row.trigger.kind !== 'schedule') continue
-        runs.syncBotRuns(open.jobId, [{ id: row.id, status: row.status, at: row.createdAt,
+        runs.syncBotRuns(open.jobId, [{ id: row.id, status: workWaits(row) ? 'running' : row.status, at: row.createdAt,
           ...(row.endedAt ? { endedAt: row.endedAt } : {}), ...(row.endReason ? { endReason: row.endReason } : {}),
           ...(row.threadId ? { threadId: row.threadId } : {}) }])
       } catch {
@@ -2438,7 +2441,8 @@ export class MmsProfileServices {
   private repairSubagentLineage(): void {
     try {
       const rows = this.runEngine.delegations.listLineage('subagent')
-      const known = new Set(rows.map((row) => row.threadId))
+      // A side chat is a child too; the run store keeps it as a fork.
+      const known = new Set([...rows, ...this.runEngine.delegations.listLineage('fork')].map((row) => row.threadId))
       this.threads.discardOrphanedSubagents((threadId) => known.has(threadId))
       backfillSubagentLineage(this.threads, rows)
     } catch (error) {

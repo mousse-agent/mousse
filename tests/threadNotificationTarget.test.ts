@@ -12,7 +12,9 @@ describe('resolveThreadNotification', () => {
     { id: 'parent', name: 'Fix the build' },
     { id: 'child', name: 'API reviewer', lineage: subagentOf('parent') },
     { id: 'grandchild', name: 'Deep helper', lineage: subagentOf('child', 'parent') },
-    { id: 'orphan', name: 'Left behind', lineage: subagentOf('trashed') }
+    { id: 'orphan', name: 'Left behind', lineage: subagentOf('trashed') },
+    { id: 'aside', name: 'Quick question', lineage: { parentThreadId: 'child', rootThreadId: 'parent', relationship: 'side' } },
+    { id: 'stray-aside', lineage: { parentThreadId: 'trashed', rootThreadId: 'trashed', relationship: 'side' } }
   )
 
   it('notifies for a thread as itself', () => {
@@ -36,6 +38,12 @@ describe('resolveThreadNotification', () => {
   it('treats a subagent whose parent is gone as a normal thread', () => {
     expect(resolveThreadNotification('orphan', 'completed', threads)).toEqual({ threadId: 'orphan' })
     expect(resolveThreadNotification('orphan', 'question', threads)).toEqual({ threadId: 'orphan' })
+  })
+
+  it("announces only a side chat's question, under the thread shown for its parent, and nothing once that is gone", () => {
+    expect(resolveThreadNotification('aside', 'completed', threads)).toBeNull()
+    expect(resolveThreadNotification('aside', 'question', threads)).toEqual({ threadId: 'parent', parentName: 'Fix the build', viaThreadId: 'aside', sideChat: true })
+    expect(resolveThreadNotification('stray-aside', 'question', threads)).toBeNull()
   })
 
   it('notifies as itself for a thread it has no row for', () => {
@@ -62,6 +70,40 @@ describe('NotificationThreadIndex', () => {
     expect(index.resolve('a', 'child', 'idle')).toBeNull()
     index.note('a', [{ id: 'parent', name: 'Parent' }])
     expect(index.resolve('a', 'child', 'idle')).toEqual({ threadId: 'child' })
+  })
+})
+
+describe('NotificationThreadIndex and threads a bot keeps out of the sidebar', () => {
+  const list = [
+    { id: 'job', name: 'Quick check', hidden: true },
+    { id: 'helper', name: 'Helper', lineage: subagentOf('job') },
+    { id: 'deep', name: 'Deep helper', lineage: subagentOf('helper', 'job') },
+    { id: 'mine', name: 'Fix tests' }
+  ]
+  const kinds = ['completed', 'question', 'idle'] as const
+
+  it('says nothing for the thread or any subagent below it, whatever happened', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    for (const kind of kinds) {
+      for (const id of ['job', 'helper', 'deep']) expect(index.resolve('a', id, kind), `${id} ${kind}`).toBeNull()
+      expect(index.resolve('a', 'mine', kind)).toEqual(expect.objectContaining({ threadId: 'mine' }))
+    }
+  })
+
+  it('notifies like any thread when the person chose to hear about bot threads', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    expect(index.resolve('a', 'job', 'completed', true)).toEqual(expect.objectContaining({ threadId: 'job' }))
+    expect(index.resolve('a', 'deep', 'question', true)).toEqual(expect.objectContaining({ threadId: 'job', viaThreadId: 'deep' }))
+  })
+
+  it('notifies again once the thread is shown in the sidebar', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    index.note('a', list.map(({ hidden: _hidden, ...row }) => row))
+    expect(index.resolve('a', 'job', 'completed')).toEqual(expect.objectContaining({ threadId: 'job' }))
+    expect(index.resolve('a', 'helper', 'question')).toEqual(expect.objectContaining({ threadId: 'job', viaThreadId: 'helper' }))
   })
 })
 

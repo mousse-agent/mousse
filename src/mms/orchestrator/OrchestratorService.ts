@@ -377,6 +377,7 @@ import {
 } from '../queue/durableQueue'
 import { ThreadSession, isReadOnlyShared, steerImages, type ActiveTurnControl, type SharedWorkspace, type SteerEntry } from './ThreadSession'
 import { SteerHold, type PendingSteerFacts } from './steerHold'
+import { TURN_STALL_MS, TurnStalledError, watchTurnProgress, type TurnProgressWatch } from './turnStall'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { AppError, errorCauseText, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
@@ -397,7 +398,7 @@ import {
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
-import { isLocalOnlyThread, subagentDescendants } from '../../shared/threadLineage'
+import { isLocalOnlyThread, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
 import { isThreadExpired } from '../../shared/threadExpiry'
 
 /** What an agent in a private thread is told when it asks for work on another computer. */
@@ -3734,6 +3735,8 @@ export class OrchestratorService extends EventEmitter {
   private readonly folderWaits = new Map<string, Set<AbortController>>()
   /** {@link STOPPED_TURN_CHECKPOINT_WAIT_MS}; tests shorten it. */
   private stoppedTurnCheckpointWaitMs = STOPPED_TURN_CHECKPOINT_WAIT_MS
+  /** {@link TURN_STALL_MS} and how often it is checked; tests shorten them. */
+  private turnStall: { stallMs: number; tickMs?: number } = { stallMs: TURN_STALL_MS }
 
   /**
    * Waits until the volumes of the folders a thread's request or turn works in answer (see `folderAccess`),
@@ -5551,6 +5554,8 @@ export class OrchestratorService extends EventEmitter {
       })
       // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
       this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
+      // Its side chats end with it, and stay ended when it comes back.
+      for (const side of sideChatsOf(threadId, this.threadStore.listAllThreads())) await this.settleThread(side.id, true)
     }
     return thread
   }
@@ -7508,6 +7513,14 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     if (!engine || session.sharedWorkspace) return
     try {
+      // A side chat keeps the parent's checkout it was made in (`createForkThread`).
+      const thread = this.threadStore?.getThread(session.threadId)
+      if (thread?.lineage?.relationship === 'side') {
+        const binding = thread.workspaceBinding
+        if (binding?.policy === 'shared' && binding.sharedPath)
+          session.sharedWorkspace = { path: binding.sharedPath, parentThreadId: thread.lineage.parentThreadId, access: binding.access === 'write' ? 'write' : 'read-only' }
+        return
+      }
       const lineage = engine.delegations.getLineage(session.threadId)
       if (lineage?.relationship !== 'subagent') return
       // A child created with a recorded binding keeps exactly that; older children fall back to the
@@ -7558,9 +7571,21 @@ export class OrchestratorService extends EventEmitter {
     const sourceThread = this.threadStore.getThread(creation.sourceThreadId)
     if (!sourceThread) throw new Error(`Thread not found: ${creation.sourceThreadId}`)
     const source = this.getOrCreateSession(creation.sourceThreadId)
-    const title = creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
+    // A side chat lives in its parent's side panel: a child of it (so archiving, deleting and expiring the parent
+    // take it along) that works in the parent's checkout as it is now, never in a worktree of its own. It is named
+    // from its first message like a new thread.
+    const sideChat = creation.sideChat === true
+    const sideFolder = sideChat ? this.threadCheckoutOf(sourceThread.id) : undefined
+    const title = sideChat ? 'New chat' : creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
-      ...(sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
+      ...(sideFolder || sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
+      ...(sideChat ? {
+        // Started from the first write, so "New chat" never reuses it as an empty draft.
+        started: true,
+        lineage: { parentThreadId: sourceThread.id, rootThreadId: sourceThread.lineage?.rootThreadId ?? sourceThread.id, relationship: 'side' as const },
+        ownerThreadId: sourceThread.id,
+        ...(sideFolder ? { workspaceBinding: { policy: 'shared' as const, sharedPath: sideFolder, access: 'write' as const } } : {})
+      } : {}),
       // A fork carries the conversation, so a private thread's fork is private too.
       localOnly: this.isLocalOnly(sourceThread.id)
     })
@@ -13745,6 +13770,8 @@ export class OrchestratorService extends EventEmitter {
       pendingSteer: [] as SteerEntry[],
       ...(engineRunId ? { runId: engineRunId } : {})
     }
+    // A turn has no limit on its total time; one whose runtime says nothing for `TURN_STALL_MS` is hung and ends as failed.
+    let stallWatch: TurnProgressWatch | undefined
     const turnAuthority = session.executionLease ? new TaskWriterAuthority(session.executionLease) : undefined
     const turnWriter = turnAuthority?.issue(turnId, { version: 1, workspace: 'shared', access: 'write' })
     // The external signal's reason (a profile shutdown) travels with the abort.
@@ -14200,7 +14227,18 @@ export class OrchestratorService extends EventEmitter {
         try { opts.bot.modelOutput() }
         catch (error) { console.warn('A bot work update could not be confirmed; it will be carried again.', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) }) }
       }
-      const turnSink = this.inTurn<TurnSink>(session, turn, turnId, 'sink', {
+      // Calls that wait for a person's answer (an approval inside the runtime): no progress is due meanwhile.
+      const awaitingPerson = new Set<string>()
+      stallWatch = watchTurnProgress({
+        ...this.turnStall,
+        waiting: () => awaitingPerson.size > 0 || this.questions.listPendingForThread(session.threadId).length > 0,
+        onStall: (stalledMs) => {
+          console.warn('a turn made no progress and was stopped', { threadId: session.threadId, turnId, stalledMs })
+          turn.abort.abort(new TurnStalledError(stalledMs))
+        }
+      })
+      const watched = stallWatch
+      const sinkCalls = this.inTurn<TurnSink>(session, turn, turnId, 'sink', {
         text: (event) => {
           if (event.content) confirmBotOutput()
           hold.modelOutput(event.phase)
@@ -14221,7 +14259,11 @@ export class OrchestratorService extends EventEmitter {
           // restart it (§2.3): a subagent's or a background call's events say nothing about the turn's next tool.
           if (assembler.ownsForegroundCall(event.callId)) hold.toolEvent()
         },
-        toolAwaiting: (callId, waiting) => hold.awaiting(callId, waiting),
+        toolAwaiting: (callId, waiting) => {
+          if (waiting) awaitingPerson.add(callId)
+          else awaitingPerson.delete(callId)
+          hold.awaiting(callId, waiting)
+        },
         boundary: (at) => hold.boundary(at),
         providerTurn: () => hold.providerTurn(),
         nativeMessages: (nativeMessages, checkpoint) => {
@@ -14364,6 +14406,10 @@ export class OrchestratorService extends EventEmitter {
         },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }, { dropLate: true })
+      // Every word from the runtime is progress.
+      const turnSink = Object.fromEntries(Object.entries(sinkCalls).map(([key, call]) => [key, typeof call === 'function'
+        ? (...args: unknown[]): unknown => { watched.progress(); return (call as (...params: unknown[]) => unknown)(...args) }
+        : call])) as unknown as TurnSink
       const drainEntry = (drainOpts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut: boolean; forced?: boolean; images?: ChatImageAttachment[] } | undefined => {
         // An adapter on the hold takes only what it can deliver now: nothing while a steer is held.
         let forced = false
@@ -14621,10 +14667,20 @@ export class OrchestratorService extends EventEmitter {
       // A helper whose end the runtime never reported reads unknown, never done.
       mirroredRun?.end()
       if (compactionNote) onCompaction('unchanged')
+      stallWatch?.stop()
       if (turn.abort.signal.aborted) aborted = true
       opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)
       // The turn remains active until post-stream persistence/actions finish, but its model reads no more steers.
       this.closeTurnInput(session, turn, aborted)
+    }
+
+    // A turn its no-progress check ended failed: it was hung, not stopped by anyone, and says so.
+    const stalled = turn.abort.signal.reason instanceof TurnStalledError ? turn.abort.signal.reason : undefined
+    if (stalled && !providerError) {
+      aborted = false
+      executionFailed = true
+      providerError = serializeAppError(stalled)
+      assistantText = providerFailureText(providerError)
     }
 
     // The retry row ends with the provider's turn: stopped, or the provider got the request in the end. A failure turns

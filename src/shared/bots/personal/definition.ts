@@ -183,8 +183,8 @@ export interface BotCustomSlot {
 export const BOT_BASE_SLOT_NAMES = ['talk', 'work', 'light', 'medium', 'hard', 'images', 'image'] as const
 /** A custom slot's name: a letter, then letters, digits, `-` or `_`; at most 24 characters, lower case. */
 export const BOT_CUSTOM_SLOT_NAME = /^[a-z][a-z0-9_-]{0,23}$/
-/** The most custom slots a bot keeps. */
-export const MAX_BOT_CUSTOM_SLOTS = 12
+/** The most custom slots a bot keeps: a ceiling no owner reaches, there only to stop a runaway. */
+export const MAX_BOT_CUSTOM_SLOTS = 1000
 /** The longest custom slot description. */
 export const MAX_BOT_CUSTOM_SLOT_DESCRIPTION = 200
 
@@ -246,7 +246,7 @@ export interface BotDefinition {
   /** When the owner last edited or reset the prompt in About (ISO): replies written before it may follow older words. */
   promptChangedAt?: string
   main: BotThreadSpec
-  /** Context threads it consults (6c-2); at most 8. */
+  /** Context threads it consults (6c-2); at most `MAX_BOT_CONTEXT_THREADS`. */
   context: BotThreadSpec[]
   permissions: BotManifest
   /** Manual activation always. Schedules live in `bots.db` (`bot_schedules`), not on the definition. */
@@ -276,7 +276,7 @@ export interface BotDefinitionV1 {
   name: string
   role: string
   main: BotThreadSpecV1
-  /** Context threads it consults (6c-2); at most 8. */
+  /** Context threads it consults (6c-2); at most `MAX_BOT_CONTEXT_THREADS`. */
   context: BotThreadSpecV1[]
   permissions: BotManifest
   /** Manual activation always; schedules on the bot itself (6d). */
@@ -301,8 +301,8 @@ export interface BotSchedule {
   prompt: string
 }
 
-/** Most schedules one bot may have. */
-export const MAX_BOT_SCHEDULES = 8
+/** Most schedules one bot may have: a ceiling no owner reaches, there only to stop a bot that adds them in a loop. */
+export const MAX_BOT_SCHEDULES = 1000
 
 /**
  * What started an activation: the Bots tab or a schedule occurrence. Activations saved by older
@@ -350,15 +350,17 @@ export interface BotWorkModelName {
 
 /**
  * The longest one turn of a bot's work runs before it goes on in a fresh turn of the same thread, as at its runtime's
- * step cap (`BotEngine.continueAfterTurnCap`, not counted with those). Not a limit on the work: it keeps each turn's
- * timer, supervisor and runtime wall time finite, and stays under the run engine's cut of one turn
- * (`EFFECT_KIND_SPEC['turn.start'].timeoutMs`, six hours), so a long turn goes on instead of failing there.
+ * step cap (`BotEngine.continueAfterTurnCap`, not counted with those). Not a limit on the work, which goes on for as
+ * many windows as it needs: it keeps each turn's timer, supervisor and runtime wall time finite.
  */
 export const BOT_TURN_WINDOW_MS = 5 * 60 * 60_000
-/** Most context threads one bot may have. */
-export const MAX_BOT_CONTEXT_THREADS = 8
-/** Most activations one bot keeps queued; the oldest is dropped beyond this. */
-export const MAX_QUEUED_ACTIVATIONS = 20
+/** Most context threads one bot may have: a ceiling no owner reaches, there only to stop a runaway. */
+export const MAX_BOT_CONTEXT_THREADS = 1000
+/**
+ * Most activations one lane of a bot keeps waiting: a ceiling no real bot reaches, there only to stop a loop that queues
+ * work. What waits is never dropped; a new one beyond it is refused, and its owner told (`BotEngine.refuseOverQueue`).
+ */
+export const MAX_QUEUED_ACTIVATIONS = 10_000
 /** A slice of a turn's window: a steer or a subagent needs at least two of them left in the turn to start. */
 export const ACTIVE_TIME_CHUNK_MS = 15_000
 

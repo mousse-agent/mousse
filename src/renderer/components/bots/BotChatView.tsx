@@ -1,7 +1,8 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
 import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
-import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
+import { BOT_COLOUR_HEX, DEFAULT_BOT_LOOK, normalizeBotLook } from '../../../shared/bots/personal/look'
+import { botMessageFrom, type BotMessageFrom } from '../../../shared/bots/personal/botMessages'
 import { plainCards } from '../../../shared/bots/personal/cards'
 import { MAX_BOT_CHAT_TEXT } from '../../../shared/bots/personal/methods'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
@@ -325,12 +326,22 @@ function useReclampOpenTools(transcript: RefObject<HTMLDivElement | null>) {
   }, [transcript])
 }
 
+/** Who wrote a message, for its groups: the owner, the bot, or another of the owner's bots that sent it a message. */
+function senderOf(message: BotChatMessage): string {
+  const from = message.author === 'bot' ? botMessageFrom(message) : undefined
+  return from ? `bot:${from.botId ?? from.name}` : message.author
+}
+
+/** Another bot's name on its message: as it is called now, or as it was when it sent the message once it is gone. */
+const senderName = (from: BotMessageFrom, sender: BotSummary | undefined) => sender?.name ?? from.name
+
 /**
  * A bot's message as a messenger shows it in a one-to-one chat: a bubble on the left, with no face or name (the header
  * says who it is), the time in its corner. A report reads as any reply that quotes the request; a list of keys and
  * values reads as a small card; the files it names are chips, its pictures a picture message above its words (the
  * ones a tool handed it among them). Every chip of its work folds behind "Worked for", none dropped. Read aloud, Copy and
- * Reply show beside it on hover; its applets sit under it; an open ask is quick replies under it.
+ * Reply show beside it on hover; its applets sit under it; an open ask is quick replies under it. A message another of
+ * the owner's bots sent it reads as in a group chat: that bot's face beside the bubble, its name on top, its colour.
  */
 const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settled, browser, quote, starts, time, onReply, asked, onApplet }: BotMessageProps) {
   const store = useBotsStore.getState
@@ -349,6 +360,10 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
     return { ...row, text: row.text.slice(0, row.plainFrom).trimEnd(), ...(row.attachments ? { attachments } : {}) }
   }, [question, cards, row])
   const quoted = quote && message.replyTo
+  // Another of the owner's bots sent it: drawn as that bot's own bubble, its face beside it and its name on top.
+  const from = useMemo(() => botMessageFrom(row), [row])
+  // The sender as the owner's bots list has it now (its look, its name), by its id; an older row names it only.
+  const sender = useBotsStore((s) => (from ? s.bots.find((other) => (from.botId ? other.id === from.botId : other.name === from.name)) : undefined))
   const [stepsOpen, setStepsOpen] = useState(false)
   const steps = message.chips
   // This turn saved something to memory (its "remembered" chip): a tag under the bubble opens it in Memory.
@@ -379,37 +394,43 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   // The tools hang off the bubble's right edge: beside a wide bubble they move left, inside the transcript.
   const tools = useRef<HTMLSpanElement>(null)
   const clampTools = () => { if (tools.current) clampBotTools(tools.current) }
-  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}`} data-message-id={message.id} data-turn-key={message.id}
-    onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
-    <div className="bot-message-line">
-      <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
-        {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
-        <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
-        {message.action ? <BotActionCard card={message.action} botId={bot.id} botName={bot.name} messageId={message.id} /> : message.actionSentAt ? <p className="bot-question-settled" role="note" data-find-text data-message-id={message.id} data-part-index="0">Sent · <time dateTime={message.actionSentAt}>{botGroupTime(message.actionSentAt)}</time></p> : media.text && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={media.text} className="bot-markdown" /></div>}
-        {cards && <BotCards cards={cards} botId={bot.id} />}
-        {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
-        {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
-        {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
-        {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} />}
-        {stepsOpen && <BotSteps chips={steps} />}
-        {(steps.length > 0 || time && (!message.action || message.action.status === 'open')) && <div className="bot-bubble-foot">
-          {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
-          {time && (!message.action || message.action.status === 'open') && <BubbleTime message={message} />}
-        </div>}
-        {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
-      </div>
-      {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. Anchored to the bubble's lower
-          right edge and taking no width of its own, so the bubble is as wide with them as without. */}
-      <span ref={tools} className="bot-message-tools">
-        {canReact && <BotReactionBar current={message.reaction} onReact={react} onPicked={picked} onFocus={() => setReacted(false)} />}
-        <span className="bot-message-actions">
-          {message.text && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={message.text} />}
-          {/* Copy takes its cards too, as text. */}
-          {(cards ? row.text : message.text) && <CopyButton text={cards ? row.text : message.text} />}
-          <ReplyButton onReply={() => onReply(message)} />
-        </span>
-      </span>
+  // Another bot's message shows its words alone: who sent it is its name and face, not a header.
+  const words = from ? from.message : media.text
+  const line = <div className="bot-message-line">
+    <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !words && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
+      {from && <span className="bot-from-name">{senderName(from, sender)}</span>}
+      {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
+      <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
+      {message.action ? <BotActionCard card={message.action} botId={bot.id} botName={bot.name} messageId={message.id} /> : message.actionSentAt ? <p className="bot-question-settled" role="note" data-find-text data-message-id={message.id} data-part-index="0">Sent · <time dateTime={message.actionSentAt}>{botGroupTime(message.actionSentAt)}</time></p> : words && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={words} className="bot-markdown" /></div>}
+      {cards && <BotCards cards={cards} botId={bot.id} />}
+      {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
+      {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
+      {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
+      {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} />}
+      {stepsOpen && <BotSteps chips={steps} />}
+      {(steps.length > 0 || time && (!message.action || message.action.status === 'open')) && <div className="bot-bubble-foot">
+        {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
+        {time && (!message.action || message.action.status === 'open') && <BubbleTime message={message} />}
+      </div>}
+      {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
     </div>
+    {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. Anchored to the bubble's lower
+        right edge and taking no width of its own, so the bubble is as wide with them as without. */}
+    <span ref={tools} className="bot-message-tools">
+      {canReact && <BotReactionBar current={message.reaction} onReact={react} onPicked={picked} onFocus={() => setReacted(false)} />}
+      <span className="bot-message-actions">
+        {(from ? from.message : message.text) && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={from ? from.message : message.text} />}
+        {/* Copy takes its cards too, as text. */}
+        {(from ? from.message : cards ? row.text : message.text) && <CopyButton text={from ? from.message : cards ? row.text : message.text} />}
+        <ReplyButton onReply={() => onReply(message)} />
+      </span>
+    </span>
+  </div>
+  return <article className={`chat-participant-message from-agent bot-message${from ? ' is-from-bot' : ''}${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}`} data-message-id={message.id} data-turn-key={message.id}
+    style={from ? { '--from-colour': BOT_COLOUR_HEX[normalizeBotLook(sender?.look).colour] } as CSSProperties : undefined}
+    onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
+    {/* As in a group chat: the sender's face at the foot of its bubble. */}
+    {from ? <div className="bot-from-row"><BotFace look={sender?.look ?? DEFAULT_BOT_LOOK} state="idle" size={28} view="head" still className="bot-from-face" />{line}</div> : line}
     {saved && <button type="button" className="bot-memory-tag" title="Open it in Memory" onClick={() => store().openMemory(bot.id, saved.title?.startsWith('Put away:\n') ? saved.highlight?.replace(/ · put away \d+$/, '') : saved.highlight)}>
       <Brain size={12} aria-hidden />Saved to memory
     </button>}
@@ -653,7 +674,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, [messages, bot.name, notes, cuts])
   // The sent rows and the messages on their way, in one run of groups (a quiet line ends a group), with the day lines.
   const shown = useMemo<BotChatRow[]>(() => (pending.length ? [...rows, ...pending.map((message) => ({ kind: 'message' as const, message }))] : rows), [rows, pending])
-  const places = useMemo(() => placeMessages(shown.map((row, index) => (row.kind === 'message' ? { author: row.message.author, at: row.message.at, sending: index >= rows.length } : { author: row.cut ? 'bot' : 'system', at: row.at }))), [shown, rows.length])
+  const places = useMemo(() => placeMessages(shown.map((row, index) => (row.kind === 'message' ? { author: senderOf(row.message), at: row.message.at, sending: index >= rows.length } : { author: row.cut ? 'bot' : 'system', at: row.at }))), [shown, rows.length])
   // Only the newest rows are drawn (botChatWindow.ts). `from`: the first row drawn while the reader is away from the
   // end; without it, the newest rows. `revealOlder`: a page asked for at the window's top shows once it arrives.
   const [from, setFrom] = useState<string | undefined>(undefined)

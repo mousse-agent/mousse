@@ -105,7 +105,7 @@ describe('a watcher ends and wakes the bot once', () => {
     expect(output).toContain('warning: slow disk')
     expect(output).toMatch(/compiling[\s\S]*done/)
     expect(prompt).toContain('Tell them how the build went.')
-    expect(chatOf(f, botId).find((message) => message.id === `bm_wake_${watcherId}`)?.text).toBe('Following up · "Nightly build" exited with code 3')
+    expect(chatOf(f, botId).find((message) => message.id === `bm_wake_${watcherId}`)).toBeUndefined()
     expect(f.bots.tools.watchers!.list(botId)).toEqual([])
   })
 

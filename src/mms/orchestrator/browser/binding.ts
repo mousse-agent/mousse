@@ -1,4 +1,5 @@
 import type { AgentExecutionRequest, AgentExecutionSource, AgentRuntimeHostBindings } from '../../../shared/agents/execution'
+import { effectiveAgentLimits } from '../../../shared/agents/defaults'
 import type { AgentBrowserMode, ResolvedAgentDefinition } from '../../../shared/agents/types'
 import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { BrowserToolContext } from '../../../shared/browser/automation'
@@ -67,14 +68,16 @@ export function createDefinitionBrowserBinding(input: {
     .map((grant) => grant.id)
     .filter(isBrowserAutomationTool)
   const allowedCapabilities = [...new Set(grantedBrowserTools.map(browserToolCapability))]
+  const limits = effectiveAgentLimits(input.resolved.settings.limits)
   const policy = new ExecutionPolicyService().snapshot(
     input.request.profileId,
     {
       allowedTools: grantedBrowserTools,
       allowedCapabilities,
       allowedEffects: ['read', 'external'],
-      maxToolCalls: input.resolved.settings.limits.maxToolCalls,
-      maxElapsedMs: input.resolved.settings.limits.maxElapsedMs
+      maxToolCalls: limits.maxToolCalls,
+      // A time of 0 is no deadline; the browser's policy reads 0 as none left.
+      maxElapsedMs: limits.maxElapsedMs > 0 ? limits.maxElapsedMs : Number.MAX_SAFE_INTEGER
     }
   )
   const execution: ExecutionContext = {

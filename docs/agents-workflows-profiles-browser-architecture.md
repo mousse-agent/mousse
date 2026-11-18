@@ -356,7 +356,7 @@ Respect reduced-motion preferences with a static orb and disable pointer paralla
 | Workspace | Read-only/current thread worktree/dedicated child worktree, permitted roots | Default follows thread policy. Never mutate the primary checkout merely because a workflow asks. |
 | Code | Script capability, interpreter allowlist, execution mode, network/filesystem requests | Defaults follow profile trust; executable code cannot gain authority from prompt text. |
 | Human interaction | Ask-user capability, approval policy, unattended behavior | Reuse existing run authorization; persist new workflow-critical approvals. |
-| Limits | Max turns, tool calls, elapsed time, input/output tokens, cost, artifact size | Finite defaults; parent/workflow limits cap child values. Unsupported cost estimates remain marked unknown. |
+| Limits | Max turns, tool calls, elapsed time, input/output tokens, cost, artifact size | Turns, tool calls and time have no limit unless the owner sets one (the editor shows "No limit"); artifact size keeps a ceiling only a runaway reaches. Parent/workflow limits cap child values. Unsupported cost estimates remain marked unknown. |
 | Recovery | Retry count/backoff, transient-error categories, stop condition, final-report template | Conservative retry; ambiguous external effects require reconciliation. |
 | Testing | Sample prompts, expected schema/assertions, fixture context, isolated test run | Test conversations are separate runs and do not pollute production agent memory by default. |
 | Versioning | Revision list, diff, duplicate, export, archive | Runs keep historical revisions even after definition archival. |

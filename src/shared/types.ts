@@ -6,7 +6,7 @@ import type { PermissionMode } from './permissionMode'
 import type { ProviderRetryState } from './providerRetry'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
-export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'sideChats' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
@@ -1460,8 +1460,10 @@ export interface ThreadLineage {
    * `subagent`: a Mousse subagent (`delegate_task`). `native`: a watch-only mirror of a helper the provider runtime
    * started on its own (`Thread.native`); the parent is the thread whose run hosts it. Only the thread record says
    * `native`: the run store's `thread_lineage` has no row for a mirror, so no delegation rule ever applies to one.
+   * `side`: a side chat, a fork of the parent made from its side panel (`thread.fork` with `sideChat`). The run store
+   * keeps it as a `fork`; only the thread record says `side`. No list shows it: only its parent's Side chats panel does.
    */
-  relationship: 'subagent' | 'native'
+  relationship: 'subagent' | 'native' | 'side'
 }
 
 /** The runtimes whose own helpers Mousse mirrors as threads. */
@@ -1609,7 +1611,9 @@ export interface Thread {
   /**
    * Set on a thread kept out of the owner's sidebar: a personal bot started it hidden, or hid it later (a short background
    * job). It is not in the thread lists of this computer or the owner's other devices; the bot's chat lists it, it opens
-   * like any thread, and Show in sidebar (`threads.setHidden`) clears the mark. Search, links and Needs me still reach it.
+   * like any thread, and Show in sidebar (`threads.setHidden`) clears the mark. Search and links still reach it. Until it is
+   * shown, it and its subagents notify nothing (no banner, sound, toast, Needs me or app badge) unless the person turned
+   * on `notifications.botThreads`.
    */
   hidden?: true
   /** Set on a thread another of the user's devices created through Bridge. */

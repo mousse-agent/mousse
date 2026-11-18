@@ -419,7 +419,7 @@ describe('unsent drafts', () => {
     expect(item.draggable).toBe(false)
     key(item, { key: 'F2' })
     act(() => { item.querySelector('.threads-sidebar-thread-name')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
-    expect(host.querySelector('input')).toBeNull()
+    expect(host.querySelector('input:not(.thread-filter-field)')).toBeNull()
     act(() => { item.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })) })
     expect(document.querySelector('[role="menuitem"]')).toBeNull()
   })

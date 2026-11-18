@@ -33,6 +33,7 @@ import { openSurface } from './lib/surfaces'
 import { DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKeys'
 import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './lib/panelSplit'
 import { selectThread } from './lib/threadActions'
+import { useShownBotThread } from './lib/botThread'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore, withNewerTimes } from './stores/appStore'
 import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
@@ -45,7 +46,7 @@ import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
 import { useAppCommands } from './commands/useAppCommands'
 import { useBotsStore } from './stores/botsStore'
 // Rail pages, Chats and New bot load as their own chunks; see lib/lazySurfaces.
-import { AutomationsPage, ChatWorkspace, NewBotDialogHost, SubscriptionUsagePage, preloadSplitSurfaces } from './lib/lazySurfaces'
+import { AutomationsPage, BotThreadHeader, ChatWorkspace, NewBotDialogHost, SubscriptionUsagePage, preloadSplitSurfaces } from './lib/lazySurfaces'
 import { useCommandShortcuts } from './commands/useCommandShortcuts'
 
 import './styles/app.css'
@@ -127,6 +128,10 @@ export default function App() {
   const { shown: workspaceMode, phase: workspaceSwap } = useViewSwap(sidebarMode)
   // A run's thread from the Automations page always shows as a conversation, whatever Chats was showing.
   const layoutMode = inboxThread ? 'projects' : workspaceMode
+  // A bot's thread opened in its chat pane: Chats stays on screen, and the conversation pane shows the thread there,
+  // under the bot's header, in the chat pane's place.
+  const shownBotThread = useShownBotThread()
+  const botThread = layoutMode === 'chats' ? shownBotThread : null
   useEffect(() => {
     if (!profileReady) return
     useChatsStore.getState().activate(profileId)
@@ -287,9 +292,10 @@ export default function App() {
 
 
 
-    // The bound profile's shortcut overrides and new-chat worktree default; later changes arrive through settings.onChanged below.
+    // The bound profile's shortcut overrides, bot-thread notifications and new-chat worktree default; later changes arrive through settings.onChanged below.
     window.mousse.settings.get().then(applyIfCurrent((settings) => {
       setShortcuts(settings.shortcuts ?? {})
+      useAppStore.getState().setNotifyBotThreads(settings.notifications?.botThreads === true)
       useAppStore.getState().setRunDefaults(normalizeRunSettings(settings.runs))
     })).catch(() => {})
     void window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
@@ -380,6 +386,7 @@ export default function App() {
         const llmProvider = settings?.provider?.llmProvider ?? ''
         if (info && info.llmProvider !== llmProvider) setAppInfo({ ...info, llmProvider })
         setShortcuts(settings?.shortcuts ?? {})
+        useAppStore.getState().setNotifyBotThreads(settings?.notifications?.botThreads === true)
         useAppStore.getState().setRunDefaults(normalizeRunSettings(settings?.runs))
       })),
       // A turn that ends shows with its last text, never a frame before it.
@@ -615,10 +622,11 @@ export default function App() {
 
         <aside
           ref={sidebarRef}
-          className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
-          style={layoutMode === 'chats' ? { display: 'none' } : undefined}
+          className={`sidebar${!mainAreaOpen || botThread ? ' sidebar-full' : ''}`}
+          style={layoutMode === 'chats' && !botThread ? { display: 'none' } : undefined}
         >
           {inboxThread && <RunStrip />}
+          {botThread && <Suspense fallback={null}><BotThreadHeader botId={botThread.botId} threadId={botThread.threadId} /></Suspense>}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
           {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
 
@@ -630,7 +638,7 @@ export default function App() {
 
 
         {/* The conversation pane is hidden here, so a failed workspace load shows in this pane's place. */}
-        {layoutMode === 'chats' && <KeepMounted active={!usageOpen} className="keep-mounted-pane">
+        {layoutMode === 'chats' && <KeepMounted active={!usageOpen && !botThread} className="keep-mounted-pane">
           {bootstrapError
             ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
             : <Suspense fallback={null}><ChatWorkspace key={profileId} /></Suspense>}

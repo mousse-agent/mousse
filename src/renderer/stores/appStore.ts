@@ -302,9 +302,15 @@ interface AppState {
   /** The bound profile's shortcut overrides (`settings.shortcuts`). Not persisted here; the daemon owns them. */
   shortcuts: ShortcutOverrides
   setShortcuts: (shortcuts: ShortcutOverrides) => void
+  /**
+   * The bound profile's `notifications.botThreads`: threads a bot keeps out of the sidebar count in Needs me and the
+   * app badge like any thread. Off until the profile's settings say otherwise.
+   */
+  notifyBotThreads: boolean
+  setNotifyBotThreads: (on: boolean) => void
   /** The command palette, which also searches threads and messages. Not persisted. */
   paletteOpen: boolean
-  /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). Kept on close. */
+  /** What the palette leads with: `messages` is Search everything, with commands last (the rail's search opens it so). Kept on close. */
   paletteMode: PaletteMode
   setPaletteOpen: (open: boolean, mode?: PaletteMode) => void
   /** The sidebar's tab. It and `sidebarMode` always agree (`agreeWithTab`): setting either moves the other. */
@@ -417,8 +423,9 @@ interface AppState {
    * held in `openingThreadId`, so its row shows as chosen at once while the chat goes on showing the thread before:
    * one with its messages cached (`'cached'`) until the next frame has been drawn (`showOpeningThread`), so the click
    * is answered before the transcript is drawn; one with nothing cached (`'held'`) until its view arrives.
+   * `keepWorkspace`: the workspace stays as it is (a bot's thread opened in its chat pane keeps Chats on screen).
    */
-  openThreadWhenReady: (id: string) => 'cached' | 'held' | false
+  openThreadWhenReady: (id: string, options?: { keepWorkspace?: boolean }) => 'cached' | 'held' | false
   /**
    * Shows the held thread now: a cached one once the frame that highlights its row has been drawn, or one whose view is
    * slow (another computer, a busy service), which then waits with an empty transcript.
@@ -708,8 +715,9 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   messages: [],
   transcriptPending: false,
   openingThreadId: null,
-  openThreadWhenReady: (id) => {
+  openThreadWhenReady: (id, options) => {
     const s = get()
+    const workspace = options?.keepWorkspace ? {} : { sidebarMode: 'projects' as const }
     if (s.activeThreadId === id) {
       // Back to the thread on screen while another was being opened: stop opening that one.
       if (s.openingThreadId) set({ openingThreadId: null })
@@ -718,15 +726,15 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
     if (opensFromCache(s, id)) {
       // Its row shows as chosen in this update; its transcript, which takes a while to draw, comes in the next.
       openingEarly = null
-      set({ openingThreadId: id, sidebarMode: 'projects' })
+      set({ openingThreadId: id, ...workspace })
       return 'cached'
     }
     if (!opensEmpty(s, id)) {
-      get().switchToThread(id)
+      set((current) => ({ ...workspace, ...(current.openingThreadId ? { openingThreadId: null } : {}), ...switchPatch(current, id) }))
       return false
     }
     openingEarly = null
-    set({ openingThreadId: id, sidebarMode: 'projects' })
+    set({ openingThreadId: id, ...workspace })
     return 'held'
   },
   showOpeningThread: (threadId) =>
@@ -754,6 +762,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   shortcuts: {},
   // Settings events repeat the same map; keep the old object so nothing re-resolves for no change.
   setShortcuts: (shortcuts) => set((s) => (JSON.stringify(s.shortcuts) === JSON.stringify(shortcuts) ? s : { shortcuts })),
+  notifyBotThreads: false,
+  setNotifyBotThreads: (notifyBotThreads) => set((s) => (s.notifyBotThreads === notifyBotThreads ? s : { notifyBotThreads })),
   paletteOpen: false,
   paletteMode: 'all',
   // Closing keeps the mode, so the fading palette keeps its rows; each opening sets it again.
@@ -1251,6 +1261,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       workspaceReady: false,
       // Another profile's shortcuts must not stay bound until its own settings arrive.
       shortcuts: {},
+      notifyBotThreads: false,
       paletteOpen: false,
       ...next,
       queueDraftNotices: {},

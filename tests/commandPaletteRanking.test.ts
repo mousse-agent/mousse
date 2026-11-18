@@ -212,10 +212,13 @@ describe('buildPaletteGroups', () => {
     expect(items).toMatchObject([{ id: 't2', detail: 'Website' }])
   })
 
-  it('finds archived threads by title, after the open ones and marked Archived, and leaves empty drafts out', () => {
-    expect(build('settled').find((group) => group.label === 'Threads')!.items).toMatchObject([{ id: 't4', detail: 'Archived' }])
+  it('finds archived threads by title in their own group after the open ones, and leaves empty drafts out', () => {
+    const settled = build('settled')
+    expect(settled.find((group) => group.label === 'Archived')!.items).toMatchObject([{ id: 't4' }])
+    expect(settled.some((group) => group.label === 'Threads')).toBe(false)
     const withOpen = buildPaletteGroups({ query: 'work', commands: [], threads: [threads[3]!, thread('t6', 'Open work', { projectId: 'p1' })], projects })
-    expect(withOpen.find((group) => group.label === 'Threads')!.items).toMatchObject([{ id: 't6', detail: 'Mousse' }, { id: 't4', detail: 'Archived' }])
+    expect(labels(withOpen)).toEqual(['Threads: Open work', 'Archived: Settled work'])
+    expect(withOpen[0]!.items).toMatchObject([{ id: 't6', detail: 'Mousse' }])
     expect(flattenGroups(build('new')).some((item) => item.kind === 'thread' && item.id === 't5')).toBe(false)
   })
 
@@ -304,13 +307,13 @@ describe('message hits in the palette', () => {
     expect(messageRows(build('checkout', { messagesCapped: true }))).toContain('more:2+ more')
   })
 
-  it('puts messages after commands, threads and projects, and first in message mode', () => {
+  it('puts messages after commands, threads and projects, and in Search everything after what was found, with commands last', () => {
     const projects = [project('p1', 'Checkout service')]
     const threads = [thread('t1', 'Checkout flow')]
     const stopHit = [hit('a', 'm1', { snippet: 'stop the run' })]
     expect(build('checkout', { projects, threads }).map((group) => group.label)).toEqual(['Threads', 'Projects', 'Messages'])
     expect(build('stop', { messages: stopHit }).map((group) => group.label)).toEqual(['Commands', 'Messages'])
-    expect(build('checkout', { projects, threads, mode: 'messages' }).map((group) => group.label)).toEqual(['Messages', 'Threads', 'Projects'])
+    expect(build('checkout', { projects, threads, mode: 'messages' }).map((group) => group.label)).toEqual(['Threads', 'Messages', 'Projects'])
     expect(build('stop', { messages: stopHit, mode: 'messages' }).map((group) => group.label)).toEqual(['Messages', 'Commands'])
   })
 
@@ -332,6 +335,77 @@ describe('message hits in the palette', () => {
     ])
     expect(markMatches('nothing here', 'zz')).toEqual([{ text: 'nothing here', match: false }])
     expect(markMatches('aaa', 'aa')).toEqual([{ text: 'aa', match: true }, { text: 'a', match: false }])
+  })
+})
+
+describe('Search everything', () => {
+  const alpha = { botId: 'b1', name: 'alpha' }
+  const projects = [project('p1', 'mousse')]
+  const threads = [
+    thread('t1', 'Nightly installer drops the tray icon', { projectId: 'p1' }),
+    thread('t2', 'Nightly build triage', { projectId: 'p1', startedByBot: alpha }),
+    thread('t3', 'Mac nightly signing check', { projectId: 'p1', startedByBot: alpha, settledAt: '2026-02-01T00:00:00.000Z' }),
+    // alpha's own chat runs in this thread; it is found as the bot, never as a thread.
+    thread('home', 'Nightly chat with alpha'),
+    thread('chat-thread', 'Release crew nightly')
+  ]
+  const bots = [
+    { id: 'b1', name: 'alpha', description: 'Runs the nightly builds.\nAnd the weekly sweeps.', homeThreadId: 'home' },
+    { id: 'b2', name: 'Funbo', description: 'Keeps dependencies fresh.', last: { text: 'The nightly bump is merged.' } },
+    { id: 'b3', name: 'Garden', description: 'Waters the plants.' }
+  ]
+  const chats = [
+    { id: 'c1', name: 'Release crew', kind: 'group' as const, threadId: 'chat-thread', lastMessage: { text: 'Nightly 0.48 is signed.' } },
+    { id: 'c2', name: 'Opus', kind: 'direct' as const, lastMessage: { text: 'Lunch?' } }
+  ]
+  const hit = (threadId: string, messageId: string, threadName: string): ThreadSearchResult =>
+    ({ threadId, threadName, matchType: 'message', messageId, snippet: `the nightly ${messageId}` }) as ThreadSearchResult
+  const build = (query: string, messages: ThreadSearchResult[] = []) =>
+    buildPaletteGroups({ query, commands: allCommands, threads, projects, bots, chats, messages, mode: 'messages' })
+  const group = (groups: PaletteGroup[], label: string) => groups.find((entry) => entry.label === label)?.items ?? []
+
+  it('groups threads, bot threads, archived threads, bots, chats and messages, the same for every query', () => {
+    const groups = build('nightly', [hit('t9', 'm1', 'Weekly issue sweep')])
+    expect(labels(groups)).toEqual([
+      'Threads: Nightly installer drops the tray icon',
+      'Bot threads: Nightly build triage',
+      'Archived: Mac nightly signing check',
+      'Bots: alpha, Funbo',
+      'Chats: Release crew',
+      'Messages: Weekly issue sweep, the nightly m1'
+    ])
+  })
+
+  it('names the bot that started a thread, and says Archived only outside the Archived group', () => {
+    const groups = build('nightly')
+    expect(group(groups, 'Bot threads')).toMatchObject([{ kind: 'thread', id: 't2', detail: 'alpha · mousse' }])
+    expect(group(groups, 'Archived')).toMatchObject([{ kind: 'thread', id: 't3', detail: 'alpha · mousse' }])
+    const messageOnly = group(build('signing', [hit('t3', 'm1', 'Mac nightly signing check')]), 'Archived')
+    expect(messageOnly.map((item) => item.kind)).toEqual(['thread', 'message'])
+  })
+
+  it('finds a bot by name, by what it does or by its latest message, and shows the line that matched', () => {
+    expect(group(build('nightly'), 'Bots')).toEqual([
+      { kind: 'bot', key: 'bot:b1', id: 'b1', title: 'alpha', detail: 'Runs the nightly builds.' },
+      { kind: 'bot', key: 'bot:b2', id: 'b2', title: 'Funbo', detail: 'The nightly bump is merged.' }
+    ])
+    expect(group(build('garden'), 'Bots')).toMatchObject([{ id: 'b3', detail: 'Waters the plants.' }])
+  })
+
+  it('finds a chat by name or by its latest message, a group saying so', () => {
+    expect(group(build('nightly'), 'Chats')).toEqual([{ kind: 'chat', key: 'chat:c1', id: 'c1', title: 'Release crew', detail: 'Group · Nightly 0.48 is signed.' }])
+    expect(group(build('opus'), 'Chats')).toMatchObject([{ id: 'c2', detail: 'Lunch?' }])
+  })
+
+  it("puts a hit in a bot's or a chat's own thread under that bot or chat, and the hit opens it", () => {
+    const groups = build('nightly', [hit('home', 'm1', 'Nightly chat with alpha'), hit('chat-thread', 'm2', 'Release crew nightly')])
+    expect(group(groups, 'Messages')).toMatchObject([
+      { kind: 'bot', id: 'b1', title: 'alpha', detail: 'Bot chat' },
+      { kind: 'message', threadId: 'home', place: { kind: 'bot', id: 'b1' } },
+      { kind: 'chat', id: 'c1', title: 'Release crew', detail: 'Group' },
+      { kind: 'message', threadId: 'chat-thread', place: { kind: 'chat', id: 'c1' } }
+    ])
+    expect(flattenGroups(groups).some((item) => item.kind === 'thread' && (item.id === 'home' || item.id === 'chat-thread'))).toBe(false)
   })
 })
 

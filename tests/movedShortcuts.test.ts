@@ -33,7 +33,8 @@ const SURFACES: Array<[string, CommandId]> = [
   ['T', 'surface.terminal'],
   ['F', 'surface.files'],
   ['D', 'surface.git'],
-  ['P', 'surface.pullRequest']
+  ['P', 'surface.pullRequest'],
+  ['S', 'surface.sideChats']
 ]
 const MODEL_SLOTS: CommandId[] = ['model.pick1', 'model.pick2', 'model.pick3', 'model.pick4', 'model.pick5']
 const WORKFLOW_COMMANDS: CommandId[] = ['workflow.save', 'workflow.duplicate', 'workflow.delete']

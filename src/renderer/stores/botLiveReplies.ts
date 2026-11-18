@@ -104,6 +104,14 @@ export function liveReplyText(content: string): string {
   return kept.trim() ? kept : ''
 }
 
+/**
+ * Whether `bot`'s chat shows a turn of its own now, as its typing bubble does (`BotChatView`): the service names one
+ * (`chat`), or a service from before work (no `chat`, `work` or `threads`) says the bot works.
+ */
+function chatTurnShown(bot: BotSummary): boolean {
+  return Boolean(bot.chat) || (bot.chat === undefined && bot.work === undefined && bot.threads === undefined && bot.state === 'working')
+}
+
 function isReplyText(message: ChatMessage): boolean {
   return message.role === 'assistant' && !message.hidden && (message.kind === undefined || message.kind === 'message')
 }
@@ -172,6 +180,9 @@ export function noteThreadMessage(threadId: string, message: ChatMessage | undef
     return
   }
   if (!isReplyText(message)) return
+  // Only the chat's own turn is written live. A turn no person started or waits on (a wake-up, a thread's notice) is out
+  // of sight: the service names no chat turn for it, and only what it posts shows.
+  if (!chatTurnShown(bot)) return
   const text = liveReplyText(message.content)
   if (!text) {
     // Its words became nothing to show (the silent marker): what it showed goes.

@@ -75,9 +75,9 @@ class EffectCancelledError extends Error {
 
 /**
  * In-process effect worker (SPEC §12.3): one turn claimer and async fibres for the other lane classes claim from
- * the outbox, execute under a deadline and settle by CAS on the lease. The turn claimer starts each `turn.start` it
- * claims without waiting for it and claims again, so every due turn runs at once; the outbox's lanes still keep one
- * turn per thread. Wake sources: outbox commits (`subscribe`), `notify()`, the next `available_at` and a safety poll.
+ * the outbox, execute under a deadline (a turn under none: `EffectKindSpec.deadline`) and settle by CAS on the lease.
+ * The turn claimer starts each `turn.start` it claims without waiting for it and claims again, so every due turn runs
+ * at once; the outbox's lanes still keep one turn per thread. Wake sources: outbox commits (`subscribe`), `notify()`, the next `available_at` and a safety poll.
  *
  * Settlement rules: success → `succeed`; `EffectDeferredError` → `defer` (pending again later);
  * failure → `fail(message)` (`'timeout'` when the deadline fired); `cancelInFlight` →
@@ -246,8 +246,9 @@ export class EffectWorker {
     const { effectId } = effect
     const cancel = new AbortController()
     const lease = new AbortController()
-    const timeout = AbortSignal.timeout(effect.timeoutMs)
-    const signal = AbortSignal.any([stopSignal, cancel.signal, timeout, lease.signal])
+    // A kind without a deadline (a turn) runs as long as it needs; its lease is still renewed, so a lost one ends it.
+    const timeout = this.outbox.kindSpec[effect.kind]?.deadline === false ? undefined : AbortSignal.timeout(effect.timeoutMs)
+    const signal = AbortSignal.any([stopSignal, cancel.signal, lease.signal, ...(timeout ? [timeout] : [])])
     this.running.set(effectId, cancel)
     const renewLease = (): boolean => {
       let renewed = false
@@ -276,7 +277,7 @@ export class EffectWorker {
       }
     } catch (cause) {
       if (cause instanceof EffectDeferredError && !signal.aborted) deferred = cause
-      else error = timeout.aborted ? 'timeout' : messageOf(cause)
+      else error = timeout?.aborted ? 'timeout' : messageOf(cause)
     } finally {
       clearInterval(renewer)
       this.running.delete(effectId)

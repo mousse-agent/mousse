@@ -1,6 +1,7 @@
 import { readableActionTitle, type ActionRow } from '../actions/BotActions'
 import type { BotActionCard } from '../../../shared/bots/personal/chat'
 import { workWaitLine, parkedNeedsOwner } from '../activation/workWaiting'
+import { unattendedChatTurn } from '../activation/unattended'
 import { replyPreviewText } from '../../../shared/threadPreview'
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
@@ -15,7 +16,7 @@ import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import { workModelDetail } from '../../../shared/bots/personal/chips'
 import type { BotJournal } from '../seams'
 import type { BotMcpWhere } from '../mcp/BotMcp'
-import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotQuestionRow, type BotStore } from '../store/BotStore'
+import { outOfSightRow, workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotQuestionRow, type BotStore } from '../store/BotStore'
 import { plainChoices, type BotChatQuestion } from '../../../shared/bots/personal/questions'
 import { cardFileName, plainCards, type BotCard, type BotChatCard } from '../../../shared/bots/personal/cards'
 import { MAX_BOT_CHAT_ATTACHMENTS } from '../../../shared/bots/personal/methods'
@@ -326,13 +327,15 @@ export class BotChatProjection {
           ...(input.questionId ? { questionId: input.questionId } : {})
         }
       })
-      const tell = this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
+      // A row the chat never shows (an event's line, `outOfSightRow`) is kept for the bot's memory and its guards only:
+      // it tells nobody and reaches no window.
+      const tell = outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
       this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? this.options.tellAt?.(input.botId, tell, at, id) ?? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })
     const message = this.toMessage(row)
     // Emitted once the row is durable: inside a caller's transaction, after its commit.
-    if (inserted) this.store.db.afterCommit(() => this.emitMessage(this.toMessage(this.store.message(row.id) ?? row), row.botId))
+    if (inserted && !outOfSightRow(row.kind, row.id)) this.store.db.afterCommit(() => this.emitMessage(this.toMessage(this.store.message(row.id) ?? row), row.botId))
     return message
   }
 
@@ -355,7 +358,7 @@ export class BotChatProjection {
 
   /** A lightweight row-kind check for telling priority; no card or message reads. */
   isActionMessage(row: Pick<BotMessageRow, 'id'>): boolean {
-    return row.id.startsWith('bm_action_') && this.options.asksFirst?.() === true
+    return row.id.startsWith('bm_action_')
   }
 
   toMessage(row: BotMessageRow): BotChatMessage {
@@ -413,7 +416,7 @@ export class BotChatProjection {
   private actionForMessage(messageId: string): BotActionCard | undefined {
     // Only the two known nudge ids refer back to an existing review; they never create actions.
     messageId = messageId.replace(/_n[12]$/, '')
-    const row = this.store.get('SELECT id, bot_id, activation_id, args_digest, args_json, card_json, status, created_at, ran_at, answered_at, target_json, result_json, bot_note FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { bot_note: string | null; created_at: string }) | undefined
+    const row = this.store.get('SELECT id, bot_id, activation_id, args_digest, args_json, card_json, status, created_at, ran_at, answered_at, target_json, result_json FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { created_at: string }) | undefined
     if (!row) return undefined
     const storedMetadata = JSON.parse(row.card_json ?? '{}')
     const metadata = storedMetadata && typeof storedMetadata === 'object' && !Array.isArray(storedMetadata) ? storedMetadata : {}
@@ -456,8 +459,7 @@ export class BotChatProjection {
       status: row.status as BotActionCard['status'],
       ...(previous && typeof previousAt === 'string' ? { previous: { status: previous.status as 'done' | 'uncertain' | 'failed', at: previousAt } } : {}),
       ...(at ? { at } : {}),
-      ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}), ...(result.notSentInTime === true ? { notSentInTime: true } : {}) } } : {}),
-      ...(!forgotten && row.bot_note ? { note: row.bot_note } : {})
+      ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}), ...(result.notSentInTime === true ? { notSentInTime: true } : {}) } } : {})
     }
   }
 
@@ -572,7 +574,9 @@ export class BotChatProjection {
     const error: BotError | undefined = registry?.error?.error ?? (stuck[0] ? { text: stuck[0][1].text, action: { kind: 'pick_model', label: 'Pick a model' } } : undefined)
     // Only asks whose card is posted: a chat turn's asks show once its message is complete.
     const asks = this.store.openAsks(definition.id).filter((ask) => ask.messageId !== null)
-    const liveRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant'])
+    // A chat turn no person started or waits on (a wake-up, a thread's notice or message, another bot's message) is out of
+    // sight: no typing, no working line. Only what it says shows, as any reply.
+    const liveRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant']).filter((row) => !unattendedChatTurn(row))
     const live = liveRows.length
     // The chat and its work are apart: the chat's turn has the status line and Stop, work its own line.
     const chatTurn = liveRows.find((row) => row.lane === 'chat' && row.status === 'running')

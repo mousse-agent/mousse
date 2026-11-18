@@ -111,6 +111,7 @@ import {
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
 import {
+  SIDE_CHAT_QUESTION_BODY,
   SUBAGENT_QUESTION_BODY,
   automationRunBody,
   bodyWithProject,
@@ -575,8 +576,9 @@ export function registerGuiIpc(
     profileSettings = settings.get(),
     profileId = currentProfileKey()
   ): void => {
-    // Subagents are quiet; one that asks a question is announced under its parent's name.
-    const about = notificationThreads.resolve(profileId, threadId, kind)
+    // Subagents are quiet; one that asks a question is announced under its parent's name. A thread a bot keeps out of
+    // the sidebar is quiet too, unless the person chose to hear about bot threads.
+    const about = notificationThreads.resolve(profileId, threadId, kind, profileSettings.notifications?.botThreads === true)
     if (!about) return
     const content = getThreadNotificationPresentation(kind, profileSettings)
     const win = targetWindow
@@ -594,7 +596,7 @@ export function registerGuiIpc(
         kind,
         ...(threadName ? { threadName } : {}),
         ...(about.projectName ? { projectName: about.projectName } : {}),
-        ...(about.viaThreadId ? { subagent: true } : {})
+        ...(about.sideChat ? { sideChat: true } : about.viaThreadId ? { subagent: true } : {})
       }
       win.webContents.send('notifications:threadToast', payload)
     }
@@ -609,7 +611,7 @@ export function registerGuiIpc(
     const notification = new Notification({
       title: about.threadName ?? about.parentName ?? 'Mousse',
       ...content,
-      body: bodyWithProject(about.viaThreadId ? SUBAGENT_QUESTION_BODY : content.body, about.projectName),
+      body: bodyWithProject(about.sideChat ? SIDE_CHAT_QUESTION_BODY : about.viaThreadId ? SUBAGENT_QUESTION_BODY : content.body, about.projectName),
       // Unpackaged Windows Electron notifications do not reliably play their toast
       // sound. Play Mousse's softer completion chime below and avoid a double sound.
       silent: useWindowsCompletionSound ? true : content.silent
@@ -2501,6 +2503,19 @@ export function registerGuiIpc(
       broadcast('threads:updated', threadListPayload(threads))
     }
     await selectThread(forked.threadId)
+    return { threadId: forked.threadId }
+  })
+
+  // A side chat: a fork of the thread as it is now, kept in its side panel. The open thread stays open.
+  registerHandler('threads:newSideChat', async (_e, threadId: string) => {
+    if (isQualifiedId(threadId)) throw new Error('Side chats are for threads on this computer.')
+    const forked = await guiMms.request<{ threadId: string }>('thread.fork', {
+      sourceThreadId: threadId,
+      atRunOrdinal: 'latest_stable',
+      seedFrom: 'current_head',
+      sideChat: true,
+      clientRequestId: randomUUID()
+    })
     return { threadId: forked.threadId }
   })
 

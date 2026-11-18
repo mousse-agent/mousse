@@ -20,7 +20,7 @@
 
 .thread-search-dialog {
   width: min(560px, calc(100vw - 32px));
-  max-height: min(70vh, 560px);
+  max-height: min(80vh, 640px);
   display: flex;
   flex-direction: column;
   border: 1px solid var(--ui-line-strong);

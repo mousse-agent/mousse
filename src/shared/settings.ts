@@ -161,6 +161,11 @@ export interface NotificationSettings {
    * sent in, or that was opened here in the last seven days, notifies.
    */
   allRemoteThreads: boolean
+  /**
+   * Notify for threads a personal bot keeps out of the sidebar (`Thread.hidden`), and their subagents, like any
+   * thread. Absent means off: such a thread raises no banner, sound, toast or Needs me count until it is shown.
+   */
+  botThreads?: boolean
   /** The channels chosen for each event. A channel not chosen yet is on. */
   events?: Partial<Record<ThreadNotificationEvent, Partial<NotificationChannels>>>
   /**

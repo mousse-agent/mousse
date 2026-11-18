@@ -320,18 +320,18 @@ describe('nothing is left waiting', () => {
     expect(chatOf(f, botId).at(-1)).toMatchObject({ text: 'I stopped "Flat hunt": my permissions changed.', replyTo: { id: asked.id } })
   })
 
-  it('a full queue drops the oldest waiting work with its line, and withdraws its question', async () => {
+  it('a full queue never drops work waiting on its question: the newest run is refused and the question stays open', async () => {
     const { workId, work, questionId } = await workThatAsks()
     await endTurn(work)
-    // Nothing starts while the bot's journal cannot be written, so the runs asked for queue.
+    // Nothing starts while the bot's journal cannot be written, so the runs asked for queue. Only a runaway fills the
+    // queue; a ceiling of one stands in for it.
     f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
-    for (let i = 0; i < 20; i += 1) {
-      f.clock.now += 1_000
-      await f.bots.activate({ botId, input: `Run ${i}`, clientRequestId: `q${i}` })
-    }
-    expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'queue_full' })
-    expect(f.store.question(questionId)?.status).toBe('withdrawn')
-    expect(chatOf(f, botId).some((message) => message.text === 'I had too much waiting, so I dropped "Flat hunt". Ask me again when I\'m less busy.')).toBe(true)
+    f.host.maxQueuedActivations = 1
+    f.clock.now += 1_000
+    await f.bots.activate({ botId, input: 'Run 0', clientRequestId: 'q0' })
+    expect(f.store.activationByKey('manual:q0')).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(f.store.activation(workId)).toMatchObject({ status: 'blocked' })
+    expect(f.store.question(questionId)?.status).not.toBe('withdrawn')
   })
 })
 

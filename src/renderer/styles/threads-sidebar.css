@@ -171,7 +171,8 @@
 }
 
 /* As tall as its rows, and no taller: the footer comes right after it. It shrinks and scrolls once the rows
-   outgrow the sidebar. The Chats tab has no footer, so there it fills the sidebar. */
+   outgrow the sidebar. With no footer (the Chats tab, or the filter's Archived) it fills the sidebar, so the
+   profile stays at the bottom. */
 .threads-sidebar-scroll {
   flex: 0 1 auto;
   min-height: 0;
@@ -179,7 +180,7 @@
   padding-bottom: 12px;
 }
 
-.threads-sidebar-scroll[data-view='chats'] {
+.threads-sidebar-scroll[data-fill] {
   flex-grow: 1;
 }
 

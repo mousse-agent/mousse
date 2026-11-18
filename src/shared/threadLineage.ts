@@ -30,6 +30,19 @@ export function isNativeHelperThread(thread: Pick<Thread, 'lineage'>): boolean {
   return thread.lineage?.relationship === 'native'
 }
 
+/** True for a side chat (`ThreadLineage.relationship: 'side'`): a fork that lives in its parent's side panel only. */
+export function isSideChatThread(thread: Pick<Thread, 'lineage'>): boolean {
+  return thread.lineage?.relationship === 'side'
+}
+
+/** The side chats of `parentThreadId` that are not archived, newest first. */
+export function sideChatsOf<T extends Pick<Thread, 'id' | 'lineage' | 'settledAt' | 'updatedAt'>>(parentThreadId: string | null | undefined, threads: readonly T[]): T[] {
+  if (!parentThreadId) return []
+  return threads
+    .filter((thread) => isSideChatThread(thread) && thread.lineage!.parentThreadId === parentThreadId && !thread.settledAt)
+    .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))
+}
+
 function indexById<T extends LineageThread>(threads: readonly T[]): Map<string, T> {
   return new Map(threads.map((thread) => [thread.id, thread]))
 }
@@ -45,8 +58,9 @@ function indexById<T extends LineageThread>(threads: readonly T[]): Map<string, 
  */
 export function visibleThreads<T extends LineageThread>(threads: readonly T[], inventory: readonly LineageThread[] = threads): T[] {
   const known = new Set(inventory.map((thread) => thread.id))
-  // The Automation manager's thread is opened from Automations ("Open conversation"), never listed.
-  return threads.filter((thread) => !(thread as Partial<Pick<Thread, 'automationManager'>>).automationManager && (!isSubagentThread(thread) || !known.has(thread.lineage!.parentThreadId)))
+  // The Automation manager's thread is opened from Automations ("Open conversation"), never listed; a side chat is
+  // opened from its parent's side panel only, even when that parent is gone.
+  return threads.filter((thread) => !(thread as Partial<Pick<Thread, 'automationManager'>>).automationManager && !isSideChatThread(thread) && (!isSubagentThread(thread) || !known.has(thread.lineage!.parentThreadId)))
 }
 
 /**
@@ -155,4 +169,23 @@ export function rollUpActivities(threads: readonly LineageThread[], activity: Th
     rows[thread.id] = rolledUp(activity[thread.id] ?? 'idle', descendantsIn(childrenOf, thread.id).map((id) => activity[id]))
   }
   return rows
+}
+
+/**
+ * True for a thread kept out of the owner's sidebar by one of their bots (`Thread.hidden`), and for any subagent
+ * below one: a subagent takes its root's visibility. Such a thread notifies the owner only when they chose
+ * `notifications.botThreads`; Show in sidebar clears the mark and it notifies like any thread again.
+ */
+export function hiddenFromOwner(
+  threadId: string,
+  threadOf: (id: string) => Pick<Thread, 'id' | 'lineage' | 'hidden'> | undefined
+): boolean {
+  let current = threadOf(threadId)
+  if (current?.lineage?.rootThreadId && threadOf(current.lineage.rootThreadId)?.hidden) return true
+  for (let depth = 0; current && depth < 64; depth++) {
+    if (current.hidden) return true
+    const parentId = current.lineage?.parentThreadId
+    current = parentId ? threadOf(parentId) : undefined
+  }
+  return false
 }

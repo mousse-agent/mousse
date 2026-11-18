@@ -147,13 +147,13 @@ export function jobNoticeInput(job: BotJob, result?: string): string {
   if (result?.trim()) parts.push(quoted('its answer', capReport(result, 'read the rest with thread_read view "messages"').text))
   else if (job.state !== 'needs_input' && job.state !== 'gone') parts.push('It ended without a final answer: thread_read shows what happened (view "events" for why a run failed).')
   if (job.state === 'needs_input')
-    parts.push('It waits for your owner: tell them in one short line, with the link. You are told again when it finishes.')
+    parts.push('It waits for your owner: tell them in one short line, with the link, unless you already did. You are told again when it finishes.')
   else
-    parts.push('What came of it goes to your owner in one line with the link: the result, never the housekeeping (cleanup, what was left alone). Carry on only if the job needs a next step.')
+    parts.push('Your owner did not see this. Carry on if the job needs a next step. Reply [SILENT] unless it failed in a way only your owner can fix, or everything they asked for in that request is now done (every thread it started has finished: see "Threads you handed work to"); then one short line with the links: the result, never the housekeeping.')
   return notice({ kind: 'job_update', reply: 'if-needed', ref: job.threadId }, parts)
 }
 
-/** The quiet line in the chat above the bot's words on a job's notice: "Thread "Fix login" finished". */
+/** A job's change in a few words, for the line a paused bot leaves instead of a notice turn: "Thread "Fix login" finished". */
 export function jobNoticeLabel(job: Pick<BotJob, 'title' | 'state'>): string {
   const title = `"${jobLine(job.title, 80)}"`
   if (job.state === 'needs_input') return `${title} waits for you`

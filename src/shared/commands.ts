@@ -42,6 +42,7 @@ export type CommandId =
   | 'surface.files'
   | 'surface.git'
   | 'surface.pullRequest'
+  | 'surface.sideChats'
   | 'model.pick1'
   | 'model.pick2'
   | 'model.pick3'
@@ -234,9 +235,9 @@ export const COMMANDS: readonly CommandDefinition[] = [
   },
   {
     id: 'threads.search',
-    title: 'Search threads',
+    title: 'Search everything',
     category: 'Threads',
-    searchTerms: ['find', 'chat', 'messages'],
+    searchTerms: ['find', 'threads', 'chats', 'bots', 'archived', 'messages'],
     defaultBinding: `${MOD}+Shift+O`,
     scope: 'global',
     textInput: 'allow',
@@ -504,6 +505,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   surfaceCommand('surface.files', 'Open Files', 'F'),
   surfaceCommand('surface.git', 'Open Changes', 'D'),
   surfaceCommand('surface.pullRequest', 'Open Pull request', 'P'),
+  surfaceCommand('surface.sideChats', 'Open Side chats', 'S'),
   modelCommand('model.pick1', 1),
   modelCommand('model.pick2', 2),
   modelCommand('model.pick3', 3),
