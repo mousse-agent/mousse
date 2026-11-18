@@ -341,3 +341,5 @@ export function botInstructions(bot: { name: string; description: string; filesF
   const catalogue = lane ? `\n\n${botCatalogueIndex(catalogueWithout(bot.allowed?.off))}` : ''
   return `${who.join('\n')}\n\n${baseInstructionsWithout(bot.allowed?.off)}${catalogue}${lane ? `\n\n${lane}` : ''}${allowed ? `\n\n${allowed}` : ''}`
 }
+
+export const BOT_ASKS_FIRST_INSTRUCTIONS = 'Some of your tools ask your owner first: the call is held and you end your turn. You carry on with its result, or are told it was not sent. Never try another way to do the same thing, and never ask your owner in words to approve what a card asks.'

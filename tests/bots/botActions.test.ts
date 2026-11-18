@@ -3583,7 +3583,7 @@ it.each(['work', 'schedule'] as const)('C6 classifies an existing %s grant at ca
   expect(t.calls).toEqual([])
   expect(f.bots.actions.forWork('id' in t ? t.id : t.workId)?.status).toBe('open')
   expect(f.store.activeGrant(t.botId)).toEqual(before)
-  expect(botManifestDigest(f.store.activeGrant(t.botId)!.manifest)).toBe(before!.manifestDigest)
+  expect(botManifestDigest(f.store.activeGrant(t.botId)!.manifest)).toBe(before!.digest)
 })
 it('C6 a hint changing to read-only invalidates an existing card', async () => {
   const t = await setup(true)
@@ -3611,7 +3611,7 @@ it('C6 About classifies unstamped grants and respects current hints', async () =
   const t = await setup(true)
   const grant = f.store.activeGrant(t.botId)!
   const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] }
-  const about = () => f.bots.chat.permissionItems(t.botId, manifest, grant.approvedAt).find(p => p.id.startsWith('mcp'))
+  const about = () => f.bots.chat.permissionItems(t.botId, manifest, grant.approvedAt).find(p => p.title === 'use your Mail tools')
   expect(about()?.mark).toBe('Asks first')
   Object.assign(t.descriptor, { readOnlyHint: true })
   expect(about()?.mark).toBeUndefined()

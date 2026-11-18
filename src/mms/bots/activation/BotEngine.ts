@@ -1,3 +1,5 @@
+import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
+import { BOT_ASKS_FIRST_INSTRUCTIONS } from '../instructions'
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
 import { unattendedChatTurn } from './unattended'
 import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle } from '../actions/BotActions'
@@ -676,7 +678,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const limit = source?.trigger.kind === 'manual' ? source.trigger.owner?.limit ?? null : null
       const schedule = row.trigger.kind === 'schedule' ? this.host.schedules?.get(row.botId, row.trigger.scheduleId) : undefined
       if (row.trigger.kind === 'schedule' && (!schedule || schedule.paused)) return undefined
-      return { ...server, pairLevel: pair.level ?? 'allowed', deviceLimit: limit, ...(schedule ? { scheduleRevision: schedule.revision } : {}) }
+      return { ...server, pairLevel: this.actionLevel(tool, pair.level), deviceLimit: limit, ...(schedule ? { scheduleRevision: schedule.revision } : {}) }
     },
     obsolete: action => {
       const row = this.store.activation(action.activation_id)
@@ -684,7 +686,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (row?.trigger.kind === 'schedule' && this.host.schedules?.get(row.botId, row.trigger.scheduleId)?.revision !== held.scheduleRevision) return true
       const tool = JSON.parse(action.target_json) as BotMcpTool
       const pair = row && this.actionPair(row, tool)
-      if (!pair || held.pairLevel !== (pair.level ?? 'allowed')) return true
+      if (!pair || held.pairLevel !== this.actionLevel(tool, pair.level)) return true
       const where = this.host.mcp?.where?.(tool.server)
       if (!where) return false // A cold catalogue is not evidence of removal.
       if (where.state !== 'on') return true
@@ -3039,6 +3041,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Bot UI), then the thread's own. Built at each dispatch from the words published now, so a rename or the owner's
    * prompt edit applies at the next turn, while a turn already running keeps the text it was given.
    */
+  private actionLevel(tool: { server: string; tool: string }, storedLevel?: string): 'asks_first' | 'allowed' {
+    const server = findServer(this.host.mcp?.servers() ?? [], tool.server)
+    return asksFirstFor({ tool: tool.tool, serverName: [server?.name ?? '', server?.installationId ?? installationOf(tool.server)], readOnlyHint: server?.tools.find(t => t.tool === tool.tool)?.readOnlyHint, storedLevel }) ? 'asks_first' : 'allowed'
+  }
+
   private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): { instructions?: string } {
     if (permissions) {
       // Commands, the browser and the owner's threads the owner switched off for the bot are named as off.
@@ -3065,7 +3072,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const role = system && words.role.trim() === words.description.trim() ? undefined : words.role.trim()
     const disabled = this.store.disabledPermissions(definition.id).flatMap((off) => grantedPermissions(off.manifest).filter((item) => permissionId(item) === off.id).map((item) => askText(item).title))
     const offNote = disabled.length ? `Your owner has switched off for now: ${disabled.join(', ')}. These are not offered and you must not ask for them. Carry on without them.` : undefined
-    const parts = [system?.trim(), role, own?.trim(), offNote].filter((part): part is string => Boolean(part))
+    const asksFirst = lane === 'run' && !permissions?.subagent && botAsksFirst(this.host.settings?.get()) ? BOT_ASKS_FIRST_INSTRUCTIONS : undefined
+    const parts = [system?.trim(), role, own?.trim(), offNote, asksFirst].filter((part): part is string => Boolean(part))
     return parts.length ? { instructions: [...new Set(parts)].join('\n\n') } : {}
   }
 
@@ -3576,7 +3584,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         maskMcpArguments: (args: Record<string, unknown>) => maskedActionData(args) as Record<string, unknown>,
         holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string) => {
           const pair = this.store.activeGrant(row.botId)?.manifest.mcp.find(p => p.serverId === tool.server && p.tool === tool.tool)
-          if (pair?.level !== 'asks_first') return undefined
+          if (!pair || this.actionLevel(tool, pair.level) !== 'asks_first') return undefined
+          if (row.lane === 'chat') return { text: 'Hand this to work: it asks your owner first.', isError: true }
           if (row.trigger.kind !== 'work' && row.trigger.kind !== 'schedule') return { text: "A run started by hand can't wait for your owner. Say in your report what you would have sent.", isError: true }
           if (row.trigger.kind === 'schedule' && !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return { text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent.", isError: true }
           const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]))

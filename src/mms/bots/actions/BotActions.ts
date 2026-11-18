@@ -12,7 +12,7 @@ import { maskMemoryCredentials } from '../memory/guard'
 import { plainText, type BotMcpCallOutcome } from '../mcp/BotMcp'
 import type { ToolOutcome } from '../../run/mcp/appTools/types'
 
-/** The sole feature-switch read. No UI sets it until the complete feature ships. */
+/** The sole feature-switch read. The file setting remains a support rollback. */
 export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): boolean {
   return settings?.experimental.botAsksFirst === true
 }
@@ -371,6 +371,8 @@ export class BotActions {
     const id = `action_${randomUUID()}`
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
+      const introduced = this.host.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, 'asks-first:introduced', '1')", row.botId)
+      if (introduced) this.host.post(row, `bm_${id}_intro`, `From now on ${this.host.name(row.botId)} asks you before it sends or changes anything with your tools. Tools that only read don't ask.`)
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
