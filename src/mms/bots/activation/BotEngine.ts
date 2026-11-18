@@ -3822,7 +3822,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const authority: BotAuthority = {
       ...base,
       ...(input.role === 'activation' && row.lane === 'run' && (row.trigger.kind === 'work' || row.trigger.kind === 'schedule') ? {
-        secretFetch: (request, run) => secretFetchAction(this.store, { ...request, botId: row.botId, activationId: row.id, callKey: JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, request.callKey]), now: this.now() }, run)
+        secretFetch: (request: Parameters<NonNullable<BotAuthority['secretFetch']>>[0], run: Parameters<NonNullable<BotAuthority['secretFetch']>>[1]) => secretFetchAction(this.store, { ...request, botId: row.botId, activationId: row.id, callKey: JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, request.callKey]), now: this.now() }, run)
       } : {}),
       // The chat's own turns may run on a process kept warm between them, only while lane, turn kind and grant stay these.
       ...(row.lane === 'chat' && input.role === 'activation' ? { warm: `chat:${input.role}:${input.grantDigest}` } : {}),

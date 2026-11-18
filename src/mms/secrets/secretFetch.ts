@@ -66,7 +66,11 @@ export async function fetchWithSecret(vault: SecretVault, input: SecretFetchInpu
     if (textual && Buffer.byteLength(body) <= 65536) return {text: `${prefix}\n\n${body}`}
     const folder = join(input.folder, 'fetches'); mkdirSync(folder, {recursive:true, mode:0o700})
     if (!lstatSync(folder).isDirectory() || lstatSync(folder).isSymbolicLink()) return refuse('The fetch folder is unavailable.')
-    const file = join(folder, randomUUID()); writeFileSync(file, textual ? Buffer.from(body) : Buffer.from((secretMasker([{name,value:Buffer.from(value).toString('latin1')}]) ?? (s => s))(mask(response.body.toString('latin1'))), 'latin1'), {mode:0o600, flag:'wx'})
+    // Latin-1 is a reversible byte mapping. Supplement the home masker with the UTF-8
+    // key's byte form so non-ASCII keys are hidden without decoding unrelated binary bytes.
+    const byteMask = secretMasker([{name, value:Buffer.from(value).toString('latin1')}]) ?? ((s: string) => s)
+    const bytes = textual ? Buffer.from(body) : Buffer.from(byteMask(mask(response.body.toString('latin1'))), 'latin1')
+    const file = join(folder, randomUUID()); writeFileSync(file, bytes, {mode:0o600, flag:'wx'})
     return {text:`${prefix}\nFile: ${file}`}
   } catch { return refuse('The service read could not finish. Check the service or try again later.') }
 }
