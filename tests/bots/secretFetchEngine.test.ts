@@ -1,9 +1,10 @@
 import { afterEach, expect, it } from 'vitest'
+import { createBotActivitySink } from '../../src/mms/bots/activity/BotActivitySink'
 import { botFixture, createBot, start, type BotFixture } from './botFixture'
 let f:BotFixture
 afterEach(()=>f?.close())
 it('supplies the ledger only for work, and service reads never become held calls',async()=>{
- f=botFixture();const {botId}=await createBot(f,{name:'Reader',reply:'Hello.'})
+ f=botFixture();const activity=createBotActivitySink({emit:()=>{}});f.host.activity=activity;const {botId}=await createBot(f,{name:'Reader',reply:'Hello.'})
  await f.bots.service.chatSend({botId,text:'Read models',clientRequestId:'chat'})
  const chat=f.store.laneActivations(botId,'chat',['running'])[0]!
  expect((await start(f,chat.id)).prepared.authority.secretFetch).toBeUndefined()
@@ -12,6 +13,7 @@ it('supplies the ledger only for work, and service reads never become held calls
  const started=await start(f,work.workId)
  expect(started.prepared.authority.secretFetch).toBeTypeOf('function')
  await started.prepared.authority.secretFetch!({callKey:'read',secret:'KEY',service:'OpenAI',args:{path:'/v1/models'},mask:s=>s},async()=>({text:'data'}))
+ expect(activity.drain(`${work.workId}:d1`)).toContainEqual({icon:'read',text:'read from',highlight:'OpenAI'})
  expect(f.store.get("SELECT status FROM bot_actions WHERE activation_id = ?",work.workId)?.status).toBe('done')
  expect(f.bots.actions.forWork(work.workId)).toBeUndefined()
  expect(f.store.unreadWorkActions(work.workId)).toEqual([])

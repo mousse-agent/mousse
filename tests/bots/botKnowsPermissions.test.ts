@@ -263,3 +263,11 @@ it('tells granted work and scheduled runs how to use a bound key without seeing 
  expect(text).toContain("To read from a service your owner gave you a key for, use secret_fetch with the key's name. You never see the key.")
  expect(botInstructions({name:'Reader',description:'Read models',lane:'chat',allowed})).not.toContain("use secret_fetch with the key's name")
 })
+
+it('keeps service-read guidance out of subagents and consults where the tool is absent',()=>{
+ const allowed={...botAllowedOf(botStarterManifest()),secrets:true}
+ for(const scope of [{subagent:true as const},{allowed:{...allowed,mcpNotHere:true}}]){
+  const text=botInstructions({name:'Reader',description:'Read models',lane:'run',allowed,...scope})
+  expect(text).not.toContain("use secret_fetch with the key's name")
+ }
+})

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, readdirSync, mkdirSync, symlinkSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SecretVault } from '../../src/mms/secrets/SecretVault'
@@ -68,4 +68,28 @@ it.each(escapedEchoes.flatMap(([encoding, echo]) => ['application/x-ndjson', 'te
  const out=await run();expect(out.isError).not.toBe(true)
  const text=out.text.includes('File: ') ? readFileSync(out.text.split('File: ')[1]!, 'utf8') : out.text
  expect(text).not.toContain(echo);expect(text).not.toContain(ESCAPED_KEY);expect(text).toContain('[secret KEY hidden]')
+})
+
+// Normalization families: matrix parameters, one/two/three-dot leaders, fullwidth and ideographic stops.
+it.each(['..;', 'file;version=1', '%3b', '․', '‥', '…', '．', '｡', '。', '︒', '﹒'])('refuses ambiguous path segment %s',async segment=>{
+ const {run}=fixture();vi.mocked(publicFetch).mockClear()
+ const out=await run({path:`/v1/models/${segment}/x`})
+ expect(out.isError).toBe(true);expect(out.text).toContain('ambiguous');expect(publicFetch).not.toHaveBeenCalled()
+})
+it('lists allowed prefixes for a path outside a known service',async()=>{
+ const {run}=fixture('github');const out=await run({path:'/gists'})
+ expect(out.text).toContain('outside');expect(out.text).toContain('/repos');expect(out.text).toContain('/notifications');expect(out.text).not.toContain('ambiguous')
+})
+it('keeps the newest 20 response files and warns that they last only for this work',async()=>{
+ const {run,home}=fixture();const folder=join(home,'fetches');mkdirSync(folder)
+ // Mtime, rather than directory order or UUID order, defines old and new files.
+ for(let i=0;i<20;i++){const file=join(folder,String(i));(await import('node:fs')).writeFileSync(file,'previous');utimesSync(file,new Date(i*1000),new Date(i*1000))}
+ vi.mocked(publicFetch).mockResolvedValue({status:200,headers:{'content-type':'text/plain'},body:Buffer.from('x'.repeat(70000))})
+ const out=await run();expect(out.text).toContain('only for this work')
+ const files=readdirSync(folder);expect(files).toHaveLength(20);expect(files).not.toContain('0');expect(files).toContain('19');expect(readFileSync(out.text.split('File: ')[1]!, 'utf8')).toHaveLength(70000)
+})
+it('refuses a linked fetch folder and writes nothing through it',async()=>{
+ const {run,home}=fixture();const outside=mkdtempSync(join(tmpdir(),'fetch-outside-'));homes.push(outside);symlinkSync(outside,join(home,'fetches'),'dir')
+ vi.mocked(publicFetch).mockResolvedValue({status:200,headers:{'content-type':'text/plain'},body:Buffer.from('x'.repeat(70000))})
+ expect((await run()).isError).toBe(true);expect(readdirSync(outside)).toEqual([])
 })

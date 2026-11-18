@@ -188,3 +188,12 @@ it('also refuses private DNS answers on authenticated reads',async()=>{
  await expect(publicFetch('https://api.example.com',{secretRead:true,headers:{Authorization:'Bearer private'}})).rejects.toThrow('public')
  expect(https.request).not.toHaveBeenCalled()
 })
+
+it.each([false,true])('uses the page/service Accept default for secretRead=%s',async secretRead=>{
+ vi.mocked(dns.lookup).mockResolvedValue([{address:'8.8.8.8',family:4}] as never)
+ vi.mocked(https.request).mockImplementation(((options:any,callback:any)=>{
+  expect(options.headers.accept).toBe(secretRead ? 'application/json, text/plain;q=0.9, */*;q=0.8' : 'text/html, text/plain')
+  const req=new EventEmitter() as any;req.end=()=>{const res=new EventEmitter() as any;res.statusCode=200;res.headers={};callback(res);res.emit('end')};req.destroy=()=>{};return req
+ }) as any)
+ await publicFetch('https://example.com',{secretRead})
+})
