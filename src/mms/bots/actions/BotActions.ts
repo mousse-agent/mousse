@@ -413,16 +413,19 @@ export class BotActions {
     })
   }
 
-  private valid(action: ActionRow): BotActivationRow | undefined {
+  private valid(action: ActionRow, allowCold = false): BotActivationRow | undefined {
     const row = this.host.store.activation(action.activation_id)
     if (!row || !action.exec_args || action.exec_args.length > ACTION_MAX_ARGUMENT_CHARS || (action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now()))) return undefined
     try {
       const args: unknown = JSON.parse(action.exec_args)
       if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
-      const review = reviewArguments(args, this.host.schema(JSON.parse(action.target_json)))
+      const target = JSON.parse(action.target_json)
+      const binding = this.host.binding(row, target)
+      // Admission may precede the first relay listing. Execution always requires the full binding.
+      if (!binding && allowCold && !this.host.obsolete(action)) return row
+      const review = reviewArguments(args, this.host.schema(target))
       if (action.args_json !== '"[forgotten]"' && (canonicalJson(JSON.parse(action.args_json)) !== canonicalJson(review.args)
         || Boolean(JSON.parse(action.card_json ?? '{}').hasHiddenValues) !== review.hasHiddenValues)) return undefined
-      const binding = this.host.binding(row, JSON.parse(action.target_json))
       return binding && canonicalJson(binding) === canonicalJson(JSON.parse(action.binding_json)) ? row : undefined
     } catch { return undefined }
   }
@@ -461,11 +464,20 @@ export class BotActions {
       })
       throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
     }
-    if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
+    if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action, true)) throw changed()
     return action
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
-    const action = this.checked(input, true)
+    let action = this.checked(input, true)
+    if (input.answer === 'send' && !this.host.binding(this.host.store.activation(action.activation_id)!, JSON.parse(action.target_json))) {
+      // warm() bounds the wait. Re-read after awaiting: Stop, expiry and another answer may have won.
+      await this.host.refresh()
+      action = this.checked(input, true)
+      if (!this.valid(action)) {
+        const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'The service'
+        throw new BotActionChanged(`${service} couldn't be reached. Try again when it is available.`, 'bot_action_unreachable')
+      }
+    }
     if (input.answer === 'not_now') {
       this.host.store.db.transaction(() => {
         if (!this.transition(action.id, 'open', 'declined', { text: 'Your owner chose not to send this: carry on without it and say what you skipped.' })) throw changed()
