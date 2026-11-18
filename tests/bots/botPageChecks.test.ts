@@ -142,7 +142,7 @@ it('keeps the watched URL in the saved prompt for older builds',async()=>{
 it('six unchanged checks leave no page files and no inbox rows',async()=>{
   await add()
   for(let i=1;i<=6;i++) await check(i*5)
-  const files=readdirSync(f.bots.filesFolder(botId),{recursive:true})
+  const files=readdirSync(f.store.directory,{recursive:true})
   expect(files.filter(p=>String(p).endsWith('.txt'))).toEqual([])
   expect(f.automationRuns.list().runs).toEqual([])
 })
@@ -283,4 +283,12 @@ it('a fresh scheduler recovers the admitted occurrence after a crash through fin
     expect(restarted.getJob(entry.jobId)?.runClaim).toBeUndefined()
     expect(restarted.getJob(entry.jobId)?.lastStatus).toBe('ok')
   } finally {restarted.beginShutdown()}
+})
+
+it('startup removes a change file left before its activation transaction committed',async()=>{
+  await add()
+  const root=join(f.store.directory,'scratch')
+  const file=writePageChange(root,'act_crash_before_commit','orphaned page')
+  await f.bots.reconcileOnStartup()
+  expect(existsSync(file)).toBe(false)
 })
