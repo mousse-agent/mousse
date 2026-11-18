@@ -112,6 +112,10 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   const call = () => callForBot({ bot: work.prepared.authority, mcp, name: 'Mail__send', args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
   return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog }
 }
+async function legacyExpired(action: { id: string }): Promise<void> {
+  f.bots.actions.transition(action.id, 'open', 'expired', { text: 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' })
+  await f.bots.maintain(new Date(f.clock.now)); await flush()
+}
 it('switch off runs the same offered call directly and writes no action', async () => {
   const t = await setup(false, true)
   expect((await t.call()).text).toContain('delivered')
@@ -227,7 +231,7 @@ it('an expired Send is refused', async () => {
   const t = await setup(true)
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
-  f.clock.now += 48 * 3600_000 + 1000
+  await legacyExpired(a)
   await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
   expect(t.calls).toEqual([])
 })
@@ -597,7 +601,7 @@ it.each(['declined', 'expired', 'forgotten'] as const)('unattended %s history fo
   await finish(f, first.run.payload)
   const a = f.bots.actions.forWork(first.id)!
   if (settled === 'declined') await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
-  else if (settled === 'expired') { f.clock.now = Date.parse(a.expires_at); await f.bots.actions.reconcile() }
+  else if (settled === 'expired') await legacyExpired(a)
   else {
     const memory = new BotMemoryStore({ db: f.store.db })
     const seq = memory.append({ botId: t.botId, sourceKey: 'bm:' + a.message_id, kind: 'notice', who: 'bot', text: 'call' })!
@@ -718,7 +722,7 @@ it('with asks first off a scheduled call sends directly, writes no card and fini
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(f.store.activation(t.id)?.status).toBe('done')
 })
-it.each([1, 60, 180])('a schedule card lives for one gap with an hour minimum: %s minutes', async minutes => {
+it.each([1, 60, 180])('an older expired schedule card keeps its outcome and progress: %s minutes', async minutes => {
   const t = await scheduledCall(true, minutes)
   const memory = new BotMemoryStore({ db: f.store.db })
   f.host.progress = memory
@@ -727,9 +731,7 @@ it.each([1, 60, 180])('a schedule card lives for one gap with an hour minimum: %
   await t.call()
   await finish(f, t.run.payload)
   const a = f.bots.actions.forWork(t.id)!
-  expect(Date.parse(a.expires_at) - f.clock.now).toBe(Math.max(60, minutes) * 60_000)
-  f.clock.now = Date.parse(a.expires_at)
-  await f.bots.actions.reconcile()
+  await legacyExpired(a)
   await flush()
   const next = await start(f, t.id, 2)
   expect(f.bots.service.chatList(t.botId).messages.find(m => m.id === a.message_id)?.expiredActionSchedule).toBe(t.schedule.scheduleId)
@@ -1703,13 +1705,11 @@ it.each(['open', 'approved'] as const)('withdraws %s calls atomically when work 
   expect(f.store.message(a.message_id)?.text).toBe('Not sent')
 })
 
-it('expires on the due timer and carries its outcome until model output', async () => {
+it('an older expired row carries its outcome until model output', async () => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  expect(f.bots.nextDueAt(t.botId)).toBe(a.expires_at)
-  f.clock.now = Date.parse(a.expires_at)
-  f.timers.at(-1)!.fn()
+  await legacyExpired(a)
   await flush()
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'expired', exec_args: null })
   expect(f.store.message(a.message_id)?.text).toBe('Expired · not sent')
@@ -1726,7 +1726,7 @@ it.each(['declined', 'expired'] as const)('refuses an identical %s call without 
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   if (outcome === 'declined') await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
-  else { f.clock.now = Date.parse(a.expires_at); await f.bots.deliverDueReminders() }
+  else await legacyExpired(a)
   await flush()
   const next = await start(f, t.workId, 2)
   const call = (args = t.args, id = 'repeat') => callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: id, signal: new AbortController().signal })
@@ -1818,11 +1818,11 @@ it('forget history removes settled text and preserves the call key that prevents
   expect(t.calls).toEqual([])
 })
 
-it.each(['restart', 'sleep', 'late Send'] as const)('expires at the written deadline after %s', async path => {
+it.each(['restart', 'sleep', 'late Send'] as const)('keeps an older expired row settled after %s', async path => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  f.clock.now = Date.parse(a.expires_at) + 1000
+  await legacyExpired(a)
   if (path === 'restart') { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
   else if (path === 'sleep') await f.bots.deliverDueReminders()
   else await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('expired')
@@ -2095,7 +2095,7 @@ it.each([false, true])('B1 an approved row survives a cold restart, past deadlin
   f.bots.actions.transition(a.id, 'open', 'approved')
   const tools = t.server.tools.splice(0)
   const where = vi.spyOn(t.mcp, 'where').mockReturnValue(undefined)
-  if (late) f.clock.now = Date.parse(a.expires_at) + 1000
+  if (late) f.clock.now += 48 * 3600_000 + 1000
   f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup()
   expect(f.bots.actions.get(a.id)?.status).toBe(late ? 'failed' : 'approved')
   expect(t.calls).toEqual([])
@@ -2142,9 +2142,7 @@ it('R2-4 three expired cards refuse further calls without claiming the owner dec
     await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: `expires ${n}` }, toolCallId: `expires-${n}`, signal: new AbortController().signal })
     await finish(f, runtime.payload)
     const a = f.bots.actions.forWork(t.workId)!
-    // Move just the card's deadline: advancing three real deadlines would also end the work's week.
-    f.store.run('UPDATE bot_actions SET expires_at = ? WHERE id = ?', f.store.now(), a.id)
-    await f.bots.deliverDueReminders(); await flush()
+    await legacyExpired(a)
     runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   }
   expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'before-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
@@ -2237,7 +2235,7 @@ it('R2-5 a timely Send remains running when the deadline passes', async () => {
   vi.spyOn(t.manager, 'callTool').mockImplementationOnce(async () => { await waiting; return { content: [{ type: 'text', text: 'delivered' }] } as never })
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  f.clock.now = Date.parse(a.expires_at) - 1000
+  f.clock.now += 48 * 3600_000 - 1000
   const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   await flush()
   f.clock.now += 2000
@@ -2248,13 +2246,13 @@ it('R2-5 a timely Send remains running when the deadline passes', async () => {
   expect(f.bots.actions.get(a.id)?.status).toBe('done')
 })
 
-it.each(['stop', 'expiry', 'forget'] as const)('R2-6 existing rows still settle after switch-off on %s', async path => {
+it.each(['stop', 'upkeep', 'forget'] as const)('R2-6 existing rows still settle after switch-off on %s', async path => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   f.host.settings!.get().experimental.botAsksFirst = false
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
-  if (path === 'expiry') { f.clock.now = Date.parse(a.expires_at); f.timers.at(-1)!.fn(); await flush() }
+  if (path === 'upkeep') await f.bots.deliverDueReminders()
   if (path === 'forget') {
     const memory = new BotMemoryStore({ db: f.store.db })
     const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'card' })!
@@ -2287,7 +2285,7 @@ it.each(['paused', 'expired', 'withdrawn', 'binding'] as const)('R2-8 Send repor
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   if (reason === 'paused') f.bots.pauseBot(t.botId)
-  if (reason === 'expired') f.clock.now = Date.parse(a.expires_at) + 1000
+  if (reason === 'expired') await legacyExpired(a)
   if (reason === 'withdrawn') await f.bots.stopWork(t.botId, t.workId)
   if (reason === 'binding') t.server.configDigest = 'changed'
   const code = reason === 'binding' ? 'bot_action_changed' : reason === 'withdrawn' ? 'bot_action_work_ended' : reason === 'unreachable' ? 'bot_action_gone' : `bot_action_${reason}`
@@ -2300,7 +2298,7 @@ it('R2-5 accepts Send before refreshing tools so the timer cannot overtake it', 
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  f.clock.now = Date.parse(a.expires_at) - 1000
+  f.clock.now += 48 * 3600_000 - 1000
   let release!: () => void
   const refresh = new Promise<void>(resolve => { release = resolve })
   vi.spyOn(t.mcp, 'warm').mockImplementationOnce(() => refresh)
@@ -2355,11 +2353,11 @@ it.each([9, 11])('R3-1 accepted Send recovers at %s minutes only within its tap 
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(2)
 })
 
-it.each(['inside two restarts', 'outside two restarts', 'sleep', 'card deadline'] as const)('R3-1 tap deadline survives %s', async path => {
+it.each(['inside two restarts', 'outside two restarts', 'sleep', 'after thirty days'] as const)('R3-1 tap deadline survives %s', async path => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  if (path === 'card deadline') f.clock.now = Date.parse(a.expires_at) - 1000
+  if (path === 'after thirty days') f.clock.now += 30 * 24 * 3600_000
   const tapped = f.clock.now
   vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
@@ -2372,7 +2370,7 @@ it.each(['inside two restarts', 'outside two restarts', 'sleep', 'card deadline'
   } else { f.clock.now = tapped + (path === 'sleep' ? 660_000 : 540_000); f.timers.at(-1)!.fn(); await flush() }
   t.server.tools.push(t.descriptor); t.server.failing = false
   f.bots.fillMcpAsks(); await flush()
-  const sent = path === 'inside two restarts' || path === 'card deadline'
+  const sent = path === 'inside two restarts' || path === 'after thirty days'
   expect(t.calls).toEqual(sent ? [t.args] : [])
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: sent ? 'done' : 'failed', exec_args: null })
 })
@@ -2658,7 +2656,7 @@ it.each(c4Refusals)('C4 integration protocol preserves the exact %s refusal and 
   const params = { actionId: a.id, digest: a.args_digest, answer: 'send' }
   if (reason === 'changed') params.digest = 'stale'
   if (reason === 'paused') f.bots.pauseBot(t.botId)
-  if (reason === 'expired') f.clock.now = Date.parse(a.expires_at) + 1000
+  if (reason === 'expired') await legacyExpired(a)
   if (reason === 'withdrawn') await f.bots.stopWork(t.botId, t.workId)
   if (reason === 'settled') await f.bots.service.answerAction({ ...params, answer: 'not_now' })
   if (reason === 'gone') f.store.run('DELETE FROM bot_actions WHERE id = ?', a.id)
@@ -2844,13 +2842,11 @@ it('C4 next wait-false question survives a held call and its answer reaches the 
   expect(t.calls).toEqual([t.args])
 })
 
-it('C4 next removed week wait does not remove the card deadline or leave expired work parked', async () => {
+it('C4 an older expired row does not leave work parked', async () => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  expect(Date.parse(a.expires_at) - f.clock.now).toBe(48 * 60 * 60_000)
-  f.clock.now = Date.parse(a.expires_at)
-  await f.bots.deliverDueReminders(); await flush()
+  await legacyExpired(a)
   expect(f.bots.actions.get(a.id)!.status).toBe('expired')
   expect(f.store.activation(t.workId)!.endReason).not.toBe('approval')
   const runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
@@ -3034,14 +3030,14 @@ it('review12 a later scheduled occurrence warns about the earlier sent call', as
   expect(t.calls).toEqual([t.args])
 })
 
-it.each(['overdue', 'obsolete'] as const)('review5 preflight retires an %s card before refusing without dispatch', async kind => {
+it.each(['overdue', 'obsolete'] as const)('review5 preflight refuses an older expired or obsolete card: %s', async kind => {
   const t = kind === 'overdue' ? await setup(true) : await scheduledCall()
   await t.call()
   const runtime = 'run' in t ? t.run : t.work
   const workId = 'id' in t ? t.id : t.workId
   await finish(f, runtime.payload)
   const a = f.bots.actions.forWork(workId)!
-  if (kind === 'overdue') f.clock.now = Date.parse(a.expires_at) + 1
+  if (kind === 'overdue') await legacyExpired(a)
   else {
     const current = f.host.schedules!.get.bind(f.host.schedules)
     vi.spyOn(f.host.schedules!, 'get').mockImplementation((bot, id) => { const entry = current(bot, id); return entry ? { ...entry, revision: 'missed-edit' } : undefined })
@@ -3187,8 +3183,7 @@ it('C9 expiry reaches work once with the owner-writing rule', async () => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  f.clock.now = Date.parse(a.expires_at)
-  await f.bots.deliverDueReminders(); await flush()
+  await legacyExpired(a)
   const prompt = f.store.lastMainDispatch(t.workId)!.prompt.text
   expect(prompt.split('This expired, so nothing was sent.')).toHaveLength(2)
   expect(prompt).not.toContain('without a new reason')
@@ -3417,7 +3412,7 @@ it.each(['send', 'not_now', 'expired'] as const)('C10 review inbox keeps a held 
   expect(inbox().state).toBe('running')
   expect(inbox().endedAt).toBeUndefined()
   const a = f.bots.actions.forWork(t.id)!
-  if (outcome === 'expired') { f.clock.now = Date.parse(a.expires_at); f.bots.actions.expireDue() }
+  if (outcome === 'expired') await legacyExpired(a)
   else await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: outcome })
   await flush()
   const continuation = await start(f, t.id, 2)
@@ -3518,17 +3513,22 @@ it.each(['work', 'schedule'] as const)('C11 parked %s survives startup and upkee
   expect(t.calls).toEqual([])
 })
 
-it.each(['work', 'schedule'] as const)('C11 %s cards stay sendable after thirty days, restart and sleep', async kind => {
+it.each(['work', 'schedule'].flatMap(kind => [false, true].map(legacy => ({ kind, legacy }))))('C11 $kind cards stay sendable after thirty days, restart and sleep, older row=$legacy', async ({ kind, legacy }) => {
   const t = kind === 'work' ? await setup(true) : await scheduledCall(true, 60)
   const id = 'run' in t ? t.id : t.workId
   await t.call(); await finish(f, ('run' in t ? t.run : t.work).payload)
   const a = f.bots.actions.forWork(id)!
+  if (legacy) f.store.run('UPDATE bot_actions SET expires_at = ? WHERE id = ?', new Date(f.clock.now + 3600_000).toISOString(), a.id)
   f.clock.now += 30 * 24 * 3600_000
   f.bots.close(); f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup()
   await f.bots.maintain(new Date(f.clock.now)); await f.bots.deliverDueReminders(); await flush()
   expect(f.bots.actions.get(a.id)?.status).toBe('open')
   expect(f.store.activation(id)).toMatchObject({ status: 'blocked', endReason: 'approval' })
+  if ('run' in t) {
+    expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+    expect(f.book.get(t.botId, t.schedule.scheduleId)?.skip?.reason).toBe('bot_waiting_for_owner')
+  }
   await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
   await expect(f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('already answered')
