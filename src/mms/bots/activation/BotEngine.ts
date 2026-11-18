@@ -3203,7 +3203,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const server = findServer(this.host.mcp?.servers() ?? [], tool.server)
     const listed = server?.tools.find(t => t.tool === tool.tool)
     if (!listed) return 'asks_first'
-    return asksFirstFor({ tool: tool.tool, serverName: [tool.serverName ?? server?.name ?? '', server?.installationId ?? installationOf(tool.server)], readOnlyHint: offered ? tool.readOnlyHint : listed.readOnlyHint, storedLevel }) ? 'asks_first' : 'allowed'
+    const classification = { tool: tool.tool, serverName: [tool.serverName ?? server?.name ?? '', server?.installationId ?? installationOf(tool.server)], storedLevel }
+    return (asksFirstFor({ ...classification, readOnlyHint: listed.readOnlyHint }) || offered && asksFirstFor({ ...classification, readOnlyHint: tool.readOnlyHint })) ? 'asks_first' : 'allowed'
   }
 
 

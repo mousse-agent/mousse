@@ -361,7 +361,7 @@ export class BotActions {
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
     const refused = unanswered.find(action => action.args_digest === digest && (row.trigger.kind !== 'schedule' || action.activation_id === row.id))
     if (refused)
-      return this.refuse(row, refused, 'Your owner chose Not now for this same request. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
+      return this.refuse(row, refused, refused.status === 'expired' ? 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' : 'Your owner chose Not now for this same request. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
