@@ -6,7 +6,7 @@ import { ConfirmRemoveButton } from './IconButtons'
 import { MoreDetails, SettingsGroup, SettingsRow } from './SettingsRow'
 
 export const SECRETS_HELP =
-  "An agent that needs a key, token or password asks for it with a private card in its thread. What you type there goes to Mousse's secret store on this computer, never into the conversation. The agent gets its name and a private file holding it, which only your account on this computer can open: it uses the value in its commands, settings and logins, and never shows it in the thread (any output that holds it is masked). ${secret:NAME} reads it in an MCP server's settings. A secret bound to a service stays with Mousse: the bot gets no file and cannot use it in commands or MCP settings. Keys you save for automations are listed here too. Removing one here deletes it at once; a thread that used it can no longer."
+  "An agent that needs a key, token or password asks for it with a private card in its thread. What you type there goes to Mousse's secret store on this computer, never into the conversation. The agent gets its name and a private file holding it, which only your account on this computer can open: it uses the value in its commands, settings and logins, and never shows it in the thread (any output that holds it is masked). ${secret:NAME} reads it in an MCP server's settings. A secret bound to a service stays with Mousse: the agent gets no file and cannot use it in commands or MCP settings. Keys you save for automations are listed here too. Removing one here deletes it at once; a thread that used it can no longer."
 
 function when(iso: string | undefined): string | undefined {
   if (!iso) return undefined
