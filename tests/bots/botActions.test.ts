@@ -3104,7 +3104,7 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
   expect(f.bots.actions.get(`${a.id}_running`)?.status).toBe(path === 'startup' ? 'uncertain' : 'running')
   expect(f.store.message(a.message_id)?.text).not.toContain('Mail · send')
   expect(t.calls).toEqual([])
-  expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('This could not wait for your owner after all, so nothing was sent. Say so in your report.')
+  expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('This could not wait for your owner after all, so nothing was sent. Do not make this call again in this work; say in your report what you would have sent.')
 })
 
 it.each(['expiry', 'nudges', 'nudge holds'] as const)('C9 failed action %s backs off without starving another bot', async step => {
