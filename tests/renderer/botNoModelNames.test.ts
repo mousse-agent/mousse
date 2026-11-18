@@ -133,7 +133,7 @@ describe('no model name on any bot screen', () => {
     expect(host.querySelector('[role="menu"]')).not.toBeNull()
     expect(found()).toEqual([])
     await click(button('About this bot'))
-    expect(host.querySelector('.bot-about-row')).not.toBeNull()
+    expect(host.querySelector('.bot-about-head')).not.toBeNull()
     expect(found()).toEqual([])
     for (const item of ['Rename', 'Change look', 'Delete bot']) {
       await click(button('Bot menu'))

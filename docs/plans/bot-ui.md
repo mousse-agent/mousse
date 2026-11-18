@@ -218,13 +218,12 @@ The Chats layout, as in the reference image:
 ### 4.8 The menu and About this bot
 
 - **⋯ menu:** About this bot, Rename, Change face, Pause, Delete bot.
-- **About this bot:** a narrow panel on the right of the chat, opened from the menu or by clicking the header. It shows:
-  - the large face, the name and the description;
-  - **Can use:** each allowed permission, with Remove;
-  - **Runs:** each schedule and trigger, with Remove;
-  - **Pause** and **Delete**.
+- **About this bot:** a resizable panel on the right of the chat, opened from the menu or by clicking the header. It shows:
+  - the face beside the name and, in words, what the bot does now, its model, its context and its prompt cache;
+  - sections that fold, Context and cache open at first: **Context and cache**, **Instructions**, **Can use** (each permission with its own icon, a switch and Remove), **Automations** (each by name, when it runs, what it does and its last run, with Remove), **Reminders**, **Memory** and **Runs on**;
+  - **Pause** and **Delete bot**.
 
-  That is all. There is no model, folder picker, limits, log or device. Editing the description is asking the bot to change.
+  Every Remove asks first. See `docs/bots.md`, What a bot is.
 
 ### 4.9 States
 

@@ -29,8 +29,7 @@ import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
-import { BotAboutPanel, RUNS_ON_ID } from './BotAboutPanel'
-import { centerWithin } from '../../lib/shellScroll'
+import { BotAboutPanel } from './BotAboutPanel'
 import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
@@ -816,16 +815,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     // Sign in opens the card of the owner's provider entry the bot would run on; Set up opens the list.
     if (action.kind === 'sign_in' && action.instanceId) openProvider(action.instanceId)
     else if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
-    // A picked model that can't run (#673): About opens at Runs on. Only the panel scrolls: scrollIntoView also moved
-    // every box around it, the app's own included.
-    else if (action.kind === 'pick_model') {
-      useBotsStore.setState({ aboutOpen: true })
-      window.requestAnimationFrame(() => {
-        const runsOn = document.getElementById(RUNS_ON_ID)
-        const panel = runsOn?.closest('.bot-about')
-        if (runsOn && panel) centerWithin(panel, runsOn)
-      })
-    } else void store().resume(bot.id)
+    // A picked model that can't run (#673): About opens at its model rows.
+    else if (action.kind === 'pick_model') useBotsStore.setState({ aboutOpen: true, aboutFocus: 'runs-on' })
+    else void store().resume(bot.id)
   }, [bot.id, store])
   // Reply on a message: its quote goes above the composer, which takes the focus.
   const reply = useCallback((message: BotChatMessage) => {
