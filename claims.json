@@ -34,6 +34,20 @@
       "expiresAt": "2026-11-18T14:54:45.325Z"
     },
     {
+      "task": "bot-page-change-checks",
+      "session": "agibook-e0ccc0",
+      "machine": "agibook",
+      "branch": "bot-page-change-checks",
+      "paths": [
+        "src/mms/bots/activation/BotEngine.ts",
+        "src/mms/scheduled",
+        "src/mms/net-public",
+        "src/mms/run/mcp/appTools/bots.ts"
+      ],
+      "claimedAt": "2026-11-18T15:50:20.219Z",
+      "expiresAt": "2026-11-18T17:50:20.219Z"
+    },
+    {
       "task": "bot-phase-two-followups",
       "session": "agibook-f42da1",
       "machine": "agibook",
