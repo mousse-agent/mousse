@@ -52,21 +52,6 @@
   }
 }
 
-/* Add project slides in beside the tabs on the Projects tab; the tabs give it the room as it grows. When it
-   leaves, ThreadsSidebar eases the tab list back out over the space. */
-.threads-sidebar-tabs-row > .threads-sidebar-add-project {
-  transition:
-    width calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
-    opacity calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
-}
-
-@starting-style {
-  .threads-sidebar-tabs-row > .threads-sidebar-add-project {
-    width: 0;
-    opacity: 0;
-  }
-}
-
 /* The workspace beside the sidebar (App: `workspaceMode`, `data-workspace-swap`) swaps with the tabs, in step
    with the lists: going to or from Chats, the other side shows at once, in the click's own update, and settles
    with the same short lift (180ms). Only during a swap, so hiding the app panel or opening Usage stays as it
@@ -93,7 +78,6 @@
   .view-swap > [role='tabpanel'],
   .threads-sidebar-tabs .threads-sidebar-tab,
   .threads-sidebar-tabs .threads-sidebar-tab .threads-sidebar-tab-label,
-  .threads-sidebar-tabs-row > .threads-sidebar-add-project,
   .app-workspace[data-workspace-swap] > * {
     transition: none !important;
   }

@@ -1,4 +1,4 @@
-import type { KeyboardEvent, Ref } from 'react'
+import type { KeyboardEvent } from 'react'
 import type { LucideIcon } from '../../lib/icons'
 
 export interface PillTab<T extends string> {
@@ -14,7 +14,7 @@ export interface PillTab<T extends string> {
  * size container 240–319px wide, only the open tab shows its word, and the word widens into a newly opened tab.
  * Left and Right move between tabs (wrapping), Home and End to the ends; the tab moved to opens and takes focus.
  */
-export function PillTabs<T extends string>({ tabs, value, onSelect, ariaLabel, idPrefix, tabsRef, className }: {
+export function PillTabs<T extends string>({ tabs, value, onSelect, ariaLabel, idPrefix, className }: {
   tabs: readonly PillTab<T>[]
   value: T
   /** Opens a tab; may ask first (a promise), focus follows the keyboard either way. */
@@ -22,7 +22,6 @@ export function PillTabs<T extends string>({ tabs, value, onSelect, ariaLabel, i
   ariaLabel: string
   /** Tabs are `${idPrefix}-${id}-tab` and control `${idPrefix}-${id}-panel`. */
   idPrefix: string
-  tabsRef?: Ref<HTMLDivElement>
   className?: string
 }) {
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -39,7 +38,7 @@ export function PillTabs<T extends string>({ tabs, value, onSelect, ariaLabel, i
   }
 
   return (
-    <div ref={tabsRef} className={`threads-sidebar-tabs${className ? ` ${className}` : ''}`} role="tablist" aria-label={ariaLabel} onKeyDown={onKeyDown}>
+    <div className={`threads-sidebar-tabs${className ? ` ${className}` : ''}`} role="tablist" aria-label={ariaLabel} onKeyDown={onKeyDown}>
       {tabs.map(({ id, label, icon: Icon }) => (
         <button
           key={id}

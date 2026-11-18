@@ -10,6 +10,7 @@ import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds, threadAfterArchive } from './threadOrder'
 import { afterNextPaint } from './pendingThreadRows'
 import { runWithToast } from './actionToast'
+import { showProjectInSidebar } from './sidebarReveal'
 import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
 /**
@@ -152,10 +153,17 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   await selectThread(thread.id)
 }
 
-/** Asks for a project folder, then opens a new thread in it. Nothing happens when the picker is cancelled. */
+/**
+ * Asks for a project folder, then opens a new thread in it. The project is listed at once, and an open sidebar shows
+ * its group. Nothing happens when the picker is cancelled.
+ */
 export async function addProjectAndStartThread(): Promise<void> {
   const project = await window.mousse.projects.open()
   if (!project) return
+  const store = useAppStore.getState()
+  // The service also pushes the list, but that can come after the new thread is open.
+  if (!store.projects.some((entry) => entry.id === project.id)) store.setProjects([...store.projects, project])
+  if (store.threadsSidebarOpen) showProjectInSidebar(project.id)
   await createAndSelectProjectThread(project.id)
 }
 
