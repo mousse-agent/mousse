@@ -4225,3 +4225,29 @@ it('E1 an uncertain automatic call gets a card under a new call id in the same r
   expect(f.bots.actions.forWork(next.id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
   expect(t.calls).toHaveLength(2)
 })
+
+it.each(['saved', 'all', 'source', 'revoke'] as const)('E1 forgetting or revoking removes exceptions: %s', async kind => {
+  const t = await aloneAsk()
+  f.bots.alone.prepare(t.botId, 'abandoned', t.request as never)
+  const grant = f.store.activeGrant(t.botId)!
+  if (kind === 'saved' || kind === 'all') await f.bots.wipeMemory(t.botId, kind === 'saved' ? 'saved' : undefined)
+  if (kind === 'source') f.bots.actions.forgetText(t.botId, f.bots.actions.forWork(t.id)!.id)
+  if (kind === 'revoke') { f.bots.revoke(t.botId); f.bots.approve(t.botId, botManifestDigest(f.bots.definitionOf(t.botId).permissions)); f.store.approve(t.botId, grant.digest, grant.manifest) }
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*' OR key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 clearing chat removes withdrawn consent snapshots', async () => {
+  const t = await aloneAsk('not_now')
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Ask again', clientRequestId: 'alone-again' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  turn.prepared.authority.escalate!({ permission: t.request as never, reason: 'Again' })
+  await finish(f, turn.payload)
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone-ask:*'")).toHaveLength(1)
+  await f.bots.clearChat(t.botId)
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 exported action records omit exact local place values', async () => {
+  const t = await aloneAsk()
+  const memory = new BotMemoryStore({ db: f.store.db })
+  expect(memory.actions(t.botId).every(row => row.place_json == null)).toBe(true)
+})
