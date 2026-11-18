@@ -1,3 +1,4 @@
+import { pageChangePath, writePageChange, removePageChange } from '../pageChangeFiles'
 import { PageChecks, pageSetting, type PageSetting } from '../pageChecks'
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
 import { unattendedChatTurn } from './unattended'
@@ -1612,6 +1613,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.endUsagePauseIfDue(botId, input.now ?? new Date(this.now()))
     const paused = this.store.registry(botId)?.pausedReason
     let skip: string | undefined = paused ? (paused === 'usage_limit' ? 'usage_limited' : 'paused') : undefined
+    const id = `act_${randomUUID()}`
+    const pageRoot = join(this.store.directory, 'scratch')
     let page: ReturnType<PageChecks['check']>
     if (!skip) {
       const schedule = this.host.schedules?.get(botId, scheduleId)
@@ -1621,7 +1624,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return page
       }
       if (page?.kind === 'not_ready') return page
-      if (page?.kind === 'changed') prompt += `\n\n${page.prompt}`
+      if (page?.kind === 'changed') prompt += `\n\nThe page at ${page.url} changed since your last run; the new text is in ${pageChangePath(pageRoot, id)}.`
     }
     let admitted: ReturnType<BotEngine['admissible']> | undefined
     if (!skip) {
@@ -1651,13 +1654,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         else if (this.entryLimitOf(botId, turn.pick)) skip = 'usage_limited'
       }
     }
-    const id = `act_${randomUUID()}`
     // The same occurrence handed over again (after a crash): it was inserted already, whatever runs now.
     // Labels use the latest due time; a retry must still reuse the original claim's run.
     const key = `sched:${botId}:${scheduleId}:${input.occurrenceKey ?? occurrenceAt}`
     const existing = this.store.activationByKey(key)
     if (existing) return { kind: 'started', activationId: existing.id }
-    const made = this.store.db.transaction(() => {
+    let made: boolean
+    try { made = this.store.db.transaction(() => {
       if (!admitted || skip) return false
       // Only this schedule's own previous run skips it: other runs and the owner's work run beside it.
       const same = (row: BotActivationRow) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === scheduleId
@@ -1677,7 +1680,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         createdAt: this.store.now(),
         lane: 'run'
       }, limitsOf(intersectManifest(admitted.published.permissions, admitted.grant.manifest)))
-      if (inserted && page?.kind === 'changed') page.commit()
+      if (inserted && page?.kind === 'changed') {
+        writePageChange(pageRoot, id, page.text)
+        this.store.run('UPDATE bot_activations SET scratch = ? WHERE id = ?', join(pageRoot,id), id)
+        page.commit()
+      }
       if (inserted && own) this.store.setModelOverride(id, { mode: 'named', ...own, depth: admitted.published.main.model.depth })
       // Said once per automation, with its first run on the bot's Work row (a fixed id: a later run posts nothing).
       if (inserted && ignoredName)
@@ -1685,6 +1692,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (inserted) this.refuseOverQueue(botId, 'run')
       return inserted
     })
+    } catch (error) {
+      if (page?.kind === 'changed') removePageChange(pageRoot, id)
+      throw error
+    }
     if (skip) {
       this.changed({ botId })
       return { kind: 'skipped', reason: skip }
@@ -1758,6 +1769,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const botId of this.host.definitions.ids()) {
       try {
         for (const ended of endedSchedules.filter(schedule => schedule.botId === botId)) {
+          new PageChecks(this.store).remove(botId, ended.scheduleId)
           if (this.store.registry(botId)?.deletedAt) continue
           const endedKey = `schedule-ended:${ended.jobId}`
           if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, endedKey)) continue

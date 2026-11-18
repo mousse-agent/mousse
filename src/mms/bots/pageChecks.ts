@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { removePageChange } from './pageChangeFiles'
 import { publicFetch, publicUrl } from '../net-public/publicFetch'
 import { htmlToText } from '../orchestrator/WebTools'
 import type { BotStore } from './store/BotStore'
 export interface PageSetting { url: string; contains?: string }
 interface Flight { key: string; generation: string; startedAt: number; token: string }
-interface Result { flight: Flight; hash?: string; file?: string; error?: string; checked?: boolean; failure?: string }
+interface Result { flight: Flight; hash?: string; text?: string; error?: string; checked?: boolean; failure?: string }
 interface State extends PageSetting { generation: string; handedHash: string | null; inFlight?: Flight; result?: Result; failures: number; firstFailureAt?: number; toldUnreadable: boolean }
 export function pageSetting(value: PageSetting): PageSetting {
   publicUrl(value.url)
@@ -33,13 +33,15 @@ export class PageChecks {
   set(botId: string, id: string, setting: PageSetting, generation: string): void {
     this.save(botId,id,{url:setting.url,...(setting.contains !== undefined ? {contains:setting.contains} : {}),generation,handedHash:null,failures:0,toldUnreadable:false})
   }
-  remove(botId: string, id: string): void { this.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?',botId,`pagecheck:${id}`) }
+  remove(botId: string, id: string): void {
+    for (const row of this.store.listActivations(botId)) if (row.trigger.kind === 'schedule' && row.trigger.scheduleId === id) removePageChange(join(this.store.directory, 'scratch'), row.id)
+    this.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?',botId,`pagecheck:${id}`) }
   sweep(exists: (botId: string, id: string) => boolean): void {
     for (const row of this.store.all("SELECT bot_id,key FROM bot_memory_state WHERE key LIKE 'pagecheck:%'"))
       if (!exists(String(row.bot_id),String(row.key).slice(10))) this.remove(String(row.bot_id),String(row.key).slice(10))
   }
   check(botId: string, id: string, generation: string, key: string, now: number, folder: string):
-    | { kind:'not_ready' } | { kind:'checked'; failure?: string } | { kind:'changed'; prompt:string; commit: () => void } | undefined {
+    | { kind:'not_ready' } | { kind:'checked'; failure?: string } | { kind:'changed'; text:string; url:string; commit: () => void } | undefined {
     const state = this.read(botId,id)
     if (!state) return undefined
     if (state.generation !== generation) { this.set(botId,id,state,generation); return this.check(botId,id,generation,key,now,folder) }
@@ -63,10 +65,10 @@ export class PageChecks {
       if (state.handedHash === null || state.handedHash === result.hash) {
         state.handedHash=result.hash!; state.result=undefined; this.save(botId,id,state); return {kind:'checked'}
       }
-      // A complete file precedes the transaction. A failed insert leaves the result and old hash for retry.
-      readFileSync(result.file!, 'utf8')
+      // Text remains in the profile-owned database until the run takes it atomically.
+      if (result.text === undefined) { state.result=undefined; this.save(botId,id,state); return this.check(botId,id,generation,key,now,folder) }
       this.save(botId,id,state)
-      return {kind:'changed',prompt:`The page at ${state.url} changed since your last run; the new text is in ${result.file}.`,commit:() => {
+      return {kind:'changed',text:result.text,url:state.url,commit:() => {
         state.handedHash=result.hash!; state.result=undefined; this.save(botId,id,state)
       }}
     }
@@ -83,10 +85,7 @@ export class PageChecks {
       const current = this.read(botId,id)
       if (current?.inFlight?.token !== flight.token || current.generation !== generation) return
       const text=comparedText(response.body.toString('utf8'),state.contains)
-      const dir=join(folder,'page-changes',id); mkdirSync(dir,{recursive:true})
-      const file=join(dir,`${createHash('sha256').update(key).digest('hex')}-${flight.token}.txt`)
-      writeFileSync(file,text)
-      finish({flight,hash:createHash('sha256').update(text).digest('hex'),file})
+      finish({flight,hash:createHash('sha256').update(text).digest('hex'),text})
     }).catch(error => { try { finish({flight,error:error instanceof Error ? error.message : String(error)}) } catch { /* A closed store recovers the in-flight check on restart. */ } })
     return {kind:'not_ready'}
   }
