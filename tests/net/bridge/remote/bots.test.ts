@@ -267,7 +267,7 @@ describe('bot methods on a real bot', () => {
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const { payload, prepared } = await start(f, activation.id)
     prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'Ask' })
-    await finish(f, payload)
+    await finish(f, payload, 'completed', { text: 'Allow?' })
     const ask = f.store.openAsks(botId)[0]!
     f.store.run('UPDATE bot_escalations SET permission_json = ? WHERE id = ?', JSON.stringify({ ask: 'let_alone', scheduleId: 's', serverId: 'mail', tool: 'send' }), ask.id)
     const before = f.store.all('SELECT * FROM bot_memory_state')

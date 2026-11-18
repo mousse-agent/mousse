@@ -4045,7 +4045,7 @@ async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args)
 }
 it('E1 Allow lets only the same schedule destination run on the action ledger without a card', async () => {
   const t = await aloneAsk()
-  expect(f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))).toMatchObject({ enabled: undefined })
+  expect(f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))).not.toHaveProperty('enabled')
   const next = await aloneNext(t)
   expect(next.result.text).toContain('delivered')
   expect(next.action).toMatchObject({ status: 'done', card_json: null, exec_args: null })
@@ -4114,7 +4114,7 @@ it.each(['no-history', 'no-place', 'off'] as const)('E1 refuses an owner ask wit
 it.each(['time', 'prompt', 'pair', 'schedule', 'bot'] as const)('E1 cleans up exceptions after %s changes', async change => {
   const t = await aloneAsk()
   if (change === 'time' || change === 'prompt') {
-    f.bots.editSchedule(t.botId, () => f.scheduler.update(t.schedule.jobId, change === 'time' ? { schedule: { kind: 'interval', minutes: 2 } } : { prompt: 'A new job' }))
+    f.bots.editSchedule(t.botId, () => f.scheduler.updateJob(t.schedule.jobId, change === 'time' ? { schedule: { kind: 'interval', minutes: 2 } } : { prompt: 'A new job' }))
   }
   if (change === 'pair') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
   if (change === 'schedule') f.bots.removeSchedule(t.botId, t.schedule.scheduleId)

@@ -492,7 +492,7 @@ it('an unknown saved special ask is a plain permission card and Allow grants not
   const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
   const { payload, prepared } = await start(f, activation.id)
   prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'Ask' })
-  await finish(f, payload)
+  await finish(f, payload, 'completed', { text: 'Allow?' })
   const ask = f.store.openAsks(botId)[0]!
   f.store.run('UPDATE bot_escalations SET permission_json = ?, title = NULL WHERE id = ?', JSON.stringify({ ask: 'future_ask' }), ask.id)
   expect(f.bots.chat.card(f.store.escalation(ask.id)!)).toMatchObject({ kind: 'permission' })
