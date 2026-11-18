@@ -69,24 +69,6 @@
       "expiresAt": "2026-11-18T08:04:59.558Z"
     },
     {
-      "task": "provider-error-retry-visibility",
-      "session": "Animatrix-d1ef43",
-      "machine": "Animatrix",
-      "branch": "provider-error-retry-visibility",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/mms/orchestrator/turnRetry.ts",
-        "src/mms/harness/vendors/claude",
-        "src/mms/orchestrator/providerErrors.ts",
-        "src/mms/bots/activation/BotEngine.ts",
-        "src/renderer/chat",
-        "src/mms/run/restartNote.ts",
-        "src/shared/providerRetry.ts"
-      ],
-      "claimedAt": "2026-11-18T09:03:09.423Z",
-      "expiresAt": "2026-11-18T11:03:09.423Z"
-    },
-    {
       "task": "startup-delete-retry-after-ready",
       "session": "Animatrix-3930ac",
       "machine": "Animatrix",
