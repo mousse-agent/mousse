@@ -3,7 +3,7 @@ import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { pastedSecretShape, pastedSecretValue, missingAwsSecret } from '../../../shared/secretShapes'
 import { SECRET_KEEPS, secretKeepLabel, secretKeepLine } from '../../../shared/secretRequests'
 import { useBotsStore } from '../../stores/botsStore'
-import { privateBotDraft, subscribePrivateBotDrafts, updatePrivateBotDraft, changePrivateBotDraft, savedPrivateBotDraft, admitPrivateBotDraft } from './privateBotDrafts'
+import { privateBotDraft, subscribePrivateBotDrafts, updatePrivateBotDraft, changePrivateBotDraft, savedPrivateBotDraft, admitPrivateBotDraft, sentPrivateBotDraft } from './privateBotDrafts'
 
 /** A private paste survives unmounts, but lives only in this window's in-memory draft map. */
 export function usePastedBotSecret(bot: BotSummary, storedDraft: string) {
@@ -35,6 +35,7 @@ export function usePastedBotSecret(bot: BotSummary, storedDraft: string) {
     const currentShape=pastedSecretShape(current.text??useBotsStore.getState().drafts[bot.id]??'')
     if(currentShape && !current.dismissed && !current.highlighted) {updatePrivateBotDraft(bot.id,{highlighted:true});return false}
     if(current.text!==undefined) admitPrivateBotDraft(bot.id,current.text)
+    sentPrivateBotDraft(bot.id)
     return true
   }
   const offer=<>

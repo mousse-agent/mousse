@@ -1,8 +1,8 @@
-import { DEFAULT_SECRET_KEEP, type SecretKeep } from '../../../shared/secretRequests'
+import { DEFAULT_SECRET_KEEP, SECRET_DAY_MS, type SecretKeep } from '../../../shared/secretRequests'
 import { pastedSecretShape, pastedSecretValue, pastedSecretReplacement } from '../../../shared/secretShapes'
 import { useBotsStore } from '../../stores/botsStore'
 
-interface Saved { value: string; name: string }
+interface Saved { value: string; name: string; expiresAt: number }
 export interface PrivateBotDraft {
   text?: string
   busy: boolean
@@ -15,6 +15,7 @@ export interface PrivateBotDraft {
 }
 // Window memory only. Values never enter Zustand, local storage, transcript or IPC until an explicit choice.
 const drafts = new Map<string, PrivateBotDraft>()
+const expiryTimers = new Set<ReturnType<typeof setTimeout>>()
 const listeners = new Set<() => void>()
 let admitting: string | undefined
 const notify = () => { for (const listener of listeners) listener() }
@@ -22,12 +23,14 @@ export const subscribePrivateBotDrafts = (listener: () => void) => { listeners.a
 export function privateBotDraft(botId: string): PrivateBotDraft {
   let entry=drafts.get(botId)
   if (!entry) { entry={ busy:false, dismissed:false, highlighted:false, keep:DEFAULT_SECRET_KEEP, error:undefined, saved:[] };drafts.set(botId,entry) }
+  const saved=entry.saved.filter(item=>item.expiresAt>Date.now())
+  if(saved.length!==entry.saved.length) {entry={...entry,saved};drafts.set(botId,entry)}
   return entry
 }
 export function updatePrivateBotDraft(botId:string, patch:Partial<PrivateBotDraft>):void {
   drafts.set(botId,{...privateBotDraft(botId),...patch});notify()
 }
-export function clearPrivateBotDrafts():void { drafts.clear();notify() }
+export function clearPrivateBotDrafts():void { for(const timer of expiryTimers) clearTimeout(timer);expiryTimers.clear();drafts.clear();notify() }
 function replaceKnown(text:string, saved:readonly Saved[]):string {
   for (const item of saved) {
     text=text.split(item.value).join(pastedSecretReplacement(item.value,item.name))
@@ -40,15 +43,21 @@ export function changePrivateBotDraft(botId:string,text:string):void {
   const entry=privateBotDraft(botId)
   text=replaceKnown(text,entry.saved)
   const privateText=pastedSecretShape(text)!==undefined
-  updatePrivateBotDraft(botId,{text:privateText?text:undefined,dismissed:false,highlighted:false,error:undefined})
+  updatePrivateBotDraft(botId,{text:privateText?text:undefined,dismissed:false,highlighted:false,error:undefined,notice:undefined})
   useBotsStore.getState().setDraft(botId,privateText?'':text)
 }
 export function savedPrivateBotDraft(botId:string,value:string,name:string):void {
   const entry=privateBotDraft(botId)
-  const saved=[...entry.saved,{value,name}]
+  const expiresAt=entry.keep==='day'?Date.now()+SECRET_DAY_MS:Infinity
+  const saved=[...entry.saved,{value,name,expiresAt}]
+  if(Number.isFinite(expiresAt)) {
+    const timer=setTimeout(()=>{expiryTimers.delete(timer);const current=drafts.get(botId);if(current) {drafts.set(botId,{...current,saved:current.saved.filter(item=>item.expiresAt>Date.now())});notify()}},SECRET_DAY_MS)
+    expiryTimers.add(timer)
+  }
   const text=replaceKnown(entry.text??useBotsStore.getState().drafts[botId]??'',saved)
-  updatePrivateBotDraft(botId,{saved,notice:`Kept as ${name}`,busy:false})
+  updatePrivateBotDraft(botId,{saved,busy:false})
   changePrivateBotDraft(botId,text)
+  updatePrivateBotDraft(botId,{notice:`Kept as ${name}`})
 }
 export function admitPrivateBotDraft(botId:string,text:string):void {
   updatePrivateBotDraft(botId,{text:undefined})
@@ -66,3 +75,7 @@ useBotsStore.subscribe((state,previous)=>{
     else if(pastedSecretShape(incoming) || entry?.saved.length) changePrivateBotDraft(botId,incoming)
   }
 })
+
+export function sentPrivateBotDraft(botId:string):void {
+ updatePrivateBotDraft(botId,{notice:undefined,saved:[]})
+}
