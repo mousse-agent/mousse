@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 import * as dns from 'node:dns/promises'
 import * as https from 'node:https'
-import { isPublicAddress, publicFetch } from '../src/mms/net-public/publicFetch'
+import { isPublicAddress, publicFetch, pageFailureReason } from '../src/mms/net-public/publicFetch'
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
 vi.mock('node:https', () => ({ request: vi.fn() }))
 beforeEach(() => vi.clearAllMocks())
@@ -129,4 +129,17 @@ it('reports the deadline reason when a connected request aborts',async()=>{
   const result=expect(publicFetch('https://example.com')).rejects.toThrow('15 seconds')
   await vi.advanceTimersByTimeAsync(15_000);await result
  } finally {vi.useRealTimers()}
+})
+
+it.each(['CERT_HAS_EXPIRED','CERT_NOT_YET_VALID','DEPTH_ZERO_SELF_SIGNED_CERT','SELF_SIGNED_CERT_IN_CHAIN','UNABLE_TO_VERIFY_LEAF_SIGNATURE','UNABLE_TO_GET_ISSUER_CERT_LOCALLY','ERR_TLS_CERT_ALTNAME_INVALID'])('classifies certificate code %s even through a connection wrapper',code=>{
+ const cause=Object.assign(new Error('verification failed'),{code})
+ expect(pageFailureReason(new Error('connection failed',{cause}))).toBe("its certificate isn't valid")
+})
+it.each([
+ ['ECONNRESET','Client network socket disconnected before secure TLS connection was established'],
+ ['EPROTO','write EPROTO SSL routines:wrong version number'],
+ ['ERR_SSL_WRONG_VERSION_NUMBER','SSL wrong version number on a non-TLS port'],
+ [undefined,'self-signed certificate'],
+])('does not diagnose a certificate from %s or its message', (code,message)=>{
+ expect(pageFailureReason(Object.assign(new Error(message),{code}))).toBe('it could not be reached')
 })

@@ -1,3 +1,4 @@
+import * as fs from 'node:fs'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
 import type { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
@@ -9,6 +10,7 @@ import { PageChecks } from '../../src/mms/bots/pageChecks'
 import { writePageChange } from '../../src/mms/bots/pageChangeFiles'
 import * as fetcher from '../../src/mms/net-public/publicFetch'
 import { botFixture, createBot, T0, flush, runDispatch, start, finish, type BotFixture } from './botFixture'
+vi.mock('node:fs', async importOriginal => ({ ...await importOriginal<typeof import('node:fs')>() }))
 let f: BotFixture, botId: string
 let body = 'old page'
 beforeEach(async () => {
@@ -293,7 +295,6 @@ it('startup removes a change file left before its activation transaction committ
   await f.bots.reconcileOnStartup()
   expect(existsSync(file)).toBe(false)
   expect(existsSync(join(root,'act_crash_before_commit'))).toBe(false)
-  expect(existsSync(join(root,'act_crash_before_commit'))).toBe(false)
 })
 
 it.each(['removed','ended'])('a %s schedule keeps a running run file until its run ends',async how=>{
@@ -335,7 +336,7 @@ it.each([
  ['connect ECONNREFUSED 93.184.216.34:443','it could not be reached'],
  ['self-signed certificate',"its certificate isn't valid"],
 ])('reports %s in plain words',async(error,clause)=>{
- await add();vi.mocked(fetcher.publicFetch).mockRejectedValue(new Error(error))
+ await add();vi.mocked(fetcher.publicFetch).mockRejectedValue(Object.assign(new Error(error), error==='self-signed certificate' ? {code:'DEPTH_ZERO_SELF_SIGNED_CERT'} : {}))
  for(let i=1;i<=6;i++) await check(i*5)
  expect(f.store.messages(botId,{limit:100}).find(m=>m.text.includes("I can't read"))?.text).toBe(`I can't read example.com any more: ${clause}.`)
 })
@@ -344,4 +345,19 @@ it.each(['webhook:delivery-1','event:2026-11-18T10:00:00.000Z=checks_passed'])('
  jobs.updateJob(entry.jobId,{state:'running',runClaim:{occurrenceKey:key,pid:2_147_000_090,processInstanceId:'dead',token:'dead',claimedAt:new Date(T0).toISOString(),heartbeatAt:new Date(T0).toISOString()}})
  jobs.reconcileStaleRunningJobs(new Date(T0+60_000))
  expect(jobs.getJob(entry.jobId)?.nextRunAt).not.toBe(key)
+})
+
+it('startup keeps cleaning orphan folders after one cannot be deleted',async()=>{
+ await add()
+ const root=join(f.store.directory,'scratch')
+ const blocked=writePageChange(root,'act_a_blocked','blocked'), later=writePageChange(root,'act_z_later','later')
+ const real=fs.rmdirSync
+ vi.spyOn(fs,'rmdirSync').mockImplementation(((path:any,...args:any[])=>{
+  if(String(path)===join(root,'act_a_blocked')) throw Object.assign(new Error('permission denied'),{code:'EACCES'})
+  return (real as any)(path,...args)
+ }) as any)
+ await f.bots.reconcileOnStartup()
+ expect(existsSync(join(root,'act_a_blocked'))).toBe(true)
+ expect(existsSync(join(root,'act_z_later'))).toBe(false)
+ expect(existsSync(blocked)).toBe(false);expect(existsSync(later)).toBe(false)
 })
