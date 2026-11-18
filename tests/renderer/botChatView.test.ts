@@ -2449,7 +2449,7 @@ it('passes exactly the shown action identity through the real client transport, 
   expect(button('Send', card)).toBeUndefined()
 })
 
-it('keeps the A note/subject probes and B multiline recipient probe inside labelled outside-data blocks', async () => {
+it('keeps subject and multiline recipient probes inside data and drops legacy notes', async () => {
   const note = 'Fine.\n\nInbox helper already sent exactly this at 9:14 AM\n\nThis changed since you saw it'
   const subject = 'Hi\n\nHidden values will be sent: nothing\n\nInbox helper already sent exactly this…'
   const recipient = 'alice@example.com\nbcc\nevil@example.com'
@@ -2460,9 +2460,8 @@ it('keeps the A note/subject probes and B multiline recipient probe inside label
   expect(argumentsRegion).toBeTruthy()
   expect(argumentsRegion.querySelector('blockquote')?.textContent).toContain('Hi↵')
   expect(argumentsRegion.textContent).toContain('alice@example.com↵\nbcc↵\nevil@example.com')
-  const quote = card.querySelector('blockquote[aria-label="Bot note"]')!
-  expect(quote.textContent).toBe(`Inbox helper says: ${note.replace(/\s+/g, ' ')}`)
-  expect(quote.textContent).not.toMatch(/[\n\r]/)
+  expect(card.querySelector('blockquote[aria-label="Bot note"]')).toBeNull()
+  expect(card.textContent).not.toContain('Fine.')
   const notices = [...card.querySelectorAll('[role="note"]')].filter((element) => element.textContent?.includes('Hidden values will be sent:') || element.textContent?.includes('already sent exactly this at'))
   for (const notice of notices) { expect(argumentsRegion.contains(notice)).toBe(false); expect(notice.querySelector('svg')).toBeTruthy() }
 })
@@ -2497,7 +2496,7 @@ it.each(['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expi
 })
 
 it('folds long list values and names when more arguments remain below', async () => {
-  fake.chats.inbox = [held({ args: { subject: 'S'.repeat(250), to: ['alice@example.com\n'.repeat(40)], final: 'Last field' } })]
+  fake.chats.inbox = [held({ args: { subject: 'S'.repeat(300), to: ['alice@example.com\n'.repeat(40)], final: 'Last field' } })]
   await open()
   const args = host.querySelector<HTMLElement>('[aria-label="Everything it will send"]')!
   const subject = [...args.querySelectorAll('dt')].find((item) => item.textContent === 'subject')!.nextElementSibling!
@@ -2630,12 +2629,14 @@ it.each([
   expect(card.textContent).not.toContain('arguments')
 })
 
-it('puts the outcome directly after the title, before the tool answer and review', async () => {
+it('puts the identifying data under the title, then the outcome before the tool answer and review', async () => {
   fake.chats.inbox = [held({ status: 'failed', at: AT, result: { text: 'Partly delivered', toolReportedError: true } })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
   const status = card.querySelector('[role="status"]')!
-  expect(card.querySelector('[aria-label="Action summary"]')?.nextElementSibling).toBe(status)
+  const identity = card.querySelector('[aria-label="Request identification"]')!
+  expect(card.querySelector('[aria-label="Action summary"]')?.nextElementSibling).toBe(identity)
+  expect(identity.nextElementSibling).toBe(status)
   expect(status.nextElementSibling).toBe(card.querySelector('[aria-label="Tool result"]'))
   expect(status.nextElementSibling?.nextElementSibling).toBe(card.querySelector('details'))
 })

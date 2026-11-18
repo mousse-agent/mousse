@@ -2567,7 +2567,7 @@ it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, ca
   else await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-mail', signal: new AbortController().signal })
   for (const [i, bot] of authorities.entries()) for (const [j, name] of tools.entries()) {
     const refused = botAppToolRefusal(bot, name, {})
-    if (on) expect(refused, name).toMatch(i === 0 ? /held for your owner/ : /ended/)
+    if (on) expect(refused, name).toMatch(i === 0 ? /this one was not held/ : /ended/)
     else expect(refused, name).toBe(before[i][j])
   }
   expect(t.calls).toEqual(on ? [] : [t.args])
@@ -2623,7 +2623,7 @@ it('C4 integration nudge ids project the same stored review and follow settlemen
   expect(projected('n1').action?.status).toBe('done')
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
   f.host.settings!.get().experimental.botAsksFirst = false
-  for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toBeUndefined()
+  for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toEqual(original())
 })
 
 it.each(['done', 'tool_error'] as const)('C4 integration actual forget removes %s from repeat lookup', async outcome => {
