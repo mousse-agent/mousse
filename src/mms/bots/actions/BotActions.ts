@@ -223,6 +223,7 @@ const changed = () => new BotActionChanged('This changed since you saw it. Check
 export class BotActions {
   private warming?: Promise<void>
   private readonly executing = new Set<string>()
+  private readonly answering = new Set<string>()
   constructor(private readonly host: Host) {
     registerHeldCalls(host.store.db, {
       endWork: id => this.withdrawWork(id),
@@ -474,6 +475,12 @@ export class BotActions {
     return action
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
+    if (this.answering.has(input.actionId)) throw changed()
+    this.answering.add(input.actionId)
+    try { return await this.answerOnce(input) }
+    finally { this.answering.delete(input.actionId) }
+  }
+  private async answerOnce(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
     if (input.answer === 'send') {
       const held = this.get(input.actionId)
       if (held?.status === 'open' && held.args_digest === input.digest && await this.host.refresh(JSON.parse(held.target_json)) === false) {
@@ -495,7 +502,7 @@ export class BotActions {
       this.host.ownerAnswered(this.host.store.activation(action.activation_id)!)
     })
     this.host.held()
-    await this.runApproved(action.id)
+    await this.runApproved(action.id, true)
     return { status: this.get(action.id)!.status }
   }
   private async runApproved(id: string, refresh = false): Promise<void> {

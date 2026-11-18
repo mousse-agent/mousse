@@ -246,7 +246,7 @@ export class BotMcp implements BotMcpHost {
     try {
       const read = this.deps.catalog.refreshServer
         ? this.deps.catalog.refreshServer(installationOf(serverId)).then(() => true)
-        : this.warm().then(() => true)
+        : this.deps.catalog.ensure(undefined, BOT_MCP_WARM_MS, { signIn: false, fresh: true }).then(() => true)
       const done = await Promise.race([read, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), BOT_MCP_WARM_MS) })])
       const where = this.where(serverId)
       return done && where?.state === 'on' && !where.server.failing && !where.server.starting
