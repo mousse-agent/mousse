@@ -233,7 +233,7 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       name: 'secret_fetch', description: fetchDefinition.description, botDescription: fetchDefinition.description,
       inputSchema: plainSchema(fetchDefinition), definition: () => fetchDefinition,
       access: 'actsAsCaller', class: 'read',
-      listed: () => Boolean(secrets()?.fetch), offered: turn => fetchAvailable(turn) === true,
+      listed: listing => Boolean(listing.botTurnTools?.has('secret_fetch') && secrets()?.fetch), offered: turn => fetchAvailable(turn) === true,
       available: fetchAvailable, describe: () => 'Read from a bound service',
       handler: async (args, ctx) => {
         const allowed = fetchAvailable(ctx.turn)
