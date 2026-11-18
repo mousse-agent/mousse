@@ -4,7 +4,9 @@
  * network), paired with each other; a window's daemon calls on each; fake shells on an owner; and the marker
  * record `scripts/net-engine-check.mjs` reads (the reason the first failed step gives).
  *
- * The pairing rows are written directly (the ceremony lands with the pairing slice).
+ * Computers pair as the helper pairs them: the caller joins the owner's invitation and the owner's window approves
+ * it, then each records the other with the grant the helper named, and the owner pairs back (`grant.add` at the
+ * caller, `peer.add` at the owner).
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -14,6 +16,7 @@ import { vi } from 'vitest'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
 import type { DomainConnectionContext } from '../../../src/mms/protocol/domainRegistry'
 import { dispatchMethod } from '../../../src/mms/protocol/handlers'
+import type { EngineHelper } from '../../../src/mms/netEngine/helper/connections'
 import type { NodeId } from '../../../src/shared/net'
 import { NET_LOCAL_CAPABILITY } from '../../../src/shared/net/local'
 import { qualifyId } from '../../../src/shared/threadRef'
@@ -37,10 +40,13 @@ export async function step<T>(reason: string | undefined, work: () => Promise<T>
 }
 
 export function codeOf(error: unknown): string | undefined {
-  const value = error as { code?: unknown; details?: { reason?: unknown; cause?: unknown } } | undefined
+  const value = error as
+    { code?: unknown; details?: { reason?: unknown; cause?: unknown } } | undefined
   for (const word of [value?.details?.cause, value?.details?.reason])
     if (typeof word === 'string' && /^[a-z_]{1,64}$/.test(word)) return word
-  return typeof value?.code === 'string' && /^[a-z_]{1,64}$/.test(value.code) ? value.code : undefined
+  return typeof value?.code === 'string' && /^[a-z_]{1,64}$/.test(value.code)
+    ? value.code
+    : undefined
 }
 
 let recorded = false
@@ -79,6 +85,8 @@ export interface Computer {
   /** Its helper identity, as its pairings know it. */
   endpoint: string
   helper: FakeHelper
+  /** The app's view of its helper. */
+  engine: EngineHelper
   /** Whether it had a `net.db` before its engine was switched on. */
   hadNetDb: boolean
   /** What its windows heard. */
@@ -94,7 +102,12 @@ export class Fabric {
 
   async computer(name: string): Promise<Computer> {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-')))
-    const mms = await MousseMainService.create({ homeDir: home, repoRoot: home, headless: true, requireOwnership: false })
+    const mms = await MousseMainService.create({
+      homeDir: home,
+      repoRoot: home,
+      headless: true,
+      requireOwnership: false
+    })
     this.cleanups.push(
       () => {
         try {
@@ -107,9 +120,9 @@ export class Fabric {
     )
     const hadNetDb = existsSync(join(home, 'net', 'net.db'))
     await mms.netEngine.enable()
-    const endpoint = `endpoint-${name}`
-    const helper = this.network.helper(endpoint)
-    await mms.netEngine.useHelper(helper.pipe)
+    const helper = this.network.helper(`endpoint-${name}`)
+    const engine = await mms.netEngine.useHelper(helper.pipe)
+    const endpoint = String(engine.info.identity)
     const events: ProtocolEvent[] = []
     let sequence = 0
     mms.protocolSequence = () => sequence
@@ -128,39 +141,79 @@ export class Fabric {
       mms,
       endpoint,
       helper,
+      engine,
       hadNetDb,
       events,
       dispatch: (method, params, local = false) =>
-        dispatchMethod({ mms, connection: window(local), globalSequence: () => mms.protocolSequence() }, method, params)
+        dispatchMethod(
+          { mms, connection: window(local), globalSequence: () => mms.protocolSequence() },
+          method,
+          params
+        )
     }
   }
 
-  /** Pairs two computers both ways; answers each one's local id for the other. */
-  pair(owner: Computer, caller: Computer): { callerOnOwner: NodeId; ownerOnCaller: NodeId; grant: string } {
-    const grant = `grant-${owner.name}-to-${caller.name}`
-    const back = `grant-${caller.name}-to-${owner.name}`
+  /**
+   * Pairs two computers both ways: `caller` joins an invitation of `owner`, whose window approves it; then the owner
+   * pairs back. The join's connection is the caller's first. Answers each one's local id for the other.
+   */
+  async pair(
+    owner: Computer,
+    caller: Computer
+  ): Promise<{ callerOnOwner: NodeId; ownerOnCaller: NodeId; grant: string }> {
+    const invite = await owner.engine.request('invite.create')
+    const enrolled = new Promise<Record<string, unknown>>((resolve) => {
+      const stop = owner.engine.onEvent((event) => {
+        if (event.invitation !== invite.invitation) return
+        if (event.ev === 'approval')
+          void owner.engine.request('approval.answer', { request: event.request, yes: true })
+        if (event.ev === 'enrolled') {
+          stop()
+          resolve(event)
+        }
+      })
+    })
+    const joined = await caller.engine.request(
+      'join',
+      { ticket: invite.uri, pinned: false },
+      60_000
+    )
+    const { grant } = await enrolled
+    if (joined.identity !== owner.endpoint)
+      throw new Error(`Joined ${String(joined.identity)}, not ${owner.endpoint}`)
+    const back = await caller.engine.request('grant.add', {
+      identity: owner.endpoint,
+      name: `${owner.name} computer`
+    })
+    await owner.engine.request('peer.add', {
+      identity: caller.endpoint,
+      name: `${caller.name} computer`,
+      routes: caller.engine.info.routes ?? []
+    })
     const callerOnOwner = owner.mms.netEngine.pair({
       endpoint: caller.endpoint,
-      fingerprint: `sha256:${caller.name}`,
-      grant,
+      fingerprint: `sha256:${caller.endpoint}`,
+      grant: String(grant),
       name: `${caller.name} computer`,
       state: 'connected'
     }).localId
     const ownerOnCaller = caller.mms.netEngine.pair({
       endpoint: owner.endpoint,
-      fingerprint: `sha256:${owner.name}`,
-      grant: back,
+      fingerprint: `sha256:${owner.endpoint}`,
+      grant: String(back.grant),
       name: `${owner.name} computer`,
       state: 'connected'
     }).localId
-    this.network.grant(owner.endpoint, caller.endpoint, grant)
-    this.network.grant(caller.endpoint, owner.endpoint, back)
-    return { callerOnOwner, ownerOnCaller, grant }
+    // The join's connection, held until the caller recorded the pairing, attaches now.
+    await eventually(() => {
+      if (!caller.mms.netEngine.online(ownerOnCaller)) throw new Error('not connected yet')
+    })
+    return { callerOnOwner, ownerOnCaller, grant: String(grant) }
   }
 
-  /** `caller` connects to the pairing `node` and waits until its client is ready. */
+  /** `caller` connects to the pairing `node` (unless it is connected) and waits until its client is ready. */
   async connect(caller: Computer, node: NodeId): Promise<void> {
-    await caller.mms.netEngine.dial(node)
+    if (!caller.mms.netEngine.online(node)) await caller.mms.netEngine.dial(node)
     await eventually(() => {
       if (!caller.mms.netEngine.online(node)) throw new Error('not connected yet')
     })
@@ -170,7 +223,7 @@ export class Fabric {
   async restartHelper(computer: Computer): Promise<void> {
     computer.helper.kill()
     computer.helper = this.network.helper(computer.endpoint)
-    await computer.mms.netEngine.useHelper(computer.helper.pipe)
+    computer.engine = await computer.mms.netEngine.useHelper(computer.helper.pipe)
   }
 
   shells(owner: Computer): Spawned[] {
@@ -179,7 +232,9 @@ export class Fabric {
 
   folder(): string {
     const path = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-folder-')))
-    this.cleanups.push(() => rmSync(path, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 }))
+    this.cleanups.push(() =>
+      rmSync(path, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 })
+    )
     const git = (...args: string[]) => execFileSync('git', args, { cwd: path, stdio: 'pipe' })
     git('init', '-q')
     git('config', 'user.email', 'owner@example.test')
@@ -220,7 +275,7 @@ export async function pairProfiles(): Promise<Pair> {
   const fabric = new Fabric()
   const owner = await fabric.computer('owner'),
     caller = await fabric.computer('caller')
-  const { callerOnOwner, ownerOnCaller } = fabric.pair(owner, caller)
+  const { callerOnOwner, ownerOnCaller } = await fabric.pair(owner, caller)
   const shells = fabric.shells(owner)
   await fabric.connect(caller, ownerOnCaller)
   return {

@@ -266,7 +266,10 @@ export class NetEngineService implements EngineDirectoryPort {
 
   /** Saves a pairing (the end of the ceremony in later slices; tests pair directly). */
   pair(row: Omit<EnginePeerRow, 'localId' | 'pairedAt'> & { localId?: NodeId }): EnginePeerRow {
-    return this.require().peers.add({ ...row, pairedAt: Date.now() })
+    const saved = this.require().peers.add({ ...row, pairedAt: Date.now() })
+    // A connection the pairing brought up before it was recorded (a join's) attaches now.
+    this.helper?.claim(saved.endpoint)
+    return saved
   }
 
   /**
@@ -284,7 +287,8 @@ export class NetEngineService implements EngineDirectoryPort {
         }
       },
       attach: (connection) => this.attach(connection),
-      name: () => this.selfName()
+      name: () => this.selfName(),
+      profile: () => this.options.profileId
     })
     this.helper = helper
     helper.channel.onClose(() => {

@@ -2,8 +2,11 @@
  * A fake network helper for tests: the helper's side of the app channel (design §2), with a fake network between
  * helpers instead of the engine. It frames, hands out stream handles that are never reused, grants and honours
  * app credit, keeps FIN behind a stream's data, and reports `conn.up`, `conn.down`, `stream.incoming` and
- * `stream.reset` as the real helper does. A helper can be killed (its app sees the pipe close and its peers see
- * `conn.down`) and a new one started for the same identity.
+ * `stream.reset` as the real helper does. It pairs as the helper does too: `invite.create`, `join` (the host's app
+ * hears `approval`, answers it, hears `enrolled`; the joiner's connection comes up before the join's reply),
+ * `grant.add` and `peer.add`; and it may pause networking (`hello.paused`, `net.paused`, `net.resumed`). A helper
+ * can be killed (its app sees the pipe close and its peers see `conn.down`) and a new one started for the same
+ * identity.
  *
  * Every engine message that crosses the fake network is decoded and recorded, and a test may drop one (`tap`).
  */
@@ -17,7 +20,11 @@ import {
   jsonFrame,
   type AppPipe
 } from '../../src/mms/netEngine/helper/appChannel'
-import { encodeMessage, MessageReader, type EngineMessage } from '../../src/mms/netEngine/session/frame'
+import {
+  encodeMessage,
+  MessageReader,
+  type EngineMessage
+} from '../../src/mms/netEngine/session/frame'
 
 const STREAM_CREDIT = 256 * 1024
 
@@ -58,19 +65,50 @@ interface Conn {
 
 export class FakeNetwork {
   private readonly helpers = new Map<string, FakeHelper>()
-  /** For each host identity, the grant each caller identity holds there. */
-  private readonly grants = new Map<string, Map<string, string>>()
+  /** For each host identity, the grant each caller identity holds there (the helper's numbers; tests may name one). */
+  private readonly grants = new Map<string, Map<string, number | string>>()
+  /** For each identity, the identities it may dial (its peers). */
+  private readonly peers = new Map<string, Set<string>>()
+  /** Open invitations by ticket, with their host. */
+  readonly invitations = new Map<string, { host: string; invitation: string }>()
+  private nextGrant = 1
   private readonly conns = new Set<Conn>()
   private next = 1
   readonly crossed: Crossed[] = []
   /** Decides each message that crosses; `drop` loses it on the way. */
   tap?: (message: Crossed) => 'drop' | void
 
-  /** `caller` may connect to `host`, holding `grant` there. */
-  grant(host: string, caller: string, grant: string): void {
+  /**
+   * `caller` holds a grant at `host` (a new grant number when none is given) and knows `host` as a peer; answers
+   * the grant, as `grant.add` does.
+   */
+  grant(
+    host: string,
+    caller: string,
+    grant?: number | string
+  ): { grant: number | string; already: boolean } {
     let held = this.grants.get(host)
     if (!held) this.grants.set(host, (held = new Map()))
-    held.set(caller, grant)
+    const had = held.get(caller)
+    if (grant === undefined && had !== undefined) return { grant: had, already: true }
+    const given = grant ?? this.nextGrant++
+    held.set(caller, given)
+    this.peer(caller, host)
+    return { grant: given, already: false }
+  }
+
+  /** `from` knows `to` as a peer (it may dial it); answers whether it did already. */
+  peer(from: string, to: string): boolean {
+    let known = this.peers.get(from)
+    if (!known) this.peers.set(from, (known = new Set()))
+    const already = known.has(to)
+    known.add(to)
+    return already
+  }
+
+  /** @internal */
+  helperOf(identity: string): FakeHelper | undefined {
+    return this.helpers.get(identity)
   }
 
   /** A new helper for `identity` (replacing a killed one). */
@@ -82,10 +120,12 @@ export class FakeNetwork {
 
   /** @internal */
   dial(from: FakeHelper, identity: string): number {
+    if (!this.peers.get(from.identity)?.has(identity))
+      throw Object.assign(new Error('not paired with that identity'), { code: 'no_peer' })
     const to = this.helpers.get(identity)
     if (!to || !to.alive) throw Object.assign(new Error('unreachable'), { code: 'unreachable' })
     const grant = this.grants.get(identity)?.get(from.identity)
-    if (!grant) throw Object.assign(new Error('not allowed'), { code: 'forbidden' })
+    if (grant === undefined) throw Object.assign(new Error('not allowed'), { code: 'forbidden' })
     const conn: Conn = {
       id: { [from.identity]: this.next++, [identity]: this.next++ },
       a: from,
@@ -108,7 +148,10 @@ export class FakeNetwork {
   /** Cuts one connection between two identities, as a lost path does. */
   cut(a: string, b: string): void {
     for (const conn of [...this.conns])
-      if ((conn.a.identity === a && conn.b.identity === b) || (conn.a.identity === b && conn.b.identity === a))
+      if (
+        (conn.a.identity === a && conn.b.identity === b) ||
+        (conn.a.identity === b && conn.b.identity === a)
+      )
         this.down(conn, 'path_lost')
   }
 
@@ -144,7 +187,11 @@ export class FakeNetwork {
       other.helper.toApp(other, bytes, false)
     }
     for (const message of messages) {
-      if (end.label === 'mousse.rpc' && end.method === undefined && typeof message.header.method === 'string')
+      if (
+        end.label === 'mousse.rpc' &&
+        end.method === undefined &&
+        typeof message.header.method === 'string'
+      )
         other.method = end.method = message.header.method
       const row: Crossed = {
         from: end.helper.identity,
@@ -169,7 +216,11 @@ export class FakeNetwork {
 
 /** The app's end of an in-memory pipe and the helper's. */
 function pipePair(): { app: AppPipe; helper: AppPipe } {
-  const make = () => ({ data: [] as Array<(bytes: Uint8Array) => void>, close: [] as Array<() => void>, open: true })
+  const make = () => ({
+    data: [] as Array<(bytes: Uint8Array) => void>,
+    close: [] as Array<() => void>,
+    open: true
+  })
   const toApp = make(),
     toHelper = make()
   const end = (inbox: ReturnType<typeof make>, outbox: ReturnType<typeof make>): AppPipe => ({
@@ -205,12 +256,24 @@ export class FakeHelper {
   private readonly conns = new Map<number, Conn>()
   private nextHandle = 1
   private helloed = false
+  /** What the app said in `hello`. */
+  hello?: { name?: string; profile?: string }
+  /** Why networking is paused, while it is. */
+  private paused?: string
+  /** Approvals waiting for this host's app: the joiner and how to answer its join. */
+  private readonly approvals = new Map<
+    string,
+    { invitation: string; joiner: FakeHelper; answer(fields: Record<string, unknown>): void }
+  >()
+  private nextRequest = 1
   /** Frames the app sent for a handle that was not open. */
   dropped = 0
 
   constructor(
     private readonly network: FakeNetwork,
-    readonly identity: string
+    readonly identity: string,
+    /** The profile its endpoint belongs to: `hello` for another is refused. */
+    readonly profile?: string
   ) {
     const pair = pipePair()
     this.pipe = pair.app
@@ -227,6 +290,35 @@ export class FakeHelper {
     this.network.helperGone(this)
   }
 
+  /** Networking pauses (a removal not saved) until `resume`. */
+  pause(reason: string): void {
+    this.paused = reason
+    this.event({ ev: 'net.paused', reason })
+  }
+  resume(): void {
+    this.paused = undefined
+    this.event({ ev: 'net.resumed' })
+  }
+
+  /** @internal A joiner asks this host's app to approve it; `answer` ends the join. */
+  askApproval(
+    invitation: string,
+    joiner: FakeHelper,
+    name: string,
+    answer: (fields: Record<string, unknown>) => void
+  ): void {
+    const request = `request-${this.nextRequest++}`
+    this.approvals.set(request, { invitation, joiner, answer })
+    this.event({
+      ev: 'approval',
+      request,
+      invitation,
+      identity: joiner.identity,
+      device: joiner.identity.slice(0, 8),
+      name
+    })
+  }
+
   private send(frame: Uint8Array): void {
     if (this.alive) this.own.write(frame)
   }
@@ -235,16 +327,29 @@ export class FakeHelper {
   }
 
   /** @internal */
-  connUp(conn: Conn, id: number, identity: string, dir: 'in' | 'out', grant?: string): void {
+  connUp(
+    conn: Conn,
+    id: number,
+    identity: string,
+    dir: 'in' | 'out',
+    grant?: number | string
+  ): void {
     this.conns.set(id, conn)
-    // As the helper until E3: an inbound connection carries its grant and role, an outbound one neither.
-    this.event({ ev: 'conn.up', conn: id, identity, dir, ...(grant ? { grant, role: 'owner' } : {}), deadline: 0 })
+    // An inbound connection carries its grant and that grant's role; an outbound one the role the peer gave here.
+    const fields =
+      dir === 'in' ? (grant !== undefined ? { grant, role: 'owner' } : {}) : { role: 'owner' }
+    this.event({ ev: 'conn.up', conn: id, identity, dir, ...fields, deadline: 0 })
   }
   /** @internal */
   connDown(conn: Conn, id: number, reason: string): void {
     if (this.conns.get(id) !== conn) return
     this.conns.delete(id)
-    this.event({ ev: 'conn.down', conn: id, identity: (conn.a === this ? conn.b : conn.a).identity, reason })
+    this.event({
+      ev: 'conn.down',
+      conn: id,
+      identity: (conn.a === this ? conn.b : conn.a).identity,
+      reason
+    })
   }
   /** @internal */
   newEnd(conn: Conn, label: string): End {
@@ -269,7 +374,10 @@ export class FakeHelper {
   toApp(end: End, bytes: Uint8Array, fin: boolean): void {
     if (end.closed) return
     for (let at = 0; at < bytes.byteLength; at += 64 * 1024)
-      end.queue.push({ bytes: bytes.subarray(at, Math.min(bytes.byteLength, at + 64 * 1024)), fin: false })
+      end.queue.push({
+        bytes: bytes.subarray(at, Math.min(bytes.byteLength, at + 64 * 1024)),
+        fin: false
+      })
     if (fin) end.queue.push({ bytes: new Uint8Array(0), fin: true })
     this.flush(end)
   }
@@ -333,18 +441,103 @@ export class FakeHelper {
     const re = message.id
     const reply = (fields: Record<string, unknown> = {}) => this.send(jsonFrame({ re, ...fields }))
     try {
-      if (!this.helloed && message.op !== 'hello') return reply({ error: 'no_hello', reason: 'hello first' })
+      if (!this.helloed && message.op !== 'hello')
+        return reply({ error: 'no_hello', reason: 'hello first' })
       switch (message.op) {
         case 'hello': {
           const proto = message.proto
-          if (!Array.isArray(proto) || proto[0] !== 1) return reply({ error: 'unsupported_proto', reason: '1.0 only' })
+          if (!Array.isArray(proto) || proto[0] !== 1)
+            return reply({ error: 'unsupported_proto', reason: '1.0 only' })
+          if (
+            typeof message.profile === 'string' &&
+            this.profile &&
+            message.profile !== this.profile
+          )
+            return reply({
+              error: 'wrong_profile',
+              reason: 'this endpoint belongs to another profile'
+            })
           this.helloed = true
-          return reply({ proto: [1, 0], identity: this.identity })
+          this.hello = { name: message.name, profile: message.profile }
+          return reply({
+            proto: [1, 0],
+            identity: this.identity,
+            routes: [],
+            paused: this.paused ?? null
+          })
         }
         case 'config.set':
           return reply()
         case 'dial':
+          if (this.paused) return reply({ error: 'paused', reason: this.paused })
           return reply({ conn: this.network.dial(this, String(message.identity)) })
+        case 'invite.create': {
+          const invitation = `inv-${this.identity}-${this.nextRequest++}`
+          const uri = `fake#${invitation}`
+          this.network.invitations.set(uri, { host: this.identity, invitation })
+          return reply({
+            invitation,
+            uri,
+            routes: [],
+            expires_at: Math.floor(Date.now() / 1000) + 600
+          })
+        }
+        case 'invite.cancel':
+          for (const [uri, open] of this.network.invitations)
+            if (open.invitation === message.invitation) this.network.invitations.delete(uri)
+          return reply()
+        case 'join': {
+          if (this.paused) return reply({ error: 'paused', reason: this.paused })
+          const open = this.network.invitations.get(String(message.ticket))
+          const host = open && this.network.helperOf(open.host)
+          if (!open || !host?.alive)
+            return reply({ error: 'bad_ticket', reason: 'no such invitation' })
+          this.event({
+            ev: 'join.progress',
+            invitation: open.invitation,
+            step: 'connecting',
+            route: 'fake'
+          })
+          host.askApproval(open.invitation, this, this.hello?.name ?? this.identity, (fields) => {
+            if (fields.error) return reply(fields)
+            // As the helper: the connection comes up before the join's reply.
+            const conn = this.network.dial(this, open.host)
+            reply({
+              identity: open.host,
+              name: host.hello?.name ?? open.host,
+              role: 'owner',
+              already: false,
+              conn
+            })
+          })
+          return
+        }
+        case 'approval.answer': {
+          const waiting = this.approvals.get(String(message.request))
+          if (!waiting)
+            return reply({ error: 'no_request', reason: 'no such approval request is waiting' })
+          this.approvals.delete(String(message.request))
+          if (message.yes !== true) {
+            reply()
+            return waiting.answer({ error: 'declined', reason: 'the host declined' })
+          }
+          for (const [uri, open] of this.network.invitations)
+            if (open.invitation === waiting.invitation) this.network.invitations.delete(uri)
+          const { grant } = this.network.grant(this.identity, waiting.joiner.identity)
+          reply()
+          this.event({
+            ev: 'enrolled',
+            invitation: waiting.invitation,
+            grant,
+            identity: waiting.joiner.identity
+          })
+          this.event({ ev: 'invite.ended', invitation: waiting.invitation, reason: 'used' })
+          return waiting.answer({})
+        }
+        case 'grant.add':
+          return reply(this.network.grant(this.identity, String(message.identity)))
+        case 'peer.add':
+          return reply({ already: this.network.peer(this.identity, String(message.identity)) })
         case 'stream.open': {
           const conn = this.conns.get(Number(message.conn))
           if (!conn || !conn.up) return reply({ error: 'peer_offline' })

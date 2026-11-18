@@ -2,7 +2,12 @@ import { NetError } from '../../../shared/net/errors'
 import type { NodeId } from '../../../shared/net'
 import { ROUTED_LARGE_READS, routedNetMethod } from '../../../shared/bridge/routed'
 import { engineLimits } from '../limits'
-import { ENGINE_LABELS, type EngineConnection, type EngineLabel, type EngineStream } from '../session/transport'
+import {
+  ENGINE_LABELS,
+  type EngineConnection,
+  type EngineLabel,
+  type EngineStream
+} from '../session/transport'
 import type { AppChannel, HandleSink, StreamClass } from './appChannel'
 
 /** The class a stream travels in (§3.2): bulk for blobs, staged writes and the large reads, else interactive. */
@@ -119,14 +124,18 @@ export class HelperConnection implements EngineConnection {
     readonly peer: NodeId,
     readonly direction: 'inbound' | 'outbound',
     readonly grant?: string,
-    readonly endpoint?: string
+    readonly endpoint?: string,
+    /** The role this computer holds at the peer, on an outbound connection (`conn.up` says, when it knows). */
+    readonly role?: string
   ) {
     this.id = String(conn)
   }
 
   open(label: EngineLabel, method?: string): EngineStream {
     if (!this.open_) throw new NetError('peer_offline')
-    const stream = new HelperStream(label, classOf(label, method), this.channel, () => this.released())
+    const stream = new HelperStream(label, classOf(label, method), this.channel, () =>
+      this.released()
+    )
     const start = (): void => {
       if (!this.open_) return stream.failed('peer_offline')
       this.live += 1
@@ -153,7 +162,9 @@ export class HelperConnection implements EngineConnection {
     const stream = new HelperStream(label, cls, this.channel, () => this.released())
     this.channel.bind(handle, cls, stream.sink)
     stream.bound(handle)
-    void this.channel.request('stream.accept', { handle }).catch(() => stream.failed('peer_offline'))
+    void this.channel
+      .request('stream.accept', { handle })
+      .catch(() => stream.failed('peer_offline'))
     if (this.streamListeners.length) for (const listener of this.streamListeners) listener(stream)
     else this.early.push(stream)
   }
@@ -190,31 +201,48 @@ export interface HelperPeers {
 }
 
 /**
- * The app's view of its helper: the connections it reports up and down, the streams on them, and dials. Every
- * connection that comes up goes to `attach`; when the helper exits, every connection closes.
+ * The app's view of its helper: the connections it reports up and down, the streams on them, dials, pairing
+ * requests and whether networking is paused. Every connection that comes up for a known pairing goes to `attach`;
+ * one for an identity not recorded yet (the connection a `join` brings up comes before its reply) waits until
+ * `claim`. When the helper exits, every connection closes.
  */
 export class EngineHelper {
   private readonly connections = new Map<number, HelperConnection>()
+  /** Connections up for an identity with no pairing here yet, by the helper's number. */
+  private readonly unclaimed = new Map<number, Record<string, unknown>>()
+  private readonly pausedListeners: Array<(reason: string | undefined) => void> = []
+  /** Why networking is paused (a removal not saved yet), while it is. */
+  paused?: string
+  /** What the helper said of itself in `hello` (`identity`, `device`, `port`, `routes`, `build`). */
+  info: Record<string, any> = {}
   constructor(
     readonly channel: AppChannel,
     private readonly options: {
       peers: HelperPeers
       attach(connection: EngineConnection): Promise<void>
       name(): string
+      /** The profile the endpoint belongs to: a helper started on another profile's endpoint refuses `hello`. */
+      profile?(): string
     }
   ) {
     channel.onEvent((event) => this.event(event))
     channel.onClose((reason) => {
       for (const connection of [...this.connections.values()]) connection.close(reason)
       this.connections.clear()
+      this.unclaimed.clear()
     })
   }
 
-  /** The helper's `hello` (protocol 1.0), then this computer's name for it; answers what it said of itself. */
+  /** The helper's `hello` (protocol 1.0) with this computer's name and profile; answers what it said of itself. */
   async hello(): Promise<Record<string, unknown>> {
-    const answer = await this.channel.request('hello', { proto: [1, 0] })
-    // A helper before `config.set` keeps the name it has; nothing depends on it here.
-    await this.channel.request('config.set', { name: this.options.name() }).catch(() => undefined)
+    const profile = this.options.profile?.()
+    const answer = await this.channel.request('hello', {
+      proto: [1, 0],
+      name: this.options.name(),
+      ...(profile ? { profile } : {})
+    })
+    this.info = answer
+    this.setPaused(typeof answer.paused === 'string' ? answer.paused : undefined)
     return answer
   }
 
@@ -223,36 +251,104 @@ export class EngineHelper {
     await this.channel.request('dial', { identity })
   }
 
+  /** A pairing request (`invite.create`, `join`, `approval.answer`, `grant.add` and the rest), as the helper answers. */
+  request(
+    op: string,
+    fields: Record<string, unknown> = {},
+    deadlineMs?: number
+  ): Promise<Record<string, unknown>> {
+    return this.channel.request(op, fields, deadlineMs)
+  }
+
+  /** The helper's events (`approval`, `enrolled`, `join.progress` and the rest). */
+  onEvent(listener: (event: Record<string, unknown>) => void): () => void {
+    return this.channel.onEvent(listener)
+  }
+
+  onPaused(listener: (reason: string | undefined) => void): void {
+    this.pausedListeners.push(listener)
+  }
+
+  /** A pairing was recorded for `identity`: its connections that came up before it attach now. */
+  claim(identity: string): void {
+    for (const [conn, event] of [...this.unclaimed])
+      if (event.identity === identity) {
+        this.unclaimed.delete(conn)
+        this.up(event)
+      }
+  }
+
   close(): void {
     this.channel.close()
   }
 
+  private setPaused(reason: string | undefined): void {
+    if (this.paused === reason) return
+    this.paused = reason
+    for (const listener of this.pausedListeners) listener(reason)
+  }
+
+  private up(event: Record<string, unknown>): void {
+    const conn = event.conn as number,
+      identity = event.identity as string
+    const peer = this.options.peers.byIdentity(identity)
+    if (!peer) {
+      this.unclaimed.set(conn, event)
+      return
+    }
+    const direction = event.dir === 'in' ? 'inbound' : 'outbound'
+    // Serving authority exists only on inbound connections, from the grant `conn.up` reports (§3.6).
+    const grant =
+      direction === 'inbound' &&
+      (typeof event.grant === 'number' || typeof event.grant === 'string')
+        ? String(event.grant)
+        : undefined
+    if (direction === 'inbound' && grant === undefined) return
+    const role = direction === 'outbound' && typeof event.role === 'string' ? event.role : undefined
+    const connection = new HelperConnection(
+      this.channel,
+      conn,
+      peer.node,
+      direction,
+      grant,
+      peer.endpoint,
+      role
+    )
+    this.connections.set(conn, connection)
+    void this.options.attach(connection).catch(() => connection.close('refused'))
+  }
+
   private event(event: Record<string, unknown>): void {
     if (event.ev === 'conn.up') {
-      const conn = event.conn,
-        identity = event.identity,
-        dir = event.dir
-      if (typeof conn !== 'number' || typeof identity !== 'string' || (dir !== 'in' && dir !== 'out')) return
-      const peer = this.options.peers.byIdentity(identity)
-      if (!peer) return
-      const direction = dir === 'in' ? 'inbound' : 'outbound'
-      // Serving authority exists only on inbound connections, from the grant `conn.up` reports (§3.6).
-      const grant = direction === 'inbound' ? (typeof event.grant === 'string' ? event.grant : undefined) : undefined
-      if (direction === 'inbound' && grant === undefined) return
-      const connection = new HelperConnection(this.channel, conn, peer.node, direction, grant, peer.endpoint)
-      this.connections.set(conn, connection)
-      void this.options.attach(connection).catch(() => connection.close('refused'))
+      if (
+        typeof event.conn !== 'number' ||
+        typeof event.identity !== 'string' ||
+        (event.dir !== 'in' && event.dir !== 'out')
+      )
+        return
+      this.up(event)
       return
     }
     if (event.ev === 'conn.down') {
-      const connection = typeof event.conn === 'number' ? this.connections.get(event.conn) : undefined
+      if (typeof event.conn !== 'number') return
+      this.unclaimed.delete(event.conn)
+      const connection = this.connections.get(event.conn)
       if (!connection) return
-      this.connections.delete(event.conn as number)
+      this.connections.delete(event.conn)
       connection.close(typeof event.reason === 'string' ? event.reason : 'closed')
       return
     }
+    if (event.ev === 'net.paused') {
+      this.setPaused(typeof event.reason === 'string' && event.reason ? event.reason : 'paused')
+      return
+    }
+    if (event.ev === 'net.resumed') {
+      this.setPaused(undefined)
+      return
+    }
     if (event.ev === 'stream.incoming') {
-      const connection = typeof event.conn === 'number' ? this.connections.get(event.conn) : undefined
+      const connection =
+        typeof event.conn === 'number' ? this.connections.get(event.conn) : undefined
       const handle = event.handle,
         label = event.label
       if (typeof handle !== 'number') return
@@ -266,7 +362,11 @@ export class EngineHelper {
         this.channel.reset(handle, 'refused')
         return
       }
-      connection.incoming(handle, label as EngineLabel, event.class === 'bulk' ? 'bulk' : 'interactive')
+      connection.incoming(
+        handle,
+        label as EngineLabel,
+        event.class === 'bulk' ? 'bulk' : 'interactive'
+      )
     }
   }
 }

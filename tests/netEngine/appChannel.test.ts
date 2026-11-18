@@ -15,6 +15,7 @@ import {
   type AppPipe,
   type HandleSink
 } from '../../src/mms/netEngine/helper/appChannel'
+import { EngineHelper } from '../../src/mms/netEngine/helper/connections'
 
 /** A pipe whose helper side is the test: frames the app wrote, and frames pushed to the app. */
 function pipe() {
@@ -119,5 +120,29 @@ describe('the app channel', () => {
     p.push(jsonFrame({ ev: 'stream.reset', handle: 42, code: 'cancelled' }))
     expect(channel.dropped).toBe(1)
     expect(channel.isOpen()).toBe(true)
+  })
+})
+
+describe('the helper, as the app sees it', () => {
+  it('says its name and profile in hello, and keeps whether networking is paused', async () => {
+    const p = pipe()
+    const helper = new EngineHelper(new AppChannel(p.app), {
+      peers: { byIdentity: () => undefined },
+      attach: async () => undefined,
+      name: () => 'Desk',
+      profile: () => 'profile-1'
+    })
+    const seen: Array<string | undefined> = []
+    helper.onPaused((reason) => seen.push(reason))
+    const hello = helper.hello()
+    const asked = JSON.parse(p.written[0]!.body.toString('utf8'))
+    expect(asked).toMatchObject({ op: 'hello', proto: [1, 0], name: 'Desk', profile: 'profile-1' })
+    p.push(jsonFrame({ re: asked.id, proto: [1, 0], identity: 'ab', paused: 'journal' }))
+    await hello
+    expect(helper.paused).toBe('journal')
+    p.push(jsonFrame({ ev: 'net.resumed' }))
+    p.push(jsonFrame({ ev: 'net.paused', reason: 'disk' }))
+    expect(helper.paused).toBe('disk')
+    expect(seen).toEqual(['journal', undefined, 'disk'])
   })
 })
