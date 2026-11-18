@@ -4868,16 +4868,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { escalation: this.escalationSummary(this.store.escalation(escalation.id)!), activation: this.activationSummary(this.store.activation(row.id)!) }
   }
 
+  private withdrawChangedAloneAsk(id: string): void {
+    this.store.run("UPDATE bot_escalations SET status = 'withdrawn', note = ? WHERE id = ?", 'This automation or tool changed. Nothing was allowed. Ask again.', id)
+  }
+
   /**
    * The owner's answer to an ask card (`bots.asks.answer`, §5.4). Allow publishes the widened
    * revision and approves it (an `export_memory` ask grants nothing: the renderer then exports).
    * Not now records a deny; on a run's ask no new ask follows for 24 hours. A chat wall continues
    * once its last open card is answered; a run's ask needs no follow-up (the next run uses it).
    */
-  private withdrawChangedAloneAsk(id: string): void {
-    this.store.run("UPDATE bot_escalations SET status = 'withdrawn', note = ? WHERE id = ?", 'This automation or tool changed. Nothing was allowed. Ask again.', id)
-  }
-
   async answerAsk(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage | undefined> {
     const escalation = this.store.escalation(askId)
     if (!escalation || escalation.botId !== botId) throw new BotEngineError('ask_not_found', 'No such ask.')
@@ -4964,9 +4964,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private journalAnswer(escalation: BotEscalationRow, answer: 'allow' | 'not_now'): void {
     const title = escalation.title ?? permissionTextOf(escalation.permission)
+    const withdrawn = this.store.escalation(escalation.id)?.status === 'withdrawn' && 'ask' in escalation.permission && escalation.permission.ask === 'let_alone'
     this.journalInTx({
       botId: escalation.botId, kind: 'answer', activationId: escalation.activationId, sourceKey: `ask:${escalation.id}:answer`, who: 'owner',
-      text: `${answer === 'allow' ? 'Allowed' : 'Not now'}: ${title}`, json: { v: 1, askId: escalation.id, answer }
+      text: withdrawn ? `Nothing was allowed: ${title}. This automation or tool changed. Ask again.` : `${answer === 'allow' ? 'Allowed' : 'Not now'}: ${title}`, json: { v: 1, askId: escalation.id, answer: withdrawn ? 'withdrawn' : answer }
     })
   }
 
@@ -5904,6 +5905,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
+      if (answer.status === 'withdrawn') return answer.note ?? 'This automation or tool changed. Nothing was allowed. Ask again.'
       if (answer.status === 'denied') return input.ownerText !== undefined
         ? `The owner wrote instead of answering, so the answer is not now: ${title}. Carry on without it.`
         : `The owner said not now: ${title}. Carry on without it and say what you couldn't do.`
