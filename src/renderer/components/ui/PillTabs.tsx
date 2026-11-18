@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from 'react'
+import type { KeyboardEvent, MouseEvent } from 'react'
 import type { LucideIcon } from '../../lib/icons'
 
 export interface PillTab<T extends string> {
@@ -14,11 +14,13 @@ export interface PillTab<T extends string> {
  * size container 240–319px wide, only the open tab shows its word, and the word widens into a newly opened tab.
  * Left and Right move between tabs (wrapping), Home and End to the ends; the tab moved to opens and takes focus.
  */
-export function PillTabs<T extends string>({ tabs, value, onSelect, ariaLabel, idPrefix, className }: {
+export function PillTabs<T extends string>({ tabs, value, onSelect, onTabContextMenu, ariaLabel, idPrefix, className }: {
   tabs: readonly PillTab<T>[]
   value: T
   /** Opens a tab; may ask first (a promise), focus follows the keyboard either way. */
   onSelect: (id: T) => void | Promise<void>
+  /** A right-click, or the menu key, on a tab. */
+  onTabContextMenu?: (id: T, event: MouseEvent<HTMLButtonElement>) => void
   ariaLabel: string
   /** Tabs are `${idPrefix}-${id}-tab` and control `${idPrefix}-${id}-panel`. */
   idPrefix: string
@@ -52,6 +54,7 @@ export function PillTabs<T extends string>({ tabs, value, onSelect, ariaLabel, i
           aria-label={label}
           className={`threads-sidebar-tab${value === id ? ' active' : ''}`}
           onClick={() => void onSelect(id)}
+          onContextMenu={onTabContextMenu ? (event) => onTabContextMenu(id, event) : undefined}
         >
           <Icon size={15} strokeWidth={1.8} aria-hidden="true" />
           <span className="threads-sidebar-tab-label">{label}</span>

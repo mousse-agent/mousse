@@ -422,7 +422,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     unwatch()
   })
 
-  it('a thread it starts hidden is kept out of the sidebar and listed as hidden in its chat; it hides or shows only threads it started, and each change tells its chat thread', async () => {
+  it('a thread it starts is kept out of the sidebar and listed as hidden in its chat unless it asks to show it; it hides or shows only threads it started, and each change tells its chat thread', async () => {
     const w = world()
     const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): unknown[] }
     const changed: string[] = []
@@ -430,16 +430,19 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const listed = () => launchedThreadsIn({ threads: w.d.store, engine: w.d.engine, asks: () => false }, new Set([w.chat.id]))
       .map((thread) => [thread.title, thread.hidden ?? false])
     const actions = (threadId: string) => w.d.engine.store.listEvents(threadId).filter((event) => event.type === 'agent.action').map((event) => (event.payload as { action: string }).action)
-    const made = await w.create('h1', { title: 'Quick check', hidden: true })
-    const visible = await w.create('h2', { title: 'Big refactor' })
+    const made = await w.create('h1', { title: 'Quick check' })
+    const visible = await w.create('h2', { title: 'Big refactor', hidden: false })
     await w.settled((made.firstMessage as { runId: string }).runId)
     // Hidden from the first write, and it still runs its first message like any thread.
     expect(w.d.store.getThread(made.threadId)).toMatchObject({ hidden: true, startedByBot: { botId: 'b1', name: 'alpha' } })
     expect(w.d.store.getThread(visible.threadId)!.hidden).toBeUndefined()
     expect(w.d.engine.getRun((made.firstMessage as { runId: string }).runId)!.status).toBe('completed')
     expect(listed()).toEqual(expect.arrayContaining([['Quick check', true], ['Big refactor', false]]))
+    // The bot writing in it again (thread_send) leaves it hidden: only its owner's message shows it.
+    await w.settled((await w.send(made.threadId, 'h3')).runId)
+    expect(w.d.store.getThread(made.threadId)!.hidden).toBe(true)
     // A retry of the same request finds the same hidden thread.
-    expect(await w.create('h1', { title: 'Quick check', hidden: true })).toMatchObject({ threadId: made.threadId, replayed: true })
+    expect(await w.create('h1', { title: 'Quick check' })).toMatchObject({ threadId: made.threadId, replayed: true })
 
     // Shown again, then hidden again: each a change of the thread, recorded as the bot's, and heard by its chat thread.
     let seen = changed.length
@@ -524,7 +527,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     }, new Set(creators))
     const made = await w.create('c1')
     await waitFor(() => release !== undefined, 'the launched thread\'s turn')
-    expect(managed([w.chat.id])).toEqual([{ threadId: made.threadId, title: 'Fix login', project: 'Shop', status: 'running', startedAt: expect.any(String), updatedAt: expect.any(String) }])
+    expect(managed([w.chat.id])).toEqual([{ threadId: made.threadId, title: 'Fix login', project: 'Shop', status: 'running', hidden: true, startedAt: expect.any(String), updatedAt: expect.any(String) }])
     // Another thread's launches are not this bot's.
     expect(managed(['another-thread'])).toEqual([])
     expect(changed.length).toBeGreaterThan(0)

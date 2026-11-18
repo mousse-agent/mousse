@@ -90,7 +90,7 @@
   color: var(--text-primary);
 }
 
-/* Projects · Threads · Chats, three equal segments, then the bot threads eye while bots have started threads. */
+/* Projects · Threads · Chats, three equal segments. */
 .threads-sidebar-tabs-row {
   display: flex;
   align-items: center;
@@ -350,11 +350,6 @@
 
 .threads-sidebar-thread-name.provisional {
   opacity: 0.5;
-}
-
-/* A thread a bot keeps out of the sidebar, listed while the eye shows hidden threads: quieter title. */
-.threads-sidebar-thread.hidden-thread :is(.threads-sidebar-thread-name, .threads-sidebar-card-title) {
-  opacity: 0.55;
 }
 
 /* No bottom margin: it sits inside the Collapse, so it would add to the project's own 8px instead of

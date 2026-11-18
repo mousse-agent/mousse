@@ -55,7 +55,7 @@ export interface BotCatalogueGroup {
 const THREADS_GUIDANCE = [
   "These reach your owner's Mousse threads, here and on their other computers that let agents work there (list_computers): search them (thread_search), wait on one (thread_wait), read the terminals open in them (terminal_read), look at their queues and Git status and diffs, steer or stop one's turn, change what waits in its queue, fork one or hand a fork's work back, hide or show a thread you started, and archive one whose work is merged or dropped (and unarchive it again).",
   'thread_list names their projects and the models a thread can run on. Each thread comes with a link: put it in your reply when you name a thread, and your owner can click it to open it.',
-  "Start a short background job your owner won't follow (a quick check, a lookup, a cleanup) with hidden: true, so it stays out of their sidebar; your chat lists it. Leave work they will want to follow, answer or continue visible. thread_hide (or thread_update with hidden) hides or shows a thread you started later.",
+  "A thread you start stays out of your owner's sidebar, your chat lists it, until your owner writes in it. Start it with hidden: false when they asked to follow, answer or continue that work in their sidebar. thread_hide (or thread_update with hidden) hides or shows a thread you started later.",
   'Approvals and questions in a thread are your owner\'s: answer an approval (approval_respond) only when your owner asks you to and lets agents answer approvals, never a question.'
 ].join('\n')
 

@@ -5125,8 +5125,8 @@ export class OrchestratorService extends EventEmitter {
       createdByThreadId: intent.createdByThreadId,
       // The bot that started it, by its name then: the thread says so after the bot is renamed or deleted.
       ...(intent.bot ? { startedByBot: intent.bot } : {}),
-      // A bot's short background job stays out of the owner's sidebar; its chat lists it.
-      ...(intent.bot && intent.request.hidden === true ? { hidden: true } : {}),
+      // A bot's thread starts out of the owner's sidebar, its chat lists it; a bot that asks shows it there from the start.
+      ...(intent.bot && intent.request.hidden !== false ? { hidden: true } : {}),
       localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.

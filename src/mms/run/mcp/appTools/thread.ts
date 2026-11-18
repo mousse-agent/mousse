@@ -89,7 +89,7 @@ export const BOT_JOB_NEXT = 'This job is in your ledger: you are told here in yo
  * The rule for where a bot's work goes, in its thread tools: a job in a project goes to a thread there, the bot's own
  * work keeps the chores that need no project.
  */
-export const BOT_WORK_IN_THREADS = 'A job in one of your owner\'s projects (fix, build, change or review code there) goes to a thread in that project: on a Git project its edits happen in a worktree of its own. Keep it hidden when it is small (a quick check, a lookup, a cleanup). Your own work (work_start) keeps the chores that need no project.'
+export const BOT_WORK_IN_THREADS = 'A job in one of your owner\'s projects (fix, build, change or review code there) goes to a thread in that project: on a Git project its edits happen in a worktree of its own. It starts out of your owner\'s sidebar (your chat lists it); start it with hidden: false when your owner will want to follow, answer or continue it there. Your own work (work_start) keeps the chores that need no project.'
 
 /** `notify` read from a call's arguments. A personal bot's is a wake on the thread (`botNotify`), unless its ledger follows the thread (`botJob`). */
 function notifyArg(args: Record<string, unknown>): boolean {
@@ -2366,7 +2366,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           effort: { type: 'string', description: 'The reasoning level of the model, one of its efforts in list_models; needs model.' },
           firstMessage: { type: 'string', description: 'Sent to the new thread as your message, so it starts working.' },
           mode: { type: 'string', enum: ['agent', 'plan'], description: 'The mode of firstMessage; defaults to agent.' },
-          hidden: { type: 'boolean', description: 'Personal bots only. true keeps the thread out of your owner\'s sidebar: your chat lists it, and your owner opens it or shows it in the sidebar from there. Hide short background jobs your owner will not follow (a quick check, a lookup, a cleanup); leave visible work your owner will want to follow, answer or continue. thread_hide changes it later. Defaults to false.' },
+          hidden: { type: 'boolean', description: 'Personal bots only. A thread you start is out of your owner\'s sidebar: your chat lists it, and your owner opens it or shows it in the sidebar from there; it shows there once your owner writes in it. false shows it in the sidebar from the start: for work your owner asked to follow, answer or continue there. thread_hide changes it later. Defaults to true.' },
           notify: { ...NOTIFY_SCHEMA, description: `${NOTIFY_SCHEMA.description} Needs a firstMessage.` },
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         }
@@ -2413,7 +2413,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
         if (args.mode !== undefined && args.firstMessage === undefined) throw new Error('mode is the mode of firstMessage: give a firstMessage, or leave mode out.')
         if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
-        // Only a bot's chat lists the threads it started, so only a bot's thread can be hidden and still be found.
+        // Only a bot's chat lists the threads it started, so only a bot's thread can be hidden and still be found. A bot's
+        // starts hidden unless it asks otherwise.
         if (args.hidden === true && !bot) throw new Error('hidden is for personal bots: a thread an agent starts always shows in the sidebar.')
         const notify = notifyArg(args)
         if (notify && args.firstMessage === undefined) throw new Error('notify tells you when the work of firstMessage settles: give a firstMessage, or leave notify out.')
@@ -2426,7 +2427,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
           ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {}),
-          ...(args.hidden === true ? { hidden: true } : {})
+          ...(bot && typeof args.hidden === 'boolean' ? { hidden: args.hidden } : {})
         }
         const actor = actorOf(ctx)
         // A bot's key names its chat turn. A key that already has a stored creation is a retry of that one thread: the
@@ -2465,7 +2466,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             ...(created.firstMessage ? { firstMessage: created.firstMessage } : {}),
             ...(created.replayed ? { replayed: true } : {}),
             ...(hidden ? { hidden: true } : {}),
-            note: `${botThreadModeText(created.permissionMode)} ${hidden ? 'It is hidden from your owner\'s sidebar: your chat lists it, started by you.' : 'It shows in your owner\'s sidebar, started by you.'} Its approvals and questions are your owner's. Tell your owner in one line what you started.`
+            note: `${botThreadModeText(created.permissionMode)} ${hidden ? 'It is hidden from your owner\'s sidebar until they write in it: your chat lists it, started by you.' : 'It shows in your owner\'s sidebar, started by you.'} Its approvals and questions are your owner's. Tell your owner in one line what you started.`
           })
         }
         if (!created.replayed) {

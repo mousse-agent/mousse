@@ -361,6 +361,17 @@ function isPerson(connection: HandlerContext['connection']): boolean {
   return connection?.clientType === 'gui' || connection?.clientType === 'bridge'
 }
 
+/**
+ * A person who writes in a thread one of their bots keeps out of the sidebar (`Thread.hidden`) is following it now, so it
+ * shows there again. Only a person's message from a window: an agent's or a bot's (thread_send, which reaches the
+ * orchestrator without a window's connection) leaves it hidden.
+ */
+function showWrittenThread(ctx: HandlerContext, threadId: string): void {
+  if (!isPerson(ctx.connection) || !ctx.mms.threads.getThread(threadId)?.hidden) return
+  ctx.mms.threads.setThreadHidden(threadId, false)
+  ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreadsVersioned().threads })
+}
+
 /** Browser authority uses the authenticated ingress, never a caller's source label. */
 function admittedChatSource(ctx: HandlerContext, fallback: string): string {
   if (!ctx.connection) return fallback === 'gui' || fallback === 'cli' ? 'internal' : fallback
@@ -2702,6 +2713,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           throw new DomainRpcError('first_send_unbound', 'Update Mousse to send the first message in this chat.', { threadId, update: true })
       }
       const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)
+      // Before the send: a send may answer only once its turn has run, and the thread shows in the sidebar from the click.
+      showWrittenThread(ctx, threadId)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
@@ -2743,6 +2756,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
         const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx), sentFromOf(ctx)), runId)
         noteSentFrom(ctx, threadId)
+        showWrittenThread(ctx, threadId)
         return response
       }
       // Prefer mid-turn steer; fall back to external enqueue when no local turn.
@@ -2754,6 +2768,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(sentFromOf(ctx) ? { sentFrom: sentFromOf(ctx) } : {})
       })
       noteSentFrom(ctx, threadId)
+      if (result.steered || result.queued) showWrittenThread(ctx, threadId)
       return { ok: result.steered || result.queued, steered: result.steered, queued: result.queued }
     }
     case 'orchestrator.steerNow': {

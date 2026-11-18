@@ -522,7 +522,7 @@ A miss is the bot asking the owner a question (which passport) instead of showin
 ## 16. Work in threads (phase 2)
 
 **The rule.** A job in one of the owner's projects goes to a thread in that project, in its own worktree on a Git
-project, hidden when it is small. The bot's own work keeps the chores that need no project. There is no setting: this is
+project, hidden from the sidebar until the owner writes in it. The bot's own work keeps the chores that need no project. There is no setting: this is
 the only path, and it answers file access outside the bot's folder (#1366) through threads instead of a wider grant.
 
 **The ledger.** One durable row per job in `bot_jobs` (bots.db v13): the request that caused it, who asked, the thread,
@@ -541,7 +541,7 @@ on threads (#1359). The same cap holds a report from the bot's own work in the c
 events, subagents below a thread it reaches.
 
 **Where.** `src/mms/bots/jobs.ts` (decisions), `BotEngine.openJob`, `checkJobs` and `deliverJobNotice`,
-`BotStore` (`bot_jobs`), `contextPack.ts` (`ledger`), `launchedThreads.ts` (`jobThreadIn`), and the sidebar's eye
-(`src/renderer/lib/hiddenThreadsShown.ts`).
+`BotStore` (`bot_jobs`), `contextPack.ts` (`ledger`), `launchedThreads.ts` (`jobThreadIn`), and the sidebar's Hide bot
+threads menus (`ThreadsContextMenu.tsx`).
 
 **What waits.** Other things that work for a bot (schedules, other bots, its own work) moving to the same report.

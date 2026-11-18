@@ -4,7 +4,7 @@ import { flushSync } from 'react-dom'
 import { expiresAtAfter } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, Eye, EyeOff, Folder, FolderOpen, FolderKanban, GitBranch, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pencil, Pin, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, Folder, FolderOpen, FolderKanban, GitBranch, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pencil, Pin, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
@@ -22,11 +22,10 @@ import { useAppStore } from '../stores/appStore'
 import { workspaceModeFor } from '../stores/sidebarTabAgreement'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
-import { addProjectAndStartThread, archiveThread, setThreadArchived, createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
+import { addProjectAndStartThread, archiveThread, setThreadArchived, createAndSelectProjectThread, createAndSelectThread, hideThreads, selectThread } from '../lib/threadActions'
 import { draftedThreadIds, draftedThreadsKey, unsentChatTitle, withUnsentChats } from '../lib/sidebarDrafts'
 import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
 import { runWithToast } from '../lib/actionToast'
-import { isBotStarted, listsInSidebar, listsThread, readBotThreadsShown, writeBotThreadsShown, type BotThreadsShown } from '../lib/hiddenThreadsShown'
 import { Modal } from './ui/Modal'
 import { PillTabs, type PillTab } from './ui/PillTabs'
 import { ChatsSidebar } from './chats/ChatsSidebar'
@@ -43,8 +42,8 @@ import {
 
   type ProjectOpener,
 
-  type ThreadsContextMenuTarget
-
+  type ThreadsContextMenuTarget,
+  ThreadsTabMenu
 } from './ThreadsContextMenu'
 import { defaultEditor, loadLastEditorId, openLabel, splitEditors } from './sideCard/openInEditor'
 import { loadEditors, useEditorsStore } from '../stores/editorsStore'
@@ -355,6 +354,11 @@ function ThreadCardBody({
   )
 }
 
+/** The sidebar lists a thread unless a bot keeps it out (`Thread.hidden`); an archived one is listed under Archived. */
+function listsInSidebar(thread: Thread): boolean {
+  return !thread.hidden || Boolean(thread.settledAt)
+}
+
 export function ThreadsSidebar({ className = '' }: { className?: string }) {
   countRender('ThreadsSidebar')
 
@@ -495,25 +499,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  // Subagent threads sit under their parent, not beside it: the list holds the threads people started. The threads the
-  // owner's bots started follow the eye (a view preference of this profile; it never changes a thread's `hidden`): by
-  // default those a bot keeps out of the sidebar (`Thread.hidden`) are listed in the bot's chat instead, and the eye
-  // then shows all of them or none. An archived one is listed under Archived unless the eye hides every bot thread.
-  const [botThreadsShown, setBotThreadsShown] = useState<BotThreadsShown | undefined>(() => readBotThreadsShown(shownProfileId))
-  useEffect(() => setBotThreadsShown(readBotThreadsShown(shownProfileId)), [shownProfileId])
-  const botThreads = useMemo(() => {
-    const started = visibleThreads(threads).filter((thread) => isBotStarted(thread) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))
-    return { count: started.length, hidden: started.filter((thread) => thread.hidden && !thread.settledAt).length }
-  }, [threads, agentThreadIds])
-  // The eye hides every bot thread while they are all shown, or by default when the bots hide none; else it shows them all.
-  const eyeHides = botThreadsShown === 'all' || (botThreadsShown === undefined && botThreads.hidden === 0)
-  const eyeLabel = eyeHides ? 'Hide bot threads' : botThreadsShown === 'none' ? `Show bot threads (${botThreads.count})` : `Show hidden bot threads (${botThreads.hidden})`
-  const toggleBotThreads = () => {
-    const next: BotThreadsShown = eyeHides ? 'none' : 'all'
-    setBotThreadsShown(next)
-    writeBotThreadsShown(shownProfileId, next)
-  }
-  const listedThreads = useMemo(() => visibleThreads(threads).filter((thread) => listsInSidebar(thread, botThreadsShown)), [threads, botThreadsShown])
+  // Subagent threads sit under their parent, not beside it: the list holds the threads people started. A thread one of
+  // the owner's bots keeps out of the sidebar (`Thread.hidden`, how a bot's threads start) is listed in its chat instead,
+  // and under Archived once it is archived.
+  const listedThreads = useMemo(() => visibleThreads(threads).filter(listsInSidebar), [threads])
   // A thread archived or unarchived, by any means, leaves its list and arrives in its new place with motion: for a
   // moment its old row stays in the old list (`threadsForList`) while it fades and closes (archiveMotion.ts).
   const asideRef = useRef<HTMLElement>(null)
@@ -543,6 +532,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     [unarchivedListThreads, agentThreadIds, draftedIds]
   )
   const projectListThreads = useMemo(() => withUnsentChats(availableThreads, unsentChats), [availableThreads, unsentChats])
+  // The listed threads the owner's bots started, which the Threads tab's menu and a project's menu hide. Only this
+  // computer's: a thread is hidden by the computer that runs it.
+  const shownBotThreads = useMemo(() => availableThreads.filter((thread) => thread.startedByBot && !thread.node), [availableThreads])
   // The Threads tab: in the order its rows were dragged into, with threads started since on top, newest
   // first. Later messages do not move a row.
   const feedThreads = useMemo(() => sortThreadFeed(availableThreads, threadFeedOrder), [availableThreads, threadFeedOrder])
@@ -599,7 +591,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // The group in focus: the open thread's (a draft's project too), whose header stays bright while the other
   // groups dim (threads-sidebar.css). None for a Chats thread or with nothing open, and then nothing dims.
   const focusedThread = threads.find((thread) => thread.id === (openSubagentParentId ?? activeThreadId))
-  const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) && listsThread(focusedThread, botThreadsShown) ? listGroupOf(focusedThread.projectId) : undefined
+  const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) && listsInSidebar(focusedThread) ? listGroupOf(focusedThread.projectId) : undefined
   // The Threads tab dims its other cards only while the open thread has a card there.
   const feedHasActive = Boolean(focusedThread && feedRows.some((thread) => thread.id === focusedThread.id))
 
@@ -612,8 +604,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const shownId = openSubagentParentId ?? activeThreadId
     if (!shownId || revealedRow.current === shownId) return
     const shown = threads.find((thread) => thread.id === shownId)
-    // A bot thread the eye keeps out of the list has no row to reveal.
-    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id) || !listsInSidebar(shown, botThreadsShown)) return
+    // A hidden bot thread has no row to reveal.
+    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id) || !listsInSidebar(shown)) return
     revealedRow.current = shownId
     if (shown.settledAt) {
       setArchivedExpanded(true)
@@ -632,7 +624,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
     // listGroupOf reads groupOf and groupById, which are listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeThreadId, openSubagentParentId, threads, availableThreads, agentThreadIds, groupOf, groupById, botThreadsShown])
+  }, [activeThreadId, openSubagentParentId, threads, availableThreads, agentThreadIds, groupOf, groupById])
 
   const toggleProject = (projectId: string) => {
     toggledProjectRef.current = projectId
@@ -890,6 +882,39 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const returnTo = contextMenu?.returnFocus
     setContextMenu(null)
     if (returnTo?.isConnected) returnTo.focus({ preventScroll: true })
+  }
+
+  // The Threads tab's menu, while bot threads are listed: Hide all bot threads. From the keyboard (the menu key) it
+  // opens below the tab.
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; returnFocus: HTMLElement } | null>(null)
+  const openTabMenu = (tab: SidebarView, event: React.MouseEvent<HTMLButtonElement>) => {
+    if (tab !== 'threads' || !shownBotThreads.length) return
+    event.preventDefault()
+    const anchor = event.currentTarget
+    const rect = anchor.getBoundingClientRect()
+    const fromKeyboard = event.clientX === 0 && event.clientY === 0
+    setTabMenu({ x: fromKeyboard ? rect.left : event.clientX, y: fromKeyboard ? rect.bottom + 4 : event.clientY, returnFocus: anchor })
+  }
+  const closeTabMenu = () => {
+    const returnTo = tabMenu?.returnFocus
+    setTabMenu(null)
+    if (returnTo?.isConnected) returnTo.focus({ preventScroll: true })
+  }
+  const handleHideAllBotThreads = () => {
+    const ids = shownBotThreads.map((thread) => thread.id)
+    closeTabMenu()
+    void hideThreads(ids)
+  }
+  // A project's listed bot threads, for its menu's Hide bot threads.
+  const botThreadsOfProject = (projectId: string) => {
+    const groupId = listGroupOf(projectId)
+    return shownBotThreads.filter((thread) => listGroupOf(thread.projectId) === groupId)
+  }
+  const handleHideProjectBotThreads = () => {
+    if (!contextMenu || contextMenu.target.type !== 'project') return
+    const ids = botThreadsOfProject(contextMenu.target.id).map((thread) => thread.id)
+    closeContextMenu()
+    void hideThreads(ids)
   }
 
   const startRename = (target: RenamingTarget) => setRenaming(target)
@@ -1240,13 +1265,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           isActive ? ' active' : openSubagentParentId === thread.id ? ' has-open-subagent' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${thread.hidden ? ' hidden-thread' : ''}${unsentChat ? ' unsent-chat' : ''}${rowPreview ? ' has-preview' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${unsentChat ? ' unsent-chat' : ''}${rowPreview ? ' has-preview' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
 
         style={hue ? ({ '--project-tint': projectHueColor(hue) } as CSSProperties) : undefined}
 
         aria-current={isActive ? 'page' : undefined}
-
-        aria-description={thread.hidden ? 'Hidden thread' : undefined}
 
         {...(inTree ? {
           role: 'treeitem',
@@ -1621,22 +1644,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   return (
 
     // While a menu is open, the rows under the pointer do not light their actions (see threads-sidebar.css).
-    <aside ref={asideRef} data-mousse="sidebar" className={`threads-sidebar${contextMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
+    <aside ref={asideRef} data-mousse="sidebar" className={`threads-sidebar${contextMenu || tabMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-tabs-row">
-        <PillTabs tabs={SIDEBAR_TABS} value={sidebarView} onSelect={setSidebarView} ariaLabel="Sidebar" idPrefix={tabsId} />
-        {/* Only where threads are listed, and only while a bot has started some. */}
-        {contentView !== 'chats' && botThreads.count > 0 && (
-          <button
-            type="button"
-            className="threads-sidebar-toolbar-button threads-sidebar-hidden-toggle"
-            onClick={toggleBotThreads}
-            title={eyeLabel}
-            aria-label={eyeLabel}
-          >
-            {eyeHides ? <Eye size={16} strokeWidth={1.8} aria-hidden="true" /> : <EyeOff size={16} strokeWidth={1.8} aria-hidden="true" />}
-          </button>
-        )}
+        <PillTabs tabs={SIDEBAR_TABS} value={sidebarView} onSelect={setSidebarView} onTabContextMenu={openTabMenu} ariaLabel="Sidebar" idPrefix={tabsId} />
       </div>
 
       <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-more-below={moreBelow || undefined}>
@@ -2039,10 +2050,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           onSetExpiry={(ms) => void handleSetExpiry(ms)}
           onDeleteAllArchived={localArchivedCount > 0 ? handleDeleteAllArchived : undefined}
           {...projectIconActions(contextMenu.target)}
+          onHideBotThreads={contextMenu.target.type === 'project' && botThreadsOfProject(contextMenu.target.id).length > 0 ? handleHideProjectBotThreads : undefined}
 
         />
 
       )}
+
+      {tabMenu && <ThreadsTabMenu x={tabMenu.x} y={tabMenu.y} onClose={closeTabMenu} onHideAllBotThreads={handleHideAllBotThreads} />}
 
       <Modal
         open={removingProject !== null}

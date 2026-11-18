@@ -473,24 +473,25 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(host.setThreadHidden).not.toHaveBeenCalled()
   })
 
-  it('a thread it starts hidden is asked for hidden, says so to the bot and in its chip; thread_hide hides or shows one later; an ordinary agent hides nothing', async () => {
+  it('a thread it starts is created as it asks, hidden or not, and says so to the bot and in its chip; thread_hide hides or shows one later; an ordinary agent hides nothing', async () => {
     const { text, host, onAppResult, runId, threads } = await world({ threads: 'all' })
-    // The service makes the thread hidden; the tool reads it back as it is.
+    // The service makes a bot's thread hidden unless asked not to; the tool reads it back as it is.
     vi.mocked(host.createThread!).mockImplementationOnce(async (request) => {
-      threads.set('new-1', thread('new-1', { name: 'Quick check', ...(request.hidden ? { hidden: true as const } : {}) }))
+      threads.set('new-1', thread('new-1', { name: 'Quick check', ...(request.hidden !== false ? { hidden: true as const } : {}) }))
       return { threadId: 'new-1', projectId: 'p1', title: 'Quick check', workspace: 'project', runsIn: 'project_folder', model: null, permissionMode: 'full', replayed: false }
     })
-    const started = await text('thread_create', { projectId: 'p1', title: 'Quick check', firstMessage: 'Check the build.', hidden: true })
+    const started = await text('thread_create', { projectId: 'p1', title: 'Quick check', firstMessage: 'Check the build.' })
     expect(started.error).toBe(false)
-    expect(host.createThread).toHaveBeenLastCalledWith(expect.objectContaining({ hidden: true }), expect.anything())
+    // Without hidden the service decides (a bot's thread starts hidden).
+    expect(vi.mocked(host.createThread!).mock.lastCall![0]).not.toHaveProperty('hidden')
     expect(JSON.parse(started.text)).toMatchObject({ threadId: 'new-1', hidden: true, note: expect.stringContaining('hidden from your owner\'s sidebar') })
     expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_create', { threadId: 'new-1', title: 'Quick check', sent: 'Check the build.', hidden: true })
-    // Without it, the thread shows in the sidebar, and the bot is told so.
+    // With hidden: false it is asked to show in the sidebar, and the bot is told it does.
     vi.mocked(host.createThread!).mockResolvedValueOnce({ threadId: 'new-2', projectId: 'p1', title: 'Big job', workspace: 'project', runsIn: 'project_folder', model: null, permissionMode: 'full', replayed: false })
-    const plain = JSON.parse((await text('thread_create', { projectId: 'p1', title: 'Big job', firstMessage: 'Refactor.' })).text)
+    const plain = JSON.parse((await text('thread_create', { projectId: 'p1', title: 'Big job', firstMessage: 'Refactor.', hidden: false })).text)
     expect(plain.hidden).toBeUndefined()
     expect(plain.note).toContain('It shows in your owner\'s sidebar')
-    expect(host.createThread).toHaveBeenLastCalledWith(expect.not.objectContaining({ hidden: true }), expect.anything())
+    expect(host.createThread).toHaveBeenLastCalledWith(expect.objectContaining({ hidden: false }), expect.anything())
     expect((await text('thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y', hidden: 'yes' })).text).toMatch(/hidden must be true or false/)
 
     // Later: hidden, then shown again, each with a line in the thread and a chip; already so, neither.
