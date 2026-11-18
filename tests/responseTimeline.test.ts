@@ -1,12 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { formatDurationLong, formatWorkedFor, formatWorkingFor } from '../src/renderer/utils/responseTimeline'
+import { formatContinuedFor, formatDurationLong, formatWorkedFor, formatWorkingFor } from '../src/renderer/utils/responseTimeline'
 
 describe('response duration labels', () => {
   it('formats a completed duration with only the units that apply', () => {
     expect(formatWorkedFor(4_000)).toBe('Worked for 4s')
     expect(formatWorkedFor(65_000)).toBe('Worked for 1m 5s')
     expect(formatWorkedFor(120_000)).toBe('Worked for 2m')
-    expect(formatWorkedFor(-1)).toBe('Worked for 0s')
+  })
+
+  it('says under a second, never 0s, for work a steer followed at once', () => {
+    expect(formatWorkedFor(0)).toBe('Worked for <1s')
+    expect(formatWorkedFor(999)).toBe('Worked for <1s')
+    expect(formatWorkedFor(-1)).toBe('Worked for <1s')
+    expect(formatContinuedFor(200)).toBe('Continued for <1s')
+    expect(formatWorkedFor(1_000)).toBe('Worked for 1s')
+    expect(formatDurationLong(200)).toBe('less than a second')
+    // The live timer still counts from 0s.
+    expect(formatWorkingFor(0)).toBe('Working · 0s')
   })
 
   it('drops seconds above an hour', () => {

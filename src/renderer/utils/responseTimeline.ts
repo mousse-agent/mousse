@@ -15,10 +15,19 @@ export function formatDurationShort(milliseconds: number): string {
   return `${seconds}s`
 }
 
+/**
+ * A finished span: "<1s" under a second, else the short form. Work a steer followed at once (it joined the turn as it
+ * started) is not "0s", which reads as work that never happened.
+ */
+export function formatSpanShort(milliseconds: number): string {
+  return milliseconds < 1_000 ? '<1s' : formatDurationShort(milliseconds)
+}
+
 const countLabel = (count: number, singular: string): string => `${count} ${singular}${count === 1 ? '' : 's'}`
 
 /** "1 hour and 2 minutes", "4 minutes and 12 seconds", "12 seconds": the same parts as the short form, spelled out. */
 export function formatDurationLong(milliseconds: number): string {
+  if (milliseconds < 1_000) return 'less than a second'
   const { hours, minutes, seconds } = durationParts(milliseconds)
   if (hours) return minutes ? `${countLabel(hours, 'hour')} and ${countLabel(minutes, 'minute')}` : countLabel(hours, 'hour')
   if (minutes) return seconds ? `${countLabel(minutes, 'minute')} and ${countLabel(seconds, 'second')}` : countLabel(minutes, 'minute')
@@ -26,10 +35,10 @@ export function formatDurationLong(milliseconds: number): string {
 }
 
 /** "Worked for 4m 12s" under a finished turn. */
-export const formatWorkedFor = (milliseconds: number): string => `Worked for ${formatDurationShort(milliseconds)}`
+export const formatWorkedFor = (milliseconds: number): string => `Worked for ${formatSpanShort(milliseconds)}`
 
 /** "Continued for 1m 3s" after a message steered into a finished turn: the time of the work that answered it. */
-export const formatContinuedFor = (milliseconds: number): string => `Continued for ${formatDurationShort(milliseconds)}`
+export const formatContinuedFor = (milliseconds: number): string => `Continued for ${formatSpanShort(milliseconds)}`
 
 /** "Working · 4m 12s" while a turn runs. */
 export const formatWorkingFor = (milliseconds: number): string => `Working · ${formatDurationShort(milliseconds)}`

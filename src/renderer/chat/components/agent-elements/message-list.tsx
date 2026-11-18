@@ -96,7 +96,7 @@ import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
 import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloudButton";
 import { useVisiblePromptIds } from "./use-visible-prompt-ids";
-import { formatContinuedFor, formatDurationLong, formatDurationShort, formatWorkedFor, formatWorkingFor } from "../../../utils/responseTimeline";
+import { formatContinuedFor, formatDurationLong, formatSpanShort, formatWorkedFor, formatWorkingFor } from "../../../utils/responseTimeline";
 import {
   classifyIntent,
   nextComposerCompact,
@@ -398,7 +398,7 @@ function FinishedLabel({ durationMs, continued = false, end }: { durationMs: num
   const why = end.tools?.length ? `${detail} May have run: ${end.tools.join(", ")}` : detail;
   return (
     <span className="turn-work-end" data-turn-end={end.cause} title={why}>
-      {durationMs == null ? word : `${word} after ${formatDurationShort(durationMs)}`}
+      {durationMs == null ? word : `${word} after ${formatSpanShort(durationMs)}`}
       <span className="sr-only">: {why}</span>
     </span>
   );

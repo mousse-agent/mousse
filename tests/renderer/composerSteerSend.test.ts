@@ -84,7 +84,7 @@ beforeEach(async () => {
   const now = new Date().toISOString()
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
   useAppStore.setState({
-    profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: true,
+    profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: true, turnStates: {}, threadActivity: {},
     activeThreadId: 'thread-a',
     threads: [{ id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0 }] as never,
     messages: [{ id: 'm-1', role: 'user', content: 'First message', timestamp: now }] as never
@@ -123,6 +123,38 @@ describe('a steer from the composer', () => {
     expect(select).toHaveBeenCalledWith('thread-a')
     // It did not arrive: the text is back in the composer.
     expect(host.querySelector<HTMLTextAreaElement>('.composer-input')!.value).toBe('Use the id')
+  })
+})
+
+describe('the composer while the thread works with no turn of its own running here', () => {
+  /** The thread as the sidebar shows it, while this window has no running turn for it. */
+  const showThread = async (activity: 'processing' | 'waiting' | 'completed') => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({ loading: false, turnStates: { 'thread-a': { phase: 'completed', turnId: 'run-1' } } as never, threadActivity: { 'thread-a': activity } })
+  }
+
+  it('steers while the thread shows working or waiting (its subagents, a turn ending), and sends as usual once it is done', async () => {
+    orchestrator.isTurnActive = vi.fn(async () => false)
+    orchestrator.steer = vi.fn(async () => true)
+    orchestrator.sendToThread = vi.fn(async () => ({ message: '', actions: [] }))
+    orchestrator.send = vi.fn(async () => ({ message: '', actions: [] }))
+    await showThread('waiting')
+    await mount()
+    await send('Use the id', { ctrlKey: true })
+    expect(orchestrator.steer).toHaveBeenCalledWith('Use the id', 'thread-a')
+    expect(orchestrator.sendToThread).not.toHaveBeenCalled()
+
+    await showThread('processing')
+    await settle()
+    await send('And the name', { ctrlKey: true })
+    expect(orchestrator.steer).toHaveBeenLastCalledWith('And the name', 'thread-a')
+
+    // Done: the same keys send a message that starts a turn.
+    await showThread('completed')
+    await settle()
+    await send('Next task', { ctrlKey: true })
+    expect(orchestrator.steer).toHaveBeenCalledTimes(2)
+    expect((orchestrator.sendToThread as ReturnType<typeof vi.fn>).mock.calls.length + (orchestrator.send as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
   })
 })
 

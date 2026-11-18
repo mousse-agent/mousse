@@ -1281,6 +1281,9 @@ export function OrchestratorChat() {
   // Until the daemon's compaction row arrives, and while the request is out, the chip reads Compacting….
   // Never offered beside work in progress: a running turn, or working subagents whose results come back to this thread.
   const subagentsWorking = threadSubagents.some(isWorkingSubagent)
+  // The composer works as the thread shows: while it is working or waiting (its subagents, a turn ending, a turn that
+  // started elsewhere), it offers Queue and Steer and a send follows them, even when this window has no running turn.
+  const composerWorking = turnActive || loading || isThreadActivityActive(activeThreadActivity) || subagentsRunning
   const [compactingThread, setCompactingThread] = useState<string | null>(null)
   const handleCompactNow = useCallback(() => {
     const threadId = activeThreadId
@@ -2026,8 +2029,8 @@ export function OrchestratorChat() {
                 compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId),
                 ...(activeThread?.botOwned ? { contextHidden: true } : {})
               }}
-              loading={turnActive || loading}
-              stoppable={turnActive || loading || turnStoppable || subagentsRunning}
+              loading={composerWorking}
+              stoppable={composerWorking || turnStoppable}
               placeholder={!workspaceReady ? ''
                 : questionsTakeMessage ? QUESTION_COMPOSER_PLACEHOLDER
                   : approvalWaiting ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}

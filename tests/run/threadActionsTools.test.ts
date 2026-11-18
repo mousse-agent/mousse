@@ -301,6 +301,19 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(host.showAgentAction).toHaveBeenCalledTimes(1)
     })
 
+    it('a steer that came after the run finished its answer says it runs as the next turn, to the caller and in the thread', async () => {
+      const { call, result, answers, host, targetRun } = await world()
+      answers.steer = async () => ({ status: 'accepted', runId: targetRun.runId, sequence: 12, replayed: false, followUp: true })
+      expect(await result(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'x' }))).toMatchObject({ runId: targetRun.runId, followUp: true, delivery: 'queued' })
+      expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), expect.stringMatching(/runs after run .* had just finished/))
+      // A steer the turn takes says neither.
+      answers.steer = async () => ({ status: 'accepted', runId: targetRun.runId, sequence: 13, replayed: false })
+      const joined = await result(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'y' }))
+      expect(joined).not.toHaveProperty('followUp')
+      expect(joined).not.toHaveProperty('delivery')
+      expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), `steered run ${targetRun.runId}`)
+    })
+
     it('requires the run and the text', async () => {
       const { call, host } = await world()
       for (const [name, args] of [['thread_interrupt', { threadId: 'target' }], ['thread_steer', { threadId: 'target', runId: 'r' }], ['thread_steer', { threadId: 'target', runId: 'r', text: ' ' }]] as const)

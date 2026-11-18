@@ -178,6 +178,8 @@ export type CommandResult =
       endedPause?: { runId: string; resumeItemId?: string }
       /** A send with `queueBehindPause` that found the thread paused: the paused run, whose pause it left in place. */
       heldByPause?: { runId: string }
+      /** A steer that reached the run after its provider's turn was over: it runs as the next turn instead (set by the orchestrator). */
+      followUp?: true
     }
   | { status: 'rejected'; reason: string; sequence: number; replayed?: boolean }
   | {
