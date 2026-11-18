@@ -653,7 +653,7 @@ export interface PendingUserQuestions {
    */
   wait?: false
   /**
-   * Set when the personal bot that started the thread answers this request (a turn no person started there): the
+   * Set when the personal bot that started the thread answers this request (whoever started the turn): the
    * owner is not pinged for it and it is not in Needs me. The card still shows, and the owner may answer first.
    */
   supervised?: true

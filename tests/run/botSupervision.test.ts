@@ -1,7 +1,7 @@
 /**
  * A bot answers for the threads it started (supervision): a real `OrchestratorService` and Run Engine over a temporary
  * profile, with the bot's threads faked as `botThreadsDaemon.test.ts` does. The bot that started a thread answers that
- * thread's own questions and approvals without the profile's switch, on a turn no person started, labelled as its own;
+ * thread's own questions and approvals without the profile's switch, whoever started the turn, labelled as its own;
  * every other caller and request keeps today's rule; and such a request is marked supervised (no ping, not in Needs me)
  * only while the bot can answer it.
  */
@@ -146,18 +146,31 @@ describe('a bot answers for the threads it started', () => {
     ['a subagent of its own work', { alphaRole: 'subagent' as const }, 'question_for_user', 'approvals_disabled'],
     ['a thread nobody started, with the switch off', { thread: 'plain' as const }, 'question_for_user', 'approvals_disabled'],
     // A subagent's thread is never a thread the bot started (the rule table covers `not_parent` for it).
-    ['the started thread\'s subagent', { thread: 'child' as const }, 'question_for_user', 'approvals_disabled'],
-    ['a turn a person started there', { source: 'gui' as const }, 'person_turn', 'person_turn']
+    ['the started thread\'s subagent', { thread: 'child' as const }, 'question_for_user', 'approvals_disabled']
   ])('refuses %s', async (_name, input, questionReason, approvalReason) => {
     const w = world(input.alphaRole ? { alphaRole: input.alphaRole } : {})
     const threadId = w[input.thread ?? 'job'].id
-    await w.runIn(threadId, input.source ?? 'internal')
+    await w.runIn(threadId)
     const question = w.ask(threadId)
     expect(w.answer(input.bot ?? 'b1', threadId, question.requestId, { db: 'pg' })).toEqual({ ok: false, reason: questionReason })
     w.d.questions.dismiss(question.requestId)
     const approval = w.ask(threadId, tag('command'))
     expect(w.answer(input.bot ?? 'b1', threadId, approval.requestId, { permission: 'allow' })).toEqual({ ok: false, reason: approvalReason })
     expect(w.d.questions.listPendingForThread(threadId)).toHaveLength(1)
+  })
+
+  it('answers on a turn its owner started in a thread it started: the bot owns that thread', async () => {
+    const w = world()
+    await w.runIn(w.job.id, 'gui', 'full')
+    const question = w.ask(w.job.id)
+    expect(w.d.orch.supervisorOf(w.job.id, question.requestId)).toEqual({ botId: 'b1', name: 'alpha' })
+    expect(w.answer('b1', w.job.id, question.requestId, { db: 'pg' })).toEqual({ ok: true, answered: 'question', replayed: false })
+    expect(await question.answered).toEqual({ db: 'pg' })
+    const approval = w.ask(w.job.id, tag('command'))
+    expect(w.answer('b1', w.job.id, approval.requestId, { permission: 'allow' })).toEqual({ ok: true, decision: 'allow', replayed: false })
+    // Another bot is still refused there, as a person's turn is the person's to everyone else.
+    const other = w.ask(w.job.id, tag('command'))
+    expect(w.answer('b2', w.job.id, other.requestId, { permission: 'allow' })).toEqual({ ok: false, reason: 'person_turn' })
   })
 
   it('refuses what the provider keeps for a person and "always", on a thread it started', async () => {
@@ -184,7 +197,7 @@ describe('a bot answers for the threads it started', () => {
     ])
   })
 
-  it('marks a request supervised only while its bot can answer it: not the owner\'s turn, not a paused bot, not a subagent\'s', async () => {
+  it('marks a request supervised only while its bot can answer it: not a paused bot, not a subagent\'s, whoever started the turn', async () => {
     const w = world()
     await w.runIn(w.job.id)
     const asked = w.ask(w.job.id, tag('command'))
@@ -197,14 +210,14 @@ describe('a bot answers for the threads it started', () => {
     expect(w.d.orch.supervisorOf(w.job.id, asked.requestId)).toBeUndefined()
     expect(w.d.orch.waitSupervised(w.job.id)).toBe(false)
     w.paused.delete('b1')
-    // The thread's subagent, and a turn the owner started in another thread the bot started, are the owner's.
+    // The thread's subagent is the owner's; a turn the owner started in another thread the bot started is the bot's.
     await w.runIn(w.child.id)
     const below = w.ask(w.child.id)
     expect(w.d.orch.supervisorOf(w.child.id, below.requestId)).toBeUndefined()
     const mine = w.d.store.createThread('Owner took over', w.project.id, undefined, { startedByBot: { botId: 'b1', name: 'alpha' } })
     await w.runIn(mine.id, 'gui')
     const owners = w.ask(mine.id)
-    expect(w.d.orch.supervisorOf(mine.id, owners.requestId)).toBeUndefined()
-    expect(w.d.orch.waitSupervised(mine.id)).toBe(false)
+    expect(w.d.orch.supervisorOf(mine.id, owners.requestId)).toEqual({ botId: 'b1', name: 'alpha' })
+    expect(w.d.orch.waitSupervised(mine.id)).toBe(true)
   })
 })

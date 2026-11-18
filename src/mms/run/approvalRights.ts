@@ -15,8 +15,8 @@ export interface AgentApprovalAccess {
   /** The profile's switch "Agents may answer approvals on other threads" (off by default). */
   answerApprovals: boolean
   /**
-   * The answerer is the personal bot that started the request's thread, answering that thread's own request on a turn
-   * no person started (`OrchestratorService.supervisorOf`): it needs no switch. Every other part of the rule still holds.
+   * The answerer is the personal bot that started the request's thread, answering that thread's own request, whoever
+   * started the turn (`OrchestratorService.supervisorOf`): it needs no switch. Every other part of the rule still holds.
    */
   startedThread?: boolean
 }

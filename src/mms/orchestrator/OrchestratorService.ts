@@ -4707,11 +4707,11 @@ export class OrchestratorService extends EventEmitter {
     // the device its owner wrote from, and to every other part of the rule an agent is (the switch, a person's turn, the
     // provider's own checks, never "always").
     const bot = actor.remote ? undefined : this.botSenderOf(actor, 'approval_respond')
-    // The bot that started this thread answers its own requests on a turn no person started (`supervisorOf`): only from
-    // its own turn (never a subagent of its work), and only while it supervises the thread now.
+    // The bot that started this thread answers its requests, whoever started the turn (`supervisorOf`): only from its own
+    // turn (never a subagent of its work), and only while it supervises the thread now.
     const supervisor = bot && this.botRoleOf(actor.threadId) === 'activation' ? this.supervisorOf(threadId, requestId) : undefined
     const supervising = supervisor !== undefined && supervisor.botId === bot?.botId ? supervisor : undefined
-    if (!request.approval) return this.answerQuestionAsBot(threadId, requestId, answers, options, bot, supervising)
+    if (!request.approval) return this.answerQuestionAsBot(threadId, requestId, answers, options, supervising)
     const key = options.clientRequestId
     const earlier = engine.store.getReceipt(key)
     if (earlier) {
@@ -4722,10 +4722,10 @@ export class OrchestratorService extends EventEmitter {
       // other receipts of a command a thread's run issued; the approval it names is in `result`.
       engine.store.putReceipt({ clientRequestId: key, threadId: actor.threadId, commandKind: 'approval_respond', status: 'accepted', result: { requestId, threadId, runId: actor.runId }, createdAt: new Date().toISOString() })
     }
-    // A turn a person started is the person's to answer: they may be reading the card. A request that is already
-    // answered or closed is settled below so the loser learns who won.
+    // A turn a person started is the person's to answer (they may be reading the card), except in a thread the answering
+    // bot started. A request that is already answered or closed is settled below so the loser learns who won.
     const asking = engine.approvals.get(requestId)
-    if (asking?.status === 'pending' && this.askedInPersonTurn(asking.runId)) return { ok: false, reason: 'person_turn' }
+    if (!supervising && asking?.status === 'pending' && this.askedInPersonTurn(asking.runId)) return { ok: false, reason: 'person_turn' }
     const answerApprovals = this.agentAccessSettings().answerApprovals
     // Without the switch, the bot that started the thread answers there, no wider than the thread's own mode now.
     const startedThread = !answerApprovals && supervising !== undefined
@@ -4765,7 +4765,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * A plain question answered with `approval_respond`: only by the bot that started its thread, only for a question the
-   * thread waits on, on a turn no person started (`supervisorOf`). Text that names no option reaches the agent labelled
+   * thread waits on (`supervisorOf`). Text that names no option reaches the agent labelled
    * as the bot's, never as the user's; the transcript gets one system row, for the answer that won.
    */
   private answerQuestionAsBot(
@@ -4773,7 +4773,6 @@ export class OrchestratorService extends EventEmitter {
     requestId: string,
     answers: UserQuestionAnswers,
     options: { clientRequestId: string; actor: AgentActor },
-    bot: BotSender | undefined,
     supervising: { botId: string; name: string } | undefined
   ): AgentApprovalResult {
     const engine = this.requireRunEngine()
@@ -4783,11 +4782,7 @@ export class OrchestratorService extends EventEmitter {
       const named = (earlier.result as { requestId?: unknown } | null)?.requestId
       if (earlier.commandKind !== 'approval_respond' || named !== requestId) return { ok: false, reason: 'client_request_id_conflict' }
     }
-    if (!supervising) {
-      // The bot that started the thread, on a turn its owner started there: the owner's to answer.
-      const started = bot !== undefined && this.threadStore?.getThread(threadId)?.startedByBot?.botId === bot.botId
-      return { ok: false, reason: started && this.waitsOnPersonTurn(threadId, requestId) ? 'person_turn' : 'question_for_user' }
-    }
+    if (!supervising) return { ok: false, reason: 'question_for_user' }
     const pending = this.questions.getPending(requestId)
     if (!pending || pending.threadId !== threadId) return { ok: false, reason: 'already_answered' }
     if (!earlier)
@@ -4840,29 +4835,11 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** The run request `requestId` of `threadId` waits on: an approval's own run, else the thread's active run; null for none. */
-  private askingRunOf(threadId: string, requestId: string): string | null {
-    const engine = this.runEngine
-    if (!engine) return null
-    try {
-      const approval = engine.approvals.get(requestId)
-      return approval ? approval.runId : engine.getActiveRun(threadId)?.runId ?? null
-    } catch {
-      return null
-    }
-  }
-
-  /** Whether `requestId` waits on a turn a person started (an unreadable run counts as theirs). */
-  private waitsOnPersonTurn(threadId: string, requestId: string): boolean {
-    const runId = this.askingRunOf(threadId, requestId)
-    return runId !== null && this.askedInPersonTurn(runId)
-  }
-
   /**
    * The personal bot that supervises request `requestId` of `threadId`, with its name now; undefined when the request is
    * the owner's. Supervised: the bot started that thread (`Thread.startedByBot`; a subagent's requests are its parent's),
-   * it exists, is not paused and holds "use your threads" (`setBotSupervision`), the thread waits on the request (not a
-   * question asked without waiting), and the request waits on a run no person started. Only such a request may the bot
+   * it exists, is not paused and holds "use your threads" (`setBotSupervision`), and the thread waits on the request (not
+   * a question asked without waiting), whoever started the turn: the bot owns the thread. Only such a request may the bot
    * answer without the switch, and only such a request pings no one and stays out of Needs me. Anything that cannot be
    * read is not supervised: the owner keeps it.
    */
@@ -4872,8 +4849,6 @@ export class OrchestratorService extends EventEmitter {
       const botId = thread?.startedByBot?.botId
       if (!thread || !botId || thread.runsOn || thread.lineage || this.isSubagentThread(threadId)) return undefined
       if (!this.questions.listPendingForThread(threadId).some((entry) => entry.requestId === requestId)) return undefined
-      const runId = this.askingRunOf(threadId, requestId)
-      if (runId === null || this.askedInPersonTurn(runId)) return undefined
       const bot = this.botSupervision?.(botId)
       return bot ? { botId, name: bot.name } : undefined
     } catch {
