@@ -321,6 +321,8 @@ export interface ThreadSearchOptions {
   titlesOnly?: boolean
   /** Read transcripts of at most this many threads (the most recently updated first). */
   maxMessageThreads?: number
+  /** Archived threads are searched too; without it they are left out. */
+  includeSettled?: boolean
 }
 
 /** A thread's `meta.json`, with a reasoning level packed into its model (written before #490) moved into its own field. */
@@ -2702,7 +2704,7 @@ export class ThreadDataStore extends EventEmitter {
     const titles: ScoredSearchResult[] = []
     const candidates: Thread[] = []
     for (const thread of threads) {
-      if (thread.settledAt) continue
+      if (thread.settledAt && !options.includeSettled) continue
       // Skip pure empty drafts; startedAt may be backfilled above via ensureStartedAt.
       if (!thread.startedAt && isDefaultThreadName(thread.name)) continue
       const projectName = thread.projectId ? projectNameById.get(thread.projectId) : undefined

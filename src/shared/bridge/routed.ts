@@ -535,7 +535,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'threads.delete': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
   'threads.regenerateTitle': write('thread', ['threadId']),
   'threads.setWorktreeEnabled': write('thread', ['threadId', 'enabled']),
-  // When the thread deletes itself for good, or null to keep it; the owner's daemon runs the delete.
+  // When the thread archives itself, or null for never; the owner's daemon archives it.
   'threads.setExpiry': write('thread', ['threadId', 'expiresAt', 'stopsRun']),
   'thread.fork': write(
     'thread',

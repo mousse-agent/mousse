@@ -25,6 +25,11 @@ export function compareThreadFeed(a: Thread, b: Thread): number {
   return started || a.id.localeCompare(b.id)
 }
 
+/** Archived threads, the most recently archived first, so a thread just archived is at the top of Archived. */
+export function sortArchivedThreads<T extends Thread>(threads: readonly T[]): T[] {
+  return [...threads].sort((a, b) => (b.settledAt ?? '').localeCompare(a.settledAt ?? '') || compareThreadFeed(a, b))
+}
+
 /**
  * The Threads tab's rows. `arranged` is the order the person last dragged the rows into (ids, top first):
  * those threads keep it, and threads that started since (not in it) go above them, newest first.

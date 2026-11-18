@@ -19,7 +19,7 @@ export const BRIDGE_REMOTE_METHODS = {
   'threads.rename': { capability: 'write', mutating: true },
   'threads.pin': { capability: 'write', mutating: true },
   'threads.settle': { capability: 'write', mutating: true },
-  // The thread menu's Regenerate title and Delete after: the same handlers as a window here. Delete itself is not
+  // The thread menu's Regenerate title and Archive after: the same handlers as a window here. Delete itself is not
   // exposed: only the computer that runs a thread deletes it.
   'threads.regenerateTitle': { capability: 'write', mutating: true },
   'threads.setExpiry': { capability: 'write', mutating: true },

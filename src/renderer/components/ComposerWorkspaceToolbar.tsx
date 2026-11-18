@@ -188,7 +188,7 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
 
 /**
  * Below a new thread's composer: where it runs (computer, then checkout or worktree) on the left;
- * Private and when it deletes itself on the right.
+ * Private and when it archives itself on the right.
  */
 export function ComposerThreadSettings({ workspace, disabled, device, onChange, onPrivateChange, onExpiryChange }: {
   workspace: ComposerWorkspace
@@ -197,7 +197,7 @@ export function ComposerThreadSettings({ workspace, disabled, device, onChange, 
   onChange: (workspace: ComposerWorkspace) => void
   /** Turns Private on or off for the new chat (`Thread.localOnly`). Without it the toggle is not shown. */
   onPrivateChange?: (localOnly: boolean) => void
-  /** Picks when the new chat deletes itself (`ms` after it is created, or null for never). Without it the menu is not shown. */
+  /** Picks when the new chat archives itself (`ms` after it is created, or null for never). Without it the menu is not shown. */
   onExpiryChange?: (ms: number | null, stopsRun: boolean) => void
 }) {
   const git = useProjectGit(workspace.projectId)
@@ -239,7 +239,7 @@ export function ComposerThreadSettings({ workspace, disabled, device, onChange, 
         {onExpiryChange && !workspace.node && (
           <ExpiryMenu
             triggerClassName={`new-thread-chip new-thread-icon new-thread-expiry${workspace.expiryMs !== undefined ? ' active' : ''}`}
-            triggerTitle={workspace.expiryMs !== undefined ? `Deletes itself ${expiryDurationLabel(workspace.expiryMs)} after it starts` : 'Delete this thread after a while'}
+            triggerTitle={workspace.expiryMs !== undefined ? `Archives itself ${expiryDurationLabel(workspace.expiryMs)} after it starts` : 'Archive this thread after a while'}
             trigger={<><ExpiryIcon />{workspace.expiryMs !== undefined && <span className="new-thread-expiry-label">{expiryShortLabel(workspace.expiryMs)}</span>}</>}
             selectedMs={workspace.expiryMs}
             hasExpiry={false}

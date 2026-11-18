@@ -1637,8 +1637,8 @@ export interface Thread {
    */
   automationManager?: true
   /**
-   * When the thread deletes itself (ISO time): it, its subagents, worktree, checkpoints and attachments are
-   * deleted for good, not archived and not moved to Recently deleted. A subagent follows its root thread's.
+   * When the thread archives itself (ISO time), as Archive does; the expiry is then removed. Nothing is deleted.
+   * A subagent follows its root thread's.
    * Absent: the thread never expires. Set when the thread is created or later, extended or removed before then.
    */
   expiresAt?: string

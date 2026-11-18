@@ -1060,7 +1060,7 @@ const api = {
       ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:settle', threadId, settled),
-    /** When the thread deletes itself for good (`Thread.expiresAt`); null keeps it. */
+    /** When the thread archives itself (`Thread.expiresAt`); null: never. */
     setExpiry: (threadId: string, expiresAt: string | null, stopsRun?: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:setExpiry', threadId, expiresAt, stopsRun),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>

@@ -1869,7 +1869,7 @@ export function OrchestratorChat() {
 
   // A thread whose transcript is still loading is not empty: it shows the plain chat (no headline, logo or glow) until it lands.
   const emptyThread = shownMessages.length === 0 && !transcriptPending && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
-  // A new thread's settings (project above the composer, where it runs and Private / Delete after below) leave once the first send starts.
+  // A new thread's settings (project above the composer, where it runs and Private / Archive after below) leave once the first send starts.
   const newThreadSettings = newChat && !turnActive && !loading && !firstSendShown
   // The first message shows in the transcript while its thread is made: the locked composer that still holds it (to
   // show it again if the send does not go ahead) looks empty meanwhile, so the message is not shown twice.

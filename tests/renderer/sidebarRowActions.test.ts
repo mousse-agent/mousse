@@ -207,7 +207,7 @@ describe('the row menu', () => {
     click(more)
     expect(menuLabels()).toEqual(fromRightClick)
     // A thread in use is archived first: no Delete.
-    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Delete after'])
+    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Archive after'])
     expect(more.getAttribute('aria-expanded')).toBe('true')
     expect(document.activeElement).toBe(menuItem('Pin'))
   })
@@ -222,7 +222,7 @@ describe('the row menu', () => {
     key(document.activeElement!, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(menuItem('Regenerate title'))
     key(document.activeElement!, { key: 'End' })
-    expect(document.activeElement).toBe(menuItem('Delete after'))
+    expect(document.activeElement).toBe(menuItem('Archive after'))
     key(document.activeElement!, { key: 'Home' })
     expect(document.activeElement).toBe(menuItem('Pin'))
     key(document.activeElement!, { key: 'Escape' })

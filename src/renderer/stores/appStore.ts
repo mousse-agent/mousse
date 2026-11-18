@@ -364,7 +364,7 @@ interface AppState {
   /** The project last picked for a new thread here (none: no project), so New thread opens in it again. */
   lastNewThreadProjectId: string | null
   setLastNewThreadProjectId: (projectId: string | null) => void
-  /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
+  /** Settings → Runs: when a new private chat archives itself; `never`: it does not. */
   privateThreadExpiry: ExpiryPreset | 'never'
   /** Where a new thread in a project with no remembered checkout starts (`runs.newThreadWorktree`). */
   newThreadWorktree: boolean

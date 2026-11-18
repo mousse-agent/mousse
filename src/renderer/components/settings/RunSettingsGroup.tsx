@@ -21,7 +21,7 @@ function capLabel(cap: number): string {
 
 /**
  * Settings → General → Threads: whether a run paused by a usage limit continues by itself, and how often in a row,
- * whether the computer stays awake while runs work, and when new private threads delete themselves. Resuming is one select: Off, or how many times in a row. Off keeps the
+ * whether the computer stays awake while runs work, and when new private threads archive themselves. Resuming is one select: Off, or how many times in a row. Off keeps the
  * saved count, so turning it back on offers the same one.
  */
 export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['runs']; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
@@ -81,12 +81,12 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
         }
       />
       <SettingsRow
-        title="Delete private threads after"
+        title="Archive private threads after"
         anchor="general-private-expiry"
-        description={<span title="A new private thread starts with this expiry; the composer can change it before the first message, and the thread can be extended or kept later. At expiry the thread, its subagents, worktree and checkpoints are deleted for good. Commits and pushed code are kept.">New private threads delete themselves after this time.</span>}
+        description={<span title="A new private thread starts with this expiry; the composer can change it before the first message, and the thread can be extended or kept later. At expiry the thread is archived, as Archive does; nothing is deleted.">New private threads archive themselves after this time.</span>}
         control={
           <Select
-            ariaLabel="Delete private threads after"
+            ariaLabel="Archive private threads after"
             value={runs.privateThreadExpiry}
             onChange={(next) => {
               if (next === runs.privateThreadExpiry) return

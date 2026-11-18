@@ -48,9 +48,14 @@ export function eligibleCommands(ctx: CommandContext, isRegistered: (id: Command
   }))
 }
 
-/** Threads the sidebar lists: started, not settled, and not a subagent shown under its parent. */
+/** Threads a search finds by title: started, and not a subagent shown under its parent. Archived ones too. */
+function searchableThreads(threads: readonly Thread[]): Thread[] {
+  return visibleThreads(threads).filter((thread) => isThreadStarted(thread))
+}
+
+/** Threads the sidebar lists outside Archived. */
 function listedThreads(threads: readonly Thread[]): Thread[] {
-  return visibleThreads(threads).filter((thread) => !thread.settledAt && isThreadStarted(thread))
+  return searchableThreads(threads).filter((thread) => !thread.settledAt)
 }
 
 const byNewest = (a: Thread, b: Thread): number => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0)
@@ -111,11 +116,13 @@ export function buildPaletteGroups({
   if (commandsOnly) return commandGroup ? [commandGroup] : []
 
   const listed = listedThreads(threads)
+  const archivedIds = new Set(threads.filter((thread) => thread.settledAt).map((thread) => thread.id))
   const { groups: projectGroups, groupOf } = groupProjects(projects)
   const groupById = new Map(projectGroups.map((group) => [group.id, group]))
   const computerName = (node: string): string => computers?.[node]?.name ?? UNKNOWN_COMPUTER_NAME
-  const where = (projectName: string | undefined, node: string | undefined): string | undefined =>
-    [projectName, node ? computerName(node) : undefined].filter(Boolean).join(' · ') || undefined
+  // An archived thread says so, after where it is.
+  const where = (projectName: string | undefined, node: string | undefined, archived = false): string | undefined =>
+    [projectName, node ? computerName(node) : undefined, archived ? 'Archived' : undefined].filter(Boolean).join(' · ') || undefined
   const threadItem = (thread: Thread): Extract<PaletteItem, { kind: 'thread' }> => {
     const group = thread.projectId ? groupById.get(groupOf.get(thread.projectId) ?? '') : undefined
     return {
@@ -123,7 +130,7 @@ export function buildPaletteGroups({
       key: `thread:${thread.id}`,
       id: thread.id,
       title: thread.name,
-      detail: where(group?.project.name, thread.node)
+      detail: where(group?.project.name, thread.node, Boolean(thread.settledAt))
     }
   }
 
@@ -140,7 +147,9 @@ export function buildPaletteGroups({
   const hitRows = (threadId: string, hits: readonly ThreadSearchResult[]): PaletteItem[] =>
     messageHitRows(threadId, hits, match ?? '', expanded?.has(threadId) ?? false, messagesCapped)
 
-  const threadRows = rankItems(text, listed.map((thread) => ({ thread, title: thread.name }))).map((row) => threadItem(row.thread))
+  // Archived threads are found too, after the open ones.
+  const rankThreads = (pool: readonly Thread[]) => rankItems(text, pool.map((thread) => ({ thread, title: thread.name }))).map((row) => threadItem(row.thread))
+  const threadRows = [...rankThreads(listed), ...rankThreads(searchableThreads(threads).filter((thread) => thread.settledAt))]
   const titled = new Set(threadRows.map((row) => row.id))
 
   // Threads that match only by message text get their own header row in Messages.
@@ -149,7 +158,7 @@ export function buildPaletteGroups({
     if (titled.has(threadId)) continue
     const first = hits[0]!
     messageItems.push(
-      { kind: 'thread', key: `message-thread:${threadId}`, id: threadId, title: first.threadName, detail: where(first.projectName, first.node) },
+      { kind: 'thread', key: `message-thread:${threadId}`, id: threadId, title: first.threadName, detail: where(first.projectName, first.node, archivedIds.has(threadId)) },
       ...hitRows(threadId, hits)
     )
   }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { create } from 'zustand'
 import type { Thread } from '../../shared/types'
 import { motionAllowed } from '../components/ui/Collapse'
 import { scaleMotionMs } from './motion'
@@ -15,6 +16,40 @@ export type ArchiveMove = { toArchived: boolean; before: Thread }
 export type ArchiveMoves = ReadonlyMap<string, ArchiveMove>
 
 const NO_MOVES: ArchiveMoves = new Map()
+
+/**
+ * Archives and unarchives this window asked for and the service has not shown yet, by thread: the archive time shown
+ * meanwhile, or null for an unarchive. The sidebar shows them from the click on (`withPendingArchives`), so the row
+ * starts to move at once instead of when the service's answer arrives.
+ */
+export const usePendingArchives = create<{ pending: ReadonlyMap<string, string | null> }>(() => ({ pending: new Map() }))
+
+/** Marks `threadId` as being archived (or unarchived) until the returned function is called. */
+export function markPendingArchive(threadId: string, archived: boolean): () => void {
+  const mark = archived ? new Date().toISOString() : null
+  usePendingArchives.setState((state) => ({ pending: new Map(state.pending).set(threadId, mark) }))
+  return () => usePendingArchives.setState((state) => {
+    if (!state.pending.has(threadId) || state.pending.get(threadId) !== mark) return state
+    const pending = new Map(state.pending)
+    pending.delete(threadId)
+    return { pending }
+  })
+}
+
+/** `threads` as they will be once the pending archives are done. Threads that do not change keep their objects. */
+export function withPendingArchives(threads: readonly Thread[], pending: ReadonlyMap<string, string | null>): Thread[] {
+  if (pending.size === 0) return threads as Thread[]
+  let changed = false
+  const next = threads.map((thread) => {
+    const mark = pending.get(thread.id)
+    if (mark === undefined || Boolean(thread.settledAt) === (mark !== null)) return thread
+    changed = true
+    if (mark !== null) return { ...thread, settledAt: mark }
+    const { settledAt: _settledAt, ...rest } = thread
+    return rest
+  })
+  return changed ? next : (threads as Thread[])
+}
 
 /**
  * The threads whose archived state just changed, however it changed: the sidebar's menu, the shortcut, a bot or

@@ -15,7 +15,7 @@ import type { ListsServices } from '../../../../src/mms/bridge/remote/MmsListsSo
 import type { RpcContext } from '../../../../src/mms/net/contracts'
 import { newId, type NodeId, type UserId } from '../../../../src/shared/net'
 
-// A phone's thread menu: Rename, Pin and Archive were already open to phones; Regenerate title and Delete after are
+// A phone's thread menu: Rename, Pin and Archive were already open to phones; Regenerate title and Archive after are
 // now too, through the same handlers as a window here. Deleting stays on the computer that runs the thread.
 
 const clock = {
@@ -61,7 +61,7 @@ async function profile() {
 }
 
 describe('the thread menu from a phone', () => {
-  it('opens Regenerate title and Delete after to phones, never Delete, and reports them in net.info', () => {
+  it('opens Regenerate title and Archive after to phones, never Delete, and reports them in net.info', () => {
     expect(BRIDGE_REMOTE_METHODS['threads.regenerateTitle']).toEqual({
       capability: 'write',
       mutating: true
