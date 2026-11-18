@@ -59,9 +59,7 @@ export interface BotMcpAsk {
  * An ask that grants nothing (Bot Phase 1 §5.11): `export_memory` ("Save my memory to a folder").
  * Allow opens a folder picker in the renderer, which calls `bots.memory.export`.
  */
-export interface BotSpecialAsk {
-  ask: 'export_memory'
-}
+export type BotSpecialAsk = { ask: 'export_memory' } | { ask: 'let_alone'; scheduleId: string; serverId: string; tool: string }
 
 /** What the bot may ask its owner for with `escalate`: a permission, or a special ask. */
 export type BotAskRequest = BotPermissionRequest | BotSpecialAsk
@@ -158,7 +156,7 @@ const BUDGET_WORDS: Record<BotBudgetWallKey, string> = {
  * "use the browser" (`{tool: 'browser'}`), so it has one card, one fingerprint and one grant.
  */
 export function grantRequestOf<T extends BotAskRequest>(request: T): T {
-  if (!('tool' in request) || typeof request.tool !== 'string') return request
+  if (isSpecialAsk(request) || !('tool' in request) || typeof request.tool !== 'string') return request
   const tool = botGrantTool(request.tool)
   return (tool === request.tool ? request : { tool }) as T
 }
@@ -227,6 +225,10 @@ export const WHAT_TO_ASK_TEXT = "Ask for a tool, a skill, the tools of one of yo
 
 /** Why a value is not something `escalate` may ask for, or undefined when it is one. */
 export function askProblem(value: unknown): string | undefined {
+  if (value && typeof value === 'object' && 'ask' in value && value.ask === 'let_alone') {
+    const request = value as Record<string, unknown>
+    return Object.keys(request).length === 4 && ['scheduleId', 'serverId', 'tool'].every(k => typeof request[k] === 'string' && (request[k] as string).trim().length > 0) ? undefined : 'The automation ask is invalid.'
+  }
   if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && 'ask' in value)
     return (value as { ask: unknown }).ask === 'export_memory' ? undefined : 'The ask is not one a bot can make.'
   return permissionProblem(value)
