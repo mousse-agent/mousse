@@ -130,6 +130,8 @@ interface BotsState {
   newBotOpen: boolean
   newBotDraft: NewBotDraft
   aboutOpen: boolean
+  /** About brings this part into view once it opens: Pick a model's rows. */
+  aboutFocus: 'runs-on' | null
   dialog: BotDialog | null
   /** Each bot's memory as About and the Memory dialog show it: the entries every turn carries, with their words. */
   memory: Record<string, BotMemoryEntry[]>
@@ -362,7 +364,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
   return {
     profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-    reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+    reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {},
 
     activate(profileId) {
@@ -380,7 +382,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       reactions.clear()
       clearBotLiveReplies()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-        reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+        reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {} })
       subscribe()
       void get().refresh()

@@ -60,6 +60,11 @@ describe('a bot turn keeps what it cost', () => {
     expect(row.systemChars).toBe(turn.prepared.instructions!.length)
     expect(row.preambleChars).toBe(turn.prepared.preamble!.length)
     expect(row.promptChars).toBe(turn.prepared.prompt.length)
+    // About's context and cache: the last request's size and window, the turn's split, and when the cache was fed.
+    expect(f.bots.service.get(botId).context).toEqual({
+      used: 10_500, window: 200_000, model: 'some/model-2026', turn: { cacheRead: 19_000, cacheWrite: 300, fresh: 1200 },
+      lastRequestAt: f.clock.now, cacheTtlMs: 3_600_000
+    })
   })
 
   it('the gap is measured from the bot\'s previous request in the same lane, and About shows the week as one line', async () => {
@@ -81,6 +86,7 @@ describe('a bot turn keeps what it cost', () => {
   it('a turn with no report yet is not in About; a failing measurement never fails the turn', async () => {
     const turn = await chatTurn('Hi', 'u1')
     expect(f.bots.service.get(botId).usage).toBeUndefined()
+    expect(f.bots.service.get(botId).context).toBeUndefined()
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     f.host.toolList = () => { throw new Error('registry gone') }
     try {

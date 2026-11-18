@@ -1442,6 +1442,18 @@ export class BotStore {
     return row ? activationOf(row) : undefined
   }
 
+  /** When each of the bot's schedules last ran to an end, and how that run ended, by schedule id. */
+  lastScheduleRuns(botId: string): Map<string, { endedAt: string; status: 'done' | 'failed' | 'cancelled' }> {
+    // SQLite gives a bare column the values of the row that holds MAX(): each schedule's latest ended run.
+    const rows = this.all(
+      `SELECT json_extract(trigger_json, '$.scheduleId') AS schedule_id, status, MAX(ended_at) AS ended_at FROM bot_activations
+       WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') AND ended_at IS NOT NULL AND json_extract(trigger_json, '$.kind') = 'schedule'
+       GROUP BY schedule_id`,
+      botId
+    )
+    return new Map(rows.filter((row) => typeof row.schedule_id === 'string').map((row) => [row.schedule_id as string, { endedAt: row.ended_at as string, status: row.status as 'done' | 'failed' | 'cancelled' }]))
+  }
+
   /**
    * The owner's words of an ended chat turn move to the turn that answers them again (Resume after a usage limit): its
    * chat pack leaves them out of the recent chat, as they are its request.

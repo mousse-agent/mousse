@@ -879,7 +879,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       },
       tellingSettings: (botId) => this.tellingSettings(botId),
       telling: (botId) => this.tellingLine(botId),
-      schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused })),
+      schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused, name: schedule.name, prompt: schedule.prompt })),
       // The threads it started that still work: it is busy while it manages them.
       launched: (botId) => this.launchedThreads(botId),
       watchers: (botId) => this.watchers.list(botId).map((view) => ({ id: view.id, title: view.title, command: view.command, startedAt: view.startedAt, until: view.until, ...(view.lastLine ? { lastLine: view.lastLine } : {}) })),

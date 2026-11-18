@@ -1,6 +1,6 @@
 import type { BotActivationRow, BotStore, BotTurnUsageRow } from '../store/BotStore'
 import type { ProviderMetrics } from '../../harness/adapter'
-import type { BotTurnUsageSummary } from '../../../shared/bots/personal/chat'
+import type { BotContextSummary, BotTurnUsageSummary } from '../../../shared/bots/personal/chat'
 
 /**
  * What each main turn of a bot cost and carried (docs/plans/bot-context.md, phase 0). A measurement: a failure here is
@@ -121,5 +121,21 @@ export function turnUsageSummary(rows: readonly BotTurnUsageRow[]): BotTurnUsage
     inputPerTurn: Math.round(input / rows.length),
     outputPerTurn: Math.round(output / rows.length),
     cachedShare: input > 0 ? cacheRead / input : 0
+  }
+}
+
+/**
+ * About's context and cache: what the bot's latest chat turn that reached its model measured. Undefined before one
+ * did. The token count and window are the last request's; the split is the whole turn's input.
+ */
+export function botContextSummary(row: BotTurnUsageRow | undefined): BotContextSummary | undefined {
+  if (!row?.lastRequestAt) return undefined
+  return {
+    ...(row.lastPrompt ? { used: row.lastPrompt } : {}),
+    ...(row.contextWindow ? { window: row.contextWindow } : {}),
+    ...(row.model ? { model: row.model } : {}),
+    turn: { cacheRead: row.cacheRead, cacheWrite: row.cacheWrite, fresh: row.input },
+    lastRequestAt: row.lastRequestAt,
+    ...(row.cacheTtlMs ? { cacheTtlMs: row.cacheTtlMs } : {})
   }
 }
