@@ -13,3 +13,9 @@ it.each([
 it('stored asks-first is a floor even with a read-only hint', () => {
   expect(asksFirstFor({ tool: 'list', serverName: 'Mail', readOnlyHint: true, storedLevel: 'asks_first' })).toBe(true)
 })
+
+it('asks first defaults on but an explicit false keeps the support rollback', async () => {
+  const { getDefaultSettings, normalizeExperimentalSettings } = await import('../../src/shared/settings')
+  expect(getDefaultSettings().experimental.botAsksFirst).toBe(true)
+  expect(normalizeExperimentalSettings({ botAsksFirst: false }).botAsksFirst).toBe(false)
+})
