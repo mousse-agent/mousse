@@ -172,6 +172,21 @@ describe('Quit from the tray', () => {
     expect(kept.closed).toBe(false)
   })
 
+  it('an update install waiting on the Quit hears its outcome only once the windows have decided', async () => {
+    const quitAndStop = (windows: QuitWindow[]) => createTrayQuit({ windows: () => windows, isQuitting: () => false, destroyTray: () => undefined, quit: () => undefined })
+    // Nothing asked: the install goes ahead.
+    await expect(quitAndStop([appWindow()]).decided()).resolves.toBe(false)
+    // A window's beforeunload is still running: the answer waits for it.
+    const vetoed = quitAndStop([appWindow({ unsavedEdits: true })])
+    vetoed()
+    await expect(vetoed.decided()).resolves.toBe(false)
+    const closing = quitAndStop([appWindow()])
+    closing()
+    expect(closing.closing).toBe(true)
+    await expect(closing.decided()).resolves.toBe(true)
+    await expect(closing.decided()).resolves.toBe(true)
+  })
+
   it('the service this run started gets the stop before it takes the home; one started by anything else is left alone', async () => {
     const home = newHome()
     process.env.MOUSSE_HOME = home

@@ -20,10 +20,8 @@ export interface QuitWindow {
 export function closeWindowsForQuit(windows: QuitWindow[]): Promise<boolean> {
   const open = windows.filter((window) => !window.isDestroyed())
   return Promise.all(open.map((window) => new Promise<boolean>((resolve) => {
-    const closed = (): void => {
-      window.webContents.removeListener('will-prevent-unload', kept)
-      resolve(true)
-    }
+    // Electron marks the window destroyed before `closed`: its webContents can no longer be read here.
+    const closed = (): void => resolve(true)
     const kept = (): void => {
       window.removeListener('closed', closed)
       if (!window.isDestroyed()) {
@@ -43,6 +41,8 @@ export interface TrayQuit {
   (): void
   /** True while its windows are closing, before the quit itself begins. */
   readonly closing: boolean
+  /** Whether the quit goes ahead: waits while windows are still closing, false when none was asked for or one stayed open. */
+  decided(): Promise<boolean>
 }
 
 /**
@@ -55,16 +55,20 @@ export function createTrayQuit(host: {
   destroyTray(): void
   quit(): void
 }): TrayQuit {
-  let closing = false
+  let pending: Promise<boolean> | null = null
+  let quitting = false
   const run = (): void => {
-    if (closing || host.isQuitting()) return
-    closing = true
-    void closeWindowsForQuit(host.windows()).then((allClosed) => {
-      closing = false
-      if (!allClosed || host.isQuitting()) return
+    if (pending || host.isQuitting()) return
+    pending = closeWindowsForQuit(host.windows()).then((allClosed) => {
+      pending = null
+      if (!allClosed || host.isQuitting()) return false
+      quitting = true
       host.destroyTray()
       host.quit()
+      return true
     })
   }
-  return Object.defineProperty(run, 'closing', { get: () => closing }) as TrayQuit
+  return Object.assign(Object.defineProperty(run, 'closing', { get: () => pending !== null }), {
+    decided: () => pending ?? Promise.resolve(quitting)
+  }) as TrayQuit
 }

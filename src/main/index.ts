@@ -219,12 +219,13 @@ function startGuiApp(): void {
 
   /**
    * An update install does not start once the tray's quit began: the installer would start Mousse
-   * again after the person stopped it.
+   * again after the person stopped it. While the tray's quit is still closing windows, the installer
+   * waits for it and starts only if a window kept Mousse open.
    */
   async function installUnlessQuitting(prepare: () => Promise<void>): Promise<void> {
     if (stopServiceOnQuit) throw new Error('Mousse is quitting.')
     await prepare()
-    if (stopServiceOnQuit) throw new Error('Mousse is quitting.')
+    if (stopServiceOnQuit || await quitAndStopService.decided()) throw new Error('Mousse is quitting.')
   }
 
   function ensureServiceTray(): void {

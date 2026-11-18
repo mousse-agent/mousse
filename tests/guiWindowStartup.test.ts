@@ -6,7 +6,12 @@ const startup = vi.hoisted(() => {
   const pending = new Promise(done => { ready = done })
   // A feature someone passed on the command line, which the app must keep.
   const switches = new Map([['enable-features', 'FeatureFromCommandLine']])
-  return { pending, ready, ipc: false, chrome: false, windows: [] as Array<any>, controller: null as any, controllers: [] as Array<any>, ipcDeps: null as any, failLoads: 0, switches, featuresWhenReady: undefined as string | undefined }
+  return {
+    pending, ready, ipc: false, chrome: false, windows: [] as Array<any>, controller: null as any, controllers: [] as Array<any>, ipcDeps: null as any, failLoads: 0, switches, featuresWhenReady: undefined as string | undefined,
+    // The notification-area icon main makes on Windows.
+    tray: { enabled: false, made: [] as Array<{ destroyed: boolean; template: Array<{ label?: string; click?: () => void }> }> },
+    stopServiceForQuit: null as any
+  }
 })
 
 vi.mock('electron', async () => {
@@ -21,8 +26,16 @@ vi.mock('electron', async () => {
     }
   })
   class BrowserWindow extends EventEmitter {
-    readonly webContents = Object.assign(new EventEmitter(), {
+    readonly #webContents = Object.assign(new EventEmitter(), {
       id: 123, setWindowOpenHandler: vi.fn(), isDestroyed: () => false
+    })
+    // As in Electron: a destroyed window's webContents cannot be read, also not in its own `closed`.
+    get webContents() {
+      if (this.destroyed) throw new TypeError('Object has been destroyed')
+      return this.#webContents
+    }
+    readonly close = vi.fn(() => {
+      setTimeout(() => { this.destroyed = true; this.emit('closed') }, 1)
     })
     readonly loadURL = vi.fn(async (url: string) => {
       if (startup.failLoads > 0) { startup.failLoads--; throw new Error('load failed') }
@@ -49,8 +62,17 @@ vi.mock('electron', async () => {
     isDestroyed() { return this.destroyed }
     static getAllWindows() { return startup.windows }
   }
+  class Tray {
+    destroyed = false
+    template: Array<{ label?: string; click?: () => void }> = []
+    constructor() { startup.tray.made.push(this) }
+    setToolTip() {}
+    setContextMenu(menu: { template: Array<{ label?: string; click?: () => void }> }) { this.template = menu.template }
+    on() {}
+    destroy() { this.destroyed = true }
+  }
   return {
-    app, BrowserWindow, ipcMain: new EventEmitter(),
+    app, BrowserWindow, Tray, Menu: { buildFromTemplate: (template: unknown) => ({ template }) }, ipcMain: new EventEmitter(),
     nativeTheme: { shouldUseDarkColors: true },
     powerSaveBlocker: { start: () => 0, stop: () => undefined },
     dialog: { showErrorBox: vi.fn() }, shell: { openExternal: vi.fn() },
@@ -88,7 +110,13 @@ vi.mock('../src/main/ipc/registerGuiIpc', () => ({
 vi.mock('../src/main/fonts/registerFontIpc', () => ({ registerFontIpc: vi.fn() }))
 vi.mock('../src/main/browser/BrowserViewManager', () => ({ BrowserViewManager: class {} }))
 vi.mock('../src/main/browser/AttachedBrowserHost', () => ({ AttachedBrowserHost: class {} }))
-vi.mock('../src/main/appIcon', () => ({ applyAppIcon: vi.fn(), getAppIconPath: () => undefined }))
+vi.mock('../src/main/appIcon', () => ({ applyAppIcon: vi.fn(), getAppIconPath: () => startup.tray.enabled ? 'icon.png' : undefined }))
+vi.mock('../src/main/serviceTray', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/main/serviceTray')>(),
+  usesServiceTray: () => startup.tray.enabled
+}))
+// Never asks a real service to stop: the home this test resolves is not a test folder.
+vi.mock('../src/main/mms/stopServiceForQuit', () => ({ stopServiceForQuit: vi.fn(async () => { startup.stopServiceForQuit?.() }) }))
 vi.mock('../src/main/windowsChrome', () => ({ refreshWindowChrome: vi.fn() }))
 vi.mock('../src/main/windowResume', () => ({
   mainWindowLoadTarget: () => ({}), registerWindowForResumeRecovery: vi.fn(),
@@ -145,4 +173,26 @@ it('a startup retry after the first window fails keeps the one service connectio
   expect(startup.controllers).toHaveLength(1)
   expect(startup.ipcDeps.guiMms).toBe(startup.controllers[0])
   expect(startup.ipcDeps.guiMms.start).toHaveBeenCalledTimes(1)
+})
+
+it("the tray's Quit closes the window, removes the tray and quits, stopping the background service", async () => {
+  vi.resetModules()
+  startup.windows.length = 0
+  startup.controllers.length = 0
+  startup.tray.enabled = true
+  const quitStops = vi.fn()
+  startup.stopServiceForQuit = quitStops
+  const { app } = await import('electron') as unknown as { app: { quit: ReturnType<typeof vi.fn> } }
+  app.quit.mockClear()
+  await import('../src/main/index')
+  await vi.waitFor(() => expect(startup.tray.made).toHaveLength(1))
+  const window = startup.windows[0]
+  const tray = startup.tray.made[0]
+  const quit = tray.template.find((item) => item.label === 'Quit Mousse and stop background work')
+  quit!.click!()
+  await vi.waitFor(() => expect(app.quit).toHaveBeenCalled())
+  expect(window.close).toHaveBeenCalled()
+  expect(window.isDestroyed()).toBe(true)
+  expect(tray.destroyed).toBe(true)
+  expect(quitStops).toHaveBeenCalledTimes(1)
 })

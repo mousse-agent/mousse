@@ -76,7 +76,7 @@ export async function sendDaemonStop(
   opts: { reason?: string; retryMs?: number; intervalMs?: number } = {}
 ): Promise<DaemonStopTarget> {
   const target = await resolveDaemonStopTargetSettled(homeDir, opts)
-  if (target.kind === 'running') requestDaemonShutdown(homeDir, target.token, opts.reason ?? 'client-request')
+  if (target.kind === 'running') requestDaemonShutdown(homeDir, target.token, opts.reason ?? 'client-request', { shared: true })
   return target
 }
 
@@ -115,7 +115,7 @@ export async function stopRunningDaemon(
   } catch {
     /* fall through to the stop request */
   }
-  requestDaemonShutdown(homeDir, target.token, reason)
+  requestDaemonShutdown(homeDir, target.token, reason, { shared: true })
   const result = await pollUntilRuntimeStopped(homeDir, target.token, {
     timeoutMs: opts.timeoutMs ?? SERVICE_STOP_TIMEOUT_MS,
     ...(opts.intervalMs === undefined ? {} : { intervalMs: opts.intervalMs })
@@ -127,16 +127,20 @@ export async function stopRunningDaemon(
     : { kind: 'replaced', pid: target.pid, record: result.record }
 }
 
-/** Write an owner-token-fenced stop request. Single source of truth for graceful stop signaling. */
+/**
+ * Write an owner-token-fenced stop request. Single source of truth for graceful stop signaling.
+ * `shared` is for a daemon that holds the home and may be an earlier version (see `writeStopRequest`).
+ */
 export function requestDaemonShutdown(
   homeDir: string,
   ownerToken: string,
-  reason = 'client-request'
+  reason = 'client-request',
+  opts: { shared?: boolean } = {}
 ): { accepted: true; reason: string; stopRequest: MmsStopRequest } {
   if (!ownerToken || !ownerToken.trim()) {
     throw new Error('owner token required for daemon shutdown')
   }
-  const stopRequest = writeStopRequest(homeDir, ownerToken)
+  const stopRequest = writeStopRequest(homeDir, ownerToken, opts)
   return { accepted: true, reason, stopRequest }
 }
 
@@ -151,7 +155,17 @@ export interface DaemonLifecycleState {
   shuttingDown: boolean
   /** The latest teardown pass. Every shutdown caller waits for it. */
   teardown?: Promise<void>
+  /** Overrides `DRAIN_RETRY_DELAY_MS` and `DRAIN_STUCK_AFTER_MS` (tests). */
+  drainWait?: { retryDelayMs: number; stuckAfterMs: number }
 }
+
+/** Pause between stop attempts while the service's work is still draining. */
+export const DRAIN_RETRY_DELAY_MS = 1_000
+/**
+ * How long a drain may keep failing its stop before it counts as stuck. The daemon then stops anyway
+ * and exits, so `service stop` and an update install are not held up forever by work that never ends.
+ */
+export const DRAIN_STUCK_AFTER_MS = 2 * 60_000
 
 /**
  * Daemon teardown: stop protocol → stop MMS (scheduler) → runtime record →
@@ -195,9 +209,12 @@ async function tearDownRemaining(
     log(`protocol stop failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  // A drain past the stop's own deadline is still running: keep the handle and keep waiting, so
-  // the process never exits while personal work is still being written.
+  // A drain past the stop's own deadline is still running: keep the handle and keep trying, so the
+  // process does not exit while personal work is still being written. A drain still failing after
+  // `stuckAfterMs` is stuck: stop anyway.
   const mms = state.mms
+  const { retryDelayMs, stuckAfterMs } = state.drainWait ?? { retryDelayMs: DRAIN_RETRY_DELAY_MS, stuckAfterMs: DRAIN_STUCK_AFTER_MS }
+  let stuckAt: number | null = null
   while (mms) {
     try {
       await mms.stop()
@@ -207,7 +224,13 @@ async function tearDownRemaining(
         log(`mms.stop failed: ${err instanceof Error ? err.message : String(err)}`)
         break
       }
+      stuckAt ??= Date.now() + stuckAfterMs
+      if (Date.now() >= stuckAt) {
+        log(`MMS work is still draining ${Math.round(stuckAfterMs / 1000)}s after the stop's deadline; forcing the stop`)
+        break
+      }
       log('MMS is still finishing its work; waiting before exiting')
+      await sleepAsync(retryDelayMs)
     }
   }
   state.mms = null

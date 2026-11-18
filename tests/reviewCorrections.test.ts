@@ -106,7 +106,8 @@ describe('Review: daemon.shutdown shared implementation', () => {
       ownerToken: null,
       runtimeWritten: false,
       pollStop: null,
-      shuttingDown: false
+      shuttingDown: false,
+      drainWait: { retryDelayMs: 5, stuckAfterMs: 60_000 }
     }
     let done = false
     const teardown = shutdownDaemonLifecycle(state).then(() => { done = true })
@@ -117,6 +118,32 @@ describe('Review: daemon.shutdown shared implementation', () => {
     await teardown
     expect(state.mms).toBeNull()
   })
+
+  it('a drain that never finishes is stuck: after the bounded wait the stop goes ahead, logged, and teardown ends', async () => {
+    const busy = Object.assign(new Error('Profile work is still draining'), { code: 'profile_busy' })
+    let attempts = 0
+    const mms = {
+      stop: async () => {
+        attempts += 1
+        throw new AggregateError([busy], 'Failed to stop installation services')
+      }
+    } as unknown as MmsInstance
+    const state: DaemonLifecycleState = {
+      homeDir: home,
+      mms,
+      protocolServer: null,
+      ownerToken: null,
+      runtimeWritten: false,
+      pollStop: null,
+      shuttingDown: false,
+      drainWait: { retryDelayMs: 5, stuckAfterMs: 100 }
+    }
+    const logs: string[] = []
+    await shutdownDaemonLifecycle(state, { onLog: (msg) => logs.push(msg) })
+    expect(attempts).toBeGreaterThan(1)
+    expect(state.mms).toBeNull()
+    expect(logs.at(-1)).toMatch(/forcing the stop/)
+  }, 10_000)
 
   it('a stop reaches a daemon whose lease is unreadable for a moment while it is rewritten', async () => {
     const lease = acquireMmsOwnerLease(home, { kind: 'daemon' })

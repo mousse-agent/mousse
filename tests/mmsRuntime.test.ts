@@ -1,8 +1,8 @@
 import {
   closeSync,
-  existsSync,
   mkdtempSync,
   openSync,
+  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync
@@ -115,14 +115,19 @@ describe('mmsRuntime readiness (secondary to owner lease)', () => {
     expect(readStopRequest(home, 'token-c')).toBeNull()
   })
 
-  it("the earlier versions' shared stop file still stops the daemon it names, and only that one", () => {
-    writeFileSync(join(home, MMS_STOP_REQUEST_FILENAME), JSON.stringify({ token: 'token-old', requestedAt: new Date().toISOString() }))
+  it("the earlier versions' shared stop file: written for a daemon holding the home, honoured only for its token, never removed", () => {
+    const shared = join(home, MMS_STOP_REQUEST_FILENAME)
+    // The daemon holding the home may be an earlier version, which reads only the shared file.
+    writeStopRequest(home, 'token-held', { shared: true })
+    expect(JSON.parse(readFileSync(shared, 'utf-8')).token).toBe('token-held')
+    // An earlier version's `service stop` replaced it for its own daemon.
+    writeFileSync(shared, JSON.stringify({ token: 'token-old', requestedAt: new Date().toISOString() }))
     expect(readStopRequest(home, 'token-old')?.token).toBe('token-old')
     expect(readStopRequest(home, 'token-b')).toBeNull()
-    clearStopRequest(home, 'token-b')
-    expect(existsSync(join(home, MMS_STOP_REQUEST_FILENAME))).toBe(true)
+    // Clearing a daemon's stop leaves the shared file to whoever wrote it last.
+    clearStopRequest(home, 'token-held')
     clearStopRequest(home, 'token-old')
-    expect(existsSync(join(home, MMS_STOP_REQUEST_FILENAME))).toBe(false)
+    expect(JSON.parse(readFileSync(shared, 'utf-8')).token).toBe('token-old')
   })
 
   it('removeOwnRuntimeRecord never deletes a different token', () => {

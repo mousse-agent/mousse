@@ -30,7 +30,11 @@ import {
 } from '../mms/ownership/MmsOwnerLease'
 
 export const MMS_RUNTIME_FILENAME = 'mms.runtime.json'
-/** The one stop request file of earlier versions; still honoured for the daemon whose token it carries. */
+/**
+ * The one stop request file of earlier versions. Still written for a daemon that holds the home (it may
+ * be an earlier version, which reads only this file) and honoured for the daemon whose token it carries.
+ * Never removed: an earlier version may have just written it for another daemon.
+ */
 export const MMS_STOP_REQUEST_FILENAME = 'mms.stop.request.json'
 /**
  * Carries the owner token a window client chose for a daemon it starts, so it can stop that daemon
@@ -392,13 +396,15 @@ export function resolveRuntimeStatus(homeDir: string): {
   return { running: true, record, staleRemoved: false, owner }
 }
 
-export function writeStopRequest(homeDir: string, token: string): MmsStopRequest {
+/** `shared` also writes the earlier versions' file, for a daemon that holds the home and may be one of them. */
+export function writeStopRequest(homeDir: string, token: string, opts: { shared?: boolean } = {}): MmsStopRequest {
   const request: MmsStopRequest = {
     token,
     requestedAt: new Date().toISOString(),
     requesterPid: process.pid
   }
   writeJsonAtomic(getMmsStopRequestPath(homeDir, token), request)
+  if (opts.shared) writeJsonAtomic(getLegacyStopRequestPath(homeDir), request)
   return request
 }
 
@@ -426,17 +432,11 @@ export function readStopRequest(homeDir: string, token: string): MmsStopRequest 
   return null
 }
 
-/** Removes the stop request for the daemon with `token` only; another daemon's stays. */
+/** Removes the stop request for the daemon with `token` only; another daemon's, and the shared file, stay. */
 export function clearStopRequest(homeDir: string, token: string): void {
   try {
     const path = getMmsStopRequestPath(homeDir, token)
     if (existsSync(path)) unlinkSync(path)
-  } catch {
-    /* ignore */
-  }
-  try {
-    const legacy = getLegacyStopRequestPath(homeDir)
-    if (readStopRequestFile(legacy)?.token === token) unlinkSync(legacy)
   } catch {
     /* ignore */
   }
