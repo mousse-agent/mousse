@@ -21,7 +21,7 @@ import { BotPrompt } from './BotPrompt'
 import { promptCacheState, shortDuration, useMinuteClock } from '../../lib/promptCache'
 import { profilePreferenceKey } from '../../lib/profilePreferences'
 import { centerWithin } from '../../lib/shellScroll'
-import { shortModelName } from '../../../shared/modelNames'
+import { canonicalModelName, modelNameFromId, shortModelName } from '../../../shared/modelNames'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string; 'aria-hidden'?: boolean }>
 
@@ -279,8 +279,8 @@ function talkModelText(choices: RunsOnState['choices']): string | null {
   if (!pick || !choices?.providers) return null
   const listing = choices.providers.find((provider) => provider.instanceId === pick.instanceId)
   const model = listing?.models.find((option) => option.id === pick.model)
-  if (!model) return shortModelName(pick.model)
-  return `${shortModelName(model.label)}${pick.effort ? `, ${pick.effort}` : ''}`
+  if (!model) return shortModelName(modelNameFromId(pick.model))
+  return `${shortModelName(canonicalModelName(model.label, model.id))}${pick.effort ? `, ${pick.effort}` : ''}`
 }
 
 function RunsOn({ name, state }: { name: string; state: RunsOnState }) {
@@ -473,7 +473,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const now = useMinuteClock(true, context?.lastRequestAt)
   const cache = cacheWords(context, now)
   const view = botContextView(context)
-  const model = talkModelText(runsOn.choices) ?? (context?.model ? shortModelName(context.model) : null)
+  const model = talkModelText(runsOn.choices) ?? (context?.model ? shortModelName(modelNameFromId(context.model)) : null)
   const runs = detail?.runs ?? []
   const reminders = detail?.reminders ?? []
 

@@ -298,6 +298,8 @@ describe('About this bot', () => {
       fake.details.b1 = { ...fake.details.b1!, context: measured() }
       await show()
       expect(fact('Context')).toBe('38% of 200k used')
+      // No Talk pick read yet: the model that answered, by name.
+      expect(fact('Model')).toBe('Opus 5.5')
       expect(fact('Cache')).toBe('Warm, 3m left')
       const context = host.querySelector('[data-testid="bot-about-context"]')!
       expect(context.textContent).toContain('76k of 200k tokens')
