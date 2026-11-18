@@ -170,7 +170,7 @@ function withdrawalCode(action: Pick<ActionRow, 'card_json' | 'result_json'>): B
   if (text.includes('work ended')) return 'bot_action_work_ended'
   if (text.includes('paused')) return 'bot_action_owner_paused'
   if (text.includes('forgotten')) return 'bot_action_owner_removed'
-  if (text.includes('could not wait')) return 'bot_action_disabled'
+  if (text.includes('could not wait') || text.includes('owner changed a setting')) return 'bot_action_disabled'
   if (text.includes('schedule') && text.includes('changed')) return 'bot_action_schedule_changed'
   if (text.includes('changed since')) return 'bot_action_binding_changed'
   if (text.includes('tool') && text.includes('changed')) return 'bot_action_permission_changed'
@@ -223,6 +223,7 @@ const pending = new Set(['open', 'approved', 'running'])
 export class BotActionChanged extends Error { constructor(message: string, readonly code = 'bot_action_changed') { super(message) } }
 const changed = () => new BotActionChanged('This changed since you saw it. Check it again before sending.')
 export class BotActions {
+  private warming?: Promise<void>
   private readonly executing = new Set<string>()
   constructor(private readonly host: Host) {
     registerHeldCalls(host.store.db, {
@@ -272,7 +273,7 @@ export class BotActions {
     if (this.host.enabled()) return
     this.host.store.db.transaction(() => {
       for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
-        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This could not wait for your owner after all, so nothing was sent. Do not make this call again in this work; say in your report what you would have sent.' }, 'bot_action_disabled'))
+        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'Your owner changed a setting, so this request was withdrawn and nothing was sent. Do not make this call again in this work; say in your report what you would have sent.' }, 'bot_action_disabled'))
           this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
       }
     })
@@ -313,12 +314,16 @@ export class BotActions {
   forWork(id: string): ActionRow | undefined {
     return this.host.store.get("SELECT * FROM bot_actions WHERE activation_id = ? ORDER BY rowid DESC LIMIT 1", id) as unknown as ActionRow | undefined
   }
-  pendingInTurn(activationId: string, mainN: number): ActionRow | undefined {
+  inTurn(activationId: string, mainN: number): ActionRow | undefined {
     const action = this.forWork(activationId)
-    if (!action || !pending.has(action.status)) return undefined
+    if (!action) return undefined
     const dispatchId = JSON.parse(action.call_key)[1]
     const dispatch = this.host.store.dispatches(activationId).find(d => d.clientRequestId === dispatchId)
     return dispatch && (dispatch.n === mainN || dispatch.mainN === mainN) ? action : undefined
+  }
+  pendingInTurn(activationId: string, mainN: number): ActionRow | undefined {
+    const action = this.inTurn(activationId, mainN)
+    return action && pending.has(action.status) ? action : undefined
   }
   private ownerWroteAfter(action: ActionRow, removed = false): boolean {
     const card = JSON.parse(action.card_json ?? '{}')
@@ -333,12 +338,12 @@ export class BotActions {
     if (!this.host.enabled()) return { text: 'This tool cannot be used now. Carry on without it.', isError: true }
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
-    const existing = this.host.store.get('SELECT id, args_digest, target_json FROM bot_actions WHERE call_key = ?', callKey)
+    const existing = this.host.store.get('SELECT * FROM bot_actions WHERE call_key = ?', callKey)
     if (existing?.args_digest === '[forgotten]' && existing.target_json === JSON.stringify({ server: tool.server, tool: tool.tool }))
       return { text: 'This call id belongs to a forgotten call. Nothing new was held or sent.' }
     if (existing && (existing.args_digest !== actionDigest(args) || existing.target_json !== JSON.stringify({ server: tool.server, tool: tool.tool })))
       return { text: 'This call id was already used for a different call. Nothing was held for this call.', isError: true }
-    if (existing) return { text: 'This call is held for your owner. End your turn now.' }
+    if (existing) return pending.has(String(existing.status)) ? { text: 'This call is held for your owner. End your turn now.' } : { text: actionContinuation(existing as unknown as ActionRow), isError: true }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
     const origin = this.host.origin(row)
     if (!origin) return { text: "This work's starting turn could not be established. Nothing was held or sent; say so in your report.", isError: true }
@@ -413,16 +418,19 @@ export class BotActions {
     })
   }
 
-  private valid(action: ActionRow): BotActivationRow | undefined {
+  private valid(action: ActionRow, allowCold = false): BotActivationRow | undefined {
     const row = this.host.store.activation(action.activation_id)
     if (!row || !action.exec_args || action.exec_args.length > ACTION_MAX_ARGUMENT_CHARS || (action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now()))) return undefined
     try {
       const args: unknown = JSON.parse(action.exec_args)
       if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
-      const review = reviewArguments(args, this.host.schema(JSON.parse(action.target_json)))
+      const target = JSON.parse(action.target_json)
+      const binding = this.host.binding(row, target)
+      // Admission may precede the first relay listing. Execution always requires the full binding.
+      if (!binding && allowCold && !this.host.obsolete(action)) return row
+      const review = reviewArguments(args, this.host.schema(target))
       if (action.args_json !== '"[forgotten]"' && (canonicalJson(JSON.parse(action.args_json)) !== canonicalJson(review.args)
         || Boolean(JSON.parse(action.card_json ?? '{}').hasHiddenValues) !== review.hasHiddenValues)) return undefined
-      const binding = this.host.binding(row, JSON.parse(action.target_json))
       return binding && canonicalJson(binding) === canonicalJson(JSON.parse(action.binding_json)) ? row : undefined
     } catch { return undefined }
   }
@@ -431,7 +439,7 @@ export class BotActions {
     const action = this.get(id)
     if (action?.status === 'running' && this.approvedDeadline(action) <= Date.parse(this.host.store.now())) {
       this.sendTimeout(action)
-      throw new BotActionChanged(JSON.parse(this.get(id)!.result_json!).text, 'bot_action_unreachable')
+      throw new BotActionChanged(botActionRefusalText('bot_action_gone'), 'bot_action_gone')
     }
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
@@ -442,7 +450,7 @@ export class BotActions {
   private checked(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }, settle: boolean): ActionRow {
     const action = this.get(input.actionId)
     if (!action) throw new BotActionChanged("This can't be sent any more.", 'bot_action_gone')
-    if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(JSON.parse(action.result_json).text, 'bot_action_unreachable')
+    if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(botActionRefusalText('bot_action_gone'), 'bot_action_gone')
     if (action.status === 'expired') throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
     if (action.status === 'withdrawn') {
       const code = withdrawalCode(action)
@@ -461,7 +469,13 @@ export class BotActions {
       })
       throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
     }
-    if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
+    if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action, true)) throw changed()
+    if (input.answer === 'send' && !this.host.binding(row!, JSON.parse(action.target_json))) {
+      // Admission is synchronous at the bridge. Refuse before effects, then warm for a later tap.
+      this.warming ??= Promise.resolve().then(() => this.host.refresh()).catch(() => {}).finally(() => { this.warming = undefined })
+      const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'The service'
+      throw new BotActionChanged(botActionRefusalText('bot_action_unreachable', { serverName: service }), 'bot_action_unreachable')
+    }
     return action
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
@@ -532,7 +546,7 @@ export class BotActions {
     this.withdrawChanged()
     this.expireDue()
     const interrupted = this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")
-    if (interrupted.length) await this.host.refresh()
+    if (interrupted.length || this.host.store.get("SELECT 1 FROM bot_actions WHERE status = 'open' LIMIT 1")) await this.host.refresh()
     this.withdrawChanged()
     if (this.host.store.get("SELECT 1 FROM bot_actions WHERE status IN ('open', 'approved') LIMIT 1")) this.host.held()
     for (const a of interrupted) {

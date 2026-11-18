@@ -78,13 +78,13 @@ const refusals = [
   ['work_ended', 'This work ended. Nothing was sent.'],
   ['owner_paused', 'This bot was paused, so nothing was sent.'],
   ['permission_changed', 'This tool or its permission changed, so nothing was sent.'],
-  ['disabled', 'This could not wait for your owner after all, so nothing was sent.'],
+  ['disabled', 'Withdrawn when asks first was turned off. Nothing was sent.'],
   ['owner_removed', 'You removed this request, so nothing was sent.'],
   ['binding_changed', 'This changed since you saw it. Nothing was sent.'],
   ['schedule_changed', 'This changed since you saw it. Nothing was sent.'],
   ['settled', 'This was already answered.'],
   ['gone', "This can't be sent any more."],
-  ['unreachable', "Mail couldn't be reached, so nothing was sent."]
+  ['timed_out', "This can't be sent any more."]
 ] as const
 const rpcAnswer = (choice = 'send') => t.caller.net.session(t.node).rpc('bots.actions.answer', {
   botId: BOT, actionId: ACTION, digest: 'a'.repeat(64), answer: choice
@@ -96,21 +96,22 @@ it.each(refusals)('reports %s before effects over a real link', async (reason, s
   f.store.setPaused(realBot, reason === 'paused' ? 'owner' : null)
   if (reason !== 'gone') {
     const withdrawn = ['schedule_changed', 'work_ended', 'owner_paused', 'permission_changed', 'disabled', 'owner_removed', 'binding_changed'].includes(reason)
-    const status = withdrawn ? 'withdrawn' : ['expired', 'withdrawn'].includes(reason) ? reason : reason === 'settled' ? 'done' : reason === 'unreachable' ? 'failed' : 'open'
+    const status = withdrawn ? 'withdrawn' : ['expired', 'withdrawn'].includes(reason) ? reason : reason === 'settled' ? 'done' : reason === 'timed_out' ? 'failed' : 'open'
     f.store.run(`INSERT INTO bot_actions (id, call_key, bot_id, activation_id, lane, kind, target_json, args_json, args_digest, binding_json, status, expires_at, created_at, result_json, card_json)
       VALUES (?, ?, ?, 'missing-run', 'run', 'mcp', '{}', '{}', ?, '{}', ?, ?, ?, ?, ?)`,
       ACTION, ACTION, realBot, 'b'.repeat(64), status, new Date(f.clock.now + 60_000).toISOString(), f.store.now(),
-      reason === 'unreachable' ? JSON.stringify({ text: sentence, notSentInTime: true }) : withdrawn ? JSON.stringify({ text: sentence }) : null, withdrawn ? JSON.stringify({ withdrawalCode: `bot_action_${reason}` }) : null)
+      reason === 'timed_out' ? JSON.stringify({ text: sentence, notSentInTime: true }) : withdrawn ? JSON.stringify({ text: sentence }) : null, withdrawn ? JSON.stringify({ withdrawalCode: `bot_action_${reason}` }) : null)
   }
   const input = { botId: realBot, actionId: ACTION, digest: 'a'.repeat(64), answer: 'send' as const }
   check = () => f.bots.service.actionCheck(input)
   answer = vi.fn(() => f.bots.service.answerAction(input))
   sent = []
   const error = await rpcAnswer().catch(error => error)
-  expect(error).toMatchObject({ code: 'conflict', details: { reason: `bot_action_${reason}` } })
+  const refusalCode = reason === 'timed_out' ? 'bot_action_gone' : `bot_action_${reason}`
+  expect(error).toMatchObject({ code: 'conflict', details: { reason: refusalCode } })
   const frame = sent.find(header => header.t === 'rpc.result' && 'error' in header)
   expect(frame).toMatchObject({ error: { code: 'conflict', message: new NetError('conflict').message,
-    cause: [{ code: `application.bot_action_${reason}`, message: new NetError('conflict').message }] } })
+    cause: [{ code: `application.${refusalCode}`, message: new NetError('conflict').message }] } })
   expect(botActionRefusal(error, { botName: 'Mail', serverName: message.action!.serverName })?.text).toBe(sentence)
   expect(error.message).not.toBe(sentence)
   expect(answer).not.toHaveBeenCalled()
@@ -185,3 +186,45 @@ it('an older computer preflight conflict remains definite on a newer device', as
   expect(answer).not.toHaveBeenCalled()
   expect(t.caller.net.session(t.node).state()).toBe('open')
 }, 60_000)
+
+it.each(['ready', 'unreachable', 'changed'] as const)('cold admission over the bridge remains definite: %s', async state => {
+  // Real BotActions and bridge; only the service listing and tool transport are scripted.
+  const { BotActions } = await import('../../../../src/mms/bots/actions/BotActions')
+  f.store.run('DELETE FROM bot_actions')
+  let cold = false
+  let schema = 1
+  const calls: unknown[] = []
+  const actions = new BotActions({ store: f.store, enabled: () => true, name: () => 'Mail',
+    refresh: async () => { if (state !== 'unreachable') { cold = false; if (state === 'changed') schema = 2 } },
+    park: () => {}, lifetime: () => 3600_000, origin: () => 'owner', schema: () => ({}),
+    binding: () => cold ? undefined : { schema }, obsolete: () => false,
+    post: () => {}, settled: () => {}, publish: () => {}, ownerAnswered: () => {}, held: () => {}, forgottenRequest: () => {},
+    execute: async (_row, _tool, args) => { calls.push(args); return { text: 'delivered' } }
+  })
+  const row = f.store.listActivations(realBot)[0]!
+  actions.hold(row, 'bridge-dispatch', { server: 'mail', tool: 'send', serverName: 'Mail' } as never, { to: 'one@example.test' }, 'bridge-call')
+  const a = actions.forWork(row.id)!
+  f.store.run('UPDATE bot_actions SET id = ? WHERE id = ?', ACTION, a.id)
+  message = { ...message, action: { ...message.action!, actionId: ACTION, digest: a.args_digest, args: {}, status: 'open' } }
+  const input = { actionId: ACTION, digest: a.args_digest, answer: 'send' as const }
+  check = () => actions.check(input)
+  answer = vi.fn(() => actions.answer(input))
+  const tap = () => t.caller.net.session(t.node).rpc('bots.actions.answer', { botId: BOT, ...input }, { id: newId('rpc'), idem: newId('rpc'), deadlineMs: 15_000 })
+  cold = true
+  const first = await tap().catch(error => error)
+  expect(first).toMatchObject({ code: 'conflict', details: { reason: 'bot_action_unreachable' } })
+  expect(first.message).not.toContain('partly happened')
+  expect(botActionRefusal(first, { serverName: 'Mail' })?.text).toBe("Mail couldn't be reached. Nothing was sent. Try again when it is available.")
+  expect(answer).not.toHaveBeenCalled()
+  expect(actions.get(ACTION)?.status).toBe('open')
+  if (state === 'ready') {
+    expect(await tap()).toMatchObject({ status: 'done' })
+    expect(calls).toEqual([{ to: 'one@example.test' }])
+  } else {
+    const next = await tap().catch(error => error)
+    expect(next).toMatchObject({ code: 'conflict', details: { reason: state === 'changed' ? 'bot_action_changed' : 'bot_action_unreachable' } })
+    expect(next.message).not.toContain('partly happened')
+    expect(calls).toEqual([])
+    expect(answer).not.toHaveBeenCalled()
+  }
+})

@@ -3532,7 +3532,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const subagent = input.role === 'subagent'
     // Work that asked its owner a question in this dispatch ends its turn: every later call is refused (never a wall,
     // which would cut the turn as an interruption), and the answer continues it. It only refuses; it never allows.
-    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? (this.actions.pendingInTurn(row.id, input.mainN) ? 'The call is held for your owner. End your turn now.' : this.store.workWait(row.id)?.status === 'waiting' ? 'This work is waiting. End your turn now; it carries on here when the time or event comes.' : QUESTION_END_TURN_TEXT) : undefined)
+    const endTurn = (): string | undefined => {
+      if (input.role !== 'activation' || this.askedIn.get(row.id) !== input.mainN) return undefined
+      const action = this.actions.inTurn(row.id, input.mainN)
+      if (action) {
+        if (action.status === 'open') return 'Not sent: one call already waits for your owner in this turn, and this one was not held. End your turn now. After your owner answers, ask again only if it is still needed and is not the same request.'
+        const ownerAnswered = ['approved', 'running', 'done', 'declined'].includes(action.status)
+          || action.status === 'withdrawn' && JSON.parse(action.card_json ?? '{}').withdrawalCode === 'bot_action_owner_removed'
+        return ownerAnswered ? 'Not sent: your owner already answered the request in this turn. End your turn now.'
+          : 'Not sent: the request held in this turn is no longer waiting. End your turn now.'
+      }
+      return this.store.workWait(row.id)?.status === 'waiting'
+        ? 'This work is waiting. End your turn now; it carries on here when the time or event comes.' : QUESTION_END_TURN_TEXT
+    }
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
       const stop = endTurn()
@@ -3579,6 +3591,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           if (row.trigger.kind === 'schedule' && !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return { text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent.", isError: true }
           const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]))
           if (!existing) {
+            const stop = endTurn()
+            if (stop) return { text: stop, isError: true }
             const allowed = base.check({ kind: 'mcp', server: tool.server, tool: tool.tool, args })
             if (!allowed.ok) return { text: checkMessage(allowed), isError: true }
           }

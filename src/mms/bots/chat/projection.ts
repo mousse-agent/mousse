@@ -355,7 +355,7 @@ export class BotChatProjection {
 
   /** A lightweight row-kind check for telling priority; no card or message reads. */
   isActionMessage(row: Pick<BotMessageRow, 'id'>): boolean {
-    return row.id.startsWith('bm_action_') && this.options.asksFirst?.() === true
+    return row.id.startsWith('bm_action_')
   }
 
   toMessage(row: BotMessageRow): BotChatMessage {
@@ -413,7 +413,7 @@ export class BotChatProjection {
   private actionForMessage(messageId: string): BotActionCard | undefined {
     // Only the two known nudge ids refer back to an existing review; they never create actions.
     messageId = messageId.replace(/_n[12]$/, '')
-    const row = this.store.get('SELECT id, bot_id, activation_id, args_digest, args_json, card_json, status, created_at, ran_at, answered_at, target_json, result_json, bot_note FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { bot_note: string | null; created_at: string }) | undefined
+    const row = this.store.get('SELECT id, bot_id, activation_id, args_digest, args_json, card_json, status, created_at, ran_at, answered_at, target_json, result_json FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { created_at: string }) | undefined
     if (!row) return undefined
     const storedMetadata = JSON.parse(row.card_json ?? '{}')
     const metadata = storedMetadata && typeof storedMetadata === 'object' && !Array.isArray(storedMetadata) ? storedMetadata : {}
@@ -456,8 +456,7 @@ export class BotChatProjection {
       status: row.status as BotActionCard['status'],
       ...(previous && typeof previousAt === 'string' ? { previous: { status: previous.status as 'done' | 'uncertain' | 'failed', at: previousAt } } : {}),
       ...(at ? { at } : {}),
-      ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}), ...(result.notSentInTime === true ? { notSentInTime: true } : {}) } } : {}),
-      ...(!forgotten && row.bot_note ? { note: row.bot_note } : {})
+      ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}), ...(result.notSentInTime === true ? { notSentInTime: true } : {}) } } : {})
     }
   }
 

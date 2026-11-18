@@ -91,7 +91,6 @@ export interface BotActionCard {
   status: 'open' | 'approved' | 'running' | 'done' | 'failed' | 'uncertain' | 'declined' | 'expired' | 'withdrawn'
   at?: string
   result?: { text?: string; toolReportedError?: boolean; notSentInTime?: boolean }
-  note?: string
   previous?: { status: 'done' | 'uncertain' | 'failed'; at: string }
   tooLarge?: boolean
   /** The stored review was erased by the owner; only its outcome remains. */
