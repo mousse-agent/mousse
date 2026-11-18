@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
- * About this bot (bot-ui §4.8): the whole mouse, the name and the description; Can use and Runs,
- * each item with a Remove that works; Pause and Delete. Nothing else.
+ * About this bot (bot-ui §4.8): the whole mouse beside what it does now, its model, context and cache; then sections
+ * that fold (Context opens by default): Instructions, Can use and Automations, each item with a Remove that asks first;
+ * Reminders, Memory, Runs on; Pause and Delete.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -20,12 +21,20 @@ const botsInitial = useBotsStore.getInitialState()
 const bot = summary('b1', { name: 'Inbox helper', description: 'Tells me which emails need a reply.', look: { colour: 'green', accessory: 'scarf' } })
 const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('button')].find((element) => element.getAttribute('aria-label') === label || element.textContent === label)
 const click = async (element: Element | undefined) => { await act(async () => { (element as HTMLElement).click() }); await act(async () => {}) }
-const rows = (heading: string) => {
-  const items: string[] = []
-  let node = [...host.querySelectorAll('h3')].find((element) => element.textContent === heading)?.nextElementSibling
-  while (node && node.classList.contains('bot-about-row')) { items.push(node.querySelector('span')!.textContent!); node = node.nextElementSibling }
-  return items
+/** A section, found by its heading as a person reads it. */
+const section = (title: string) => [...host.querySelectorAll('.bot-about-fold')].find((element) => element.querySelector('.bot-about-fold-title')?.textContent === title)
+/** The titles of a section's rows, without a status word beside them. */
+const rows = (title: string) => [...section(title)?.querySelectorAll('.settings-item-title') ?? []].map((element) => element.firstChild?.textContent ?? '')
+/** Runs on: each line's label. */
+const setupRows = () => [...section('Runs on')?.querySelectorAll('.bot-about-line, .bot-about-row') ?? []].map((element) => element.querySelector('span')?.textContent)
+/** Remove asks first, as everywhere in Settings: the first click only arms it. */
+async function remove(label: string, confirm = 'Confirm remove') {
+  const before = fake.calls.length
+  await click(button(label))
+  expect(fake.calls.length).toBe(before)
+  await click(button(confirm))
 }
+const ALL_OPEN = ['context', 'prompt', 'permissions', 'automations', 'reminders', 'setup']
 async function show(current = bot) {
   fake.bots = [current]
   await act(async () => root.render(createElement(BotAboutPanel, { bot: current })))
@@ -33,6 +42,8 @@ async function show(current = bot) {
 }
 
 beforeEach(() => {
+  // Most cases read a section's contents: every section opens, as if the owner had opened them before.
+  window.localStorage.setItem('mousse-profile-default-mousse:bot-about-open', JSON.stringify(ALL_OPEN))
   fake = fakeBots({
     details: {
       b1: {
@@ -57,6 +68,7 @@ afterEach(() => {
   host.remove()
   setBotsClient(null)
   useBotsStore.setState(botsInitial)
+  window.localStorage.clear()
 })
 
 describe('About this bot', () => {
@@ -74,17 +86,34 @@ describe('About this bot', () => {
     const head = host.querySelector('.bot-about-head')!
     const face = head.querySelector('.bot-face')!
     expect(face.getAttribute('data-view')).toBe('full')
-    expect(face.getAttribute('width')).toBe('88')
     expect(face.getAttribute('data-colour')).toBe('green')
     expect(head.querySelector('h2')?.textContent).toBe('Inbox helper')
-    expect(host.querySelector('.bot-prompt-body')?.textContent).toBe('Tells me which emails need a reply.')
-    expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['PROMPT', 'CAN USE', 'RUNS', 'RUNS ON'])
+    expect(section('Instructions')?.querySelector('.bot-prompt-body')?.textContent).toBe('Tells me which emails need a reply.')
+    // Reminders shows only when there are some.
+    expect([...host.querySelectorAll('.bot-about-fold-title')].map((element) => element.textContent)).toEqual(['Context and cache', 'Instructions', 'Can use', 'Automations', 'Memory', 'Runs on'])
+  })
+
+  it('opens Context alone at first; a section opened stays open next time', async () => {
+    window.localStorage.clear()
+    await show()
+    const opened = () => [...host.querySelectorAll('.bot-about-fold-head[aria-expanded="true"] .bot-about-fold-title')].map((element) => element.textContent)
+    expect(opened()).toEqual(['Context and cache'])
+    // Closed, a section still says what is inside.
+    expect(section('Can use')?.querySelector('.bot-about-fold-summary')?.textContent).toBe('2 on')
+    expect(section('Automations')?.querySelector('.bot-about-fold-summary')?.textContent).toBe('1 · paused')
+    expect(rows('Can use')).toEqual([])
+    await click(section('Can use')!.querySelector('.bot-about-fold-head')!)
+    expect(rows('Can use')).toEqual(['Use files on this computer', 'Use the pdf skill'])
+    act(() => root.unmount())
+    root = createRoot(host)
+    await show()
+    expect(opened()).toEqual(['Context and cache', 'Can use'])
   })
 
   it('with an older service (no rows): one Model picker, by usage until the owner picks a model by hand, on this computer (#673)', async () => {
     await show()
     // One computer: no Computer row (computer names show only with two or more).
-    expect(rows('RUNS ON')).toEqual(['Model', 'Devices'])
+    expect(setupRows()).toEqual(['Model', 'Devices'])
     expect(host.querySelector('[data-testid="bot-about-model"]')?.textContent).toContain('By usage')
     await click(host.querySelector('[aria-label="Inbox helper\'s model"]') ?? undefined)
     const sonnet = [...document.querySelectorAll('[role="option"]')].find((option) => option.textContent?.includes('Claude · sonnet'))
@@ -216,7 +245,7 @@ describe('About this bot', () => {
   it('lists the person’s other computers in Computer, greyed: a bot runs on the computer that holds it', async () => {
     vi.mocked(fake.client.model).mockImplementationOnce(async () => ({ model: null, models: [], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }, { id: 'nod_laptop', name: 'Laptop', offline: true, unavailable: 'Laptop is offline.' }] }))
     await show()
-    expect(rows('RUNS ON')).toEqual(['Model', 'Computer', 'Devices'])
+    expect(setupRows()).toEqual(['Model', 'Computer', 'Devices'])
     expect(host.querySelector('[data-testid="bot-about-computer"]')?.textContent).toContain('Desk')
     await click(host.querySelector('[aria-label="Inbox helper\'s computer"]') ?? undefined)
     const laptop = [...document.querySelectorAll('[role="option"]')].find((option) => option.textContent?.includes('Laptop · offline'))
@@ -225,10 +254,10 @@ describe('About this bot', () => {
 
   it('lists what it can use and removes one', async () => {
     await show()
-    expect(rows('CAN USE')).toEqual(['Use files on this computer', 'Use the pdf skill'])
-    await click(button('Remove use files on this computer'))
+    expect(rows('Can use')).toEqual(['Use files on this computer', 'Use the pdf skill'])
+    await remove('Remove use files on this computer')
     expect(fake.calls).toContainEqual(['revokePermission', 'b1', 'fp1'])
-    expect(rows('CAN USE')).toEqual(['Use the pdf skill'])
+    expect(rows('Can use')).toEqual(['Use the pdf skill'])
   })
 
   it('marks an MCP server that gives nothing now with what is true of it, keeping Remove', async () => {
@@ -238,29 +267,96 @@ describe('About this bot', () => {
       { id: 'fp4', title: 'use your Notes tools', note: 'Notes isn\'t set up in Mousse any more.', grantedAt: '2026-11-06T10:00:00.000Z', gone: true }
     ]
     await show()
-    expect([...host.querySelectorAll('[data-testid="bot-about-gone"]')].map((element) => element.textContent)).toEqual(['Switched off', 'Gone from Mousse'])
+    expect([...section('Can use')!.querySelectorAll('.bot-about-status')].map((element) => element.textContent)).toEqual(['Switched off', 'Gone from Mousse'])
     expect(button('Remove use your GitHub tools')).toBeDefined()
   })
 
-  it('says what a chat turn costs in one quiet line once turns reported usage, and nothing before', async () => {
+  it('says what its chat turns cost over the last week once turns reported usage, and nothing before', async () => {
     await show()
     expect(host.querySelector('[data-testid="bot-about-usage"]')).toBeNull()
     fake.details.b1 = { ...fake.details.b1, usage: { turns: 12, inputPerTurn: 18_400, outputPerTurn: 640, cachedShare: 0.72 } }
     await act(async () => { await useBotsStore.getState().loadDetail('b1') })
     const line = host.querySelector<HTMLElement>('[data-testid="bot-about-usage"]')!
-    expect(line.textContent).toBe('18k tokens a turn · 72% from cache')
-    expect(line.title).toContain('Chat turns in the last 7 days: 12')
+    expect(line.textContent).toContain('12 turns · 18k in, 640 out a turn')
+    expect(line.textContent).toContain('72% cached')
+    expect(line.querySelector<HTMLElement>('[title]')?.title).toContain('Chat turns in the last 7 days: 12')
   })
-  it('lists its runs and removes one', async () => {
+
+  describe('context and cache, from its latest chat turn', () => {
+    const MIN = 60_000
+    const measured = (extra: object = {}) => ({ used: 76_000, window: 200_000, model: 'claude-opus-5-5', turn: { cacheRead: 69_000, cacheWrite: 4_000, fresh: 3_000 }, lastRequestAt: Date.now() - 2 * MIN - 1000, cacheTtlMs: 5 * MIN, ...extra })
+    const fact = (term: string) => [...host.querySelectorAll('.bot-about-facts dt')].find((element) => element.textContent === term)?.nextElementSibling?.textContent
+
+    it('before any turn: no figures, and Context says when it will know', async () => {
+      await show()
+      expect(fact('Context')).toBeUndefined()
+      expect(fact('Cache')).toBeUndefined()
+      expect(section('Context and cache')?.textContent).toContain('Measured after its next message.')
+    })
+
+    it("how full its context is, how the last turn's input split, and how long the cache stays warm", async () => {
+      fake.details.b1 = { ...fake.details.b1!, context: measured() }
+      await show()
+      expect(fact('Context')).toBe('38% of 200k used')
+      // No Talk pick read yet: the model that answered, by name.
+      expect(fact('Model')).toBe('Opus 5.5')
+      expect(fact('Cache')).toBe('Warm, 3m left')
+      const context = host.querySelector('[data-testid="bot-about-context"]')!
+      expect(context.textContent).toContain('76k of 200k tokens')
+      expect(context.querySelector('[role="img"]')?.getAttribute('aria-label')).toBe('Context 38% full')
+      expect([...context.querySelectorAll('.context-usage-item')].map((item) => item.textContent)).toEqual(['Read from cache91%', 'Written to cache5%', 'Sent fresh4%'])
+      expect(section('Context and cache')?.textContent).toContain('Next message reads 76k from cache.')
+    })
+
+    it('an expired cache says the next message sends it all again; without a lifetime, how long it has been idle', async () => {
+      fake.details.b1 = { ...fake.details.b1!, context: measured({ lastRequestAt: Date.now() - 65 * MIN }) }
+      await show()
+      expect(fact('Cache')).toBe('Expired 1h ago')
+      expect(section('Context and cache')?.textContent).toContain('Next message sends all 76k again.')
+      act(() => root.unmount())
+      root = createRoot(host)
+      fake.details.b1 = { ...fake.details.b1!, context: measured({ cacheTtlMs: undefined, lastRequestAt: Date.now() - 10 * MIN }) }
+      await show()
+      expect(fact('Cache')).toBe('Idle 10m')
+    })
+
+    it('a runtime that reports no token count or window shows the cache alone', async () => {
+      fake.details.b1 = { ...fake.details.b1!, context: measured({ used: undefined, window: undefined }) }
+      await show()
+      expect(fact('Context')).toBeUndefined()
+      expect(fact('Cache')).toBe('Warm, 3m left')
+      expect(section('Context and cache')?.textContent).toContain('Next message reads from cache.')
+    })
+  })
+
+  it('lists each automation by name, when it runs, what it does and how its last run went; removes one after asking', async () => {
+    const next = new Date(Date.now() + 26 * 60 * 60_000).toISOString()
+    fake.details.b1!.runs = [
+      { id: 's1', label: 'every weekday · 09:00', kind: 'schedule', nextAt: next, name: 'Morning PR digest', does: 'Read open PRs and tell me which need me.', lastAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(), lastOutcome: 'failed' },
+      // An older service sends the schedule alone: it is named by when it runs.
+      { id: 's2', label: 'every Friday · 16:00', kind: 'schedule', paused: true }
+    ]
     await show()
-    expect(rows('RUNS')).toEqual(['Every weekday · 09:00'])
-    await click(button('Remove every weekday · 09:00'))
+    expect(rows('Automations')).toEqual(['Morning PR digest', 'Every Friday at 16:00'])
+    const automations = () => [...section('Automations')!.querySelectorAll('.bot-about-automation')]
+    expect(automations()[0]!.textContent).toContain(`Every weekday at 09:00 · next ${nextRunText(next)}`)
+    expect(automations()[0]!.textContent).toContain('Read open PRs and tell me which need me.')
+    expect(automations()[0]!.textContent).toContain('Last ran 3h ago, failed')
+    expect(automations()[1]!.textContent).toContain('Paused')
+    await remove('Remove Morning PR digest')
     expect(fake.calls).toContainEqual(['removeSchedule', 'b1', 's1'])
-    expect(rows('RUNS')).toEqual([])
+    expect(rows('Automations')).toEqual(['Every Friday at 16:00'])
+  })
+
+  it('removes its last automation and says how to get one', async () => {
+    await show()
+    await remove('Remove every weekday · 09:00')
+    expect(fake.calls).toContainEqual(['removeSchedule', 'b1', 's1'])
+    expect(rows('Automations')).toEqual([])
     expect(host.textContent).toContain('Only when you message it. Ask it to run on a schedule.')
   })
 
-  it('lists its waiting reminders under Runs with when each fires, and cancels one', async () => {
+  it('lists its waiting reminders with when each fires, and cancels one after asking', async () => {
     const at = new Date(Date.now() + 2 * 60 * 60_000).toISOString()
     fake.details.b1 = { summary: bot, permissions: [], runs: [], reminders: [
       { id: 'rem_1', dueAt: at, text: 'Call mum.' },
@@ -270,19 +366,18 @@ describe('About this bot', () => {
       { id: 'rem_4', dueAt: at, text: 'Tell them it shipped.', wake: 'when acme/app#12 merges' }
     ] }
     await show()
-    const reminders = [...host.querySelectorAll('[data-testid="bot-about-reminder"]')]
-    expect(reminders.map((row) => row.querySelector('.bot-about-clamp')!.textContent)).toEqual(['Call mum.', 'Check the weather.', 'Look at the logs again.', 'Tell them it shipped.'])
-    expect(reminders.map((row) => row.querySelector('.bot-about-next')!.textContent)).toEqual([
+    const reminders = () => [...section('Reminders')!.querySelectorAll('.settings-item')]
+    expect(reminders().map((row) => row.querySelector('.bot-about-clamp')!.textContent)).toEqual(['Call mum.', 'Check the weather.', 'Look at the logs again.', 'Tell them it shipped.'])
+    expect(reminders().map((row) => row.querySelector('.settings-item-desc')!.textContent)).toEqual([
       `Reminds: ${reminderWhenText(at)}`,
       `Starts: ${reminderWhenText(at)}`,
       `Follows up: ${reminderWhenText(at)}`,
       'Follows up when acme/app#12 merges'
     ])
-    expect(reminders[3]!.querySelector('.bot-about-next')!.getAttribute('title')).toBe(`Gives up: ${reminderWhenText(at)}`)
-    expect(host.textContent).not.toContain('Only when you message it.')
-    await click(button('Cancel reminder: Call mum.'))
+    expect(reminders()[3]!.querySelector('.settings-item-desc [title]')!.getAttribute('title')).toBe(`Gives up: ${reminderWhenText(at)}`)
+    await remove('Cancel reminder: Call mum.', 'Confirm cancel')
     expect(fake.calls).toContainEqual(['cancelReminder', 'b1', 'rem_1'])
-    expect([...host.querySelectorAll('[data-testid="bot-about-reminder"] .bot-about-clamp')].map((row) => row.textContent)).toEqual(['Check the weather.', 'Look at the logs again.', 'Tell them it shipped.'])
+    expect(reminders().map((row) => row.querySelector('.bot-about-clamp')!.textContent)).toEqual(['Check the weather.', 'Look at the logs again.', 'Tell them it shipped.'])
   })
 
   it('writes a reminder further than a week ahead with its date', () => {
@@ -307,7 +402,7 @@ describe('About this bot', () => {
     await show()
     // Only what every turn carries is counted: the expired entry is not.
     const row = host.querySelector<HTMLButtonElement>('[data-testid="bot-about-memory"]')!
-    expect(row.textContent).toBe('Memory · 41 wish · 3 notes')
+    expect(row.textContent).toBe('Memory1 wish · 3 notes')
     expect(host.querySelectorAll('[data-testid="bot-about-memory"]')).toHaveLength(1)
     await click(row)
     expect(useBotsStore.getState().memoryOpen).toEqual({ botId: 'b1' })
@@ -316,13 +411,13 @@ describe('About this bot', () => {
   it('counts its memory again when the bot changes, so an entry it just saved is counted', async () => {
     await show()
     const row = () => host.querySelector('[data-testid="bot-about-memory"]')!.textContent
-    expect(row()).toBe('Memory · 0Nothing yet')
+    expect(row()).toBe('MemoryNothing yet')
     fake.memory.b1 = [{ id: 'm1', version: 1, ref: 'm1', kind: 'owner', text: 'Call the owner Sam.', since: AT, learnedAt: AT, by: 'you said', status: 'active' }]
     // A detail read over the bridge is a new object each time.
     fake.details.b1 = { ...fake.details.b1! }
     await act(async () => { await useBotsStore.getState().loadDetail('b1') })
     await act(async () => {})
-    expect(row()).toBe('Memory · 11 wish')
+    expect(row()).toBe('Memory1 wish')
   })
 
   it('pauses, resumes and asks before deleting', async () => {
@@ -332,7 +427,7 @@ describe('About this bot', () => {
     await show({ ...bot, state: 'paused', stateText: 'Paused' })
     await click(button('Resume'))
     expect(fake.calls).toContainEqual(['resume', 'b1'])
-    await click(button('Delete'))
+    await click(button('Delete bot'))
     expect(useBotsStore.getState().dialog).toEqual({ kind: 'delete', botId: 'b1' })
     expect(fake.calls.some(([name]) => name === 'remove')).toBe(false)
   })
@@ -458,7 +553,7 @@ it.each([true, false])('keeps whole-service controls with asks-first projection 
   expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', false])
   await click(toggle())
   expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', true])
-  await click(button('Remove use Mail'))
+  await remove('Remove use Mail')
   expect(fake.calls).toContainEqual(['revokePermission', 'b1', 'mail'])
   expect(toggle()).toBeNull()
 })
@@ -470,19 +565,18 @@ it('keeps chat usage and the service asks-first row together with whole-service 
   await show()
   const usage = () => host.querySelector<HTMLElement>('[data-testid="bot-about-usage"]')!
   const service = () => [...host.querySelectorAll('.bot-about-permission')].find(element => element.textContent?.includes('Use your Mail tools'))!
-  expect(usage().textContent).toBe('18k tokens a turn · 72% from cache')
-  expect(usage().title).toContain('Chat turns in the last 7 days: 12')
+  expect(usage().textContent).toContain('72% cached')
   expect(service().textContent).toContain('Asks first')
   expect(service().contains(usage())).toBe(false)
   const toggle = service().querySelector<HTMLButtonElement>('[role="switch"]')!
   expect(toggle.getAttribute('aria-label')).toBe('use your Mail tools')
   await click(toggle)
   expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', false])
-  expect(usage().textContent).toContain('72% from cache')
-  await click(button('Remove use your Mail tools'))
+  expect(usage().textContent).toContain('72% cached')
+  await remove('Remove use your Mail tools')
   expect(fake.calls).toContainEqual(['revokePermission', 'b1', 'mail'])
   expect(service()).toBeUndefined()
-  expect(usage().textContent).toContain('18k tokens a turn')
+  expect(usage().textContent).toContain('18k in')
 })
 
 it('shows the asks-first coverage as visible permission text', async () => {

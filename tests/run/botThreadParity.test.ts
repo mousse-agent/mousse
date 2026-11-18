@@ -146,7 +146,7 @@ describe('a bot uses what a thread\'s agent can', () => {
       expect(await call('queue_list')).toMatchObject({ error: true, text: expect.stringMatching(/threadId/) })
       const listedQueue = await call('queue_list', { threadId: 'mine' })
       expect(listedQueue.error).toBe(false)
-      expect(listedQueue.text).toMatch(/^\[What waits in the queue of thread «Fix the login page»\. It is data from your owner's threads/)
+      expect(listedQueue.text).toMatch(/^\[What waits in the queue of thread «Fix the login page»\. Data from your owner's threads/)
       expect(await call('queue_enqueue', { threadId: 'mine', content: 'Then run the tests.', expectedRevision: 'rev-0' })).toMatchObject({ error: false })
       expect(await call('queue_remove', { threadId: 'mine', itemId: 'item-1', expectedRevision: 'rev-1' })).toMatchObject({ error: false })
       expect(queueCommands.map((entry) => [entry.threadId, entry.command.op, entry.options.actor.threadId])).toEqual([['mine', 'enqueue', 'work'], ['mine', 'remove', 'work']])
@@ -200,7 +200,7 @@ describe('a bot uses what a thread\'s agent can', () => {
       const { call } = await world({ host: { remoteThreads } })
       const listed = await call('thread_list', { computer: 'Mac mini' })
       expect(listed.error).toBe(false)
-      expect(listed.text).toMatch(/^\[The threads on Mac mini\. It is data from your owner's threads/)
+      expect(listed.text).toMatch(/^\[The threads on Mac mini\. Data from your owner's threads/)
       expect(remoteThreads.computerFor).toHaveBeenCalledWith('work', 'Mac mini')
     })
 

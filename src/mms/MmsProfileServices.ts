@@ -55,7 +55,7 @@ import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
-import { jobThreadIn, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
+import { jobThreadIn, lastReplyOf, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
 import { readRunResultText } from './run/delegation/hold'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
@@ -80,6 +80,7 @@ import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
 import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
 import { BOT_LAUNCHED_RECENT_MS } from '../shared/bots/personal/chat'
+import { BOT_THREADS_PERMISSION } from '../shared/bots/personal/manifest'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -800,7 +801,10 @@ export class MmsProfileServices {
           const record = this.threads.lifecycleStore.get(id)
           return Boolean(record && record.state !== 'active')
         },
-        result: (id, runId) => readRunResultText(this.runEngine.store, id, runId)
+        // A turn the owner started keeps no run result: then the thread's last reply, when the turn ended on one.
+        result: (id, runId) => readRunResultText(this.runEngine.store, id, runId) ?? lastReplyOf(this.orchestrator.visibleMessagesWithoutLoading(id)),
+        // What it waits on, for the bot that may answer it (`approval_respond`).
+        pending: (id) => this.questions.listPendingForThread(id)
       }, threadId),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
@@ -984,6 +988,14 @@ export class MmsProfileServices {
     const orchestrator = this.orchestrator
     const ptys = this.ptyManager
     this.orchestrator.setBotNames(personalBots ? (botId) => personalBots.botName(botId) : null)
+    // A bot answers for the threads it started while it exists, is not paused and holds "use your threads" (`supervisorOf`).
+    const botStore = opened?.store
+    this.orchestrator.setBotSupervision(personalBots && botStore ? (botId) => {
+      const row = botStore.registry(botId)
+      if (!row || row.deletedAt || row.pausedReason) return undefined
+      if (!botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_THREADS_PERMISSION)) return undefined
+      return { name: personalBots.botName(botId) ?? botId }
+    } : null)
     this.orchestrator.setRunning(new RunningRegistry({
       terminals: () => ptys.runningTerminals(),
       terminalOutput: (ptyId) => ptys.getScrollback(ptyId).slice(-8_000),
@@ -2887,6 +2899,7 @@ export class MmsProfileServices {
         this.orchestrator.setRunEngine(null)
         this.orchestrator.setBotDispatcher(null)
         this.orchestrator.setBotThreads(null)
+        this.orchestrator.setBotSupervision(null)
         this.orchestrator.setBotAppTools(null)
       }],
       ['personal bots close', () => this.personalBots?.close()],
