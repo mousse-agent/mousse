@@ -2326,7 +2326,9 @@ export class MmsProfileServices {
     const openAsks = store.openAsks(botId).filter((ask) => ask.messageId !== null).map((ask) => engine.chat.card(ask).title)
     const schedules = engine.listSchedules(botId).map((schedule) => ({ label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
     // What its work is doing and what it will say later, so a chat turn answers "how's it going?" without a tool.
-    const work = engine.listWork(botId).now
+    const work = engine.listWork(botId).now.map(work =>
+      work.status === 'queued' && store.activation(work.workId)?.endReason === 'approval_answered'
+        ? { ...work, status: 'carrying on' } : work)
     // A wake reads as the bot's own follow-up, with what it waits for: its time is then when it gives up.
     const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.wake ? `your wake-up${reminder.event ? ` ${wakeEventLabel(reminder.event)}` : ''}: ${reminder.text}` : reminder.text }))
     // Work rows whose model can't run (#673): the chat can tell the owner why such work does not start.
