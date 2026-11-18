@@ -65,6 +65,40 @@ describe('NotificationThreadIndex', () => {
   })
 })
 
+describe('NotificationThreadIndex and threads a bot keeps out of the sidebar', () => {
+  const list = [
+    { id: 'job', name: 'Quick check', hidden: true },
+    { id: 'helper', name: 'Helper', lineage: subagentOf('job') },
+    { id: 'deep', name: 'Deep helper', lineage: subagentOf('helper', 'job') },
+    { id: 'mine', name: 'Fix tests' }
+  ]
+  const kinds = ['completed', 'question', 'idle'] as const
+
+  it('says nothing for the thread or any subagent below it, whatever happened', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    for (const kind of kinds) {
+      for (const id of ['job', 'helper', 'deep']) expect(index.resolve('a', id, kind), `${id} ${kind}`).toBeNull()
+      expect(index.resolve('a', 'mine', kind)).toEqual(expect.objectContaining({ threadId: 'mine' }))
+    }
+  })
+
+  it('notifies like any thread when the person chose to hear about bot threads', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    expect(index.resolve('a', 'job', 'completed', true)).toEqual(expect.objectContaining({ threadId: 'job' }))
+    expect(index.resolve('a', 'deep', 'question', true)).toEqual(expect.objectContaining({ threadId: 'job', viaThreadId: 'deep' }))
+  })
+
+  it('notifies again once the thread is shown in the sidebar', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    index.note('a', list.map(({ hidden: _hidden, ...row }) => row))
+    expect(index.resolve('a', 'job', 'completed')).toEqual(expect.objectContaining({ threadId: 'job' }))
+    expect(index.resolve('a', 'helper', 'question')).toEqual(expect.objectContaining({ threadId: 'job', viaThreadId: 'helper' }))
+  })
+})
+
 describe('NotificationThreadIndex names for the banner', () => {
   const list = [
     { id: 'fix-a', name: 'Fix tests', projectId: 'p-a' },

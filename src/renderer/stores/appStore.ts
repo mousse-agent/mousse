@@ -302,6 +302,12 @@ interface AppState {
   /** The bound profile's shortcut overrides (`settings.shortcuts`). Not persisted here; the daemon owns them. */
   shortcuts: ShortcutOverrides
   setShortcuts: (shortcuts: ShortcutOverrides) => void
+  /**
+   * The bound profile's `notifications.botThreads`: threads a bot keeps out of the sidebar count in Needs me and the
+   * app badge like any thread. Off until the profile's settings say otherwise.
+   */
+  notifyBotThreads: boolean
+  setNotifyBotThreads: (on: boolean) => void
   /** The command palette, which also searches threads and messages. Not persisted. */
   paletteOpen: boolean
   /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). Kept on close. */
@@ -754,6 +760,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   shortcuts: {},
   // Settings events repeat the same map; keep the old object so nothing re-resolves for no change.
   setShortcuts: (shortcuts) => set((s) => (JSON.stringify(s.shortcuts) === JSON.stringify(shortcuts) ? s : { shortcuts })),
+  notifyBotThreads: false,
+  setNotifyBotThreads: (notifyBotThreads) => set((s) => (s.notifyBotThreads === notifyBotThreads ? s : { notifyBotThreads })),
   paletteOpen: false,
   paletteMode: 'all',
   // Closing keeps the mode, so the fading palette keeps its rows; each opening sets it again.
@@ -1251,6 +1259,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       workspaceReady: false,
       // Another profile's shortcuts must not stay bound until its own settings arrive.
       shortcuts: {},
+      notifyBotThreads: false,
       paletteOpen: false,
       ...next,
       queueDraftNotices: {},

@@ -22,7 +22,7 @@ const thread = (id: string, name: string, over: Partial<Thread> = {}): Thread =>
 
 type AppPatch = Partial<ReturnType<typeof useAppStore.getState>>
 const appInitial = useAppStore.getInitialState()
-const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'threadsSidebarOpen'] as const
+const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'threadsSidebarOpen', 'notifyBotThreads'] as const
 const appOriginal = Object.fromEntries(appKeys.map((key) => [key, appInitial[key]])) as AppPatch
 
 /** Server rendering reads the store's initial state, so patch both it and the live state. */
@@ -110,17 +110,27 @@ describe('the Needs me group', () => {
 describe('a thread a bot keeps out of the sidebar', () => {
   const hidden = thread('h', 'Quick check', { projectId: 'p1', updatedAt: at(6), hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' } })
 
+  const helper = thread('hc', 'Helper', { projectId: 'p1', updatedAt: at(7), lineage: { parentThreadId: 'h', rootThreadId: 'h', relationship: 'subagent' } })
+
   // The Threads view and the Projects tree list the same threads (`availableThreads`); the Threads view draws every row.
-  it('is not in the thread list, and still in Needs me while it waits on the person', () => {
+  it('is not in the thread list, nor in Needs me or the badge while it waits, until it is shown', () => {
     setStore({ projects, threads: [...threads, hidden], threadActivity: {}, threadsSidebarView: 'threads' })
     expect(titlesIn(sidebar())).toEqual(expect.arrayContaining(['Fix tests', 'Ship docs', 'Refactor']))
     expect(titlesIn(sidebar())).not.toContain('Quick check')
-    // A question in it is the person's: Needs me lists it, and opens it from there.
-    setStore({ projects, threads: [...threads, hidden], threadActivity: { h: 'awaiting_input', a: 'awaiting_input' }, threadsSidebarView: 'threads' })
+    // Its question, or its subagent's, is not news: the bot's chat lists the thread, and nothing counts it.
+    setStore({ projects, threads: [...threads, hidden, helper], threadActivity: { h: 'awaiting_input', hc: 'awaiting_input', a: 'awaiting_input' }, threadsSidebarView: 'threads', threadsSidebarOpen: false })
+    expect(titlesIn(needsMeSection(sidebar()))).toEqual(['Fix tests'])
+    expect(titleBar()).toContain('titlebar-attention-badge" aria-hidden="true">1<')
+    // Shown again, it is an ordinary row, and its question counts.
+    setStore({ threads: [...threads, { ...hidden, hidden: undefined }, helper] })
     expect(titlesIn(needsMeSection(sidebar()))).toEqual(['Quick check', 'Fix tests'])
-    // Shown again, it is an ordinary row.
-    setStore({ projects, threads: [...threads, { ...hidden, hidden: undefined }], threadActivity: {}, threadsSidebarView: 'threads' })
-    expect(titlesIn(sidebar())).toContain('Quick check')
+    expect(titleBar()).toContain('titlebar-attention-badge" aria-hidden="true">2<')
+  })
+
+  it('counts in Needs me and the badge like any thread when the person chose to hear about bot threads', () => {
+    setStore({ projects, threads: [...threads, hidden, helper], threadActivity: { hc: 'awaiting_input', a: 'awaiting_input' }, threadsSidebarView: 'threads', threadsSidebarOpen: false, notifyBotThreads: true })
+    expect(titlesIn(needsMeSection(sidebar()))).toEqual(['Quick check', 'Fix tests'])
+    expect(titleBar()).toContain('titlebar-attention-badge" aria-hidden="true">2<')
   })
 
   it('a pushed list that only hides or shows a thread reaches the store, though the thread kept its time', () => {

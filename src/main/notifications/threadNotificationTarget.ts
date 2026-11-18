@@ -1,8 +1,8 @@
 import type { Thread } from '../../shared/types'
-import { isSubagentThread, nearestVisibleAncestor } from '../../shared/threadLineage'
+import { hiddenFromOwner, isSubagentThread, nearestVisibleAncestor } from '../../shared/threadLineage'
 import type { ThreadNotificationKind } from './threadNotification'
 
-type NotificationThread = Pick<Thread, 'id' | 'name' | 'lineage' | 'projectId'>
+type NotificationThread = Pick<Thread, 'id' | 'name' | 'lineage' | 'projectId' | 'hidden'>
 
 /** What a notification is about once subagents are folded under their parents. */
 export interface ThreadNotificationTarget {
@@ -55,7 +55,9 @@ export class NotificationThreadIndex {
     if (!rows) return
     const next = new Map<string, NotificationThread>()
     for (const row of rows as NotificationThread[]) {
-      if (row && typeof row.id === 'string') next.set(row.id, { id: row.id, name: row.name, lineage: row.lineage, projectId: row.projectId })
+      if (row && typeof row.id === 'string') {
+        next.set(row.id, { id: row.id, name: row.name, lineage: row.lineage, projectId: row.projectId, ...(row.hidden ? { hidden: true as const } : {}) })
+      }
     }
     this.byProfile.set(profileId, next)
   }
@@ -71,8 +73,13 @@ export class NotificationThreadIndex {
     this.projectNames.set(profileId, next)
   }
 
-  resolve(profileId: string, threadId: string, kind: ThreadNotificationKind): NamedThreadNotificationTarget | null {
+  /**
+   * What to announce for `threadId`, or null for nothing. A thread a bot keeps out of the sidebar, or a subagent below
+   * one, is quiet unless the person chose to hear about bot threads (`notifications.botThreads`).
+   */
+  resolve(profileId: string, threadId: string, kind: ThreadNotificationKind, notifyBotThreads = false): NamedThreadNotificationTarget | null {
     const threads = this.byProfile.get(profileId) ?? new Map<string, NotificationThread>()
+    if (!notifyBotThreads && hiddenFromOwner(threadId, (id) => threads.get(id))) return null
     const target = resolveThreadNotification(threadId, kind, threads)
     if (!target) return null
     const thread = threads.get(target.threadId)

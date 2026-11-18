@@ -544,7 +544,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   )
   const attentionOf = (threadId: string) => threadAttention(rolledUpActivity[threadId] ?? threadActivity[threadId])
   // Threads that wait for an answer or an approval, from every project and computer, at the top of the list.
-  const needsMe = useMemo(() => needsMeThreads(threads, threadActivity, agentThreadIds), [threads, threadActivity, agentThreadIds])
+  const notifyBotThreads = useAppStore((s) => s.notifyBotThreads)
+  const needsMe = useMemo(() => needsMeThreads(threads, threadActivity, agentThreadIds, notifyBotThreads), [threads, threadActivity, agentThreadIds, notifyBotThreads])
   // With one thread in all, its own row already says it: a group of it would only repeat it.
   const showNeedsMe = needsMe.length > 0 && availableThreads.length > 1
   // The Threads tab lists a thread in one place: while "Needs me" shows it, the list below leaves it out.
