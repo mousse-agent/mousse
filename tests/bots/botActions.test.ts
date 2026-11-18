@@ -4132,3 +4132,11 @@ it('E1 an automatic send clears the scheduled decline reminder in the current an
   await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'clears-decline', signal: new AbortController().signal })
   expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe('quiet')
 })
+it('E1 an open consent keeps its original destination when a newer call finishes', async () => {
+  const t = await aloneAsk()
+  expect(f.bots.alone.prepare(t.botId, 'pending', t.request as never)).toBeUndefined()
+  const first = f.bots.alone.pending(t.botId, 'pending', t.request as never)!
+  f.store.run('UPDATE bot_actions SET place_json = ? WHERE activation_id = ?', JSON.stringify({ to: ['different@example.test'] }), t.id)
+  expect(f.bots.alone.prepare(t.botId, 'pending', t.request as never)).toBeUndefined()
+  expect(f.bots.alone.pending(t.botId, 'pending', t.request as never)).toEqual(first)
+})
