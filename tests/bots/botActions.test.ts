@@ -564,10 +564,10 @@ async function fanOut(on: boolean, owner: boolean, count: number, different: boo
   for (const [n, work] of works.entries()) results.push(await callForBot({ bot: work.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: different ? { ...t.args, body: 'Message ' + n } : t.args, toolCallId: 'fan-call-' + n, signal: new AbortController().signal }))
   return { ...t, origin, chat, works, results }
 }
-it.each([false, true])('unattended calls keep only the exact-open duplicate refusal, different arguments=%s', async different => {
+it.each([false, true])('unattended calls keep at most three open cards, different arguments=%s', async different => {
   const t = await fanOut(true, false, 20, different)
-  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(different ? 20 : 1)
-  expect(t.results.filter(result => !result.isError)).toHaveLength(different ? 20 : 1)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(different ? 3 : 1)
+  expect(t.results.filter(result => !result.isError)).toHaveLength(different ? 3 : 1)
   if (!different) expect(t.results.at(-1)?.text).toContain('already waiting')
   expect(t.calls).toEqual([])
 })
@@ -589,7 +589,7 @@ it.each([false, true])('switch off preserves all twenty unattended calls, differ
 })
 it.each(['create:fan-out', 'question:fan-out', 'botmsg:fan-out', 'answer:fan-out'])('persisted %s origin keeps the correct approval scope', async originKey => {
   const t = await fanOut(true, false, 5, true, originKey)
-  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(5)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(originKey === 'answer:fan-out' ? 5 : 3)
 })
 it.each(['declined', 'expired', 'forgotten'] as const)('unattended %s history follows work into a new piece of work', async settled => {
   const t = await fanOut(true, false, 1, false)
@@ -608,7 +608,7 @@ it.each(['declined', 'expired', 'forgotten'] as const)('unattended %s history fo
   expect(await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'again', signal: new AbortController().signal })).toMatchObject({ isError: true })
   expect(f.bots.actions.forWork(workId)).toBeUndefined()
 })
-it('scheduled and unattended work retain shared exact-repeat history without a card count', async () => {
+it('scheduled and unattended work share three waiting cards', async () => {
   const t = await fanOut(true, false, 3, true)
   f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send another email' }, 'owner')
   f.clock.now += 5 * 60_000
@@ -617,8 +617,8 @@ it('scheduled and unattended work retain shared exact-repeat history without a c
   const run = await start(f, id)
   const call = (body: string, key: string) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body }, toolCallId: key, signal: new AbortController().signal })
   expect(await call('Message 0', 'duplicate')).toMatchObject({ isError: true, text: expect.stringContaining('already waiting') })
-  expect((await call('From the schedule', 'changed')).isError).not.toBe(true)
-  expect(f.bots.actions.forWork(id)?.status).toBe('open')
+  expect(await call('From the schedule', 'changed')).toMatchObject({ isError: true, text: 'Not sent: three requests for this tool already wait for your owner. Say in your report what you would have sent; do not ask again until one is answered.' })
+  expect(f.bots.actions.forWork(id)).toBeUndefined()
 })
 it('a duplicate refusal explains the earlier card without borrowing its outcome', async () => {
   const t = await fanOut(true, false, 2, false)
@@ -639,13 +639,17 @@ it('a duplicate refusal explains the earlier card without borrowing its outcome'
 })
 it.each(['send', 'not_now'] as const)('different open calls remain independent while %s settles one card', async answer => {
   const t = await fanOut(true, false, 4, true)
-  expect(t.results.at(-1)?.isError).not.toBe(true)
+  expect(t.results.at(-1)).toMatchObject({ isError: true })
   const first = t.works[0]!
   await finish(f, first.run.payload)
   const a = f.bots.actions.forWork(first.id)!
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })
   expect(f.bots.actions.forWork(first.id)?.status).toBe(answer === 'send' ? 'done' : 'declined')
   expect(f.store.lastMainDispatch(first.id)?.prompt.text).toContain(answer === 'send' ? 'Your owner sent it' : 'chose not to send')
+  const next = t.works[3]!
+  const result = await callForBot({ bot: next.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'A freed place' }, toolCallId: 'freed-place', signal: new AbortController().signal })
+  expect(result.isError).not.toBe(true)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(3)
 })
 it('a saved schedule edit succeeds and refreshes observers if approval cleanup fails', async () => {
   const t = await scheduledCall()
