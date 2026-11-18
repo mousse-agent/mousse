@@ -147,13 +147,13 @@ it('six unchanged checks leave no page files and no inbox rows',async()=>{
   expect(files.filter(p=>String(p).endsWith('.txt'))).toEqual([])
   expect(f.automationRuns.list().runs).toEqual([])
 })
-it('change files belong to the run and are removed from Automations',async()=>{
+it('change files belong to the run; Automations removal drops the watch',async()=>{
   const entry=await add(); await check(5); body='new page'; await check(10)
   const row=runs()[0]!
   const file=join(f.store.directory,'scratch',row.id,'page-change.txt')
   expect(pageText(file)).toBe('new page')
   f.scheduler.deleteJob(entry.jobId)
-  expect(existsSync(file)).toBe(false)
+  expect(existsSync(file)).toBe(true)
   expect(state(entry.scheduleId)).toBeUndefined()
 })
 it('a symlink in the run directory cannot redirect the page write',()=>{
@@ -208,12 +208,12 @@ it('startup retries an interrupted fetch immediately and fences its late respons
   const saved=JSON.parse(state(entry.scheduleId)!.value)
   expect(saved.failures).toBe(0); expect(saved.handedHash).not.toBeNull(); expect(saved.inFlight).toBeUndefined()
 })
-it('schedule end removes its watch and change file',async()=>{
+it('schedule end removes its watch without stealing the run file',async()=>{
   const entry=await add(); await check(5); body='changed'; await check(10)
   const row=runs()[0]!,file=join(f.store.directory,'scratch',row.id,'page-change.txt')
   f.scheduler.updateJob(entry.jobId,{state:'completed',expiresAt:new Date(T0+11*60_000).toISOString()})
   await f.bots.maintain(new Date(T0+12*60_000))
-  expect(state(entry.scheduleId)).toBeUndefined(); expect(existsSync(file)).toBe(false)
+  expect(state(entry.scheduleId)).toBeUndefined(); expect(existsSync(file)).toBe(true)
 })
 
 it('retries an unreadable report if posting it fails',async()=>{
