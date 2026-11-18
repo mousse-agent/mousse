@@ -15,7 +15,7 @@ export async function secretFetchAction(store: BotStore, input: SecretFetchActio
     const previous = store.get('SELECT status, result_json FROM bot_actions WHERE call_key = ?', callKey)
     if (previous) return { previous: previous.result_json ? JSON.parse(String(previous.result_json)) as ToolOutcome : {text:'This read is already running.',isError:true} }
     const count = (since: number, secret?: string): number => Number(store.get(
-      `SELECT count(*) AS n FROM bot_actions WHERE kind = 'secret_fetch' AND ran_at >= ? AND ${secret === undefined ? 'bot_id = ?' : "json_extract(binding_json, '$.secretDigest') = ?"}`,
+      `SELECT count(*) AS n FROM bot_actions WHERE kind = 'secret_fetch' AND ran_at > ? AND ${secret === undefined ? 'bot_id = ?' : "json_extract(binding_json, '$.secretDigest') = ?"}`,
       new Date(since).toISOString(), secret === undefined ? botId : createHash('sha256').update(secret).digest('hex')
     )?.n ?? 0)
     const refusal = count(at - 3600000, input.secret) >= BOT_ALONE_HOURLY_CALLS ? `You've read from ${input.service} ${BOT_ALONE_HOURLY_CALLS} times this hour; try again later or tell your owner.` : count(at - 86400000) >= BOT_ALONE_DAILY_CALLS ? `You've made ${BOT_ALONE_DAILY_CALLS} service reads today; try again later or tell your owner.` : undefined
