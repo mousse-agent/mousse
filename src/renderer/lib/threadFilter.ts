@@ -1,0 +1,125 @@
+import type { Thread } from '../../shared/types'
+
+/**
+ * The sidebar's thread filter (`ThreadFilterBar`): which threads its Projects and Threads tabs list.
+ *
+ * - `show`: My threads (the threads listed today: not kept out by a bot, `Thread.hidden`), Bot threads (those one of the
+ *   owner's bots started, hidden or not), or All.
+ * - `botId`: only the threads that bot started, hidden or not, whatever `show` says.
+ * - `projectId`: only the threads of that project group (`groupProjects`).
+ * - `archived`: the list holds archived threads instead of the others.
+ * - `query`: each word must be in the thread's title, its project's name or its bot's name.
+ */
+export type ThreadShow = 'mine' | 'bots' | 'all'
+
+export interface ThreadFilter {
+  query: string
+  show: ThreadShow
+  projectId: string | null
+  botId: string | null
+  archived: boolean
+}
+
+export const SHOW_LABELS: Record<ThreadShow, string> = { mine: 'My threads', bots: 'Bot threads', all: 'All' }
+
+/** What a thread is matched against, besides its own fields. */
+export interface ThreadFilterContext {
+  /** The group a project belongs to (the project itself when it has no group). */
+  groupOf(projectId: string): string
+  projectName(projectId: string): string | undefined
+  botName(botId: string): string | undefined
+}
+
+/** The query's words, lower case. */
+export function queryWords(query: string): string[] {
+  return query.toLowerCase().split(/\s+/).filter(Boolean)
+}
+
+/** Whether a thread is in the filter's scope; `archived` is not looked at (the lists split on it themselves). */
+export function threadInFilter(thread: Thread, filter: ThreadFilter, context: ThreadFilterContext): boolean {
+  const bot = thread.startedByBot
+  if (filter.botId !== null) {
+    if (bot?.botId !== filter.botId) return false
+  } else if (filter.show === 'mine') {
+    // Today's list: a thread a bot keeps out of the sidebar is not listed, unless it is archived.
+    if (thread.hidden && !thread.settledAt) return false
+  } else if (filter.show === 'bots' && !bot) {
+    return false
+  }
+  if (filter.projectId !== null && (!thread.projectId || context.groupOf(thread.projectId) !== filter.projectId)) return false
+  const words = queryWords(filter.query)
+  if (!words.length) return true
+  const haystack = [
+    thread.name,
+    thread.projectId ? context.projectName(thread.projectId) : undefined,
+    bot ? (context.botName(bot.botId) ?? bot.name) : undefined
+  ].filter(Boolean).join('\n').toLowerCase()
+  return words.every((word) => haystack.includes(word))
+}
+
+/** Whether anything narrows the list beyond the default (My threads, nothing typed). */
+export function filterNarrows(filter: ThreadFilter): boolean {
+  return filter.show !== 'mine' || filter.botId !== null || filter.projectId !== null || filter.archived || queryWords(filter.query).length > 0
+}
+
+export interface FilterOption {
+  id: string
+  name: string
+  /** When its newest thread was updated (ISO), for "Recent". */
+  lastUsed?: string
+}
+
+/** How many options "Recent" holds, and the shortest list that gets one. */
+export const RECENT_OPTIONS = 3
+const RECENT_FROM = 6
+
+/**
+ * A sub-list's options for what was typed in its search line: the most recently used first under "Recent" (when the list is
+ * long enough to need it and nothing is typed), then the rest by name. Typed text keeps the names that contain it, those
+ * that start with it first.
+ */
+export function orderOptions<T extends FilterOption>(options: readonly T[], search: string): { recent: T[]; rest: T[] } {
+  const needle = search.trim().toLowerCase()
+  const byName = (a: T, b: T) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+  if (needle) {
+    const matching = options.filter((option) => option.name.toLowerCase().includes(needle))
+    const starts = (option: T) => (option.name.toLowerCase().startsWith(needle) ? 0 : 1)
+    return { recent: [], rest: matching.sort((a, b) => starts(a) - starts(b) || byName(a, b)) }
+  }
+  if (options.length < RECENT_FROM) return { recent: [], rest: [...options].sort(byName) }
+  const recent = options.filter((option) => option.lastUsed)
+    .sort((a, b) => (b.lastUsed ?? '').localeCompare(a.lastUsed ?? ''))
+    .slice(0, RECENT_OPTIONS)
+  const shown = new Set(recent.map((option) => option.id))
+  return { recent, rest: options.filter((option) => !shown.has(option.id)).sort(byName) }
+}
+
+export type FilterSuggestion = { kind: 'project' | 'bot'; id: string; name: string }
+
+/** At most this many projects, and as many bots, are suggested above the list while typing. */
+export const SUGGESTIONS_PER_KIND = 2
+
+/**
+ * The projects and bots whose names hold the typed text, suggested above the list: picking one makes it a filter. Not
+ * the one already filtered on.
+ */
+export function filterSuggestions(query: string, filter: ThreadFilter, projects: readonly FilterOption[], bots: readonly FilterOption[]): FilterSuggestion[] {
+  if (!query.trim()) return []
+  const pick = (kind: FilterSuggestion['kind'], options: readonly FilterOption[], current: string | null) =>
+    orderOptions(options.filter((option) => option.id !== current), query).rest
+      .slice(0, SUGGESTIONS_PER_KIND)
+      .map((option): FilterSuggestion => ({ kind, id: option.id, name: option.name }))
+  return [...pick('project', projects, filter.projectId), ...pick('bot', bots, filter.botId)]
+}
+
+/** The newest update of each key's threads (ISO), for "Recent". */
+export function lastUsedBy(threads: readonly Thread[], keyOf: (thread: Thread) => string | undefined): Map<string, string> {
+  const last = new Map<string, string>()
+  for (const thread of threads) {
+    const key = keyOf(thread)
+    if (!key) continue
+    const at = thread.updatedAt ?? thread.createdAt
+    if (at && at > (last.get(key) ?? '')) last.set(key, at)
+  }
+  return last
+}

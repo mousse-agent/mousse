@@ -13,7 +13,7 @@ import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { keptCardOf, type BotCard } from '../../../shared/bots/personal/cards'
-import type { BotWakeEvent, BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { WAKE_LINE_PREFIX, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import { BOT_JOB_ENDED, type BotJob, type BotJobAsker, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
@@ -1068,6 +1068,18 @@ function jobOf(row: Row): BotJob {
 }
 type Param = string | number | null
 
+/**
+ * The chat rows the owner sees: every one but an event's line (`outOfSightRow`): a thread's message to the bot, kept
+ * for its guard, and the lines older versions posted for a wake-up or a thread's notice. Those events are the bot's to
+ * act on, not the owner's to read; only what the bot says shows.
+ */
+const SHOWN_MESSAGE = String.raw`NOT (kind = 'notice' AND id LIKE 'bm\_wake\_%' ESCAPE '\')`
+
+/** Whether a chat row is one the owner never sees (`SHOWN_MESSAGE`): a notice whose id starts `bm_wake_`. */
+export function outOfSightRow(kind: string, id: string): boolean {
+  return kind === 'notice' && id.startsWith(WAKE_LINE_PREFIX)
+}
+
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null)
 const num = (value: unknown): number | null => (typeof value === 'number' ? value : typeof value === 'bigint' ? Number(value) : null)
 const json = <T>(value: unknown): T | null => (typeof value === 'string' ? (JSON.parse(value) as T) : null)
@@ -2070,25 +2082,25 @@ export class BotStore {
   /** A page of a bot's chat, oldest first: the `limit` rows before `beforeSeq` (the newest without it). */
   messages(botId: string, options: { beforeSeq?: number; limit: number }): BotMessageRow[] {
     const rows = options.beforeSeq === undefined
-      ? this.all('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT ?', botId, options.limit)
-      : this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?', botId, options.beforeSeq, options.limit)
+      ? this.all(`SELECT * FROM bot_messages WHERE bot_id = ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT ?`, botId, options.limit)
+      : this.all(`SELECT * FROM bot_messages WHERE bot_id = ? AND seq < ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT ?`, botId, options.beforeSeq, options.limit)
     return rows.map(messageOf).reverse()
   }
 
   lastMessage(botId: string): BotMessageRow | undefined {
-    const row = this.get('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT 1', botId)
+    const row = this.get(`SELECT * FROM bot_messages WHERE bot_id = ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT 1`, botId)
     return row ? messageOf(row) : undefined
   }
 
   /** The bot's latest message with text, for the preview of its row in the Bots list. */
   lastBotReply(botId: string): BotMessageRow | undefined {
-    const row = this.get("SELECT * FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND COALESCE(text, '') != '' ORDER BY seq DESC LIMIT 1", botId)
+    const row = this.get(`SELECT * FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND COALESCE(text, '') != '' AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT 1`, botId)
     return row ? messageOf(row) : undefined
   }
 
   /** The bot's messages after the owner's read marker. */
   unread(botId: string, readSeq: number): number {
-    return Number(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ?", botId, readSeq)?.n ?? 0)
+    return Number(this.get(`SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ? AND ${SHOWN_MESSAGE}`, botId, readSeq)?.n ?? 0)
   }
 
   /** The 30-day purge: every row of a bot's asks, activations (with their dispatches, counts and spend), grants and context generations. */

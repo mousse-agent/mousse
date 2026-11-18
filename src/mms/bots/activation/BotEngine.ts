@@ -1,4 +1,5 @@
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
+import { unattendedChatTurn } from './unattended'
 import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours, settingCompactionPoint } from '../../../shared/settings'
@@ -488,6 +489,8 @@ interface RoomSettled {
 }
 
 interface LiveDispatch {
+  /** A chat turn no person started or waits on (`unattendedChatTurn`): the chat shows none of its activity. */
+  outOfSight?: true
   controller: AbortController
   timer: { clear(): void } | undefined
   /** When the dispatch started, on the monotonic clock: what settlement measures from. */
@@ -2788,7 +2791,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId,
       lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0, steering: new Map(), steerSeq: 0, compactions: 0, regiven: 0,
       powers: powersOf(compiled.permissions), consultPowers: new Map(),
-      held: effective, subagentStarts: new Map()
+      held: effective, subagentStarts: new Map(),
+      ...(unattendedChatTurn(row) ? { outOfSight: true as const } : {})
     })
     this.liveRuns.set(payload.runId, row.id)
     this.watchOffline(row.id, dispatch.n)
@@ -5206,8 +5210,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // its report is not posted, so the chat shows nothing; the run and its line stay in Automations. Open asks and
     // cards it made still show, without the marker. Work the owner asked for and chat replies are posted as written.
     // A chat turn nobody started or waits on (a wake-up, a thread's notice, another bot's message), and work such a turn
-    // started, may say `[SILENT]` when nothing finished and nothing needs the owner: nothing is
-    // posted and nobody is notified; the wake's quiet line and the work list still show it happened. An empty reply
+    // started, may say `[SILENT]` (the default it is told) unless the owner must act or their request is all done: nothing
+    // is posted and nobody is notified; the event itself never shows in the chat, and the work list shows the work. An empty reply
     // stays as it is (a chat turn that only handed work off still shows it).
     // Its marker is a line of its own: a reply that also says something posts what it says, without the marker.
     const quietTurn = unattendedChatTurn(row) || (report && row.trigger.kind === 'work' && unattendedChatTurn(this.store.activation(row.trigger.from) ?? { lane: 'run', idempotencyKey: '' }))
@@ -6711,6 +6715,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     else this.liveChips.delete(event.activationId)
     // Every event carries the activation's status as it is now: an event without one clears it.
     const status = this.liveStatuses.get(event.activationId)
+    // A turn out of sight (a wake-up, a thread's notice) shows no chip and no status line in any window.
+    if (this.live.get(event.activationId)?.outOfSight) return
     try { this.events.emit('activity', { ...event, ...(status ? { status } : {}) }) } catch { /* a listener never stops a call */ }
   }
 
@@ -6734,9 +6740,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.publishActivity({ botId: at.botId, activationId: at.activationId, chip: this.liveChips.get(at.activationId)?.chip ?? null })
   }
 
-  /** The bot's working activation, its live chip and its status, chat lane first (each piece of work's come as `activity`). */
+  /**
+   * The bot's working activation, its live chip and its status, chat lane first (each piece of work's come as `activity`).
+   * A chat turn no person started or waits on (`unattendedChatTurn`) is out of sight, so it is never the one.
+   */
   liveActivity(botId: string): { activationId: string; chip?: BotChip; status?: string } | undefined {
-    const working = [...this.store.laneActivations(botId, 'chat', ['running']), ...this.store.laneActivations(botId, 'run', ['running'])][0]
+    const working = [...this.store.laneActivations(botId, 'chat', ['running']).filter((row) => !unattendedChatTurn(row)), ...this.store.laneActivations(botId, 'run', ['running'])][0]
     if (!working) return undefined
     const chip = this.liveChips.get(working.id)?.chip
     const status = this.liveStatuses.get(working.id)
@@ -7462,9 +7471,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A job's notice: a chat turn of the bot's own (`job:<id>:<activation>`) that starts with the report (`jobNoticeInput`:
-   * state, the thread's title and link, who asked, and its answer held to the report cap), after a quiet line in the chat
-   * saying why the bot speaks. It may act on the owner's threads (`threadsActOf`). A bot that is paused, or can't run now,
-   * has it said as a line with the link instead. The job moves in the transaction that queues the turn: one notice per change.
+   * state, the thread's title and link, who asked, and its answer held to the report cap). Nothing shows in the chat but
+   * what the bot says. It may act on the owner's threads (`threadsActOf`). A bot that is paused, or can't run now, has it
+   * said as a line with the link instead. The job moves in the transaction that queues the turn: one notice per change.
    */
   private async deliverJobNotice(job: BotJob, state: BotJobState, line: string | undefined, seen: JobThreadView): Promise<void> {
     const registry = this.store.registry(job.botId)
@@ -7479,12 +7488,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     let refused: BotEngineError | undefined
     const started = this.store.db.transaction(() => {
       if (!this.store.moveJob(job.id, job.state, state, { ...(line ? { line } : {}), notice: true })) return undefined
-      const id = `${WAKE_LINE_PREFIX}job_${job.id}_${activationId}`
       if (!paused) refused = this.queueChatInTx(job.botId, `job:${job.id}:${activationId}`, input, activationId)
-      if (!paused && !refused) {
-        this.chat.post({ id, botId: job.botId, author: 'bot', kind: 'notice', text: jobNoticeLabel(next), external: true, lane: 'chat' })
-        return true
-      }
+      // Nothing shows in the chat: the notice is the bot's to act on, and only what it says reaches the owner.
+      if (!paused && !refused) return true
       this.chat.post({ id: `bm_job_${job.id}_${activationId}`, botId: job.botId, author: 'bot', kind: 'run_report', text: `${jobNoticeLabel(next)}: ${threadLink(job.threadId)}. I didn't follow up on this: ${paused ? 'I\'m paused.' : refused!.message}`, external: true, lane: 'chat' })
       return false
     })
@@ -7495,9 +7501,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A message from a thread the bot started (`message_parent`), sent while it works: a question, a blocker, a finding
-   * the bot must know now. It arrives as a job's notice does: a quiet line in the chat and a chat turn of the bot's own
+   * the bot must know now. It arrives as a job's notice does, out of sight: a chat turn of the bot's own
    * (`threadmsg:<thread>:<request>`) that starts with the message framed as data from that thread, with its link, and it
-   * wakes an idle bot. The same request again replays. Refused, in words for the thread: a deleted or paused bot, or one
+   * wakes an idle bot. A line the owner never sees (`outOfSightRow`) is kept per message for the flood guard below. The same request again replays. Refused, in words for the thread: a deleted or paused bot, or one
    * that can't run now; `maxWaiting` of the thread's messages still waiting for the bot to read them; or
    * `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER` of its messages since the owner last wrote, with no person in between.
    */
@@ -9216,8 +9222,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A wake that is due, at any hour: a chat turn of the bot's own (`wake:<id>`, not the owner's, though it may act on
-   * their threads: `threadsActOf`) starts with what the bot wrote for itself and what happened, after a quiet line in the chat saying why the
-   * bot speaks. A wake on an event whose time came first ended without it, and says so. A bot that is paused, or can't
+   * their threads: `threadsActOf`) starts with what the bot wrote for itself and what happened; nothing shows in the chat
+   * but what the bot says. A wake on an event whose time came first ended without it, and says so. A bot that is paused, or can't
    * run now, has the wake said as a line instead, so it is never lost and never retried forever. Marked delivered in the
    * transaction that queues the turn: it wakes once.
    */
@@ -9250,10 +9256,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Cancelled or forgotten since the pass read it: nothing happens.
       if (this.store.reminder(wake.id)?.status !== 'waiting') return undefined
       if (!paused) refused = this.queueChatInTx(wake.botId, `wake:${wake.id}`, input, activationId)
+      // Nothing shows in the chat: the wake-up is the bot's to act on, and only what it says reaches the owner.
       if (!paused && !refused) {
         this.store.settleReminder(wake.id, 'delivered', { activationId })
-        // A quiet line says why the bot speaks unasked.
-        this.chat.post({ id: `${WAKE_LINE_PREFIX}${wake.id}`, botId: wake.botId, author: 'bot', kind: 'notice', text: wakeFiredLabel(fired), external, lane: 'chat' })
         return true
       }
       const id = `bm_${wake.id}`
@@ -10322,17 +10327,6 @@ export function withoutSilentMarker(text: string): { text: string; marked: boole
   const lines = text.split(/\r?\n/)
   const kept = lines.filter((line) => line.trim() !== SILENT_REPLY)
   return kept.length < lines.length ? { text: kept.join('\n').trim(), marked: true } : { text, marked: false }
-}
-
-/**
- * The chat turns no person started and no person waits on: a wake-up (`wake:`), a thread's notice (`job:`) or message
- * (`threadmsg:`), and another bot's message (`botmsg:`). They may end silently (`[SILENT]`). A question's default answer
- * (`question:`) always says what it went with, so it is not one of them.
- */
-const UNATTENDED_CHAT_KEYS = ['wake:', 'job:', 'botmsg:', THREAD_MESSAGE_KEY_PREFIX] as const
-
-export function unattendedChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
-  return row.lane === 'chat' && UNATTENDED_CHAT_KEYS.some((key) => row.idempotencyKey.startsWith(key))
 }
 
 /**

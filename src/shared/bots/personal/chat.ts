@@ -213,7 +213,8 @@ export interface BotSummary {
   work?: BotWorkItem[]
   /**
    * The owner's threads the bot started ("use your threads"), hidden ones too: those that work (oldest first), then those
-   * that wait on the owner (a question, or on hold), then the most recent of those that sit idle or ended (`BOT_LAUNCHED_ENDED_SHOWN`).
+   * that wait on the owner (a question, or on hold), then the most recent of those that sit idle or ended in the last six
+   * hours and are not archived (`launchedRecent`, at most `BOT_LAUNCHED_ENDED_SHOWN`).
    * The bot is busy while any is active (`launchedActive`); one on hold never makes it busy. Absent from older services and while it started none.
    */
   threads?: BotLaunchedThread[]
@@ -239,6 +240,14 @@ export interface BotWatcherItem {
 
 /** How many of the threads a bot started that ended or sit idle its summary carries, the most recently updated. */
 export const BOT_LAUNCHED_ENDED_SHOWN = 30
+
+/** How long a thread the bot started stays under "Recent" after it was last updated: six hours. "See all" lists the rest. */
+export const BOT_LAUNCHED_RECENT_MS = 6 * 60 * 60 * 1000
+
+/** Whether a thread the bot started that no longer goes is still listed under "Recent" at `now`: updated in the last six hours. */
+export function launchedRecent(thread: Pick<BotLaunchedThread, 'updatedAt'>, now: number): boolean {
+  return Date.parse(thread.updatedAt) >= now - BOT_LAUNCHED_RECENT_MS
+}
 
 /**
  * A thread the bot started: its title, its project, and how it stands now: its run works, waits its turn, is held (a
