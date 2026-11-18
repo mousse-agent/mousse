@@ -651,7 +651,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private createActions(): BotActions { return new BotActions({
     store: this.host.store,
     refresh: async tool => {
-      if (tool && this.host.mcp?.refresh) return this.host.mcp.refresh(tool.server)
+      if (tool && this.host.mcp?.refresh) return this.host.mcp.refresh(tool.server, tool.tool)
       await this.host.mcp?.warm()
     },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },

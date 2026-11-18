@@ -28,6 +28,7 @@ export interface RelayCatalogDeps {
 /** One project scope's catalogue. */
 interface Scope {
   /** Each enabled installation's last good tools. */
+  serverTimes: Map<string, number>
   servers: Map<string, RelayServerTools>
   /** Installations whose last listing failed (their last good tools are kept). */
   failing: Set<string>
@@ -93,6 +94,11 @@ export class RelayCatalog {
       const identity = scope.configured.get(entry.installationId)?.identity
       return { ...entry, failing: scope.failing.has(entry.installationId), starting: scope.starting.has(entry.installationId), ...(identity ? { identity, configDigest: scope.configured.get(entry.installationId)?.configDigest } : {}) }
     })
+  }
+
+  /** Last successful answer from this server, never the time a refresh merely started. */
+  serverRefreshedAt(installationId: string, projectPath?: string): number | undefined {
+    return this.scopes.get(scopeKey(projectPath))?.serverTimes.get(installationId)
   }
 
   /** Every configured installation of the scope, switched on or off, by its last read; empty while the scope is cold. */
@@ -183,7 +189,7 @@ export class RelayCatalog {
     const key = scopeKey(projectPath)
     let scope = this.scopes.get(key)
     if (!scope) {
-      scope = { servers: new Map(), failing: new Set(), starting: new Set(), configured: new Map(), listing: [], byName: new Map(), previous: new Map(), revision: '', seen: -1 }
+      scope = { serverTimes: new Map(), servers: new Map(), failing: new Set(), starting: new Set(), configured: new Map(), listing: [], byName: new Map(), previous: new Map(), revision: '', seen: -1 }
       this.scopes.set(key, scope)
     }
     return scope
@@ -280,6 +286,7 @@ export class RelayCatalog {
       if (eligible.length) {
         const heard = (entry: RelayServerTools): void => {
           answered.set(entry.installationId, entry)
+          if (!entry.error) scope.serverTimes.set(entry.installationId, this.now())
           if (entry.error) logWarn('McpRelay', `Listing MCP server "${entry.serverName}" failed; its last good tools are kept: ${redactSensitiveText(entry.error)}`)
         }
         try {

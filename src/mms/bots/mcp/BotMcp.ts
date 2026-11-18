@@ -96,7 +96,7 @@ export type BotMcpWhere =
 export interface BotMcpHost {
   /** Reads the servers again when the listing is cold or old, waiting at most `BOT_MCP_WARM_MS`. Never throws. */
   warm(): Promise<void>
-  refresh?(serverId: string): Promise<boolean>
+  refresh?(serverId: string, toolName?: string): Promise<boolean>
   servers(): BotMcpServer[]
   /** Whether the servers were read since Mousse started: before that, `servers()` says nothing of a server being gone. */
   listed?(): boolean
@@ -114,7 +114,7 @@ export interface BotMcpHost {
 }
 
 export interface BotMcpDeps {
-  catalog: Pick<RelayCatalog, 'ensure' | 'servers' | 'listing'> & Partial<Pick<RelayCatalog, 'listed' | 'configured' | 'onPublished' | 'refreshServer'>>
+  catalog: Pick<RelayCatalog, 'ensure' | 'servers' | 'listing'> & Partial<Pick<RelayCatalog, 'listed' | 'configured' | 'onPublished' | 'refreshServer' | 'serverRefreshedAt'>>
   manager: { callTool(providerName: string, args: Record<string, unknown>, projectPath: string | undefined, signal: AbortSignal | undefined, actor: ReturnType<typeof defaultIntegrationActor>, expected: McpToolExecutionPin | undefined, options: McpCallOptions): Promise<McpToolCallResult> }
   /** MCP is on in Settings. */
   enabled(): boolean
@@ -241,7 +241,10 @@ export class BotMcp implements BotMcpHost {
   }
 
   /** Send needs fresh server evidence, even when the ordinary turn cache is warm. */
-  async refresh(serverId: string): Promise<boolean> {
+  async refresh(serverId: string, toolName?: string): Promise<boolean> {
+    const before = this.where(serverId)
+    const offered = before?.state === 'on' ? before.server.tools.find(t => t.tool === toolName) : undefined
+    const hint = offered?.readOnlyHint
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const read = this.deps.catalog.refreshServer
@@ -249,7 +252,11 @@ export class BotMcp implements BotMcpHost {
         : this.deps.catalog.ensure(undefined, BOT_MCP_WARM_MS, { signIn: false, fresh: true }).then(() => true)
       const done = await Promise.race([read, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), BOT_MCP_WARM_MS) })])
       const where = this.where(serverId)
-      return done && where?.state === 'on' && !where.server.failing && !where.server.starting
+      if (where?.state !== 'on' || where.server.failing || where.server.starting) return false
+      if (done) return true
+      const refreshedAt = this.deps.catalog.serverRefreshedAt?.(installationOf(serverId))
+      const current = where.server.tools.find(t => t.tool === toolName)
+      return Boolean(offered && current && current.readOnlyHint === hint && refreshedAt !== undefined && Date.now() - refreshedAt <= 30_000)
     } catch { return false }
     finally { clearTimeout(timer) }
   }
