@@ -166,7 +166,7 @@ The page-check setting `onlyIfChanged: { url, contains? }` and its state live in
 
 The new fixed-line fields sit under `bot`, because `jobs-kept.json` keeps that field whole when an older build's save drops what it does not know (`ScheduledJobStore.ts:229`); `restoreDroppedFields` must also merge missing keys into a `bot` that survived. An older build runs a `say` job as a prompt that says it, and ends an `until` job at its time. The "where I left off" line and the page's last hash live in `bots.db`, never in `jobs.json`, so Forget and search reach them and a file rewritten every tick stays small.
 
-About → Runs and the automation card word each combination: "Inbox check · every weekday 09:00", "Says “Take your pills” · every day 08:00", "Tickets page · checks every 15 min · tells you when it changes", with " · until Fri 21 Nov" appended.
+About → Runs and the automation card word each combination: "Inbox check · every weekday 09:00", "Says “Take your pills” · every day 08:00", "Every 15 min · when example.com changes", with " · until Fri 21 Nov" appended.
 
 ## 1. Event inbox
 
@@ -200,7 +200,7 @@ About → Runs and the automation card word each combination: "Inbox check · ev
   - **The first check** records the page and starts no run.
   - **The fetch** is made by Mousse under the same rules as a secret's request (a public address, checked and then used; no redirect to another host), with no secret. `runScheduledOccurrence` starts it and answers "not ready"; the next tick reads the result.
   - **Unchanged:** the computer-only scheduler/engine outcome is `checked`, which advances the occurrence without setting `botSkip` (a new reason would cross to phones): no activation, no run in the automation's list, no model call.
-  - **Changed:** the changed text is written to a file, and then one transaction inserts the run, which names that file, and moves the handed-over hash. A crash before it leaves the old hash, so the change is seen again; a crash after it leaves a run that holds the change. A run that then fails is told as a failure, so a change is never lost silently.
+  - **Changed:** the text waits in `bot_memory_state`. One transaction inserts the run, writes the text into a file in that run’s folder, and moves the handed-over hash only if the queue accepts the run. The run names that file and owns it until it ends, even if its schedule ends or is removed. A crash before it leaves the old hash, so the change is seen again; a crash after it leaves a run that holds the change. A run that then fails is told as a failure, so a change is never lost silently.
   - **A result for an older generation** (the schedule was edited or removed while the page loaded) is dropped.
   - **A page that can't be read** six times in a row, or for a day, is told once ("I can't read the tickets page any more: it asks me to sign in") and counts as a failed run. It is never skipped in silence for ever.
 
