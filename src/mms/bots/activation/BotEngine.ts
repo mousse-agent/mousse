@@ -9289,7 +9289,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** Durable nudge rows carry the count; telling receipts carry the clock, never executable arguments. */
   private actionNudgeFollowUps(botId?: string, now = this.now()): ActionNudgeFollowUp[] {
     if (!botAsksFirst(this.host.settings?.get())) return []
-    const rows = this.store.all(`SELECT a.id, a.bot_id, a.activation_id, a.message_id, a.expires_at FROM bot_actions a
+    const rows = this.store.all(`SELECT a.id, a.bot_id, a.activation_id, a.message_id FROM bot_actions a
       JOIN bot_registry b ON b.bot_id = a.bot_id JOIN bot_messages m ON m.id = a.message_id
       WHERE a.status = 'open' AND a.args_digest <> '[forgotten]' AND b.deleted_at IS NULL
       AND (? IS NULL OR a.bot_id = ?)`, botId ?? null, botId ?? null)
@@ -9307,7 +9307,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       let history = budgets.get(bot)
       if (!history) { history = this.nudgeTimes(bot, now); budgets.set(bot, history) }
       const at = this.followUpTime(bot, nudgeSlot(due, history))
-      if (!Number.isFinite(at) || at >= Date.parse(String(row.expires_at))) return []
+      if (!Number.isFinite(at)) return []
       return [{ id, actionId: id, botId: bot, activationId: String(row.activation_id), messageId, count: first ? 2 : 1, at }]
     })
   }
