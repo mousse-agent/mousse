@@ -185,3 +185,45 @@ it('an older computer preflight conflict remains definite on a newer device', as
   expect(answer).not.toHaveBeenCalled()
   expect(t.caller.net.session(t.node).state()).toBe('open')
 }, 60_000)
+
+it.each(['ready', 'unreachable', 'changed'] as const)('cold admission over the bridge remains definite: %s', async state => {
+  // Real BotActions and bridge; only the service listing and tool transport are scripted.
+  const { BotActions } = await import('../../../../src/mms/bots/actions/BotActions')
+  f.store.run('DELETE FROM bot_actions')
+  let cold = false
+  let schema = 1
+  const calls: unknown[] = []
+  const actions = new BotActions({ store: f.store, enabled: () => true, name: () => 'Mail',
+    refresh: async () => { if (state !== 'unreachable') { cold = false; if (state === 'changed') schema = 2 } },
+    park: () => {}, lifetime: () => 3600_000, origin: () => 'owner', schema: () => ({}),
+    binding: () => cold ? undefined : { schema }, obsolete: () => false,
+    post: () => {}, settled: () => {}, publish: () => {}, ownerAnswered: () => {}, held: () => {}, forgottenRequest: () => {},
+    execute: async (_row, _tool, args) => { calls.push(args); return { text: 'delivered' } }
+  })
+  const row = f.store.listActivations(realBot)[0]!
+  actions.hold(row, 'bridge-dispatch', { server: 'mail', tool: 'send', serverName: 'Mail' } as never, { to: 'one@example.test' }, 'bridge-call')
+  const a = actions.forWork(row.id)!
+  f.store.run('UPDATE bot_actions SET id = ? WHERE id = ?', ACTION, a.id)
+  message = { ...message, action: { ...message.action!, actionId: ACTION, digest: a.args_digest, args: {}, status: 'open' } }
+  const input = { actionId: ACTION, digest: a.args_digest, answer: 'send' as const }
+  check = () => actions.check(input)
+  answer = vi.fn(() => actions.answer(input))
+  const tap = () => t.caller.net.session(t.node).rpc('bots.actions.answer', { botId: BOT, ...input }, { id: newId('rpc'), idem: newId('rpc'), deadlineMs: 15_000 })
+  cold = true
+  const first = await tap().catch(error => error)
+  expect(first).toMatchObject({ code: 'conflict', details: { reason: 'bot_action_unreachable' } })
+  expect(first.message).not.toContain('partly happened')
+  expect(botActionRefusal(first, { serverName: 'Mail' })?.text).toBe("Mail couldn't be reached. Nothing was sent. Try again when it is available.")
+  expect(answer).not.toHaveBeenCalled()
+  expect(actions.get(ACTION)?.status).toBe('open')
+  if (state === 'ready') {
+    expect(await tap()).toMatchObject({ status: 'done' })
+    expect(calls).toEqual([{ to: 'one@example.test' }])
+  } else {
+    const next = await tap().catch(error => error)
+    expect(next).toMatchObject({ code: 'conflict', details: { reason: state === 'changed' ? 'bot_action_changed' : 'bot_action_unreachable' } })
+    expect(next.message).not.toContain('partly happened')
+    expect(calls).toEqual([])
+    expect(answer).not.toHaveBeenCalled()
+  }
+})
