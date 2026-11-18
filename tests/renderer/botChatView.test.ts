@@ -2959,3 +2959,47 @@ it.each(['local', 'device'])('keeps the changed-schedule sentence and closes but
   expect(host.textContent).toContain('This changed since you saw it. Nothing was sent.')
   expect(button('Send', transcript())).toBeUndefined()
 })
+
+describe('a message from another of the owner\'s bots', () => {
+  const alpha = summary('bot-alpha', { name: 'Alpha', look: { colour: 'green', accessory: 'beret' } })
+  const text = '**Message from your bot Alpha**\n\n> The Mac nightly passed.\n>\n> The DMG is in `nightly/`.'
+  async function openWith(row: { id: string; text: string }, sender = alpha) {
+    fake.bots = [inbox, sender]
+    fake.chats[inbox.id] = [
+      message(1, { author: 'owner', text: 'Ask Alpha about the nightly.' }),
+      message(2, { id: row.id, kind: 'notice', text: row.text }),
+      message(3, { text: 'Alpha says the nightly passed.' })
+    ]
+    await act(async () => useChatsStore.getState().activate('p1'))
+    await act(async () => root.render(createElement(ChatWorkspace)))
+    await act(async () => useChatsStore.getState().openBot(inbox.id))
+  }
+  const sent = (id: string) => host.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+
+  it('reads as that bot\'s own message: its name on top and its words, with no header or quote, and Copy takes the words alone', async () => {
+    const id = 'bm_botmsg_bot-alpha_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+    await openWith({ id, text })
+    expect(sent(id).textContent).toContain('Alpha')
+    expect(sent(id).textContent).toContain('The Mac nightly passed.')
+    expect(sent(id).textContent).not.toContain('Message from your bot')
+    expect(sent(id).querySelector('blockquote')).toBeNull()
+    const writeText = vi.fn(async () => undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    await click(button('Copy', sent(id)))
+    expect(writeText).toHaveBeenCalledWith('The Mac nightly passed.\n\nThe DMG is in `nightly/`.')
+  })
+
+  it('names the sender as it is called now', async () => {
+    const id = 'bm_botmsg_bot-alpha_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+    await openWith({ id, text }, { ...alpha, name: 'Alpha Two' })
+    expect(sent(id).textContent).toContain('Alpha Two')
+  })
+
+  it('draws a message kept before the sender\'s id was, by the name it holds', async () => {
+    const id = 'bm_botmsg_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+    await openWith({ id, text })
+    expect(sent(id).textContent).toContain('Alpha')
+    expect(sent(id).textContent).toContain('The DMG is in')
+    expect(sent(id).textContent).not.toContain('Message from your bot')
+  })
+})

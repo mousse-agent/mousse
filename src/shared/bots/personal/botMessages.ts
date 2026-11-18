@@ -24,8 +24,18 @@ export const MAX_BOT_MESSAGE_CHARS = 2_000
 
 /** The key of the chat turn a bot's message starts: `botmsg:<sender's bot id>:<message id>`. */
 export const BOT_MESSAGE_KEY_PREFIX = 'botmsg:'
-/** The id of the message's row in the receiving bot's chat (`bm_botmsg_<message id>`). */
+/**
+ * The start of the id of the message's row in the receiving bot's chat: `bm_botmsg_<sender's bot id>_<message id>`
+ * (`botMessageRowId`); rows written before the sender was kept are `bm_botmsg_<message id>`.
+ */
 export const BOT_MESSAGE_ROW_PREFIX = 'bm_botmsg_'
+/** A message id, a UUID: its row's id ends with it. */
+const MESSAGE_ID_TAIL = /_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+
+/** The id of the row bot `fromBotId`'s message `messageId` leaves in the receiving bot's chat. */
+export function botMessageRowId(fromBotId: string, messageId: string): string {
+  return `${BOT_MESSAGE_ROW_PREFIX}${fromBotId}_${messageId}`
+}
 
 /** Who sent a chat turn its message, kept on the turn (`BotActivationTrigger`). */
 export interface BotMessageSender {
@@ -53,6 +63,29 @@ function plainName(name: string): string {
 export function botMessageRowText(fromName: string, message: string): string {
   const quoted = message.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n')
   return `**Message from your bot ${plainName(fromName)}**\n\n${quoted}`
+}
+
+/** Another bot's message as its row in a chat holds it: who sent it (its bot id when the row keeps it) and the message. */
+export interface BotMessageFrom {
+  botId?: string
+  name: string
+  message: string
+}
+
+const ROW_TEXT = /^\*\*Message from your bot ([^\n]*)\*\*\n\n(>[^\n]*(?:\n>[^\n]*)*)$/
+
+/**
+ * The sender and the message of a row another bot's message left (`botMessageRowText`), for a chat that draws it as
+ * that bot's own bubble; undefined for any other row, or one whose text is not that shape.
+ */
+export function botMessageFrom(row: { id: string; text: string }): BotMessageFrom | undefined {
+  if (!row.id.startsWith(BOT_MESSAGE_ROW_PREFIX)) return undefined
+  const parts = ROW_TEXT.exec(row.text)
+  if (!parts) return undefined
+  const message = parts[2]!.split('\n').map((line) => line.replace(/^> ?/, '')).join('\n')
+  const tail = MESSAGE_ID_TAIL.exec(row.id)
+  const botId = tail && tail.index > BOT_MESSAGE_ROW_PREFIX.length ? row.id.slice(BOT_MESSAGE_ROW_PREFIX.length, tail.index) : undefined
+  return { ...(botId ? { botId } : {}), name: parts[1]!, message }
 }
 
 /**
