@@ -20,7 +20,7 @@ export async function secretFetchAction(store: BotStore, input: SecretFetchActio
     store.run(`INSERT INTO bot_actions(id,call_key,bot_id,activation_id,lane,kind,target_json,args_json,args_digest,binding_json,status,created_at,answered_at) VALUES(?,?,?,?,'run','secret_fetch',?,?,?,?,'approved',?,?)`, id, callKey, botId, activationId, mask(JSON.stringify({service:input.service})), args, createHash('sha256').update(args).digest('hex'), mask(JSON.stringify({secret:input.secret})), now, now)
     if (!refusal) store.run("UPDATE bot_actions SET status = 'running', ran_at = ? WHERE id = ?", now, id)
     return {id,refusal}
-  })()
+  })
   if ('previous' in admission) return admission.previous!
   let result: ToolOutcome
   try { result = admission.refusal ? {text:admission.refusal,isError:true} : await run() }
