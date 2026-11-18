@@ -2712,7 +2712,7 @@ it.each([
   ['work_ended', 'This work ended. Nothing was sent.', 'withdrawn'],
   ['owner_paused', 'This bot was paused, so nothing was sent.', 'withdrawn'],
   ['permission_changed', 'This tool or its permission changed, so nothing was sent.', 'withdrawn'],
-  ['disabled', 'This could not wait for your owner after all, so nothing was sent.', 'withdrawn'],
+  ['disabled', 'Withdrawn when asks first was turned off. Nothing was sent.', 'withdrawn'],
   ['owner_removed', 'You removed this request, so nothing was sent.', 'withdrawn'],
   ['binding_changed', 'This changed since you saw it. Nothing was sent.', 'withdrawn'],
   ['settled', 'This was already answered.', 'done'],
