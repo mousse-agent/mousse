@@ -2675,7 +2675,7 @@ it('keeps a curly-quoted arrow name in one unquoted hidden-path segment', async 
 })
 
 it.each(['approved', 'running', 'unreachable'])('C4 integration waiting distinguishes %s from an actual send', async (state) => {
-  const sentence = "Stored Mail couldn't be reached, so nothing was sent."
+  const sentence = "Stored Mail couldn't be reached. Nothing was sent. Try again when it is available."
   fake.chats.inbox = [held({ status: state === 'unreachable' ? 'failed' : state, serverName: 'Stored Mail', at: AT, result: state === 'unreachable' ? { text: sentence, notSentInTime: true } : undefined })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
@@ -2718,7 +2718,7 @@ it.each([
   ['binding_changed', 'This changed since you saw it. Nothing was sent.', 'withdrawn'],
   ['settled', 'This was already answered.', 'done'],
   ['gone', "This can't be sent any more.", 'gone'],
-  ['unreachable', "Mail couldn't be reached, so nothing was sent.", 'failed']
+  ['unreachable', "Mail couldn't be reached. Nothing was sent. Try again when it is available.", 'failed']
 ])('C4 integration renderer preserves the exact %s service refusal through the real client', async (reason, text, status) => {
   fake.chats.inbox = [held()]
   const { createPersonalBotsClient } = await import('../../src/renderer/services/personalBotsClient')
@@ -2740,7 +2740,7 @@ it.each([
 })
 
 it('C4 integration bridge timeout stub has its outcome and computer explanation without an empty review fold', async () => {
-  const text = "Mail couldn't be reached, so nothing was sent."
+  const text = "Mail couldn't be reached. Nothing was sent. Try again when it is available."
   fake.chats.inbox = [held({ status: 'failed', at: AT, tooLarge: true, args: null, hiddenPaths: [], result: { text, notSentInTime: true } })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
@@ -2838,7 +2838,7 @@ it('keeps empty and unusual field names injective and reserves the non-ASCII not
 })
 
 it('shows a settled card time once, trims timeout punctuation and avoids repeating an expired refusal', async () => {
-  const sentence = "Mail couldn't be reached, so nothing was sent."
+  const sentence = "Mail couldn't be reached. Nothing was sent. Try again when it is available."
   fake.chats.inbox = [held({ status: 'failed', at: '2026-11-07T10:24:00.000Z', result: { text: sentence, notSentInTime: true } })]
   await open()
   const row = host.querySelector('[data-message-id="held-message"]')!
@@ -2946,7 +2946,7 @@ it('keeps the cached service name for a device refusal after its card disappears
   }) })
   await open()
   await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
-  expect(host.textContent).toContain("Mail couldn't be reached, so nothing was sent.")
+  expect(host.textContent).toContain("Mail couldn't be reached. Nothing was sent. Try again when it is available.")
   expect(host.textContent).not.toContain('WIRE SERVICE MUST NOT APPEAR')
   expect(host.querySelector('[aria-label="Action to review"]')).toBeNull()
 })
@@ -3049,4 +3049,21 @@ it.each([
   const region = host.querySelector('[aria-label="Everything it will send"]')!
   expect(region.querySelector('details') !== null).toBe(folds)
   expect(region.textContent).toContain(value.replaceAll('\n', '↵\n'))
+})
+
+it('C10 review cold Send gives a local retry sentence and leaves both buttons live', async () => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: async () => { throw Object.assign(new Error('not owner-facing'), { code: 'bot_action_unreachable' }) } })
+  await open()
+  await click(button('Send'))
+  expect(host.textContent).toContain("Mail couldn't be reached. Nothing was sent. Try again when it is available.")
+  expect(button('Send')?.disabled).toBe(false)
+  expect(button('Not now')?.disabled).toBe(false)
+})
+it('C10 review compact recipient carries the full review look-alike warning', async () => {
+  fake.chats.inbox = [held({ status: 'done', args: { to: 'аlex@example.test' } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const warning = [...card.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')].find(el => !el.closest('details'))
+  expect(warning?.textContent).toContain('Contains letters or digits outside A–Z and 0–9')
 })

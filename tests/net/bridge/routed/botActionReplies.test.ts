@@ -84,7 +84,7 @@ const refusals = [
   ['schedule_changed', 'This changed since you saw it. Nothing was sent.'],
   ['settled', 'This was already answered.'],
   ['gone', "This can't be sent any more."],
-  ['unreachable', "Mail couldn't be reached, so nothing was sent."]
+  ['unreachable', "Mail couldn't be reached. Nothing was sent. Try again when it is available."]
 ] as const
 const rpcAnswer = (choice = 'send') => t.caller.net.session(t.node).rpc('bots.actions.answer', {
   botId: BOT, actionId: ACTION, digest: 'a'.repeat(64), answer: choice
