@@ -911,7 +911,8 @@ export class BotChatService {
       }
     })
     const ask = this.store.openAsks(botId).find((entry) => entry.messageId !== null && runs.some((run) => run.id === entry.activationId))
-    const whenText = new PageChecks(this.store).read(botId, scheduleId) ? this.engine.schedulesOf(botId).find(s => s.scheduleId === scheduleId)?.label : undefined
+    const page = new PageChecks(this.store).read(botId, scheduleId)
+    const whenText = page ? `when ${new URL(page.url).host} changes` : undefined
     return {
       ...(whenText ? { whenText } : {}),
       botName: definition.name,
