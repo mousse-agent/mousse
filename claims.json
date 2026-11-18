@@ -76,6 +76,19 @@
       "expiresAt": "2026-11-18T12:35:24.569Z"
     },
     {
+      "task": "bots-ask-first-default",
+      "session": "agibook-80ed0e",
+      "machine": "agibook",
+      "branch": "bots-ask-first-default",
+      "paths": [
+        "src/mms/bots",
+        "src/shared/bots/personal",
+        "src/shared/settings.ts"
+      ],
+      "claimedAt": "2026-11-18T15:49:33.335Z",
+      "expiresAt": "2026-11-18T17:49:33.335Z"
+    },
+    {
       "task": "mousse/owner-request-in-a-personal-bot-chat",
       "session": "Animatrix-71802f",
       "machine": "Animatrix",
