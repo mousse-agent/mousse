@@ -2,6 +2,19 @@
   "version": 1,
   "claims": [
     {
+      "task": "bot-phase-two-followups",
+      "session": "agibook-f42da1",
+      "machine": "agibook",
+      "branch": "bot-phase-two-followups",
+      "paths": [
+        "tests/bots",
+        "docs/bots.md",
+        "docs/plans/bot-always-on.md"
+      ],
+      "claimedAt": "2026-11-18T07:11:07.367Z",
+      "expiresAt": "2026-11-18T09:11:07.367Z"
+    },
+    {
       "task": "mousse/owner-request-in-a-personal-bot-chat",
       "session": "Animatrix-71802f",
       "machine": "Animatrix",
