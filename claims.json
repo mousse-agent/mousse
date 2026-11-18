@@ -83,18 +83,6 @@
       "expiresAt": "2026-11-18T13:06:38.379Z"
     },
     {
-      "task": "steer-after-provider-ends",
-      "session": "Animatrix-adf195",
-      "machine": "Animatrix",
-      "branch": "steer-after-provider-ends",
-      "paths": [
-        "src/mms/orchestrator",
-        "src/renderer/utils/responseTimeline.ts"
-      ],
-      "claimedAt": "2026-11-18T07:56:14.086Z",
-      "expiresAt": "2026-11-18T09:56:14.086Z"
-    },
-    {
       "task": "thread-journal-latest-index",
       "session": "Animatrix-abde56",
       "machine": "Animatrix",
