@@ -223,6 +223,7 @@ const pending = new Set(['open', 'approved', 'running'])
 export class BotActionChanged extends Error { constructor(message: string, readonly code = 'bot_action_changed') { super(message) } }
 const changed = () => new BotActionChanged('This changed since you saw it. Check it again before sending.')
 export class BotActions {
+  private warming?: Promise<void>
   private readonly executing = new Set<string>()
   constructor(private readonly host: Host) {
     registerHeldCalls(host.store.db, {
@@ -465,19 +466,16 @@ export class BotActions {
       throw new BotActionChanged('This changed since you saw it. Nothing was sent.', 'bot_action_schedule_changed')
     }
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action, true)) throw changed()
+    if (input.answer === 'send' && !this.host.binding(row!, JSON.parse(action.target_json))) {
+      // Admission is synchronous at the bridge. Refuse before effects, then warm for a later tap.
+      this.warming ??= Promise.resolve().then(() => this.host.refresh()).catch(() => {}).finally(() => { this.warming = undefined })
+      const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'The service'
+      throw new BotActionChanged(`${service} couldn't be reached. Try again when it is available.`, 'bot_action_unreachable')
+    }
     return action
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
-    let action = this.checked(input, true)
-    if (input.answer === 'send' && !this.host.binding(this.host.store.activation(action.activation_id)!, JSON.parse(action.target_json))) {
-      // warm() bounds the wait. Re-read after awaiting: Stop, expiry and another answer may have won.
-      await this.host.refresh()
-      action = this.checked(input, true)
-      if (!this.valid(action)) {
-        const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'The service'
-        throw new BotActionChanged(`${service} couldn't be reached. Try again when it is available.`, 'bot_action_unreachable')
-      }
-    }
+    const action = this.checked(input, true)
     if (input.answer === 'not_now') {
       this.host.store.db.transaction(() => {
         if (!this.transition(action.id, 'open', 'declined', { text: 'Your owner chose not to send this: carry on without it and say what you skipped.' })) throw changed()
@@ -544,7 +542,7 @@ export class BotActions {
     this.withdrawChanged()
     this.expireDue()
     const interrupted = this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")
-    if (interrupted.length) await this.host.refresh()
+    if (interrupted.length || this.host.store.get("SELECT 1 FROM bot_actions WHERE status = 'open' LIMIT 1")) await this.host.refresh()
     this.withdrawChanged()
     if (this.host.store.get("SELECT 1 FROM bot_actions WHERE status IN ('open', 'approved') LIMIT 1")) this.host.held()
     for (const a of interrupted) {
