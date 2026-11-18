@@ -68,6 +68,7 @@ export type SecretAnswer =
 
 /** The daemon methods of this feature. A window of the computer that runs the thread calls them; nothing routes them. */
 export const SECRET_METHODS = [
+  'secrets.keepPasted',
   'secrets.requests.list',
   'secrets.requests.answer',
   'secrets.requests.useSaved',

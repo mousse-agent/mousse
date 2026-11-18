@@ -278,6 +278,14 @@ export class BotChatService {
     return this.detailOf(botId)
   }
 
+  /** The local vault resolves its recipient and current grant here, never from a window's thread id. */
+  secretHome(botId: string): { threadId: string; allowed: boolean } {
+    this.engine.definitionOf(botId)
+    const threadId = this.store.registry(botId)?.homeThreadId
+    if (!threadId) throw new Error('This bot has no home thread.')
+    return { threadId, allowed: this.store.activeGrant(botId)?.manifest.appTools.includes('secrets') === true }
+  }
+
   /**
    * `bots.create` (§5.3.1): validates, names the bot (or uses the given name), writes and approves
    * its starter grant, makes its home thread and files folder, and starts its first chat

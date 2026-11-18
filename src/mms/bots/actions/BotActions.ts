@@ -1,3 +1,4 @@
+import { unmistakableCredential } from '../../../shared/secretShapes'
 import { botActionRefusalText, isBotActionRefusalCode, type BotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { notice, quoted } from '../../../shared/mousseContext'
 /** Longest an accepted Send may wait before transport dispatch, counted from the owner's tap. */
@@ -72,18 +73,6 @@ function boundedActionResult(result: BotMcpCallOutcome): BotMcpCallOutcome {
     else high = mid - 1
   }
   return build(low)
-}
-// Deliberately narrower than the memory heuristic: IDs, attachments and prose need review, not refusal.
-const UNMISTAKABLE_KEYS = /\b(?:sk-[A-Za-z0-9_-]{16,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}\b|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}\b|ya29\.[0-9A-Za-z_-]{20,})|-----BEGIN [A-Z ]*PRIVATE KEY-----/
-function unmistakableCredential(text: string): boolean {
-  if (UNMISTAKABLE_KEYS.test(text)) return true
-  for (const match of text.matchAll(/\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"'`]+/gi)) {
-    try {
-      const url = new URL(match[0])
-      if (url.password || [...url.searchParams].some(([key, value]) => value && /(?:token|key|secret|signature|password|passwd|pwd|authorization|credentials?)$/i.test(key))) return true
-    } catch { /* Invalid addresses remain visible to the owner. */ }
-  }
-  return false
 }
 /** Check original strings before any key-based hiding, including object keys and nested containers. */
 function containsCredential(value: unknown): boolean {

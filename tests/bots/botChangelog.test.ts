@@ -149,3 +149,11 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   on = true
   expect(await provider.chatPreamble({ botId: 'ada', activationId: 'c6-on' })).toContain('Tools that send or change things now ask your owner first')
 })
+
+it('tells existing bots that a pasted secret arrives by name', async () => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', 25))
+  const text = await packs().chatPreamble({ botId: 'ada', activationId: 'pasted-secret' })
+  expect(text).toContain('Your owner can keep a pasted key as a secret')
+  expect(text).toContain('secret_run')
+})
