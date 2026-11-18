@@ -24,7 +24,7 @@ export function secretEntryLine(entry: SecretEntryView): string {
         ? 'This thread only'
         : `Until ${when(entry.expiresAt) ?? 'tomorrow'}`
   const parts = [kept]
-  if (entry.binding) parts.push(`for ${entry.binding.service ?? entry.binding.host}, read only`)
+  if (entry.binding) parts.push(entry.binding.unavailable ? 'bound, service unavailable' : `for ${entry.binding.service ?? entry.binding.host}, read only`)
   if (entry.threadId) parts.push(`asked for in ${entry.threadTitle ? `“${entry.threadTitle}”` : 'a deleted thread'}`)
   const used = when(entry.lastUsedAt)
   parts.push(used ? `last used ${used}` : 'not used yet')
