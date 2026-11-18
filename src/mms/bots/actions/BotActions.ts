@@ -2,7 +2,6 @@ import { botActionRefusalText, isBotActionRefusalCode, type BotActionRefusalCode
 import { notice, quoted } from '../../../shared/mousseContext'
 /** Longest an accepted Send may wait before transport dispatch, counted from the owner's tap. */
 export const APPROVED_SEND_WINDOW_MS = 10 * 60_000
-import { MAX_SAME_WAKES } from '../../../shared/bots/personal/wakes'
 import { registerHeldCalls } from './lifecycle'
 import { randomUUID } from 'node:crypto'
 import type { MousseSettings } from '../../../shared/settings'
@@ -356,8 +355,6 @@ export class BotActions {
     const removed = history.find(action => JSON.parse(action.card_json ?? '{}').ownerRemoved && !this.ownerWroteAfter(action, true))
     if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
-    if (unanswered.length >= MAX_SAME_WAKES)
-      return this.refuse(row, unanswered[0], row.trigger.kind === 'schedule' ? 'Three requests for this tool are waiting or were not sent. Say what you need in your report.' : 'Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
     const refused = unanswered.find(action => action.args_digest === digest)
     if (refused)
       return this.refuse(row, refused, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')

@@ -424,12 +424,12 @@ it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route 
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
-it.each(['repeat', 'three', 'forgotten'] as const)('removed or recreated schedules and a second schedule cannot reset %s refusals', async rule => {
+it.each(['repeat', 'forgotten'] as const)('removed or recreated schedules and a second schedule cannot reset %s refusals', async rule => {
   const t = await scheduledCall()
   let id = t.id, turn = t.run, schedule = t.schedule
-  const count = rule === 'three' ? 3 : 1
+  const count = 1
   for (let n = 0; n < count; n++) {
-    const args = rule === 'three' ? { body: 'draft ' + n } : t.args
+    const args = t.args
     await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'hold-' + n, signal: new AbortController().signal })
     await finish(f, turn.payload)
     const a = f.bots.actions.forWork(id)!
@@ -451,7 +451,7 @@ it.each(['repeat', 'three', 'forgotten'] as const)('removed or recreated schedul
     id = due.inserted[0]!
     turn = await start(f, id)
   }
-  const args = rule === 'three' ? { body: 'another draft' } : t.args
+  const args = t.args
   const attempt = (bot: typeof turn.prepared.authority, key: string) => callForBot({ bot, mcp: t.mcp, name: 'Mail__send', args, toolCallId: key, signal: new AbortController().signal })
   expect((await attempt(turn.prepared.authority, 'recreated')).isError).toBe(true)
   const second = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Same task elsewhere' }, 'owner')
@@ -564,15 +564,11 @@ async function fanOut(on: boolean, owner: boolean, count: number, different: boo
   for (const [n, work] of works.entries()) results.push(await callForBot({ bot: work.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: different ? { ...t.args, body: 'Message ' + n } : t.args, toolCallId: 'fan-call-' + n, signal: new AbortController().signal }))
   return { ...t, origin, chat, works, results }
 }
-it.each([false, true])('one unattended chat starting twenty works has bounded open cards, different arguments=%s', async different => {
+it.each([false, true])('unattended calls keep only the exact-open duplicate refusal, different arguments=%s', async different => {
   const t = await fanOut(true, false, 20, different)
-  const actions = f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")
-  expect(actions).toHaveLength(different ? 3 : 1)
-  expect(t.results.filter(result => !result.isError)).toHaveLength(different ? 3 : 1)
-  expect(t.results.at(-1)).toMatchObject({
-    isError: true,
-    text: expect.stringContaining(different ? 'Three requests for this tool are waiting or were not sent' : 'already waiting')
-  })
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(different ? 20 : 1)
+  expect(t.results.filter(result => !result.isError)).toHaveLength(different ? 20 : 1)
+  if (!different) expect(t.results.at(-1)?.text).toContain('already waiting')
   expect(t.calls).toEqual([])
 })
 it('owner-started work retains five different open cards', async () => {
@@ -593,7 +589,7 @@ it.each([false, true])('switch off preserves all twenty unattended calls, differ
 })
 it.each(['create:fan-out', 'question:fan-out', 'botmsg:fan-out', 'answer:fan-out'])('persisted %s origin keeps the correct approval scope', async originKey => {
   const t = await fanOut(true, false, 5, true, originKey)
-  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(originKey.startsWith('answer:') ? 5 : 3)
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(5)
 })
 it.each(['declined', 'expired', 'forgotten'] as const)('unattended %s history follows work into a new piece of work', async settled => {
   const t = await fanOut(true, false, 1, false)
@@ -612,27 +608,17 @@ it.each(['declined', 'expired', 'forgotten'] as const)('unattended %s history fo
   expect(await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'again', signal: new AbortController().signal })).toMatchObject({ isError: true })
   expect(f.bots.actions.forWork(workId)).toBeUndefined()
 })
-it('a non-waiting question tap still lifts the unattended cap', async () => {
-  const t = await fanOut(true, false, 4, true)
-  const last = t.works.at(-1)!
-  expect(t.results.at(-1)?.isError).toBe(true)
-  expect(f.bots.askOwner(t.botId, last.id, { question: 'May I carry on?', choices: [{ label: 'Yes' }, { label: 'No' }], other: true, wait: false }).asked).toBe(true)
-  const q = f.store.workQuestion(last.id)!
-  const before = f.store.ownerLastWroteSeq(t.botId)
-  await f.bots.service.answerQuestion({ botId: t.botId, questionId: q.id, choice: 'Yes', clientRequestId: 'unattended-cap-tap' })
-  expect(f.store.ownerLastWroteSeq(t.botId)).toBeGreaterThan(before)
-  const result = await callForBot({ bot: last.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'After owner tap' }, toolCallId: 'after-tap', signal: new AbortController().signal })
-  expect(result.isError).not.toBe(true)
-})
-it('scheduled and unattended work share the same pending-card cap', async () => {
+it('scheduled and unattended work retain shared exact-repeat history without a card count', async () => {
   const t = await fanOut(true, false, 3, true)
   f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send another email' }, 'owner')
   f.clock.now += 5 * 60_000
   const due = await f.tickSchedules(new Date(f.clock.now))
-  const run = await start(f, due.inserted[0]!)
-  const result = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'From the schedule' }, toolCallId: 'scheduled-cap', signal: new AbortController().signal })
-  expect(result).toMatchObject({ isError: true, text: expect.stringContaining('Three requests') })
-  expect(f.bots.actions.forWork(due.inserted[0]!)).toBeUndefined()
+  const id = due.inserted[0]!
+  const run = await start(f, id)
+  const call = (body: string, key: string) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body }, toolCallId: key, signal: new AbortController().signal })
+  expect(await call('Message 0', 'duplicate')).toMatchObject({ isError: true, text: expect.stringContaining('already waiting') })
+  expect((await call('From the schedule', 'changed')).isError).not.toBe(true)
+  expect(f.bots.actions.forWork(id)?.status).toBe('open')
 })
 it('a duplicate refusal explains the earlier card without borrowing its outcome', async () => {
   const t = await fanOut(true, false, 2, false)
@@ -651,9 +637,9 @@ it('a duplicate refusal explains the earlier card without borrowing its outcome'
   expect(f.store.dispatches(duplicate!.id)).toHaveLength(1)
   expect(f.store.unreadWorkActions(duplicate!.id)).toEqual([])
 })
-it.each(['send', 'not_now'] as const)('the open-card limit describes pending requests while %s still settles its card', async answer => {
+it.each(['send', 'not_now'] as const)('different open calls remain independent while %s settles one card', async answer => {
   const t = await fanOut(true, false, 4, true)
-  expect(t.results.at(-1)?.text).toBe('Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
+  expect(t.results.at(-1)?.isError).not.toBe(true)
   const first = t.works[0]!
   await finish(f, first.run.payload)
   const a = f.bots.actions.forWork(first.id)!
@@ -796,7 +782,7 @@ it.each(['needs_you', 'look', 'fyi', 'every'] as const)('a scheduled approval is
   const a = f.bots.actions.forWork(t.id)!
   expect(f.store.message(a.message_id)?.tell).toBe('soon')
 })
-it('three unsent calls stop the tool across occurrences, and owner words reset it', async () => {
+it('three Not nows allow a changed request across schedule occurrences', async () => {
   const t = await scheduledCall()
   let id = t.id, turn = t.run
   for (let n = 0; n < 3; n++) {
@@ -813,10 +799,8 @@ it('three unsent calls stop the tool across occurrences, and owner words reset i
     turn = await start(f, id)
   }
   const call = () => callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'new version' }, toolCallId: 'fourth-call', signal: new AbortController().signal })
-  expect(await call()).toMatchObject({ isError: true, text: expect.stringContaining('Three requests') })
-  expect(f.bots.actions.forWork(id)).toBeUndefined()
-  await f.bots.service.chatSend({ botId: t.botId, text: 'Please try again', clientRequestId: 'reset-schedule-refusal' })
   expect((await call()).isError).not.toBe(true)
+  expect(f.bots.actions.forWork(id)?.status).toBe('open')
 })
 it('a schedule ending at until withdraws a parked call and preserves its report', async () => {
   const t = await scheduledCall(true, 5, 7)
@@ -2129,7 +2113,7 @@ it('B2 a running call cannot restore its forgotten content when its result arriv
   expect(JSON.stringify(memory.actions(t.botId))).not.toContain('private delivered receipt')
 })
 
-it('R2-4 three expired cards refuse further calls without claiming the owner declined', async () => {
+it('R2-4 older expired cards refuse exact repeats but do not count changed calls', async () => {
   const t = await setup(true)
   let runtime = t.work
   for (let n = 0; n < 3; n++) {
@@ -2139,20 +2123,16 @@ it('R2-4 three expired cards refuse further calls without claiming the owner dec
     await legacyExpired(a)
     runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   }
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'before-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
-  const a = f.bots.actions.forWork(t.workId)!
-  const memory = new BotMemoryStore({ db: f.store.db })
-  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'declined call' })!
-  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Three requests for this tool are waiting or were not sent') })
-  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(3)
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'expires 0' }, toolCallId: 'old-exact-repeat', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('declined exactly this, or it expired') })
+  expect((await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'changed-after-old-expiry', signal: new AbortController().signal })).isError).not.toBe(true)
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(4)
 })
 
-it.each(['repeat', 'loop'] as const)('R2-1 %s refusal is a Mousse update and never starts an extra report', async reason => {
+it.each(['repeat', 'older repeat'] as const)('R2-1 %s refusal is a Mousse update and never starts an extra report', async reason => {
   const t = await setup(true)
   let runtime = t.work
-  for (let n = 0; n < (reason === 'loop' ? 3 : 1); n++) {
-    await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, ...(reason === 'loop' ? { body: `body ${n}` } : {}) }, toolCallId: `decline-${n}`, signal: new AbortController().signal })
+  for (let n = 0; n < (reason === 'older repeat' ? 3 : 1); n++) {
+    await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, ...(reason === 'older repeat' ? { body: `body ${n}` } : {}) }, toolCallId: `decline-${n}`, signal: new AbortController().signal })
     await finish(f, runtime.payload)
     const a = f.bots.actions.forWork(t.workId)!
     await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
@@ -2160,7 +2140,7 @@ it.each(['repeat', 'loop'] as const)('R2-1 %s refusal is a Mousse update and nev
     ;(runtime.prepared as any).modelOutput?.()
   }
   const dispatches = f.store.dispatches(t.workId).length
-  const result = await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'refused', signal: new AbortController().signal })
+  const result = await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: reason === 'older repeat' ? { ...t.args, body: 'body 0' } : t.args, toolCallId: 'refused', signal: new AbortController().signal })
   expect(result.isError).toBe(true)
   expect(f.store.pendingWorkNotes(t.workId)).toEqual([])
   await finish(f, runtime.payload, 'completed', { text: 'Finished without sending.' }); await flush()
@@ -3210,7 +3190,7 @@ it.each(['stop', 'done', 'failed'] as const)('C9 work ending %s consumes unread 
   expect(f.store.unreadWorkActions(t.workId)).toEqual([])
 })
 
-it('C9 a scheduled unsent loop ends at its report', async () => {
+it('C11 a scheduled run can review a fourth changed request', async () => {
   const t = await scheduledCall()
   let turn = t.run
   for (let n = 0; n < 3; n++) {
@@ -3221,7 +3201,8 @@ it('C9 a scheduled unsent loop ends at its report', async () => {
     await flush(); turn = await start(f, t.id, f.store.lastMainDispatch(t.id)!.n)
   }
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'fourth request' }, toolCallId: 'fourth', signal: new AbortController().signal })
-  expect(result).toMatchObject({ isError: true, text: 'Three requests for this tool are waiting or were not sent. Say what you need in your report.' })
+  expect(result.isError).not.toBe(true)
+  expect(f.bots.actions.forWork(t.id)?.status).toBe('open')
 })
 it('C9 a hand-started run cannot hold a call or start work', async () => {
   const t = await setup(true)
