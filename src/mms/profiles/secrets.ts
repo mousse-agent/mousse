@@ -39,7 +39,17 @@ export function createProfileSecretAdapter(options: {
   // ref, such as an automation's webhook signing secret (`scheduled-webhook-<id>`), reads the inherited overlay only.
   const toolSecrets: IntegrationSecretAdapter = {
     resolveEnv: (value) => value,
-    resolveSecretRef: (ref) => (isKeyName(ref) ? readFileSecrets()[ref] : undefined) ?? environment[ref]
+    resolveSecretRef: (ref) => {
+      // Refuse before resolving, including an inherited environment fallback. Daemon-only reads remain available for masking.
+      const metaPath = join(options.profileRoot, 'secrets', 'meta.json')
+      if (existsSync(metaPath)) {
+        let meta: Record<string, { binding?: { service?: string; origin: string } }>
+        try { meta = JSON.parse(readFileSync(metaPath, 'utf8')) } catch { throw new Error('Secret metadata could not be read.') }
+        const binding = meta?.[ref]?.binding
+        if (binding) throw new Error(`${ref} is bound to ${binding.service ?? new URL(binding.origin).host}; use secret_fetch.`)
+      }
+      return (isKeyName(ref) ? readFileSecrets()[ref] : undefined) ?? environment[ref]
+    }
   }
   return {
     resolveEnv(value: string): string {

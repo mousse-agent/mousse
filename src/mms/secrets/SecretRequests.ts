@@ -1,3 +1,4 @@
+import { secretBindingView, type SecretBinding, type SecretBindingView } from '../../shared/secretServices'
 import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import {
@@ -14,6 +15,7 @@ import type { SecretVault } from './SecretVault'
 
 /** What the agent asked for. */
 export interface SecretRequestInput {
+  binding?: SecretBinding
   label: string
   reason: string
   link?: string
@@ -24,8 +26,8 @@ export interface SecretRequestInput {
 
 /** How a request ended, as the agent is told. Never holds a value; `file` is the private file the agent may read. */
 export type SecretRequestOutcome =
-  | { kind: 'stored'; name: string; keep: SecretKeep; file?: string }
-  | { kind: 'saved_reused'; name: string; file?: string }
+  | { kind: 'stored'; name: string; keep: SecretKeep; file?: string; binding?: SecretBindingView }
+  | { kind: 'saved_reused'; name: string; file?: string; binding?: SecretBindingView }
   | { kind: 'declined' }
   | { kind: 'ended'; why: 'stopped' | 'timed_out' | 'shutdown' }
 
@@ -38,6 +40,7 @@ export class SecretRequestError extends Error {
 }
 
 interface Pending {
+  binding?: SecretBinding
   view: SecretRequestView
   settle(outcome: SecretRequestOutcome): void
 }
@@ -70,7 +73,8 @@ export class SecretRequests extends EventEmitter {
       ...(link ? { link } : {}),
       ...(format ? { format } : {}),
       name,
-      savedExists: this.vault.isSaved(name),
+      savedExists: this.vault.isSaved(name, input.binding),
+      ...(input.binding ? { binding: secretBindingView(input.binding) } : {}),
       createdAt: new Date(this.now()).toISOString()
     }
     return new Promise<SecretRequestOutcome>((resolve) => {
@@ -83,7 +87,7 @@ export class SecretRequests extends EventEmitter {
         this.emit('changed', { threadId })
         resolve(outcome)
       }
-      this.pending.set(requestId, { view, settle: finish })
+      this.pending.set(requestId, { view, binding: input.binding ? structuredClone(input.binding) : undefined, settle: finish })
       if (options.signal?.aborted) {
         finish({ kind: 'ended', why: 'stopped' })
         return
@@ -115,9 +119,9 @@ export class SecretRequests extends EventEmitter {
     if (problem) throw new SecretRequestError('invalid', problem)
     if (typeof keep !== 'string' || !(SECRET_KEEPS as readonly string[]).includes(keep)) throw new SecretRequestError('invalid', 'Choose how long to keep it.')
     const name = this.vault.freeName(entry.view.name)
-    this.vault.store(name, value as string, { keep: keep as SecretKeep, threadId, label: entry.view.label })
+    this.vault.store(name, value as string, { keep: keep as SecretKeep, threadId, label: entry.view.label, binding: entry.binding })
     const file = this.vault.fileFor(name, threadId)
-    entry.settle({ kind: 'stored', name, keep: keep as SecretKeep, ...(file ? { file } : {}) })
+    entry.settle({ kind: 'stored', name, keep: keep as SecretKeep, ...(entry.view.binding ? { binding: entry.view.binding } : {}), ...(file ? { file } : {}) })
     return { name }
   }
 
@@ -125,10 +129,10 @@ export class SecretRequests extends EventEmitter {
   useSaved(threadId: string, requestId: string): { name: string } {
     const entry = this.find(threadId, requestId)
     const name = entry.view.name
-    if (!this.vault.isSaved(name)) throw new SecretRequestError('not_saved', `No saved secret is named ${name}.`)
-    this.vault.grant(name, threadId)
+    if (!this.vault.isSaved(name, entry.binding)) throw new SecretRequestError('not_saved', `No saved secret is named ${name}.`)
+    this.vault.grant(name, threadId, entry.binding)
     const file = this.vault.fileFor(name, threadId)
-    entry.settle({ kind: 'saved_reused', name, ...(file ? { file } : {}) })
+    entry.settle({ kind: 'saved_reused', name, ...(entry.view.binding ? { binding: entry.view.binding } : {}), ...(file ? { file } : {}) })
     return { name }
   }
 
@@ -164,6 +168,7 @@ export function secretOutcomeText(outcome: SecretRequestOutcome): { text: string
     case 'stored':
     case 'saved_reused': {
       const kept = outcome.kind === 'saved_reused' ? 'a saved secret' : outcome.keep === 'thread' ? 'for this thread only' : outcome.keep === 'day' ? 'for 24 hours' : 'saved in Settings'
+      if (outcome.binding) return { text: `${secretGivenSentence(outcome.name, kept)} It is bound to ${outcome.binding.service ?? outcome.binding.host}, read only. Use secret_fetch when available; Mousse keeps the value and adds it only to that service's requests.` }
       return {
         text: [
           secretGivenSentence(outcome.name, kept),

@@ -1,3 +1,4 @@
+import { sameSecretBinding, secretBindingView, type SecretBinding } from '../../shared/secretServices'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isKeyName } from '../../shared/automationKeys'
@@ -9,6 +10,7 @@ import { secretMasker, type SecretMasker } from './secretMasking'
 
 /** What the vault keeps about a secret given in a thread, next to the value in the secret store. Never the value. */
 interface SecretMeta {
+  binding?: SecretBinding
   label?: string
   keep: SecretKeep
   /** A `day` secret's end. */
@@ -128,10 +130,10 @@ export class SecretVault {
   }
 
   /** A saved secret (Settings or an automation's key field) the person may give to another thread. */
-  isSaved(name: string): boolean {
+  isSaved(name: string, binding?: SecretBinding): boolean {
     if (!this.has(name)) return false
     const meta = this.readMeta()[name]
-    return !meta || meta.keep === 'saved'
+    return (!meta || meta.keep === 'saved') && sameSecretBinding(meta?.binding, binding)
   }
 
   /** `base`, or `base_2`, `base_3`… when the store already holds `base`. */
@@ -147,7 +149,7 @@ export class SecretVault {
   }
 
   /** Keeps a value the person typed, for the thread that asked. The name must be free (`freeName`). */
-  store(name: string, value: string, input: { keep: SecretKeep; threadId: string; label?: string }): void {
+  store(name: string, value: string, input: { keep: SecretKeep; threadId: string; label?: string; binding?: SecretBinding }): void {
     if (!isKeyName(name)) throw new Error('A secret name is a word like GITHUB_TOKEN.')
     if (this.has(name)) throw new Error(`A secret named ${name} already exists.`)
     const now = this.now()
@@ -157,6 +159,7 @@ export class SecretVault {
       [name]: {
         ...(input.label ? { label: input.label.slice(0, 200) } : {}),
         keep: input.keep,
+        ...(input.binding ? { binding: structuredClone(input.binding) } : {}),
         ...(input.keep === 'day' ? { expiresAt: new Date(now + SECRET_DAY_MS).toISOString() } : {}),
         threadId: input.threadId,
         createdAt: new Date(now).toISOString(),
@@ -167,8 +170,8 @@ export class SecretVault {
   }
 
   /** Lets a thread's agents use a saved secret by name (the person chose "Use saved" on its card). */
-  grant(name: string, threadId: string): void {
-    if (!this.isSaved(name)) throw new Error(`No saved secret is named ${name}.`)
+  grant(name: string, threadId: string, binding?: SecretBinding): void {
+    if (!this.isSaved(name, binding)) throw new Error(`No saved secret is named ${name}.`)
     const meta = this.readMeta()
     const current = meta[name] ?? { keep: 'saved' as const, createdAt: new Date(this.now()).toISOString(), threads: [] }
     if (current.threads.includes(threadId)) return
@@ -227,7 +230,7 @@ export class SecretVault {
 
   /** The private file that holds the secret for the thread's agents to read; undefined when the thread may not use it. */
   fileFor(name: string, threadId: string): string | undefined {
-    if (!isKeyName(name) || !FOLDER_ID.test(threadId) || !this.usableIn(name, threadId)) return undefined
+    if (!isKeyName(name) || !FOLDER_ID.test(threadId) || !this.usableIn(name, threadId) || this.bindingFor(name)) return undefined
     const path = join(this.filesRoot, threadId, name)
     return existsSync(path) ? path : undefined
   }
@@ -235,6 +238,10 @@ export class SecretVault {
   /** The value for a command or a tool's settings; undefined when it is gone. */
   value(name: string): string | undefined {
     return isKeyName(name) ? this.values.resolveSecretRef?.(name) : undefined
+  }
+
+  bindingFor(name: string): SecretBinding | undefined {
+    return this.readMeta()[name]?.binding
   }
 
   markUsed(name: string): void {
@@ -329,6 +336,7 @@ export class SecretVault {
       const title = entry.threadId ? this.options.threadTitle?.(entry.threadId) : undefined
       return {
         name,
+        ...(entry.binding ? { binding: secretBindingView(entry.binding) } : {}),
         keep: entry.keep,
         ...(entry.label ? { label: entry.label } : {}),
         ...(entry.expiresAt ? { expiresAt: entry.expiresAt } : {}),
@@ -423,6 +431,7 @@ export class SecretVault {
     try {
       const wanted = new Map<string, Map<string, string>>()
       for (const [name, entry] of Object.entries(this.readMeta())) {
+        if (entry.binding) continue
         const threads = entry.threads.filter((threadId) => FOLDER_ID.test(threadId) && this.copyThreads.has(threadId) && !this.holds.has(threadId) && this.options.threadAlive(threadId))
         const value = threads.length ? this.value(name) : undefined
         if (!value) continue
@@ -479,6 +488,7 @@ export class SecretVault {
         if (entry.keep !== 'thread' && entry.keep !== 'day' && entry.keep !== 'saved') continue
         out[name] = {
           ...(typeof entry.label === 'string' ? { label: entry.label } : {}),
+          ...(entry.binding ? { binding: entry.binding } : {}),
           keep: entry.keep,
           ...(typeof entry.expiresAt === 'string' ? { expiresAt: entry.expiresAt } : {}),
           ...(typeof entry.threadId === 'string' ? { threadId: entry.threadId } : {}),
