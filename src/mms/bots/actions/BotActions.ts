@@ -314,9 +314,9 @@ export class BotActions {
   forWork(id: string): ActionRow | undefined {
     return this.host.store.get("SELECT * FROM bot_actions WHERE activation_id = ? ORDER BY rowid DESC LIMIT 1", id) as unknown as ActionRow | undefined
   }
-  pendingInTurn(activationId: string, mainN: number): ActionRow | undefined {
+  inTurn(activationId: string, mainN: number): ActionRow | undefined {
     const action = this.forWork(activationId)
-    if (!action || !pending.has(action.status)) return undefined
+    if (!action) return undefined
     const dispatchId = JSON.parse(action.call_key)[1]
     const dispatch = this.host.store.dispatches(activationId).find(d => d.clientRequestId === dispatchId)
     return dispatch && (dispatch.n === mainN || dispatch.mainN === mainN) ? action : undefined
@@ -334,12 +334,12 @@ export class BotActions {
     if (!this.host.enabled()) return { text: 'This tool cannot be used now. Carry on without it.', isError: true }
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
-    const existing = this.host.store.get('SELECT id, args_digest, target_json FROM bot_actions WHERE call_key = ?', callKey)
+    const existing = this.host.store.get('SELECT * FROM bot_actions WHERE call_key = ?', callKey)
     if (existing?.args_digest === '[forgotten]' && existing.target_json === JSON.stringify({ server: tool.server, tool: tool.tool }))
       return { text: 'This call id belongs to a forgotten call. Nothing new was held or sent.' }
     if (existing && (existing.args_digest !== actionDigest(args) || existing.target_json !== JSON.stringify({ server: tool.server, tool: tool.tool })))
       return { text: 'This call id was already used for a different call. Nothing was held for this call.', isError: true }
-    if (existing) return { text: 'This call is held for your owner. End your turn now.' }
+    if (existing) return pending.has(String(existing.status)) ? { text: 'This call is held for your owner. End your turn now.' } : { text: actionContinuation(existing as unknown as ActionRow), isError: true }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
     const origin = this.host.origin(row)
     if (!origin) return { text: "This work's starting turn could not be established. Nothing was held or sent; say so in your report.", isError: true }
