@@ -12,7 +12,9 @@ describe('resolveThreadNotification', () => {
     { id: 'parent', name: 'Fix the build' },
     { id: 'child', name: 'API reviewer', lineage: subagentOf('parent') },
     { id: 'grandchild', name: 'Deep helper', lineage: subagentOf('child', 'parent') },
-    { id: 'orphan', name: 'Left behind', lineage: subagentOf('trashed') }
+    { id: 'orphan', name: 'Left behind', lineage: subagentOf('trashed') },
+    { id: 'aside', name: 'Quick question', lineage: { parentThreadId: 'child', rootThreadId: 'parent', relationship: 'side' } },
+    { id: 'stray-aside', lineage: { parentThreadId: 'trashed', rootThreadId: 'trashed', relationship: 'side' } }
   )
 
   it('notifies for a thread as itself', () => {
@@ -36,6 +38,12 @@ describe('resolveThreadNotification', () => {
   it('treats a subagent whose parent is gone as a normal thread', () => {
     expect(resolveThreadNotification('orphan', 'completed', threads)).toEqual({ threadId: 'orphan' })
     expect(resolveThreadNotification('orphan', 'question', threads)).toEqual({ threadId: 'orphan' })
+  })
+
+  it("announces only a side chat's question, under the thread shown for its parent, and nothing once that is gone", () => {
+    expect(resolveThreadNotification('aside', 'completed', threads)).toBeNull()
+    expect(resolveThreadNotification('aside', 'question', threads)).toEqual({ threadId: 'parent', parentName: 'Fix the build', viaThreadId: 'aside', sideChat: true })
+    expect(resolveThreadNotification('stray-aside', 'question', threads)).toBeNull()
   })
 
   it('notifies as itself for a thread it has no row for', () => {

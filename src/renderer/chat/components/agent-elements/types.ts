@@ -141,6 +141,8 @@ export type AgentChatProps = {
   lastTurnNotice?: React.ReactNode;
   /** Drawn after the last turn (the thread's queued messages). */
   afterTurns?: React.ReactNode;
+  /** Drawn above the first turn, once the transcript has one (a side chat's fork line). */
+  beforeTurns?: React.ReactNode;
   showCopyToolbar?: boolean;
 
   /**

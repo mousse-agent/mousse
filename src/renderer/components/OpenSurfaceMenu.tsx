@@ -1,7 +1,7 @@
 import { formatBinding } from '../../shared/commands'
 import type { MainView } from '../../shared/types'
 import { useCommandBindings, useCommands } from '../commands/commandRegistry'
-import { Bot, FileText, FolderOpen, GitCompare, GitPullRequest, Globe, Terminal } from '../lib/icons'
+import { Bot, FileText, FolderOpen, GitCompare, GitPullRequest, Globe, MessagesSquare, Terminal } from '../lib/icons'
 import { SURFACE_CHOICES, openSurface, type SurfaceChoice } from '../lib/surfaces'
 import { useAppStore } from '../stores/appStore'
 
@@ -11,6 +11,7 @@ const ICONS = {
   files: FolderOpen,
   git: GitCompare,
   pullRequest: GitPullRequest,
+  sideChats: MessagesSquare,
   agents: Bot,
   documents: FileText
 } as const

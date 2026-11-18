@@ -37,6 +37,9 @@ export function automationRunBody(outcome: RunEndState, error?: string, report?:
 /** Body of a subagent's question, announced under its parent's name. */
 export const SUBAGENT_QUESTION_BODY = 'A subagent has a question for you'
 
+/** Body of a side chat's question, announced under the thread whose panel shows it. */
+export const SIDE_CHAT_QUESTION_BODY = 'A side chat has a question for you'
+
 /** A notification body that names the thread's project, so threads with the same title in two projects read apart. */
 export function bodyWithProject(body: string, projectName?: string): string {
   return projectName ? `${body} · ${projectName}` : body
