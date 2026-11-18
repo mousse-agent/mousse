@@ -1,20 +1,12 @@
 import type { BotChip } from '../../../shared/bots/personal/chat'
 import { selectThread } from '../../lib/threadActions'
 import { useAppStore } from '../../stores/appStore'
+import { stepText } from './botChatShape'
 
 /** Shows a thread the bot started, messaged or stopped, with its project's threads in the sidebar. */
 export function openThread(threadId: string): void {
   useAppStore.getState().setThreadsSidebarView('projects')
   void selectThread(threadId).catch(() => undefined)
-}
-
-/**
- * One step as a line of plain words: "Searched the web · vacuum prices", "Started thread: Fix the login page". Mousse
- * writes these from the calls it allowed (shared/bots/personal/chips.ts), never from model text.
- */
-export function stepText(chip: BotChip): string {
-  const text = chip.text.charAt(0).toUpperCase() + chip.text.slice(1)
-  return chip.highlight ? `${text}${chip.thread ? ': ' : ' · '}${chip.highlight}` : text
 }
 
 /**

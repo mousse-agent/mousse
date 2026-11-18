@@ -35,7 +35,7 @@ import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 import { botGroupTime, placeMessages } from './messageGroups'
-import { chatRows, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
+import { botDoingLine, chatRows, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
 import { BOT_CHAT_WINDOW_STEP, rowIndex, rowKey, windowStart } from './botChatWindow'
 import { botCommandSuggestions } from './botCommands'
 import { slotModels, submitBotChat } from './runBotCommand'
@@ -60,8 +60,11 @@ const NO_MARKS = new Map<string, OwnerMarks>()
 const NO_NOTES: BotLocalNote[] = []
 /** The chat's turn waits for the internet (its work, if any, says so in the header's list). */
 const OFFLINE_TEXT = 'Waiting for internet'
-/** Beside the typing dots until the bot says what it is doing now. */
-const WORKING_TEXT = 'Working…'
+/**
+ * How long Mousse's words beside the typing dots stay before the next ones take their place, so a burst of quick
+ * calls never flickers there: the newest waits its turn, and the ones between are never shown.
+ */
+export const DOING_HOLD_MS = 1000
 const ignore = () => {}
 
 /**
@@ -436,11 +439,10 @@ function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
 
 /**
  * While the chat's turn runs: the bot's next message, typing, as a messaging app shows it: three dots in a small bubble
- * in the bot's column, the only thing in the chat that moves, and beside them what the bot said it is doing now (its
- * latest line before a step), in full, or "Working…" until it says. Waiting for the internet, it says so instead, still.
+ * in the bot's column, the only thing in the chat that moves, and beside them what it is doing now (`useDoingLine`),
+ * in full. Waiting for the internet, it says so instead, still.
  */
-function BotTyping({ bot, starts, offline, status }: { bot: BotSummary; starts: boolean; offline: boolean; status?: string }) {
-  const doing = status || WORKING_TEXT
+function BotTyping({ bot, starts, offline, doing }: { bot: BotSummary; starts: boolean; offline: boolean; doing: string }) {
   return <article className={`chat-participant-message from-agent bot-message bot-typing${starts ? ' is-group-start' : ''}`} role="status" aria-label={offline ? OFFLINE_TEXT : `${bot.name}: ${doing}`}>
     <div className="bot-message-line">
       {offline
@@ -455,16 +457,16 @@ function BotTyping({ bot, starts, offline, status }: { bot: BotSummary; starts: 
  * finished sentence or block at a time (`usePacedText`), never word by word. Until its first block is finished, the
  * typing bubble stays. Only this renders as the reply grows; its message, once posted, takes its place.
  */
-function BotLiveReply(props: { bot: BotSummary; starts: boolean; offline: boolean; status?: string; onGrow: () => void }) {
+function BotLiveReply(props: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void }) {
   const reply = useBotLiveReply(props.bot.id)
   // Each reply of the turn is paced from its own start.
   return <PacedLiveReply key={reply?.messageId ?? ''} text={reply?.text ?? ''} {...props} />
 }
 
-function PacedLiveReply({ bot, starts, offline, status, onGrow, text }: { bot: BotSummary; starts: boolean; offline: boolean; status?: string; onGrow: () => void; text: string }) {
+function PacedLiveReply({ bot, starts, offline, doing, onGrow, text }: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void; text: string }) {
   const shown = usePacedText(text, true)
   useLayoutEffect(onGrow, [shown, onGrow])
-  if (!shown) return <BotTyping bot={bot} starts={starts} offline={offline} status={status} />
+  if (!shown) return <BotTyping bot={bot} starts={starts} offline={offline} doing={doing} />
   return <article className={`chat-participant-message from-agent bot-message bot-live-reply${starts ? ' is-group-start' : ''}`} aria-busy="true">
     <div className="bot-message-line">
       <div className="bot-bubble"><BotMarkdown text={shown} className="bot-markdown" streaming /></div>
@@ -485,6 +487,34 @@ function BotCutReply({ text, starts }: { text: string; starts: boolean }) {
       </div>
     </div>
   </article>
+}
+
+/**
+ * The words beside the typing dots, held calm. `line` is what the turn does now (`botDoingLine`), `turn` the chat turn
+ * it belongs to.
+ * - The bot's own words show at once, and so does the first line of a turn.
+ * - Mousse's words replace what is shown only once it has stayed `DOING_HOLD_MS`; the newest waits, so calls that
+ *   come and go faster than that never show.
+ * - Once the turn has said what it does, a moment with nothing to say (its step ended, its reply not begun) keeps the
+ *   last words: the line never falls back to "Reading your message" or "Working" in between.
+ */
+function useDoingLine(turn: string | undefined, line: { text: string; own?: true; idle?: true }): string {
+  const [shown, setShown] = useState(() => ({ turn, text: line.text, idle: Boolean(line.idle), at: Date.now() }))
+  const sameTurn = shown.turn === turn
+  const keep = sameTurn && Boolean(line.idle) && !shown.idle
+  const text = keep ? shown.text : line.text
+  const idle = keep ? shown.idle : Boolean(line.idle)
+  const atOnce = !sameTurn || Boolean(line.own)
+  useLayoutEffect(() => {
+    if (sameTurn && shown.text === text) return
+    const show = () => setShown({ turn, text, idle, at: Date.now() })
+    const wait = atOnce ? 0 : shown.at + DOING_HOLD_MS - Date.now()
+    if (wait <= 0) return show()
+    const timer = setTimeout(show, wait)
+    return () => clearTimeout(timer)
+  }, [turn, text, idle, atOnce, sameTurn, shown])
+  // A new turn's first line and the bot's own words are drawn in this render, not the next.
+  return atOnce ? text : shown.text
 }
 
 /** One rise and fall of the dots, and of the status's shimmer. */
@@ -590,11 +620,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // The chat's turn waits for the internet: no dots, and it says so.
   const offline = bot.chat ? Boolean(bot.chat.offline) : working && bot.waiting === 'internet'
   const typing = working && !offline
-  // What the chat's turn said it is doing now; a service from before work: what the bot's working activation said.
-  const status = useBotsStore((s) => {
-    const activationId = bot.chat?.activationId ?? (legacy ? s.live[bot.id]?.activationId : undefined)
-    return activationId ? s.statuses[activationId] : undefined
-  })
+  // The chat's turn (a service from before work: the bot's working activation), and what it said it is doing now.
+  const turn = useBotsStore((s) => bot.chat?.activationId ?? (legacy ? s.live[bot.id]?.activationId : undefined))
+  const status = useBotsStore((s) => (turn ? s.statuses[turn] : undefined))
+  // Its live step: the call its turn is making now. A chat opened mid-turn has it from the page it loaded (`live`).
+  const step = useBotsStore((s) => (turn ? s.activity[turn] ?? (s.live[bot.id]?.activationId === turn ? s.live[bot.id]!.chip : undefined) : undefined))
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES
@@ -778,6 +808,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const typingStarts = !((last?.kind === 'message' && last.message.author === 'bot') || (last?.kind === 'system' && last.cut))
   // The reply the chat's turn is writing takes the typing bubble's place, and the end stays in view as it grows.
   const writing = useHasBotLiveReply(bot.id)
+  // What the turn is doing now, beside its typing dots: the owner's message is unanswered while it is the newest row.
+  const doing = useDoingLine(turn, botDoingLine({ status, writing, chip: step, unanswered: last?.kind === 'message' && last.message.author === 'owner' }))
   const followEnd = useCallback(() => {
     const element = transcript.current
     if (!element || !anchor.current.atEnd) return
@@ -867,8 +899,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           </Fragment>
         })}
         {writing
-          ? <BotLiveReply bot={bot} starts={typingStarts} offline={offline} status={status} onGrow={followEnd} />
-          : (working || offline) && <BotTyping bot={bot} starts={typingStarts} offline={offline} status={status} />}
+          ? <BotLiveReply bot={bot} starts={typingStarts} offline={offline} doing={doing} onGrow={followEnd} />
+          : (working || offline) && <BotTyping bot={bot} starts={typingStarts} offline={offline} doing={doing} />}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}

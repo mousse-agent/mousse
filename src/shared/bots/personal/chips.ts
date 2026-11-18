@@ -270,6 +270,13 @@ export function chipForCall(tool: string, input: unknown, ctx: BotChipContext = 
   return { icon: classified.icon, text: classified.live, ...(classified.detail ? { highlight: classified.detail } : {}), live: true }
 }
 
+/**
+ * The live chip of a call that has no words of its own (a tool `classify` does not name, a card that is its own chip):
+ * the bot is doing something else now, so what it did before no longer stands. Never the tool's name. It is live only:
+ * such a call settles to no chip.
+ */
+export const WORKING_LIVE_CHIP: BotChip = { icon: 'think', text: 'working', live: true }
+
 /** A few distinct values in one highlight: "a.com", "a.com, b.com", "a.com +2". */
 function listed(values: readonly string[]): string | undefined {
   const distinct = [...new Set(values)]
