@@ -652,6 +652,11 @@ export interface PendingUserQuestions {
    * open until it is answered, dismissed or withdrawn; a new message does not close it.
    */
   wait?: false
+  /**
+   * Set when the personal bot that started the thread answers this request (a turn no person started there): the
+   * owner is not pinged for it and it is not in Needs me. The card still shows, and the owner may answer first.
+   */
+  supervised?: true
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
