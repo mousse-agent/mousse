@@ -262,6 +262,15 @@ describe('bot methods on a real bot', () => {
     expect(missing.code).toBe('stream_unknown')
   })
 
+  it('a phone can remove one automation exception without widening a grant', async () => {
+    const key = 'alone:s:mail:send'
+    const before = f.store.activeGrant(botId)!.digest
+    f.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, key, '{}')
+    await call(methods, 'bots.permissions.revoke', { botId, id: key })
+    expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)).toBeUndefined()
+    expect(f.store.activeGrant(botId)!.digest).toBe(before)
+  })
+
   it('refuses a let-alone answer on a phone without changing authority', async () => {
     await f.bots.service.chatSend({ botId, text: 'Ask', clientRequestId: 'alone' })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
