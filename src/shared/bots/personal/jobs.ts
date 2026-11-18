@@ -60,6 +60,17 @@ export interface BotReport {
 }
 
 /** Most characters of a report's body a bot is given: a thread's final answer in its notice, or its own work's report in the chat pack. */
+/**
+ * A request waiting for a person in a thread the bot started (`JobThreadView.asks`): a plain question or an approval,
+ * with what it asks and the option ids an answer names. The bot that started the thread may answer it
+ * (`approval_respond`); its text is the thread's, so it reaches the bot as data.
+ */
+export interface BotThreadAsk {
+  requestId: string
+  approval: boolean
+  questions: Array<{ id: string; text: string; options: Array<{ id: string; label: string }> }>
+}
+
 export const BOT_REPORT_MAX_CHARS = 2_000
 /** Most characters of a job's request and result lines. */
 export const BOT_JOB_LINE_CHARS = 200

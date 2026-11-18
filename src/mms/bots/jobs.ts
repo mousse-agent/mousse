@@ -1,5 +1,5 @@
 import type { BotLaunchedThread } from '../../shared/bots/personal/chat'
-import { jobLine, type BotJob, type BotJobAsker, type BotJobState } from '../../shared/bots/personal/jobs'
+import { jobLine, type BotJob, type BotJobAsker, type BotJobState, type BotThreadAsk } from '../../shared/bots/personal/jobs'
 import type { BotActivationRow } from './store/BotStore'
 
 /**
@@ -14,6 +14,8 @@ export interface JobThreadView {
   title?: string
   /** The final text of its last run, once its turn ended. */
   result?: string
+  /** The thread's own requests waiting for a person (not its subagents'), oldest first, when it waits for one. */
+  asks?: BotThreadAsk[]
 }
 
 /**
