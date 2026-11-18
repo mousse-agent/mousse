@@ -2718,7 +2718,7 @@ it.each([
   ['binding_changed', 'This changed since you saw it. Nothing was sent.', 'withdrawn'],
   ['settled', 'This was already answered.', 'done'],
   ['gone', "This can't be sent any more.", 'gone'],
-  ['unreachable', "Mail couldn't be reached. Nothing was sent. Try again when it is available.", 'failed']
+  ['unreachable', "Mail couldn't be reached. Nothing was sent. Try again when it is available.", 'open']
 ])('C4 integration renderer preserves the exact %s service refusal through the real client', async (reason, text, status) => {
   fake.chats.inbox = [held()]
   const { createPersonalBotsClient } = await import('../../src/renderer/services/personalBotsClient')
@@ -3066,4 +3066,18 @@ it('C10 review compact recipient carries the full review look-alike warning', as
   const card = host.querySelector('[aria-label="Action to review"]')!
   const warning = [...card.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')].find(el => !el.closest('details'))
   expect(warning?.textContent).toContain('Contains letters or digits outside A–Z and 0–9')
+})
+
+it('R2 a timed-out Send is terminal while the card retains its stored timeout outcome', async () => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: async () => {
+    fake.chats.inbox = [held({ status: 'failed', at: AT, result: { text: "Mail couldn't be reached, so nothing was sent.", notSentInTime: true } })]
+    throw Object.assign(new Error('not owner-facing'), { code: 'bot_action_gone' })
+  } })
+  await open(); await click(button('Send'))
+  expect(host.textContent).toContain("This can't be sent any more.")
+  expect(host.textContent).not.toContain('Try again when it is available.')
+  expect(button('Send')).toBeUndefined()
+  expect(button('Not now')).toBeUndefined()
+  expect(host.textContent).toContain("Mail couldn't be reached, so nothing was sent")
 })

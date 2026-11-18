@@ -2290,7 +2290,7 @@ it.each(['paused', 'expired', 'withdrawn', 'binding'] as const)('R2-8 Send repor
   if (reason === 'expired') f.clock.now = Date.parse(a.expires_at) + 1000
   if (reason === 'withdrawn') await f.bots.stopWork(t.botId, t.workId)
   if (reason === 'binding') t.server.configDigest = 'changed'
-  const code = reason === 'binding' ? 'bot_action_changed' : reason === 'withdrawn' ? 'bot_action_work_ended' : `bot_action_${reason}`
+  const code = reason === 'binding' ? 'bot_action_changed' : reason === 'withdrawn' ? 'bot_action_work_ended' : reason === 'unreachable' ? 'bot_action_gone' : `bot_action_${reason}`
   const sentence = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : reason === 'expired' ? 'This expired, so nothing was sent.' : reason === 'withdrawn' ? 'This work ended. Nothing was sent.' : 'This changed since you saw it. Check it again before sending.'
   await expect(f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code, message: sentence })
   expect(t.calls).toEqual([])
@@ -2418,8 +2418,8 @@ it.each(['gone', 'settled', 'unreachable'] as const)('R3-3 owner wording for %s 
       f.clock.now += 11 * 60_000; await f.bots.deliverDueReminders()
     }
   }
-  const sentence = reason === 'gone' ? "This can't be sent any more." : reason === 'settled' ? 'This was already answered.' : "Mail couldn't be reached, so nothing was sent."
-  await expect(f.bots.service.answerAction({ actionId: id, digest, answer: 'send' })).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : `bot_action_${reason}`, message: sentence })
+  const sentence = reason === 'settled' ? 'This was already answered.' : "This can't be sent any more."
+  await expect(f.bots.service.answerAction({ actionId: id, digest, answer: 'send' })).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : reason === 'unreachable' ? 'bot_action_gone' : `bot_action_${reason}`, message: sentence })
 })
 
 it('R3-3 a failing card of another bot cannot undo this bot grant change', async () => {
@@ -2649,7 +2649,7 @@ const c4Refusals = [
   ['changed', 'This changed since you saw it. Check it again before sending.'],
   ['paused', ''], ['expired', 'This expired, so nothing was sent.'],
   ['withdrawn', 'This work ended. Nothing was sent.'], ['settled', 'This was already answered.'],
-  ['gone', "This can't be sent any more."], ['unreachable', "Mail couldn't be reached, so nothing was sent."]
+  ['gone', "This can't be sent any more."], ['unreachable', "This can't be sent any more."]
 ] as const
 it.each(c4Refusals)('C4 integration protocol preserves the exact %s refusal and projected row status', async (reason, storedSentence) => {
   const t = await setup(true)
@@ -2671,7 +2671,7 @@ it.each(c4Refusals)('C4 integration protocol preserves the exact %s refusal and 
   registerPersonalBotMethods(domains, () => f.bots.service)
   const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as never
   const text = reason === 'paused' ? `Resume ${f.bots.definitionOf(t.botId).name} to send this.` : storedSentence
-  await expect(domains.dispatch(context, 'bots.actions.answer', params)).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : `bot_action_${reason}`, message: text })
+  await expect(domains.dispatch(context, 'bots.actions.answer', params)).rejects.toMatchObject({ code: reason === 'withdrawn' ? 'bot_action_work_ended' : reason === 'unreachable' ? 'bot_action_gone' : `bot_action_${reason}`, message: text })
   const projected = f.bots.service.chatList(t.botId).messages.find(message => message.id === a.message_id)?.action
   if (reason === 'gone') expect(projected).toBeUndefined()
   else expect(projected?.status === 'open').toBe(['changed', 'paused'].includes(reason))
@@ -3462,5 +3462,31 @@ it.each([
     expect(result).toContain('the request held in this turn is no longer waiting')
     expect(result).not.toContain('your owner already answered')
   }
+  expect(t.calls).toEqual([])
+})
+
+it('R2 cold pre-check says nothing was sent before warming', async () => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  t.catalog.servers = () => []; t.catalog.listing = () => []; t.catalog.listed = () => false
+  expect(() => f.bots.actions.check({ actionId: a.id, digest: a.args_digest, answer: 'send' })).toThrow(expect.objectContaining({ code: 'bot_action_unreachable', message: "Mail couldn't be reached. Nothing was sent. Try again when it is available." }))
+  expect(t.calls).toEqual([])
+})
+it.each(['waiting', 'at_dispatch'] as const)('R2 accepted timeout is terminal at %s', async stage => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  const input = { actionId: a.id, digest: a.args_digest, answer: 'send' as const }
+  await f.bots.actions.answer(input)
+  if (stage === 'at_dispatch') f.bots.actions.transition(a.id, 'approved', 'running')
+  f.clock.now += 11 * 60_000
+  const terminal = { code: 'bot_action_gone', message: "This can't be sent any more." }
+  if (stage === 'at_dispatch') expect(() => f.bots.actions.assertRunning(a.id)).toThrow(expect.objectContaining(terminal))
+  else f.bots.actions.expireDue()
+  expect(() => f.bots.service.actionCheck({ ...input, botId: t.botId })).toThrow(expect.objectContaining(terminal))
+  await expect(f.bots.service.answerAction(input)).rejects.toMatchObject(terminal)
+  expect(f.bots.actions.get(a.id)?.status).toBe('failed')
   expect(t.calls).toEqual([])
 })
