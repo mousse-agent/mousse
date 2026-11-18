@@ -493,7 +493,7 @@ export class BotChatProjection {
     return {
       askId: escalation.id,
       title: text.title,
-      note: asks ? 'Tools that may send or change things ask before each use. Tools that say they only read do not ask.' : this.options.asksFirst?.() && mcp?.changes === 'unknown' ? 'Some tools do not provide a read-only hint.' : text.note,
+      note: asks ? 'Tools that may send or change things ask before each use. Tools that say they only read do not ask.' : this.options.asksFirst?.() && mcp?.changes === 'unknown' ? 'Mousse decides which calls ask at each use. Tools that say they only read do not ask.' : text.note,
       ...(tip ? { tip } : {}),
       status: cardStatus(escalation.status),
       kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
