@@ -47,6 +47,20 @@
       "expiresAt": "2026-11-18T09:11:07.367Z"
     },
     {
+      "task": "bot-reporting-supervision",
+      "session": "Animatrix-aaecf1",
+      "machine": "Animatrix",
+      "branch": "mousse/the-owner-approved-a-design-for-how",
+      "paths": [
+        "src/mms/bots/activation/BotEngine.ts",
+        "src/mms/bots/instructions.ts",
+        "src/shared/bots/personal/jobs.ts",
+        "src/shared/bots/personal/catalogue.ts"
+      ],
+      "claimedAt": "2026-11-18T15:24:43.116Z",
+      "expiresAt": "2026-11-18T17:24:43.116Z"
+    },
+    {
       "task": "bot-threads-hidden-by-default",
       "session": "Animatrix-7d7f46",
       "machine": "Animatrix",
