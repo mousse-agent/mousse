@@ -11,6 +11,7 @@ import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
 import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
 import { NET_LOCAL_METHODS } from '../../shared/net/local'
+import { NET_ENGINE_LOCAL_METHODS } from '../../shared/netEngine/local'
 import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
 import { BRIDGE_ACTIVITY_METHODS } from '../../shared/bridge/deviceActivity'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
@@ -240,6 +241,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...CHAT_RESOURCE_METHODS,
   ...CHAT_NETWORK_METHODS,
   ...NET_LOCAL_METHODS.filter(method => !['net.plus.bind','net.plus.connect'].includes(method)),
+  ...NET_ENGINE_LOCAL_METHODS,
   ...BRIDGE_HUB_LOCAL_METHODS,
   ...BRIDGE_ACTIVITY_METHODS,
   ...SPACES_LOCAL_METHODS,

@@ -47,6 +47,7 @@ import { createManagedBrowserInstaller } from './browser/install'
 import { bundledBrowserWorkerModule } from './browser/workerModulePath'
 import { registerBrowserSetupMethods, type BrowserSetupDomainRegistration } from './browser/registerBrowserSetupMethods'
 import { registerSpeechHostMethods } from './speech/registerSpeechHostMethods'
+import { registerNetEngineMethods } from './netEngine/registerMethods'
 
 export type { MmsOptions } from './MmsOptions'
 
@@ -233,6 +234,7 @@ export class MousseMainService extends MmsProfileServices {
       }
     )
     registerEditorTunnelMethods(this.domains, async profileId => (await profile(profileId)).net)
+    registerNetEngineMethods(this.domains, async profileId => (await profile(profileId)).netEngine)
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
     this.domainCleanupSubscriptions.push(
       registerSpeechHostMethods(this.domains, async profileId => (await profile(profileId)).speechRelay)

@@ -6,6 +6,7 @@ import type { BrowserSetupMethod } from './browser/setup'
 import type { BrowserAccessMethod } from './browser/access'
 import type { ChatNetworkMethod } from './chatsNetwork'
 import type { NetLocalMethod } from './net/local'
+import type { NetEngineLocalMethod } from './netEngine/local'
 import type { BridgeHubLocalMethod } from './bridge/types'
 import type { BridgeActivityMethod } from './bridge/deviceActivity'
 import type { SpacesLocalMethod } from './spaces/local'
@@ -20,7 +21,7 @@ import type { SpeechHostMethod } from './speechRelay'
 import type { SecretMethod } from './secretRequests'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
-  | ChatNetworkMethod | NetLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
+  | ChatNetworkMethod | NetLocalMethod | NetEngineLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
   | BotsPersonalV2Method | BotDeviceMethod | BotsBrowserMethod | BrowserViewMethod
   | AutomationsMethod
   | SecretMethod

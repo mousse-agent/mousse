@@ -5,6 +5,7 @@ import { NetError } from '../../shared/net/errors'
 import type { BlobId, NodeCapability, NodeId, StoredRecord, StreamId } from '../../shared/net'
 import type { BridgeNodePolicy } from '../../shared/net/local'
 import { ENGINE_OWNER_METHODS } from '../../shared/netEngine/allowlist'
+import type { NetEngineDevice, NetEngineStatus } from '../../shared/netEngine/local'
 import type { BridgeProfileService } from '../bridge/BridgeProfileService'
 import type { EngineDirectoryPort, PeerRow } from '../bridge/peers'
 import { checkNodePolicy } from '../net/checkNodePolicy'
@@ -87,6 +88,8 @@ export class NetEngineService implements EngineDirectoryPort {
       bridge(): BridgeProfileService | undefined
       /** The name this computer gives itself in `hello` and when it bootstraps an identity. */
       name?: () => string
+      /** Something a window shows changed: the switch, the helper, a device's row or whether it is online. */
+      onChanged?: () => void
     }
   ) {
     options.net.onSetAside((suffix) => this.setAside(suffix))
@@ -126,10 +129,73 @@ export class NetEngineService implements EngineDirectoryPort {
     return !!this.started || !this.settings()?.enabled
   }
 
-  /** Turns the switch on and starts. */
+  /** Turns the switch on and starts the engine (its helper starts with `startHelper`; tests link sessions directly). */
   async enable(): Promise<void> {
     this.writeSettings(true)
+    this.changed()
     await this.start()
+  }
+
+  /** The switch in Settings: on, and the helper runs. */
+  async switchOn(): Promise<void> {
+    await this.enable()
+    await this.startHelper()
+  }
+
+  /** Turns the switch off: the helper gets `shutdown` and the engine stops. Pairings stay for the next time. */
+  async disable(): Promise<void> {
+    this.writeSettings(false)
+    this.problem = undefined
+    await this.stop()
+    this.changed()
+  }
+
+  /** What Settings → Devices and the picker read: the switch, the helper and each paired computer. */
+  status(): NetEngineStatus {
+    const helper = this.helperStatus()
+    const text = 'text' in helper ? helper.text : undefined
+    return {
+      enabled: !!this.settings()?.enabled,
+      on: this.on(),
+      helper: { state: helper.state, ...(text ? { text } : {}) },
+      ...(this.helper?.paused ? { paused: this.helper.paused } : {}),
+      ...(typeof this.helper?.info.identity === 'string' ? { identity: this.helper.info.identity } : {}),
+      devices: this.devices()
+    }
+  }
+
+  private devices(): NetEngineDevice[] {
+    const started = this.started
+    if (!started) return []
+    return started.peers
+      .all()
+      .filter((row) => row.state !== 'removed')
+      .map((row) => {
+        const online = started.sessions.online(row.localId)
+        return {
+          node: row.localId,
+          name: row.name,
+          shortId: row.endpoint.slice(0, 8),
+          state:
+            row.state === 'removing'
+              ? 'removing'
+              : row.state !== 'connected'
+                ? 'finishing'
+                : online
+                  ? 'connected'
+                  : 'offline',
+          online
+        }
+      })
+  }
+
+  /** Tells the windows to read the status again. */
+  private changed(): void {
+    try {
+      this.options.onChanged?.()
+    } catch {
+      // A window that missed it reads again on focus.
+    }
   }
 
   /**
@@ -192,8 +258,14 @@ export class NetEngineService implements EngineDirectoryPort {
         verify: (stream, _record, _snapshot, client) => this.verifyIngest(stream, client)
       },
       hooks: {
-        onClientReady: (node) => this.options.bridge()?.peerOnline(node),
-        onClientClosed: (node) => this.options.bridge()?.peerOffline(node)
+        onClientReady: (node) => {
+          this.options.bridge()?.peerOnline(node)
+          this.changed()
+        },
+        onClientClosed: (node) => {
+          this.options.bridge()?.peerOffline(node)
+          this.changed()
+        }
       }
     })
     const bridge = (): BridgeProfileService => {
@@ -279,6 +351,7 @@ export class NetEngineService implements EngineDirectoryPort {
       wrongProfile: () => this.setEndpointAside('wrong-profile'),
       log: (message) => console.warn(message)
     })
+    this.supervisor.onStatus(() => this.changed())
     this.supervisor.start()
   }
 
@@ -403,10 +476,12 @@ export class NetEngineService implements EngineDirectoryPort {
       profile: () => helperProfileId(this.options.profileId)
     })
     this.helper = helper
+    helper.onPaused(() => this.changed())
     helper.channel.onClose(() => {
       if (this.helper === helper) this.helper = undefined
     })
     await helper.hello()
+    this.changed()
     return helper
   }
 

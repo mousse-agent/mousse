@@ -229,6 +229,20 @@ describe('Bridge over an engine session, v1 off', () => {
     expect(owner.threads.getThread(thread.id)?.name).toBe('After')
   })
 
+  it('refuses a paired computer the methods off the allow-list: local ones and the routed editor rows', async () => {
+    const thread = owner.threads.createThread('Editor')
+    const call = (method: string, params: unknown) =>
+      caller.netEngine
+        .client(ownerOnCaller)
+        .rpc(method, params, { id: newId('rpc') as RpcId, deadlineMs: 10_000 })
+    for (const [method, params] of [
+      ['netEngine.status', {}],
+      ['bridge.policy', { terminal: true }],
+      [routedNetMethod('editor.folder'), { threadId: thread.id }]
+    ] as const)
+      expect(await refused(call(method, params)), method).toMatchObject({ code: 'forbidden' })
+  })
+
   describe('a thread', () => {
     let threadId: string
     it('opens through net.info and routed.stream.open, and its live records reach the window', async () => {

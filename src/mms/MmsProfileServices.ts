@@ -1360,7 +1360,12 @@ export class MmsProfileServices {
       profileDir: this.homeDir,
       profileId: this.profileId,
       net: this.net,
-      bridge: () => this.bridgeService
+      bridge: () => this.bridgeService,
+      onChanged: () =>
+        this.events.emit({
+          channel: 'protocol:event',
+          data: { type: 'ui.notify', data: { kind: 'net-engine', profileId: this.profileId } }
+        })
     })
     this.peers = new PeerDirectory({ net: this.net, engine: () => this.netEngine })
     this.chatNetwork = new ChatNetworkBindingService({
