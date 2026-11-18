@@ -105,7 +105,7 @@ const card = (description?: string) => Type.Union([
 export const BOT_TOOLS: Tool[] = [
   {
     name: 'escalate',
-    description: 'In an owner message turn, ask to let one automation act alone with permission {ask: \'let_alone\', scheduleId, serverId, tool}; Mousse fills in the place from a call they sent. Ask your owner for a permission you do not have, in one plain sentence. Ask as soon as you need it; never ask the owner whether to ask. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped.',
+    description: 'In an owner message turn, {ask:\'let_alone\',scheduleId,serverId,tool} asks to let that automation act alone in a place Mousse fills in. Ask your owner for a permission you do not have, in one plain sentence. Ask as soon as you need it; never ask the owner whether to ask. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped.',
     parameters: Type.Object({
       permission: PERMISSION,
       reason: Type.String({ description: 'Why you need it, in one or two sentences for the owner.' })
