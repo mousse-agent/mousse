@@ -3490,3 +3490,47 @@ it.each(['waiting', 'at_dispatch'] as const)('R2 accepted timeout is terminal at
   expect(f.bots.actions.get(a.id)?.status).toBe('failed')
   expect(t.calls).toEqual([])
 })
+
+// C11 prerequisite: isolate parking from the expiry policy that C11 changes.
+it.each(['work', 'schedule'] as const)('C11 parked %s survives startup and upkeep for days, admits chat and other work, and offers Stop', async kind => {
+  const t = kind === 'work' ? await setup(true) : await scheduledCall(true, 60)
+  const workId = 'run' in t ? t.id : t.workId
+  await t.call(); await finish(f, ('run' in t ? t.run : t.work).payload)
+  const a = f.bots.actions.forWork(workId)!
+  f.store.run('UPDATE bot_actions SET expires_at = ? WHERE id = ?', '9999-12-31T23:59:59.999Z', a.id)
+  f.clock.now += 30 * 24 * 3600_000
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  await f.bots.maintain(new Date(f.clock.now)); await flush()
+  expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'approval' })
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Another job', clientRequestId: 'c11-another' })
+  const chat = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  expect(chat).toBeDefined()
+  const turn = await start(f, chat.id)
+  const other = await f.bots.tools.work.start(t.botId, chat.id, { title: 'Other', brief: 'Other job', key: 'c11-other' })
+  await flush()
+  expect(f.store.activation(other.workId)?.status).toBe('running')
+  expect(f.bots.service.get(t.botId).summary.work?.some(w => w.id === workId)).toBe(true)
+  await f.bots.service.workStop(t.botId, workId)
+  expect(f.store.activation(workId)?.status).toBe('cancelled')
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(t.calls).toEqual([])
+})
+
+it.each(['work', 'schedule'] as const)('C11 %s cards stay sendable after thirty days, restart and sleep', async kind => {
+  const t = kind === 'work' ? await setup(true) : await scheduledCall(true, 60)
+  const id = 'run' in t ? t.id : t.workId
+  await t.call(); await finish(f, ('run' in t ? t.run : t.work).payload)
+  const a = f.bots.actions.forWork(id)!
+  f.clock.now += 30 * 24 * 3600_000
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  await f.bots.maintain(new Date(f.clock.now)); await f.bots.deliverDueReminders(); await flush()
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  expect(f.store.activation(id)).toMatchObject({ status: 'blocked', endReason: 'approval' })
+  await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+  await expect(f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('already answered')
+  expect(t.calls).toEqual([t.args])
+})
