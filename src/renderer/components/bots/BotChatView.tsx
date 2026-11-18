@@ -49,7 +49,7 @@ import { botChatImages } from './imageSources'
 import type { RevealNavigation } from '../../chat/components/agent-elements/find/reveal'
 import { useBotChatFind } from './useBotChatFind'
 import { useBotCutReplies, useBotLiveReply, useHasBotLiveReply } from '../../stores/botLiveReplies'
-import { usePacedText } from '../../chat/components/agent-elements/reply-pacing'
+import { useFlowingText } from '../../chat/components/agent-elements/reply-flow'
 import { FindInThreadBar } from '../../chat/components/agent-elements/find/FindInThreadBar'
 
 const EMPTY: BotChatMessage[] = []
@@ -453,18 +453,18 @@ function BotTyping({ bot, starts, offline, doing }: { bot: BotSummary; starts: b
 }
 
 /**
- * The reply the chat's turn is writing, in the bubble its message will have, shown as a thread shows its live reply: a
- * finished sentence or block at a time (`usePacedText`), never word by word. Until its first block is finished, the
- * typing bubble stays. Only this renders as the reply grows; its message, once posted, takes its place.
+ * The reply the chat's turn is writing, in the bubble its message will have: whole words at an even pace, each fading in
+ * as it shows (`useFlowingText`), so it reads as a steady flow and lines already shown never re-wrap. Until its first
+ * word is whole, the typing bubble stays. Only this renders as the reply grows; its message, once posted, takes its place.
  */
 function BotLiveReply(props: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void }) {
   const reply = useBotLiveReply(props.bot.id)
   // Each reply of the turn is paced from its own start.
-  return <PacedLiveReply key={reply?.messageId ?? ''} text={reply?.text ?? ''} {...props} />
+  return <FlowingLiveReply key={reply?.messageId ?? ''} text={reply?.text ?? ''} {...props} />
 }
 
-function PacedLiveReply({ bot, starts, offline, doing, onGrow, text }: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void; text: string }) {
-  const shown = usePacedText(text, true)
+function FlowingLiveReply({ bot, starts, offline, doing, onGrow, text }: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void; text: string }) {
+  const shown = useFlowingText(text, true)
   useLayoutEffect(onGrow, [shown, onGrow])
   if (!shown) return <BotTyping bot={bot} starts={starts} offline={offline} doing={doing} />
   return <article className={`chat-participant-message from-agent bot-message bot-live-reply${starts ? ' is-group-start' : ''}`} aria-busy="true">

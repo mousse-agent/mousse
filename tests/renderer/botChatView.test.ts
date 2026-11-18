@@ -52,6 +52,7 @@ const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/
 const { SelectionReplyButton } = await import('../../src/renderer/components/SelectionReplyButton')
 const { botMessageScroller, DOING_HOLD_MS } = await import('../../src/renderer/components/bots/BotChatView')
 const { SETTLE_MS, clearBotLiveReplies } = await import('../../src/renderer/stores/botLiveReplies')
+const { FLOW_CATCH_UP_MS } = await import('../../src/renderer/chat/components/agent-elements/reply-flow')
 
 let root: Root
 let host: HTMLElement
@@ -988,6 +989,10 @@ describe('a reply as it is written', () => {
   }
   const live = () => transcript().querySelector('.bot-live-reply')
   const stopped = () => transcript().querySelector('.bot-cut-reply')
+  // With Animation speed Off (as with reduced motion) the reply's whole words show as they come, with no flow: the tests
+  // about what shows and when it goes read it at once. The flow itself has its own test, at normal speed.
+  beforeEach(() => { act(() => setAnimationSpeed('off')) })
+  afterEach(() => { act(() => setAnimationSpeed('normal')) })
   async function openWriting(bot = writer) {
     thread.added.length = 0
     thread.updated.length = 0
@@ -1041,16 +1046,28 @@ describe('a reply as it is written', () => {
     expect(stopped()).toBeNull()
   })
 
-  it('shows the turn a finished block at a time before it ends, then only its posted message', async () => {
+  it('shows the turn whole words at a time before it ends, each word drawn once, then only its posted message', async () => {
+    act(() => setAnimationSpeed('normal'))
     await openWriting()
     expect(transcript().querySelector('.bot-typing')).not.toBeNull()
-    // A sentence still being written is not shown: the dots stay.
-    await write('The first drive')
+    // A word still being written is not shown: the dots stay until one is whole.
+    await write('The')
     expect(live()).toBeNull()
     expect(transcript().querySelector('.bot-typing')).not.toBeNull()
-    await write('The first drive is faster.\n\nThe second one is')
-    expect(live()?.textContent).toBe('The first drive is faster.')
+    await write('The first drive')
+    // Its first whole word at once, the rest a step at a time.
+    expect(live()?.textContent).toBe('The')
     expect(transcript().querySelector('.bot-typing')).toBeNull()
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, FLOW_CATCH_UP_MS)) })
+    expect(live()?.textContent).toBe('The first')
+    const first = live()!.querySelector('.an-word')
+    expect(first?.textContent).toBe('The')
+    await write('The first drive is faster.\n\nThe second one is')
+    // What has come shows within the flow's catch-up time.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, FLOW_CATCH_UP_MS + 200)) })
+    expect(live()?.textContent).toBe('The first drive is faster.The second one')
+    // Words already shown keep their element, so only the new ones fade in.
+    expect(live()!.querySelector('.an-word')).toBe(first)
     // Another chat's thread is not this bot's.
     await act(async () => { for (const cb of thread.updated) cb({ threadId: 'other', message: { id: 'x', role: 'assistant', content: 'Not mine.\n\n', timestamp: AT, streaming: true } }) })
     await frame()

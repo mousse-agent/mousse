@@ -92,7 +92,7 @@ export function liveReplyText(content: string): string {
   // An applet is shown from what the turn published, once its message is posted: its source never shows.
   const applet = text.search(/^ {0,3}(`{3,}|~{3,})[ \t]*mousse-applet/m)
   if (applet >= 0) text = text.slice(0, applet)
-  // Its end stays as written: a blank line after a paragraph is what says that paragraph is finished (`usePacedText`).
+  // Its end stays as written: white space after a word is what says that word is whole (`useFlowingText`).
   const kept = text.split(/(\n\s*\n)/).filter((part) => !RUNTIME_PLACEHOLDER.test(part.trim())).join('').trimStart()
   return kept.trim() ? kept : ''
 }
