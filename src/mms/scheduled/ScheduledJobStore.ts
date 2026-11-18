@@ -1676,6 +1676,18 @@ export class ScheduledJobStore {
       // Legacy running without claim, or dead owner → interrupt.
       if (claim && isOwnerLive(claim)) continue
 
+      // Bot handover commits its activation separately. Replay the same occurrence so findOccurrence
+      // can recover it before admission or a new fetch; never turn that handover into an interrupted run.
+      if (job.bot && claim?.occurrenceKey) {
+        job.runClaim = undefined
+        job.state = 'scheduled'
+        job.nextRunAt = claim.occurrenceKey
+        job.updatedAt = nowIso
+        interrupted.push({ ...job })
+        dirty = true
+        continue
+      }
+
       if (claim?.workflowInvocationId && WORKFLOW_UUID_PATTERN.test(claim.workflowInvocationId)) {
         job.runClaim = undefined
         job.state = 'scheduled'
