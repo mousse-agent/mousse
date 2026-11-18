@@ -42,7 +42,7 @@ function Value({ value, literal = false }: { value: unknown; literal?: boolean }
   return <div><blockquote className="bot-action-text">{actionText(text).replaceAll("\n", "↵\n")}</blockquote><AlphabetWarning text={value} /></div>
 }
 function Field({ name, value, literal }: { name: string; value: unknown; literal: boolean }) {
-  return (Array.isArray(value) && value.length > 8) || typeof value === 'string' && (value.length > 160 || /^(body|text|content|message)$/i.test(name))
+  return (Array.isArray(value) && value.length > 8) || typeof value === 'string' && (value.length > 280 || value.split(/\r\n|\r|\n/).length > 4)
     ? <details><summary>Read {fieldName(name)}</summary><Value value={value} literal={literal} /></details>
     : <Value value={value} literal={literal} />
 }
