@@ -9,7 +9,7 @@ export interface SecretBinding {
   service?: string
   headers?: Record<string, string>
 }
-export interface SecretBindingView { service?: string; host: string; readOnly: true }
+export interface SecretBindingView { unavailable?: true; service?: string; host: string; readOnly: true }
 
 /** Paths match whole segments after decoding: `/user` must not match `/users`.
  * Read prefixes are deliberately limited to documented API resources, never website or credential-management paths. */

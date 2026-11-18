@@ -4,10 +4,10 @@ import { createRoot } from 'react-dom/client'
 import { expect, it } from 'vitest'
 import { SecretsSettings } from '../../src/renderer/components/settings/SecretsSettings'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-it('lists a bound secret by service and removes it through the ordinary Settings action', async () => {
+it.each([false,true])('lists a bound secret by service and removes it through the ordinary Settings action', async unavailable => {
   const removed: string[] = []
   ;(window as unknown as { mousse: unknown }).mousse = { platformRequest: { request: async (method: string, params: {name: string}) => {
-    if (method === 'secrets.list') return { secrets: [{ name: 'KEY', keep: 'saved', binding: { service: 'OpenAI', host: 'api.openai.com', readOnly: true } }] }
+    if (method === 'secrets.list') return { secrets: [{ name: 'KEY', keep: 'saved', binding: unavailable ? {host:'',readOnly:true,unavailable:true} : { service: 'OpenAI', host: 'api.openai.com', readOnly: true } }] }
     if (method === 'secrets.delete') removed.push(params.name)
     return {}
   } } }
@@ -15,7 +15,7 @@ it('lists a bound secret by service and removes it through the ordinary Settings
   const root = createRoot(host)
   try {
     await act(async () => root.render(createElement(SecretsSettings)))
-    expect(host.textContent).toContain('for OpenAI, read only')
+    expect(host.textContent).toContain(unavailable ? 'bound, service unavailable' : 'for OpenAI, read only')
     const button = host.querySelector<HTMLButtonElement>('button[aria-label="Remove KEY"]')!
     await act(async () => button.click())
     await act(async () => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Confirm remove')!.click())

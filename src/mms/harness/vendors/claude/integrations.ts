@@ -185,6 +185,11 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
         continue
       }
       if (server.status === 'missing-env' || (server.missingEnvVars?.length ?? 0) > 0) {
+        const bound = server.missingEnvVars?.find(ref => ref.startsWith('secret:') && this.deps.secrets.canUseSecretRef?.(ref.slice(7)) === false)
+        if (bound) {
+          try { this.deps.secrets.resolveEnv('${' + bound + '}') }
+          catch (error) { result.warnings.push(`MCP server ${server.name} was not attached: ${message(error)}`); continue }
+        }
         result.warnings.push(`MCP server ${server.name} is missing environment: ${(server.missingEnvVars ?? []).join(', ')}`)
         continue
       }

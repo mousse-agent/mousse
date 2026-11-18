@@ -17,6 +17,7 @@ export const UNAVAILABLE_BINDING: SecretBinding = { origin: 'https://unavailable
 export class SecretBindings {
   private readonly path: string
   private readonly guards: string
+  private readable = true
   private signature?: string
   private entries: Record<string, unknown> = Object.create(null)
   constructor(private readonly profileRoot: string) {
@@ -31,8 +32,10 @@ export class SecretBindings {
       signature = `${stat.dev}:${stat.ino}:${stat.ctimeMs}:${stat.mtimeMs}:${stat.size}`
       if (signature === this.signature) return this.entries
       const parsed: unknown = JSON.parse(readFileSync(this.path, 'utf8'))
-      this.entries = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : Object.create(null)
-    } catch {
+      this.readable = Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+      this.entries = this.readable ? parsed as Record<string, unknown> : Object.create(null)
+    } catch (error) {
+      this.readable = (error as NodeJS.ErrnoException).code === 'ENOENT'
       this.entries = Object.create(null)
     }
     // Cache parse/read failures too, until this file changes; guards still deny every affected name.
@@ -63,18 +66,21 @@ export class SecretBindings {
   }
 
   set(name: string, binding: SecretBinding): void {
+    const entries = this.read()
+    if (!this.readable) throw new Error('Secret bindings could not be read; the file was left unchanged.')
     const directory = join(this.profileRoot, 'secrets')
     ensurePrivateDirectory(directory)
     ensurePrivateDirectory(this.guards)
     atomicWriteJsonSync(join(this.guards, name), true, {mode: 0o600})
     const entry = binding.serviceId ? {service: binding.serviceId} : {origin: binding.origin, header: binding.header, format: binding.format}
-    atomicWriteJsonSync(this.path, {...this.read(), [name]: entry}, {mode: 0o600})
+    atomicWriteJsonSync(this.path, {...entries, [name]: entry}, {mode: 0o600})
     this.signature = undefined
   }
 
   delete(name: string): void {
     if (!isKeyName(name)) return
     const entries = {...this.read()}
+    if (!this.readable) throw new Error('Secret bindings could not be read; the file was left unchanged.')
     if (Object.hasOwn(entries, name)) {
       delete entries[name]
       atomicWriteJsonSync(this.path, entries, {mode: 0o600})
