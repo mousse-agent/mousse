@@ -746,6 +746,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     enabled: () => botAsksFirst(this.host.settings?.get()),
     schedule: (botId, id) => this.host.schedules?.get(botId, id),
     schema: (server, tool) => this.host.mcp?.inputSchema?.({ server, tool } as BotMcpTool),
+    serverName: (server, tool) => this.host.mcp?.offered(new Set([`${server}::${tool}`]))[0]?.serverName ?? 'the service',
     binding: (botId, server, tool) => {
       const pair = this.store.activeGrant(botId)?.manifest.mcp.find(p => p.serverId === server && p.tool === tool)
       if (!pair || this.store.disabledPermissions(botId).some(p => p.manifest.mcp.some(t => t.serverId === server && t.tool === tool))) return undefined

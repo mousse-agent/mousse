@@ -21,6 +21,7 @@ interface Host {
   schedule(botId: string, id: string): { prompt: string; name: string } | undefined
   binding(botId: string, server: string, tool: string): unknown | undefined
   schema(server: string, tool: string): unknown
+  serverName(server: string, tool: string): string
 }
 const pendingKey = (activationId: string, request: AloneRequest): string => `alone-ask:${activationId}:${actionDigest(request)}`
 export const aloneKey = (r: Pick<AloneRequest, 'scheduleId' | 'serverId' | 'tool'>): string => `alone:${r.scheduleId}:${r.serverId}:${r.tool}`
@@ -53,7 +54,7 @@ export class BotAlone {
     const place = JSON.parse(String(previous.place_json)) as Record<string, unknown>
     const result = JSON.parse(String(previous.result_json ?? '{}')).text ?? ''
     const values = Object.values(maskedActionData(place) as object).map(v => placeLabel(v, result)).join(', ')
-    this.put(botId, pendingKey(activationId, request), { ...request, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest(schedule.prompt), grantedAt: this.host.store.now(), title: `‘${schedule.name}’ · ${readableActionTitle(request.tool)} · ${values} without asking` })
+    this.put(botId, pendingKey(activationId, request), { ...request, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest(schedule.prompt), grantedAt: this.host.store.now(), title: `‘${schedule.name}’ · ${readableActionTitle(request.tool)} · ${values} in ${this.host.serverName(request.serverId, request.tool)} without asking` })
   }
   pending(botId: string, activationId: string, request: AloneRequest): { title: string; details: { summary: string; items: string[] } } | undefined {
     const entry = this.read(botId, pendingKey(activationId, request))
