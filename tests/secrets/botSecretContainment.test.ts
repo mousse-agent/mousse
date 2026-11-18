@@ -1,3 +1,4 @@
+import { resolveSecretBinding } from '../../src/mms/secrets/secretBinding'
 /**
  * A personal bot's secrets, through the real path (bot/thread parity, "use secrets you give it").
  *
@@ -179,7 +180,7 @@ describe('a bot\'s secret is masked in what a turn of its work keeps', () => {
   }
 
   /** A bot's work turn whose runtime echoes the secret in a tool's output and in its reply. */
-  const run = async (botThreads: boolean) => {
+  const run = async (botThreads: boolean, bound = false) => {
     const adapter = piAdapter(() => 'unused')
     adapter.startTurn = async (input: TurnInput, sink): Promise<TurnResult> => {
       sink.providerRef({ provider: input.llmProvider, model: input.model })
@@ -197,7 +198,7 @@ describe('a bot\'s secret is masked in what a turn of its work keeps', () => {
     if (botThreads) orch.setBotThreads({ roleOf: () => undefined, homeOf: (threadId) => (threadId === work.id || threadId === chat.id ? chat.id : undefined) })
     const vault = new SecretVault({ profileRoot: home, threadAlive: (id) => Boolean(store.getThread(id)) })
     const requests = new SecretRequests(vault)
-    vault.store('API_TOKEN', VALUE, { keep: 'thread', threadId: chat.id })
+    vault.store('API_TOKEN', VALUE, { keep: 'thread', threadId: chat.id, ...(bound ? { binding: resolveSecretBinding({service: 'github'}) } : {}) })
     orch.setSecrets({ tools: createSecretToolHost({ vault, requests, scratchRoot: join(home, 'secrets', 'run') }), masker: (threadId) => vault.maskerFor(threadId) })
     orch.setPersistCallback((threadId) => {
       if (!threadId) return
@@ -217,8 +218,8 @@ describe('a bot\'s secret is masked in what a turn of its work keeps', () => {
     return { reply: JSON.stringify(reply), messages: JSON.stringify(orch.getMessages(work.id)), native: JSON.stringify(orch.getNativeContext(work.id)), result: results.join('\n') }
   }
 
-  it('in its messages, its recorded result, its native history, the reply and every file of the profile', async () => {
-    const kept = await run(true)
+  it.each([false, true])('in its messages, recorded result, native history, reply and profile files (bound: %s)', async bound => {
+    const kept = await run(true, bound)
     for (const [where, text] of Object.entries(kept)) expect({ where, leaked: text.includes(VALUE) }).toEqual({ where, leaked: false })
     expect(kept.messages).toContain('[secret API_TOKEN hidden]')
     expect(kept.result).toContain('[secret API_TOKEN hidden]')

@@ -1,3 +1,4 @@
+import { OldMetaReader } from './oldMetaReader'
 import { afterEach, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -44,6 +45,7 @@ it('keeps the binding across restart, masks the value, and never gives a readabl
   vault.allowCopies('bot', true)
   expect(vault.fileFor('OPENAI_API_KEY', 'bot')).toBeUndefined()
   expect(existsSync(join(home, 'secrets/threads/bot/OPENAI_API_KEY'))).toBe(false)
+  expect(new OldMetaReader(join(home, 'secrets/meta.json')).readMeta().OPENAI_API_KEY).toMatchObject({ keep: 'saved', threads: ['bot'] })
   const restarted = new SecretVault({ profileRoot: home, threadAlive: () => true })
   expect(restarted.bindingFor('OPENAI_API_KEY')).toEqual(binding)
   expect(restarted.list()[0].binding).toEqual(card.binding)
