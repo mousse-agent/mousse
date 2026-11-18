@@ -3537,3 +3537,14 @@ it.each(['approved', 'running'] as const)('C11 Automations knows Send was answer
   f.store.run('UPDATE bot_actions SET status = ?, answered_at = ? WHERE id = ?', status, f.store.now(), a.id)
   expect(f.bots.service.automationFacts(t.botId, t.schedule.scheduleId)?.runs[0]?.endReason).toBe('approval_answered')
 })
+
+it('C11 repeat refusal explains an unsent request without promising expiry', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  await flush()
+  const turn = await start(f, t.workId, 2)
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-copy', signal: new AbortController().signal })
+  expect(result.text).toBe('Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.')
+})
