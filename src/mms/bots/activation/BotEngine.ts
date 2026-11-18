@@ -3035,16 +3035,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     live.controller.abort(new BotWallAbort())
   }
 
+  private actionLevel(tool: { server: string; tool: string }, storedLevel?: string): 'asks_first' | 'allowed' {
+    const server = findServer(this.host.mcp?.servers() ?? [], tool.server)
+    return asksFirstFor({ tool: tool.tool, serverName: [server?.name ?? '', server?.installationId ?? installationOf(tool.server)], readOnlyHint: server?.tools.find(t => t.tool === tool.tool)?.readOnlyHint, storedLevel }) ? 'asks_first' : 'allowed'
+  }
+
+
   /**
    * A thread's instructions: the bot's system text (its name, description and files folder, then
    * the base instructions), its role when that says more than its description (a bot made before the
    * Bot UI), then the thread's own. Built at each dispatch from the words published now, so a rename or the owner's
    * prompt edit applies at the next turn, while a turn already running keeps the text it was given.
    */
-  private actionLevel(tool: { server: string; tool: string }, storedLevel?: string): 'asks_first' | 'allowed' {
-    const server = findServer(this.host.mcp?.servers() ?? [], tool.server)
-    return asksFirstFor({ tool: tool.tool, serverName: [server?.name ?? '', server?.installationId ?? installationOf(tool.server)], readOnlyHint: server?.tools.find(t => t.tool === tool.tool)?.readOnlyHint, storedLevel }) ? 'asks_first' : 'allowed'
-  }
 
   private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): { instructions?: string } {
     if (permissions) {

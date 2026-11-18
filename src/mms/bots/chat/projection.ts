@@ -28,7 +28,7 @@ import { WAKE_LINE_PREFIX, wakeEventLabel } from '../../../shared/bots/personal/
 import { BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TITLE } from '../../../shared/bots/personal/memory'
 
 function isServiceLine(id: string): boolean {
-  return ['bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
+  return ['bm_asks_first_', 'bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
 }
 import type { AppletReference } from '../../../shared/applets'
 import { BOT_USAGE_WINDOW_MS, turnUsageSummary } from '../activation/turnUsage'
@@ -120,11 +120,12 @@ export interface PostInput {
    * message of a dispatch also takes the cards its turn made (`show_card`), and a question's bubble its question's card.
    */
   cards?: BotCard[]
+  /** A service notice that stays in chat without its own notification. */
+  quiet?: true
   /**
    * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
    */
-  quiet?: true
   hidden?: true
   /** Trusted job facts from the scheduler, used only by the post-time telling classifier. */
   scheduleLine?: { say: string; ownerAsked?: boolean }
