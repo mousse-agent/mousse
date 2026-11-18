@@ -49,7 +49,7 @@ export class PageChecks {
       if (entry.isDirectory() && /^act_[a-zA-Z0-9_-]+$/.test(entry.name) && !this.store.activation(entry.name)) {
         removePageChange(root, entry.name)
         try { rmdirSync(join(root, entry.name)) } catch (error) {
-          if (!['ENOENT','ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+          if (!['ENOENT','ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) console.warn('an orphan run folder could not be removed', { activationId:entry.name, error })
         }
       }
     }
