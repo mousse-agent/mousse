@@ -4146,5 +4146,6 @@ it('E1 replaying an automatic call returns its recorded result without sending t
   const again = await callForBot({ bot: next.turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'alone-next', signal: new AbortController().signal })
   expect(again).toMatchObject({ text: expect.stringContaining('delivered') })
   expect(again.isError).not.toBe(true)
+  expect(f.store.activation(next.id)?.status).toBe('running')
   expect(t.calls).toHaveLength(2)
 })
