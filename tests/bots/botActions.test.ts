@@ -4121,3 +4121,14 @@ it.each(['time', 'prompt', 'pair', 'schedule', 'bot'] as const)('E1 cleans up ex
   if (change === 'bot') await f.bots.remove(t.botId)
   expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toHaveLength(change === 'time' ? 1 : 0)
 })
+it('E1 an automatic send clears the scheduled decline reminder in the current and later runs', async () => {
+  const t = await aloneAsk()
+  // Legacy decline history with the same arguments remains eligible to be sent under new consent.
+  f.store.run("UPDATE bot_actions SET status = 'declined' WHERE activation_id = ?", t.id)
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
+  const turn = await start(f, id)
+  expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe('fyi')
+  await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'clears-decline', signal: new AbortController().signal })
+  expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe('quiet')
+})
