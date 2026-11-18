@@ -4081,7 +4081,8 @@ it.each(['place', 'schema', 'config', 'off', 'hour', 'day', 'removed'] as const)
   expect(next.action.status).toBe('open')
   if (change === 'schema' || change === 'config') expect(f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))?.mark).toBe('Changed')
   if (change === 'hour' || change === 'day') {
-    expect(next.action.card_json).toContain('too?')
+    expect(JSON.parse(next.action.card_json!).title).toBe(change === 'hour' ? `${f.bots.definitionOf(t.botId).name} has used this action 20 times this hour. Send this one too?` : `${f.bots.definitionOf(t.botId).name} has used tools 100 times today. Send this one too?`)
+    expect(f.bots.service.get(t.botId).summary.stateText).toContain('Send · Mail')
     await f.bots.actions.answer({ actionId: next.action.id, digest: next.action.args_digest, answer: 'send' })
     expect(f.bots.actions.get(next.action.id)?.status).toBe('done')
   }
@@ -4365,4 +4366,47 @@ it('E1 automatic calls neither introduce asks first again nor publish a nonexist
   const next = await aloneNext(t)
   expect(f.store.message(`bm_asks_first_${t.botId}`)).toBeUndefined()
   expect(published).not.toHaveBeenCalledWith(next.action.message_id)
+})
+
+it.each(['tool', 'schedule', 'work', 'manual'] as const)('E1 consent grants no standing authority to another %s', async scope => {
+  const t = await aloneAsk()
+  let id: string, turn: Awaited<ReturnType<typeof start>>, name = 'Mail__send'
+  if (scope === 'tool') {
+    t.server.tools.push({ ...t.descriptor, toolName: 'other', providerName: 'mail_other' })
+    const grant = f.store.activeGrant(t.botId)!
+    const manifest = { ...grant.manifest, mcp: [...grant.manifest.mcp, { serverId: 'mail', tool: 'other', level: 'asks_first' as const }] }
+    f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+    name = 'Mail__other'
+  }
+  if (scope === 'tool' || scope === 'schedule') {
+    const schedule = scope === 'tool' ? t.schedule : f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 1 }, prompt: 'Other automation' }, 'owner')
+    f.clock.now += 60_000
+    const due = await f.tickSchedules(new Date(f.clock.now))
+    id = due.inserted.find(id => { const trigger = f.store.activation(id)?.trigger; return trigger?.kind === 'schedule' && trigger.scheduleId === schedule.scheduleId })!
+    turn = await start(f, id)
+  } else if (scope === 'manual') {
+    const row = await f.bots.activate({ botId: t.botId, input: 'Send it now', clientRequestId: 'manual-alone' })
+    id = row.id; turn = await start(f, id)
+  } else {
+    const reply = await start(f, t.consentActivation, 2); await finish(f, reply.payload)
+    await f.bots.service.chatSend({ botId: t.botId, text: 'Send an email', clientRequestId: 'work-alone' })
+    const chat = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+    const talking = await start(f, chat.id)
+    id = (await f.bots.tools.work.start(t.botId, chat.id, { title: 'Another email', brief: 'Send it', key: 'another-alone' })).workId
+    await finish(f, talking.payload)
+    turn = await start(f, id)
+  }
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name, args: t.args, toolCallId: 'outside-alone', signal: new AbortController().signal })
+  if (scope === 'manual') { expect(result.text).toContain("A run started by hand can't wait"); expect(f.bots.actions.forWork(id)).toBeUndefined() }
+  else expect(f.bots.actions.forWork(id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 replay does not park or fence the next automatic call in a live turn', async () => {
+  const t = await aloneAsk()
+  const next = await aloneNext(t)
+  const call = (toolCallId: string, args = t.args) => callForBot({ bot: next.turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId, signal: new AbortController().signal })
+  await call('alone-next')
+  expect((await call('new-content', { ...t.args, body: 'Next plain message' })).text).toContain('delivered')
+  expect(f.store.activation(next.id)).toMatchObject({ status: 'running', endReason: null })
+  expect(t.calls).toHaveLength(3)
 })
