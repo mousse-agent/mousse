@@ -12,8 +12,7 @@ import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { newId, type BlobId, type EventId, type NodeId, type StreamDescriptor, type StreamId } from '../../../src/shared/net'
 import { PROJECT_SHELL_AGENT_ID } from '../../../src/shared/types'
-import type { Crossed } from '../fakeHelper'
-import { codeOf, eventually, Fabric, refused, step, type Computer } from './harness'
+import { codeOf, eventually, Fabric, refused, step, type Computer, type Crossed } from './harness'
 
 describe('phase1a.private-streams', () => {
   const fabric = new Fabric()
@@ -37,14 +36,14 @@ describe('phase1a.private-streams', () => {
     await fabric.connect(second, ownerOnSecond)
     await owner.dispatch('bridge.policy', { node: firstOnOwner, terminal: true }, true)
   }, 120_000)
-  afterAll(() => fabric.close())
+  afterAll(() => fabric.close(), 60_000)
 
   const fromFirst = (row: Crossed) => row.from === first.endpoint
   const fromOwner = (row: Crossed) => row.from === owner.endpoint
 
   it('the first caller opens a thread, a terminal, an artifact answer and a staged write', async () => {
     const node = ownerOnFirst
-    const from = fabric.network.crossed.length
+    const from = fabric.crossed.length
     const project = await step(undefined, () => first.dispatch('projects.open', { node, path: fabric.folder() }))
     const created = await step(undefined, () =>
       first.dispatch('threads.create', { node, name: 'Private', projectId: (project.project ?? project).id })
@@ -67,7 +66,7 @@ describe('phase1a.private-streams', () => {
       opened.streams.clear()
       opened.blobs.length = 0
       opened.inputs.length = 0
-      for (const row of fabric.network.crossed.slice(from)) {
+      for (const row of fabric.crossed.slice(from)) {
         const h = row.header as Record<string, any>
         if (fromFirst(row) && row.label === 'mousse.sub' && h.t === 'subscribe') opened.streams.add(h.stream)
         if (fromFirst(row) && row.label === 'mousse.put' && h.t === 'append')

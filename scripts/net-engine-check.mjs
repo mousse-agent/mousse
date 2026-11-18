@@ -38,9 +38,13 @@ const git = (...gitArgs) => spawnSync('git', gitArgs, { cwd: root, encoding: 'ut
 const commit = git('rev-parse', 'HEAD').stdout.trim() || 'unknown'
 const dirty = git('status', '--porcelain').stdout.trim() !== ''
 console.log(`app_build=${commit}${dirty ? '-dirty' : ''}`)
-// The checks run over the fake helper until the app spawns the real one; a requested helper is named, not used.
-console.log('helper=fake')
-if (process.env.MOUSSE_NET_HELPER) console.log(`helper_requested=${process.env.MOUSSE_NET_HELPER} (not used yet)`)
+// The checks run the helper named by MOUSSE_NET_HELPER (each computer's engine service starts it), else the fake one.
+const helper = process.env.MOUSSE_NET_HELPER?.trim()
+if (helper && !existsSync(helper)) {
+  console.log(`FAIL ${id} reason=no_helper (${helper} does not exist)`)
+  process.exit(1)
+}
+console.log(helper ? `helper=${helper}` : 'helper=fake')
 if (process.env.MOUSSE_NET_ENGINE_CONTROL) console.log(`control=${process.env.MOUSSE_NET_ENGINE_CONTROL}`)
 
 const vitest = join(root, 'node_modules', 'vitest', 'vitest.mjs')

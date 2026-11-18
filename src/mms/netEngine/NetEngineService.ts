@@ -17,6 +17,15 @@ import type { BridgeClient, EngineClient } from './session/client'
 import type { EngineConnection } from './session/transport'
 import { AppChannel, type AppPipe } from './helper/appChannel'
 import { EngineHelper } from './helper/connections'
+import {
+  findNetHelper,
+  helperProfileId,
+  initEndpoint,
+  insecureFileKey,
+  launchHelper,
+  type LaunchedHelper
+} from './helper/process'
+import { HELPER_TEXT, HelperNotInBuild, HelperSupervisor, type HelperStatus } from './helper/supervisor'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 
 export const NON_KEEPER_MESSAGE =
@@ -57,6 +66,12 @@ export class NetEngineService implements EngineDirectoryPort {
   private own?: { issuedAt: number; expiresAt: number }
   /** The helper this profile's connections run through, while one runs. */
   private helper?: EngineHelper
+  /** Runs the helper process, once `startHelper` asked for it. */
+  private supervisor?: HelperSupervisor
+  /** Why this profile's networking could not start, or turned itself off, until it starts again. */
+  private problem?: string
+  /** Starts a helper; tests put a fake one here. By default, the binary of this build (design §1). */
+  launcher?: () => Promise<LaunchedHelper>
   private starting?: Promise<void>
   constructor(
     private readonly options: {
@@ -76,6 +91,10 @@ export class NetEngineService implements EngineDirectoryPort {
   }
   private get settingsPath(): string {
     return join(this.directory, 'settings.json')
+  }
+  /** The helper's state folder: its endpoint (key reference, grants, peers, log). */
+  private get endpointPath(): string {
+    return join(this.directory, 'endpoint')
   }
   private selfName(): string {
     return this.options.name?.() ?? hostname()
@@ -103,11 +122,7 @@ export class NetEngineService implements EngineDirectoryPort {
 
   /** Turns the switch on and starts. */
   async enable(): Promise<void> {
-    mkdirSync(this.directory, { recursive: true })
-    writeFileSync(
-      this.settingsPath,
-      JSON.stringify({ enabled: true, profile: this.options.profileId } satisfies EngineSettings)
-    )
+    this.writeSettings(true)
     await this.start()
   }
 
@@ -223,8 +238,78 @@ export class NetEngineService implements EngineDirectoryPort {
     }
   }
 
+  /**
+   * Starts the engine and then its helper process, which is started again whenever it exits until `stop`. A
+   * failure marks only this profile: `helperStatus` says "Couldn't start".
+   */
+  async startHelper(): Promise<void> {
+    try {
+      await this.start()
+    } catch (error) {
+      this.problem = "Couldn't start"
+      throw error
+    }
+    if (!this.started) return
+    this.problem = undefined
+    this.supervisor ??= new HelperSupervisor({
+      launch: () => (this.launcher ?? (() => this.launchBuilt()))(),
+      use: (pipe) => this.useHelper(pipe),
+      mismatch: () => {
+        this.writeSettings(false)
+        this.problem = HELPER_TEXT.mismatch
+        void this.stop()
+      },
+      wrongProfile: () => this.setEndpointAside('wrong-profile'),
+      log: (message) => console.warn(message)
+    })
+    this.supervisor.start()
+  }
+
+  /** Where this profile's helper is, and what the switch shows. */
+  helperStatus(): HelperStatus | { state: 'failed'; text: string } {
+    const status = this.supervisor?.status()
+    if (this.problem && (!status || status.state === 'off')) return { state: 'failed', text: this.problem }
+    return status ?? { state: 'off' }
+  }
+
+  /** The app's view of the helper running now. */
+  currentHelper(): EngineHelper | undefined {
+    return this.helper
+  }
+
+  /** Starts this build's helper: `init` first when there is no endpoint, then `serve --app`. */
+  async launchBuilt(): Promise<LaunchedHelper> {
+    const binary = findNetHelper()
+    if (!binary) throw new HelperNotInBuild()
+    // A profile folder copied from another profile carries that profile's endpoint: it is set aside.
+    const settings = this.settings()
+    if (settings && settings.profile !== this.options.profileId) {
+      this.setEndpointAside('copied')
+      this.writeSettings(settings.enabled)
+    }
+    const insecure = insecureFileKey()
+    if (!existsSync(join(this.endpointPath, 'identity.json'))) {
+      mkdirSync(this.directory, { recursive: true })
+      await initEndpoint(binary, this.endpointPath, helperProfileId(this.options.profileId), insecure)
+    }
+    return launchHelper(binary, this.endpointPath, insecure)
+  }
+
+  private writeSettings(enabled: boolean): void {
+    mkdirSync(this.directory, { recursive: true })
+    writeFileSync(this.settingsPath, JSON.stringify({ enabled, profile: this.options.profileId } satisfies EngineSettings))
+  }
+
+  /** The endpoint goes aside; the next start makes a new one, and its pairings show "Pair again". */
+  private setEndpointAside(why: string): void {
+    if (existsSync(this.endpointPath)) renameSync(this.endpointPath, `${this.endpointPath}.${why}-${Date.now()}`)
+  }
+
   async stop(): Promise<void> {
     await this.starting?.catch(() => undefined)
+    const supervisor = this.supervisor
+    this.supervisor = undefined
+    await supervisor?.stop()
     const started = this.started
     if (!started) return
     this.started = undefined
@@ -288,7 +373,7 @@ export class NetEngineService implements EngineDirectoryPort {
       },
       attach: (connection) => this.attach(connection),
       name: () => this.selfName(),
-      profile: () => this.options.profileId
+      profile: () => helperProfileId(this.options.profileId)
     })
     this.helper = helper
     helper.channel.onClose(() => {

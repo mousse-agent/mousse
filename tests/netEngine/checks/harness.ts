@@ -1,8 +1,12 @@
 /**
  * What the Phase 1a owner checks share: fresh profiles in one process with the engine switched on and v1
- * networking off, each running its connections through a helper (the fake helper of `../fakeHelper`, on a fake
- * network), paired with each other; a window's daemon calls on each; fake shells on an owner; and the marker
- * record `scripts/net-engine-check.mjs` reads (the reason the first failed step gives).
+ * networking off, each running its connections through a helper its engine service starts and starts again
+ * (`startHelper`), paired with each other; a window's daemon calls on each; fake shells on an owner; what each app
+ * sends its helper (`./tap`); and the marker record `scripts/net-engine-check.mjs` reads (the reason the first
+ * failed step gives).
+ *
+ * The helper is the fake one of `../fakeHelper` on a fake network, or with `MOUSSE_NET_HELPER` set, that real
+ * helper: each computer's endpoint in its profile, its key in a file, listening on loopback.
  *
  * Computers pair as the helper pairs them: the caller joins the owner's invitation and the owner's window approves
  * it, then each records the other with the grant the helper named, and the owner pairs back (`grant.add` at the
@@ -22,6 +26,12 @@ import { NET_LOCAL_CAPABILITY } from '../../../src/shared/net/local'
 import { qualifyId } from '../../../src/shared/threadRef'
 import { fakeShells, type Spawned } from '../../net/bridge/routed/terminalFixture'
 import { FakeNetwork, type FakeHelper } from '../fakeHelper'
+import { tapPipe, type Crossed, type Tap } from './tap'
+
+export type { Crossed } from './tap'
+
+/** Whether the checks run the real helper (`MOUSSE_NET_HELPER`) instead of the fake one. */
+export const REAL_HELPER = !!process.env.MOUSSE_NET_HELPER?.trim()
 
 export const DAY = 24 * 60 * 60_000
 export const eventually = (check: () => unknown, timeout = 15_000) => vi.waitFor(check, { timeout })
@@ -84,9 +94,12 @@ export interface Computer {
   mms: MousseMainService
   /** Its helper identity, as its pairings know it. */
   endpoint: string
-  helper: FakeHelper
-  /** The app's view of its helper. */
+  /** The app's view of its helper (the one running now; `restartHelper` updates it). */
   engine: EngineHelper
+  /** Its fake helper now, when the helper is fake. */
+  fake?: FakeHelper
+  /** Kills its helper now, as a crash does; its engine service starts another. */
+  kill(): void
   /** Whether it had a `net.db` before its engine was switched on. */
   hadNetDb: boolean
   /** What its windows heard. */
@@ -98,7 +111,17 @@ export interface Computer {
 /** The computers of one check, their helpers and the fake network between them. */
 export class Fabric {
   readonly network = new FakeNetwork()
+  /** Every engine message each app sent its helper; `decide` may drop one. */
+  private readonly tap: Tap = { crossed: [] }
   private readonly cleanups: Array<() => unknown> = []
+
+  get crossed(): Crossed[] {
+    return this.tap.crossed
+  }
+  /** Decides each message an app sends; `drop` loses it before its helper (unset after it drops one, by the caller). */
+  set decide(decide: Tap['decide']) {
+    this.tap.decide = decide
+  }
 
   async computer(name: string): Promise<Computer> {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-')))
@@ -119,10 +142,32 @@ export class Fabric {
       () => mms.stop()
     )
     const hadNetDb = existsSync(join(home, 'net', 'net.db'))
+    let endpoint = ''
+    let kill = () => undefined as void
+    const computer = {} as Computer
+    if (REAL_HELPER) {
+      process.env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY = '1'
+      process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP = '127.0.0.1'
+      mms.netEngine.launcher = async () => {
+        const launched = await mms.netEngine.launchBuilt()
+        kill = () => launched.kill()
+        return { ...launched, pipe: tapPipe(launched.pipe, () => endpoint, this.tap) }
+      }
+    } else {
+      mms.netEngine.launcher = async () => {
+        const fake = this.network.helper(`endpoint-${name}`)
+        computer.fake = fake
+        kill = () => fake.kill()
+        const exited = new Promise<{ code: number; signal: null; stderr: string }>((resolve) =>
+          fake.pipe.onClose(() => resolve({ code: 0, signal: null, stderr: '' }))
+        )
+        return { pipe: tapPipe(fake.pipe, () => endpoint, this.tap), exited, kill: () => fake.kill() }
+      }
+    }
     await mms.netEngine.enable()
-    const helper = this.network.helper(`endpoint-${name}`)
-    const engine = await mms.netEngine.useHelper(helper.pipe)
-    const endpoint = String(engine.info.identity)
+    await mms.netEngine.startHelper()
+    const engine = await running(mms)
+    endpoint = String(engine.info.identity)
     const events: ProtocolEvent[] = []
     let sequence = 0
     mms.protocolSequence = () => sequence
@@ -136,21 +181,21 @@ export class Fabric {
       capabilities: new Set(local ? [NET_LOCAL_CAPABILITY] : []),
       binding: { profileId: mms.profileId, epoch: 1 }
     })
-    return {
+    return Object.assign(computer, {
       name,
       mms,
       endpoint,
-      helper,
       engine,
+      kill: () => kill(),
       hadNetDb,
       events,
-      dispatch: (method, params, local = false) =>
+      dispatch: (method: string, params: unknown, local = false) =>
         dispatchMethod(
           { mms, connection: window(local), globalSequence: () => mms.protocolSequence() },
           method,
           params
         )
-    }
+    })
   }
 
   /**
@@ -219,11 +264,14 @@ export class Fabric {
     })
   }
 
-  /** The helper of `computer` exits and a new one starts; nothing reconnects until someone dials. */
+  /**
+   * The helper of `computer` exits (unless it already did) and its engine service starts a new one; nothing
+   * reconnects until someone dials.
+   */
   async restartHelper(computer: Computer): Promise<void> {
-    computer.helper.kill()
-    computer.helper = this.network.helper(computer.endpoint)
-    computer.engine = await computer.mms.netEngine.useHelper(computer.helper.pipe)
+    const before = computer.engine
+    computer.kill()
+    computer.engine = await running(computer.mms, before)
   }
 
   shells(owner: Computer): Spawned[] {
@@ -250,6 +298,18 @@ export class Fabric {
     vi.useRealTimers()
     for (const close of this.cleanups.splice(0).reverse()) await close()
   }
+}
+
+/** The helper `mms` runs once it said hello (another than `before`). */
+async function running(mms: MousseMainService, before?: EngineHelper): Promise<EngineHelper> {
+  let engine: EngineHelper | undefined
+  await eventually(() => {
+    const status = mms.netEngine.helperStatus()
+    engine = mms.netEngine.currentHelper()
+    if (status.state !== 'running' || !engine || engine === before || !engine.info.identity)
+      throw new Error(`helper ${status.state}${'text' in status && status.text ? `: ${status.text}` : ''}`)
+  }, 30_000)
+  return engine!
 }
 
 /** The common shape: an owner and one caller, paired and connected. */

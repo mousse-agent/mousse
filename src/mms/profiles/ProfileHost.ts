@@ -185,6 +185,26 @@ export class ProfileHost {
     }
   }
 
+  /**
+   * Starts the network helper of each running profile whose networking switch is on (design §1). Called in the
+   * background once the daemon is ready; each profile starts on its own, and a failure marks only that profile.
+   */
+  async startNetworkedProfiles(): Promise<void> {
+    for (const record of this.manager.list()) {
+      if (this.stopping || record.status !== 'active') continue
+      const services = this.live.get(record.id)
+      if (!services?.netEngine.settings()?.enabled) continue
+      try {
+        await services.netEngine.startHelper()
+      } catch (error) {
+        console.warn('the network helper did not start', {
+          profileId: record.id,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+  }
+
   async stopAll(): Promise<void> {
     this.stopping = true
     // An archive/remove that already passed admission remains installation-owned

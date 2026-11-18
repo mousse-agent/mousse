@@ -455,11 +455,17 @@ function wireCode(code: string): string {
   return 'cancelled'
 }
 
-/** A helper's error reply as a Net error: its code when the app knows it, with its reason. */
+/** A helper's error reply as a Net error: its code when the app knows it, with its reason; `details.helper` is the helper's code. */
 function helperError(code: string, reason?: string): NetError {
   try {
-    return new NetError(code as never, undefined, reason ? { details: { reason } } : undefined)
+    return new NetError(code as never, undefined, { details: { ...(reason ? { reason } : {}), helper: code } })
   } catch {
-    return new NetError('internal', undefined, { details: { reason: code } })
+    return new NetError('internal', reason, { details: { reason: code, helper: code } })
   }
+}
+
+/** The helper's own code for an error its reply carried. */
+export function helperCode(error: unknown): string | undefined {
+  const helper = (error as { details?: { helper?: unknown } } | undefined)?.details?.helper
+  return typeof helper === 'string' ? helper : undefined
 }

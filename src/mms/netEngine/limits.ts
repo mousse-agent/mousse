@@ -52,6 +52,20 @@ export interface EngineLimits {
   appStreamsPerConnection: number
   /** How long a request to the helper (`dial`, `stream.open`, ...) waits for its answer. */
   appRequestDeadlineMs: number
+  /** The first wait before a helper that exited is started again; each exit in a row doubles it. */
+  helperRestartFirstMs: number
+  /** The longest wait between restarts: once reached, the helper is started again this often. */
+  helperRestartMaxMs: number
+  /** A helper up this long has started well: the next exit starts the waits from the first again. */
+  helperUpResetMs: number
+  /** Exits in a row, each before `helperUpResetMs`, after which the status says the helper keeps stopping. */
+  helperFastExits: number
+  /** How long a helper asked to shut down has before it is killed. */
+  helperShutdownGraceMs: number
+  /** How long a start keeps trying while another helper still holds the endpoint. */
+  helperLockWaitMs: number
+  /** How long `init` (a new endpoint, its key into the keystore) may take. */
+  helperInitDeadlineMs: number
 }
 
 export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
@@ -75,7 +89,14 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   appStreamCreditBytes: 256 * 1024,
   appInteractiveReserveBytes: 1024 * 1024,
   appStreamsPerConnection: 32,
-  appRequestDeadlineMs: 15_000
+  appRequestDeadlineMs: 15_000,
+  helperRestartFirstMs: 500,
+  helperRestartMaxMs: 5 * 60_000,
+  helperUpResetMs: 60_000,
+  helperFastExits: 3,
+  helperShutdownGraceMs: 3_000,
+  helperLockWaitMs: 5_000,
+  helperInitDeadlineMs: 60_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -99,7 +120,14 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   appStreamCreditBytes: 'MOUSSE_NET_ENGINE_APP_STREAM_CREDIT_BYTES',
   appInteractiveReserveBytes: 'MOUSSE_NET_ENGINE_APP_INTERACTIVE_RESERVE_BYTES',
   appStreamsPerConnection: 'MOUSSE_NET_ENGINE_APP_STREAMS_PER_CONNECTION',
-  appRequestDeadlineMs: 'MOUSSE_NET_ENGINE_APP_REQUEST_DEADLINE_MS'
+  appRequestDeadlineMs: 'MOUSSE_NET_ENGINE_APP_REQUEST_DEADLINE_MS',
+  helperRestartFirstMs: 'MOUSSE_NET_ENGINE_HELPER_RESTART_FIRST_MS',
+  helperRestartMaxMs: 'MOUSSE_NET_ENGINE_HELPER_RESTART_MAX_MS',
+  helperUpResetMs: 'MOUSSE_NET_ENGINE_HELPER_UP_RESET_MS',
+  helperFastExits: 'MOUSSE_NET_ENGINE_HELPER_FAST_EXITS',
+  helperShutdownGraceMs: 'MOUSSE_NET_ENGINE_HELPER_SHUTDOWN_GRACE_MS',
+  helperLockWaitMs: 'MOUSSE_NET_ENGINE_HELPER_LOCK_WAIT_MS',
+  helperInitDeadlineMs: 'MOUSSE_NET_ENGINE_HELPER_INIT_DEADLINE_MS'
 })
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
@@ -136,6 +164,9 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
   if (limits.appStreamCreditBytes + limits.appInteractiveReserveBytes > limits.appCreditBudgetBytes)
     for (const key of ['appCreditBudgetBytes', 'appStreamCreditBytes', 'appInteractiveReserveBytes'] as const)
       keep(key, "does not leave a stream's credit beside the interactive reserve")
+  if (limits.helperRestartFirstMs > limits.helperRestartMaxMs)
+    for (const key of ['helperRestartFirstMs', 'helperRestartMaxMs'] as const)
+      keep(key, 'makes the first restart wait longer than the longest')
   return { limits, problems }
 }
 
@@ -171,7 +202,7 @@ export type EngineControl = (typeof ENGINE_CONTROLS)[number]
 const CONTROL_VARIABLE = 'MOUSSE_NET_ENGINE_CONTROL'
 
 /** Whether this code runs from an installed app (inside its `app.asar`). */
-function packagedBuild(): boolean {
+export function packagedBuild(): boolean {
   try {
     return /[\/]app\.asar(?:\.unpacked)?[\/]/iu.test(new URL(import.meta.url).pathname)
   } catch {

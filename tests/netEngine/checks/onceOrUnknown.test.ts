@@ -12,8 +12,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { PROJECT_SHELL_AGENT_ID } from '../../../src/shared/types'
-import type { Crossed } from '../fakeHelper'
-import { codeOf, eventually, pairProfiles, step, type Pair } from './harness'
+import { codeOf, eventually, pairProfiles, step, type Crossed, type Pair } from './harness'
 
 describe('phase1a.once-or-unknown', () => {
   let pair: Pair
@@ -26,7 +25,7 @@ describe('phase1a.once-or-unknown', () => {
     const created = await pair.dispatch('threads.create', { node, name: 'Once', projectId: (project.project ?? project).id })
     threadId = (created.thread ?? created).id
   }, 120_000)
-  afterAll(() => pair?.close())
+  afterAll(() => pair?.close(), 60_000)
 
   /**
    * Drops the owner's answer to the next `method` call and kills the caller's helper as it does. Resolves once
@@ -34,10 +33,10 @@ describe('phase1a.once-or-unknown', () => {
    */
   function dropNextAnswer(method: string): Promise<void> {
     return new Promise<void>((resolve) => {
-      pair.fabric.network.tap = (row: Crossed) => {
+      pair.fabric.decide = (row: Crossed) => {
         if (row.from !== pair.ownerComputer.endpoint || row.method !== method || row.header.t !== 'result') return
-        pair.fabric.network.tap = undefined
-        pair.callerComputer.helper.kill()
+        pair.fabric.decide = undefined
+        pair.callerComputer.kill()
         resolve()
         return 'drop'
       }
@@ -89,11 +88,11 @@ describe('phase1a.once-or-unknown', () => {
       const dropped = dropNextAnswer('routed.orchestrator.send')
       const call = pair.dispatch('orchestrator.send', { threadId, content: 'once please', requestId: 'once-1' })
       await dropped
-      const from = pair.fabric.network.crossed.length
+      const from = pair.fabric.crossed.length
       await helperBack()
       const outcome = await step(undefined, () => answered(call))
       // Its result was asked for by the same request id, before any repeat of the call.
-      const asked = pair.fabric.network.crossed
+      const asked = pair.fabric.crossed
         .slice(from)
         .filter((row) => row.from === pair.callerComputer.endpoint && row.label === 'mousse.rpc')
         .map((row) => (row.header.t === 'call' ? `call ${String(row.header.method)}` : String(row.header.t)))
@@ -119,12 +118,12 @@ describe('phase1a.once-or-unknown', () => {
     try {
       const call = pair.dispatch('orchestrator.send', { threadId, content: 'slow one', requestId: 'once-2' })
       await started
-      pair.callerComputer.helper.kill()
+      pair.callerComputer.kill()
       await helperBack()
       // The caller asks for the result again (result.get) while the owner's handler still runs.
       await eventually(() =>
         expect(
-          pair.fabric.network.crossed.some(
+          pair.fabric.crossed.some(
             (row) => row.from === pair.callerComputer.endpoint && row.header.t === 'result.get'
           )
         ).toBe(true)

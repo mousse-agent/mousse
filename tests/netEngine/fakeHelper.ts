@@ -268,6 +268,8 @@ export class FakeHelper {
   private nextRequest = 1
   /** Frames the app sent for a handle that was not open. */
   dropped = 0
+  /** It neither answers `shutdown` nor exits for it (a helper that hangs). */
+  ignoreShutdown = false
 
   constructor(
     private readonly network: FakeNetwork,
@@ -468,6 +470,10 @@ export class FakeHelper {
         }
         case 'config.set':
           return reply()
+        case 'shutdown':
+          if (this.ignoreShutdown) return
+          reply()
+          return void setImmediate(() => this.kill())
         case 'dial':
           if (this.paused) return reply({ error: 'paused', reason: this.paused })
           return reply({ conn: this.network.dial(this, String(message.identity)) })

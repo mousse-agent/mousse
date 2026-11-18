@@ -18,7 +18,7 @@ describe('phase1a.picker-v1-off', () => {
   beforeAll(async () => {
     pair = await pairProfiles()
   }, 120_000)
-  afterAll(() => pair?.close())
+  afterAll(() => pair?.close(), 60_000)
 
   /** The owner as the picker lists it, from `bridge.nodes`. */
   const listed = async () => {
