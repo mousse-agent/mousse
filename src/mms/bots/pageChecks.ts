@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync } from 'node:fs'
+import { lstatSync, readdirSync, rmdirSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { removePageChange } from './pageChangeFiles'
@@ -46,7 +46,12 @@ export class PageChecks {
       if (!lstatSync(root).isDirectory()) throw new Error('Invalid run root.')
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
     for (const entry of readdirSync(root, { withFileTypes:true })) {
-      if (entry.isDirectory() && /^act_[a-zA-Z0-9_-]+$/.test(entry.name) && !this.store.activation(entry.name)) removePageChange(root, entry.name)
+      if (entry.isDirectory() && /^act_[a-zA-Z0-9_-]+$/.test(entry.name) && !this.store.activation(entry.name)) {
+        removePageChange(root, entry.name)
+        try { rmdirSync(join(root, entry.name)) } catch (error) {
+          if (!['ENOENT','ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+        }
+      }
     }
   }
   recoverFlights(): void {
