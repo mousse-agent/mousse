@@ -3084,7 +3084,7 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
   expect(f.bots.actions.get(`${a.id}_running`)?.status).toBe(path === 'startup' ? 'uncertain' : 'running')
   expect(f.store.message(a.message_id)?.text).not.toContain('Mail · send')
   expect(t.calls).toEqual([])
-  expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('This could not wait for your owner after all, so nothing was sent. Do not make this call again in this work; say in your report what you would have sent.')
+  expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('Your owner changed a setting, so this request was withdrawn and nothing was sent. Do not make this call again in this work; say in your report what you would have sent.')
 })
 
 it.each(['expiry', 'nudges', 'nudge holds'] as const)('C9 failed action %s backs off without starving another bot', async step => {
@@ -3152,7 +3152,7 @@ it.each([
   ['stop', 'bot_action_work_ended', 'This work ended. Nothing was sent.'],
   ['pause', 'bot_action_owner_paused', 'This bot was paused, so nothing was sent.'],
   ['permission', 'bot_action_permission_changed', 'This tool or its permission changed, so nothing was sent.'],
-  ['switch', 'bot_action_disabled', 'This could not wait for your owner after all, so nothing was sent.'],
+  ['switch', 'bot_action_disabled', 'Withdrawn when asks first was turned off. Nothing was sent.'],
   ['forget', 'bot_action_owner_removed', 'You removed this request, so nothing was sent.'],
   ['binding', 'bot_action_binding_changed', 'This changed since you saw it. Nothing was sent.']
 ] as const)('C9 %s withdrawal tells each audience its real cause', async (path, code, ownerText) => {
@@ -3176,7 +3176,8 @@ it.each([
   const text = actionContinuation(settled)
   expect(text).not.toContain('No longer needed')
   expect(text).not.toContain('[forgotten]')
-  if (path !== 'forget') expect(text).toContain(ownerText)
+  if (path === 'switch') expect(text).toContain('Your owner changed a setting, so this request was withdrawn and nothing was sent.')
+  else if (path !== 'forget') expect(text).toContain(ownerText)
   else expect(text).toContain('Your owner removed this request')
   expect(() => f.bots.actions.check({ actionId: a.id, digest: a.args_digest, answer: 'send' })).toThrow(expect.objectContaining({ code, message: ownerText }))
   expect(t.calls).toEqual([])
