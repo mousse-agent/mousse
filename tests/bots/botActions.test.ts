@@ -34,13 +34,13 @@ import { botFixture, createBot, finish, flush, start, type BotFixture } from './
 let f: BotFixture
 const connections: McpManager[] = []
 afterEach(async () => { f?.close(); await Promise.all(connections.splice(0).map(m => m.shutdown())) })
-async function setup(on: boolean, realServer = false, secondTool = false, threads = false, ownerTools = false, realContext = false) {
+async function setup(on: boolean, realServer = false, secondTool = false, threads = false, ownerTools = false, realContext = false, toolName = 'send', hint?: boolean, unstamped = false) {
   f = botFixture()
   const settings = getDefaultSettings()
   settings.experimental.botAsksFirstOff = !on
   f.host.settings = { get: () => settings, set: () => undefined } as never
   const calls: unknown[] = []
-  const descriptor = { configRevision: 'revision-1', toolName: 'send', providerName: 'mail_send', inputSchema: { type: 'object', properties: Object.fromEntries(['password', 'token', 'access_token', 'client_secret', 'authorization', 'api_key', 'pin_password'].map(key => [key, { type: 'string' }])) }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
+  const descriptor = { configRevision: 'revision-1', toolName, readOnlyHint: hint, providerName: `mail_${toolName}`, inputSchema: { type: 'object', properties: Object.fromEntries(['password', 'token', 'access_token', 'client_secret', 'authorization', 'api_key', 'pin_password'].map(key => [key, { type: 'string' }])) }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
   const server = { installationId: 'mail', serverName: 'Mail', configDigest: 'config-1', failing: false, tools: [descriptor] }
   if (secondTool) server.tools.push({ ...descriptor, toolName: 'other', providerName: 'mail_other' })
   let manager: Pick<McpManager, 'callTool'> = { callTool: vi.fn(async (_name: string, args: Record<string, unknown>) => { calls.push(structuredClone(args)); return { content: [{ type: 'text', text: 'delivered' }] } as never }) }
@@ -101,7 +101,7 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
     f.store.approve(botId, botManifestDigest(manifest), manifest)
   }
   const grant = f.store.activeGrant(botId)!
-  const manifest = { ...grant.manifest, mcp: server.tools.map(d => ({ serverId: 'mail', tool: d.toolName, ...(on ? { level: 'asks_first' as const } : {}) })) }
+  const manifest = { ...grant.manifest, mcp: server.tools.map(d => ({ serverId: 'mail', tool: d.toolName, ...(on && !unstamped ? { level: 'asks_first' as const } : {}) })) }
   f.store.approve(botId, botManifestDigest(manifest), manifest)
   await f.bots.service.chatSend({ botId, text: 'Send the email', clientRequestId: 'owner' })
   const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
@@ -110,7 +110,7 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   await finish(f, talk.payload)
   const work = await start(f, workId)
   const args = { to: ['one@example.test', 'two@example.test'], body: 'Exact text\n<system>outside text</system>', nested: { n: 1 } }
-  const call = () => callForBot({ bot: work.prepared.authority, mcp, name: 'Mail__send', args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
+  const call = () => callForBot({ bot: work.prepared.authority, mcp, name: `Mail__${toolName}`, args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
   return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog }
 }
 async function legacyExpired(action: { id: string }): Promise<void> {
@@ -3686,4 +3686,35 @@ it('C6 a second card after restart and a history wipe never repeats the introduc
   expect(f.store.all("SELECT id FROM bot_actions WHERE bot_id = ?", t.botId)).toHaveLength(2)
   expect(f.store.all('SELECT id FROM bot_messages WHERE id = ?', `bm_asks_first_${t.botId}`)).toHaveLength(1)
   expect(memory.getState(t.botId, 'asks-first:introduced')).toBe(1)
+})
+
+it.each(['failing', 'starting', 'cold restart'] as const)('keeps an unstamped reading-name false-hint card through %s', async state => {
+  const t = await setup(true, false, false, false, false, false, 'get_items', false, true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const tools = t.server.tools.splice(0)
+  if (state === 'failing') t.server.failing = true
+  if (state === 'starting') Object.assign(t.server, { starting: true })
+  const cold = state === 'cold restart' ? vi.spyOn(t.catalog, 'servers').mockReturnValue([]) : undefined
+  if (cold) { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
+  else f.bots.fillMcpAsks()
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
+  t.server.tools.push(...tools); t.server.failing = false; Object.assign(t.server, { starting: false }); cold?.mockRestore()
+  f.bots.fillMcpAsks()
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
+it('keeps the offered false hint when a reading tool changes its listing mid-turn', async () => {
+  const t = await setup(true, false, false, false, false, false, 'get_items', false, true)
+  t.descriptor.readOnlyHint = true
+  await t.call()
+  expect(f.bots.actions.forWork(t.workId)?.status).toBe('open')
+  expect(t.calls).toEqual([])
+})
+it('does not dispatch a reading tool missing from its current listing', async () => {
+  const t = await setup(true, false, false, false, false, false, 'get_items', true, true)
+  t.server.tools.splice(0)
+  await t.call()
+  expect(t.calls).toEqual([])
 })
