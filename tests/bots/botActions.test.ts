@@ -3290,3 +3290,29 @@ it('C9 an unread expiry from the earlier build uses the owner-writing rule too',
   expect(text.split('This expired, so nothing was sent.')).toHaveLength(2)
   expect(text).toContain('unless your owner writes')
 })
+
+it('C9 rollback on restart waits for catch-up and activation reconciliation', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  f.host.settings!.get().experimental.botAsksFirst = false
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  let dispatchesAtCatchUp = -1
+  let reconciled = false
+  let reconciledBeforeActions = false
+  const catchUp = f.host.journal!.catchUp.bind(f.host.journal)
+  vi.spyOn(f.host.journal!, 'catchUp').mockImplementation(async () => {
+    await flush()
+    dispatchesAtCatchUp = f.store.dispatches(t.workId).length
+    return catchUp()
+  })
+  const reconcile = (f.bots as any).reconcileAll.bind(f.bots)
+  vi.spyOn(f.bots as any, 'reconcileAll').mockImplementation(async () => { await reconcile(); reconciled = true })
+  const actions = f.bots.actions.reconcile.bind(f.bots.actions)
+  vi.spyOn(f.bots.actions, 'reconcile').mockImplementation(async () => { reconciledBeforeActions = reconciled; await actions() })
+  await f.bots.reconcileOnStartup(); await flush()
+  expect(dispatchesAtCatchUp).toBe(1)
+  expect(reconciledBeforeActions).toBe(true)
+  expect(f.store.lastMainDispatch(t.workId)!.n).toBe(2)
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(t.calls).toEqual([])
+})
