@@ -670,6 +670,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
     publish: id => {
+      this.scheduledCallChecks.clear()
       // State changes are new Mousse facts for resumed chat epochs, not another chat turn or the bot's words.
       const action = this.store.get('SELECT bot_id, activation_id, status, args_digest FROM bot_actions WHERE message_id = ?', id)
       if (action && action.args_digest !== '[forgotten]' && ['done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn'].includes(String(action.status))) this.store.db.transaction(() => this.host.journal?.appendInTx(this.store.db, {
@@ -925,16 +926,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
-  /** An unchanged schedule that previously tried a call still needs it after Not now. */
+  // Bounded per-run memo; action publications invalidate it, including a matching Send.
+  private readonly scheduledCallChecks = new Map<string, { revision: string; value: boolean }>()
+
+  /** An unchanged schedule's first run after a decline, unless that exact call was sent. */
   private scheduledCallNotSent(row: BotActivationRow): boolean {
     if (!botAsksFirst(this.host.settings?.get()) || row.trigger.kind !== 'schedule') return false
     const scheduleId = row.trigger.scheduleId
     const revision = this.host.schedules?.get(row.botId, scheduleId)?.revision
     if (!revision) return false
-    const ordinal = this.store.get('SELECT rowid AS n FROM bot_activations WHERE id = ?', row.id)?.n
-    const previous = this.store.all('SELECT id FROM bot_activations WHERE bot_id = ? AND rowid < ? ORDER BY rowid DESC', row.botId, Number(ordinal)).map(r => this.store.activation(String(r.id))).find(r => r?.trigger.kind === 'schedule' && r.trigger.scheduleId === scheduleId)
+    const cached = this.scheduledCallChecks.get(row.id)
+    if (cached?.revision === revision) return cached.value
+    const value = this.readScheduledCallNotSent(row, scheduleId, revision)
+    if (this.scheduledCallChecks.size >= 256) this.scheduledCallChecks.delete(this.scheduledCallChecks.keys().next().value!)
+    this.scheduledCallChecks.set(row.id, { revision, value })
+    return value
+  }
+
+  private readScheduledCallNotSent(row: BotActivationRow, scheduleId: string, revision: string): boolean {
+    // bot_actions_bot narrows this to the bot's declined actions, before any history lookup.
+    if (!this.store.get("SELECT a.id FROM bot_actions a INDEXED BY bot_actions_bot JOIN bot_activations w ON w.id = a.activation_id WHERE a.bot_id = ? AND a.status = 'declined' AND json_extract(w.trigger_json, '$.kind') = 'schedule' AND json_extract(w.trigger_json, '$.scheduleId') = ? AND json_extract(a.binding_json, '$.scheduleRevision') = ? LIMIT 1", row.botId, scheduleId, revision)) return false
+    const previous = this.store.get("SELECT id FROM bot_activations WHERE bot_id = ? AND rowid < (SELECT rowid FROM bot_activations WHERE id = ?) AND json_extract(trigger_json, '$.kind') = 'schedule' AND json_extract(trigger_json, '$.scheduleId') = ? ORDER BY rowid DESC LIMIT 1", row.botId, row.id, scheduleId)
     if (!previous) return false
-    return this.store.all("SELECT rowid AS n, target_json, args_digest, binding_json FROM bot_actions WHERE activation_id = ? AND status = 'declined' AND args_digest != '[forgotten]'", previous.id).some(action => {
+    return this.store.all("SELECT rowid AS n, target_json, args_digest, binding_json FROM bot_actions WHERE activation_id = ? AND status = 'declined' AND args_digest != '[forgotten]'", String(previous.id)).some(action => {
       if (JSON.parse(String(action.binding_json)).scheduleRevision !== revision) return false
       return !this.store.get("SELECT id FROM bot_actions WHERE bot_id = ? AND rowid > ? AND target_json = ? AND args_digest = ? AND status IN ('done', 'failed', 'uncertain') LIMIT 1", row.botId, Number(action.n), String(action.target_json), String(action.args_digest))
     })
