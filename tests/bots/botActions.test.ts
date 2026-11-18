@@ -3571,3 +3571,55 @@ it.each(['stop', 'not_now', 'send', 'withdraw', 'forget', 'clear'] as const)('C1
   }
   expect(f.bots.actions.get(a.id)?.exec_args).toBeNull()
 })
+
+// C6: existing grants have no stored level. Classification must never rewrite them.
+it.each(['work', 'schedule'] as const)('C6 classifies an existing %s grant at call time without rewriting it', async kind => {
+  const t = kind === 'work' ? await setup(true) : await scheduledCall()
+  const grant = f.store.activeGrant(t.botId)!
+  const manifest = { ...grant.manifest, mcp: grant.manifest.mcp.map(({ level: _level, ...pair }) => pair) }
+  f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+  const before = structuredClone(f.store.activeGrant(t.botId))
+  await t.call()
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.forWork('id' in t ? t.id : t.workId)?.status).toBe('open')
+  expect(f.store.activeGrant(t.botId)).toEqual(before)
+  expect(botManifestDigest(f.store.activeGrant(t.botId)!.manifest)).toBe(before!.manifestDigest)
+})
+it('C6 a hint changing to read-only invalidates an existing card', async () => {
+  const t = await setup(true)
+  const grant = f.store.activeGrant(t.botId)!
+  f.store.approve(t.botId, botManifestDigest({ ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] }), { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  Object.assign(t.descriptor, { readOnlyHint: true })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('This changed since you saw it')
+  expect(t.calls).toEqual([])
+})
+it('C6 introduces asks first once before the first card, surviving restart', async () => {
+  const t = await setup(true)
+  await t.call()
+  const messages = () => f.store.all('SELECT text FROM bot_messages WHERE bot_id = ? ORDER BY seq', t.botId).map(m => String(m.text))
+  const introduction = `From now on ${f.bots.definitionOf(t.botId).name} asks you before it sends or changes anything with your tools. Tools that only read don't ask.`
+  expect(messages().filter(text => text === introduction)).toHaveLength(1)
+  expect(messages().indexOf(introduction)).toBeLessThan(messages().findIndex(text => text.startsWith('Mail · send')))
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  await t.call()
+  expect(messages().filter(text => text === introduction)).toHaveLength(1)
+})
+it('C6 About classifies unstamped grants and respects current hints', async () => {
+  const t = await setup(true)
+  const grant = f.store.activeGrant(t.botId)!
+  const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] }
+  const about = () => f.bots.chat.permissionItems(t.botId, manifest, grant.approvedAt).find(p => p.id.startsWith('mcp'))
+  expect(about()?.mark).toBe('Asks first')
+  Object.assign(t.descriptor, { readOnlyHint: true })
+  expect(about()?.mark).toBeUndefined()
+})
+it.each(['withdrawn', 'expired'] as const)('C6 a %s schedule card never claims the owner answered', async status => {
+  const t = await scheduledCall()
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  f.bots.actions.transition(a.id, 'open', status, { text: 'Nothing was sent.' })
+  expect(f.bots.service.automationFacts(t.botId, t.schedule.scheduleId)?.runs[0]?.endReason).toBe(`approval_${status}`)
+})
