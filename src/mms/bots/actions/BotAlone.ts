@@ -22,6 +22,7 @@ interface Host {
   binding(botId: string, server: string, tool: string): unknown | undefined
   schema(server: string, tool: string): unknown
 }
+const pendingKey = (activationId: string, request: AloneRequest): string => `alone-ask:${activationId}:${actionDigest(request)}`
 export const aloneKey = (r: Pick<AloneRequest, 'scheduleId' | 'serverId' | 'tool'>): string => `alone:${r.scheduleId}:${r.serverId}:${r.tool}`
 /** Computer-local authority. Pending consent freezes the facts the owner actually saw. */
 export class BotAlone {
@@ -39,6 +40,7 @@ export class BotAlone {
   }
   prepare(botId: string, activationId: string, request: AloneRequest): string | undefined {
     if (!this.host.enabled()) return 'Asks first is off'
+    if (this.read(botId, pendingKey(activationId, request))) return undefined
     const schedule = this.host.schedule(botId, request.scheduleId)
     const binding = this.host.binding(botId, request.serverId, request.tool)
     if (!schedule || !binding) return 'This automation or tool changed. Let it ask once first.'
@@ -51,18 +53,18 @@ export class BotAlone {
     const place = JSON.parse(String(previous.place_json)) as Record<string, unknown>
     const result = JSON.parse(String(previous.result_json ?? '{}')).text ?? ''
     const values = Object.values(maskedActionData(place) as object).map(v => placeLabel(v, result)).join(', ')
-    this.put(botId, `alone-ask:${activationId}`, { ...request, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest(schedule.prompt), grantedAt: this.host.store.now(), title: `‘${schedule.name}’ · ${readableActionTitle(request.tool)} · ${values} without asking` })
+    this.put(botId, pendingKey(activationId, request), { ...request, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest(schedule.prompt), grantedAt: this.host.store.now(), title: `‘${schedule.name}’ · ${readableActionTitle(request.tool)} · ${values} without asking` })
   }
-  pending(botId: string, activationId: string): { title: string; details: { summary: string; items: string[] } } | undefined {
-    const entry = this.read(botId, `alone-ask:${activationId}`)
+  pending(botId: string, activationId: string, request: AloneRequest): { title: string; details: { summary: string; items: string[] } } | undefined {
+    const entry = this.read(botId, pendingKey(activationId, request))
     if (!entry) return undefined
     return { title: `Let ${entry.title}?`, details: { summary: 'Only in this place', items: Object.entries(maskedActionData(entry.place) as object).map(([k,v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`) } }
   }
-  answer(botId: string, activationId: string, allow: boolean): void {
-    const entry = this.read(botId, `alone-ask:${activationId}`)
+  answer(botId: string, activationId: string, allow: boolean, request: AloneRequest): void {
+    const entry = this.read(botId, pendingKey(activationId, request))
     if (allow && (!entry || !this.holds(botId, entry))) throw new Error('This automation or tool changed. Ask again before allowing it.')
     if (allow && entry) this.put(botId, aloneKey(entry), { ...entry, grantedAt: this.host.store.now() })
-    this.host.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `alone-ask:${activationId}`)
+    this.host.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, pendingKey(activationId, request))
   }
   match(botId: string, scheduleId: string, serverId: string, tool: string, place: Record<string, unknown> | undefined): string | undefined {
     const key = aloneKey({ scheduleId, serverId, tool })

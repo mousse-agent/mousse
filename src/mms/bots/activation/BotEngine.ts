@@ -881,7 +881,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.chat = new BotChatProjection({
       asksFirst: () => botAsksFirst(this.host.settings?.get()),
       aloneItems: botId => this.alone.items(botId),
-      aloneAsk: (botId, activationId) => this.alone.pending(botId, activationId),
+      aloneAsk: (botId, activationId, request) => this.alone.pending(botId, activationId, request),
       store: host.store,
       ...(host.journal ? { journal: host.journal } : {}),
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
@@ -4620,7 +4620,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
   private askCardText(row: BotActivationRow, permission: BotAskRequest, callNote?: string): { title: string; note: string } {
     if ('ask' in permission && permission.ask === 'let_alone') {
-      const pending = this.alone.pending(row.botId, row.id)
+      const pending = this.alone.pending(row.botId, row.id, permission)
       if (pending) return { title: pending.title, note: 'Only this automation, this tool and this place. Anything else asks you first.' }
     }
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
@@ -4845,7 +4845,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, status, amount)) return false
       if (!special && (input.answer === 'allow_once' || input.answer === 'allow_more')) this.store.putOverlay(row.id, escalation.id, escalation.permission, amount)
-      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone') this.alone.answer(row.botId, row.id, status !== 'denied')
+      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone') this.alone.answer(row.botId, row.id, status !== 'denied', escalation.permission)
       this.journalAnswer(escalation, status === 'denied' ? 'not_now' : 'allow')
       // Work that waits on the same limit is settled with the answer: an overlay for this activation gives it no room.
       if (limit) settled = this.settleRoomInTx(row.botId, limit, status !== 'denied', waiting!)
@@ -4898,7 +4898,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     let settled: RoomSettled | undefined
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, answer === 'allow' ? 'allowed_bot' : 'denied', amount, cooldown)) return false
-      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone') this.alone.answer(botId, escalation.activationId, answer === 'allow')
+      if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone') this.alone.answer(botId, escalation.activationId, answer === 'allow', escalation.permission)
       this.journalAnswer(escalation, answer)
       // Work that waits for room goes on with the wider grant, or ends with what it posted, with the answer.
       if (limit) settled = this.settleRoomInTx(botId, limit, answer === 'allow', waiting!)

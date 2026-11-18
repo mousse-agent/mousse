@@ -1,3 +1,4 @@
+import type { AloneRequest } from '../actions/BotAlone'
 import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
 import { readableActionTitle, type ActionRow } from '../actions/BotActions'
 import type { BotActionCard } from '../../../shared/bots/personal/chat'
@@ -227,7 +228,7 @@ export class BotChatProjection {
     store: BotStore
     asksFirst?(): boolean
     aloneItems?(botId: string): BotPermissionItem[]
-    aloneAsk?(botId: string, activationId: string): { title: string; details: { summary: string; items: string[] } } | undefined
+    aloneAsk?(botId: string, activationId: string, request: AloneRequest): { title: string; details: { summary: string; items: string[] } } | undefined
     journal?: BotJournal
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
@@ -511,7 +512,7 @@ export class BotChatProjection {
       kind: isSpecialAsk(escalation.permission) && escalation.permission.ask === 'export_memory' ? 'export_memory' : 'permission',
       ...(tools.length ? { details: { summary: `${tools.length} ${mcp?.added ? 'new ' : ''}tool${tools.length === 1 ? '' : 's'}`, items: tools, ...(more ? { more } : {}) } } : {}),
       ...(mcp && !tools.length && escalation.status === 'open' ? { loading: true as const } : {}),
-      ...('ask' in escalation.permission && escalation.permission.ask === 'let_alone' ? this.options.aloneAsk?.(escalation.botId, escalation.activationId) : {}),
+      ...('ask' in escalation.permission && escalation.permission.ask === 'let_alone' ? this.options.aloneAsk?.(escalation.botId, escalation.activationId, escalation.permission) : {}),
       ...this.limitOutcome(escalation),
       ...this.permissionOutcome(escalation)
     }
