@@ -115,3 +115,5 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Contract version:** the version of a protocol, saved format or schema that other builds rely on, such as the daemon protocol or the Run Engine database. Bumped only on incompatible changes; listed in `src/mms/contractVersions.ts`.
 - **Primary checkout:** the first entry in `git worktree list`, normally the copy the user runs and reads.
 
+
+- **Let alone:** permission for one bot automation to use one tool in one exact place without a card, while its bindings hold and its hourly and daily call limits have room. Other calls still ask.
