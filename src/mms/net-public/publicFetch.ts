@@ -83,9 +83,24 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
 /** Only controlled clauses reach the owner; transport diagnostics stay out of chat. */
 export function pageFailureReason(error: unknown): string {
   const message = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
-  if (['the response was interrupted', 'it could not be reached', "its certificate isn't valid", 'it took more than 15 seconds', 'it exceeds 2 MiB', 'it must resolve only to public addresses', 'it returned an invalid redirect'].includes(message) || /^it returned HTTP \d+$/.test(message)) return message
-  const code = typeof error === 'object' && error ? String((error as NodeJS.ErrnoException).code ?? '') : ''
-  if (/CERT|TLS|SSL|certificate|self.signed/i.test(code + ' ' + message)) return "its certificate isn't valid"
+  if (typeof error === 'string' && (['the response was interrupted', 'it could not be reached', "its certificate isn't valid", 'it took more than 15 seconds', 'it exceeds 2 MiB', 'it must resolve only to public addresses', 'it returned an invalid redirect'].includes(message) || /^it returned HTTP \d+$/.test(message))) return message
+  const certificateCodes = new Set([
+    'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_DECRYPT_CERT_SIGNATURE',
+    'UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY', 'ERROR_IN_CERT_NOT_BEFORE_FIELD',
+    'ERROR_IN_CERT_NOT_AFTER_FIELD', 'INVALID_CA', 'INVALID_PURPOSE',
+    'PATH_LENGTH_EXCEEDED', 'HOSTNAME_MISMATCH'
+  ])
+  // The pinned-connection wrapper keeps the original Node error as its cause.
+  const seen = new Set<object>()
+  let cause: unknown = error
+  while (cause && typeof cause === 'object' && !seen.has(cause)) {
+    seen.add(cause)
+    const { code, cause: next } = cause as { code?: unknown; cause?: unknown }
+    if (typeof code === 'string' && (/^(?:CERT_|ERR_TLS_CERT_)/.test(code) || certificateCodes.has(code))) return "its certificate isn't valid"
+    cause = next
+  }
   if (message === 'The page response was interrupted.') return 'the response was interrupted'
   const status = /^The page returned HTTP (\d+)\.$/.exec(message)
   if (status) return `it returned HTTP ${status[1]}`
