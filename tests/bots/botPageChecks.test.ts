@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync } from 'n
 import { join } from 'node:path'
 import { writePageChange } from '../../src/mms/bots/pageChangeFiles'
 import * as fetcher from '../../src/mms/net-public/publicFetch'
-import { botFixture, createBot, T0, flush, type BotFixture } from './botFixture'
+import { botFixture, createBot, T0, flush, runDispatch, type BotFixture } from './botFixture'
 let f: BotFixture, botId: string
 let body = 'old page'
 beforeEach(async () => {
@@ -139,12 +139,12 @@ it('six unchanged checks leave no page files and no inbox rows',async()=>{
   expect(files.filter(p=>String(p).endsWith('.txt'))).toEqual([])
   expect(f.automationRuns.list().runs).toEqual([])
 })
-it('change files belong to the run, disappear on run end, and are removed from Automations',async()=>{
+it('change files belong to the run and are removed from Automations',async()=>{
   const entry=await add(); await check(5); body='new page'; await check(10)
   const row=runs()[0]!
   const file=join(f.store.directory,'scratch',row.id,'page-change.txt')
   expect(readFileSync(file,'utf8')).toBe('new page')
-  f.scheduler.removeJob(entry.jobId)
+  f.scheduler.deleteJob(entry.jobId)
   expect(existsSync(file)).toBe(false)
   expect(state(entry.scheduleId)).toBeUndefined()
 })
@@ -159,4 +159,12 @@ it('a symlink in the run directory cannot redirect the page write',()=>{
   symlinkSync(target,join(root,'leaf','page-change.txt'))
   expect(()=>writePageChange(root,'leaf','hostile')).toThrow()
   expect(existsSync(target)).toBe(false)
+})
+
+it('deletes the change file when its run ends',async()=>{
+  await add(); await check(5); body='changed'; await check(10)
+  const row=runs()[0]!, file=join(f.store.directory,'scratch',row.id,'page-change.txt')
+  expect(existsSync(file)).toBe(true)
+  await runDispatch(f,row.id)
+  expect(existsSync(file)).toBe(false)
 })
