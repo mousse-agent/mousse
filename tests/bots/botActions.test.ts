@@ -4030,6 +4030,7 @@ async function aloneAsk(answer: 'allow' | 'not_now' = 'allow') {
   const ask = f.store.openAsks(t.botId).find(a => 'ask' in a.permission && a.permission.ask === 'let_alone')!
   expect(ask).toBeDefined()
   const card = f.bots.chat.card(ask)
+  expect(card.title).toContain('Mail')
   expect(card).toMatchObject({ kind: 'permission', details: { items: [expect.stringContaining('one@example.test')] } })
   expect(f.bots.service.askKind(t.botId, ask.id)).toBe('export_memory')
   await f.bots.service.answer(t.botId, ask.id, answer)
