@@ -6,7 +6,7 @@ it.each([
   ['send_email', undefined, true], ['update_list', undefined, true], ['listing_update', undefined, true],
   ['getaway', undefined, true], ['github_list_issues', undefined, false], ['github-list-issues', undefined, false],
   ['github.list.issues', undefined, false], ['githubListIssues', undefined, false], ['listIssues', undefined, false],
-  ['search_and_delete', false, true], ['send_email', true, false], ['fetch_and_archive', undefined, false]
+  ['search_and_delete', false, true], ['send_email', true, false], ['fetch_and_archive', undefined, true]
 ])('%s with hint %s asks: %s', (tool, readOnlyHint, expected) => {
   expect(asksFirstFor({ tool, serverName: 'GitHub', readOnlyHint })).toBe(expected)
 })
