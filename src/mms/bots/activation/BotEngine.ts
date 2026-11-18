@@ -645,14 +645,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (this.store.reminder(row.trigger.from)?.botId === row.botId) return 'unattended'
       return undefined
     },
-    lifetime: row => {
-      if (row.trigger.kind !== 'schedule') return 48 * 3600_000
-      const schedule = this.host.schedules?.get(row.botId, row.trigger.scheduleId)
-      if (!schedule) return 3600_000
-      const at = new Date(row.trigger.occurrenceAt)
-      const next = computeNextRun(schedule.when, at.toISOString(), at)
-      return Math.max(3600_000, next ? Date.parse(next) - at.getTime() : 3600_000)
-    },
     name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
     publish: id => {
