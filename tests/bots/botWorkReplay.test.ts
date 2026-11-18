@@ -1,3 +1,4 @@
+import { MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
