@@ -383,7 +383,7 @@ export interface RunSettings {
   resumeAfterUsageLimit: boolean
   usageLimitPauseCap: number
   newThreadWorktree: boolean
-  /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
+  /** When a new private thread archives itself (`Thread.expiresAt`); `never`: it does not. Each new chat can change it. */
   privateThreadExpiry: ExpiryPreset | 'never'
   /** How many turns Mousse starts for a thread's goal (`/goal`) before it stops; Continue allows as many again. */
   goalTurnLimit: number

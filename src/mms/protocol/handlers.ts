@@ -2368,9 +2368,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A computer asked by another of the user's computers reads the transcripts of its newest threads only,
       // so a search typed on one computer is bounded work on the others.
       const hidden = connectionIsLocal(ctx.connection) ? undefined : localOnlyThreadIds(ctx.mms.threads.listAllThreads())
-      // A personal bot's threads are its chat, never a thread result (`Thread.botOwned`).
+      // A personal bot's threads are its chat, never a thread result (`Thread.botOwned`). Archived threads are found too.
       const results = await ctx.mms.threads.searchThreadsAsync(query, limit, {
         hideSubagents: true,
+        includeSettled: true,
         allow: (thread: Thread) => !thread.botOwned && !hidden?.has(thread.id),
         ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {})
       })
@@ -2593,7 +2594,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.setExpiry': {
-      // When the thread deletes itself for good (`Thread.expiresAt`), or null to keep it. A subagent follows its root.
+      // When the thread archives itself (`Thread.expiresAt`), or null for never. A subagent follows its root.
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'expiresAt', 'stopsRun'])
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -2603,8 +2604,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const expiresAt = p.expiresAt === null ? null : asString(p.expiresAt, 'expiresAt', 64)
       const problem = expiresAt === null ? undefined : expiryRefusal(expiresAt)
       if (problem) throw new DomainRpcError('invalid_params', problem)
-      // An expired thread is already being deleted; it can no longer be kept.
-      if (isThreadExpired(thread)) throw new DomainRpcError('thread_expired', 'This thread has expired and is being deleted.', { threadId })
+      // An expired thread is already being archived; its expiry can no longer change.
+      if (isThreadExpired(thread)) throw new DomainRpcError('thread_expired', 'This thread has expired and is being archived.', { threadId })
       const updated = ctx.mms.threads.updateThreadMeta(threadId, {
         expiresAt: expiresAt ?? undefined,
         expiryStopsRun: expiresAt !== null && asOptionalBoolean(p.stopsRun, 'stopsRun') === true ? true : undefined

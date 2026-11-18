@@ -141,6 +141,51 @@ describe('archiving moves the row with motion', () => {
     expect(rowsOf('a2').archived).toHaveLength(0)
   })
 
+  it('starts to move when Archive is clicked, before the service answers, and moves back when it fails', async () => {
+    let answer!: { resolve: () => void; reject: (error: Error) => void }
+    const settle = vi.fn(() => new Promise<void>((resolve, reject) => { answer = { resolve, reject } }))
+    ;(window as unknown as { mousse: { threads: { settle: unknown } } }).mousse.threads.settle = settle
+    await mount({ archivedOpen: true })
+    const archiveButton = () => host.querySelector<HTMLButtonElement>('[aria-label="Archive Thread a2"]')!
+
+    await act(async () => { archiveButton().click() })
+    expect(settle).toHaveBeenCalledWith('a2', true)
+    // Still unanswered: the old row is already closing and the new one opening under Archived.
+    expect(rowsOf('a2').listed[0]!.hasAttribute('inert')).toBe(true)
+    expect(wasAnimated(rowsOf('a2').listed[0])).toBe(true)
+    expect(rowsOf('a2').archived).toHaveLength(1)
+
+    await act(async () => { answer.reject(new Error('refused')) })
+    await afterTheMove()
+    expect(rowsOf('a2').archived).toHaveLength(0)
+    expect(rowsOf('a2').listed).toHaveLength(1)
+    expect(rowsOf('a2').listed[0]!.hasAttribute('inert')).toBe(false)
+
+    // Answered, the row stays archived while the thread's update arrives.
+    await act(async () => { archiveButton().click() })
+    await act(async () => { answer.resolve() })
+    await setSettled('a2', true)
+    await afterTheMove()
+    expect(rowsOf('a2').listed).toHaveLength(0)
+    expect(rowsOf('a2').archived).toHaveLength(1)
+  })
+
+  it('lists the most recently archived first, and a thread a bot keeps out of the sidebar once it is archived', async () => {
+    useAppStore.setState({
+      threads: [
+        thread('started-late', 50, { settledAt: at(51) }),
+        thread('started-early', 5, { settledAt: at(55) }),
+        thread('bot-archived', 20, { hidden: true, settledAt: at(53) }),
+        thread('bot-open', 21, { hidden: true }),
+        thread('a1', 1),
+      ],
+    })
+    await mount({ archivedOpen: true })
+    const archivedIds = [...archivedSection().querySelectorAll<HTMLElement>('[data-thread-id]')].map((row) => row.dataset.threadId)
+    expect(archivedIds).toEqual(['started-early', 'bot-archived', 'started-late'])
+    expect(rowsOf('bot-open').listed).toHaveLength(0)
+  })
+
   it('with reduced motion, the row moves at once and nothing animates', async () => {
     reduced = true
     await mount({ archivedOpen: true })

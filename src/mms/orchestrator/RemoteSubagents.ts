@@ -275,7 +275,7 @@ export class RemoteSubagents {
       const code = codeOf(error)
       // Not reached, or no answer that says what happened: tried again on a later pass.
       if (!(error instanceof DomainRpcError) || REMOTE_START_TRANSIENT.has(code)) return this.expiry.noteError(childThreadId, row.generation, messageOf(error))
-      // Gone there, or already expired and being deleted there: nothing is left to set. Any other refusal is that
+      // Gone there, or already expired and being archived there: nothing is left to set. Any other refusal is that
       // computer's answer for good (it does not let this one change its threads): kept as the reason, not asked again.
       this.expiry.markSent(childThreadId, row.generation, code === 'thread_not_found' || code === 'thread_expired' ? undefined : messageOf(error))
     }

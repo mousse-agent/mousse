@@ -1483,14 +1483,15 @@ export class MmsProfileServices {
       runInProgress: (threadId) => this.lifecycleOwnedTasks(threadId).some((task) => this.orchestrator.isTurnActive(task.taskId) || this.runEngine.getActiveRun(task.taskId) !== null),
       stop: async (threadId) => { await this.orchestrator.stopThread(threadId, 'expired', { clearQueue: true }) },
       quiesce: (threadId) => {
-        // What the expired threads launched on other computers is stopped there; nothing there is deleted.
+        // What the expired threads launched on other computers is stopped there; nothing there is archived or deleted.
         this.orchestrator.stopRemoteLaunches(this.lifecycleOwnedTasks(threadId).map((task) => task.taskId), 'expired')
         // A question waiting for an answer and an open terminal are not a run: they end at expiry.
         for (const task of this.lifecycleOwnedTasks(threadId)) {
-          this.questions.dismissAllForThread(task.taskId, 'thread_deleted')
+          this.questions.dismissAllForThread(task.taskId, 'stopped')
           this.ptyManager.killByThreadId(task.taskId)
         }
       },
+      archive: (threadId) => this.archiveExpiredThread(threadId),
       deleteForGood: (threadId) => this.deleteExpiredThread(threadId),
       onRunEnd: (listener) => {
         const handler = (event: ThreadEvent): void => {
@@ -1769,9 +1770,20 @@ export class MmsProfileServices {
   }
 
   /**
-   * Deletes a thread whose expiry passed, for good, with its subagent threads (`ThreadDeleter`, with the expiry's
-   * intent: no archive first, and the purge has the expiry's authority). A delete a crash or a refusal cut short is
-   * finished the same way, also by the next start.
+   * Archives a thread whose expiry passed, as the sidebar's Archive does (what it runs stops), then removes the expiry
+   * so it is not expired any more: it can be unarchived and used again. Archived first, so a crash in between archives
+   * it again on the next pass. Its subagents on other computers are told the expiry is gone, so they are kept there.
+   */
+  private async archiveExpiredThread(threadId: string): Promise<void> {
+    if (!this.threads.getThread(threadId)?.settledAt) await this.orchestrator.settleThread(threadId, true)
+    this.threads.updateThreadMeta(threadId, { expiresAt: undefined, expiryStopsRun: undefined }, { touch: false })
+    this.orchestrator.threadExpiryChanged(threadId)
+    this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
+  }
+
+  /**
+   * Finishes the delete of a thread an expiry started before expiry archived instead (it is in the trash or half
+   * purged), with its subagent threads (`ThreadDeleter`, with the expiry's intent and authority).
    */
   private async deleteExpiredThread(taskId: string): Promise<void> {
     const record = await this.deleteThreadForGood(taskId, { human: false, discard: false, expiry: true })

@@ -1,6 +1,6 @@
 /**
- * `ThreadExpiryService` (issue #672) with its daemon ports faked: when a thread is deleted, when it waits
- * for a run, when it stops one, and what it does after a refusal.
+ * `ThreadExpiryService` (issue #672) with its daemon ports faked: when a thread is archived (never deleted), when
+ * it waits for a run, when it stops one, and what it does after a failure.
  */
 import { describe, expect, it, vi } from 'vitest'
 import { ThreadExpiryService, type ThreadExpiryDeps } from '../src/mms/lifecycle/ThreadExpiryService'
@@ -10,12 +10,13 @@ const NOW = Date.parse('2026-11-06T12:00:00.000Z')
 const at = (offsetMs: number) => new Date(NOW + offsetMs).toISOString()
 const thread = (id: string, patch: Partial<Thread> = {}): Thread => ({ id, name: id, createdAt: at(-1000), updatedAt: at(-1000), order: 0, ...patch })
 
-function harness(threads: Thread[], options: { running?: Set<string>; failDelete?: (id: string) => Error | undefined; unfinished?: string[] } = {}) {
+function harness(threads: Thread[], options: { running?: Set<string>; failArchive?: (id: string) => Error | undefined; unfinished?: string[] } = {}) {
   let list = [...threads]
   const running = options.running ?? new Set<string>()
   const runEnd: Array<(threadId: string) => void> = []
   const timers: Array<{ run: () => void; ms: number }> = []
   const deleted: string[] = []
+  const archived: string[] = []
   const deps: ThreadExpiryDeps = {
     listThreads: () => list,
     // What a crash left half deleted, until this service deletes it.
@@ -23,9 +24,14 @@ function harness(threads: Thread[], options: { running?: Set<string>; failDelete
     runInProgress: (id) => running.has(id),
     stop: vi.fn(async (id: string) => { running.delete(id) }),
     quiesce: vi.fn(),
-    deleteForGood: vi.fn(async (id: string) => {
-      const failure = options.failDelete?.(id)
+    // As the daemon does: archived, and the expiry removed.
+    archive: vi.fn(async (id: string) => {
+      const failure = options.failArchive?.(id)
       if (failure) throw failure
+      archived.push(id)
+      list = list.map((entry) => (entry.id === id ? { ...entry, settledAt: at(0), expiresAt: undefined } : entry))
+    }),
+    deleteForGood: vi.fn(async (id: string) => {
       deleted.push(id)
       list = list.filter((entry) => entry.id !== id)
     }),
@@ -37,15 +43,16 @@ function harness(threads: Thread[], options: { running?: Set<string>; failDelete
     timers: { setTimeout: (run, ms) => { timers.push({ run, ms }); return timers.length }, clearTimeout: () => undefined }
   }
   const service = new ThreadExpiryService(deps)
-  return { service, deps, deleted, running, timers, endRun: (id: string) => { running.delete(id); runEnd.forEach((listener) => listener(id)) }, setList: (next: Thread[]) => { list = next } }
+  return { service, deps, deleted, archived, running, timers, endRun: (id: string) => { running.delete(id); runEnd.forEach((listener) => listener(id)) }, setList: (next: Thread[]) => { list = next } }
 }
 
 describe('thread expiry', () => {
-  it('deletes a thread whose expiry passed, and only that one, on the first pass', async () => {
+  it('archives a thread whose expiry passed, and only that one, on the first pass, and deletes nothing', async () => {
     const h = harness([thread('due', { expiresAt: at(-1) }), thread('later', { expiresAt: at(3_600_000) }), thread('never')])
     h.service.start()
     await h.service.pass()
-    expect(h.deleted).toEqual(['due'])
+    expect(h.archived).toEqual(['due'])
+    expect(h.deleted).toEqual([])
     expect(h.deps.quiesce).toHaveBeenCalledWith('due')
     // The timer waits for the next expiry.
     expect(h.timers.at(-1)!.ms).toBe(3_600_000)
@@ -64,15 +71,15 @@ describe('thread expiry', () => {
     const h = harness([thread('child', { expiresAt: at(-1), lineage: { parentThreadId: 'root', rootThreadId: 'root', relationship: 'subagent' } })])
     h.service.start()
     await h.service.pass()
-    expect(h.deleted).toEqual([])
+    expect(h.archived).toEqual([])
     await h.service.stop()
   })
 
-  it('waits for a run in progress to end, then deletes', async () => {
+  it('waits for a run in progress to end, then archives', async () => {
     const h = harness([thread('busy', { expiresAt: at(-1) })], { running: new Set(['busy']) })
     h.service.start()
     await h.service.pass()
-    expect(h.deleted).toEqual([])
+    expect(h.archived).toEqual([])
     expect(h.deps.stop).not.toHaveBeenCalled()
     // A question or approval the run waits on ends at once, so the run can end.
     expect(h.deps.quiesce).toHaveBeenCalledWith('busy')
@@ -80,7 +87,7 @@ describe('thread expiry', () => {
     expect(h.timers.at(-1)!.ms).toBe(60_000)
     h.endRun('busy')
     await h.service.pass()
-    expect(h.deleted).toEqual(['busy'])
+    expect(h.archived).toEqual(['busy'])
     await h.service.stop()
   })
 
@@ -89,20 +96,22 @@ describe('thread expiry', () => {
     h.service.start()
     await h.service.pass()
     expect(h.deps.stop).toHaveBeenCalledWith('busy')
-    expect(h.deleted).toEqual(['busy'])
+    expect(h.archived).toEqual(['busy'])
     await h.service.stop()
   })
 
-  it('tries a refused delete again, and finishes a delete a crash left in the trash', async () => {
+  it('tries a failed archive again, and finishes a delete an earlier expiry left in the trash', async () => {
     let refuse = true
-    const h = harness([thread('refused', { expiresAt: at(-1) })], { failDelete: (id) => (refuse && id === 'refused' ? new Error('busy') : undefined), unfinished: ['in-trash'] })
+    const h = harness([thread('refused', { expiresAt: at(-1) })], { failArchive: (id) => (refuse && id === 'refused' ? new Error('busy') : undefined), unfinished: ['in-trash'] })
     h.service.start()
     await h.service.pass()
     expect(h.deleted).toEqual(['in-trash'])
+    expect(h.archived).toEqual([])
     expect(h.timers.at(-1)!.ms).toBe(60_000)
     refuse = false
     await h.service.pass()
-    expect(h.deleted).toEqual(['in-trash', 'refused'])
+    expect(h.archived).toEqual(['refused'])
+    expect(h.deleted).toEqual(['in-trash'])
     await h.service.stop()
   })
 
@@ -115,7 +124,7 @@ describe('thread expiry', () => {
     await h.service.pass()
     h.endRun('busy')
     await h.service.pass()
-    expect(h.deleted).toEqual([])
+    expect(h.archived).toEqual([])
     await h.service.stop()
   })
 })

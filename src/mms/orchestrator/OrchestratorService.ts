@@ -6171,7 +6171,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
-    // A thread whose expiry passed is being deleted: nothing queued or recovered starts in it.
+    // A thread whose expiry passed is being archived: nothing queued or recovered starts in it.
     if (this.isExpired(effect.threadId)) {
       const { runId } = (effect.payload ?? {}) as { runId?: unknown }
       if (typeof runId === 'string') {
@@ -12547,7 +12547,7 @@ export class OrchestratorService extends EventEmitter {
     if (runsOn)
       throw new DomainRpcError('runs_on_other_computer', `This subagent runs on ${runsOn.computerName}. Open its thread there to write to it.`, { node: runsOn.node, ...(runsOn.ref ? { ref: runsOn.ref } : {}) })
     if (this.isExpired(threadId))
-      throw new DomainRpcError('thread_expired', 'This thread has expired and is being deleted.', { threadId })
+      throw new DomainRpcError('thread_expired', 'This thread has expired and is being archived.', { threadId })
 
     const session = this.getOrCreateSession(threadId)
     if (session.deleted) {
@@ -16012,7 +16012,7 @@ export class OrchestratorService extends EventEmitter {
       : this.boundSession
     this.assertNotBotThread(session.threadId)
     if (!session.failedConnectionRequest || session.isTurnRunning()) return false
-    // An expired thread is being deleted: Retry starts nothing in it.
+    // An expired thread is being archived: Retry starts nothing in it.
     if (session.threadId && this.isExpired(session.threadId)) return false
     const request = session.failedConnectionRequest
     // A request sent under a device's limit is retried under it, whoever presses Retry.
@@ -16971,7 +16971,7 @@ export class OrchestratorService extends EventEmitter {
       // A bot's thread is never written into from outside: only the bot's own dispatches run there (PR 6 §6).
       const botRefusal = this.botThreadRefusal(threadId)
       if (botRefusal) return { text: '', silent: false, error: botRefusal.message }
-      if (this.isExpired(threadId)) return { text: '', silent: false, error: 'This thread has expired and is being deleted.' }
+      if (this.isExpired(threadId)) return { text: '', silent: false, error: 'This thread has expired and is being archived.' }
 
       try {
         lease = await waitAcquireExecutionLease(threadStore.getThreadDir(threadId), {

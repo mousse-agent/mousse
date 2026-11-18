@@ -147,7 +147,7 @@ describe('new thread settings row', () => {
     const { onChange } = await renderSettled({ projectId: 'p1', worktreeEnabled: true, baseBranch: 'feat/x' })
     expect(workspaceButton()).toBeNull()
     expect(onChange).toHaveBeenCalledWith({ projectId: 'p1', worktreeEnabled: false, worktreePicked: true })
-    // The row keeps the computer on the left and Private / Delete after on the right, with nothing between.
+    // The row keeps the computer on the left and Private / Archive after on the right, with nothing between.
     expect(host.querySelector('.new-thread-row-start')!.children).toHaveLength(1)
   })
 

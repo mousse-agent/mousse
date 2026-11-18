@@ -38,7 +38,7 @@ export interface ThreadsContextMenuTarget {
   alsoOn?: readonly string[]
   /** A project's folder, on the computer that holds it. */
   path?: string
-  /** Threads only: when it deletes itself (`Thread.expiresAt`). */
+  /** Threads only: when it archives itself (`Thread.expiresAt`). */
   expiresAt?: string
   /** Threads only: its expiry can be set here (a thread of this computer that is not a subagent). */
   canExpire?: boolean
@@ -90,7 +90,7 @@ interface ThreadsContextMenuProps {
 const Separator = () => <div className="threads-context-menu-separator" role="separator" />
 
 /**
- * "Git ›", "Delete after ›" (threads not archived): rarely needed actions, one level down. Opens on hover, click, Enter, Space or the right
+ * "Git ›", "Archive after ›" (threads not archived): rarely needed actions, one level down. Opens on hover, click, Enter, Space or the right
  * arrow (focusing its first item); the left arrow or Escape closes it and returns to its item.
  */
 function Submenu({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
@@ -333,7 +333,7 @@ export function ThreadsContextMenu({
           </button>
         )}
         {target.type === 'thread' && !target.settled && target.canExpire && onSetExpiry && (
-          <Submenu icon={<Clock />} label="Delete after">
+          <Submenu icon={<Clock />} label="Archive after">
             {EXPIRY_PRESETS.map((preset) => (
               <button key={preset.id} type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(preset.ms)}>
                 <span>After {preset.label}</span>
@@ -341,7 +341,7 @@ export function ThreadsContextMenu({
             ))}
             {target.expiresAt && (
               <button type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(null)}>
-                <span>Keep it</span>
+                <span>Never</span>
               </button>
             )}
           </Submenu>

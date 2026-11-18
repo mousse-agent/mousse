@@ -11,6 +11,7 @@ import { orderedThreadIds, threadAfterArchive } from './threadOrder'
 import { afterNextPaint } from './pendingThreadRows'
 import { runWithToast } from './actionToast'
 import { showProjectInSidebar } from './sidebarReveal'
+import { markPendingArchive } from './archiveMotion'
 import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
 /**
@@ -200,18 +201,45 @@ export async function archiveOpenThread(): Promise<void> {
   await archiveThread(thread.id)
 }
 
+/** How long a confirmed archive is still shown from here when the thread's update has not arrived. */
+const ARCHIVE_UPDATE_WAIT_MS = 3000
+
+/**
+ * Archives (or unarchives) a thread through the service, and shows it so in the sidebar from the call on
+ * (`markPendingArchive`): its row starts to move at once. A failure throws, and the row moves back.
+ */
+export async function setThreadArchived(threadId: string, archived: boolean): Promise<void> {
+  const release = markPendingArchive(threadId, archived)
+  try {
+    await window.mousse.threads.settle(threadId, archived)
+  } catch (error) {
+    release()
+    throw error
+  }
+  // Shown from here until the thread's update arrives, so the row does not move back and forth meanwhile.
+  const arrived = () => Boolean(useAppStore.getState().threads.find((thread) => thread.id === threadId)?.settledAt) === archived
+  if (arrived()) return release()
+  const finish = () => {
+    clearTimeout(timer)
+    unsubscribe()
+    release()
+  }
+  const timer = setTimeout(finish, ARCHIVE_UPDATE_WAIT_MS)
+  const unsubscribe = useAppStore.subscribe(() => { if (arrived()) finish() })
+}
+
 /**
  * Archives a thread. When it is the thread open in the pane (or the parent of the open subagent thread), the pane then
  * opens the next thread in its project, or the one before it when it was the last; a project's only thread stays
- * open. A failed archive throws and changes nothing. The sidebar's rows move when the thread's update arrives, as for
- * an archive from anywhere else (`useArchiveMoves`).
+ * open. A failed archive throws and changes nothing. The sidebar's rows start to move at the call
+ * (`setThreadArchived`); an archive from anywhere else moves them when its update arrives (`useArchiveMoves`).
  */
 export async function archiveThread(threadId: string): Promise<void> {
   const { projects, threads, activeThreadId } = useAppStore.getState()
   const openRow = activeThreadId ? (openSubagentParentRow(activeThreadId, threads) ?? activeThreadId) : null
   const excluded = new Set(useChatsStore.getState().snapshot.chats.flatMap((chat) => (chat.threadId ? [chat.threadId] : [])))
   const next = openRow === threadId ? threadAfterArchive({ projects, threads, threadId, excluded }) : null
-  await window.mousse.threads.settle(threadId, true)
+  await setThreadArchived(threadId, true)
   // Only when the person has not moved on to another thread in the meantime.
   const now = useAppStore.getState().activeThreadId
   const stillOpen = now ? (openSubagentParentRow(now, useAppStore.getState().threads) ?? now) === threadId : false

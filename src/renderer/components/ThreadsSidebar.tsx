@@ -11,7 +11,7 @@ import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 import type { Project, Thread, ThreadActivitySnapshot, ThreadActivityState } from '../../shared/types'
 import { worktreeMark } from '../lib/worktreeMark'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
-import { arrangeThreadFeed, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
+import { arrangeThreadFeed, sortArchivedThreads, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
 import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention } from '../../shared/threadAttention'
 import { needsMeThreads } from '../lib/needsMe'
@@ -22,11 +22,11 @@ import { useAppStore } from '../stores/appStore'
 import { workspaceModeFor } from '../stores/sidebarTabAgreement'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
-import { addProjectAndStartThread, archiveThread, createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
+import { addProjectAndStartThread, archiveThread, setThreadArchived, createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
 import { draftedThreadIds, draftedThreadsKey, unsentChatTitle, withUnsentChats } from '../lib/sidebarDrafts'
 import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
 import { runWithToast } from '../lib/actionToast'
-import { isBotStarted, listsThread, readBotThreadsShown, writeBotThreadsShown, type BotThreadsShown } from '../lib/hiddenThreadsShown'
+import { isBotStarted, listsInSidebar, listsThread, readBotThreadsShown, writeBotThreadsShown, type BotThreadsShown } from '../lib/hiddenThreadsShown'
 import { Modal } from './ui/Modal'
 import { PillTabs, type PillTab } from './ui/PillTabs'
 import { ChatsSidebar } from './chats/ChatsSidebar'
@@ -34,7 +34,7 @@ import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
 import { ArchivedList } from './sidebar/ArchivedList'
 import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
-import { threadsForList, useArchiveMotionRows } from '../lib/archiveMotion'
+import { threadsForList, useArchiveMotionRows, usePendingArchives, withPendingArchives } from '../lib/archiveMotion'
 import { Collapse, COLLAPSE_LONG_LIST, motionAllowed } from './ui/Collapse'
 import { scaleMotionMs, useMotionScale, VIEW_SWAP_IN_MS } from '../lib/motion'
 
@@ -361,7 +361,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const tabsId = useId()
   const projects = useAppStore((s) => s.projects)
 
-  const listedInStore = useAppStore((s) => s.threads)
+  // An archive asked for here shows from the click on, before the service's update arrives (archiveMotion.ts).
+  const storeThreads = useAppStore((s) => s.threads)
+  const pendingArchives = usePendingArchives((s) => s.pending)
+  const listedInStore = useMemo(() => withPendingArchives(storeThreads, pendingArchives), [storeThreads, pendingArchives])
   const agentChats = useChatsStore((s) => s.snapshot.chats)
   const agentThreadIds = useMemo(() => new Set(agentChats.map((chat) => chat.threadId)), [agentChats])
 
@@ -495,12 +498,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // Subagent threads sit under their parent, not beside it: the list holds the threads people started. The threads the
   // owner's bots started follow the eye (a view preference of this profile; it never changes a thread's `hidden`): by
   // default those a bot keeps out of the sidebar (`Thread.hidden`) are listed in the bot's chat instead, and the eye
-  // then shows all of them or none.
+  // then shows all of them or none. An archived one is listed under Archived unless the eye hides every bot thread.
   const [botThreadsShown, setBotThreadsShown] = useState<BotThreadsShown | undefined>(() => readBotThreadsShown(shownProfileId))
   useEffect(() => setBotThreadsShown(readBotThreadsShown(shownProfileId)), [shownProfileId])
   const botThreads = useMemo(() => {
     const started = visibleThreads(threads).filter((thread) => isBotStarted(thread) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))
-    return { count: started.length, hidden: started.filter((thread) => thread.hidden).length }
+    return { count: started.length, hidden: started.filter((thread) => thread.hidden && !thread.settledAt).length }
   }, [threads, agentThreadIds])
   // The eye hides every bot thread while they are all shown, or by default when the bots hide none; else it shows them all.
   const eyeHides = botThreadsShown === 'all' || (botThreadsShown === undefined && botThreads.hidden === 0)
@@ -510,7 +513,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     setBotThreadsShown(next)
     writeBotThreadsShown(shownProfileId, next)
   }
-  const listedThreads = useMemo(() => visibleThreads(threads).filter((thread) => listsThread(thread, botThreadsShown)), [threads, botThreadsShown])
+  const listedThreads = useMemo(() => visibleThreads(threads).filter((thread) => listsInSidebar(thread, botThreadsShown)), [threads, botThreadsShown])
   // A thread archived or unarchived, by any means, leaves its list and arrives in its new place with motion: for a
   // moment its old row stays in the old list (`threadsForList`) while it fades and closes (archiveMotion.ts).
   const asideRef = useRef<HTMLElement>(null)
@@ -544,7 +547,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // first. Later messages do not move a row.
   const feedThreads = useMemo(() => sortThreadFeed(availableThreads, threadFeedOrder), [availableThreads, threadFeedOrder])
   const archivedThreads = useMemo(
-    () => sortThreadFeed(archivedListThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    () => sortArchivedThreads(archivedListThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
     [archivedListThreads, agentThreadIds]
   )
   const attentionOf = (threadId: string) => threadAttention(rolledUpActivity[threadId] ?? threadActivity[threadId])
@@ -610,7 +613,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (!shownId || revealedRow.current === shownId) return
     const shown = threads.find((thread) => thread.id === shownId)
     // A bot thread the eye keeps out of the list has no row to reveal.
-    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id) || !listsThread(shown, botThreadsShown)) return
+    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id) || !listsInSidebar(shown, botThreadsShown)) return
     revealedRow.current = shownId
     if (shown.settledAt) {
       setArchivedExpanded(true)
@@ -907,7 +910,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   // Archiving shows no toast: the row moving to Archived says it. Only a failure toasts.
   const setArchived = (threadId: string, archived: boolean) =>
-    runWithToast(archived ? 'archive' : 'unarchive', () => (archived ? archiveThread(threadId) : window.mousse.threads.settle(threadId, false)), { retry: true })
+    runWithToast(archived ? 'archive' : 'unarchive', () => (archived ? archiveThread(threadId) : setThreadArchived(threadId, false)), { retry: true })
 
   // A thread is archived first; deleting an archived thread is permanent, so it asks first and has no Undo.
   const askDelete = (request: DeleteRequest) => {

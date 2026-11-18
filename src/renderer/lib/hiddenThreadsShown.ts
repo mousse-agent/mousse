@@ -44,3 +44,8 @@ export function listsThread(thread: Thread, shown: BotThreadsShown | undefined):
   if (shown === 'none') return false
   return !thread.hidden
 }
+
+/** `listsThread`, and an archived thread under Archived unless the eye hides every bot thread. */
+export function listsInSidebar(thread: Thread, shown: BotThreadsShown | undefined): boolean {
+  return listsThread(thread, shown) || (Boolean(thread.settledAt) && shown !== 'none')
+}

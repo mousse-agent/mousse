@@ -102,13 +102,13 @@ describe('windows hear of list changes once, as pushes', () => {
     expect(pushed.version.seq).toBeGreaterThan(read.version.seq)
   })
 
-  it('tells windows when an expired thread is deleted, with no request behind it', async () => {
+  it('tells windows when an expired thread is archived, with no request behind it', async () => {
     const thread = mms.threads.createThread('Expiring', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
     await new Promise((resolve) => setTimeout(resolve, 100))
     mms.threads.updateThreadMeta(thread.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
     const lists = await listsAfter(seen, () => mms.threadExpiry.pass())
     expect(lists.length).toBeGreaterThanOrEqual(1)
-    expect(lists.at(-1)!.some((entry) => entry.id === thread.id)).toBe(false)
+    expect(lists.at(-1)!.find((entry) => entry.id === thread.id)?.settledAt).toBeTruthy()
   })
 
   it('tells windows of a pin and a delete a phone made through its backend', async () => {

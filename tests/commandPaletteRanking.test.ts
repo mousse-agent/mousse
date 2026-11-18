@@ -212,9 +212,17 @@ describe('buildPaletteGroups', () => {
     expect(items).toMatchObject([{ id: 't2', detail: 'Website' }])
   })
 
-  it('hides settled threads and empty drafts from a search', () => {
-    expect(build('settled').find((group) => group.label === 'Threads')).toBeUndefined()
+  it('finds archived threads by title, after the open ones and marked Archived, and leaves empty drafts out', () => {
+    expect(build('settled').find((group) => group.label === 'Threads')!.items).toMatchObject([{ id: 't4', detail: 'Archived' }])
+    const withOpen = buildPaletteGroups({ query: 'work', commands: [], threads: [threads[3]!, thread('t6', 'Open work', { projectId: 'p1' })], projects })
+    expect(withOpen.find((group) => group.label === 'Threads')!.items).toMatchObject([{ id: 't6', detail: 'Mousse' }, { id: 't4', detail: 'Archived' }])
     expect(flattenGroups(build('new')).some((item) => item.kind === 'thread' && item.id === 't5')).toBe(false)
+  })
+
+  it('names an archived thread whose messages alone match', () => {
+    const hit: ThreadSearchResult = { threadId: 't4', threadName: 'Settled work', matchType: 'message', messageId: 'm1', snippet: 'the quarterly numbers', score: 2 } as ThreadSearchResult
+    const messages = buildPaletteGroups({ query: 'quarterly', commands: [], threads, projects, messages: [hit] }).find((group) => group.label === 'Messages')!
+    expect(messages.items[0]).toMatchObject({ kind: 'thread', id: 't4', detail: 'Archived' })
   })
 
   it('limits the list to commands behind a > prefix', () => {
