@@ -91,7 +91,8 @@ it.each([
   ['2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff','2001::','2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff','2001:200::'],
   ['2001:db7:ffff:ffff:ffff:ffff:ffff:ffff','2001:db8::','2001:db8:ffff:ffff:ffff:ffff:ffff:ffff','2001:db9::'],
   ['2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff','2002::','2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff','2003::'],
-  ['3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff','3fff::','3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',null],
+  [null,'::','1fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff','2000::'],
+  ['3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff','3fff::','ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',null],
 ])('checks both boundaries of %s / %s – %s / %s',(before,first,last,after)=>{
   if(before) expect(isPublicAddress(before),before).toBe(true)
   expect(isPublicAddress(first),first).toBe(false); expect(isPublicAddress(last),last).toBe(false)
