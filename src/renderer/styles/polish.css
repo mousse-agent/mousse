@@ -910,7 +910,6 @@ html .settings-nav-item.active {
 /* Composer fields draw focus on their card, not on the bare field. */
 .composer textarea:focus,
 .agent-chat-composer textarea:focus,
-.chat-search input:focus,
 .chat-resource-url input:focus {
   box-shadow: none;
 }

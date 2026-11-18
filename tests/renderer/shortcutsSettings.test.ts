@@ -40,7 +40,7 @@ it('shows a custom shortcut with a badge and a reset, and a shortcut another com
   const markup = render({ 'thread.new': 'CommandOrControl+K', 'threads.search': null })
   expect(markup).toContain('Custom')
   expect(markup).toContain('Reset New thread to its default shortcut')
-  expect(markup).toContain('Reset Search threads to its default shortcut')
+  expect(markup).toContain('Reset Search everything to its default shortcut')
   expect(markup).toContain('Not set')
   expect(markup).toContain('Not active while Command palette uses this shortcut')
   expect(markup).not.toMatch(/<button[^>]*disabled=""[^>]*>Reset all<\/button>/)

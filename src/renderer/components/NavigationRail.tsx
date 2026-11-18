@@ -1,11 +1,10 @@
 import { useEffect } from 'react'
-import { Automations, CircleGauge, House, Search, Settings, type LucideIcon } from '../lib/icons'
+import { Automations, CircleGauge, House, SearchEverything, Settings, type LucideIcon } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { openPalette } from '../commands/paletteActions'
 import { activeRailPage, sidebarProfileShown, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
 import { refreshStorageReview, useStorageReviewPending } from '../lib/storageReview'
 import { useAppStore } from '../stores/appStore'
-import { useChatsStore } from '../stores/chatsStore'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import '../styles/navigation-rail.css'
@@ -26,9 +25,8 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
   // The sidebar's footer shows the profile; while the sidebar is closed (a hover peek included) the rail does.
   const profileShown = useAppStore((s) => !sidebarProfileShown(s))
   const profileReady = useAppStore((s) => s.profileReady)
-  // In the Chats tab, Search finds agent chats.
-  const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
-  const searchThreadsTitle = useShortcutTitle('Search threads', 'threads.search')
+  // One search on every tab: threads, archived threads, bots, chats and messages.
+  const searchTitle = useShortcutTitle('Search everything', 'threads.search')
 
   const activePage = activeRailPage({ scheduledOpen, usageOpen, settingsOpen })
   const reviewPending = useStorageReviewPending()
@@ -57,13 +55,6 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
     )
   }
 
-  const search = async () => {
-    if (!chatsMode) return openPalette('messages')
-    // The chat search is in the sidebar, which a rail page covers.
-    await leaveRailPage()
-    if (activeRailPage(useAppStore.getState()) === null) useChatsStore.setState({ searchOpen: true })
-  }
-
   return (
     <nav data-mousse="rail" className="navigation-rail" aria-label="Mousse navigation"
       onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onPointerDown={onPointerDown}>
@@ -74,9 +65,9 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
         <House size={18} strokeWidth={1.8} aria-hidden="true" />
       </button>
       <button type="button" className="navigation-rail-button"
-        aria-label={chatsMode ? 'Search chats' : 'Search threads'} title={chatsMode ? 'Search chats' : searchThreadsTitle}
-        onClick={() => void search()}>
-        <Search size={18} strokeWidth={1.8} aria-hidden="true" />
+        aria-label="Search everything" title={searchTitle}
+        onClick={() => openPalette('messages')}>
+        <SearchEverything size={18} strokeWidth={1.8} aria-hidden="true" />
       </button>
       {shortcut('automations', 'Automations', Automations)}
       {/* Pinned to the bottom; the empty space above it is still rail, so hovering it peeks. */}

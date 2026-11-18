@@ -28,8 +28,6 @@ interface ChatsState {
   loading: boolean
   newChatOpen: boolean
   newChatKind: 'direct' | 'group'
-  searchOpen: boolean
-  search: string
   drafts: Record<string, string>
   activate(profileId: string): void
   refresh(): Promise<void>
@@ -67,7 +65,7 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 export const actionError = (error: unknown, prefix = '') => ({ error: `${prefix}${errorText(error)}`, errorSource: 'action' as const })
 export const useChatsStore = create<ChatsState>((set, get) => ({
   profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, openingBotId: null, error: null, errorSource: null,
-  loading: false, newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {},
+  loading: false, newChatOpen: false, newChatKind: 'direct', drafts: {},
   activate(profileId) {
     if (get().profileId === profileId) return
     epoch += 1
@@ -76,7 +74,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     refreshOperation = undefined
     refreshAgain = false
     set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, openingBotId: null, error: null, errorSource: null, loading: false,
-      newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {} })
+      newChatOpen: false, newChatKind: 'direct', drafts: {} })
     useBotsStore.getState().activate(profileId)
     // A bot's notification was clicked: open its chat.
     stopOpenBot?.()

@@ -26,8 +26,6 @@
 /* Shares its size with Add project (.chat-empty-action in app.css). */
 .chat-empty-create-agent { margin: 0 var(--ui-row-x, 8px) 14px; }
 .chat-recent-section { border-top: 1px solid rgba(var(--accent-pale-rgb), .1); margin-top: 16px; padding-top: 1px; }
-.chat-search { display: flex; align-items: center; border: 1px solid rgba(var(--accent-pale-rgb), .15); border-radius: 7px; margin: 0 6px 10px; padding: 5px; }
-.chat-search input { background: transparent; border: 0; min-width: 0; width: 100%; color: var(--text-primary); font-size: 12px; outline: 0; }
 .chat-workspace { display: flex; min-width: 0; flex: 1; overflow: hidden; background: transparent; }
 .chat-conversation { display: flex; flex: 1; min-width: 280px; flex-direction: column; overflow: hidden; }
 .chat-conversation-header { display: flex; flex-shrink: 0; align-items: center; gap: 10px; padding: 16px 22px; border-bottom: 1px solid rgba(var(--accent-pale-rgb), .1); }

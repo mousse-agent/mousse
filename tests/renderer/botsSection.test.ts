@@ -212,12 +212,6 @@ describe('the Bots section', () => {
     expect(fake.calls).toContainEqual(['markRead', 'b', 1])
   })
 
-  it('finds bots with the chat search', async () => {
-    await show([summary('a', { name: 'Inbox helper' }), summary('b', { name: 'Garden' })])
-    await act(async () => useChatsStore.setState({ searchOpen: true, search: 'gar' }))
-    expect(rowNames()).toEqual(['Garden'])
-  })
-
   it('follows bots.changed and plays done when a working bot finishes well', async () => {
     await show([summary('a', { name: 'Inbox helper', state: 'working', stateText: 'Working…' })])
     fake.bots = [summary('a', { name: 'Inbox helper', state: 'idle', stateText: 'All done', lastOutcome: 'ok' })]
@@ -247,14 +241,6 @@ describe('folding the sections', () => {
     expect([fold('Bots'), fold('Groups'), fold('Recent')].map((element) => element.getAttribute('aria-expanded'))).toEqual(['false', 'true', 'false'])
     await click(fold('Bots'))
     expect(rowNames()).toEqual(['Inbox helper'])
-  })
-
-  it('shows the matches of a search in a folded section', async () => {
-    await show([summary('a', { name: 'Inbox helper' }), summary('b', { name: 'Garden' })], [], false)
-    await click(fold('Bots'))
-    expect(rowNames()).toEqual([])
-    await act(async () => useChatsStore.setState({ searchOpen: true, search: 'gar' }))
-    expect(rowNames()).toEqual(['Garden'])
   })
 
   it('remembers the folds for each profile, read back when it opens again', async () => {
