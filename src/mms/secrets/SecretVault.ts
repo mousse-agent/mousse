@@ -137,6 +137,8 @@ export class SecretVault {
 
   /** A fresh value must never inherit authority approved for a deleted value. Existing bound values stay refused. */
   private prepareUnbound(name: string): void {
+    // A deleted guard cannot identify a stale entry in unreadable JSON, so new stores wait until it can be read.
+    this.bindings.requireReadable()
     if (!this.bindingFor(name)) return
     // listProfileKeyNames deliberately hides read failures. Authority removal needs proof of absence instead.
     let entries: unknown

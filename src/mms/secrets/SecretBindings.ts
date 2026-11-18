@@ -85,11 +85,17 @@ export class SecretBindings {
     this.signature = undefined
   }
 
+  /** Saving a new value must not inherit a destination hidden in an unreadable file. */
+  requireReadable(): void {
+    this.read()
+    if (!this.readable) throw new SecretBindingUnavailableError()
+  }
+
   delete(name: string): void {
     if (!isKeyName(name)) return
     const entries = {...this.read()}
-    if (!this.readable) throw new SecretBindingUnavailableError()
-    if (Object.hasOwn(entries, name)) {
+    // The caller deleted the value first. Leave unreadable bytes intact without blocking expiry or Settings removal.
+    if (this.readable && Object.hasOwn(entries, name)) {
       delete entries[name]
       atomicWriteJsonSync(this.path, entries, {mode: 0o600})
       this.signature = undefined
