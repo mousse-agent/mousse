@@ -380,10 +380,10 @@ export class AutomationRuns {
     const run = this.liveRunFor(caller)
     if (!run) throw new RunReportError('This thread has no automation run going now; run_report is for an automation\'s own run.')
     const activationId = str(this.row('SELECT activation_id FROM runs WHERE id = ?', run.id)?.activation_id)
-    if (activationId) level = this.options.botReportLevel?.(activationId, level) ?? level
+    const reportedLevel = activationId ? this.options.botReportLevel?.(activationId, level) ?? level : level
     const line = summary.trim().split(/\r?\n/).find((part) => part.trim())!.trim().slice(0, MAX_SUMMARY)
     this.db.transaction(() => {
-      this.run('UPDATE runs SET level = ?, summary = ?, reported_at = ? WHERE id = ?', level, line, this.now(), run.id)
+      this.run('UPDATE runs SET level = ?, summary = ?, reported_at = ? WHERE id = ?', reportedLevel, line, this.now(), run.id)
       this.syncReportItem(run.id)
     })
     this.changed()

@@ -929,10 +929,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const scheduleId = row.trigger.scheduleId
     const revision = this.host.schedules?.get(row.botId, scheduleId)?.revision
     if (!revision) return false
-    return this.store.all("SELECT activation_id, binding_json FROM bot_actions WHERE bot_id = ? AND status = 'declined' AND args_digest != '[forgotten]'", row.botId).some(action => {
+    const last = this.store.all("SELECT activation_id, binding_json, status FROM bot_actions WHERE bot_id = ? AND status IN ('declined', 'done', 'failed', 'uncertain') AND args_digest != '[forgotten]' ORDER BY rowid DESC", row.botId).find(action => {
       const earlier = this.store.activation(String(action.activation_id))
       return earlier?.trigger.kind === 'schedule' && earlier.trigger.scheduleId === scheduleId && JSON.parse(String(action.binding_json)).scheduleRevision === revision
     })
+    return last?.status === 'declined'
   }
 
   /** A skipped retry must stay visible instead of teaching the next run to skip silently. */
