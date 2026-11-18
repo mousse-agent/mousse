@@ -4013,8 +4013,8 @@ it('sleep cannot keep an old listing fresh when the monotonic clock pauses', asy
 })
 
 // E1: owner message, unattended schedule, exact destination, changed binding, rollback and caps.
-async function aloneAsk(answer: 'allow' | 'not_now' = 'allow') {
-  const t = await scheduledCall(true, 1)
+async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolName = 'send') {
+  const t = await scheduledCall(true, 1, undefined, toolName)
   t.descriptor.inputSchema.properties.to = { type: 'array' } as never
   await t.call(); await finish(f, t.run.payload)
   const first = f.bots.actions.forWork(t.id)!
@@ -4024,7 +4024,7 @@ async function aloneAsk(answer: 'allow' | 'not_now' = 'allow') {
   await f.bots.service.chatSend({ botId: t.botId, text: 'Let this automation send there without asking', clientRequestId: 'alone-owner' })
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const chat = await start(f, row.id)
-  const request = { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' }
+  const request = { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: toolName }
   chat.prepared.authority.escalate!({ permission: request as never, reason: 'Do it alone' })
   await finish(f, chat.payload, 'completed', { text: 'Allow this automation?' })
   const ask = f.store.openAsks(t.botId).find(a => 'ask' in a.permission && a.permission.ask === 'let_alone')!
@@ -4033,8 +4033,8 @@ async function aloneAsk(answer: 'allow' | 'not_now' = 'allow') {
   expect(card.title).toContain('Mail')
   expect(card).toMatchObject({ kind: 'permission', details: { items: [expect.stringContaining('one@example.test')] } })
   expect(f.bots.service.askKind(t.botId, ask.id)).toBe('export_memory')
-  await f.bots.service.answer(t.botId, ask.id, answer)
-  return { ...t, request }
+  if (answer !== 'pending') await f.bots.service.answer(t.botId, ask.id, answer)
+  return { ...t, request, consent: ask, consentActivation: row.id }
 }
 async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args) {
   f.clock.now += 60_000
@@ -4250,4 +4250,29 @@ it('E1 exported action records omit exact local place values', async () => {
   const t = await aloneAsk()
   const memory = new BotMemoryStore({ db: f.store.db })
   expect(memory.actions(t.botId).every(row => row.place_json == null)).toBe(true)
+})
+
+it('E1 changed consent settles without granting or leaving an Allow card', async () => {
+  const t = await aloneAsk('pending')
+  t.server.configDigest = 'changed'
+  await expect(f.bots.service.answer(t.botId, t.consent.id, 'allow')).resolves.toBeDefined()
+  expect(f.store.escalation(t.consent.id)?.status).toBe('withdrawn')
+  expect(f.bots.chat.card(f.store.escalation(t.consent.id)!).note).toContain('changed')
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*' OR key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 consent and About use verb phrases and place values joined in words', async () => {
+  const t = await aloneAsk('pending')
+  expect(f.bots.chat.card(t.consent).title).toBe('let ‘Send the email’ send to one@example.test and two@example.test in Mail without asking')
+  await f.bots.service.answer(t.botId, t.consent.id, 'allow')
+  const item = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))!
+  expect(item.title).toBe('‘Send the email’ sends to one@example.test and two@example.test in Mail without asking')
+  t.server.configDigest = 'changed'
+  expect(f.bots.alone.items(t.botId)[0]).toMatchObject({ mark: 'Changed', note: 'Send a call from this automation and ask again.' })
+})
+it('E1 an MCP tool name without ask points to the let-alone request shape', async () => {
+  const t = await aloneAsk('not_now')
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Without asking please', clientRequestId: 'wrong-shape' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.authority.escalate!({ permission: { tool: 'send' }, reason: 'Without asking' })).toBe("For an automation to use an MCP tool without asking, use {ask:'let_alone', scheduleId, serverId, tool}. Get scheduleId from bot_schedule_list, serverId from mcp_servers (id), and use the bare tool name.")
 })

@@ -3374,3 +3374,15 @@ it('forgets the kept value after its day expires',async()=>{
  await type(field,key);expect(field.value).toBe(key);expect(button('Keep as secret')).toBeTruthy()
  } finally {clock.mockRestore()}
 })
+
+it('draws a let-alone consent and a natural answered line in the bot chat', async () => {
+  const title = 'let ‘Sort new scans’ upload to Scans in Trial drive without asking'
+  fake.chats.inbox = [
+    message(1, { id: 'alone-open', text: 'May I?', ask: { askId: 'alone', title, note: 'Only this automation.', status: 'open' } }),
+    message(2, { id: 'alone-answered', text: 'May I?', ask: { askId: 'answered', title, note: 'Only this automation.', status: 'allowed' } })
+  ]
+  await open()
+  expect(transcript().querySelector('[data-message-id="alone-open"] .bot-bubble-ask')?.textContent).toBe('Wants to let ‘Sort new scans’ upload to Scans in Trial drive without asking')
+  const answered = transcript().querySelector('[data-message-id="alone-answered"]')!
+  expect(answered.nextElementSibling?.textContent).toBe('You let Inbox helper’s automation ‘Sort new scans’ upload to Scans in Trial drive without asking')
+})
