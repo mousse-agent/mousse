@@ -369,6 +369,15 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(body.notJoined).toBe(conflict)
   })
 
+  it('a bot\'s message that reaches a turn which has just finished its answer says it runs as the next turn', async () => {
+    const { text, host } = await world({ threads: 'all' })
+    const run = await fx!.runningRun('mine')
+    host.steerRun = vi.fn(async (_threadId, runId) => ({ status: 'accepted', runId, sequence: 2, replayed: false, followUp: true }) as never)
+    const body = JSON.parse((await text('thread_send', { threadId: 'mine', content: 'Use staging instead.' })).text)
+    expect(body).toMatchObject({ delivery: 'queued', followUp: true, runId: run.runId, note: expect.stringContaining('next turn') })
+    expect(host.sendToThread).not.toHaveBeenCalled()
+  })
+
   it('a retried message replays what the first call did: a join after its run ended, and a send after a join the engine refused', async () => {
     const { text, host } = await world({ threads: 'all' })
     // Steers reach the real engine, which keeps a receipt per request; `gone` names a run the engine ignores.
