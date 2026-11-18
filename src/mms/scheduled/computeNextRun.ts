@@ -127,7 +127,8 @@ function nextCronRun(expr: string, base: Date): Date | null {
 
   const limit = base.getTime() + CRON_SEARCH_YEARS * 366 * 24 * 60 * 60 * 1000
   while (candidate.getTime() <= limit) {
-    if (matchesCron(fields, candidate)) return new Date(candidate.getTime())
+    // Local setters can move a time in the second pass of a repeated hour back into its first pass.
+    if (candidate.getTime() > base.getTime() && matchesCron(fields, candidate)) return new Date(candidate.getTime())
     const before = candidate.getTime()
     if (!fields[3]!.has(candidate.getMonth() + 1)) {
       candidate.setMonth(candidate.getMonth() + 1, 1)
