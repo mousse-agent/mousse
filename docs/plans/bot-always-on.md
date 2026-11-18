@@ -271,8 +271,8 @@ About → Runs and the automation card word each combination: "Inbox check · ev
 
 **Decisions**
 
-- **Asks first is computed at call time.** The tool’s current read-only hint wins; without a hint its whole first word decides. A stored development asks-first level is a floor. Computing instead of rewriting grants preserves their canonical form, digest and revision, warm chats and waiting-card bindings, and lets older builds read the profile without recomputing incompatible digests. About uses the same classifier.
-- **Built in C6: Mousse decides what asks first, and when it can't tell, it asks.** An MCP tool that says it is read-only does not ask. One with no hints does not ask when its whole first word is a reading word (get, list, search, read, find, fetch, show, describe, query, count). Every other MCP tool asks. An explicit `readOnlyHint: false` always asks. Secret commands are outside this cover. MCP tools and `secret_fetch` exist only in work and runs, so a chat turn never meets a card of this kind.
+- **Asks first is computed at call time.** The hint offered to the turn wins; a missing current tool asks. Without a hint the first reading word, later changing words and joining words decide. Server restarts and tools/list_changed re-list tools; Send requires a fresh bounded listing, and cold listings do not withdraw a waiting card. A stored development asks-first level is a floor. Computing instead of rewriting grants preserves their canonical form, digest and revision, warm chats and waiting-card bindings, and lets older builds read the profile without recomputing incompatible digests. About uses the same classifier.
+- **Built in C6: Mousse decides what asks first, and when it can't tell, it asks.** An MCP tool that says it is read-only does not ask. One with no hints does not ask when its whole first word is a reading word (get, list, search, read, find, fetch, show, describe, query, count), no later word changes things, and no word joins actions (and, then, or). Every other MCP tool asks. An explicit `readOnlyHint: false` always asks. Secret commands are outside this cover. MCP tools and `secret_fetch` exist only in work and runs, so a chat turn never meets a card of this kind.
 - **Mousse holds the call and runs it.** The deferred tool call of Claude Code was considered and rejected: it works only when a turn makes a single call, only in one runtime, and needs sessions kept on disk. The calls worth holding are ones Mousse already runs itself (`callForBot`, the app-tool registry). So Mousse stores the exact call in `bot_actions`, the work parks as `approval` between provider turns, and on **Send** Mousse makes the stored call and the work goes on with its result.
 - **What a held call is bound to**, so that Send does exactly what the card showed and does it once:
   - **One row per call.** The row is unique on the activation, its dispatch and the runtime's tool call id, so a call the runtime makes again returns the same row and the same card.
@@ -300,7 +300,7 @@ It does not cover:
 - Commands, including background commands and secret commands; where no sandbox holds them they run as the owner's account.
 - Messages to other bots, whose turn may itself start a background command.
 - The bot's browser and anything it can do in its signed-in browser session.
-- MCP tools not marked asks-first.
+- MCP tools that only read.
 
 ## 5. Telling
 
@@ -432,7 +432,7 @@ C0, C1, C2, C3a, C8, C3b (#1392), C5 (#1403 and #1475), and C4 (#1390) are merge
 
 ## Open questions
 
-- **Answered by C6:** support can set `experimental.botAsksFirst` to false. New calls run without asking; open and accepted unstarted cards withdraw, and running calls finish.
+- **Answered by C6:** support can set `experimental.botAsksFirstOff` to true (the old `botAsksFirst` key is ignored). New calls run without asking; open and accepted unstarted cards withdraw, and running calls finish.
 
 
 1. **Commands where no sandbox holds them** (Pi, Windows, Linux without bubblewrap). A bot with "run commands" there can do anything the owner's account can, in a run nobody is watching too, and no card can hold it. The review behind this version would switch commands off in runs nobody started on those computers. That would end every scheduled bot that runs a script on Windows. The original recommendation to refuse secrets is superseded by #1375. The remaining original recommendation was to keep commands, since the owner allowed it and can switch it off for the computer; and make the "run commands" ask say, on those computers, that it is the owner's whole account.
