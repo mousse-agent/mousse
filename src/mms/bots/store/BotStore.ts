@@ -13,7 +13,7 @@ import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { keptCardOf, type BotCard } from '../../../shared/bots/personal/cards'
-import type { BotWakeEvent, BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { WAKE_LINE_PREFIX, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import { BOT_JOB_ENDED, type BotJob, type BotJobAsker, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
@@ -1069,10 +1069,16 @@ function jobOf(row: Row): BotJob {
 type Param = string | number | null
 
 /**
- * The chat rows the owner sees: every one but the quiet lines older versions posted for a wake-up or a thread's notice
- * (`bm_wake_…`). Those events are the bot's to act on, not the owner's to read; only what the bot says shows.
+ * The chat rows the owner sees: every one but an event's line (`outOfSightRow`): a thread's message to the bot, kept
+ * for its guard, and the lines older versions posted for a wake-up or a thread's notice. Those events are the bot's to
+ * act on, not the owner's to read; only what the bot says shows.
  */
 const SHOWN_MESSAGE = String.raw`NOT (kind = 'notice' AND id LIKE 'bm\_wake\_%' ESCAPE '\')`
+
+/** Whether a chat row is one the owner never sees (`SHOWN_MESSAGE`): a notice whose id starts `bm_wake_`. */
+export function outOfSightRow(kind: string, id: string): boolean {
+  return kind === 'notice' && id.startsWith(WAKE_LINE_PREFIX)
+}
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null)
 const num = (value: unknown): number | null => (typeof value === 'number' ? value : typeof value === 'bigint' ? Number(value) : null)
@@ -1473,17 +1479,6 @@ export class BotStore {
     const held = row.trigger.owner?.limit
     const trigger = { ...row.trigger, owner: { limit: held ? narrowPermissionMode(held, limit) : limit } }
     return this.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify(trigger), id) > 0
-  }
-
-  /**
-   * One more notice joins a chat activation that still waits to start (inside the caller's transaction): its request
-   * gains `text` after a blank line. False when it has started, ended or is not a manual chat one.
-   */
-  appendQueuedChatInput(id: string, text: string): boolean {
-    const row = this.activation(id)
-    if (!row || row.lane !== 'chat' || row.status !== 'queued' || row.trigger.kind !== 'manual') return false
-    const trigger = { ...row.trigger, input: `${row.trigger.input}\n\n${text}` }
-    return this.run("UPDATE bot_activations SET trigger_json = ? WHERE id = ? AND status = 'queued'", JSON.stringify(trigger), id) > 0
   }
 
   /** A running activation waits for the internet, or no longer does. False when it is not running (or did not wait). */

@@ -80,7 +80,7 @@ export interface BotFixture {
   close(): void
 }
 
-export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'deviceAccess' | 'eventSettleMs'> & { realWipe?: boolean } = {}): BotFixture {
+export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'deviceAccess'> & { realWipe?: boolean } = {}): BotFixture {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-p1-')))
   const profile = join(base, 'profile')
   mkdirSync(profile, { recursive: true })
@@ -100,8 +100,6 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
   } as unknown as BotFixture
   const host: BotEngineHost = {
     profileHome: profile,
-    // Event turns start at once unless a test is about how they wait for each other (`EVENT_TURN_SETTLE_MS`).
-    eventSettleMs: 0,
     ...options,
     store,
     definitions: new BotDefinitionStore(store.directory, (botId) => store.registry(botId)?.revision ?? null),
