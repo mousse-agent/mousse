@@ -3548,3 +3548,24 @@ it('C11 repeat refusal explains an unsent request without promising expiry', asy
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-copy', signal: new AbortController().signal })
   expect(result.text).toBe('Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.')
 })
+
+it.each(['stop', 'not_now', 'send', 'withdraw', 'forget', 'clear'] as const)('C11 hidden arguments stay while waiting and clear on %s', async path => {
+  const t = await setup(true)
+  Object.assign(t.args, { password: 'private-input' })
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.clock.now += 30 * 24 * 3600_000
+  await f.bots.maintain(new Date(f.clock.now))
+  expect(JSON.parse(f.bots.actions.get(a.id)!.exec_args!)).toEqual(t.args)
+  expect(a.args_json).not.toContain('private-input')
+  if (path === 'stop') await f.bots.service.workStop(t.botId, t.workId)
+  if (path === 'not_now' || path === 'send') await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: path })
+  if (path === 'withdraw') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  if (path === 'clear') await f.bots.clearChat(t.botId)
+  if (path === 'forget') {
+    const memory = new BotMemoryStore({ db: f.store.db })
+    const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'Held call' })!
+    memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  }
+  expect(f.bots.actions.get(a.id)?.exec_args).toBeNull()
+})
