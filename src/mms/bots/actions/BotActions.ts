@@ -272,7 +272,7 @@ export class BotActions {
     if (this.host.enabled()) return
     this.host.store.db.transaction(() => {
       for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
-        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This could not wait for your owner after all, so nothing was sent. Say so in your report.' }, 'bot_action_disabled'))
+        if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This could not wait for your owner after all, so nothing was sent. Do not make this call again in this work; say in your report what you would have sent.' }, 'bot_action_disabled'))
           this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
       }
     })

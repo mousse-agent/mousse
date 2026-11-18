@@ -427,6 +427,8 @@ C0, C1, C2, C3a, C8, C3b (#1392), C5 (#1403 and #1475), and C4 (#1390) are merge
 
 ## Open questions
 
+- After a rollback, should a tool marked asks-first run without asking, or be refused until the switch is on again?
+
 - Does card expiry remain alongside `tool-api.md`'s no-default-timeout plan?
 - Does the three-unsent rule remain alongside that plan's “no counts” decision?
 - Does an owner note fence an existing card? Today it lifts refusals but leaves the card sendable.
