@@ -935,6 +935,7 @@ The fact that lifts a refusal is unchanged: any message or tap from the owner co
 A tap on a question asked by an unattended turn is an owner start: work handed off by that tapped-answer turn gets the owner’s per-piece exact-repeat history. Unread still counts the stored message rows while the chat displays one folded expiry line.
 
 The Automations inbox keeps a scheduled run waiting on a held-call card running until its continuation ends; Send, Not now and an older row’s expiry do not finish its inbox row by themselves.
+
 #### Letting one automation act alone
 
 In your own chat message, ask to let one automation do one thing without asking. Send one of its calls first. The computer then offers Allow and Not now for that automation, that tool, and the exact destination arguments of its newest successful sent call. A tool whose input schema declares no place always asks. Names from structured results are shown when they identify the destination; otherwise its exact value is shown. This is desktop consent; a phone cannot Allow it.
@@ -942,5 +943,3 @@ In your own chat message, ask to let one automation do one thing without asking.
 Allow keeps a computer-local exception, separate from the bot's grant. Only that automation, tool and place can use it, and only for calls that already ask first. Work and independent runs gain no authority. After 20 calls for that tool in an hour or 100 calls for the bot in a day, an automatic call becomes an ordinary Send / Not now card. Calls the owner sent count too. Send still works above those limits. The cap is shown in the card's title using its existing fields.
 
 About lists each exception with Remove and no switch. A phone can remove one. A changed tool schema, server identity or configuration makes it Changed and inert; send a new call and ask again. Removing the schedule, changing its prompt, revoking the tool pair, deleting the bot or forgetting its memory removes the exception. Changing only the time keeps it. The asks-first rollback setting ignores all exceptions and refuses new requests.
-
-

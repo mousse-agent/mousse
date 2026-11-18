@@ -332,6 +332,7 @@ export class BotActions {
       return { text: 'This call id belongs to a forgotten call. Nothing new was held or sent.' }
     if (existing && (existing.args_digest !== actionDigest(args) || existing.target_json !== JSON.stringify({ server: tool.server, tool: tool.tool })))
       return { text: 'This call id was already used for a different call. Nothing was held for this call.', isError: true }
+    if (existing?.card_json === null && existing.result_json && !pending.has(String(existing.status))) return JSON.parse(String(existing.result_json)) as ToolOutcome
     if (existing) return pending.has(String(existing.status)) ? { text: 'This call is held for your owner. End your turn now.' } : { text: actionContinuation(existing as unknown as ActionRow), isError: true }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
     const origin = this.host.origin(row)
@@ -398,7 +399,7 @@ export class BotActions {
         ran_at = CASE WHEN ? IN ('running', 'done') THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
       to, pending.has(to) ? 1 : 0, result ? JSON.stringify(boundedActionResult(result)) : null,
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
-      if (moved && to === 'withdrawn') this.host.store.run("UPDATE bot_actions SET card_json = json_set(COALESCE(card_json, '{}'), '$.withdrawalCode', ?) WHERE id = ?", withdrawalReason ?? withdrawalCode({ card_json: null, result_json: JSON.stringify(result ?? {}) }), id)
+      if (moved && to === 'withdrawn' && this.get(id)?.card_json !== null) this.host.store.run("UPDATE bot_actions SET card_json = json_set(COALESCE(card_json, '{}'), '$.withdrawalCode', ?) WHERE id = ?", withdrawalReason ?? withdrawalCode({ card_json: null, result_json: JSON.stringify(result ?? {}) }), id)
       if (moved && result?.notSentInTime) this.host.store.run("UPDATE bot_actions SET card_json = json_set(card_json, '$.settledAt', ?) WHERE id = ?", this.host.store.now(), id)
       if (moved && this.get(id)?.card_json !== null && ['approved', 'running'].includes(to)) {
         const action = this.get(id)!
