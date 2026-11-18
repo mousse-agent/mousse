@@ -1,5 +1,5 @@
-import { sendDaemonStop } from '../../cli/daemonShutdown'
-import { canonicalizeHome, SERVICE_START_TIMEOUT_MS } from '../../cli/mmsRuntime'
+import { requestDaemonShutdown, sendDaemonStop } from '../../cli/daemonShutdown'
+import { canonicalizeHome } from '../../cli/mmsRuntime'
 import type { GuiMmsController } from './GuiMmsController'
 
 /**
@@ -9,20 +9,28 @@ import type { GuiMmsController } from './GuiMmsController'
  * stops itself once it reads the request.
  */
 export async function stopServiceForQuit(
-  controller: Pick<GuiMmsController, 'spawnedServiceRunning' | 'stopForQuit'> | null,
+  controller: Pick<GuiMmsController, 'spawnedServiceToken' | 'stopForQuit'> | null,
   homeDir: string | null,
-  opts: { waitForOwnerMs?: number; log?: (message: string) => void } = {}
+  opts: { log?: (message: string) => void } = {}
 ): Promise<void> {
   const log = opts.log ?? ((message: string) => console.error(message))
-  // A service this run just started may not hold the home yet; the stop waits for it to.
-  const waitForOwnerMs = controller?.spawnedServiceRunning ? (opts.waitForOwnerMs ?? SERVICE_START_TIMEOUT_MS) : 0
+  // Read before the client lets go of the service it started.
+  const spawnedToken = controller?.spawnedServiceToken ?? null
   const disconnected = controller?.stopForQuit().catch((error: unknown) => {
     log(`The window client did not disconnect cleanly: ${error instanceof Error ? error.message : String(error)}`)
   })
   try {
     if (homeDir) {
-      const target = await sendDaemonStop(canonicalizeHome(homeDir), { reason: 'gui-quit', waitForOwnerMs })
-      if (target.kind === 'unreadable') log('Background service could not be asked to stop: its owner cannot be read')
+      const home = canonicalizeHome(homeDir)
+      // The service that holds the home now, ready or still starting.
+      const target = await sendDaemonStop(home, { reason: 'gui-quit' })
+      // The service this run started may not hold the home yet. Its token was chosen here, so its
+      // stop is waiting for it when it does; a service started by anything else is left alone.
+      if (spawnedToken && !(target.kind === 'running' && target.token === spawnedToken)) {
+        requestDaemonShutdown(home, spawnedToken, 'gui-quit')
+      } else if (target.kind === 'unreadable') {
+        log('Background service could not be asked to stop: its owner cannot be read')
+      }
     }
   } catch (error) {
     log(`Background service could not be asked to stop: ${error instanceof Error ? error.message : String(error)}`)

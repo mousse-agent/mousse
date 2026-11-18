@@ -1,7 +1,8 @@
 /**
  * The tray's Quit ends Mousse at once and stops its background service, also while that service is still starting:
- * the window client stops connecting and never starts a service again, the stop reaches the service as soon as it
- * holds the home, and nothing waits for the service to become ready or to finish stopping.
+ * windows close first (an editor with unsaved edits keeps Mousse open), then the tray icon goes, the window client
+ * stops connecting and never starts a service again, and the stop reaches the service that holds the home and the
+ * one this run started. Nothing waits for the service to become ready or to finish stopping.
  */
 
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
@@ -10,15 +11,77 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { WebContents } from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+const trays = vi.hoisted(() => [] as Array<{ destroyed: boolean; menu: { template: Array<{ label?: string; click?: () => void }> } | null }>)
+vi.mock('electron', () => {
+  class Tray {
+    destroyed = false
+    menu: { template: Array<{ label?: string; click?: () => void }> } | null = null
+    constructor() { trays.push(this) }
+    setToolTip(): void {}
+    setContextMenu(menu: { template: Array<{ label?: string; click?: () => void }> }): void { this.menu = menu }
+    on(): void {}
+    destroy(): void { this.destroyed = true }
+  }
+  return { Tray, Menu: { buildFromTemplate: (template: unknown) => ({ template }) } }
+})
+
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { GuiMmsController } from '../src/main/mms/GuiMmsController'
 import { stopServiceForQuit } from '../src/main/mms/stopServiceForQuit'
+import { createServiceTray } from '../src/main/serviceTray'
+import { createTrayQuit, type QuitWindow } from '../src/main/trayQuit'
 import { runDaemonForeground } from '../src/cli/commands/service'
 import { getMmsRuntimePath, readStopRequest } from '../src/cli/mmsRuntime'
-import { acquireMmsOwnerLease, resolveOwnerStatus } from '../src/mms/ownership/MmsOwnerLease'
+import { acquireMmsOwnerLease, createOwnerToken, readOwnerRecord, resolveOwnerStatus } from '../src/mms/ownership/MmsOwnerLease'
 
-function fakeWindow(id: number): WebContents {
+function senderWindow(id: number): WebContents {
   return Object.assign(new EventEmitter(), { id, isDestroyed: () => false }) as unknown as WebContents
+}
+
+/** A window that closes, or keeps itself open the way an editor with unsaved edits does (its `beforeunload`). */
+function appWindow(opts: { unsavedEdits?: boolean } = {}): QuitWindow & { closed: boolean; shown: number } {
+  const webContents = new EventEmitter()
+  const window = Object.assign(new EventEmitter(), {
+    closed: false,
+    shown: 0,
+    webContents,
+    isDestroyed: () => window.closed,
+    show: () => { window.shown += 1 },
+    focus: () => undefined,
+    close: () => {
+      setTimeout(() => {
+        if (opts.unsavedEdits) {
+          webContents.emit('will-prevent-unload')
+          return
+        }
+        window.closed = true
+        window.emit('closed')
+      }, 5)
+    }
+  })
+  return window as unknown as QuitWindow & { closed: boolean; shown: number }
+}
+
+/** The tray as main makes it, with its Quit wired the way main wires it. Returns the Quit menu item's click. */
+function trayWithQuit(windows: QuitWindow[], quit: () => void): { click: () => void; tray: (typeof trays)[number] } {
+  let quitting = false
+  let created: { destroy(): void } | null = null
+  created = createServiceTray('icon.png', {
+    open: () => undefined,
+    quitAndStop: createTrayQuit({
+      windows: () => windows,
+      isQuitting: () => quitting,
+      destroyTray: () => created?.destroy(),
+      quit: () => {
+        quitting = true
+        quit()
+      }
+    })
+  })
+  const tray = trays.at(-1)!
+  const item = tray.menu!.template.find((entry) => entry.label === 'Quit Mousse and stop background work')!
+  return { click: () => item.click!(), tray }
 }
 
 describe('Quit from the tray', () => {
@@ -31,11 +94,12 @@ describe('Quit from the tray', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    trays.splice(0)
     delete process.env.MOUSSE_HOME
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
   })
 
-  it('while the service is starting: returns before it is ready, it stops without starting, and none starts again', async () => {
+  it('while the service is starting: window and tray go at once, the service stops without starting, and none starts again', async () => {
     const home = newHome()
     process.env.MOUSSE_HOME = home
     // Holds the service's creation after it took the home's lease, like a slow start does.
@@ -59,12 +123,19 @@ describe('Quit from the tray', () => {
       const connecting = gui.start()
       connecting.catch(() => undefined)
 
-      // Returns while the service is still being created. Before, the client's disconnect waited for that start
-      // until the 30-second readiness wait ran out.
+      const window = appWindow()
       let quitDone = false
-      const quit = stopServiceForQuit(gui, home).then(() => { quitDone = true })
+      let quit: Promise<void> | undefined
+      const { click, tray } = trayWithQuit([window], () => {
+        quit = stopServiceForQuit(gui, home).then(() => { quitDone = true })
+      })
+      click()
+      // Gone while the service is still being created. Before, the client's disconnect waited for that start
+      // until the 30-second readiness wait ran out.
       await vi.waitFor(() => expect(quitDone).toBe(true), { timeout: 10_000 })
       await quit
+      expect(window.closed).toBe(true)
+      expect(tray.destroyed).toBe(true)
       await expect(connecting).rejects.toThrow()
       expect(existsSync(getMmsRuntimePath(home))).toBe(false)
 
@@ -76,7 +147,7 @@ describe('Quit from the tray', () => {
       expect(resolveOwnerStatus(home).owned).toBe(false)
 
       // With the service gone, a window's request does not start a new one.
-      await expect(gui.runWithSender(fakeWindow(51), () => gui.request('threads.list'))).rejects.toThrow()
+      await expect(gui.runWithSender(senderWindow(51), () => gui.request('threads.list'))).rejects.toThrow()
       await expect(gui.start()).rejects.toThrow('stopped')
       expect(spawn).not.toHaveBeenCalled()
     } finally {
@@ -88,19 +159,40 @@ describe('Quit from the tray', () => {
     }
   }, 60_000)
 
-  it('right after this run started the service: the stop waits for it to take the home, then reaches it', async () => {
-    const home = newHome()
-    const controller = { spawnedServiceRunning: true, stopForQuit: vi.fn(async () => undefined) }
-    const quitting = stopServiceForQuit(controller, home, { waitForOwnerMs: 10_000 })
-    await new Promise((resolve) => setTimeout(resolve, 150))
-    expect(readStopRequest(home)).toBeNull()
-    const lease = acquireMmsOwnerLease(home, { kind: 'daemon' })
-    try {
-      await quitting
-      expect(readStopRequest(home)?.token).toBe(lease.owner.token)
-      expect(controller.stopForQuit).toHaveBeenCalledTimes(1)
-    } finally {
-      lease.release()
-    }
+  it('a window with unsaved edits keeps Mousse open: the tray stays, the service is not stopped, the window comes forward', async () => {
+    const kept = appWindow({ unsavedEdits: true })
+    const other = appWindow()
+    const quit = vi.fn()
+    const { click, tray } = trayWithQuit([other, kept], quit)
+    click()
+    await vi.waitFor(() => expect(kept.shown).toBe(1))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(quit).not.toHaveBeenCalled()
+    expect(tray.destroyed).toBe(false)
+    expect(kept.closed).toBe(false)
   })
+
+  it('the service this run started gets the stop before it takes the home; one started by anything else is left alone', async () => {
+    const home = newHome()
+    process.env.MOUSSE_HOME = home
+    // The window client chose the token of the service it just started; that service has not taken the home yet.
+    const spawnedToken = createOwnerToken()
+    const controller = { spawnedServiceToken: spawnedToken, stopForQuit: vi.fn(async () => undefined) }
+    await stopServiceForQuit(controller, home)
+
+    // Meanwhile `service start` brought up another service, which takes the home first.
+    const other = acquireMmsOwnerLease(home, { kind: 'daemon' })
+    try {
+      expect(readStopRequest(home, other.owner.token)).toBeNull()
+      // The service this run started reads its stop and never takes the home.
+      const logs: string[] = []
+      const state = await runDaemonForeground({ homeDir: home, ownerToken: spawnedToken, skipSignals: true, onLog: (msg) => logs.push(msg) })
+      expect(state.shuttingDown).toBe(true)
+      expect(logs.join('')).toContain('Shutting down MMS (stop-request)')
+      expect(readOwnerRecord(home)?.token).toBe(other.owner.token)
+      expect(readStopRequest(home, spawnedToken)).toBeNull()
+    } finally {
+      other.release()
+    }
+  }, 30_000)
 })

@@ -489,11 +489,11 @@ const shutdown = () =>
     // Keep the real owner and stores if a drain fails; never publish a false stop.
     await mms.stop()
     removeOwnRuntimeRecord(home, token)
-    clearStopRequest(home)
+    clearStopRequest(home, token)
   })())
 const timer = setInterval(() => {
   snapshot()
-  if (readStopRequest(home)?.token === token)
+  if (readStopRequest(home, token))
     void shutdown().catch((error) => process.stderr.write(String(error) + '\n'))
 }, 100)
 snapshot()

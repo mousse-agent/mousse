@@ -28,6 +28,7 @@ import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
 import { daemonCommand } from './daemonCommand'
 import {
   canonicalizeHome,
+  DAEMON_OWNER_TOKEN_ENV,
   pollUntilRuntimeReady,
   resolveRuntimeStatus,
   SERVICE_POLL_INTERVAL_MS,
@@ -35,6 +36,7 @@ import {
   type MmsRuntimeRecord
 } from '../../cli/mmsRuntime'
 import {
+  createOwnerToken,
   formatOwnerBusyMessage,
   readOwnerRecord,
   resolveOwnerStatus,
@@ -235,6 +237,8 @@ export class GuiMmsController extends EventEmitter {
   private disconnectTimer: ReturnType<typeof setInterval> | null = null
   private lastHello: ProtocolHelloOk | null = null
   private startedDaemon: ChildProcess | null = null
+  /** The owner token `startedDaemon` takes the home with, chosen here so a stop can reach it before its lease exists. */
+  private startedDaemonToken: string | null = null
   private startPromise: Promise<ProtocolHelloOk> | null = null
   private readonly maxReconnect: number
   private readonly reconnectBaseMs: number
@@ -275,10 +279,10 @@ export class GuiMmsController extends EventEmitter {
     this.requestTimeoutMs = opts.requestTimeoutMs
   }
 
-  /** A service this controller started whose process has not exited. */
-  get spawnedServiceRunning(): boolean {
+  /** The owner token of a service this controller started whose process has not exited. */
+  get spawnedServiceToken(): string | null {
     const child = this.startedDaemon
-    return child !== null && child.exitCode === null && child.signalCode === null
+    return child !== null && child.exitCode === null && child.signalCode === null ? this.startedDaemonToken : null
   }
 
   /** True from `stopForInstall` until `resumeAfterInstall`. */
@@ -396,6 +400,7 @@ export class GuiMmsController extends EventEmitter {
     this.baseBinding = null
     // Do not kill startedDaemon — daemon lifetime is independent of Electron.
     this.startedDaemon = null
+    this.startedDaemonToken = null
     // Allow a later start() after stop (tests / relaunch of UI client).
     this.quitting = false
   }
@@ -406,14 +411,15 @@ export class GuiMmsController extends EventEmitter {
    * this, the first such request after the service stopped would start it again from the executable being replaced.
    */
   async stopForInstall(): Promise<void> {
-    this.held = 'install'
+    // A quit that stops the service stays held: an install that does not start must not bring the service back.
+    if (this.held !== 'quit') this.held = 'install'
     await this.stop()
   }
 
   /**
-   * Mousse quits and stops its service. From this call on, before anything is awaited, the controller never starts,
-   * reconnects to or spawns the service again, so stopping the service cannot bring a new one up; then it disconnects
-   * like `stop()`, without waiting for a service that is still starting.
+   * Mousse quits and stops its service. From this call on, before anything is awaited and for good, the controller
+   * never starts, reconnects to or spawns the service again, so stopping the service cannot bring a new one up; then
+   * it disconnects like `stop()`, without waiting for a service that is still starting.
    */
   stopForQuit(): Promise<void> {
     this.held = 'quit'
@@ -1160,6 +1166,7 @@ export class GuiMmsController extends EventEmitter {
       host
     })
     mkdirSync(this.homeDir, { recursive: true })
+    const ownerToken = createOwnerToken()
     const logPath = join(this.homeDir, 'mms-startup.log')
     const logFd = openSync(logPath, 'a')
     let child: ChildProcess
@@ -1170,7 +1177,7 @@ export class GuiMmsController extends EventEmitter {
         {
           detached: true,
           stdio: ['ignore', logFd, logFd],
-          env: { ...env, MOUSSE_HOME: this.homeDir },
+          env: { ...env, MOUSSE_HOME: this.homeDir, [DAEMON_OWNER_TOKEN_ENV]: ownerToken },
           windowsHide: true
         }
       )
@@ -1183,6 +1190,7 @@ export class GuiMmsController extends EventEmitter {
     }
     child.unref()
     this.startedDaemon = child
+    this.startedDaemonToken = ownerToken
     return child
   }
 

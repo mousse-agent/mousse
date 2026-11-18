@@ -100,7 +100,8 @@ export class MousseMainService extends MmsProfileServices {
     const owner = options?.requireOwnership === false ? null : acquireMmsOwnerLease(home, {
       kind: options?.ownerKind ?? (options?.headless ? 'cli' : 'gui'),
       version: options?.version ?? process.env.npm_package_version,
-      build: options?.build
+      build: options?.build,
+      token: options?.ownerToken
     })
     let providers: ProviderAuthService | undefined
     let service: MousseMainService | undefined

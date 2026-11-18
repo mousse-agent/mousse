@@ -16,7 +16,7 @@ import {
   writeSync
 } from 'fs'
 import { dirname, join, resolve } from 'path'
-import { randomBytes } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import {
   getFileAgeMs,
   isOwnerLive,
@@ -30,7 +30,14 @@ import {
 } from '../mms/ownership/MmsOwnerLease'
 
 export const MMS_RUNTIME_FILENAME = 'mms.runtime.json'
+/** The one stop request file of earlier versions; still honoured for the daemon whose token it carries. */
 export const MMS_STOP_REQUEST_FILENAME = 'mms.stop.request.json'
+/**
+ * Carries the owner token a window client chose for a daemon it starts, so it can stop that daemon
+ * before the daemon has written its lease (`service run` reads and drops it).
+ */
+export const DAEMON_OWNER_TOKEN_ENV = 'MOUSSE_DAEMON_OWNER_TOKEN'
+
 /** Legacy plain-pid file; still cleared when migrating. */
 export const MMS_PID_FILENAME = 'mms.pid'
 
@@ -92,7 +99,16 @@ export function getMmsRuntimePath(homeDir: string): string {
   return join(canonicalizeHome(homeDir), MMS_RUNTIME_FILENAME)
 }
 
-export function getMmsStopRequestPath(homeDir: string): string {
+/**
+ * Each daemon's stop request has its own file, named after a digest of its owner token, so a stop
+ * for one daemon never replaces or removes the stop for another.
+ */
+export function getMmsStopRequestPath(homeDir: string, token: string): string {
+  const key = createHash('sha256').update(token).digest('hex').slice(0, 16)
+  return join(canonicalizeHome(homeDir), `mms.stop.request.${key}.json`)
+}
+
+function getLegacyStopRequestPath(homeDir: string): string {
   return join(canonicalizeHome(homeDir), MMS_STOP_REQUEST_FILENAME)
 }
 
@@ -382,12 +398,11 @@ export function writeStopRequest(homeDir: string, token: string): MmsStopRequest
     requestedAt: new Date().toISOString(),
     requesterPid: process.pid
   }
-  writeJsonAtomic(getMmsStopRequestPath(homeDir), request)
+  writeJsonAtomic(getMmsStopRequestPath(homeDir, token), request)
   return request
 }
 
-export function readStopRequest(homeDir: string): MmsStopRequest | null {
-  const path = getMmsStopRequestPath(homeDir)
+function readStopRequestFile(path: string): MmsStopRequest | null {
   try {
     if (!existsSync(path)) return null
     const raw = JSON.parse(readFileSync(path, 'utf-8')) as Partial<MmsStopRequest>
@@ -402,10 +417,26 @@ export function readStopRequest(homeDir: string): MmsStopRequest | null {
   }
 }
 
-export function clearStopRequest(homeDir: string): void {
+/** The stop request for the daemon with `token`, from its own file or the earlier versions' shared one. */
+export function readStopRequest(homeDir: string, token: string): MmsStopRequest | null {
+  for (const path of [getMmsStopRequestPath(homeDir, token), getLegacyStopRequestPath(homeDir)]) {
+    const request = readStopRequestFile(path)
+    if (request?.token === token) return request
+  }
+  return null
+}
+
+/** Removes the stop request for the daemon with `token` only; another daemon's stays. */
+export function clearStopRequest(homeDir: string, token: string): void {
   try {
-    const path = getMmsStopRequestPath(homeDir)
+    const path = getMmsStopRequestPath(homeDir, token)
     if (existsSync(path)) unlinkSync(path)
+  } catch {
+    /* ignore */
+  }
+  try {
+    const legacy = getLegacyStopRequestPath(homeDir)
+    if (readStopRequestFile(legacy)?.token === token) unlinkSync(legacy)
   } catch {
     /* ignore */
   }

@@ -3,7 +3,7 @@
  * projects/threads fan-out, daemon.shutdown, activity map.
  */
 
-import { existsSync, mkdtempSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { createConnection } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -13,6 +13,7 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import {
   requestDaemonShutdown,
+  sendDaemonStop,
   shutdownDaemonLifecycle,
   stopRunningDaemon,
   type DaemonLifecycleState
@@ -20,7 +21,7 @@ import {
 import { getMmsRuntimePath, readStopRequest } from '../src/cli/mmsRuntime'
 import { resolveLocalEndpoint } from '../src/mms/protocol/endpoint'
 import type { MousseMainService as MmsInstance } from '../src/cli/contract'
-import { resolveOwnerStatus } from '../src/mms/ownership/MmsOwnerLease'
+import { acquireMmsOwnerLease, getMmsOwnerPath, resolveOwnerStatus } from '../src/mms/ownership/MmsOwnerLease'
 import { runDaemonForeground } from '../src/cli/commands/service'
 import type { ProtocolEvent } from '../src/mms/protocol/types'
 import { bridgeProtocolEvent } from '../src/main/mms/protocolEventBridge'
@@ -48,7 +49,7 @@ describe('Review: daemon.shutdown shared implementation', () => {
     const res = requestDaemonShutdown(home, token, 'unit')
     expect(res.accepted).toBe(true)
     expect(res.reason).toBe('unit')
-    const onDisk = readStopRequest(home)
+    const onDisk = readStopRequest(home, token)
     expect(onDisk?.token).toBe(token)
   })
 
@@ -83,6 +84,55 @@ describe('Review: daemon.shutdown shared implementation', () => {
     await Promise.all([first, second])
     expect(mmsStopped).toBe(true)
     expect(state.mms).toBeNull()
+  })
+
+  it("a drain that outlasts the stop's deadline is waited for, with the service kept, before teardown ends", async () => {
+    let attempts = 0
+    let finishDrain!: () => void
+    const drain = new Promise<void>((resolve) => { finishDrain = resolve })
+    const busy = Object.assign(new Error('Profile work is still draining'), { code: 'profile_busy' })
+    const mms = {
+      stop: async () => {
+        attempts += 1
+        // The installation's stop gives up waiting after its deadline; the drain itself goes on.
+        if (attempts === 1) throw new AggregateError([busy], 'Failed to stop installation services')
+        await drain
+      }
+    } as unknown as MmsInstance
+    const state: DaemonLifecycleState = {
+      homeDir: home,
+      mms,
+      protocolServer: null,
+      ownerToken: null,
+      runtimeWritten: false,
+      pollStop: null,
+      shuttingDown: false
+    }
+    let done = false
+    const teardown = shutdownDaemonLifecycle(state).then(() => { done = true })
+    await vi.waitFor(() => expect(attempts).toBe(2))
+    expect(done).toBe(false)
+    expect(state.mms).toBe(mms)
+    finishDrain()
+    await teardown
+    expect(state.mms).toBeNull()
+  })
+
+  it('a stop reaches a daemon whose lease is unreadable for a moment while it is rewritten', async () => {
+    const lease = acquireMmsOwnerLease(home, { kind: 'daemon' })
+    try {
+      const path = getMmsOwnerPath(home)
+      const contents = readFileSync(path, 'utf-8')
+      // Mid-write: the file is there, its contents are not yet.
+      writeFileSync(path, '')
+      const sending = sendDaemonStop(home, { reason: 'unit', intervalMs: 20 })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      writeFileSync(path, contents)
+      expect(await sending).toMatchObject({ kind: 'running', token: lease.owner.token })
+      expect(readStopRequest(home, lease.owner.token)).not.toBeNull()
+    } finally {
+      lease.release()
+    }
   })
 })
 
@@ -372,7 +422,7 @@ describe('Review: protocol live events and fan-out', () => {
       reason: 'protocol-test'
     })
     expect(res.accepted).toBe(true)
-    expect(readStopRequest(home)?.token).toBe(ownerToken)
+    expect(readStopRequest(home, ownerToken)?.token).toBe(ownerToken)
     await c.close()
   })
 })

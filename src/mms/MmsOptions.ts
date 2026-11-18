@@ -24,6 +24,11 @@ export interface MmsOptions {
   requireOwnership?: boolean
   version?: string
   build?: string
+  /**
+   * The owner lease's token, when whoever started this daemon chose it, so it can send the daemon a
+   * stop before the lease is written. A new random token when unset.
+   */
+  ownerToken?: string
   /** Trusted local code supplies immutable definitions and measured runtime
    * evidence for this exact profile. Never populated from received DTOs. */
   nativeBotAdapters?(context: {

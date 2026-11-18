@@ -15,6 +15,7 @@ import { resolveCliPathForInstall } from '../cliLaunch'
 import { HEADLESS_DISPLAY_SWITCHES } from '../../shared/headlessSwitches'
 import {
   canonicalizeHome,
+  DAEMON_OWNER_TOKEN_ENV,
   pollUntilRuntimeReady,
   publishOwnRuntimeRecord,
   readStopRequest,
@@ -26,12 +27,11 @@ import {
   SERVICE_STOP_TIMEOUT_MS
 } from '../mmsRuntime'
 import {
+  createOwnerToken,
   formatOwnerBusyMessage,
   MmsOwnerBusyError,
-  readOwnerRecord,
   resolveOwnerStatus
 } from '../../mms/ownership/MmsOwnerLease'
-import { PROCESS_INSTANCE_ID } from '../../mms/queue/processLiveness'
 import { installDaemonDiagnostics } from '../daemonDiagnostics'
 import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
@@ -84,6 +84,11 @@ export interface DaemonForegroundOptions {
   skipSignals?: boolean
   /** Test inject: aborting it stops the daemon like a signal would. */
   stopSignal?: AbortSignal
+  /**
+   * The owner token to take the home with, chosen by whoever started the daemon so it can send a
+   * stop before the lease exists. A new one when unset.
+   */
+  ownerToken?: string
   onLog?: (msg: string) => void
 }
 
@@ -106,11 +111,13 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     homeDir,
     mms: null,
     protocolServer: null,
-    ownerToken: null,
+    // Known from the start, so a stop request is read before the owner lease exists.
+    ownerToken: opts.ownerToken ?? createOwnerToken(),
     runtimeWritten: false,
     pollStop: null,
     shuttingDown: false
   }
+  const ownerToken = state.ownerToken!
 
   let memoryMonitor: ReturnType<typeof prepareMemoryMonitor> = null
   const shutdown = async (reason: string, exitCode = 0): Promise<void> => {
@@ -147,22 +154,11 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     })
   }
 
-  // This daemon's token: known once the owner is created, and read from the home's
-  // owner lease before that, as soon as this process holds it.
-  const ownToken = (): string | null => {
-    if (state.ownerToken) return state.ownerToken
-    const owner = readOwnerRecord(homeDir)
-    return owner && owner.pid === process.pid && owner.processInstanceId === PROCESS_INSTANCE_ID
-      ? owner.token
-      : null
-  }
   // A stop request for this daemon starts the shutdown. Read from the start, so a stop
   // sent while startup still runs is not left waiting for readiness.
   const checkStopRequest = (): void => {
     if (state.shuttingDown) return
-    const req = readStopRequest(homeDir)
-    if (!req) return
-    if (req.token !== ownToken()) return
+    if (!readStopRequest(homeDir, ownerToken)) return
     void shutdown('stop-request')
   }
 
@@ -186,8 +182,9 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
           `Electron daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}`
         )
       })
-      if (await stoppedDuringStartup()) return state
     }
+    // A stop sent before this daemon took the home: it never takes it.
+    if (await stoppedDuringStartup()) return state
 
     // Sole production owner construction path (kind: daemon).
     const opened = await createDaemonOwner(
@@ -195,7 +192,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
         homeDir,
         mode: 'text'
       },
-      { start: false }
+      { start: false, ownerToken }
     )
     // A stop that came while the owner was being created skips the start. One that comes
     // during the start waits for it: teardown stops the owner only once it is on `state`.
@@ -205,8 +202,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       state.mms = opened.mms
     }
     if (await stoppedDuringStartup()) return state
-    state.ownerToken = opened.mms.getOwnerLease()?.owner.token ?? null
-    if (!state.ownerToken) {
+    if (opened.mms.getOwnerLease()?.owner.token !== ownerToken) {
       throw new Error('Daemon started without owner lease')
     }
 
@@ -214,7 +210,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     const protocolServer = new MmsProtocolServer({
       mms: opened.mms,
       commandRouter: opened.mms.browserCommandRouter,
-      ownerToken: state.ownerToken,
+      ownerToken,
       version: tryReadPackageVersion()
     })
     state.protocolServer = protocolServer
@@ -245,7 +241,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
         throw new RuntimeOwnershipError('Injected runtime-publish failure')
       }
       publishOwnRuntimeRecord(homeDir, {
-        ownerToken: state.ownerToken,
+        ownerToken,
         startedAt,
         version: tryReadPackageVersion(),
         ownerKind: 'daemon'
@@ -291,8 +287,13 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
 async function runForeground(homeFlag?: string): Promise<void> {
   // Before anything starts a program: the app that started the service may quit and take its mount with it.
   dropForeignAppImageMounts()
+  // The window client that started this daemon chose its owner token (`DAEMON_OWNER_TOKEN_ENV`).
+  // Dropped here so nothing the daemon starts inherits it.
+  const chosen = process.env[DAEMON_OWNER_TOKEN_ENV]
+  delete process.env[DAEMON_OWNER_TOKEN_ENV]
   await runDaemonForeground({
-    homeDir: resolveMousseHome(homeFlag)
+    homeDir: resolveMousseHome(homeFlag),
+    ...(chosen && /^[0-9a-f]{64}$/.test(chosen) ? { ownerToken: chosen } : {})
   })
 }
 

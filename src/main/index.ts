@@ -14,6 +14,7 @@ import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
 import { GuiMmsController } from './mms/GuiMmsController'
 import { stopServiceForQuit } from './mms/stopServiceForQuit'
+import { createTrayQuit } from './trayQuit'
 import { GuiConnectionLog } from './mms/guiConnectionLog'
 import { registerRendererErrorIpc, RendererErrorLog } from './diagnostics/rendererErrorLog'
 import { PresentationState } from './mms/PresentationState'
@@ -182,6 +183,8 @@ function startGuiApp(): void {
   }
 
   app.on('second-instance', () => {
+    // Quitting: nothing comes back on screen.
+    if (isQuitting || quitAndStopService.closing) return
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.show()
@@ -201,16 +204,27 @@ function startGuiApp(): void {
   }
 
   /** The tray's way to end everything: Mousse goes at once and its background service stops itself. */
-  function quitAndStopService(): void {
-    if (isQuitting) return
-    // Nothing stays on screen while the window client disconnects.
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.hide()
+  const quitAndStopService = createTrayQuit({
+    windows: () => BrowserWindow.getAllWindows(),
+    isQuitting: () => isQuitting,
+    destroyTray: () => {
+      serviceTray?.destroy()
+      serviceTray = null
+    },
+    quit: () => {
+      stopServiceOnQuit = true
+      void beginQuit()
     }
-    serviceTray?.destroy()
-    serviceTray = null
-    stopServiceOnQuit = true
-    void beginQuit()
+  })
+
+  /**
+   * An update install does not start once the tray's quit began: the installer would start Mousse
+   * again after the person stopped it.
+   */
+  async function installUnlessQuitting(prepare: () => Promise<void>): Promise<void> {
+    if (stopServiceOnQuit) throw new Error('Mousse is quitting.')
+    await prepare()
+    if (stopServiceOnQuit) throw new Error('Mousse is quitting.')
   }
 
   function ensureServiceTray(): void {
@@ -436,7 +450,7 @@ function startGuiApp(): void {
       try {
         desktopUpdater ??= startDesktopUpdates({
           // The installer replaces Mousse.exe, which also hosts the background service.
-          prepareInstall: () => prepareUpdateInstall({
+          prepareInstall: () => installUnlessQuitting(() => prepareUpdateInstall({
             controller: guiMms,
             stopService: () => stopRunningDaemon(canonicalizeHome(homeDir), { reason: 'update', timeoutMs: SERVICE_STOP_TIMEOUT_MS }),
             // Services of other clients or earlier sessions, `mousse-cli` commands and the voice engine run the same
@@ -453,12 +467,14 @@ function startGuiApp(): void {
                 kill: (pid) => process.kill(pid)
               })
             }
-          }),
+          })),
           // The installer is running: quit even when a window would hold the quit back.
           onInstallStarted: () => {
             setTimeout(() => app.exit(0), INSTALL_QUIT_DEADLINE_MS).unref()
           },
           recoverInstall: async () => {
+            // The tray's quit began: nothing starts again.
+            if (stopServiceOnQuit) return
             await recoverUpdateInstall({ controller: guiMms })
             for (const window of BrowserWindow.getAllWindows()) {
               if (!window.isDestroyed()) window.webContents.reload()
