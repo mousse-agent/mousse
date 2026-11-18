@@ -114,6 +114,8 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
     stopThread: (threadId) => { fixture.stopped.push(threadId) },
     clock: () => clock.now,
     monotonic: () => clock.now,
+    // Notices start as soon as the lane is free; tests of the settle set their own.
+    noticeSettleMs: 0,
     setTimer: (fn, ms) => {
       fixture.timers.push({ fn, ms })
       return { clear: () => {} }

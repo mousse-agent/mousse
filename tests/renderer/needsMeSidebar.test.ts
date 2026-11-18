@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ThreadsSidebar } from '../../src/renderer/components/ThreadsSidebar'
 import { TitleBar } from '../../src/renderer/components/TitleBar'
-import { needsMeThreads } from '../../src/renderer/lib/needsMe'
+import { needsMeThreads, supervisedWaits } from '../../src/renderer/lib/needsMe'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { Project, Thread, ThreadActivitySnapshot } from '../../src/shared/types'
 
@@ -62,6 +62,16 @@ describe('needsMeThreads', () => {
   it('leaves out drafts, archived threads and threads another list shows', () => {
     const draft = thread('draft', 'New Chat', { startedAt: undefined })
     expect(needsMeThreads([...threads, draft], { ...waiting, draft: 'awaiting_input' }, new Set(['b'])).map((entry) => entry.id)).toEqual(['a'])
+  })
+
+  it('leaves out a thread whose whole wait its bot answers, but not a subagent\'s question below it', () => {
+    const ask = (threadId: string, supervised: boolean, wait?: false) => ({ requestId: `${threadId}-${supervised}`, threadId, questions: [], ...(supervised ? { supervised: true as const } : {}), ...(wait === false ? { wait } : {}) })
+    // a: every wait supervised (a question asked without waiting is no wait); b: one request is the owner's.
+    const supervised = supervisedWaits([ask('a', true), ask('a', false, false), ask('b', true), ask('b', false)])
+    expect([...supervised]).toEqual(['a'])
+    expect(needsMeThreads(threads, waiting, new Set(), false, supervised).map((entry) => entry.id)).toEqual(['b'])
+    const withChild = [...threads, thread('child', 'Reviewer', { projectId: 'p1', lineage: { parentThreadId: 'a', rootThreadId: 'a', relationship: 'subagent' } })]
+    expect(needsMeThreads(withChild, { ...waiting, child: 'awaiting_input' }, new Set(), false, supervised).map((entry) => entry.id)).toEqual(['b', 'a'])
   })
 })
 

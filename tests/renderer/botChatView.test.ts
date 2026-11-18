@@ -734,6 +734,17 @@ describe('the transcript', () => {
     expect(['b1', 'b2', 'b3'].map(hasTime)).toEqual([true, false, true])
   })
 
+  it('Pick a model opens About with Runs on open, though the owner had it closed', async () => {
+    window.localStorage.removeItem('mousse-profile-default-mousse:bot-about-open')
+    fake.chats.inbox = [message(1, { kind: 'error', text: 'Pick a model so I can work.', error: { text: 'Pick a model so I can work.', action: { kind: 'pick_model', label: 'Pick a model' } } })]
+    await open()
+    await click(button('Pick a model', transcript().querySelector('article')!))
+    await act(async () => { await new Promise((resolve) => window.requestAnimationFrame(() => resolve(null))) })
+    const setup = [...document.querySelectorAll('.bot-about-fold-head')].find((head) => head.textContent?.includes('Runs on'))
+    expect(setup?.getAttribute('aria-expanded')).toBe('true')
+    expect(useBotsStore.getState().aboutFocus).toBeNull()
+  })
+
   it('Sign in opens Settings, Providers on the entry to sign in to (the bot runner\'s card)', async () => {
     const { takePendingProvider } = await import('../../src/renderer/lib/settingsNavigation')
     const requested: string[] = []
@@ -2220,7 +2231,7 @@ describe('memory', () => {
     await open()
     await click(button('About Inbox helper'))
     const row = host.querySelector<HTMLButtonElement>('[data-testid="bot-about-memory"]')!
-    expect(row.textContent).toBe('Memory · 42 wishes · 2 notes')
+    expect(row.textContent).toBe('Memory2 wishes · 2 notes')
     await click(row)
     expect(dialog()?.querySelector('h2')?.textContent).toBe('Memory')
     expect(texts(group('Your wishes'))).toEqual(['Call me Sam.', 'No em dashes in my messages.'])

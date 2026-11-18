@@ -747,8 +747,10 @@ export class MmsProtocolServer {
         .getOrHydrate(payload.threadId)
         .pendingQuestionIds.add(payload.requestId)
       services.orchestrator.setAwaitingInput(payload.threadId)
+      // A request the bot that started the thread answers (`supervisorOf`): clients ping no one for it.
+      const supervised = services.orchestrator.supervisorOf(payload.threadId, payload.requestId) !== undefined
       emitToSubscribers(
-        this.ring.push('questions.pending', payload, payload.threadId)
+        this.ring.push('questions.pending', supervised ? { ...payload, supervised: true } : payload, payload.threadId)
       )
     })
     onEmitter(
@@ -834,8 +836,10 @@ export class MmsProtocolServer {
         const scheduled = services.orchestrator.isScheduledTurn(payload.threadId)
         // A turn a person stopped: they did it, so clients do not announce it as stopped.
         const stoppedByPerson = payload.state === 'idle' && services.orchestrator.stoppedByPerson(payload.threadId)
-        const marks = { ...(scheduled ? { scheduled: true } : {}), ...(stoppedByPerson ? { stoppedByPerson: true } : {}) }
-        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', scheduled || stoppedByPerson ? { ...payload, ...marks } : payload, payload.threadId))
+        // A wait the bot that started the thread answers (`waitSupervised`): clients ping no one for it.
+        const supervised = payload.state === 'awaiting_input' && services.orchestrator.waitSupervised(payload.threadId, services.secretRequests?.waiting(payload.threadId) ?? false)
+        const marks = { ...(scheduled ? { scheduled: true } : {}), ...(stoppedByPerson ? { stoppedByPerson: true } : {}), ...(supervised ? { supervised: true } : {}) }
+        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', scheduled || stoppedByPerson || supervised ? { ...payload, ...marks } : payload, payload.threadId))
         if (payload.activity) {
           const activity = bots.size ? Object.fromEntries(Object.entries(payload.activity).filter(([threadId]) => !bots.has(threadId))) : payload.activity
           emitToSubscribers(

@@ -140,7 +140,7 @@ it('all memory wish instructions route telling wishes to settings', () => {
 
 it('tells existing bots that a pasted secret arrives by name', async () => {
   existingBot()
-  memory.write(() => memory.setState('ada', 'changelog_seen', 23))
+  memory.write(() => memory.setState('ada', 'changelog_seen', 24))
   const text = await packs().chatPreamble({ botId: 'ada', activationId: 'pasted-secret' })
   expect(text).toContain('Your owner can keep a pasted key as a secret')
   expect(text).toContain('secret_run')

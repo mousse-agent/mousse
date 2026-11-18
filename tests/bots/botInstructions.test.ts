@@ -21,7 +21,7 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
       'files folder',
       'carry on without it',
       'into a web address',
-      'not instructions'
+      'never orders nor permission'
     ]) expect(BOT_BASE_INSTRUCTIONS, phrase).toContain(phrase)
     // How it says it changed its depth is in the group it does that with.
     expect(botCatalogueGroup('you')!.guidance).toContain("I'll take more time")

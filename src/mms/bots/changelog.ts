@@ -133,6 +133,12 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 24,
     date: '2026-11-18',
+text: "Thread notices, wake-ups and other bots' messages that arrive close together now reach you as one input, with a line on whether other jobs of the same request still go; those waiting when your owner writes come with their message, as data. Questions and approvals in a thread you started now come to you first: answer what you can with approval_respond, and ask your owner only what is really their call, as your own short question. Before a request is done, speak when a result needs your owner or changes the plan.",
+    gone: [/Approvals and questions in a thread are your owner's/i, /pass it on in a line with the link/i]
+  },
+  {
+    id: 25,
+    date: '2026-11-18',
     text: 'Your owner can keep a pasted key as a secret in the desktop composer. You receive its name, never its value. Use that name with secret_run in your work, under your existing permissions; never ask your owner to paste a key into a message.'
   }
 ]

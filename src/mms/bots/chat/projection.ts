@@ -30,7 +30,7 @@ function isServiceLine(id: string): boolean {
   return ['bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
 }
 import type { AppletReference } from '../../../shared/applets'
-import { BOT_USAGE_WINDOW_MS, turnUsageSummary } from '../activation/turnUsage'
+import { BOT_USAGE_WINDOW_MS, botContextSummary, turnUsageSummary } from '../activation/turnUsage'
 
 /**
  * The Bot UI's view of `bots.db` (Bot Phase 1 §5.1.1, §5.7): the chat rows (`bot_messages`), each
@@ -91,6 +91,16 @@ export function managingLine(threads: readonly BotLaunchedThread[]): string {
 function oneLine(text: string, max = 120): string {
   const line = text.trim().split('\n').find((part) => part.trim())?.trim() ?? ''
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+/**
+ * What each run of a schedule does, in its own words on one line, for About. A fixed line ("Say exactly: …") has none:
+ * its label already says it.
+ */
+function scheduleDoes(prompt: string | undefined): string | undefined {
+  const text = prompt?.replace(/\s+/g, ' ').trim()
+  if (!text || text.startsWith('Say exactly: ')) return undefined
+  return text.length > 240 ? `${text.slice(0, 239).trimEnd()}…` : text
 }
 
 export interface PostInput {
@@ -221,7 +231,7 @@ export class BotChatProjection {
     classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
     tellingSettings?(botId: string): import('../../../shared/bots/personal/tellingSettings').BotTellingPreferences
     telling?(botId: string): string | undefined
-    schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
+    schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean; name?: string; prompt?: string }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
      * read yet (nothing is shown gone then).
@@ -680,9 +690,16 @@ export class BotChatProjection {
   /** About this bot: what it can use beyond the starter grant, its runs, and its waiting reminders. */
   detail(definition: BotDefinition, now: number): BotDetail {
     const grant = this.store.activeGrant(definition.id)
-    const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => (
-      { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}) }
-    ))
+    const lastRuns = this.store.lastScheduleRuns(definition.id)
+    const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => {
+      const last = lastRuns.get(schedule.scheduleId)
+      const does = scheduleDoes(schedule.prompt)
+      return {
+        id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}),
+        ...(schedule.name ? { name: schedule.name } : {}), ...(does ? { does } : {}),
+        ...(last ? { lastAt: last.endedAt, lastOutcome: last.status === 'done' ? 'ok' as const : last.status === 'failed' ? 'failed' as const : 'stopped' as const } : {})
+      }
+    })
     const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).filter((reminder) => !reminder.workId).map((reminder) => (
       { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ownerSet: reminder.ownerSet, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
     ))
@@ -696,7 +713,8 @@ export class BotChatProjection {
       ] : [],
       runs,
       reminders,
-      ...((usage) => (usage ? { usage } : {}))(turnUsageSummary(this.store.turnUsageSince(definition.id, 'chat', now - BOT_USAGE_WINDOW_MS)))
+      ...((usage) => (usage ? { usage } : {}))(turnUsageSummary(this.store.turnUsageSince(definition.id, 'chat', now - BOT_USAGE_WINDOW_MS))),
+      ...((context) => (context ? { context } : {}))(botContextSummary(this.store.lastTurnUsage(definition.id, 'chat')))
     }
   }
 
