@@ -1779,11 +1779,11 @@ describe('a plan usage limit (one-shot query)', () => {
     expect(retries.at(-1)).toMatchObject({ attempt: 10, maxAttempts: 10, cause: 'connection error' })
   })
 
-  it('a failure in Claude Code\'s own words keeps them as the message', async () => {
-    const { service, home } = fixture(() => fakeQuery([init, { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Stream closed unexpectedly'], session_id: 'vendor-session' }]))
+  it('a failure that is not recognisably the provider\'s stays an internal error, so its text is not shown', async () => {
+    const { service, home } = fixture(() => fakeQuery([init, { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['TypeError: x is undefined\n    at run (cli.js:1:2)'], session_id: 'vendor-session' }]))
     const error = await service.chat(chatInput(home)).catch((caught: unknown) => caught)
-    expect(error).toBeInstanceOf(AppError)
-    expect(error).toMatchObject({ code: 'provider_api_error', message: 'Stream closed unexpectedly' })
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(AppError)
   })
 
   it('a failure that is not a limit saves no session, even when a rejected window was seen earlier', async () => {

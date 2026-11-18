@@ -4063,9 +4063,9 @@ function claudeResultFailure(message: SDKResultMessage, seen: RejectedWindows, r
 }
 
 /**
- * The error a result frame stands for, or undefined when the turn succeeded. Its text is Claude Code's or the
- * provider's own words, so it is the error's message (redacted, see `providerMessageText`), never Mousse's generic
- * failure; `retries` are the retries Claude Code made of the request before it gave up.
+ * The error a result frame stands for, or undefined when the turn succeeded. A provider's failure (`API Error: …`, or
+ * any failure after retries) keeps the provider's words as its message (redacted, see `providerMessageText`); `retries`
+ * are the retries Claude Code made of the request before it gave up.
  */
 export function resultFailure(message: SDKResultMessage, retries?: ProviderRetries): Error | undefined {
   if (message.subtype === 'success' && !message.is_error) return undefined
@@ -4090,7 +4090,9 @@ export function resultFailure(message: SDKResultMessage, retries?: ProviderRetri
     return providerStatusError(undefined, unreachable[1]!, {
       provider: 'claude', code: 'provider_unavailable', errorInfo: { category: 'unavailable', retryable: true }, ...(details ? { details } : {})
     })
-  return providerReportedError(failure, { provider: 'claude', ...(details ? { details } : {}) })
+  // After retries the text is the provider's last failure; any other text may be an internal exception of Claude Code's,
+  // which keeps Mousse's generic line and its reference.
+  return details ? providerReportedError(failure, { provider: 'claude', details }) : new Error(failure)
 }
 
 /** Claude Code's report of a request that got no HTTP answer: `API Error: <reason>`, with no status first. */

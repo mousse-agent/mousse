@@ -13771,7 +13771,7 @@ export class OrchestratorService extends EventEmitter {
     let pendingRetries: ProviderRetries | undefined
     /** The runtime retried one of the turn's requests itself: Mousse never runs the turn again on top (`turnRetryDelay`). */
     let runtimeRetried = false
-    /** The runtime compacted the session inside the turn: its request reached the provider. */
+    /** The runtime or Mousse compacted the history inside the turn: the turn is never sent again as it was. */
     let providerCompacted = false
     const noteRetry = (attempt: number, maxAttempts: number | undefined, cause: string | undefined): void => {
       pendingRetries = { attempt, ...(maxAttempts ? { max: maxAttempts } : {}) }
@@ -13859,6 +13859,8 @@ export class OrchestratorService extends EventEmitter {
         return false
       }
       this.nativeContext = compacted
+      // The turn's input no longer matches the history: it is never sent again as it was.
+      providerCompacted = true
       this.clearLastTurnUsage()
       this.persist(true)
       onCompaction('complete')

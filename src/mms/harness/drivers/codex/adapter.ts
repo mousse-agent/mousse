@@ -71,25 +71,26 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
   if (refused) return refused
   if (kind === 'serverOverloaded')
     return fail('service_unavailable', 'ChatGPT is unavailable or busy right now. Try again in a moment.')
-  // The request got no answer after Codex's own retries (a refused or dropped connection): what Codex said, as the
-  // provider being unreachable.
-  if (kind === 'httpConnectionFailed' || kind === 'responseStreamConnectionFailed' || kind === 'responseStreamDisconnected')
-    return providerStatusError(undefined, error.message, { provider: 'codex', code: 'provider_unavailable', cause: error, errorInfo: { category: 'unavailable', retryable: true } })
   if (kind === 'badRequest') return fail('unsupported', 'ChatGPT did not accept this request.')
   return fail('protocol', `Codex ended the turn with an error: ${error.message}`)
 }
 
 /**
  * A turn Codex ended on the provider's HTTP error (`unexpected status 400 Bad Request: …, url: …`, or a status in
- * `codexErrorInfo`) as the provider's status and message, for the transcript. Undefined for a failure with no error
- * status, and for a context overflow, which the overflow recovery reads as it is. The message is already redacted.
+ * `codexErrorInfo`) as the provider's status and message, for the transcript; a refused or dropped connection with no
+ * status as the provider being unreachable. Undefined for any other failure with no error status, and for a context overflow, which the overflow recovery reads as it is. The message is already redacted.
  */
 export function codexProviderError(error: CodexTurnFailure): AppError | undefined {
-  if (codexErrorKind(error.codexErrorInfo) === 'contextWindowExceeded') return undefined
+  const kind = codexErrorKind(error.codexErrorInfo)
+  if (kind === 'contextWindowExceeded') return undefined
   const read = readProviderStatus(error.message)
   const status = error.httpStatus ?? read?.status
+  // The request got no answer after Codex's own retries (a refused or dropped connection): what Codex said, as the
+  // provider being unreachable.
+  if (status === undefined && (kind === 'httpConnectionFailed' || kind === 'responseStreamConnectionFailed' || kind === 'responseStreamDisconnected'))
+    return providerStatusError(undefined, error.message, { provider: 'codex', code: 'provider_unavailable', cause: error, errorInfo: { category: 'unavailable', retryable: true } })
   if (status === undefined || status < 400) return undefined
-  const busy = status === 503 || codexErrorKind(error.codexErrorInfo) === 'serverOverloaded'
+  const busy = status === 503 || kind === 'serverOverloaded'
   return providerStatusError(status, read?.body ?? error.message, { provider: 'codex', cause: error, ...(busy ? { errorInfo: { category: 'unavailable', retryable: true } } : {}) })
 }
 
