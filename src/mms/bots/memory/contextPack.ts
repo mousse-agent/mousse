@@ -330,8 +330,8 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
   const visibleChanges = () => changelog.filter(entry => !entry.asksFirst || options.asksFirstEnabled?.() !== false)
   // A cursor below hidden advice must wait; bots that already saw it can advance through later entries.
   const latestChange = (seen?: number) => {
-    const hidden = options.asksFirstEnabled?.() === false ? changelog.find(entry => entry.asksFirst) : undefined
-    return hidden && (seen ?? 0) < hidden.id ? hidden.id - 1 : changelog.at(-1)?.id ?? 0
+    const hidden = options.asksFirstEnabled?.() === false ? changelog.find(entry => entry.asksFirst && entry.id > (seen ?? 0)) : undefined
+    return hidden ? hidden.id - 1 : changelog.at(-1)?.id ?? 0
   }
   const changes = (botId: string, chat: boolean, fresh = false): string => {
     const seen = store.getState<number>(botId, CHANGELOG_SEEN_KEY)
