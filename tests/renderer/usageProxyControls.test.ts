@@ -43,7 +43,7 @@ function render(provider: ProviderUsage, handlers: { save?: (id: string, key: st
   act(() => root!.render(createElement(SubscriptionUsageView, {
     usage: { providers: [provider], fetchedAt: '2026-11-08T11:59:00Z' },
     loading: false, failed: false, now: NOW,
-    onBack: () => {}, onRefresh, onManage: () => {}, onSaveProxyKey, onClearProxyKey
+    onRefresh, onManage: () => {}, onSaveProxyKey, onClearProxyKey
   })))
   return { onSaveProxyKey, onClearProxyKey, onRefresh }
 }

@@ -29,14 +29,6 @@ html[data-acrylic='true'] .app .usage-rail-page {
   gap: var(--space-8);
 }
 
-.usage-heading h1 {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .subscription-usage-page-body {
   flex: 1;
   min-height: 0;
@@ -964,4 +956,598 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 
 .usage-level-text[data-usage-level='critical'] {
   color: color-mix(in oklab, var(--usage-level-ink, var(--usage-level)) 80%, var(--text-primary));
+}
+
+/* Usage history (components/UsageHistorySection.tsx): a chart of the picked range, a small tinted tile
+   per agent beside it that takes the agent in or out of the chart, then a ring of tokens by kind and a
+   breakdown across the column. It is set in the page's sans face with tabular figures, in a wider
+   centred column. */
+.subscription-usage-page {
+  --usage-agent-claude: #d97757;
+}
+
+.usage-content.has-history {
+  width: min(100%, 1120px);
+}
+
+.usage-history {
+  padding-top: var(--space-8);
+}
+
+.usage-history .settings-group-action {
+  gap: var(--space-8);
+}
+
+.usage-history-body {
+  container-type: inline-size;
+  font-variant-numeric: tabular-nums;
+  transition: opacity var(--ui-dur) ease;
+}
+
+.usage-history-body.is-refreshing {
+  opacity: 0.6;
+}
+
+.usage-history-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-48) 0;
+  font-size: var(--settings-fs-small);
+}
+
+.usage-history-loading .usage-loader {
+  padding: 0;
+}
+
+.usage-history-headline {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+  margin: var(--space-12) 0 var(--space-24);
+}
+
+.usage-history-total {
+  font-size: 34px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+}
+
+.usage-history-total-unit {
+  font-size: var(--settings-fs-row);
+  color: var(--text-secondary);
+}
+
+.usage-history-total-sub {
+  flex-basis: 100%;
+  margin-top: var(--space-4);
+  font-size: var(--settings-fs-small);
+}
+
+/* The chart sits on the page in a hairline frame, not a filled box. */
+.usage-history-card {
+  padding: var(--space-24) var(--space-24) var(--space-16) var(--space-16);
+  border: 1px solid color-mix(in srgb, var(--ui-line) 70%, transparent);
+  border-radius: 16px;
+}
+
+.usage-history-plot-row {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+}
+
+.usage-history-axis {
+  position: relative;
+}
+
+.usage-history-axis span {
+  position: absolute;
+  right: var(--space-12);
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
+.usage-history-plot {
+  position: relative;
+  min-width: 0;
+  height: 236px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ui-line) 80%, transparent);
+}
+
+.usage-history-grid {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid color-mix(in srgb, var(--ui-line) 45%, transparent);
+  pointer-events: none;
+}
+
+.usage-history-plot svg {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.usage-history-guide {
+  stroke: var(--text-secondary);
+  stroke-opacity: 0.45;
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.usage-history-focus {
+  fill: var(--text-primary);
+  fill-opacity: 0.05;
+}
+
+/* The hover card: the hour or day, its total, then each agent with its colour key. */
+.usage-history-tip {
+  position: absolute;
+  top: var(--space-4);
+  z-index: 2;
+  min-width: 168px;
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+  background: var(--ui-raised, var(--bg-primary));
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
+  font-size: 12px;
+  transform: translateX(var(--space-12));
+  pointer-events: none;
+}
+
+.usage-history-tip[data-side='left'] {
+  transform: translateX(calc(-100% - var(--space-12)));
+}
+
+.usage-history-tip-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-16);
+  margin-bottom: var(--space-4);
+  font-weight: 600;
+}
+
+.usage-history-tip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+
+.usage-history-tip-row > :last-child {
+  margin-left: auto;
+  color: var(--text-primary);
+}
+
+.usage-history-tip-key {
+  flex: none;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.usage-history-x {
+  position: relative;
+  height: 16px;
+  margin: var(--space-8) 0 0 56px;
+}
+
+.usage-history-x span {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
+.usage-history-x span:first-child {
+  transform: none;
+}
+
+.usage-history-x span:last-child {
+  transform: translateX(-100%);
+}
+
+.usage-history-readout {
+  margin: var(--space-12) 0 0 56px;
+  min-height: 1.5em;
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The chart beside its tiles, three to a row; the tiles go under the chart when the column is narrow. */
+.usage-history-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-16);
+}
+
+@container (max-width: 820px) {
+  .usage-history-top {
+    grid-template-columns: 1fr;
+  }
+}
+
+.usage-agent-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 120px);
+  align-content: start;
+  gap: var(--space-8);
+}
+
+.usage-agent-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px var(--space-12);
+  border: 0;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--agent) 7%, transparent);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--ui-dur-fast) ease, opacity var(--ui-dur-fast) ease;
+}
+
+.usage-agent-tile:hover {
+  background: color-mix(in srgb, var(--agent) 13%, transparent);
+}
+
+.usage-agent-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.usage-agent-tile[aria-pressed='false'] {
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+  opacity: 0.5;
+}
+
+.usage-agent-tile[aria-pressed='false']:hover {
+  opacity: 0.8;
+}
+
+.usage-agent-tile[aria-pressed='false'] .usage-agent-tile-head > :first-child {
+  filter: grayscale(1);
+}
+
+.usage-agent-tile-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 2px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.usage-agent-tile-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-agent-tile-value {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: color-mix(in srgb, var(--agent) 45%, var(--text-primary));
+}
+
+.usage-agent-tile[aria-pressed='false'] .usage-agent-tile-value {
+  color: var(--text-secondary);
+}
+
+.usage-agent-tile-line {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.usage-history-note {
+  margin: var(--space-8) 0 0;
+  font-size: var(--settings-fs-small);
+  line-height: 1.5;
+}
+
+.usage-history-more {
+  margin-top: var(--space-8);
+  font-size: var(--settings-fs-small);
+}
+
+.usage-history-sources {
+  margin: var(--space-32) 0 0;
+  font-size: 12px;
+}
+
+.usage-history-block {
+  margin-top: var(--space-40, 40px);
+}
+
+.usage-history-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+  min-height: var(--settings-control-h);
+  margin-bottom: var(--space-12);
+}
+
+.usage-history-block-head h3 {
+  margin: 0;
+  font-size: var(--settings-fs-row);
+  font-weight: 600;
+}
+
+/* The filters beside the range: quiet menu buttons, a provider's icon before its name. */
+.usage-history-filter {
+  min-width: 0;
+}
+
+.usage-history-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Tokens (or cost) by kind: a soft ring with the total in its middle, the legend beside it. */
+.usage-history-kinds {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-24) var(--space-40, 40px);
+}
+
+.usage-history-donut {
+  position: relative;
+  flex: none;
+  width: 132px;
+  height: 132px;
+}
+
+.usage-history-donut svg {
+  display: block;
+}
+
+.usage-history-donut-centre {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+}
+
+.usage-history-donut-value {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.usage-history-donut-unit {
+  font-size: 11.5px;
+}
+
+.usage-history-legend {
+  display: grid;
+  grid-template-columns: 10px minmax(150px, auto) auto auto;
+  align-items: center;
+  gap: 10px var(--space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--settings-fs-row);
+}
+
+.usage-history-legend-row {
+  display: contents;
+}
+
+.usage-history-legend-key {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.usage-history-legend-value {
+  font-weight: 500;
+  text-align: right;
+}
+
+.usage-history-legend-share {
+  min-width: 40px;
+  font-size: var(--settings-fs-small);
+  text-align: right;
+}
+
+.usage-history-kinds-block .usage-history-note {
+  margin-top: var(--space-16);
+}
+
+/* The breakdown across the whole column: roomy rows, a rank, and a thin share bar in the agent's colour under each name. */
+.usage-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--settings-fs-row);
+}
+
+.usage-history-table th {
+  padding: 0 0 var(--space-8);
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.usage-history-table td {
+  padding: 14px 0;
+  border-top: 1px solid color-mix(in srgb, var(--ui-line) 55%, transparent);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.usage-history-table .is-num {
+  padding-left: var(--space-24);
+  text-align: right;
+}
+
+.usage-history-table .usage-history-rank {
+  width: 36px;
+  padding-right: var(--space-8);
+  font-size: var(--settings-fs-small);
+}
+
+.usage-history-table td.usage-history-name {
+  width: 46%;
+  max-width: 0;
+  padding-right: var(--space-24);
+}
+
+.usage-history-model {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+.usage-history-share-bar {
+  display: block;
+  height: 3px;
+  margin-top: 7px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--ui-line) 45%, transparent);
+  overflow: hidden;
+}
+
+.usage-history-share-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+}
+
+/* Tokens / Cost / Limits, centred in the page header: plain words, the picked one on a soft fill. */
+.usage-heading.has-tabs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+
+.usage-heading-start,
+.usage-heading-end {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+}
+
+.usage-heading-end {
+  justify-content: flex-end;
+}
+
+.usage-heading:not(.has-tabs) .usage-heading-start {
+  flex: 1;
+}
+
+.usage-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.usage-tab {
+  height: 32px;
+  padding: 0 var(--space-16);
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color var(--ui-dur-fast) ease, color var(--ui-dur-fast) ease;
+}
+
+.usage-tab:hover {
+  color: var(--text-primary);
+}
+
+.usage-tab[aria-selected='true'] {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  color: var(--text-primary);
+}
+
+.usage-tab:focus {
+  outline: none;
+}
+
+.usage-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Limits in the wide column: each plan in a light frame like the chart's, two to a row when there is room. */
+.usage-limits {
+  container-type: inline-size;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-16);
+  padding-top: var(--space-16);
+}
+
+@container (min-width: 760px) {
+  .usage-limits {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .usage-limits > :not(.usage-provider) {
+    grid-column: 1 / -1;
+  }
+}
+
+.usage-limits > .usage-provider {
+  padding: var(--space-16) var(--space-20, 20px) var(--space-8);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--text-primary) 2.5%, transparent);
+}
+
+.usage-limits > .usage-section {
+  margin-top: 0;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--text-primary) 2.5%, transparent);
+}
+
+.usage-limits > .usage-error,
+.usage-limits > .usage-empty,
+.usage-limits > .usage-hidden-footer {
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-agent-tile,
+  .usage-tab,
+  .usage-history-body {
+    transition: none;
+  }
 }

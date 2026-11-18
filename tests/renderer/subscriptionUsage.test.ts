@@ -26,7 +26,7 @@ const claude: ProviderUsage = {
 }
 const response = (providers: ProviderUsage[] = [claude]): ProvidersUsageResponse => ({ providers, fetchedAt: '2026-11-05T11:58:00Z' })
 const view = (patch: Partial<ComponentProps<typeof SubscriptionUsageView>> = {}) => renderToStaticMarkup(createElement(SubscriptionUsageView, {
-  usage: response(), loading: false, failed: false, now: NOW, onBack: noop, onRefresh: noop, onManage: noop, ...patch
+  usage: response(), loading: false, failed: false, now: NOW, onRefresh: noop, onManage: noop, ...patch
 }))
 const windows = (html: string) => [...html.matchAll(/data-testid="usage-window" data-remaining="([^"]+)"/g)].map((match) => match[1])
 
@@ -113,7 +113,7 @@ describe('the Usage page', () => {
   it('shows only the delayed loader before the first reading, with no words', () => {
     const html = view({ usage: null, loading: true })
     expect(html).toContain('data-testid="usage-loading"')
-    expect(text(html)).toBe('Subscription usage')
+    expect(text(html)).toBe('')
   })
 
   it('keeps the last reading after a failed refresh, says from when, and offers Retry', () => {

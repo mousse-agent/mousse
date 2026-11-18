@@ -1,5 +1,7 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ArrowLeft, ExternalLink, RefreshCw } from '../lib/icons'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { UsageHistorySection } from './UsageHistorySection'
+import { UsageTabs, readUsageTab, rememberUsageTab, type UsageTab } from './UsageTabs'
+import { AlertTriangle, ExternalLink, RefreshCw } from '../lib/icons'
 import { useComputers } from '../lib/computers'
 import {
   ALL_COMPUTERS, THIS_COMPUTER, resetsLabel, totalResets, formatResetLine, orderUsageWindows, remainingNow, rememberedUsageComputer, rememberUsageComputer, resetTooltip, shortUsageNote,
@@ -156,7 +158,6 @@ export interface SubscriptionUsageViewProps {
   onSelect?: (value: string) => void
   /** Other computers' readings, by node id, when they share them. */
   remote?: readonly ComputerUsage[]
-  onBack: () => void
   onRefresh: () => void
   onManage: (url: string) => void
   /** Saves or removes the key of the CLI API proxy a provider's usage is read through. */
@@ -174,9 +175,13 @@ export interface SubscriptionUsageViewProps {
   /** The provider Disable is asking about, and the answer. */
   disableAsk?: ProviderUsage | null
   onDisableAnswer?: (confirmed: boolean) => void
+  /** Usage history over time. With it the page has three tabs: Tokens and Cost show it, Limits the limits. */
+  history?: ReactNode
+  tab?: UsageTab
+  onTab?: (tab: UsageTab) => void
 }
 
-export function SubscriptionUsageView({ usage, loading, failed, now, computers, selected, onSelect, remote, onBack, onRefresh, onManage, onSaveProxyKey, onClearProxyKey, loadingIds, onReconnect, hidden, rowActions, disableAsk, onDisableAnswer, onUseReset }: SubscriptionUsageViewProps) {
+export function SubscriptionUsageView({ usage, loading, failed, now, computers, selected, onSelect, remote, onRefresh, onManage, onSaveProxyKey, onClearProxyKey, loadingIds, onReconnect, hidden, rowActions, disableAsk, onDisableAnswer, onUseReset, history, tab = 'tokens', onTab }: SubscriptionUsageViewProps) {
   const [showHidden, setShowHidden] = useState(false)
   // Using a limit reset, for one card at a time: asked from its header button, answered in its own row.
   const [resetFlow, setResetFlow] = useState<ResetFlow | null>(null)
@@ -245,91 +250,102 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
   const otherShown = otherOpen ?? subscriptions.length === 0
   const toggleOther = () => { const next = !otherShown; setOtherOpen(next); rememberSectionOpen('other', next) }
   const toggleAttention = () => { const next = !attentionOpen; setAttentionOpen(next); rememberSectionOpen('attention', next) }
+  // With history, the limits are one of the page's tabs; without it they are the whole page.
+  const showLimits = !history || tab === 'limits'
   const revealAttention = () => {
     setAttentionOpen(true)
     rememberSectionOpen('attention', true)
-    document.getElementById('usage-attention')?.scrollIntoView({ block: 'nearest', behavior: motionAllowed() ? 'smooth' : 'auto' })
+    onTab?.('limits')
+    // On another tab the section is drawn first, then scrolled to.
+    requestAnimationFrame(() => document.getElementById('usage-attention')?.scrollIntoView({ block: 'nearest', behavior: motionAllowed() ? 'smooth' : 'auto' }))
   }
-  return <section className="subscription-usage-page settings-scope" aria-labelledby="usage-title">
-    <header className="rail-page-header usage-heading">
-      <button type="button" className="settings-icon-btn" onClick={onBack} aria-label="Back" title="Back"><ArrowLeft size={14} aria-hidden="true" /></button>
-      <h1 id="usage-title">Subscription usage</h1>
-      {computers && <Select
-        className="usage-computer-select"
-        variant="menu"
-        size="small"
-        ariaLabel="Computer"
-        data-testid="usage-computer"
-        value={picked}
-        onChange={(value) => onSelect?.(value)}
-        options={[
-          { value: ALL_COMPUTERS, label: 'All computers' },
-          { value: THIS_COMPUTER, label: `${computers.selfName} · this computer` },
-          ...computers.others.map((other) => ({ value: other.id, label: other.name }))
-        ]}
-      />}
-      {attention.length > 0 && <button type="button" className="usage-attention-chip" data-testid="usage-attention-chip" onClick={revealAttention} title="Needs attention" aria-label={`${attention.length} need attention`}>
-        <AlertTriangle size={12} aria-hidden="true" />{attention.length}
-      </button>}
-      <button type="button" className="settings-icon-btn" data-testid="usage-refresh" onClick={onRefresh} disabled={loading} aria-busy={loading || undefined} aria-label="Refresh usage" title="Refresh">
-        <RefreshCw size={14} aria-hidden="true" className={loading ? 'icon-spin' : undefined} />
-      </button>
+  return <section className="subscription-usage-page settings-scope" aria-label="Usage">
+    <header className={`rail-page-header usage-heading${history ? ' has-tabs' : ''}`}>
+      <div className="usage-heading-start">
+        {computers && showLimits && <Select
+          className="usage-computer-select"
+          variant="menu"
+          size="small"
+          ariaLabel="Computer"
+          data-testid="usage-computer"
+          value={picked}
+          onChange={(value) => onSelect?.(value)}
+          options={[
+            { value: ALL_COMPUTERS, label: 'All computers' },
+            { value: THIS_COMPUTER, label: `${computers.selfName} · this computer` },
+            ...computers.others.map((other) => ({ value: other.id, label: other.name }))
+          ]}
+        />}
+      </div>
+      {history && <UsageTabs tab={tab} onTab={(next) => onTab?.(next)} />}
+      <div className="usage-heading-end">
+        {attention.length > 0 && <button type="button" className="usage-attention-chip" data-testid="usage-attention-chip" onClick={revealAttention} title="Needs attention" aria-label={`${attention.length} need attention`}>
+          <AlertTriangle size={12} aria-hidden="true" />{attention.length}
+        </button>}
+        <button type="button" className="settings-icon-btn" data-testid="usage-refresh" onClick={onRefresh} disabled={loading} aria-busy={loading || undefined} aria-label="Refresh usage" title="Refresh">
+          <RefreshCw size={14} aria-hidden="true" className={loading ? 'icon-spin' : undefined} />
+        </button>
+      </div>
     </header>
     <div className="subscription-usage-page-body">
-      <div className="usage-content">
-        {failed && <p className="usage-error" role="alert" data-testid="usage-error">
-          <span>
-            <span className="settings-status-bad">Couldn&apos;t refresh usage.</span>
-            {usage && <span className="settings-muted" data-testid="usage-stale"> {readAt ? `Showing usage from ${readAt}.` : 'Showing earlier usage.'}</span>}
-          </span>
-          <button type="button" className="settings-btn" data-testid="usage-retry" onClick={onRefresh} disabled={loading}>Retry</button>
-        </p>}
-        {!usage && loading && <DelayedLoader label="Loading usage" className="usage-loader" data-testid="usage-loading" />}
-        {usage && rows.length === 0 && !loading && <p className="settings-muted usage-empty" data-testid="usage-empty">{pickedOther ? 'No usage shared yet.' : 'No subscription providers are connected.'}</p>}
-        {subscriptions.map(({ key, provider, computerName, loading: waiting }) => {
-          // Proxy controls act on this computer's Claude only.
-          const local = !computerName || computerName === computers?.selfName
-          return <UsageProviderCard
-            key={key}
-            provider={provider}
-            {...(computerName ? { computerName } : {})}
-            waiting={waiting}
-            local={local}
-            now={now}
-            canReset={!!onUseReset && local && !!provider.resettable}
-            flow={resetFlow?.providerId === provider.id ? resetFlow : null}
-            onRefresh={onRefresh}
-            onManage={onManage}
-            {...(onSaveProxyKey ? { onSaveProxyKey } : {})}
-            {...(onClearProxyKey ? { onClearProxyKey } : {})}
-            onStartReset={startReset}
-            onConfirmReset={confirmReset}
-            onCancelReset={cancelReset}
-          />
-        })}
-        {others.length > 0 && <UsageCollapsibleSection id="usage-other" title="Other usage" count={others.length} open={otherShown} onToggle={toggleOther}>
-          {others.map((row) => listRow('other', row))}
-        </UsageCollapsibleSection>}
-        {attention.length > 0 && <UsageCollapsibleSection id="usage-attention" title="Needs attention" count={attention.length} open={attentionOpen} onToggle={toggleAttention} dimmed>
-          {attention.map((row) => listRow('attention', row))}
-        </UsageCollapsibleSection>}
-        {disableAsk && onDisableAnswer && <Modal
-          open
-          title={`Disable ${disableAsk.label}?`}
-          hideTitle
-          className="git-discard-dialog"
-          onClose={() => onDisableAnswer(false)}
-          footer={<>
-            <button type="button" className="btn" onClick={() => onDisableAnswer(false)}>Cancel</button>
-            <button type="button" className="btn btn-danger" data-testid="usage-disable-confirm" onClick={() => onDisableAnswer(true)}>Disable</button>
-          </>}
-        >
-          <p className="git-discard-lead">Disable {disableAsk.label}?</p>
-          <p className="git-discard-detail">It won&apos;t be offered for new threads. You can turn it back on in Settings.</p>
-        </Modal>}
-        {hiddenCount > 0 && <p className="usage-hidden-footer settings-muted" data-testid="usage-hidden-footer">
-          {hiddenCount} hidden · <button type="button" className="usage-text-btn" data-testid="usage-hidden-toggle" onClick={() => setShowHidden((value) => !value)}>{showHidden ? 'Hide' : 'Show'}</button>
-        </p>}
+      <div className={`usage-content${history ? ' has-history' : ''}`}>
+        {/* Kept while Limits shows, so coming back draws the last reading at once. */}
+        {history && <div id="usage-panel-history" role="tabpanel" aria-label={tab === 'cost' ? 'Cost' : 'Tokens'} hidden={tab === 'limits'}>{history}</div>}
+        {showLimits && <div id="usage-panel-limits" {...(history ? { role: 'tabpanel', 'aria-label': 'Limits', className: 'usage-limits' } : {})}>
+          {failed && <p className="usage-error" role="alert" data-testid="usage-error">
+            <span>
+              <span className="settings-status-bad">Couldn&apos;t refresh usage.</span>
+              {usage && <span className="settings-muted" data-testid="usage-stale"> {readAt ? `Showing usage from ${readAt}.` : 'Showing earlier usage.'}</span>}
+            </span>
+            <button type="button" className="settings-btn" data-testid="usage-retry" onClick={onRefresh} disabled={loading}>Retry</button>
+          </p>}
+          {!usage && loading && <DelayedLoader label="Loading usage" className="usage-loader" data-testid="usage-loading" />}
+          {usage && rows.length === 0 && !loading && <p className="settings-muted usage-empty" data-testid="usage-empty">{pickedOther ? 'No usage shared yet.' : 'No subscription providers are connected.'}</p>}
+          {subscriptions.map(({ key, provider, computerName, loading: waiting }) => {
+            // Proxy controls act on this computer's Claude only.
+            const local = !computerName || computerName === computers?.selfName
+            return <UsageProviderCard
+              key={key}
+              provider={provider}
+              {...(computerName ? { computerName } : {})}
+              waiting={waiting}
+              local={local}
+              now={now}
+              canReset={!!onUseReset && local && !!provider.resettable}
+              flow={resetFlow?.providerId === provider.id ? resetFlow : null}
+              onRefresh={onRefresh}
+              onManage={onManage}
+              {...(onSaveProxyKey ? { onSaveProxyKey } : {})}
+              {...(onClearProxyKey ? { onClearProxyKey } : {})}
+              onStartReset={startReset}
+              onConfirmReset={confirmReset}
+              onCancelReset={cancelReset}
+            />
+          })}
+          {others.length > 0 && <UsageCollapsibleSection id="usage-other" title="Other usage" count={others.length} open={otherShown} onToggle={toggleOther}>
+            {others.map((row) => listRow('other', row))}
+          </UsageCollapsibleSection>}
+          {attention.length > 0 && <UsageCollapsibleSection id="usage-attention" title="Needs attention" count={attention.length} open={attentionOpen} onToggle={toggleAttention} dimmed>
+            {attention.map((row) => listRow('attention', row))}
+          </UsageCollapsibleSection>}
+          {disableAsk && onDisableAnswer && <Modal
+            open
+            title={`Disable ${disableAsk.label}?`}
+            hideTitle
+            className="git-discard-dialog"
+            onClose={() => onDisableAnswer(false)}
+            footer={<>
+              <button type="button" className="btn" onClick={() => onDisableAnswer(false)}>Cancel</button>
+              <button type="button" className="btn btn-danger" data-testid="usage-disable-confirm" onClick={() => onDisableAnswer(true)}>Disable</button>
+            </>}
+          >
+            <p className="git-discard-lead">Disable {disableAsk.label}?</p>
+            <p className="git-discard-detail">It won&apos;t be offered for new threads. You can turn it back on in Settings.</p>
+          </Modal>}
+          {hiddenCount > 0 && <p className="usage-hidden-footer settings-muted" data-testid="usage-hidden-footer">
+            {hiddenCount} hidden · <button type="button" className="usage-text-btn" data-testid="usage-hidden-toggle" onClick={() => setShowHidden((value) => !value)}>{showHidden ? 'Hide' : 'Show'}</button>
+          </p>}
+        </div>}
       </div>
     </div>
   </section>
@@ -348,6 +364,9 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   const linked = Object.keys(byNode).length > 0
   const selfName = useAppStore((state) => localDeviceName(state.appInfo?.deviceName))
   const [picked, setPicked] = useState(rememberedUsageComputer)
+  const [tab, setTab] = useState<UsageTab>(readUsageTab)
+  const changeTab = useCallback((next: UsageTab) => { setTab(next); rememberUsageTab(next) }, [])
+  const pickComputer = useCallback((value: string) => { setPicked(value); rememberUsageComputer(value) }, [])
   const effective = usageSelection(picked, [THIS_COMPUTER, ...others.map((other) => other.id)])
   useEffect(() => {
     // The picked computer went away: back to All computers, also for the rest of the session.
@@ -449,8 +468,7 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
     now={now}
     computers={linked ? { selfName, others } : undefined}
     selected={effective}
-    onSelect={(value) => { setPicked(value); rememberUsageComputer(value) }}
-    onBack={onClose}
+    onSelect={pickComputer}
     onRefresh={refresh}
     onManage={manageUsage}
     onSaveProxyKey={saveProxyKey}
@@ -462,5 +480,11 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
     onUseReset={useReset}
     disableAsk={disableAsk}
     onDisableAnswer={(confirmed) => (confirmed && disableAsk ? void disable(disableAsk) : setDisableAsk(null))}
+    history={<UsageHistorySection
+      measure={tab === 'cost' ? 'cost' : 'tokens'}
+      {...(linked ? { devices: { selfName, others }, device: effective, onDevice: pickComputer } : {})}
+    />}
+    tab={tab}
+    onTab={changeTab}
   />
 }

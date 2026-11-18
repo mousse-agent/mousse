@@ -141,6 +141,8 @@ import { ConversationBranchService, FIRST_BRANCH_ID } from '../actions/Conversat
 import { discardPendingChangesAsync, gitAsync as workspaceGitAsync } from '../actions/git'
 import { IndexLockedError, leftAsItIsText } from '../actions/provenDiscard'
 import { getMousseHomeDir } from '../data/paths'
+import { usageHistoryReader } from '../usageHistory/usageHistoryReader'
+import { USAGE_AGENT_LABELS, USAGE_HISTORY_RANGES, type UsageAgentId } from '../../shared/usageHistory'
 import { abortKeptNotice, keepCopy, keepExistingCommit, KeepCopyRefusedError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
 import { takeSnapshotAsync } from '../actions/snapshots'
 import { randomUUID } from 'node:crypto'
@@ -3851,6 +3853,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(ctx.mms.harness?.instances.usageSlots({ kind: 'device' }) ?? [])
       ]
       return { slots: usageSlots(ctx.mms, slots) }
+    }
+    // Usage history read from the coding agents' own logs on this computer (`usageHistory/`). Another of the
+    // person's computers asks over the device link to show it beside its own; it gets the numbers, not the paths.
+    case 'usage.history': {
+      const p = isObject(params) ? params : {}
+      const range = USAGE_HISTORY_RANGES.find((value) => value === p.range) ?? '30d'
+      const timeZone = asOptionalString(p.timeZone, 64)
+      const agent = typeof p.agent === 'string' && Object.hasOwn(USAGE_AGENT_LABELS, p.agent) ? p.agent as UsageAgentId : undefined
+      const history = await usageHistoryReader(ctx.mms.getHomeDir()).history({ range, ...(timeZone ? { timeZone } : {}), ...(agent ? { agent } : {}) })
+      return connectionIsLocal(ctx.connection) ? history : { ...history, sources: history.sources.map((source) => ({ ...source, path: '' })) }
     }
     case 'providers.getUsageFor': {
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')

@@ -394,6 +394,7 @@ export const PROTOCOL_METHODS = [
   'providers.getUsage',
   'providers.getSubscriptionUsage',
   'providers.usageSlots',
+  'usage.history',
   'providers.getUsageFor',
   'providers.useLimitReset',
   'providers.setUsageProxyKey',

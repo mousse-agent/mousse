@@ -224,7 +224,9 @@
       "node_modules/@cursor/sdk-*/**",
       "out/main/cursorHost.js",
       "out/main/threadDbWorker.js",
-      "out/cli/threadDbWorker.js"
+      "out/cli/threadDbWorker.js",
+      "out/main/usageHistoryWorker.js",
+      "out/cli/usageHistoryWorker.js"
     ],
     "npmRebuild": false,
     "extraResources": [

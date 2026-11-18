@@ -94,7 +94,8 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(
     'bridge.hub.result': [['id'], []],
     'bridge.hub.cancel': [['id'], []],
     'bridge.hub.requests': [[], ['target']],
-    'bridge.hub.storage': [['target'], []]
+    'bridge.hub.storage': [['target'], []],
+    'bridge.hub.usageHistory': [['target', 'range'], ['timeZone', 'agent']]
   }
   const [required, optional] = fields[method]
   const row = object(value, required, optional)
@@ -213,6 +214,8 @@ export async function executeBridgeHubLocal(
       return hub.requests(row.target)
     case 'bridge.hub.storage':
       return hub.storage(row.target)
+    case 'bridge.hub.usageHistory':
+      return hub.usageHistory(row.target, { range: row.range, ...(row.timeZone ? { timeZone: row.timeZone } : {}), ...(row.agent ? { agent: row.agent } : {}) })
     case 'bridge.hub.detach':
       if (!events) throw new NetError('forbidden')
       hub.detachFor(events.owner, row.ref)

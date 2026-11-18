@@ -39,7 +39,7 @@ function render(patch: Partial<Parameters<typeof SubscriptionUsageView>[0]> = {}
   const onReconnect = vi.fn()
   act(() => root!.render(createElement(SubscriptionUsageView, {
     usage: { providers, fetchedAt: '2026-11-09T12:00:00Z' }, loading: false, failed: false, now: Date.parse('2026-11-09T12:00:00Z'),
-    onBack: () => {}, onRefresh: () => {}, onManage: () => {}, onReconnect, ...patch
+    onRefresh: () => {}, onManage: () => {}, onReconnect, ...patch
   })))
   return { onReconnect }
 }
@@ -73,9 +73,11 @@ describe('the three sections', () => {
     expect(all('[data-testid="usage-other-row"]')).toHaveLength(2)
   })
 
-  it('the header chip opens Needs attention and brings it into view, things to fix only', () => {
+  it('the header chip opens Needs attention and brings it into view, things to fix only', async () => {
     render()
     act(() => q('[data-testid="usage-attention-chip"]')!.click())
+    // It scrolls on the next frame, once the Limits tab is showing.
+    await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)) })
     expect(all('[data-testid="usage-attention-row"]').map((row) => row.textContent)).toEqual([
       'ChatGPT subscriptionSigned outReconnect',
       'Grok (xAI)Session expiredReconnect'
