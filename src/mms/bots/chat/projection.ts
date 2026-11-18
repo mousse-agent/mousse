@@ -355,7 +355,7 @@ export class BotChatProjection {
 
   /** A lightweight row-kind check for telling priority; no card or message reads. */
   isActionMessage(row: Pick<BotMessageRow, 'id'>): boolean {
-    return row.id.startsWith('bm_action_') && this.options.asksFirst?.() === true
+    return row.id.startsWith('bm_action_')
   }
 
   toMessage(row: BotMessageRow): BotChatMessage {
