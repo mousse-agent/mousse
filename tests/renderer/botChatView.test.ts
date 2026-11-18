@@ -3343,3 +3343,25 @@ it('asks for the AWS secret half without offering to keep a public ID',async()=>
  await open();await type(host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!,'AKIAIOSFODNN7EXAMPLE')
  expect(button('Keep as secret')).toBeUndefined();expect(host.textContent).toContain('paste its secret access key too')
 })
+it.each(['edit','send'])('clears the kept notice on the next %s',async action=>{
+ const key='sk-'+'T'.repeat(48)
+ window.mousse.platformRequest={request:vi.fn(async()=>({name:'OPENAI_API_KEY'}))} as never
+ await open();const field=host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+ await type(field,key);await click(button('Keep as secret'))
+ expect(host.textContent).toContain('Kept as OPENAI_API_KEY')
+ if(action==='edit') await type(field,'A different message')
+ else await click(button('Send message'))
+ expect(host.textContent).not.toContain('Kept as OPENAI_API_KEY')
+ if(action==='send') {await type(field,key);expect(button('Keep as secret')).toBeTruthy()}
+})
+it('forgets the kept value after its day expires',async()=>{
+ const key='sk-'+'V'.repeat(48)
+ const clock=vi.spyOn(Date,'now');const start=Date.now();clock.mockReturnValue(start)
+ try {
+ window.mousse.platformRequest={request:vi.fn(async()=>({name:'OPENAI_API_KEY'}))} as never
+ await open();const field=host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+ await type(field,key);await click(button('Keep as secret'))
+ clock.mockReturnValue(start+24*60*60*1000+1)
+ await type(field,key);expect(field.value).toBe(key);expect(button('Keep as secret')).toBeTruthy()
+ } finally {clock.mockRestore()}
+})
