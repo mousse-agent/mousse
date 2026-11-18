@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react'
 import type { UIMessage } from 'ai'
 import type { SubagentSummary } from '../../shared/subagents'
-import { collectSubagentCalls, joinSubagentCards, type SubagentCardModel } from '../chat/adapters/subagentCards'
+import { collectSubagentCalls, joinSubagentCards, nameRemovedSubagents, type SubagentCardModel } from '../chat/adapters/subagentCards'
 import { collectNativeSubagentCards } from '../chat/adapters/nativeSubagents'
 import { isTurnActivePhase } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
@@ -20,7 +20,6 @@ const NO_ROWS: SubagentSummary[] = []
 export function useSubagentCardModels(threadId: string | null | undefined, messages: readonly UIMessage[]): ReadonlyMap<string, SubagentCardModel> {
   const live = useSubagents(threadId)
   const removed = useAppStore((s) => (threadId ? s.removedSubagentsByParent[threadId] : undefined) ?? NO_ROWS)
-  const subagents = useMemo(() => (removed.length === 0 ? live : [...live, ...removed]), [live, removed])
   const loaded = useAppStore((s) => (threadId ? s.subagentsByParent[threadId] !== undefined : false))
   const turnActive = useAppStore((s) => (threadId ? isTurnActivePhase(s.turnStates[threadId]?.phase ?? 'idle') : false))
   // Background agents a settled turn left running are still going while the thread waits on background work.
@@ -28,12 +27,14 @@ export function useSubagentCardModels(threadId: string | null | undefined, messa
   const previous = useRef<ReadonlyMap<string, SubagentCardModel>>(NONE)
   const cards = useMemo(() => {
     const calls = collectSubagentCalls(messages)
+    // A removed subagent has lost its thread's name: the transcript's notices give it back.
+    const subagents = removed.length === 0 ? live : [...live, ...nameRemovedSubagents(removed, messages)]
     const joined = calls.length === 0 ? NONE : joinSubagentCards(calls, subagents, { loaded, previous: previous.current, turnActive })
     const native = collectNativeSubagentCards(messages, backgroundLive, turnActive)
     const next = native.size === 0 ? joined : new Map([...joined, ...native])
     // A streamed delta changes no card: the same map keeps every row that reads it from rendering again.
     return sameCards(previous.current, next) ? previous.current : next
-  }, [messages, subagents, loaded, turnActive, backgroundLive])
+  }, [messages, live, removed, loaded, turnActive, backgroundLive])
   // Remembered once the render is committed, so a render never writes it.
   useEffect(() => {
     previous.current = cards

@@ -125,6 +125,36 @@ describe('a subagent whose thread was deleted', () => {
     expect(card!.line).toContain('Failed')
     expect(card!.line).toContain('The provider refused the request.')
   })
+
+  it('is found by an older call that recorded only its title, through the name its result notice kept', async () => {
+    listed = [row(CHILD, '', [task('d1', 2, { summary: 'Found two bugs.' })], { removed: true })]
+    // Recorded before calls kept the task they started: the row names the subagent only.
+    const titleOnly = {
+      id: 'a1', role: 'assistant', createdAt: at(2),
+      parts: [{ type: 'tool-Subagent', toolCallId: 'call-a1', state: 'output-available', subagentTool: 'delegate_task', input: { recordVersion: 1, title: 'API reviewer' }, output: 'Started.' }]
+    } as unknown as UIMessage
+    await open([
+      user('u1', 0, 'Review the module'),
+      titleOnly,
+      notice('w1', 10, { delegationId: 'd1', childThreadId: CHILD, title: 'API reviewer', runStatus: 'completed', fullyShown: true }),
+      reply('a2', 11, 'It finished.')
+    ])
+    expect(cardRows()).toEqual([{ title: 'API reviewer', line: 'Found two bugs.', opens: false }])
+    expect(host.querySelectorAll('.subagent-notice')).toHaveLength(0)
+  })
+
+  it('keeps a notice that names no task out of sight, as the card shows that subagent', async () => {
+    listed = [row(CHILD, '', [task('d1', 2, { outcome: 'stopped' })], { removed: true, state: 'stopped' })]
+    await open([
+      user('u1', 0, 'Review the module'),
+      delegate('a1', 2, 'API reviewer', 'd1', CHILD),
+      // An older stop notice, written before notices named their task.
+      notice('w1', 10, { delegationId: '', childThreadId: CHILD, title: 'API reviewer', runStatus: 'cancelled', fullyShown: true, event: 'stopped' }),
+      reply('a2', 11, 'It was stopped.')
+    ])
+    expect(cardRows()).toHaveLength(1)
+    expect(host.querySelectorAll('.subagent-notice')).toHaveLength(0)
+  })
 })
 
 describe('a follow-up task given with a thread tool', () => {

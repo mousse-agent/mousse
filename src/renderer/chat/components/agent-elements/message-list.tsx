@@ -1450,7 +1450,9 @@ export const MessageList = memo(function MessageList({
     const threads = new Set<string>();
     for (const card of subagentCards.values()) {
       if (card.delegationId) ids.add(card.delegationId);
-      if (card.childThreadId) threads.add(card.childThreadId);
+      // A deleted subagent's card opens nothing, but its notices are still its own.
+      const thread = card.childThreadId ?? card.removedThreadId;
+      if (thread) threads.add(thread);
       if (card.native?.taskId) ids.add(card.native.taskId);
     }
     return { cardedSubagents: ids, cardedThreads: threads };

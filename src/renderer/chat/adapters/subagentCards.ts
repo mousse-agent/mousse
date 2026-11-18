@@ -1,5 +1,6 @@
 import type { UIMessage } from 'ai'
 import type { SubagentState, SubagentSummary, SubagentTaskSummary, SubagentWaitingOn } from '../../../shared/subagents'
+import { readSubagentNotice } from './subagentNotice'
 import { isRefusedSubagentResult, isSubagentStartTool, readSubagentResult, toolResultText, type SubagentStartTool } from '../../../shared/subagentTools'
 
 /**
@@ -28,6 +29,23 @@ export function subagentFollowUpTask(part: { type?: unknown; state?: unknown; ou
     childThreadId: typeof result.threadId === 'string' ? result.threadId : null,
     title: typeof result.title === 'string' && result.title.trim() ? result.title : null
   }
+}
+
+/**
+ * Removed subagents (their thread is gone) named again. The daemon keeps no name once a thread is deleted, but the
+ * notices in the parent's transcript name the subagent they report on, as it was called then. A call that recorded
+ * only the subagent's title finds its task by that name. A row with a title, or with no notice naming it, is kept.
+ */
+export function nameRemovedSubagents(removed: readonly SubagentSummary[], messages: readonly UIMessage[]): SubagentSummary[] {
+  if (!removed.some((row) => !row.title)) return removed as SubagentSummary[]
+  const titles = new Map<string, string>()
+  for (const message of messages) {
+    for (const item of readSubagentNotice(message) ?? []) {
+      const title = item.title?.replace(/s+/g, ' ').trim()
+      if (title) titles.set(item.childThreadId, title)
+    }
+  }
+  return removed.map((row) => (row.title || !titles.has(row.childThreadId) ? row : { ...row, title: titles.get(row.childThreadId)! }))
 }
 
 /** One start-a-task call in the parent's transcript. */
@@ -79,8 +97,11 @@ export interface SubagentCardModel {
    * thread has started for it. Its row stays hidden and the turn's progress line says "Starting subagent…".
    */
   spawning?: boolean
-  /** The subagent's thread is gone (deleted): the card shows what the daemon kept of the task and opens nothing. */
-  removed?: true
+  /**
+   * Set when the subagent's thread is gone (deleted): the id it had. The card shows what the daemon kept of the task
+   * and opens nothing (`childThreadId` is null); this id only matches the subagent's notices to the card.
+   */
+  removedThreadId?: string
   /** The start of the result the daemon kept for the task, for a card whose thread is gone. */
   summary?: string
   /** Set on a subagent the runtime started with its own tool (Claude Code's `Agent`): it has no thread to open. */
@@ -193,7 +214,7 @@ function modelOf(call: SubagentCall, entry: TaskEntry, exact: boolean): Subagent
     delegationId: task.delegationId,
     // A deleted subagent's thread name is gone with it: the call names it.
     title: subagent.title || callTitle(call),
-    ...(removed ? { removed: true as const } : {}),
+    ...(removed ? { removedThreadId: subagent.childThreadId } : {}),
     ...(removed && task.summary ? { summary: task.summary } : {}),
     state: taskState(subagent, task, latest),
     provider: subagent.provider,
