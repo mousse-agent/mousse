@@ -1,5 +1,6 @@
 import { NetError } from '../../shared/net/errors'
 import type { NodeId, StreamId } from '../../shared/net'
+import { engineLimits } from './limits'
 import { EngineClient, type EngineClientPort } from './session/client'
 import { EngineHost, type EngineHostPort } from './session/host'
 import type { EngineConnection } from './session/transport'
@@ -9,6 +10,11 @@ export interface EngineSessionHooks {
   onClientReady(node: NodeId): void
   /** The last open client of this pairing closed. */
   onClientClosed(node: NodeId): void
+  /**
+   * An outbound connection is the one in use and nothing waits on an older one any more: the helper is told
+   * (`path.reopened`), which makes it current there and closes the older one with `PATH_REPLACED`.
+   */
+  onPathInUse?(connection: EngineConnection): void
 }
 
 /**
@@ -46,7 +52,8 @@ export class EngineSessions {
     const held = this.clients.get(node) ?? new Set<EngineClient>()
     held.add(client)
     this.clients.set(node, held)
-    connection.onClose(() => {
+    // The client's current connection closing (not an old path of a switch) ends it.
+    client.onClosed(() => {
       held.delete(client)
       if (this.ready.get(node) !== client) return
       // The slot still holds this generation: hand it to the newest other open, handoff-ready one, if any.
@@ -62,16 +69,44 @@ export class EngineSessions {
     await client.hello(this.options.name())
     if (client.state() !== 'open') throw new NetError('peer_offline')
     this.handoffReady.add(client)
-    // An older generation whose hello answered later does not take the slot from a newer one.
     const current = this.ready.get(node)
-    if (
-      current &&
-      current.state() === 'open' &&
-      this.generationOf(current) > this.generationOf(client)
-    )
+    if (current && current !== client && current.state() === 'open') {
+      // An older generation whose hello answered later does not take over from a newer one.
+      if (this.generationOf(current) > this.generationOf(client)) return
+      try {
+        await this.switchPath(node, current, client)
+      } catch (error) {
+        held.delete(client)
+        throw error
+      }
       return
+    }
     this.ready.set(node, client)
     this.options.hooks.onClientReady(node)
+    this.options.hooks.onPathInUse?.(connection)
+  }
+
+  /**
+   * The path switch (§3.6) onto a newer outbound connection of a pairing (a renewed path, or one a dial opened
+   * while another was up; the helper keeps either waiting until the app says it moved): the client in use moves
+   * there once every live subscription has its head on it, and the newer connection's own client is set aside, so
+   * whoever holds the client in use keeps it. The old connection stays until the calls running on it are done
+   * (or the drain bound passed); then the helper is told the new one is in use and closes the old one with
+   * `PATH_REPLACED`. If the newer connection fails before the move, it is dropped and the old one stays.
+   */
+  private async switchPath(
+    node: NodeId,
+    current: EngineClient,
+    candidate: EngineClient
+  ): Promise<void> {
+    const limits = engineLimits()
+    const old = await current.switchTo(candidate.connection, limits.pathSwitchDeadlineMs)
+    this.clients.get(node)?.delete(candidate)
+    this.generations.set(current, this.generationOf(candidate))
+    const next = candidate.connection
+    void current.drained(old, limits.pathDrainMs).then(() => {
+      if (next.isOpen()) this.options.hooks.onPathInUse?.(next)
+    })
   }
 
   private readonly handoffReady = new WeakSet<EngineClient>()
@@ -116,12 +151,11 @@ export class EngineSessions {
         host.endSubscriptions()
         host.connection.close(reason)
       }
-    for (const client of [...(this.clients.get(node) ?? [])]) client.connection.close(reason)
+    for (const client of [...(this.clients.get(node) ?? [])]) client.close(reason)
   }
 
   closeAll(reason: string): void {
     for (const host of [...this.hosts]) host.connection.close(reason)
-    for (const held of this.clients.values())
-      for (const client of [...held]) client.connection.close(reason)
+    for (const held of this.clients.values()) for (const client of [...held]) client.close(reason)
   }
 }

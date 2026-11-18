@@ -29,7 +29,8 @@ const CHECKS = {
   'phase1a.once-or-unknown': 'tests/netEngine/checks/onceOrUnknown.test.ts',
   'phase1a.pair-both-ways': 'tests/netEngine/checks/pairBothWays.test.ts',
   'phase1a.removal': 'tests/netEngine/checks/removal.test.ts',
-  'phase1a.reconnect': 'tests/netEngine/checks/reconnect.test.ts'
+  'phase1a.reconnect': 'tests/netEngine/checks/reconnect.test.ts',
+  'phase1a.path-switch': 'tests/netEngine/checks/pathSwitch.test.ts'
 }
 /** The checks that run as cross-machine cells, one role per computer. */
 const CROSS_MACHINE = new Set([])

@@ -67,15 +67,17 @@ describe('readTicket', () => {
 describe('client selection', () => {
   const node = newId('node') as NodeId
   /** Two outbound connections to one pairing; the other side answers each hello after the delay given. */
-  function linked(delays: number[]) {
+  function linked(delays: number[], callMs = 0) {
     const ready: string[] = []
+    const inUse: string[] = []
     const sessions = new EngineSessions({
       host: {} as never,
       client: {} as never,
       name: () => 'caller',
       hooks: {
         onClientReady: (id) => ready.push(id),
-        onClientClosed: (id) => ready.push(`closed ${id}`)
+        onClientClosed: (id) => ready.push(`closed ${id}`),
+        onPathInUse: (connection) => inUse.push(connection.id)
       }
     })
     const links = delays.map((delay) => {
@@ -90,11 +92,16 @@ describe('client selection', () => {
         channel.onMessage((message) => {
           if (message.header.t === 'hello')
             setTimeout(() => channel.send({ t: 'hello', proto: 1, name: 'owner' }), delay)
+          if (message.header.t === 'call')
+            setTimeout(() => {
+              channel.send({ t: 'result', result: { on: link.outbound.id } })
+              channel.end()
+            }, callMs)
         })
       })
       return link
     })
-    return { sessions, links, ready }
+    return { sessions, links, ready, inUse }
   }
   const current = (sessions: EngineSessions): EngineConnection => sessions.client(node).connection
 
@@ -108,6 +115,22 @@ describe('client selection', () => {
     const { sessions, links } = linked([5, 80])
     await Promise.all(links.map((link) => sessions.attach(link.outbound)))
     expect(current(sessions)).toBe(links[1]!.outbound)
+  })
+
+  it('moves to a newer connection, and says it is in use once the call on the older one is answered', async () => {
+    const { sessions, links, inUse } = linked([5, 5], 300)
+    await sessions.attach(links[0]!.outbound)
+    const client = sessions.client(node)
+    expect(inUse).toEqual([links[0]!.outbound.id])
+    const call = client.rpc('net.info', {}, { id: 'rpc_slow' as never, deadlineMs: 5_000 })
+    await sessions.attach(links[1]!.outbound)
+    // The same client now sends on the newer connection; the call already sent stays on the older one.
+    expect(sessions.client(node)).toBe(client)
+    expect(client.connection).toBe(links[1]!.outbound)
+    expect(inUse).toEqual([links[0]!.outbound.id])
+    expect(await call).toEqual({ on: links[0]!.outbound.id })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(inUse).toEqual([links[0]!.outbound.id, links[1]!.outbound.id])
   })
 
   it('keeps the slot when an older connection closes, and hands it back when the newest does', async () => {

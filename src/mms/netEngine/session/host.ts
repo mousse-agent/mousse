@@ -9,7 +9,7 @@ import type {
 } from '../../../shared/net'
 import type { AppendOutcome, BlobStore, EngineCaller, StreamStore } from '../../net/contracts'
 import type { DurableRpcDispatcher } from '../../net/sync/rpcDispatcher'
-import { engineLimits } from '../limits'
+import { engineControl, engineLimits } from '../limits'
 import type { EngineMessage } from './frame'
 import { Channel, toWireError, type EngineConnection, type EngineStream } from './transport'
 
@@ -188,7 +188,14 @@ export class EngineHost {
     // A handler runs to its deadline: a lost connection does not stop it (the caller asks for its result on the
     // next one); only a revocation does.
     const deadline = AbortSignal.timeout(deadlineMs)
-    const signal = AbortSignal.any([deadline, this.port.revoked(caller)])
+    const signals = [deadline, this.port.revoked(caller)]
+    // The path-switch check's control: the old path closing (PATH_REPLACED) aborts what still runs on it.
+    if (engineControl('abort-on-path-replaced')) {
+      const replaced = new AbortController()
+      this.connection.onClose(() => replaced.abort(new NetError('peer_offline')))
+      signals.push(replaced.signal)
+    }
+    const signal = AbortSignal.any(signals)
     try {
       const result = await this.port.rpc.dispatch(
         h.method,

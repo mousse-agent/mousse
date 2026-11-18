@@ -1,8 +1,4 @@
-import {
-  BLOB_CHUNK_BYTES,
-  DEFAULT_MAX_BLOB_BYTES,
-  MAX_FRAME_BYTES
-} from '../../shared/net/limits'
+import { BLOB_CHUNK_BYTES, DEFAULT_MAX_BLOB_BYTES, MAX_FRAME_BYTES } from '../../shared/net/limits'
 
 /**
  * Every limit of the network engine: a named default here, each overridable by one environment variable. The
@@ -72,7 +68,17 @@ export interface EngineLimits {
   pairbackDeadlineMs: number
   /** The wait before a pairing step that failed (a grant not saved, a pairback not answered) is tried again. */
   pairingRetryMs: number
+  /** How long a renewed path may take to answer hello and give back each live subscription's head (§3.6). */
+  pathSwitchDeadlineMs: number
+  /**
+   * The longest the old path of a switch is kept for the calls still running on it. A call it cuts off is
+   * collected on the new path (`result.get`). Within the renewal lead, so the old path's own deadline is later.
+   */
+  pathDrainMs: number
 }
+
+/** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
+export const HELPER_READ_AHEAD_BYTES = 64 * 1024
 
 export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   maxMessageBytes: MAX_FRAME_BYTES,
@@ -105,7 +111,9 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   helperInitDeadlineMs: 60_000,
   joinDeadlineMs: 15 * 60_000,
   pairbackDeadlineMs: 60_000,
-  pairingRetryMs: 5_000
+  pairingRetryMs: 5_000,
+  pathSwitchDeadlineMs: 30_000,
+  pathDrainMs: 25 * 60_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -139,7 +147,9 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   helperInitDeadlineMs: 'MOUSSE_NET_ENGINE_HELPER_INIT_DEADLINE_MS',
   joinDeadlineMs: 'MOUSSE_NET_ENGINE_JOIN_DEADLINE_MS',
   pairbackDeadlineMs: 'MOUSSE_NET_ENGINE_PAIRBACK_DEADLINE_MS',
-  pairingRetryMs: 'MOUSSE_NET_ENGINE_PAIRING_RETRY_MS'
+  pairingRetryMs: 'MOUSSE_NET_ENGINE_PAIRING_RETRY_MS',
+  pathSwitchDeadlineMs: 'MOUSSE_NET_ENGINE_PATH_SWITCH_DEADLINE_MS',
+  pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS'
 })
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
@@ -174,8 +184,18 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
     for (const key of ['appFrameMaxBytes', 'appDataMaxBytes'] as const)
       keep(key, 'does not fit a DATA frame in a frame')
   if (limits.appStreamCreditBytes + limits.appInteractiveReserveBytes > limits.appCreditBudgetBytes)
-    for (const key of ['appCreditBudgetBytes', 'appStreamCreditBytes', 'appInteractiveReserveBytes'] as const)
+    for (const key of [
+      'appCreditBudgetBytes',
+      'appStreamCreditBytes',
+      'appInteractiveReserveBytes'
+    ] as const)
       keep(key, "does not leave a stream's credit beside the interactive reserve")
+  // The helper reads a stream only while its credit covers what it buffered plus its read-ahead: less never reads.
+  if (limits.appStreamCreditBytes < HELPER_READ_AHEAD_BYTES)
+    keep(
+      'appStreamCreditBytes',
+      `is below the helper's read-ahead (${HELPER_READ_AHEAD_BYTES} bytes)`
+    )
   if (limits.helperRestartFirstMs > limits.helperRestartMaxMs)
     for (const key of ['helperRestartFirstMs', 'helperRestartMaxMs'] as const)
       keep(key, 'makes the first restart wait longer than the longest')
@@ -238,7 +258,9 @@ export function readEngineControl(
   if (!raw) return { problems: [] }
   if (packaged) return { problems: [`${CONTROL_VARIABLE} is ignored by an installed app`] }
   if (!(ENGINE_CONTROLS as readonly string[]).includes(raw))
-    return { problems: [`${CONTROL_VARIABLE}=${JSON.stringify(raw)} is not a known control; none is on`] }
+    return {
+      problems: [`${CONTROL_VARIABLE}=${JSON.stringify(raw)} is not a known control; none is on`]
+    }
   return { control: raw as EngineControl, problems: [] }
 }
 

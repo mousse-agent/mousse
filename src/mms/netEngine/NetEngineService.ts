@@ -301,6 +301,14 @@ export class NetEngineService implements EngineDirectoryPort {
         onClientClosed: (node) => {
           this.options.bridge()?.peerOffline(node)
           this.changed()
+        },
+        // The helper keeps a newer outbound path (renewed, or dialled while one was up) waiting until told.
+        onPathInUse: (connection) => {
+          const conn = Number(connection.id)
+          if (!Number.isSafeInteger(conn) || !this.helper) return
+          void this.helper.request('path.reopened', { conn }).catch(() => {
+            // `not_renewed`: it was current already (the first path); `no_conn`: it is gone.
+          })
         }
       }
     })
