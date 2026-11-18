@@ -3374,3 +3374,21 @@ it('forgets the kept value after its day expires',async()=>{
  await type(field,key);expect(field.value).toBe(key);expect(button('Keep as secret')).toBeTruthy()
  } finally {clock.mockRestore()}
 })
+
+it.each([
+  [{ service: 'OpenAI', host: 'api.openai.com', readOnly: true }, 'OpenAI', false],
+  [{ host: 'api.example.com', readOnly: true }, 'api.example.com', true]
+] as const)('names the service on a private bound card above the bot composer: %s', async (binding, name, warning) => {
+  const calls: string[] = []
+  window.mousse.platformRequest.request = (async (method: string) => {
+    calls.push(method)
+    if (method === 'secrets.requests.list') return { requests: [{ requestId: 'bound', threadId: 'home-key', label: 'API key', reason: 'Read updates', name: 'KEY', binding, savedExists: false }] }
+    return {}
+  }) as never
+  await open(summary('inbox', { name: 'Kai', homeThreadId: 'home-key' }))
+  await settle()
+  const card = host.querySelector('.bot-secret-requests .secret-request-card')!
+  expect(card?.textContent).toContain(`For ${name}, read only. Kai can't see it or send it anywhere else.`)
+  expect(card.textContent?.includes("Mousse can't tell what this service's reads do.")).toBe(warning)
+  expect(calls).toContain('secrets.requests.list')
+})
