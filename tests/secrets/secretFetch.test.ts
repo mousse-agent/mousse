@@ -45,3 +45,7 @@ it('preserves binary bytes around a masked UTF-8 key',async()=>{
  const out=await run();const bytes=readFileSync(out.text.split('File: ')[1]!)
  expect([...bytes.subarray(0,2)]).toEqual([255,0]);expect(bytes.at(-1)).toBe(254);expect(bytes.includes(Buffer.from(value))).toBe(false);expect(bytes.toString('latin1')).toContain('[secret KEY hidden]')
 })
+it('keeps a custom HTTPS origin and port with its fixed Bearer format',async()=>{
+ const {run,vault}=fixture();vault.store('KEY',VALUE,{threadId:'home',keep:'saved',binding:resolveSecretBinding({origin:'https://api.example.com:8443'})})
+ const out=await run({path:'/read'});expect(out.text).toContain('api.example.com:8443');expect(vi.mocked(publicFetch).mock.lastCall?.[0]).toBe('https://api.example.com:8443/read');expect(vi.mocked(publicFetch).mock.lastCall?.[1]?.headers).toEqual({Authorization:`Bearer ${VALUE}`})
+})

@@ -146,12 +146,14 @@ it.each([
 
 // Secret reads opt in; page checks retain their defaults above.
 it('returns redirects for secret HEAD reads with fixed headers and a port', async () => {
- vi.mocked(dns.lookup).mockResolvedValue([{address:'8.8.8.8',family:4}] as never)
+ vi.mocked(dns.lookup).mockResolvedValueOnce([{address:'8.8.8.8',family:4}] as never).mockResolvedValue([{address:'127.0.0.1',family:4}] as never)
  vi.mocked(https.request).mockImplementation(((options:any, callback:any)=>{
+  options.lookup('example.com',{},(_error:unknown,address:string)=>expect(address).toBe('8.8.8.8'))
   expect(options.method).toBe('HEAD'); expect(options.port).toBe('8443'); expect(options.headers.Authorization).toBe('Bearer private')
   const req=new EventEmitter() as any; req.end=()=>{const res=new EventEmitter() as any;res.statusCode=302;res.headers={location:'/next'};callback(res);res.emit('end')};return req
  }) as any)
  expect((await publicFetch('https://example.com:8443/path',{method:'HEAD',headers:{Authorization:'Bearer private'},secretRead:true})).status).toBe(302)
+ expect(dns.lookup).toHaveBeenCalledTimes(1)
 })
 
 it('keeps test address overrides unavailable in packaged builds and without explicit opt in', async () => {
