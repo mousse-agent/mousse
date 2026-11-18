@@ -16,11 +16,11 @@ import { publicFetch } from '../../src/mms/net-public/publicFetch'
 vi.mock('../../src/mms/net-public/publicFetch',()=>({publicFetch:vi.fn()}))
 const cleanups:Array<()=>void>=[]
 afterEach(()=>{cleanups.splice(0).forEach(f=>f());vi.restoreAllMocks()})
-function fixture(){
+function fixture(value='sk-test-private/a+B0123456789'){
  const home=mkdtempSync(join(tmpdir(),'fetch-admission-')),store=new BotStore({profileHome:home})
  cleanups.push(()=>{store.close();rmSync(home,{recursive:true,force:true})})
  const vault=new SecretVault({profileRoot:home,threadAlive:()=>true})
- vault.store('KEY','sk-test-private/a+B0123456789',{threadId:'owner',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
+ vault.store('KEY',value,{threadId:'owner',keep:'saved',binding:resolveSecretBinding({service:'openai'})})
  vault.store('UNBOUND','other-private-value0123456789',{threadId:'owner',keep:'saved'})
  const secrets=createSecretToolHost({vault,requests:new SecretRequests(vault),scratchRoot:home})
  const host={...fakeAppToolHost().host,secrets:()=>secrets,botHomeOf:(id:string)=>id}
@@ -46,7 +46,7 @@ it('keeps the whole allowance after another bot makes 20 refused calls on the ke
 })
 it.each([
  {secret:'UNBOUND'}, {method:'POST'}, {path:'/outside'}, {path:'/v1/models/../files'},
- {headers:{Authorization:'ghp_abcdefghijklmnopqrstuvwxyz'}}, {headers:{Accept:'line\r\nbreak'}},
+ {headers:{Authorization:'ghp_abcdefghijklmnopqrstuvwxyz'}}, {headers:{Accept:'line\r\nbreak'}}, {headers:{Accept:'bad\x01value'}}, {headers:{Accept:'🔐'}},
  {headers:{Accept:'ghp_abcdefghijklmnopqrstuvwxyz'}}, {query:{q:'ghp_abcdefghijklmnopqrstuvwxyz'}}
 ])('validates %j before reserving any allowance',async patch=>{
  const {store,invoke}=fixture()
@@ -54,4 +54,10 @@ it.each([
  expect(store.get('SELECT ran_at FROM bot_actions')?.ran_at).toBeNull()
  expect(publicFetch).not.toHaveBeenCalled()
  if(patch.headers){const args=JSON.parse(String(store.get('SELECT args_json FROM bot_actions')?.args_json));expect(args.headers).toEqual(Object.keys(patch.headers));expect(JSON.stringify(args)).not.toContain('ghp_')}
+})
+
+it.each(['bad\x01key0123456789','bad🔐key0123456789'])('refuses a key that cannot form an HTTP header before counting it',async value=>{
+ const {store,invoke}=fixture(value)
+ expect((await invoke('owner',{secret:'KEY',path:'/v1/models'})).isError).toBe(true)
+ expect(store.get('SELECT ran_at FROM bot_actions')?.ran_at).toBeNull();expect(publicFetch).not.toHaveBeenCalled()
 })
