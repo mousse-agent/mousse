@@ -58,22 +58,6 @@
       "expiresAt": "2026-11-18T09:11:07.367Z"
     },
     {
-      "task": "bot-quiet-event-turns",
-      "session": "Animatrix-71d0f6",
-      "machine": "Animatrix",
-      "branch": "bot-quiet-event-turns",
-      "paths": [
-        "src/mms/bots/activation/BotEngine.ts",
-        "src/mms/bots/store/BotStore.ts",
-        "src/mms/bots/chat/projection.ts",
-        "src/mms/bots/instructions.ts",
-        "src/shared/bots/personal/jobs.ts",
-        "src/mms/bots/changelog.ts"
-      ],
-      "claimedAt": "2026-11-18T07:32:55.214Z",
-      "expiresAt": "2026-11-18T15:14:16.578Z"
-    },
-    {
       "task": "bot-threads-hidden-by-default",
       "session": "Animatrix-7d7f46",
       "machine": "Animatrix",
