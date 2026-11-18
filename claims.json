@@ -31,6 +31,21 @@
       "expiresAt": "2026-11-18T13:15:47.441Z"
     },
     {
+      "task": "bot-threads-hidden-by-default",
+      "session": "Animatrix-7d7f46",
+      "machine": "Animatrix",
+      "branch": "bot-threads-hidden-by-default",
+      "paths": [
+        "src/renderer/components/ThreadsSidebar.tsx",
+        "src/renderer/components/ThreadsContextMenu.tsx",
+        "src/renderer/lib/hiddenThreadsShown.ts",
+        "src/mms/protocol/handlers.ts",
+        "src/mms/run/mcp/appTools/thread.ts"
+      ],
+      "claimedAt": "2026-11-18T09:35:24.569Z",
+      "expiresAt": "2026-11-18T12:35:24.569Z"
+    },
+    {
       "task": "mousse/owner-request-in-a-personal-bot-chat",
       "session": "Animatrix-71802f",
       "machine": "Animatrix",
