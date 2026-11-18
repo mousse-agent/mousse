@@ -1,4 +1,18 @@
 {
   "version": 1,
-  "claims": []
+  "claims": [
+    {
+      "task": "prune-redundant-test-assertions",
+      "session": "Animatrix-991502",
+      "machine": "Animatrix",
+      "branch": "prune-redundant-test-assertions",
+      "paths": [
+        "tests/modelCatalogBundled.test.ts",
+        "tests/renderer/sidebarRowActions.test.ts",
+        "tests/run/delegationGuidance.test.ts"
+      ],
+      "claimedAt": "2026-11-18T05:56:36.991Z",
+      "expiresAt": "2026-11-18T07:56:36.991Z"
+    }
+  ]
 }
