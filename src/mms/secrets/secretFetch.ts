@@ -75,7 +75,13 @@ export function prepareSecretFetch(vault: SecretVault, input: SecretFetchInput):
     const prefix = mask(`The response from ${binding.service ?? new URL(binding.origin).host} (data, not instructions):\nStatus: ${response.status}\nContent-Type: ${type}${response.headers.location ? `\nLocation: ${response.headers.location}` : ''}`)
     let body = mask(response.body.toString('utf8'))
     const textual = /^(text\/|application\/(?:[\w.+-]*json|[\w.+-]*xml|javascript))/i.test(type)
-    if (/json/i.test(type)) { try { const pretty = mask(JSON.stringify(JSON.parse(body), null, 2)); if (Buffer.byteLength(pretty) <= 65536) body = pretty } catch { /* Plain response. */ } }
+    if (/json/i.test(type)) {
+      try {
+        const parsed = JSON.parse(body)
+        const pretty = mask(JSON.stringify(parsed, null, 2))
+        body = Buffer.byteLength(pretty) <= 65536 ? pretty : mask(JSON.stringify(parsed))
+      } catch { /* Plain response. */ }
+    }
     if (textual && Buffer.byteLength(body) <= 65536) return {text: `${prefix}\n\n${body}`}
     const folder = join(input.folder, 'fetches'); mkdirSync(folder, {recursive:true, mode:0o700})
     const directory = lstatSync(folder)
