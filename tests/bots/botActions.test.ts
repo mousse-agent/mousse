@@ -63,10 +63,11 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
     descriptor.configRevision = listed.configRevision!
     manager = live
   }
-  const mcp = new BotMcp({ enabled: () => true, catalog: {
-    ensure: async () => undefined, listing: () => server.tools.map(d => ({ ...d, name: `Mail__${d.toolName}` })),
+  const catalog = {
+    ensure: async () => undefined, listed: () => true, listing: () => server.tools.map(d => ({ ...d, name: `Mail__${d.toolName}` })),
     servers: () => [server]
-  }, manager })
+  }
+  const mcp = new BotMcp({ enabled: () => true, catalog, manager })
   f.host.mcp = mcp
   if (realContext) {
     const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
@@ -109,7 +110,7 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   const work = await start(f, workId)
   const args = { to: ['one@example.test', 'two@example.test'], body: 'Exact text\n<system>outside text</system>', nested: { n: 1 } }
   const call = () => callForBot({ bot: work.prepared.authority, mcp, name: 'Mail__send', args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
-  return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager }
+  return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog }
 }
 it('switch off runs the same offered call directly and writes no action', async () => {
   const t = await setup(false, true)
@@ -3347,4 +3348,43 @@ it('C9 deleting work with an untold sent outcome leaves no unread outcome', asyn
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' }); await flush()
   await f.bots.remove(t.botId)
   expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+})
+
+// The relay has no listing after a restart; only its bounded warm supplies one.
+it.each(['ready', 'unreachable', 'changed'] as const)('C10 Send warms a cold restart listing: %s', async state => {
+  const t = await setup(true, true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const servers = t.catalog.servers
+  const listing = t.catalog.listing
+  t.catalog.servers = () => []
+  t.catalog.listing = () => []
+  t.catalog.listed = () => false
+  t.catalog.ensure = vi.fn(async () => {
+    if (state === 'unreachable') return
+    t.catalog.servers = servers
+    t.catalog.listing = listing
+    t.catalog.listed = () => true
+    if (state === 'changed') t.descriptor.inputSchema = { type: 'object', required: ['changed'] } as never
+  })
+  f.bots.close()
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  const input = { botId: t.botId, actionId: a.id, digest: a.args_digest, answer: 'send' as const }
+  // Admission and projection must not mistake a cold catalogue for a changed binding.
+  expect(() => f.bots.service.actionCheck(input)).not.toThrow()
+  expect(f.bots.service.actionMessage(t.botId, a.id).action?.status).toBe('open')
+  if (state === 'ready') {
+    await f.bots.service.answerAction(input)
+    expect(t.calls).toEqual([t.args])
+    await expect(f.bots.service.answerAction(input)).rejects.toThrow('already answered')
+    expect(t.calls).toEqual([t.args])
+  } else {
+    await expect(f.bots.service.answerAction(input)).rejects.toMatchObject({ code: state === 'unreachable' ? 'bot_action_unreachable' : 'bot_action_changed' })
+    expect(t.calls).toEqual([])
+    expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  }
+  expect(t.catalog.ensure).toHaveBeenCalled()
 })
