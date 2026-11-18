@@ -145,9 +145,17 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => on })
   const off = await provider.chatPreamble({ botId: 'ada', activationId: 'c6-off' })
   expect(off).not.toContain('Tools that send or change things now ask your owner first')
+  const bindingAdvice = BOT_CHANGELOG.find(entry => entry.id === 28)!.text
+  expect(off).toContain(bindingAdvice)
   await settled(provider, 'c6-off')
   on = true
-  expect(await provider.chatPreamble({ botId: 'ada', activationId: 'c6-on' })).toContain('Tools that send or change things now ask your owner first')
+  // A later non-switch entry must not make the withheld switch entry count as delivered, including across restart.
+  const restarted = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => on })
+  expect(await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-on' })).toContain('Tools that send or change things now ask your owner first')
+  await settled(restarted, 'c6-on')
+  const next = await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-after' })
+  expect(next).not.toContain(bindingAdvice)
+  expect(next).not.toContain('Tools that send or change things now ask your owner first')
 })
 
 it('tells existing bots that a pasted secret arrives by name', async () => {
