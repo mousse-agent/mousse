@@ -124,6 +124,23 @@ export class NetEngineService implements EngineDirectoryPort {
   ownName(): string {
     return this.selfName()
   }
+  /** The name the helper last heard, in its `hello` or a `config.set`. */
+  private toldName?: string
+  /**
+   * Tells the helper this computer's name when it changed since the helper heard it: the OS's computer name can
+   * answer after the helper started, and a join or an approval sends the helper's name to the other computer.
+   */
+  async tellName(): Promise<void> {
+    const helper = this.helper,
+      name = this.selfName()
+    if (!helper || name === this.toldName) return
+    try {
+      await helper.request('config.set', { name })
+      if (this.helper === helper) this.toldName = name
+    } catch {
+      // The name it heard last stands.
+    }
+  }
 
   /** Every pairing row, tombstones too (read-only; for diagnostics and tests). */
   peerRows(): EnginePeerRow[] {
@@ -673,7 +690,9 @@ export class NetEngineService implements EngineDirectoryPort {
     helper.channel.onClose(() => {
       if (this.helper === helper) this.helper = undefined
     })
+    const told = this.selfName()
     await helper.hello()
+    this.toldName = told
     this.changed()
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
     if (this.helper === helper) void started.pairing.recover().catch(() => undefined)

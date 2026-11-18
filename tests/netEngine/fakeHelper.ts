@@ -540,6 +540,8 @@ export class FakeHelper {
           })
         }
         case 'config.set':
+          // As the helper: the name joins and approvals send from now on.
+          if (typeof message.name === 'string') this.hello = { ...this.hello, name: message.name }
           return reply()
         case 'shutdown':
           if (this.ignoreShutdown) return
@@ -642,9 +644,12 @@ export class FakeHelper {
           const routes = (message.routes as unknown[]).map(String)
           const bad = routes.find(
             (route) =>
-              !/^tcp:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[f[cd])/i.test(route)
+              !/^tcp:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[f[cd])/i.test(
+                route
+              )
           )
-          if (bad) return reply({ error: 'bad_route', reason: `${bad} is not a private-range address` })
+          if (bad)
+            return reply({ error: 'bad_route', reason: `${bad} is not a private-range address` })
           this.addresses.set(String(message.identity), routes)
           return reply({ routes })
         }

@@ -73,6 +73,16 @@ describeFake('engine device rows', () => {
     await eventually(async () => expect((await status(caller)).devices[0]?.name).toBe('named-owner computer'))
   }, 60_000)
 
+  it('asks with the name the joiner has now, not the one its helper started with', async () => {
+    const owner = await fabric.computer('renamed-owner'),
+      caller = await fabric.computer('renamed-caller')
+    // The OS's computer name answered after the caller's helper started.
+    caller.mms.netEngine.displayName = 'Studio Mac'
+    const invite = await owner.dispatch('netEngine.invite', {}, true)
+    void caller.dispatch('netEngine.join', { ticket: invite.uri }, true).catch(() => undefined)
+    await eventually(async () => expect((await status(owner)).approvals[0]?.name).toBe('Studio Mac'))
+  }, 60_000)
+
   it('ends the invitation a window showed once that window closes or switches profile', async () => {
     const owner = await fabric.computer('closing-owner')
     const lifetime = new AbortController()

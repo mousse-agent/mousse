@@ -58,6 +58,7 @@ export function registerNetEngineMethods(
               await engine.disable()
               return engine.status()
             case 'netEngine.invite': {
+              await engine.tellName()
               const invite = await engine.pairing().invite(engine.ownName())
               // The window that showed the code closed, or switched profile: its invitation ends (§8).
               context.connection?.lifetime?.addEventListener(
@@ -71,9 +72,11 @@ export function registerNetEngineMethods(
               await engine.pairing().cancelInvite(p.invitation)
               return engine.status()
             case 'netEngine.approve':
+              await engine.tellName()
               await engine.pairing().approve(p.request, p.yes)
               return engine.status()
             case 'netEngine.join': {
+              await engine.tellName()
               const row = await engine.pairing().join(p.ticket)
               return { node: row.localId, status: engine.status() }
             }
