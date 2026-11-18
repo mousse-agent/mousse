@@ -139,7 +139,7 @@ describe('compileBotThread', () => {
   it('offers secret_fetch in work with the secrets grant, independently excluding the chat', () => {
     const grant = manifest({ appTools: ['secrets'] })
     for (const frontDesk of [false, true]) {
-      const compiled = compile({ grant, botTools: { escalate: true, consult: false, memory: true, frontDesk } })
+      const compiled = compile({ grant, botTools: { escalate: true, consult: false, memory: true, owner: true, frontDesk } })
       if (!compiled.ok) throw new Error(compiled.error.message)
       expect(compiled.permissions.appTools.includes('secret_fetch')).toBe(!frontDesk)
     }
