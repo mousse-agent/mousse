@@ -326,9 +326,10 @@ export interface BotOwnerTurn {
 export type BotActivationTrigger =
   /**
    * `fromBot`: the turn was started by a message from another of the owner's bots (`bot_send`), never by the owner: who
-   * sent it and which turn in a row without the owner it is.
+   * sent it and which turn in a row without the owner it is. `fast`: a notice that starts without waiting for others to
+   * settle (a thread the bot started waits on it, `NOTICE_SETTLE_MS`).
    */
-  | { kind: 'manual'; input: string; owner?: BotOwnerTurn; fromBot?: BotMessageSender }
+  | { kind: 'manual'; input: string; owner?: BotOwnerTurn; fromBot?: BotMessageSender; fast?: true }
   | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string; missed?: ScheduledMissedRuns; removedTelling?: { tellMe: TellMe; canWakeMe?: boolean }; completed?: { why: string; name: string; tellMe?: TellMe; canWakeMe?: boolean; removed?: true } }
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the

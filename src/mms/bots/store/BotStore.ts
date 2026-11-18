@@ -490,6 +490,9 @@ CREATE INDEX bot_jobs_open ON bot_jobs(thread_id) WHERE ended_at IS NULL;
   }
 ]
 
+/** The `end_reason` of a queued notice a chat turn took in and answered (`BotDispatchRow.prompt.merged`): it never ran. */
+export const MERGED_END_REASON = 'merged'
+
 /** The `end_reason` of a running activation that waits for the internet. */
 export const BOT_OFFLINE_REASON = 'waiting_for_internet'
 
@@ -864,6 +867,11 @@ export interface BotDispatchRow {
     workRefusalIds?: string[]
     /** Carried ids for replay; existing read/applied markers remain independent of confirmation. */
     workDelivery?: { answers: string[]; notes: number[]; question?: string }
+    /**
+     * A chat turn's first dispatch: the queued notices it took in with its own input (`BotEngine.noticeBatchInTx`). They
+     * stay queued while it runs, and end as `merged` when it ends done (`moveActivation`); else they run after it.
+     */
+    merged?: string[]
   }
   policyDigest: string
   deadlineMs: number | null
@@ -1416,10 +1424,10 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, ...statuses).map(activationOf)
   }
 
-  /** Activations of a bot's lane in `statuses`, oldest first. */
+  /** Activations of a bot's lane in `statuses`, oldest first (two made in the same millisecond in the order they were made). */
   laneActivations(botId: string, lane: BotLane, statuses: readonly BotActivationStatus[]): BotActivationRow[] {
     const marks = statuses.map(() => '?').join(', ')
-    return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND lane = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, lane, ...statuses).map(activationOf)
+    return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND lane = ? AND status IN (${marks}) ORDER BY created_at, rowid`, botId, lane, ...statuses).map(activationOf)
   }
 
   /** A lane's newest activation, in the order they were made (two made in the same millisecond keep it). */
@@ -1428,9 +1436,9 @@ export class BotStore {
     return row ? activationOf(row) : undefined
   }
 
-  /** The bot's most recent activation that ended, if any. */
+  /** The bot's most recent activation that ended, if any; a notice another turn took in (`merged`) never ran, and is not one. */
   lastEndedActivation(botId: string): BotActivationRow | undefined {
-    const row = this.get("SELECT * FROM bot_activations WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') ORDER BY ended_at DESC, created_at DESC LIMIT 1", botId)
+    const row = this.get("SELECT * FROM bot_activations WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') AND end_reason IS NOT 'merged' ORDER BY ended_at DESC, created_at DESC LIMIT 1", botId)
     return row ? activationOf(row) : undefined
   }
 
@@ -1492,12 +1500,14 @@ export class BotStore {
    * Compare-and-set of an activation's status; false when it was not in `from`. Only a running activation waits for the
    * internet. One that fails or is cancelled (a Stop, a failure, the bot deleted) withdraws the questions it asked and never
    * posted, in the same statement's transaction: no reply carries them now. Work that ends, however it ends, withdraws
-   * the question it still waited on: nothing would carry on with its answer.
+   * the question it still waited on: nothing would carry on with its answer. A chat turn that ends done ends the queued
+   * notices its first dispatch took in (`merged`) with it, in the same transaction: they were answered.
    */
   moveActivation(id: string, from: readonly BotActivationStatus[], to: BotActivationStatus, patch: { endReason?: string | null; result?: string | null; threadId?: string; scratch?: string } = {}): boolean {
     if (to === 'failed' || to === 'cancelled' || to === 'done') return this.db.transaction(() => {
       const moved = this.moveActivationRow(id, from, to, patch)
       if (moved && to !== 'done') this.withdrawUnpostedQuestions(id)
+      if (moved && to === 'done') for (const merged of this.dispatch(id, 1)?.prompt.merged ?? []) this.moveActivation(merged, ['queued'], 'cancelled', { endReason: MERGED_END_REASON })
       if (moved) {
         this.withdrawWorkQuestions(id)
         heldCalls(this.db)?.endWork(id)
@@ -1681,6 +1691,11 @@ export class BotStore {
   job(id: string): BotJob | undefined {
     const row = this.get('SELECT * FROM bot_jobs WHERE id = ?', id)
     return row ? jobOf(row) : undefined
+  }
+
+  /** The bot's jobs whose thread still works or waits for a person, oldest first. */
+  openJobsOf(botId: string): BotJob[] {
+    return this.all("SELECT * FROM bot_jobs WHERE bot_id = ? AND ended_at IS NULL AND state IN ('running', 'needs_input') ORDER BY created_at, rowid", botId).map(jobOf)
   }
 
   /** The jobs not ended on `threadId`, of any bot. */

@@ -14,7 +14,7 @@ import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { arrangeThreadFeed, sortArchivedThreads, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
 import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention } from '../../shared/threadAttention'
-import { needsMeThreads } from '../lib/needsMe'
+import { needsMeThreads, useSupervisedWaits } from '../lib/needsMe'
 import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
 import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
 import { setReferenceDragData } from '../../shared/chatReferences'
@@ -581,7 +581,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const attentionOf = (threadId: string) => threadAttention(rolledUpActivity[threadId] ?? threadActivity[threadId])
   // Threads that wait for an answer or an approval, from every project and computer, at the top of the list.
   const notifyBotThreads = useAppStore((s) => s.notifyBotThreads)
-  const needsMe = useMemo(() => needsMeThreads(threads, threadActivity, agentThreadIds, notifyBotThreads), [threads, threadActivity, agentThreadIds, notifyBotThreads])
+  const supervisedWaits = useSupervisedWaits()
+  const needsMe = useMemo(() => needsMeThreads(threads, threadActivity, agentThreadIds, notifyBotThreads, supervisedWaits), [threads, threadActivity, agentThreadIds, notifyBotThreads, supervisedWaits])
   // With one thread in all, its own row already says it: a group of it would only repeat it.
   // While the filter narrows the list, the threads it keeps list in it, Needs me or not.
   const showNeedsMe = needsMe.length > 0 && availableThreads.length > 1 && !filtering
@@ -1152,13 +1153,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   }
 
   /** The activity a row shows: rolled up over its subagents, or Working for a send that is starting it. */
-  const shownActivityOf = (threadId: string) => rolledUpActivity[threadId] ?? threadActivity[threadId]
+  // A wait the bot that started the thread answers shows as Working: it waits on no one the row speaks to.
+  const shownActivityOf = (threadId: string) => {
+    const activity = rolledUpActivity[threadId] ?? threadActivity[threadId]
+    return activity === 'awaiting_input' && supervisedWaits.has(threadId) ? 'processing' : activity
+  }
   /**
    * A plain thread's row reads its own activity: the list's may be one push behind on Working and Waiting. One with
    * subagents, or one a starting send shows Working, shows what the list computed.
    */
   const liveActivityOf = (threadId: string) =>
-    plainThreadIds.has(threadId) && rolledUpActivity[threadId] === undefined && threadActivity[threadId] === storeActivity[threadId]
+    plainThreadIds.has(threadId) && !supervisedWaits.has(threadId) && rolledUpActivity[threadId] === undefined && threadActivity[threadId] === storeActivity[threadId]
   const renderThreadStatus = (threadId: string) => {
     // A quiet thread shows nothing, whichever of Working and Waiting the list holds.
     if (threadStatus(shownActivityOf(threadId), approvalThreads.has(threadId)) === 'quiet') return null
