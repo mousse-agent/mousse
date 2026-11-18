@@ -1435,3 +1435,9 @@ html:not([data-acrylic='true']) .threads-sidebar:has(> .threads-sidebar-scroll[d
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
+
+/* A run of archived rows not drawn (ArchivedList): it holds their room, and is never the row the scroll keeps in place. */
+.threads-sidebar-settled-spacer {
+  flex: none;
+  overflow-anchor: none;
+}

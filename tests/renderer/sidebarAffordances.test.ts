@@ -32,6 +32,8 @@ const { ToastHost, dismissToast } = await import('../../src/renderer/components/
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { worktreeMark } = await import('../../src/renderer/lib/worktreeMark')
 const { hasMoreBelow, revealDelta } = await import('../../src/renderer/lib/sidebarScroll')
+const { startRenderCounts, stopRenderCounts } = await import('../../src/renderer/chat/components/agent-elements/render-counts')
+const { ARCHIVED_FIRST_ROWS } = await import('../../src/renderer/components/sidebar/ArchivedList')
 
 const at = '2026-11-05T10:00:00.000Z'
 const project = (id: string, name: string): Project => ({ id, name, path: `/p/${name}`, createdAt: at, order: 0 })
@@ -247,6 +249,30 @@ describe('the footer', () => {
     show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at })])
     click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
     expect(host.querySelector<HTMLElement>('.threads-sidebar-footer')!.style.getPropertyValue('--threads-sidebar-settled-head')).toMatch(/px$/)
+  })
+
+  // Scrolling, kept focus and the last row's menu need layout: archived-list-electron.test.ts.
+  it('builds no archived card while Archived is closed, and opens hundreds with only the first cards drawn', async () => {
+    const archived = Array.from({ length: 300 }, (_, index) => thread(`old-${index}`, `Old ${index}`, { settledAt: at }))
+    const counts = startRenderCounts()
+    try {
+      show([thread('a', 'Fix tests'), ...archived])
+      // Another sidebar update while closed builds none either.
+      act(() => useAppStore.setState({ threadActivity: {} }))
+      expect(Object.keys(counts).filter((name) => name.startsWith('SidebarRow:old-'))).toEqual([])
+      expect(host.querySelector('.threads-sidebar-settled-count')?.textContent).toBe('300')
+      click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+      const drawn = host.querySelectorAll('.threads-sidebar-settled-list [data-thread-id]')
+      expect(drawn.length).toBeGreaterThan(0)
+      expect(drawn.length).toBeLessThanOrEqual(ARCHIVED_FIRST_ROWS)
+      // The menu of a drawn row still acts on the whole list.
+      click(byLabel('More actions for Old 0')!)
+      click(menuItem('Delete all archived…'))
+      await flush()
+      expect(document.querySelector('[role="dialog"], [role="alertdialog"]')?.textContent).toContain('Delete 300 archived threads?')
+    } finally {
+      stopRenderCounts()
+    }
   })
 })
 
