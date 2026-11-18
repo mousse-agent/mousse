@@ -71,6 +71,17 @@
       "expiresAt": "2026-11-18T09:10:27.155Z"
     },
     {
+      "task": "net-engine-1a",
+      "session": "Animatrix-880838",
+      "machine": "Animatrix",
+      "branch": "net-engine-1a",
+      "paths": [
+        "src/mms/netEngine"
+      ],
+      "claimedAt": "2026-11-18T12:37:39.165Z",
+      "expiresAt": "2026-11-18T14:37:39.165Z"
+    },
+    {
       "task": "net-engine-phase0",
       "session": "Animatrix-f290b5",
       "machine": "Animatrix",
