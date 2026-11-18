@@ -684,3 +684,21 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 
 .bot-expired-actions { margin-top: 14px; }
 .bot-expired-actions > summary { width: fit-content; max-width: 100%; margin-inline: auto; padding: 2px 10px; font-size: 12px; line-height: 18px; color: var(--text-secondary); border-radius: 999px; background: color-mix(in srgb, var(--text-secondary) 7%, transparent); cursor: pointer; }
+
+/* A bot's hover card in the sidebar: to the right of its row, top edges aligned, its status and the threads it works on. */
+/* Its row stays tinted while the card is open. */
+.bot-hover-anchor[data-open] > .bot-row:not([aria-current='true']) { background: color-mix(in srgb, var(--text-secondary) 11%, transparent); }
+.bot-hover-card { --bot-meta: 12.5px; position: fixed; top: auto; width: min(340px, 60vw); max-height: min(360px, 60vh); padding: 6px; z-index: 60; }
+.bot-hover-head { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 6px; min-width: 0; }
+.bot-hover-name { font-size: 13px; font-weight: 600; line-height: 1.3; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-hover-status { font-size: 12px; line-height: 1.35; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A bot's thread in the bot's chat pane: back, the face, "bot / thread", and the thread's project and state under it. */
+.bot-thread-header { gap: 6px; padding-block: 12px; padding-left: 12px; }
+.bot-thread-back { flex: none; }
+.bot-thread-header .bot-header-who { margin-left: 8px; }
+.app .bot-thread-crumbs { display: flex; align-items: baseline; gap: 6px; min-width: 0; max-width: 100%; margin: 0; font-size: 14px; line-height: 18px; font-weight: 600; }
+.bot-thread-crumb-bot { flex: none; min-height: 0; padding: 0; border: 0; background: none; font: inherit; color: var(--text-secondary); cursor: pointer; }
+.bot-thread-crumb-bot:hover { color: var(--text-primary); }
+.bot-thread-crumb-sep { flex: none; font-weight: 400; color: var(--text-secondary); opacity: .7; }
+.bot-thread-crumb-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

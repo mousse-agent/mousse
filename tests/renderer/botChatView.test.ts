@@ -41,7 +41,12 @@ vi.mock('../../src/renderer/chat/components/agent-elements/markdown', async (imp
 const opened = vi.hoisted(() => ({ ids: [] as string[] }))
 vi.mock('../../src/renderer/lib/threadActions', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/renderer/lib/threadActions')>()
-  return { ...actual, selectThread: (threadId: string, ...rest: unknown[]) => { opened.ids.push(threadId); return (actual.selectThread as (...args: unknown[]) => Promise<unknown>)(threadId, ...rest) } }
+  return {
+    ...actual,
+    selectThread: (threadId: string, ...rest: unknown[]) => { opened.ids.push(threadId); return (actual.selectThread as (...args: unknown[]) => Promise<unknown>)(threadId, ...rest) },
+    // A thread opened in the bot's chat pane (lib/botThread.ts).
+    openAndSelect: (threadId: string, ...rest: unknown[]) => { opened.ids.push(threadId); return (actual.openAndSelect as (...args: unknown[]) => Promise<unknown>)(threadId, ...rest) }
+  }
 })
 
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
@@ -1872,6 +1877,9 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       await click(presence())
       await click(host.querySelector('.bot-thread-line[data-tone="waiting"]'))
       expect(opened.ids).toEqual(['t2'])
+      // In the bot's chat pane: the sidebar stays on Chats.
+      expect(useChatsStore.getState().botThread).toEqual({ botId: inbox.id, threadId: 't2' })
+      expect(useAppStore.getState().sidebarMode).toBe('chats')
       expect(host.querySelector('.bot-work')).toBeNull()
     })
 

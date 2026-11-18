@@ -264,7 +264,7 @@ export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads' | 
   if (chat.offline) return { kind: 'offline', text: 'waiting for internet' }
   if (chat.typing) return { kind: 'typing', text: 'typing…' }
   const work = bot.work ?? []
-  const threads = (bot.threads ?? []).filter(launchedActive)
+  const threads = botActiveThreads(bot)
   const watchers = bot.watchers ?? []
   const lead = leadWork(work)
   if (lead) {
@@ -278,6 +278,30 @@ export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads' | 
   if (watchers.length === 1) return { kind: 'free', text: `Waiting on ${watchers[0]!.title}` }
   if (watchers.length) return { kind: 'free', text: `Waiting on ${watchers.length} things` }
   return { kind: 'free', text: 'free' }
+}
+
+/**
+ * The threads a bot started that keep it busy now (working, queued, held, waiting on subagents or on the owner's
+ * answer), in list order. The one source for "Managing 2 threads" under its name and the threads its hover card lists.
+ */
+export function botActiveThreads(bot: Pick<BotSummary, 'threads'>): BotLaunchedThread[] {
+  return (bot.threads ?? []).filter(launchedActive).sort(compareLaunched)
+}
+
+/**
+ * The first line of a bot's hover card in the sidebar: how its chat stands ("Free to chat", "Typing…", "Paused",
+ * "Waiting for internet", what it needs from the owner), then how many threads it works on, counted from
+ * `botActiveThreads` like the line under its name: "Free to chat · working on 2 threads".
+ */
+export function botCardStatus(bot: Pick<BotSummary, 'state' | 'stateText' | 'needsOwner' | 'waiting' | 'chat' | 'threads'>): string {
+  const offline = Boolean(bot.chat?.offline) || bot.waiting === 'internet'
+  const chat = bot.state === 'paused' ? 'Paused'
+    : bot.needsOwner || bot.state === 'needs_you' || bot.state === 'stuck' ? bot.stateText || 'Needs you'
+    : offline ? 'Waiting for internet'
+    : bot.chat ? 'Typing…'
+    : 'Free to chat'
+  const count = botActiveThreads(bot).length
+  return count ? `${chat} · working on ${count === 1 ? '1 thread' : `${count} threads`}` : chat
 }
 
 /** How a bot's line in the sidebar reads: `working` in purple, `needs` (it waits on its owner) in amber, `idle` in grey. */

@@ -423,8 +423,9 @@ interface AppState {
    * held in `openingThreadId`, so its row shows as chosen at once while the chat goes on showing the thread before:
    * one with its messages cached (`'cached'`) until the next frame has been drawn (`showOpeningThread`), so the click
    * is answered before the transcript is drawn; one with nothing cached (`'held'`) until its view arrives.
+   * `keepWorkspace`: the workspace stays as it is (a bot's thread opened in its chat pane keeps Chats on screen).
    */
-  openThreadWhenReady: (id: string) => 'cached' | 'held' | false
+  openThreadWhenReady: (id: string, options?: { keepWorkspace?: boolean }) => 'cached' | 'held' | false
   /**
    * Shows the held thread now: a cached one once the frame that highlights its row has been drawn, or one whose view is
    * slow (another computer, a busy service), which then waits with an empty transcript.
@@ -714,8 +715,9 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   messages: [],
   transcriptPending: false,
   openingThreadId: null,
-  openThreadWhenReady: (id) => {
+  openThreadWhenReady: (id, options) => {
     const s = get()
+    const workspace = options?.keepWorkspace ? {} : { sidebarMode: 'projects' as const }
     if (s.activeThreadId === id) {
       // Back to the thread on screen while another was being opened: stop opening that one.
       if (s.openingThreadId) set({ openingThreadId: null })
@@ -724,15 +726,15 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
     if (opensFromCache(s, id)) {
       // Its row shows as chosen in this update; its transcript, which takes a while to draw, comes in the next.
       openingEarly = null
-      set({ openingThreadId: id, sidebarMode: 'projects' })
+      set({ openingThreadId: id, ...workspace })
       return 'cached'
     }
     if (!opensEmpty(s, id)) {
-      get().switchToThread(id)
+      set((current) => ({ ...workspace, ...(current.openingThreadId ? { openingThreadId: null } : {}), ...switchPatch(current, id) }))
       return false
     }
     openingEarly = null
-    set({ openingThreadId: id, sidebarMode: 'projects' })
+    set({ openingThreadId: id, ...workspace })
     return 'held'
   },
   showOpeningThread: (threadId) =>
