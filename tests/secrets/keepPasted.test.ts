@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import { registerSecretMethods } from '../../src/mms/secrets/registerMethods'
@@ -69,4 +69,17 @@ it('resolves the real bot home and observes its current secret grant and switch'
     f.bots.service.setPermission(botId, permission.id, false)
     expect(f.bots.service.secretHome(botId).allowed).toBe(false)
   } finally { f.close() }
+})
+
+it('never puts a storage error containing the value in a reply or a log', async () => {
+  const { vault, call } = setup()
+  const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+  vi.spyOn(vault, 'store').mockImplementation(() => { throw new Error(value) })
+  try {
+    const error = await call().catch(error => error)
+    expect(error.message).toContain('could not be saved')
+    expect(error.message).not.toContain(value)
+    expect(JSON.stringify(log.mock.calls)).not.toContain(value)
+    expect(vault.list()).toEqual([])
+  } finally { vi.restoreAllMocks() }
 })

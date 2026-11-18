@@ -3190,3 +3190,18 @@ describe('keeping a pasted key private', () => {
     expect(JSON.stringify(useBotsStore.getState())).not.toContain(key)
   })
 })
+
+it('holds Send while a key is being kept and does not overwrite edits with a late answer', async () => {
+  let answer!: (value: { name: string }) => void
+  window.mousse.platformRequest = { request: vi.fn(() => new Promise(resolve => { answer = resolve })) } as never
+  await open()
+  const field = host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  await type(field, 'sk-e5SyntheticKeyForTestsOnly123456')
+  await click(button('Keep as secret'))
+  await click(button('Send message'))
+  expect(fake.client.send).not.toHaveBeenCalled()
+  await type(field, 'Changed my mind')
+  await act(async () => answer({ name: 'OPENAI_API_KEY' }))
+  expect(field.value).toBe('Changed my mind')
+  expect(fake.client.send).not.toHaveBeenCalled()
+})
