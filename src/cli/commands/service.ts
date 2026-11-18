@@ -28,8 +28,10 @@ import {
 import {
   formatOwnerBusyMessage,
   MmsOwnerBusyError,
+  readOwnerRecord,
   resolveOwnerStatus
 } from '../../mms/ownership/MmsOwnerLease'
+import { PROCESS_INSTANCE_ID } from '../../mms/queue/processLiveness'
 import { installDaemonDiagnostics } from '../daemonDiagnostics'
 import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
@@ -145,13 +147,36 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     })
   }
 
+  // This daemon's token: known once the owner is created, and read from the home's
+  // owner lease before that, as soon as this process holds it.
+  const ownToken = (): string | null => {
+    if (state.ownerToken) return state.ownerToken
+    const owner = readOwnerRecord(homeDir)
+    return owner && owner.pid === process.pid && owner.processInstanceId === PROCESS_INSTANCE_ID
+      ? owner.token
+      : null
+  }
+  // A stop request for this daemon starts the shutdown. Read from the start, so a stop
+  // sent while startup still runs is not left waiting for readiness.
+  const checkStopRequest = (): void => {
+    if (state.shuttingDown) return
+    const req = readStopRequest(homeDir)
+    if (!req) return
+    if (req.token !== ownToken()) return
+    void shutdown('stop-request')
+  }
+
   // A stop that arrives while startup is still running: stop what startup has
   // made so far and go no further.
   const stoppedDuringStartup = async (): Promise<boolean> => {
+    checkStopRequest()
     if (!state.shuttingDown) return false
     await shutdownDaemonLifecycle(state)
     return true
   }
+
+  // Teardown clears it.
+  state.pollStop = setInterval(checkStopRequest, SERVICE_POLL_INTERVAL_MS)
 
   try {
     // Before owner creation, so an Electron quit during startup is held too.
@@ -170,9 +195,15 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
         homeDir,
         mode: 'text'
       },
-      { start: true }
+      { start: false }
     )
-    state.mms = opened.mms
+    // A stop that came while the owner was being created skips the start. One that comes
+    // during the start waits for it: teardown stops the owner only once it is on `state`.
+    try {
+      if (!(await stoppedDuringStartup())) await opened.mms.start()
+    } finally {
+      state.mms = opened.mms
+    }
     if (await stoppedDuringStartup()) return state
     state.ownerToken = opened.mms.getOwnerLease()?.owner.token ?? null
     if (!state.ownerToken) {
@@ -234,14 +265,6 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     )
 
     memoryMonitor?.start()
-
-    state.pollStop = setInterval(() => {
-      if (state.shuttingDown) return
-      const req = readStopRequest(homeDir)
-      if (!req) return
-      if (req.token !== state.ownerToken) return
-      void shutdown('stop-request')
-    }, SERVICE_POLL_INTERVAL_MS)
 
     await lifetime
     return state
@@ -353,7 +376,7 @@ async function stopDaemon(
       exitWithError('MMS is not running.', mode)
       return
     case 'unreadable':
-      exitWithError('MMS runtime is present but unreadable; cannot send owner-checked stop request.', mode)
+      exitWithError('MMS home is held but its owner cannot be read; cannot send owner-checked stop request.', mode)
       return
     case 'stopped':
       writeOutput(mode, { stopped: true, pid: result.pid, running: false })

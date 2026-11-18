@@ -13,6 +13,7 @@ import { canonicalizeHome, SERVICE_STOP_TIMEOUT_MS } from '../cli/mmsRuntime'
 import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
 import { GuiMmsController } from './mms/GuiMmsController'
+import { stopServiceForQuit } from './mms/stopServiceForQuit'
 import { GuiConnectionLog } from './mms/guiConnectionLog'
 import { registerRendererErrorIpc, RendererErrorLog } from './diagnostics/rendererErrorLog'
 import { PresentationState } from './mms/PresentationState'
@@ -167,6 +168,8 @@ function startGuiApp(): void {
   let desktopUpdater: DesktopUpdater | null = null
   let serviceTray: import('electron').Tray | null = null
   let mousseHome: string | null = null
+  /** Set by the tray's Quit: this quit also stops the background service. */
+  let stopServiceOnQuit = false
 
   const browserView = new BrowserViewManager()
   const presentation = new PresentationState()
@@ -197,15 +200,17 @@ function startGuiApp(): void {
     }
   }
 
-  /** Stops the background service, then quits; the tray's way to end everything. */
-  async function quitAndStopService(): Promise<void> {
+  /** The tray's way to end everything: Mousse goes at once and its background service stops itself. */
+  function quitAndStopService(): void {
     if (isQuitting) return
-    try {
-      if (mousseHome) await stopRunningDaemon(canonicalizeHome(mousseHome), { reason: 'gui-quit', timeoutMs: SERVICE_STOP_TIMEOUT_MS })
-    } catch (error) {
-      console.error('Background service did not stop:', error instanceof Error ? error.message : String(error))
+    // Nothing stays on screen while the window client disconnects.
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.hide()
     }
-    await beginQuit()
+    serviceTray?.destroy()
+    serviceTray = null
+    stopServiceOnQuit = true
+    void beginQuit()
   }
 
   function ensureServiceTray(): void {
@@ -215,7 +220,7 @@ function startGuiApp(): void {
     try {
       serviceTray = createServiceTray(iconPath, {
         open: openWindowFromBackground,
-        quitAndStop: () => { void quitAndStopService() }
+        quitAndStop: quitAndStopService
       })
     } catch (error) {
       console.error('Tray icon could not start:', error instanceof Error ? error.message : String(error))
@@ -505,7 +510,8 @@ function startGuiApp(): void {
           devGuiPollerStop = null
         }
         desktopUpdater?.dispose()
-        if (guiMms) await guiMms.stop()
+        if (stopServiceOnQuit) await stopServiceForQuit(guiMms, mousseHome)
+        else if (guiMms) await guiMms.stop()
       } catch (err) {
         console.error('guiMms.stop failed during shutdown:', err)
       }

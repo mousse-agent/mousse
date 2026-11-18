@@ -14,6 +14,7 @@ import { LocalMmsClient } from '../src/mms/protocol/client'
 import {
   requestDaemonShutdown,
   shutdownDaemonLifecycle,
+  stopRunningDaemon,
   type DaemonLifecycleState
 } from '../src/cli/daemonShutdown'
 import { getMmsRuntimePath, readStopRequest } from '../src/cli/mmsRuntime'
@@ -152,6 +153,45 @@ describe('Review: service startup fault cleanup', () => {
     } finally {
       if (state.pollStop) clearInterval(state.pollStop)
       await state.protocolServer?.stop().catch(() => undefined)
+      await state.mms?.stop().catch(() => undefined)
+    }
+  }, 60_000)
+
+  it('service stop reaches a daemon that is still starting: it stops as soon as it holds the home and never starts', async () => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-stop-starting-'))
+    process.env.MOUSSE_HOME = home
+    // Holds the owner's creation after it took the home's lease, like a slow start does.
+    let releaseCreation!: () => void
+    const creationGate = new Promise<void>((resolve) => { releaseCreation = resolve })
+    const initialize = MousseMainService.prototype.initialize
+    vi.spyOn(MousseMainService.prototype, 'initialize').mockImplementation(async function (this: MousseMainService) {
+      await creationGate
+      return initialize.call(this)
+    })
+    const start = vi.spyOn(MousseMainService.prototype, 'start')
+    const logs: string[] = []
+    // Only for cleanup when the test fails.
+    const cleanup = new AbortController()
+    const running = runDaemonForeground({ homeDir: home, skipSignals: true, stopSignal: cleanup.signal, onLog: (msg) => logs.push(msg) })
+    try {
+      await vi.waitFor(() => expect(resolveOwnerStatus(home).owned).toBe(true), { timeout: 20_000 })
+      // Before, this found no runtime record and answered `unreadable` without asking the daemon to stop.
+      const stopped = stopRunningDaemon(home, { timeoutMs: 20_000, intervalMs: 20 })
+      // Picked up while the owner is still being created, not once startup is over.
+      await vi.waitFor(() => expect(logs.join('')).toContain('Shutting down MMS (stop-request)'), { timeout: 5_000 })
+      releaseCreation()
+      const state = await running
+      expect((await stopped).kind).toBe('stopped')
+      expect(start).not.toHaveBeenCalled()
+      expect(state.mms).toBeNull()
+      expect(existsSync(getMmsRuntimePath(home))).toBe(false)
+      expect(resolveOwnerStatus(home).owned).toBe(false)
+      expect(await endpointAccepts(resolveLocalEndpoint(home).path)).toBe(false)
+    } finally {
+      releaseCreation()
+      vi.restoreAllMocks()
+      cleanup.abort()
+      const state = await running
       await state.mms?.stop().catch(() => undefined)
     }
   }, 60_000)

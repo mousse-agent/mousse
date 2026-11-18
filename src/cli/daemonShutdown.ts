@@ -11,7 +11,9 @@ import {
   pollUntilRuntimeStopped,
   removeOwnRuntimeRecord,
   resolveRuntimeStatus,
+  SERVICE_POLL_INTERVAL_MS,
   SERVICE_STOP_TIMEOUT_MS,
+  sleepAsync,
   writeStopRequest,
   type MmsRuntimeRecord,
   type MmsStopRequest
@@ -19,27 +21,66 @@ import {
 
 export type DaemonStopResult =
   | { kind: 'not-running' }
-  /** The runtime file exists but cannot be read, so no owner-checked stop can be sent. */
+  /** The home is held, but not by a daemon whose token can be read, so no owner-checked stop can be sent. */
   | { kind: 'unreadable' }
   | { kind: 'stopped'; pid: number }
   /** The original daemon stopped but another one owns the home now. */
   | { kind: 'replaced'; pid: number; record: MmsRuntimeRecord }
   | { kind: 'timeout'; pid: number }
 
+/** The daemon a stop is for, and the token that fences the stop request. */
+export type DaemonStopTarget =
+  | { kind: 'not-running' }
+  /** The home is held, but not by a daemon whose token can be read, so no owner-checked stop can be sent. */
+  | { kind: 'unreadable' }
+  | { kind: 'running'; pid: number; token: string }
+
 /**
- * Asks the daemon for `homeDir` to shut down and waits until it has. Uses protocol
- * `daemon.shutdown` when the endpoint answers and always writes the fenced stop request
- * as the fallback. Never kills the process or removes its ownership.
+ * The ready daemon, or one still starting: a daemon takes the home's owner lease
+ * first and publishes its runtime record only once ready, and both carry the same token.
+ */
+export function resolveDaemonStopTarget(homeDir: string): DaemonStopTarget {
+  const status = resolveRuntimeStatus(homeDir)
+  if (!status.running) return { kind: 'not-running' }
+  if (status.record) return { kind: 'running', pid: status.record.pid, token: status.record.token }
+  const owner = status.owner?.owned ? status.owner.record : null
+  if (owner?.kind === 'daemon') return { kind: 'running', pid: owner.pid, token: owner.token }
+  return { kind: 'unreadable' }
+}
+
+/**
+ * Writes the fenced stop request and returns without waiting for the daemon to stop.
+ * A daemon still starting picks it up as soon as it holds the owner lease and goes no
+ * further. `waitForOwnerMs` covers a daemon just started that has not taken the lease
+ * yet: the request is sent once it has, or not at all when none takes it in time.
+ */
+export async function sendDaemonStop(
+  homeDir: string,
+  opts: { reason?: string; waitForOwnerMs?: number; intervalMs?: number } = {}
+): Promise<DaemonStopTarget> {
+  const deadline = Date.now() + (opts.waitForOwnerMs ?? 0)
+  let target = resolveDaemonStopTarget(homeDir)
+  while (target.kind === 'not-running' && Date.now() < deadline) {
+    await sleepAsync(opts.intervalMs ?? SERVICE_POLL_INTERVAL_MS)
+    target = resolveDaemonStopTarget(homeDir)
+  }
+  if (target.kind === 'running') requestDaemonShutdown(homeDir, target.token, opts.reason ?? 'client-request')
+  return target
+}
+
+/**
+ * Asks the daemon for `homeDir` to shut down and waits until it has, also while it is
+ * still starting. Uses protocol `daemon.shutdown` when the endpoint answers and always
+ * writes the fenced stop request as the fallback. Never kills the process or removes
+ * its ownership.
  */
 export async function stopRunningDaemon(
   homeDir: string,
   opts: { reason?: string; timeoutMs?: number; intervalMs?: number } = {}
 ): Promise<DaemonStopResult> {
   const reason = opts.reason ?? 'service-stop'
-  const status = resolveRuntimeStatus(homeDir)
-  if (!status.running) return { kind: 'not-running' }
-  if (!status.record) return { kind: 'unreadable' }
-  const record = status.record
+  const target = resolveDaemonStopTarget(homeDir)
+  if (target.kind !== 'running') return target
   try {
     const owner = readOwnerRecord(homeDir)
     if (owner?.token && owner.endpoint) {
@@ -61,16 +102,16 @@ export async function stopRunningDaemon(
   } catch {
     /* fall through to the stop request */
   }
-  requestDaemonShutdown(homeDir, record.token, reason)
-  const result = await pollUntilRuntimeStopped(homeDir, record.token, {
+  requestDaemonShutdown(homeDir, target.token, reason)
+  const result = await pollUntilRuntimeStopped(homeDir, target.token, {
     timeoutMs: opts.timeoutMs ?? SERVICE_STOP_TIMEOUT_MS,
     ...(opts.intervalMs === undefined ? {} : { intervalMs: opts.intervalMs })
   })
-  if (result.kind === 'timeout') return { kind: 'timeout', pid: record.pid }
+  if (result.kind === 'timeout') return { kind: 'timeout', pid: target.pid }
   clearStopRequest(homeDir)
   return result.kind === 'stopped'
-    ? { kind: 'stopped', pid: record.pid }
-    : { kind: 'replaced', pid: record.pid, record: result.record }
+    ? { kind: 'stopped', pid: target.pid }
+    : { kind: 'replaced', pid: target.pid, record: result.record }
 }
 
 /** Write an owner-token-fenced stop request. Single source of truth for graceful stop signaling. */
