@@ -1,3 +1,5 @@
+import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
+import type { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
 import { splitDataFrames } from '../../src/shared/bots/personal/dataFrames'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync } from 'node:fs'
@@ -256,4 +258,29 @@ it('watched text disappearing starts a run with an empty compared page',async()=
   body='Tickets available'; await add('tickets'); await check(5)
   body='Sold out'; await check(10)
   expect(runs()).toHaveLength(1)
+})
+
+it('a fresh scheduler recovers the admitted occurrence after a crash through findOccurrence',async()=>{
+  const entry=await add(); await check(5); body='changed'
+  await f.tickSchedules(new Date(T0+10*60_000)); await flush()
+  const jobs=(f.scheduler as unknown as {store:ScheduledJobStore}).store
+  const finish=vi.spyOn(jobs,'finishBotClaim').mockReturnValueOnce(null)
+  await f.tickSchedules(new Date(T0+10*60_000)); finish.mockRestore()
+  expect(runs()).toHaveLength(1)
+  const claim=f.scheduler.getJob(entry.jobId)!.runClaim!
+  expect(claim).toBeDefined()
+  jobs.updateJob(entry.jobId,{runClaim:{...claim,pid:2_147_000_090,processInstanceId:'dead-page-scheduler'}})
+  f.scheduler.beginShutdown()
+  const restarted=new ScheduledJobService({runIsolated:async()=>{throw Error('no agent job')}},jobs)
+  const find=vi.fn(input=>f.bots.findScheduledOccurrence(input))
+  const run=vi.fn(input=>f.bots.runScheduledOccurrence(input))
+  restarted.setClock(()=>new Date(T0+10*60_000)); restarted.setRunLedger(f.automationRuns)
+  restarted.setBotRunner({findOccurrence:find,runOccurrence:run})
+  try {
+    await restarted.tickNow()
+    expect(find).toHaveBeenCalledWith({botId,scheduleId:entry.scheduleId,occurrenceKey:claim.occurrenceKey})
+    expect(run).not.toHaveBeenCalled(); expect(runs()).toHaveLength(1)
+    expect(restarted.getJob(entry.jobId)?.runClaim).toBeUndefined()
+    expect(restarted.getJob(entry.jobId)?.lastStatus).toBe('ok')
+  } finally {restarted.beginShutdown()}
 })
