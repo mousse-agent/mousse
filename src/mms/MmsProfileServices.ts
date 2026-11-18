@@ -1361,6 +1361,12 @@ export class MmsProfileServices {
       profileId: this.profileId,
       net: this.net,
       bridge: () => this.bridgeService,
+      // "<computer> (<profile>)", as the other computer's question names it (§5.1).
+      name: () => {
+        const computer = computerNameIfKnown() || hostname()
+        const profile = shared.listProfiles?.().find((item) => item.id === this.profileId)?.displayName
+        return profile ? `${computer} (${profile})` : computer
+      },
       onChanged: () =>
         this.events.emit({
           channel: 'protocol:event',
