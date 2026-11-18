@@ -19,3 +19,11 @@ it('asks first defaults on but an explicit false keeps the support rollback', as
   expect(getDefaultSettings().experimental.botAsksFirst).toBe(true)
   expect(normalizeExperimentalSettings({ botAsksFirst: false }).botAsksFirst).toBe(false)
 })
+
+it('turns on a profile saved with master defaults and only honors the new support lever', async () => {
+  const { normalizeExperimentalSettings } = await import('../../src/shared/settings')
+  const { botAsksFirst } = await import('../../src/mms/bots/actions/BotActions')
+  const saved = { botAsksFirst: false, subagentWorktrees: false, profiler: { enabled: false } }
+  expect(botAsksFirst({ experimental: normalizeExperimentalSettings(saved as never) })).toBe(true)
+  expect(botAsksFirst({ experimental: normalizeExperimentalSettings({ ...saved, botAsksFirstOff: true } as never) })).toBe(false)
+})
