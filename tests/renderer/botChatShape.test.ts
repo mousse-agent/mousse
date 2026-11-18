@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { BotChatMessage, BotChip, BotLaunchedThread, BotWorkItem } from '../../src/shared/bots/personal/chat'
-import { botRowLine, chatRows, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
+import { botDoingLine, botRowLine, chatRows, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
 
 const started = (title: string, text = 'started'): BotChip => ({ icon: 'think', text, highlight: title })
 const noted: BotChip = { icon: 'think', text: 'passed on your note' }
@@ -147,6 +147,25 @@ describe('presence and sticker', () => {
     for (const [shown, kind] of kinds) expect(shown).toBe(kind)
     // A task that waits shows no activity of its own.
     expect(stickerOf(presenceOf({ state: 'working', work: [item('q', 'Later', 'queued', '2026-11-13T21:55:00.000Z')] }, { typing: false, offline: false }), { icon: 'search', text: 'searching the web' })).toBe('working')
+  })
+})
+
+describe('the line beside the typing dots', () => {
+  type Now = Parameters<typeof botDoingLine>[0]
+  const search: BotChip = { icon: 'search', text: 'searching the web', highlight: 'ssd prices', live: true }
+  // What the turn has sent so far: the bot's own words, words being written, its live step, and whether the owner's message is the newest row.
+  const rows: Array<[string, Now, ReturnType<typeof botDoingLine>]> = [
+    ['nothing yet, after the owner wrote', { writing: false, unanswered: true }, { text: 'Reading your message', idle: true }],
+    ['nothing yet, in a turn the owner did not start', { writing: false, unanswered: false }, { text: 'Working', idle: true }],
+    ['a step with what it is about', { writing: false, chip: search, unanswered: true }, { text: 'Searching the web · ssd prices' }],
+    ['a step without one', { writing: false, chip: { icon: 'memory', text: 'looking back', live: true }, unanswered: true }, { text: 'Looking back' }],
+    ['a thread it just started', { writing: false, chip: { icon: 'think', text: 'started thread', highlight: 'Fix the login page', thread: 't1' }, unanswered: true }, { text: 'Started thread: Fix the login page' }],
+    ['words being written, over the step before them', { writing: true, chip: search, unanswered: true }, { text: 'Writing a reply' }],
+    ['its own words, over a step', { status: 'Comparing the two drives now', writing: false, chip: search, unanswered: true }, { text: 'Comparing the two drives now', own: true }],
+    ['its own words, over words being written', { status: 'Comparing the two drives now', writing: true, unanswered: false }, { text: 'Comparing the two drives now', own: true }]
+  ]
+  it.each(rows)('%s', (_name, now, line) => {
+    expect(botDoingLine(now)).toEqual(line)
   })
 })
 
