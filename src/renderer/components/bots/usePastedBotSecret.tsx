@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
-import { pastedSecretShape, pastedSecretValue } from '../../../shared/secretShapes'
+import { pastedSecretShape, pastedSecretValue, missingAwsSecret } from '../../../shared/secretShapes'
 import { SECRET_KEEPS, secretKeepLabel, secretKeepLine } from '../../../shared/secretRequests'
 import { useBotsStore } from '../../stores/botsStore'
 import { privateBotDraft, subscribePrivateBotDrafts, updatePrivateBotDraft, changePrivateBotDraft, savedPrivateBotDraft, admitPrivateBotDraft } from './privateBotDrafts'
@@ -38,6 +38,7 @@ export function usePastedBotSecret(bot: BotSummary, storedDraft: string) {
     return true
   }
   const offer=<>
+    {!shape && missingAwsSecret(draft) && <p role="status" className="secret-request-keep-line">That is an access key ID; paste its secret access key too.</p>}
     {held.notice && <p role="status" className="secret-request-keep-line">{held.notice}</p>}
     {shape && !held.dismissed && <div className="composer-question-modal bot-pasted-secret secret-request-card is-inline" role={held.highlighted?'alert':'status'}>
       <p className="composer-question-prompt">This looks like a key. {held.error??'Keep it as a secret?'}</p>
