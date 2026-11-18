@@ -6995,10 +6995,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('bot supervisor records could not be read', { error: error instanceof Error ? error.message : String(error) })
       }
       this.tryDropRemovedScheduleRuns()
+      await this.reconcileAll()
       try { await this.actions.reconcile() } catch (error) {
         console.warn('bot actions could not be reconciled at startup', error)
       }
-      await this.reconcileAll()
       // The bot and request key committed together, but its first turn may still be missing.
       for (const created of this.store.unfinishedCreations()) {
         try {
@@ -8970,7 +8970,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   noteOwnerActivity(): void { this.host.ownerActivity?.(); this.quietHoursChanged() }
   /** Only future tell_at on a soon row denotes a hold; no additional stored state. */
   quietHoursChanged(): void {
-    this.actions.withdrawDisabled()
+    if (this.startupPassed) this.actions.withdrawDisabled()
     const now = this.now()
     for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND (tell_at > at OR id GLOB 'bm_action_*_n[12]')")) {
       const botId = String(row.bot_id)
