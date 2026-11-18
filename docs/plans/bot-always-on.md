@@ -166,7 +166,7 @@ The page-check setting `onlyIfChanged: { url, contains? }` and its state live in
 
 The new fixed-line fields sit under `bot`, because `jobs-kept.json` keeps that field whole when an older build's save drops what it does not know (`ScheduledJobStore.ts:229`); `restoreDroppedFields` must also merge missing keys into a `bot` that survived. An older build runs a `say` job as a prompt that says it, and ends an `until` job at its time. The "where I left off" line and the page's last hash live in `bots.db`, never in `jobs.json`, so Forget and search reach them and a file rewritten every tick stays small.
 
-About → Runs and the automation card word each combination: "Inbox check · every weekday 09:00", "Says “Take your pills” · every day 08:00", "Every 15 min · when example.com changes", with " · until Fri 21 Nov" appended.
+About → Runs words each combination: "Inbox check · every weekday 09:00", "Says “Take your pills” · every day 08:00", and "<label> · runs when example.com changes", with " · until Fri 21 Nov" appended. Automations keeps its own time wording: "Every 15 min · when example.com changes".
 
 ## 1. Event inbox
 
