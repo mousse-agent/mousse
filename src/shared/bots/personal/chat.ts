@@ -393,8 +393,28 @@ export interface BotDetail {
   reminders?: BotReminderItem[]
   /** What its chat turns of the last week cost; absent before one reported usage, and from older services. */
   usage?: BotTurnUsageSummary
-  /** Its chat's context as the composer measures a thread's: how full, what fills it, and its prompt cache. Absent until measured. */
-  context?: import('../../types').ContextUsageSnapshot
+  /** Its chat's context and prompt cache, from its latest chat turn that reached the model. Absent before one did. */
+  context?: BotContextSummary
+}
+
+/**
+ * A bot chat's context as its latest turn measured it (`bot_turn_usage`): the tokens its last request carried, of the
+ * model's window, how that turn's input split between the prompt cache and fresh tokens, and when the cache was last
+ * fed and how long the provider keeps it.
+ */
+export interface BotContextSummary {
+  /** Tokens the last request carried (fresh input, cache reads and cache writes). Absent when the runtime reports none. */
+  used?: number
+  /** The model's context window. Absent when the provider gives none. */
+  window?: number
+  /** The model that answered, by id. */
+  model?: string
+  /** That turn's input over all its requests: read from the cache, written to it, sent fresh. */
+  turn: { cacheRead: number; cacheWrite: number; fresh: number }
+  /** When its last request went out (ms since epoch). */
+  lastRequestAt: number
+  /** How long the provider keeps the cache (ms). Absent when it gives no lifetime. */
+  cacheTtlMs?: number
 }
 
 /**

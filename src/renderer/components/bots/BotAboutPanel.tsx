@@ -3,10 +3,9 @@ import {
   Activity, Automations, Bell, BookOpen, BrainMemory, BrowserTab, ChevronRight, CircleGauge, Clock, Coins, Cpu, ExternalLink, FileText, Folder,
   FolderSearch, GitPullRequest, Globe, Lock, MessagesSquare, Palette, Pause, Pencil, Play, Plug, Search, ShieldCheck, Sparkles, Terminal, Trash2, X, Zap
 } from '../../lib/icons'
-import type { BotDetail, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary, BotTurnUsageSummary } from '../../../shared/bots/personal/chat'
+import type { BotContextSummary, BotDetail, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary, BotTurnUsageSummary } from '../../../shared/bots/personal/chat'
 import type { BotModelPick } from '../../../shared/bots/personal/definition'
 import type { BotShownRows, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
-import type { ContextUsageSnapshot } from '../../../shared/types'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
 import { Switch } from '../settings/SettingsRow'
 import { ConfirmRemoveButton } from '../settings/IconButtons'
@@ -19,9 +18,9 @@ import { memorySplitText } from './BotMemoryDialog'
 import { tellingLine } from '../../../shared/bots/personal/tellingSettings'
 import { botGroupTime } from './messageGroups'
 import { BotPrompt } from './BotPrompt'
-import { contextUsageKnown } from '../ContextUsagePopover'
 import { promptCacheState, shortDuration, useMinuteClock } from '../../lib/promptCache'
 import { profilePreferenceKey } from '../../lib/profilePreferences'
+import { centerWithin } from '../../lib/shellScroll'
 import { shortModelName } from '../../../shared/modelNames'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string; 'aria-hidden'?: boolean }>
@@ -154,12 +153,13 @@ function usePanelWidth(profileId: string) {
 function useFolds(profileId: string) {
   const key = profileId ? profilePreferenceKey(profileId, OPEN_KEY) : OPEN_KEY
   const [open, setOpen] = useState<FoldId[]>(() => readJson(key, DEFAULT_OPEN))
-  const toggle = (id: FoldId) => setOpen((current) => {
-    const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+  const set = (id: FoldId, shown: boolean) => setOpen((current) => {
+    if (current.includes(id) === shown) return current
+    const next = shown ? [...current, id] : current.filter((item) => item !== id)
     window.localStorage.setItem(key, JSON.stringify(next))
     return next
   })
-  return [open, toggle] as const
+  return [open, (id: FoldId) => set(id, !open.includes(id)), (id: FoldId) => set(id, true)] as const
 }
 
 /**
@@ -187,7 +187,7 @@ function Fold({ id, icon: Glyph, title, summary, open, onToggle, children }: {
 }
 
 /** A row on a section's surface, in Settings' row anatomy: an identifying glyph, title and line, then its controls. */
-function Row({ icon: Glyph, title, desc, status, children, className, titleTip }: {
+function Row({ icon: Glyph, title, desc, status, children, className, titleTip, testId }: {
   icon?: Icon
   title: ReactNode
   desc?: ReactNode
@@ -195,8 +195,9 @@ function Row({ icon: Glyph, title, desc, status, children, className, titleTip }
   children?: ReactNode
   className?: string
   titleTip?: string
+  testId?: string
 }) {
-  return <div className={`settings-item bot-about-item${className ? ` ${className}` : ''}`}>
+  return <div className={`settings-item bot-about-item${className ? ` ${className}` : ''}`} data-testid={testId}>
     {Glyph ? <div className="settings-item-lead" aria-hidden="true"><Glyph size={16} strokeWidth={1.6} /></div> : null}
     <div className="settings-item-text">
       <span className="settings-item-title" title={titleTip}>
@@ -331,39 +332,58 @@ function RunsOn({ name, state }: { name: string; state: RunsOnState }) {
 
 interface CacheWords { text: string; tone: 'ok' | 'warn' | 'quiet'; line: string }
 
+/** How full the chat's context is, and that turn's input split in the composer's colours, scaled to the bar. */
+export interface BotContextView {
+  percent: number
+  used: number
+  window: number
+  parts: Array<{ label: string; color: string; share: number; tokens: number }>
+}
+
+/** The context bar and legend from what the latest chat turn measured; null without a token count or a window. */
+export function botContextView(context: BotContextSummary | undefined): BotContextView | null {
+  if (!context?.used || !context.window) return null
+  const { cacheRead, cacheWrite, fresh } = context.turn
+  const input = cacheRead + cacheWrite + fresh
+  const parts = [
+    { label: 'Read from cache', color: 'var(--success)', tokens: cacheRead },
+    { label: 'Written to cache', color: 'var(--warning)', tokens: cacheWrite },
+    { label: 'Sent fresh', color: 'var(--accent)', tokens: fresh }
+  ].filter((part) => part.tokens > 0).map((part) => ({ ...part, share: input > 0 ? part.tokens / input : 0 }))
+  return { percent: Math.min(100, Math.round((context.used / context.window) * 100)), used: context.used, window: context.window, parts }
+}
+
 /** The prompt cache in words, for the header and the Context section: warm with time left, expired, or idle. */
-function cacheWords(context: ContextUsageSnapshot | undefined, now: number): CacheWords | null {
-  const cache = context?.promptCache
-  if (!context || !cache) return null
-  const state = promptCacheState(cache, now)
-  const cached = context.request?.cached ?? 0
-  if (state.kind === 'warm') return { text: `Warm, ${shortDuration(state.leftMs, 'up')} left`, tone: 'ok', line: `Next message reads ${tokensText(cached)} from cache.` }
-  if (state.kind === 'expired') return { text: `Expired ${shortDuration(state.agoMs)} ago`, tone: 'warn', line: `Next message sends all ${tokensText(context.used)} again.` }
+export function cacheWords(context: BotContextSummary | undefined, now: number): CacheWords | null {
+  if (!context) return null
+  const state = promptCacheState({ lastRequestAt: context.lastRequestAt, ...(context.cacheTtlMs ? { ttlMs: context.cacheTtlMs } : {}) }, now)
+  const size = context.used ? `${tokensText(context.used)} ` : ''
+  if (state.kind === 'warm') return { text: `Warm, ${shortDuration(state.leftMs, 'up')} left`, tone: 'ok', line: `Next message reads ${size}from cache.` }
+  if (state.kind === 'expired') return { text: `Expired ${shortDuration(state.agoMs)} ago`, tone: 'warn', line: `Next message sends ${size ? `all ${size}` : 'everything '}again.` }
   return { text: `Idle ${shortDuration(state.idleMs)}`, tone: 'quiet', line: 'The provider gives no cache lifetime.' }
 }
 
-function ContextSection({ context, usage, cache }: { context: ContextUsageSnapshot | undefined; usage: BotTurnUsageSummary | undefined; cache: CacheWords | null }) {
-  const known = context && contextUsageKnown(context)
+function ContextSection({ view, usage, cache }: { view: BotContextView | null; usage: BotTurnUsageSummary | undefined; cache: CacheWords | null }) {
   return <div className="settings-group-rows bot-about-surface">
-    {known ? <div className="settings-item bot-about-context">
+    {view ? <div className="settings-item bot-about-context" data-testid="bot-about-context">
       <div className="bot-about-context-top">
-        <span className="bot-about-context-share">{context.percent}%</span>
-        <span className="bot-about-context-of">{tokensText(context.used)} of {tokensText(context.limit)} tokens</span>
+        <span className="bot-about-context-share">{view.percent}%</span>
+        <span className="bot-about-context-of">{tokensText(view.used)} of {tokensText(view.window)} tokens</span>
       </div>
-      <div className="context-usage-bar" role="img" aria-label={`Context ${context.percent}% full`}>
-        {context.categories.map((category) => <div key={category.label} className="context-usage-bar-segment"
-          style={{ width: `${(category.tokens / context.limit) * 100}%`, backgroundColor: category.color }} />)}
+      <div className="context-usage-bar" role="img" aria-label={`Context ${view.percent}% full`}>
+        {view.parts.map((part) => <div key={part.label} className="context-usage-bar-segment"
+          style={{ width: `${part.share * (view.used / view.window) * 100}%`, backgroundColor: part.color }} />)}
       </div>
-      <ul className="context-usage-breakdown bot-about-breakdown">
-        {context.categories.map((category) => <li key={category.label} className="context-usage-item">
-          <span className="context-usage-swatch" style={{ backgroundColor: category.color }} />
-          <span className="context-usage-item-label">{category.label}</span>
-          <span className="context-usage-item-value">{tokensText(category.tokens)}</span>
+      {view.parts.length ? <ul className="context-usage-breakdown bot-about-breakdown" aria-label="Last turn's input">
+        {view.parts.map((part) => <li key={part.label} className="context-usage-item" title={`${tokensText(part.tokens)} tokens over the last turn`}>
+          <span className="context-usage-swatch" style={{ backgroundColor: part.color }} />
+          <span className="context-usage-item-label">{part.label}</span>
+          <span className="context-usage-item-value">{Math.round(part.share * 100)}%</span>
         </li>)}
-      </ul>
+      </ul> : null}
     </div> : <Row title="Context" desc="Measured after its next message." />}
     {cache ? <Row title="Prompt cache" desc={cache.line}><span className={`bot-about-value is-${cache.tone}`}>{cache.text}</span></Row> : null}
-    {usage ? <Row title="Last 7 days" desc={`${usage.turns} turns · ${tokensText(usage.inputPerTurn)} in, ${tokensText(usage.outputPerTurn)} out a turn`} titleTip={usageLine(usage).title}>
+    {usage ? <Row testId="bot-about-usage" title="Last 7 days" desc={`${usage.turns} turns · ${tokensText(usage.inputPerTurn)} in, ${tokensText(usage.outputPerTurn)} out a turn`} titleTip={usageLine(usage).title}>
       <span className="bot-about-value">{Math.round(usage.cachedShare * 100)}% cached</span>
     </Row> : null}
   </div>
@@ -431,12 +451,29 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const store = useBotsStore.getState
   const paused = bot.state === 'paused'
   const [width, setWidth] = usePanelWidth(profileId)
-  const [open, toggle] = useFolds(profileId)
+  const [open, toggle, unfold] = useFolds(profileId)
+  // Pick a model opens Model and devices, then brings the rows to the middle of the panel; only the panel scrolls
+  // (scrollIntoView also moved every box around it, the app's own included).
+  const focus = useBotsStore((s) => s.aboutFocus)
+  const scroller = useRef<HTMLDivElement>(null)
+  const setupOpen = open.includes('setup')
+  useEffect(() => {
+    if (focus !== 'runs-on') return
+    if (!setupOpen) { unfold('setup'); return }
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById(RUNS_ON_ID) ?? document.getElementById('bot-about-setup')
+      if (target && scroller.current?.contains(target)) centerWithin(scroller.current, target)
+      useBotsStore.setState({ aboutFocus: null })
+    })
+    return () => window.cancelAnimationFrame(frame)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus, setupOpen])
   const runsOn = useRunsOn(bot.id, `${bot.last?.at ?? ''}|${bot.error?.text ?? ''}`)
   const context = detail?.context
-  const now = useMinuteClock(true, context?.promptCache?.lastRequestAt)
+  const now = useMinuteClock(true, context?.lastRequestAt)
   const cache = cacheWords(context, now)
-  const model = talkModelText(runsOn.choices) ?? (context?.modelName ? shortModelName(context.modelName) : null)
+  const view = botContextView(context)
+  const model = talkModelText(runsOn.choices) ?? (context?.model ? shortModelName(context.model) : null)
   const runs = detail?.runs ?? []
   const reminders = detail?.reminders ?? []
 
@@ -470,7 +507,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   return <aside className="bot-about settings-scope" style={{ width }} data-mousse-decision="" aria-label={`About ${bot.name}`}>
     <div className="panel-sidebar-resize-handle bot-about-resize" role="separator" aria-orientation="vertical" aria-label="Resize About" tabIndex={0}
       onPointerDown={startResize} onKeyDown={resizeKey} />
-    <div className="bot-about-scroll">
+    <div className="bot-about-scroll" ref={scroller}>
       <header className="bot-about-head">
         <BotFace look={bot.look} state={botFaceState(bot, happy)} size={76} view="full" />
         <div className="bot-about-id">
@@ -481,15 +518,15 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
           <p className="bot-about-doing" title={doingText(bot, now)}>{doingText(bot, now)}</p>
           <dl className="bot-about-facts">
             {model ? <><dt>Model</dt><dd>{model}</dd></> : null}
-            {context && contextUsageKnown(context) ? <><dt>Context</dt><dd>{context.percent}% of {tokensText(context.limit)} used</dd></> : null}
+            {view ? <><dt>Context</dt><dd>{view.percent}% of {tokensText(view.window)} used</dd></> : null}
             {cache ? <><dt>Cache</dt><dd className={`is-${cache.tone}`}>{cache.text}</dd></> : null}
           </dl>
         </div>
       </header>
 
       <Fold id="context" icon={CircleGauge} title="Context and cache" open={open.includes('context')} onToggle={toggle}
-        summary={context && contextUsageKnown(context) ? `${context.percent}%${cache ? ` · ${cache.tone === 'ok' ? 'warm' : cache.tone === 'warn' ? 'expired' : 'idle'}` : ''}` : undefined}>
-        <ContextSection context={context} usage={detail?.usage} cache={cache} />
+        summary={view ? `${view.percent}%${cache ? ` · ${cache.tone === 'ok' ? 'warm' : cache.tone === 'warn' ? 'expired' : 'idle'}` : ''}` : undefined}>
+        <ContextSection view={view} usage={detail?.usage} cache={cache} />
       </Fold>
 
       <Fold id="prompt" icon={BookOpen} title="Instructions" open={open.includes('prompt')} onToggle={toggle} summary={bot.promptEdited ? 'Edited' : undefined}>
@@ -535,7 +572,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
         ? <Fold id="reminders" icon={Bell} title="Reminders" open={open.includes('reminders')} onToggle={toggle} summary={`${reminders.length} · next ${reminderWhenText(reminders[0]!.dueAt)}`}>
           <div className="settings-group-rows bot-about-surface">
             {reminders.map((reminder) => <Row key={reminder.id} icon={reminder.wake !== undefined ? Clock : Bell} title={<span className="bot-about-clamp">{reminder.text}</span>} titleTip={reminder.text}
-              desc={reminderWhenLine(reminder)}>
+              desc={<span title={reminder.wake ? `Gives up: ${reminderWhenText(reminder.dueAt)}` : undefined}>{reminderWhenLine(reminder)}</span>}>
               <ConfirmRemoveButton label={`Cancel reminder: ${reminder.text}`} confirmLabel="Confirm cancel" onRemove={() => void store().cancelReminder(bot.id, reminder.id)} />
             </Row>)}
           </div>

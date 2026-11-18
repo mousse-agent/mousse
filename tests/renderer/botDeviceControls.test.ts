@@ -22,6 +22,8 @@ const flush = async () => { for (let i = 0; i < 5; i++) await act(async () => { 
 const click = async (element: Element | null | undefined) => { await act(async () => { (element as HTMLElement).click() }); await flush() }
 
 beforeEach(() => {
+  // Devices sits in About's Model and devices section, which opens on a click: open it, as the owner had.
+  window.localStorage.setItem('mousse-profile-default-mousse:bot-about-open', JSON.stringify(['setup']))
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -29,6 +31,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
+  window.localStorage.clear()
 })
 
 describe('About → Devices', () => {
