@@ -77,6 +77,11 @@ export interface ActiveTurnControl {
   pendingSteer: SteerEntry[]
   /** Notices (subagent results) the steers in `pendingSteer` carry, until the model reads them or the turn ends. */
   carriedSteers?: Array<{ inboxIds: string[]; effectId: string; text: string; subagentNotice?: SubagentNoticeItem[] }>
+  /**
+   * The provider's turn is over: the model reads nothing more, though the turn still saves its reply and checkpoint.
+   * A steer from here on is a follow-up turn at once (first in the queue), never a steer the turn would hold unread.
+   */
+  inputClosed?: boolean
 }
 
 /** Mutable per-thread execution state owned by MMS. */
@@ -181,6 +186,11 @@ export class ThreadSession {
 
   isTurnActive(): boolean {
     return this.activeTurn !== null && !this.activeTurn.abort.signal.aborted
+  }
+
+  /** A live turn whose model still reads steers: running, not stopped, and its provider's turn not over yet. */
+  takesSteer(): boolean {
+    return this.isTurnActive() && !this.activeTurn!.inputClosed
   }
 
   isTurnRunning(): boolean {

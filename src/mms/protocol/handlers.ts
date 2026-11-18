@@ -598,11 +598,13 @@ async function localActionRun<T>(
 }
 
 /** Run-targeted stop/steer (SPEC §6): `ignored` is a valid answer, not an error. */
-function runCommandResponse(result: CommandResult, runId: string): { ok: boolean; ignored: boolean; reason?: string; runId: string } {
+function runCommandResponse(result: CommandResult, runId: string): { ok: boolean; ignored: boolean; reason?: string; runId: string; followUp?: true } {
   return {
     ok: result.status === 'accepted',
     ignored: result.status === 'ignored',
     ...(result.status !== 'accepted' ? { reason: result.reason } : {}),
+    // A steer that came after the run's answer was complete: it runs as the thread's next turn.
+    ...(result.status === 'accepted' && result.followUp ? { followUp: true as const } : {}),
     runId
   }
 }

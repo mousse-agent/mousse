@@ -167,7 +167,8 @@ export interface AgentCreatedThread {
 
 /** What a Stop or a steer an agent asked for did to the run it named. */
 export type AgentRunCommandResult =
-  | { status: 'accepted'; runId: string; sequence: number; replayed: boolean }
+  /** `followUp`: a steer that came after the run's answer was complete runs as the thread's next turn instead. */
+  | { status: 'accepted'; runId: string; sequence: number; replayed: boolean; followUp?: true }
   /** The run is not the thread's active run (it ended, or never ran): nothing was changed. `runStatus` is the named run's own status. */
   | { status: 'ignored'; reason: string; runId?: string; activeRunId: string | null; runStatus?: string }
   | { status: 'rejected'; reason: string }

@@ -327,6 +327,13 @@ describe('a steered turn', () => {
     act(() => toggles()[1]!.click())
     expect(toggles().map((line) => line.getAttribute('aria-expanded'))).toEqual(['false', 'true'])
   })
+
+  it('a steer that joined the turn as it started reads as under a second of work before it, never "0s"', () => {
+    render([ask('u1', 'Fix the cache', 0), steer('s1', 'use pnpm', 0.2), call('b1', 'tool-Bash', { command: 'pnpm test' }, 4), said('a1', 'Tests pass with pnpm.', 9)])
+    const lines = [...host.querySelectorAll<HTMLElement>('.turn-work-label, .turn-work-toggle')].map((line) => line.textContent)
+    expect(lines.some((line) => line?.startsWith('Worked for <1s'))).toBe(true)
+    expect(lines.some((line) => line?.includes('0s'))).toBe(false)
+  })
 })
 
 describe('a turn stopped before its answer', () => {

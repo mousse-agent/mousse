@@ -4164,10 +4164,13 @@ export class OrchestratorService extends EventEmitter {
       const limit = actor ? ceiling ?? 'ask' : deviceLimit
       // The computer it came from goes with it too (a person's, or an agent's there), so blocking that computer removes it.
       this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text, ...(origin ? { origin, permissionMode: limit } : deviceLimit ? { deviceLimit } : {}), ...(sentFrom ? { sentFrom } : {}) }, () => {
-        if (!this.steerThread(target, text, undefined, undefined, origin, limit, undefined, sentFrom, { durable: !origin })) {
-          console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
-        }
+        if (this.steerThread(target, text, undefined, undefined, origin, limit, undefined, sentFrom, { durable: !origin })) return
+        // The run's answer is complete: the steer is the next turn, as the effect makes it.
+        if (this.turnInputClosed(target, runId)) this.enqueueLateSteer(target, text, undefined, undefined, runId, origin, limit, sentFrom, true)
+        else console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
       })
+      // The run's answer is complete and it only saves it now: the text runs as the next turn, and the answer says so.
+      if (this.turnInputClosed(target, runId)) return { ...result, followUp: true }
     }
     return result
   }
@@ -5878,7 +5881,8 @@ export class OrchestratorService extends EventEmitter {
 
   private agentRunCommandResult(engine: RunEngine, threadId: string, runId: string, result: CommandResult | StopThreadOutcome): AgentRunCommandResult {
     const replayed = 'replayed' in result && result.replayed === true
-    if (result.status === 'accepted' || result.status === 'stopped') return { status: 'accepted', runId, sequence: engine.maxSeq(threadId), replayed }
+    if (result.status === 'accepted' || result.status === 'stopped')
+      return { status: 'accepted', runId, sequence: engine.maxSeq(threadId), replayed, ...('followUp' in result && result.followUp ? { followUp: true as const } : {}) }
     if (result.status === 'rejected') return { status: 'rejected', reason: result.reason ?? 'rejected' }
     return {
       status: 'ignored',
@@ -6389,6 +6393,13 @@ export class OrchestratorService extends EventEmitter {
     await this.interruptRun(runId, threadId)
   }
 
+  /** The thread's turn in this process runs `runId` and its provider's turn is over (`ActiveTurnControl.inputClosed`). */
+  private turnInputClosed(threadId: string, runId: string): boolean {
+    const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+    const turn = session?.activeTurn
+    return Boolean(turn && turn.runId === runId && turn.inputClosed)
+  }
+
   /** The thread has a turn in this process: running or admitted (setting up). */
   private hasLocalTurn(threadId: string): boolean {
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
@@ -6439,7 +6450,9 @@ export class OrchestratorService extends EventEmitter {
     const run = engine.getRun(runId)
     // A person's run-bound steer is saved with the queue while it waits (`durable`); a notice or an agent's steer is not.
     if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried, origin, limit, undefined, sentFrom, { durable: true })) return
-    this.enqueueLateSteer(threadId, content, carried, notice, runId, origin, limit, sentFrom)
+    // The run's provider turn is over while it still saves its answer: the steer is the next turn, ahead of what was
+    // queued, as a steer the turn never read is.
+    this.enqueueLateSteer(threadId, content, carried, notice, runId, origin, limit, sentFrom, this.turnInputClosed(threadId, runId))
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -6818,14 +6831,14 @@ export class OrchestratorService extends EventEmitter {
    * item (`queue:<id>`), so exactly one delivery owns them at a time: the reconciler does not hand
    * them to a wake, and the item rebuilds its text from the rows that are still its own when it runs.
    */
-  private enqueueLateSteer(threadId: string, text: string, carried?: { inboxIds: string[]; effectId: string }, subagentNotice?: SubagentNoticeItem[], runId?: string, origin?: AgentOrigin, permissionMode?: PermissionMode, sentFrom?: { node: string }): void {
+  private enqueueLateSteer(threadId: string, text: string, carried?: { inboxIds: string[]; effectId: string }, subagentNotice?: SubagentNoticeItem[], runId?: string, origin?: AgentOrigin, permissionMode?: PermissionMode, sentFrom?: { node: string }, atFront = false): void {
     const content = text.trim()
     const session = this.getOrCreateSession(threadId)
     if (!content || session.deleted) return
     // Stamped with the generation of the run it was meant for, never the current one: the Stop fence must
     // still see a steer of an older run as older.
     const stopGeneration = runId && this.runEngine ? runStopGeneration(this.runEngine.store, runId) : undefined
-    this.enqueueCarrying(threadId, { content, mode: getLastUserChatMode(session.messages) ?? 'agent' }, { source: 'steer-late', ...(stopGeneration !== undefined ? { stopGeneration } : {}), ...(origin ? { origin } : {}), ...(permissionMode ? { permissionMode } : {}), ...(sentFrom ? { sentFrom } : {}) }, carried ? [carried] : [], subagentNotice)
+    this.enqueueCarrying(threadId, { content, mode: getLastUserChatMode(session.messages) ?? 'agent' }, { source: 'steer-late', ...(stopGeneration !== undefined ? { stopGeneration } : {}), ...(origin ? { origin } : {}), ...(permissionMode ? { permissionMode } : {}), ...(sentFrom ? { sentFrom } : {}), ...(atFront ? { atFront } : {}) }, carried ? [carried] : [], subagentNotice)
     if (session.isTurnRunning()) session.drainAfterSettle = true
     else this.scheduleQueueDrain(session)
   }
@@ -6834,7 +6847,7 @@ export class OrchestratorService extends EventEmitter {
   private enqueueCarrying(
     threadId: string,
     input: OrchestratorSendInput,
-    opts: { source: string; internal?: boolean; stopGeneration?: number; origin?: QueuedMessage['origin']; permissionMode?: PermissionMode; sentFrom?: QueuedMessage['sentFrom'] },
+    opts: { source: string; internal?: boolean; stopGeneration?: number; origin?: QueuedMessage['origin']; permissionMode?: PermissionMode; sentFrom?: QueuedMessage['sentFrom']; atFront?: boolean },
     carried: ReadonlyArray<{ inboxIds: string[]; effectId: string }>,
     subagentNotice: SubagentNoticeItem[] | undefined
   ): QueuedMessage {
@@ -10218,7 +10231,8 @@ export class OrchestratorService extends EventEmitter {
       return { ok: true }
     // Already waiting to join the turn being set up.
     if (session.steerOnStart.includes(itemId) && session.turnAdmitted) return { ok: true }
-    const localActive = session.isTurnActive()
+    // A turn whose provider has finished takes no steer: the message goes first and runs as soon as it has ended.
+    const localActive = session.takesSteer()
     const externalActive = this.isThreadLeaseHeldExternally(
       threadId,
       session.executionLease?.owner.token
@@ -10335,7 +10349,8 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Hides the transcript copies of queued messages a turn was handed but never read. Each runs again as a turn of
-   * its own, whose prompt shows it; the copy inside the ended turn would show it twice.
+   * its own, whose prompt shows it; the copy inside the ended turn would show it twice. A steer that came with no item
+   * (an agent's) keeps its copy: its follow-up is an internal turn whose prompt is not shown.
    */
   private withdrawSteerEchoes(session: ThreadSession, entries: SteerEntry[]): void {
     const echoes = new Set(entries.filter((entry) => entry.itemId && entry.echoId).map((entry) => entry.echoId!))
@@ -11957,8 +11972,8 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Close a turn only after final response persistence and action execution.
-   * During that finalizing window, sends must queue and steers must remain
-   * attached to the active turn instead of racing a concurrent turn.
+   * During that finalizing window, sends queue, and a steer is a follow-up turn
+   * (`closeTurnInput`) instead of racing a concurrent turn.
    */
   private settleActiveTurn(
     session: ThreadSession,
@@ -11971,104 +11986,9 @@ export class OrchestratorService extends EventEmitter {
     const wasAborted = aborted || turn.abort.signal.aborted
     // Queued messages handed to this turn that it never read run again as turns of their own: their copies inside
     // this turn go. A stopped turn's go back first in the queue now (handed back after the Stop, say by a provider
-    // that was still delivering them).
+    // that was still delivering them). Most were handed off as the provider's turn ended (`closeTurnInput`).
     if (wasAborted) this.returnUnreadSteerItems(session, turn.pendingSteer)
-    else this.withdrawSteerEchoes(session, turn.pendingSteer)
-    const hadUnreadSteers = !wasAborted && turn.pendingSteer.length > 0
-    if (hadUnreadSteers) {
-      const pending = turn.pendingSteer
-      const carried = turn.carriedSteers ?? []
-      turn.pendingSteer = []
-      turn.carriedSteers = []
-      if (session.threadId !== '__unbound__' && !session.deleted) {
-        const mode = getLastUserChatMode(session.messages) ?? 'agent'
-        // What the turn never read goes on as turns of their own. A steer that carried subagent
-        // results is one turn per steer (it owns its rows and is rebuilt when it runs); the user's
-        // own text is a plain follow-up that nothing rebuilds.
-        // They are queued in the order they arrived.
-        const remaining = [...carried]
-        let plain: string[] = []
-        const flush = (): void => {
-          const leftover = plain.join('\n').trim()
-          plain = []
-          if (!leftover) return
-          // The follow-up is a queued run from the start, so the thread stays held without memory (a restart included).
-          let runId: string | undefined
-          try {
-            runId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
-          } catch {
-            // Without a run the person's text is still queued; the thread is just not held for it.
-          }
-          try {
-            this.enqueueForThread(session.threadId, { content: leftover, mode }, { source: 'steer-followup', internal: true, runId })
-          } catch {
-            // Best-effort: settlement must not fail if the follow-up cannot queue.
-            this.cancelQueuedRuns([runId])
-          }
-        }
-        // A promoted queue item the turn never read goes back to being the queued message it was (or, if the
-        // item is gone, is queued again from the entry): the same limits, exactly one turn, in its place.
-        const items = pending.filter((entry) => entry.itemId)
-        if (items.length) this.settleUnreadItems(session, items, mode)
-        for (const steer of pending) {
-          if (steer.itemId) continue
-          const text = steer.text
-          // An agent's steer the turn never read is a turn of its own, never merged into a person's text: it
-          // keeps who sent it, and runs under the sender's mode (not the thread's own, which may be looser).
-          if (steer.origin) {
-            flush()
-            let agentRunId: string | undefined
-            try {
-              agentRunId = this.runEngine?.store.createRun({
-                threadId: session.threadId,
-                source: 'steer-followup',
-                outcome: { sentByAgent: true, agentHops: steer.origin.hops ?? 1 }
-              }).runId
-            } catch {
-              // Without a run the text is still queued; the thread is just not held for it.
-            }
-            try {
-              this.enqueueForThread(session.threadId, { content: steer.text, mode }, { source: 'steer-followup', internal: true, runId: agentRunId, origin: steer.origin, ...(steer.permissionMode ? { permissionMode: steer.permissionMode } : {}) })
-            } catch {
-              this.cancelQueuedRuns([agentRunId])
-            }
-            continue
-          }
-          // A person's steer from another computer that the turn never read keeps that computer's limit: it is a
-          // turn of its own at no more than the limit, not merged into text that runs at the thread's mode.
-          if (steer.permissionMode) {
-            flush()
-            let limitedRunId: string | undefined
-            try {
-              limitedRunId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
-            } catch {
-              // Without a run the text is still queued; the thread is just not held for it.
-            }
-            try {
-              this.enqueueForThread(session.threadId, { content: steer.text, mode }, { source: 'steer-followup', internal: true, runId: limitedRunId, permissionMode: steer.permissionMode, ...(steer.sentFrom ? { sentFrom: steer.sentFrom } : {}) })
-            } catch {
-              this.cancelQueuedRuns([limitedRunId])
-            }
-            continue
-          }
-          const at = remaining.findIndex((entry) => entry.text === text)
-          if (at < 0) {
-            plain.push(text)
-            continue
-          }
-          flush()
-          const [entry] = remaining.splice(at, 1)
-          try {
-            this.enqueueCarrying(session.threadId, { content: entry.text, mode }, { source: 'steer-followup', internal: true }, [entry], entry.subagentNotice)
-          } catch {
-            // Settlement must not fail; the rows go back to pending so rule 4 delivers them instead.
-            this.runEngine?.inbox.release(entry.inboxIds, entry.effectId)
-          }
-        }
-        flush()
-        for (const entry of remaining) this.runEngine?.inbox.release(entry.inboxIds, entry.effectId)
-      }
-    }
+    const hadUnreadSteers = !wasAborted && this.handOffUnreadSteers(session, turn)
     if (session.activeTurn === turn) session.activeTurn = null
     // The agent asked to archive the thread when this turn ends.
     this.archiveAfterTurnEnds(session.threadId, turn.runId, wasAborted ? 'interrupted' : paused ? 'paused' : failed ? 'failed' : 'completed')
@@ -12124,6 +12044,129 @@ export class OrchestratorService extends EventEmitter {
       if (error instanceof RunStoreError && error.code === 'stale_write') this.staleRuns.add(runId)
       console.warn('the run could not be paused', { runId, error: error instanceof Error ? error.message : String(error) })
       return false
+    }
+  }
+
+  /**
+   * What a turn that was not stopped was handed and never read goes on as turns of their own, exactly once: a queued
+   * message's copy inside the turn goes and the message is back first in the queue; other texts are queued as
+   * follow-up turns. Returns whether there was anything. Called as the provider's turn ends (`closeTurnInput`), so a steer the
+   * model never read shows as the next turn at once instead of after the turn has saved its answer and checkpoint, and
+   * again as the turn settles.
+   */
+  private handOffUnreadSteers(session: ThreadSession, turn: NonNullable<ThreadSession['activeTurn']>): boolean {
+    if (turn.pendingSteer.length === 0) return false
+    this.withdrawSteerEchoes(session, turn.pendingSteer)
+    const pending = turn.pendingSteer
+    const carried = turn.carriedSteers ?? []
+    turn.pendingSteer = []
+    turn.carriedSteers = []
+    if (session.threadId !== '__unbound__' && !session.deleted) {
+      const mode = getLastUserChatMode(session.messages) ?? 'agent'
+      // What the turn never read goes on as turns of their own. A steer that carried subagent
+      // results is one turn per steer (it owns its rows and is rebuilt when it runs); the user's
+      // own text is a plain follow-up that nothing rebuilds.
+      // They are queued in the order they arrived.
+      const remaining = [...carried]
+      let plain: string[] = []
+      const flush = (): void => {
+        const leftover = plain.join('\n').trim()
+        plain = []
+        if (!leftover) return
+        // The follow-up is a queued run from the start, so the thread stays held without memory (a restart included).
+        let runId: string | undefined
+        try {
+          runId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
+        } catch {
+          // Without a run the person's text is still queued; the thread is just not held for it.
+        }
+        try {
+          this.enqueueForThread(session.threadId, { content: leftover, mode }, { source: 'steer-followup', internal: true, runId })
+        } catch {
+          // Best-effort: settlement must not fail if the follow-up cannot queue.
+          this.cancelQueuedRuns([runId])
+        }
+      }
+      // A promoted queue item the turn never read goes back to being the queued message it was (or, if the
+      // item is gone, is queued again from the entry): the same limits, exactly one turn, in its place.
+      const items = pending.filter((entry) => entry.itemId)
+      if (items.length) this.settleUnreadItems(session, items, mode)
+      for (const steer of pending) {
+        if (steer.itemId) continue
+        const text = steer.text
+        // An agent's steer the turn never read is a turn of its own, never merged into a person's text: it
+        // keeps who sent it, and runs under the sender's mode (not the thread's own, which may be looser).
+        if (steer.origin) {
+          flush()
+          let agentRunId: string | undefined
+          try {
+            agentRunId = this.runEngine?.store.createRun({
+              threadId: session.threadId,
+              source: 'steer-followup',
+              outcome: { sentByAgent: true, agentHops: steer.origin.hops ?? 1 }
+            }).runId
+          } catch {
+            // Without a run the text is still queued; the thread is just not held for it.
+          }
+          try {
+            this.enqueueForThread(session.threadId, { content: steer.text, mode }, { source: 'steer-followup', internal: true, runId: agentRunId, origin: steer.origin, ...(steer.permissionMode ? { permissionMode: steer.permissionMode } : {}) })
+          } catch {
+            this.cancelQueuedRuns([agentRunId])
+          }
+          continue
+        }
+        // A person's steer from another computer that the turn never read keeps that computer's limit: it is a
+        // turn of its own at no more than the limit, not merged into text that runs at the thread's mode.
+        if (steer.permissionMode) {
+          flush()
+          let limitedRunId: string | undefined
+          try {
+            limitedRunId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
+          } catch {
+            // Without a run the text is still queued; the thread is just not held for it.
+          }
+          try {
+            this.enqueueForThread(session.threadId, { content: steer.text, mode }, { source: 'steer-followup', internal: true, runId: limitedRunId, permissionMode: steer.permissionMode, ...(steer.sentFrom ? { sentFrom: steer.sentFrom } : {}) })
+          } catch {
+            this.cancelQueuedRuns([limitedRunId])
+          }
+          continue
+        }
+        const at = remaining.findIndex((entry) => entry.text === text)
+        if (at < 0) {
+          plain.push(text)
+          continue
+        }
+        flush()
+        const [entry] = remaining.splice(at, 1)
+        try {
+          this.enqueueCarrying(session.threadId, { content: entry.text, mode }, { source: 'steer-followup', internal: true }, [entry], entry.subagentNotice)
+        } catch {
+          // Settlement must not fail; the rows go back to pending so rule 4 delivers them instead.
+          this.runEngine?.inbox.release(entry.inboxIds, entry.effectId)
+        }
+      }
+      flush()
+      for (const entry of remaining) this.runEngine?.inbox.release(entry.inboxIds, entry.effectId)
+    }
+    return true
+  }
+
+  /**
+   * The provider's turn is over: the model reads nothing more. From here a steer is a follow-up turn at once
+   * (`ActiveTurnControl.inputClosed`), and one the turn was handed and never read is handed off now, not when the turn
+   * has saved its answer (its checkpoint may wait minutes for the repository's lease). A stopped turn keeps them for
+   * its settlement, which puts them back in the queue.
+   */
+  private closeTurnInput(session: ThreadSession, turn: NonNullable<ThreadSession['activeTurn']>, aborted: boolean): void {
+    turn.inputClosed = true
+    if (aborted || turn.abort.signal.aborted) return
+    try {
+      // The follow-ups are runs that hold the thread's tasks now; the turn no longer does (`hasUnreadSteers`).
+      if (this.handOffUnreadSteers(session, turn)) this.reevaluateHold(session.threadId)
+    } catch (error) {
+      // What is left is handed off as the turn settles.
+      console.warn('unread steers could not be handed off as the provider turn ended', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
     }
   }
 
@@ -12223,7 +12266,8 @@ export class OrchestratorService extends EventEmitter {
       this.boundSession.threadId === threadId
         ? this.boundSession
         : this.sessions.get(threadId) ?? null
-    if (session?.activeTurn && !session.activeTurn.abort.signal.aborted) {
+    // A turn whose provider has finished reads nothing more: the caller makes the text a follow-up turn at once.
+    if (session?.activeTurn && session.takesSteer()) {
       if (item?.runId && session.activeTurn.runId !== item.runId) return false
       // An agent's steer is remembered with its sender and the mode it may run in, and a promoted item with its
       // id and what it carried, so a turn that never reads it runs it as a turn of its own with the same limits.
@@ -12311,12 +12355,14 @@ export class OrchestratorService extends EventEmitter {
     // its copy out of the turn, as for a queued message. A device's limit keeps the steer of its own below.
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
     if (text.trim() && !opts?.permissionMode && session?.isTurnRunning() && !session.stopping && !session.abortRequested && !this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)) {
+      // The answer is complete and the turn only saves it: the text is the next turn, first in the queue, and says so.
+      const followUp = Boolean(session.activeTurn?.inputClosed)
       const item = this.enqueueForThread(threadId, { content: text.trim() }, {
         source: opts?.source ?? 'steer',
         ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {})
       })
       try {
-        if (this.promoteQueueItem(threadId, item.id).ok) return { steered: true, queued: false, item }
+        if (this.promoteQueueItem(threadId, item.id).ok) return followUp ? { steered: false, queued: true, item } : { steered: true, queued: false, item }
       } catch (error) {
         console.warn('a steer could not join the running turn; it is queued at the end, as a message sent with Enter is', { threadId, error: error instanceof Error ? error.message : String(error) })
       }
@@ -12324,6 +12370,13 @@ export class OrchestratorService extends EventEmitter {
     }
     if (this.steerThread(threadId, text, undefined, undefined, undefined, opts?.permissionMode, undefined, opts?.sentFrom, { durable: Boolean(opts?.permissionMode) })) {
       return { steered: true, queued: false }
+    }
+    // The turn's answer is complete and it only saves it now: the text is the next turn, first in the queue, with the
+    // device's limit.
+    const closed = session?.activeTurn?.inputClosed ? session.activeTurn : undefined
+    if (closed && text.trim()) {
+      this.enqueueLateSteer(threadId, text, undefined, undefined, closed.runId, undefined, opts?.permissionMode, opts?.sentFrom, true)
+      return { steered: false, queued: true }
     }
     if (this.isThreadLeaseHeldExternally(threadId)) {
       const item = this.enqueueExternalSteer(threadId, text, opts)
@@ -14570,7 +14623,8 @@ export class OrchestratorService extends EventEmitter {
       if (compactionNote) onCompaction('unchanged')
       if (turn.abort.signal.aborted) aborted = true
       opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)
-      // The turn remains active until post-stream persistence/actions finish.
+      // The turn remains active until post-stream persistence/actions finish, but its model reads no more steers.
+      this.closeTurnInput(session, turn, aborted)
     }
 
     // The retry row ends with the provider's turn: stopped, or the provider got the request in the end. A failure turns
