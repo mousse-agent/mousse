@@ -98,7 +98,7 @@ describe('an answered ask', () => {
 
   it('says how many pieces of work carry on, and words Not now and withdrawn', () => {
     // A limit the owner's work waits on: Allow carries that work on now, and says how many when it was several.
-    expect(askAnswerLine(ask({ status: 'allowed', title: 'work for up to 2 hours per run', carriesOn: true, carried: 3 }), true)).toBe('Allowed: work for up to 2 hours per run. 3 pieces of work carry on now.')
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'take up to 40 steps per run', carriesOn: true, carried: 3 }), true)).toBe('Allowed: take up to 40 steps per run. 3 pieces of work carry on now.')
     expect(askAnswerLine(ask({ status: 'not_now' }))).toBe('Not now: use files on this computer')
     expect(askAnswerLine(ask({ status: 'withdrawn' }))).toBe('No longer needed: use files on this computer')
   })

@@ -1505,7 +1505,7 @@ export class Harness implements HarnessGateway {
       // runtime passes admission with them. The record is taken before admission, so a first attempt
       // that is refused still leaves one.
       // A caller-given count scope (a bot activation's) records every request and tool call even
-      // with no count limit, so a bot limited only by work time still shows what it did.
+      // with no count limit, so a bot with no limits still shows what it did.
       const limits = budgetLimitsOf(spec.binding.policy) ?? (spec.counters ? {} : undefined)
       const counted = limits ? this.runCounters.acquire(spec.input.runId, limits, spec.counters, { laterAttempt: (spec.attemptOrdinal ?? 1) > 1, ...(spec.spend ? { spend: spec.spend } : {}) }) : undefined
       let signal = spec.input.signal

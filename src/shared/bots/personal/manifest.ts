@@ -1,7 +1,7 @@
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../browser/automation'
 import { PROFILER_TOOL_NAMES, type ProfilerToolName } from '../../diagnostics/profiler'
 import { isNeutralTool, type NeutralTool } from '../../harness/tools'
-import { DEFAULT_BOT_ACTIVE_MS, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
+import { foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
@@ -11,10 +11,8 @@ import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
  * dialog uses (PR 6 §4). Browser-safe: the digest itself is computed in the daemon.
  */
 
-const BUDGET_KEYS = ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
-
-/** The longest work time one activation may be given: a day. */
-export const MAX_BOT_ACTIVE_MS = 24 * 60 * 60_000
+/** The limits an owner may set on a bot's runs. Work time is not one: it has no limit (`BotBudget.maxActiveMs`). */
+const BUDGET_KEYS = ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
 
 /**
  * The bot's own app tools (Bot Phase 1 §5.10): its schedules, its name and description, how much
@@ -358,7 +356,7 @@ export function isOwnBotAppTool(tool: string): boolean {
 
 /**
  * A new bot's grant (Bot Phase 1 §5.3.1): the file tools, which reach only its files folder; the web and its own tools;
- * an hour per activation. Pressing Create bot approves it.
+ * no limits. Pressing Create bot approves it.
  */
 export function botStarterManifest(): BotManifest {
   return {
@@ -367,7 +365,7 @@ export function botStarterManifest(): BotManifest {
     mcp: [],
     skills: [],
     workspace: null,
-    budget: { maxActiveMs: DEFAULT_BOT_ACTIVE_MS },
+    budget: {},
     audience: 'owner'
   }
 }
@@ -393,10 +391,11 @@ const sorted = <T>(values: readonly T[], key: (value: T) => string): T[] => {
 
 /**
  * The manifest with every list deduplicated and sorted and every absent limit dropped, so two
- * manifests that grant the same things have the same canonical JSON (and digest).
+ * manifests that grant the same things have the same canonical JSON (and digest). An old grant's work time stays as it
+ * was, though nothing reads it: dropping it would change the digest its activations were made under.
  */
 export function canonicalManifest(manifest: BotManifest): BotManifest {
-  const budget: BotBudget = { maxActiveMs: manifest.budget.maxActiveMs }
+  const budget: BotBudget = manifest.budget.maxActiveMs !== undefined ? { maxActiveMs: manifest.budget.maxActiveMs } : {}
   for (const key of BUDGET_KEYS) if (manifest.budget[key] !== undefined) budget[key] = manifest.budget[key]
   return {
     tools: sorted(manifest.tools, (tool) => tool),
@@ -436,12 +435,11 @@ export function manifestProblem(value: unknown): string | undefined {
   if (!budget || typeof budget !== 'object') return 'The limits are missing.'
   for (const key of BUDGET_KEYS) {
     const limit = budget[key]
-    if (limit === undefined && key !== 'maxActiveMs') continue
+    if (limit === undefined) continue
     if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) return `The limit ${key} must be a positive number.`
     // Counts and times are whole numbers; only the spend is in dollars.
     if (key !== 'maxUsd' && !Number.isSafeInteger(limit)) return `The limit ${key} must be a whole number.`
   }
-  if ((budget.maxActiveMs as number) > MAX_BOT_ACTIVE_MS) return 'A bot can work at most 24 hours per run.'
   if (manifest.audience !== 'owner') return 'Bots for other people are not available yet.'
   return undefined
 }
@@ -550,16 +548,11 @@ function mcpLine(pair: { serverId: string; tool: string }): BotPermissionLine {
 
 function budgetLine(key: (typeof BUDGET_KEYS)[number], limit: number | undefined): BotPermissionLine {
   if (limit === undefined) return { kind: 'budget', text: `No limit on ${BUDGET_WORDS[key]}` }
-  if (key === 'maxActiveMs') {
-    const minutes = Math.round(limit / 60_000)
-    return { kind: 'budget', text: minutes >= 1 ? `Up to ${minutes} minute${minutes === 1 ? '' : 's'} of work per run` : `Up to ${Math.round(limit / 1000)} seconds of work per run` }
-  }
   if (key === 'maxUsd') return { kind: 'budget', text: `Up to $${limit} per run` }
   return { kind: 'budget', text: `Up to ${limit} ${BUDGET_WORDS[key]} per run` }
 }
 
 const BUDGET_WORDS: Record<(typeof BUDGET_KEYS)[number], string> = {
-  maxActiveMs: 'work time',
   maxTurns: 'model requests (retries included)',
   maxToolCalls: 'tool calls',
   maxInputTokens: 'input tokens',
@@ -597,7 +590,7 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
     const names = new Set(allowed.map(key))
     return values.filter((value) => names.has(key(value)))
   }
-  const budget: BotBudget = { maxActiveMs: Math.min(wanted.budget.maxActiveMs, granted.budget.maxActiveMs) }
+  const budget: BotBudget = {}
   for (const key of BUDGET_KEYS) {
     const a = wanted.budget[key]
     const b = granted.budget[key]

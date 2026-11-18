@@ -42,8 +42,8 @@ describe('bots.create', () => {
     expect(f.oneShot.prompts[0]).toContain('Two or three words naming a helper that does: Check my inbox')
     const definition = f.host.definitions.get(bot.id)!.published!
     expect(definition).toMatchObject({ format: 2, role: 'Check my inbox every morning and tell me what matters.', main: { model: { mode: 'auto', depth: 'normal' } }, triggers: { manual: true } })
-    // Pressing Create bot approved the starter grant: its files folder, its tools and 15 minutes.
-    expect(f.store.activeGrant(bot.id)).toMatchObject({ digest: botManifestDigest(starterManifest()), manifest: { workspace: null, budget: { maxActiveMs: 60 * 60_000 } } })
+    // Pressing Create bot approved the starter grant: its files folder, its tools and no limits.
+    expect(f.store.activeGrant(bot.id)).toMatchObject({ digest: botManifestDigest(starterManifest()), manifest: { workspace: null, budget: {} } })
     expect(existsSync(f.bots.filesFolder(bot.id))).toBe(true)
     const [first] = f.store.laneActivations(bot.id, 'chat', ['running'])
     expect(first).toMatchObject({ lane: 'chat', threadId: `thread:bot:${bot.id}`, trigger: { input: firstMessagePrompt('Check my inbox every morning and tell me what matters.') } })

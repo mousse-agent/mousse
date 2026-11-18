@@ -10,8 +10,12 @@ import { BOT_BROWSER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERM
  */
 
 /** The limits a budget wall can raise for one activation. */
-export const BOT_BUDGET_WALL_KEYS = ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
-export type BotBudgetWallKey = (typeof BOT_BUDGET_WALL_KEYS)[number]
+export const BOT_BUDGET_WALL_KEYS = ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
+/**
+ * A limit an ask names. `maxActiveMs` (work time) only in an ask an older build wrote: work time has no limit now, so
+ * none is raised or asked for, and an open one is answered when the profile opens (`BotEngine.releaseWorkTimeAsks`).
+ */
+export type BotBudgetWallKey = (typeof BOT_BUDGET_WALL_KEYS)[number] | 'maxActiveMs'
 
 /**
  * What a wall asks the owner to allow. A `path` request ("use files on this computer") is only ever read from rows an
@@ -176,8 +180,7 @@ export function permissionText(permission: BotPermissionRequest): string {
     return permission.mcp.tool ? `Use the MCP tool \`${permission.mcp.tool}\`` : 'Use the tools of an MCP server'
   }
   const { key, amount } = permission.budget
-  if (amount === undefined) return `More ${BUDGET_WORDS[key]}`
-  if (key === 'maxActiveMs') return `${Math.max(1, Math.round(amount / 60_000))} more minutes of work`
+  if (amount === undefined || key === 'maxActiveMs') return `More ${BUDGET_WORDS[key]}`
   if (key === 'maxUsd') return `$${amount} more spend`
   return `${amount} more ${BUDGET_WORDS[key]}`
 }
@@ -212,7 +215,7 @@ export function permissionProblem(value: unknown): string | undefined {
   }
   if (keys.length === 1 && keys[0] === 'budget') {
     const budget = entry.budget as Record<string, unknown> | null
-    if (!budget || typeof budget !== 'object' || !BOT_BUDGET_WALL_KEYS.includes(budget.key as BotBudgetWallKey)) return 'The limit is invalid.'
+    if (!budget || typeof budget !== 'object' || !(BOT_BUDGET_WALL_KEYS as readonly string[]).includes(budget.key as string)) return 'The limit is invalid.'
     if (budget.amount !== undefined && (typeof budget.amount !== 'number' || !Number.isFinite(budget.amount) || budget.amount <= 0)) return 'The amount is invalid.'
     return undefined
   }

@@ -23,8 +23,8 @@ export function openPersonalBots(
     engine.upgradeDefinitions()
     // "Use files on this computer" was removed: an older build's open file asks are withdrawn.
     engine.withdrawFileAsks()
-    // The base work time is an hour: grants that still hold the old 15 minutes get it.
-    engine.upgradeWorkTime()
+    // Work time has no limit: an older build's open asks for more of it are answered.
+    engine.releaseWorkTimeAsks()
     return { store: opened, engine }
   } catch (error) {
     try { store?.close() } catch { /* already unusable */ }

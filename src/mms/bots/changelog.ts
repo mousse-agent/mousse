@@ -117,6 +117,12 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-17',
     text: "Your work has no count any more: everything you start with work_start runs at once, and work that waits keeps waiting until it is woken, answered or stopped. Your first message can start and message your owner's threads like a turn your owner started. Any chat turn can start a background command with watch_start. A message holds as many cards as fit, and work_note and question_answer pass on the owner's words in full.",
     gone: [/Up to \d+ pieces of work run at once/i, /\d+ pieces run at once/i, /cards per message/i, /watch_start, only in a chat turn/i, /background only in a chat turn/i]
+  },
+  {
+    id: 22,
+    date: '2026-11-18',
+    text: "Your work has no time limit any more: it is never stopped to ask your owner for more time, and your subagents' running time counts against nothing. A limit you can still ask for is only one your owner set (steps, tool calls, tokens or spend).",
+    gone: [/counts against your work time/i, /work for up to/i, /maxActiveMs/]
   }
 ]
 

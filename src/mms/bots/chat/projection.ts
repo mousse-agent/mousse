@@ -7,7 +7,7 @@ import { askText } from '../../../shared/bots/personal/askText'
 import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
-import { askFingerprint, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
+import { askFingerprint, BOT_BUDGET_WALL_KEYS, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
@@ -40,8 +40,7 @@ import { BOT_USAGE_WINDOW_MS, turnUsageSummary } from '../activation/turnUsage'
 
 /**
  * The starter grant (§5.3.1, `botStarterManifest`): files in the bot's own files folder, the web,
- * its own tools (`BOT_DEFAULT_APP_TOOLS`) and an hour of work per activation, and nothing
- * outside. Pressing Create bot approves it.
+ * its own tools (`BOT_DEFAULT_APP_TOOLS`), no limits, and nothing outside. Pressing Create bot approves it.
  */
 export function starterManifest(): BotManifest {
   return canonicalManifest(botStarterManifest())
@@ -756,7 +755,7 @@ export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[
   const servers = new Map<string, string[]>()
   for (const pair of manifest.mcp) servers.set(pair.serverId, [...(servers.get(pair.serverId) ?? []), pair.tool])
   for (const [serverId, tools] of servers) items.push({ mcp: { serverId, tools: [...tools].sort() } })
-  for (const key of ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const) {
+  for (const key of BOT_BUDGET_WALL_KEYS) {
     const held = manifest.budget[key]
     const base = starter.budget[key]
     if (held !== undefined && (base === undefined || held > base)) items.push({ budget: { key, ...(base !== undefined ? { amount: held - base } : {}) } })
