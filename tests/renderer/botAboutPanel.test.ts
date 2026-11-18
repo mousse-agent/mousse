@@ -484,3 +484,12 @@ it('keeps chat usage and the service asks-first row together with whole-service 
   expect(service()).toBeUndefined()
   expect(usage().textContent).toContain('18k tokens a turn')
 })
+
+it('shows the asks-first coverage as visible permission text', async () => {
+  const coverage = 'Only the bot’s own tool calls wait. Calls through threads, commands or secrets do not.'
+  fake.details.b1.permissions = [{ id: 'mail', title: 'use your Trial mail tools', enabled: true, grantedAt: AT, note: coverage, mark: 'Asks first', asksFirst: true }]
+  await show()
+  const permission = button('Remove use your Trial mail tools')!.closest('.bot-about-permission')!
+  expect(permission.textContent).toContain('Asks first')
+  expect(permission.textContent).toContain(coverage)
+})
