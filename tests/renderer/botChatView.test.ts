@@ -1,3 +1,4 @@
+import { clearPrivateBotDrafts } from '../../src/renderer/components/bots/privateBotDrafts'
 // @vitest-environment jsdom
 /**
  * A bot's chat (bot-ui §4.4, §4.8, §4.9), as a one-to-one messenger: the owner's bubbles on the right and the bot's on
@@ -124,6 +125,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   setBotsClient(null)
   clearBotLiveReplies()
+  clearPrivateBotDrafts()
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
   useAppStore.setState({ settingsOpen: appInitial.settingsOpen })
