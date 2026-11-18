@@ -179,6 +179,21 @@
       "expiresAt": "2026-11-18T08:04:59.558Z"
     },
     {
+      "task": "plus-legacy-toggle",
+      "session": "agibook-07482f",
+      "machine": "agibook",
+      "branch": "plus-legacy-toggle",
+      "paths": [
+        "src/mms/net/NetService.ts",
+        "src/mms/MmsProfileServices.ts",
+        "src/shared/settings.ts",
+        "src/renderer/components/settings/LabsSettings.tsx",
+        "src/renderer/stores/mousseIdStore.ts"
+      ],
+      "claimedAt": "2026-11-18T22:01:23.773Z",
+      "expiresAt": "2026-11-19T00:01:23.773Z"
+    },
+    {
       "task": "thread-journal-latest-index",
       "session": "Animatrix-abde56",
       "machine": "Animatrix",
