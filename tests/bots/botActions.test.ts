@@ -427,7 +427,7 @@ it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route 
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
-it.each(['repeat', 'forgotten'] as const)('removed or recreated schedules and a second schedule cannot reset %s refusals', async rule => {
+it.each(['repeat', 'forgotten'] as const)('recreated schedules keep removed requests distinct from Not now: %s', async rule => {
   const t = await scheduledCall()
   let id = t.id, turn = t.run, schedule = t.schedule
   const count = 1
@@ -456,7 +456,15 @@ it.each(['repeat', 'forgotten'] as const)('removed or recreated schedules and a 
   }
   const args = t.args
   const attempt = (bot: typeof turn.prepared.authority, key: string) => callForBot({ bot, mcp: t.mcp, name: 'Mail__send', args, toolCallId: key, signal: new AbortController().signal })
-  expect((await attempt(turn.prepared.authority, 'recreated')).isError).toBe(true)
+  expect((await attempt(turn.prepared.authority, 'recreated')).isError).toBe(rule === 'forgotten' ? true : undefined)
+  if (rule === 'repeat') {
+    await finish(f, turn.payload)
+    f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Same task elsewhere' }, 'owner')
+    f.clock.now += 5 * 60_000
+    expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+    expect(t.calls).toEqual([])
+    return
+  }
   const second = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Same task elsewhere' }, 'owner')
   f.clock.now += 5 * 60_000
   const due = await f.tickSchedules(new Date(f.clock.now))
@@ -738,7 +746,7 @@ it.each([1, 60, 180])('an older expired schedule card keeps its outcome and prog
   const later = await start(f, due.inserted[0]!)
   expect(later.prepared.preamble).toContain('Checked through the first invoice')
 })
-it('Not now refuses the identical call in the next occurrence until the owner writes', async () => {
+it('Not now refuses an identical call within its occurrence, then a later occurrence asks', async () => {
   const t = await scheduledCall()
   await t.call()
   await finish(f, t.run.payload)
@@ -746,13 +754,14 @@ it('Not now refuses the identical call in the next occurrence until the owner wr
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
   await flush()
   const next = await start(f, t.id, 2)
+  expect(await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'same-occurrence', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Do not ask again') })
   await finish(f, next.payload)
   f.clock.now += 5 * 60_000
   const due = await f.tickSchedules(new Date(f.clock.now))
   const run = await start(f, due.inserted[0]!)
   const outcome = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'new-occurrence', signal: new AbortController().signal })
-  expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Do not ask again') })
-  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(outcome.text).toContain('held')
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(2)
 })
 it('restart while a schedule waits keeps one run and card and Send resumes once', async () => {
   const t = await scheduledCall()
@@ -3794,4 +3803,40 @@ it('the permission card describes mixed read-only and missing hints without repe
   expect(note).not.toContain("doesn't say whether these tools")
   expect(note.match(/ask before each use/g)).toHaveLength(1)
   expect(note).not.toContain('Some of these tools send or change things; those')
+})
+
+it('reserves the first answer while Send checks its fresh listing', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  let release!: () => void
+  Object.assign(t.catalog, { refreshServer: () => new Promise<void>(resolve => { release = resolve }) })
+  const send = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  const notNow = await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }).then(() => 'answered', () => 'refused')
+  release(); await send.catch(() => undefined)
+  expect(notNow).toBe('refused')
+  expect(t.calls).toEqual([t.args])
+})
+it('a successful fresh check retains the accepted-call recovery window', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  Object.assign(t.catalog, { refreshServer: async () => {} })
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  expect(t.calls).toEqual([])
+})
+
+it('a permission card with read-only and unhinted reading tools acknowledges both', async () => {
+  const t = await setup(true, false, true)
+  t.descriptor.readOnlyHint = true
+  t.server.tools[1]!.toolName = 'get_items'
+  const row = f.store.escalation(String(f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]!.id))!
+  const permission = structuredClone(row.permission) as any
+  permission.mcp.changes = 'unknown'; permission.mcp.tools = ['send', 'get_items']
+  const note = f.bots.chat.card({ ...row, permission, title: null, note: null }).note
+  expect(note).not.toContain("doesn't say whether these tools")
+  expect(note).toContain('Some tools do not provide a read-only hint')
 })
