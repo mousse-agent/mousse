@@ -4424,6 +4424,8 @@ it.each([
   ['https://safe.example/path', 'Plain changed text'],
   ['first@example.test', 'second@example.test'],
   ['A note from @owner', 'A note from @stranger'],
+  ['A note from @所有者', 'Plain changed text'],
+  ['Read example.рф', 'Plain changed text'],
   ['Read safe.example', 'Read evil.example'],
   [{ options: [{ path: '/sent' }], text: 'original' }, { options: [{ path: '/sent' }], text: 'changed' }],
   ['Plain sent text', { options: [{ path: '/new' }] }]
