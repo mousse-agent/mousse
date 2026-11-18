@@ -826,6 +826,8 @@ it('a subagent holds its call on its work and uses its own dispatch in the call 
   await t.work.prepared.authority.subagents!.start({ title: 'Sender', brief: 'Send mail', toolCallId: 'start-sender' })
   const childDispatch = f.store.dispatches(t.workId).find(d => d.kind === 'subagent')!
   const child = await start(f, t.workId, childDispatch.n)
+  expect(child.prepared.instructions).toContain('Some of your tools ask your owner first')
+  expect(child.prepared.instructions).toContain('If a call was not sent, say so plainly in your report.')
   await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-call', signal: new AbortController().signal })
   const a = f.bots.actions.forWork(t.workId)!
   expect(JSON.parse(a.call_key)).toEqual([t.workId, childDispatch.clientRequestId, 'child-call'])
@@ -3553,7 +3555,7 @@ it('C11 repeat refusal explains an unsent request without promising expiry', asy
   await flush()
   const turn = await start(f, t.workId, 2)
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-copy', signal: new AbortController().signal })
-  expect(result.text).toBe('Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.')
+  expect(result.text).toBe('Your owner chose Not now for this same request. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
 })
 
 it.each(['stop', 'not_now', 'send', 'withdraw', 'forget', 'clear'] as const)('C11 hidden arguments stay while waiting and clear on %s', async path => {
@@ -3608,7 +3610,7 @@ it('C6 introduces asks first once before the first card, surviving restart', asy
   const t = await setup(true)
   await t.call()
   const messages = () => f.store.all('SELECT text FROM bot_messages WHERE bot_id = ? ORDER BY seq', t.botId).map(m => String(m.text))
-  const introduction = `From now on ${f.bots.definitionOf(t.botId).name} asks you before it sends or changes anything with your tools. Tools that only read don't ask.`
+  const introduction = `${f.bots.definitionOf(t.botId).name} asks you before using tools that may send or change things. Tools that say they only read don't ask.`
   expect(messages().filter(text => text === introduction)).toHaveLength(1)
   expect(f.bots.service.chatList(t.botId).messages.find(m => m.text === introduction)?.systemLine).toBe(true)
   expect(messages().indexOf(introduction)).toBeLessThan(messages().findIndex(text => text.startsWith('Mail · send')))
@@ -3766,4 +3768,13 @@ it.each(['work', 'schedule'].flatMap(lane => ['get_items', 'get_and_send'].map(t
   const id = 'id' in t ? t.id : t.workId
   expect(f.bots.actions.forWork(id)?.status).toBe(tool === 'get_items' ? undefined : 'open')
   expect(t.calls).toEqual(tool === 'get_items' ? [t.args] : [])
+})
+
+it('chat explains waiting without promising which calls ask', async () => {
+  const t = await setup(true)
+  const talk = await f.bots.activate({ botId: t.botId, input: 'Schedule mail', clientRequestId: 'waiting-guidance' })
+  const turn = await start(f, talk.id)
+  expect(turn.prepared.instructions).toContain('When you set up work or a schedule')
+  expect(turn.prepared.instructions).toContain('one card at a time')
+  expect(turn.prepared.instructions).toContain('Never promise which calls will or will not ask')
 })
