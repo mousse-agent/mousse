@@ -3034,3 +3034,18 @@ it.each(['open', 'approved', 'running', 'forgotten'])('C10 no compact identifier
   await open()
   expect(host.querySelector('[aria-label="Request identification"]')).toBeNull()
 })
+
+// Short body-like fields and any other short strings stay in place; either length bound folds.
+it.each([
+  ['body', 'See you at noon.', false], ['text', 'Short text', false],
+  ['content', 'Short content', false], ['message', 'Short message', false],
+  ['body', 'x'.repeat(280), false], ['body', 'x'.repeat(281), true],
+  ['body', 'a\nb\nc\nd', false], ['body', 'a\nb\nc\nd\ne', true],
+  ['subject', 'x'.repeat(281), true]
+])('C10 folds %s only when its value is long (%s)', async (name, value, folds) => {
+  fake.chats.inbox = [held({ args: { [name]: value } })]
+  await open()
+  const region = host.querySelector('[aria-label="Everything it will send"]')!
+  expect(region.querySelector('details') !== null).toBe(folds)
+  expect(region.textContent).toContain(value.replaceAll('\n', '↵\n'))
+})
