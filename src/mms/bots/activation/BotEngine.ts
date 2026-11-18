@@ -7510,8 +7510,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * A message from a thread the bot started (`message_parent`), sent while it works: a question, a blocker, a finding
    * the bot must know now. It arrives as a job's notice does, out of sight: a chat turn of the bot's own
-   * (`threadmsg:<thread>:<request>`), plus a line the owner never sees that the flood guard below counts, that starts with the message framed as data from that thread, with its link, and it
-   * wakes an idle bot. The same request again replays. Refused, in words for the thread: a deleted or paused bot, or one
+   * (`threadmsg:<thread>:<request>`) that starts with the message framed as data from that thread, with its link, and it
+   * wakes an idle bot. A line the owner never sees (`outOfSightRow`) is kept per message for the flood guard below. The same request again replays. Refused, in words for the thread: a deleted or paused bot, or one
    * that can't run now; `maxWaiting` of the thread's messages still waiting for the bot to read them; or
    * `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER` of its messages since the owner last wrote, with no person in between.
    */

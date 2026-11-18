@@ -44,7 +44,8 @@ export const MAX_WAKE_BRIEF_CHARS = 2_000
 
 /**
  * The id of the quiet line older versions posted in the chat for a wake-up or a thread's notice (`bm_wake_<wakeId>`,
- * `bm_wake_job_…`). None is posted now, and the chat no longer shows the old ones (`BotStore`'s `SHOWN_MESSAGE`).
+ * `bm_wake_job_…`). Only a thread's message still writes one, for its flood guard; the chat shows none of them
+ * (`BotStore`'s `SHOWN_MESSAGE`).
  */
 export const WAKE_LINE_PREFIX = 'bm_wake_'
 
