@@ -3402,7 +3402,7 @@ it('C10 only the first call in a multi-call turn says it was held', async () => 
     const result = await call(name, { ...t.args, body: name }, `later-${name}`)
     expect(result.isError).toBe(true)
     const text = name === 'memory_list' ? JSON.parse(result.text).refused.message : result.text
-    expect(text).toBe('Not sent: one call already waits for your owner in this turn, and this one was not held. End your turn now; ask for it again after your owner answers.')
+    expect(text).toBe('Not sent: one call already waits for your owner in this turn, and this one was not held. End your turn now. After your owner answers, ask again only if it is still needed and is not the same request.')
   }
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
   expect(t.calls).toEqual([])
