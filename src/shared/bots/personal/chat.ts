@@ -358,6 +358,13 @@ export interface BotRunItem {
   jobId?: string
   /** Paused (from Automations, or a card's Pause). */
   paused?: true
+  /** Its automation's name ("Morning PR digest"). Absent from older services. */
+  name?: string
+  /** What each run does, in the automation's own words, cut to a line or two. Absent from older services. */
+  does?: string
+  /** When it last ran and how that run ended. Absent before its first run. */
+  lastAt?: string
+  lastOutcome?: 'ok' | 'failed' | 'stopped'
 }
 
 /** One of a bot's waiting reminders (one-off, not yet said), in About → Runs. */
@@ -386,6 +393,8 @@ export interface BotDetail {
   reminders?: BotReminderItem[]
   /** What its chat turns of the last week cost; absent before one reported usage, and from older services. */
   usage?: BotTurnUsageSummary
+  /** Its chat's context as the composer measures a thread's: how full, what fills it, and its prompt cache. Absent until measured. */
+  context?: import('../../types').ContextUsageSnapshot
 }
 
 /**

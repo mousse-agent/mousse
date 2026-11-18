@@ -338,6 +338,8 @@ export const Shield = /* @__PURE__ */ createIcon('Shield', Shield01Icon)
 export const ShieldCheck = /* @__PURE__ */ createIcon('ShieldCheck', ShieldCheckIcon)
 export const ShieldOff = /* @__PURE__ */ createIcon('ShieldOff', ShieldOffIcon)
 export const Brain = /* @__PURE__ */ createIcon('Brain', Brain01Icon)
+/** Hugeicons Brain 03, the chat's thinking glyph held still: a bot's memory. */
+export const BrainMemory = /* @__PURE__ */ createIcon('BrainMemory', Brain03Icon)
 export const SidebarRight = /* @__PURE__ */ createIcon('SidebarRight', SidebarRight01Icon)
 export const Sparkles = /* @__PURE__ */ createIcon('Sparkles', SparklesIcon)
 export const Smile = /* @__PURE__ */ createIcon('Smile', SmileIcon)
