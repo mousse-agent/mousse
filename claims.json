@@ -2,19 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "bot-about-panel-redesign",
-      "session": "Animatrix-745eae",
-      "machine": "Animatrix",
-      "branch": "bot-about-panel-redesign",
-      "paths": [
-        "src/renderer/components/bots/BotAboutPanel.tsx",
-        "src/mms/bots/chat/projection.ts",
-        "src/shared/bots/personal/chat.ts"
-      ],
-      "claimedAt": "2026-11-18T17:32:13.176Z",
-      "expiresAt": "2026-11-18T19:32:13.176Z"
-    },
-    {
       "task": "bot-done-list-drops-archived-and-old",
       "session": "Animatrix-5ccb01",
       "machine": "Animatrix",
