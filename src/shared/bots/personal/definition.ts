@@ -350,10 +350,11 @@ export interface BotWorkModelName {
 
 /**
  * The longest one turn of a bot's work runs before it goes on in a fresh turn of the same thread, as at its runtime's
- * step cap (`BotEngine.continueAfterTurnCap`). Not a limit on the work: it guards a runtime that hangs, and keeps each
- * turn's timer, supervisor and runtime wall time finite.
+ * step cap (`BotEngine.continueAfterTurnCap`, not counted with those). Not a limit on the work: it keeps each turn's
+ * timer, supervisor and runtime wall time finite, and stays under the run engine's cut of one turn
+ * (`EFFECT_KIND_SPEC['turn.start'].timeoutMs`, six hours), so a long turn goes on instead of failing there.
  */
-export const BOT_TURN_WINDOW_MS = 24 * 60 * 60_000
+export const BOT_TURN_WINDOW_MS = 5 * 60 * 60_000
 /** Most context threads one bot may have. */
 export const MAX_BOT_CONTEXT_THREADS = 8
 /** Most activations one bot keeps queued; the oldest is dropped beyond this. */

@@ -452,12 +452,11 @@ export const OLD_MODEL_NAME_IGNORED = 'This automation had a model of its own sa
  * stopped goes on, schedules run), and pauses again for as long if the limit still holds.
  */
 export const USAGE_RECHECK_MS = 30 * 60_000
-/** Work that waited longer than this for more room is not carried on by an Allow: it ends, and can be asked again. */
-export const MAX_ROOM_WAIT_MS = 24 * 60 * 60_000
 /**
  * Continuations after a dispatch reached its runtime's cap on model turns, in total per activation (not in a row: a
  * note or an Allow in between does not start the count again). Each one worked up to the cap (300 turns on Claude
- * Code, or a day's window), so this only bounds a runtime that keeps reaching the cap.
+ * Code), so this only bounds a runtime that keeps reaching the cap. A turn that reached the end of its window
+ * (`endWindow`) is not counted: it was working, not stuck.
  */
 export const MAX_TURN_CAP_CONTINUATIONS = 10
 /** How often deleted bots are swept for the 30-day purge. */
@@ -4184,12 +4183,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const row of this.store.activationsIn(botId, ['blocked'])) {
       if (!workWaits(row) || row.endReason !== 'budget_exhausted') continue
       if ((waiting.has(row.id) ? waiting.get(row.id) : this.waitingOn(row)) !== key) continue
-      // Work that waited more than a day is not picked up again by an Allow: what it had is old, and it can be asked again.
-      if (allowed && this.now() - this.waitingSince(row) > MAX_ROOM_WAIT_MS) {
-        const ended = this.endWaitingInTx(row, 'waited_too_long', waitedTooLong(this.workTitle(row)))
-        if (ended) settled.ended.push(ended)
-        continue
-      }
       if (allowed && this.hasRoom(row)) {
         if (this.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'room_allowed' })) settled.continued.push(row.id)
         continue
@@ -4250,13 +4243,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** After the owner forgot something: work whose question went with it ends now, with its line (`settleStrandedWork`). */
   afterForget(): void {
     this.settleStrandedWork()
-  }
-
-  /** When work started to wait: its last turn's end (or start), else when it was asked for (its first turn never went out). */
-  private waitingSince(row: BotActivationRow): number {
-    const main = this.store.lastMainDispatch(row.id)
-    if (main?.endedAt) return Date.parse(main.endedAt)
-    return main?.startedAt ?? Date.parse(row.createdAt)
   }
 
   /** Whether waiting work has room to go on under what it may use now: no limit used up, spend limits included. */
@@ -5590,7 +5576,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
           ? { usageRetry: true }
-          : { ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}), ...(input.turnCap ? { turnCap: true } : {}), ...(input.unanswered ? { unanswered: true } : {}) }
+          : { ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}), ...(input.turnCap && !input.windowEnd ? { turnCap: true } : {}), ...(input.unanswered ? { unanswered: true } : {}) }
       }
       this.store.insertDispatch(dispatch)
       if (!readAtStart && !input.usageRetry) for (const answer of answers) this.store.markApplied(answer.id)
@@ -10313,11 +10299,6 @@ export function chatSteerText(messages: readonly string[]): string {
  */
 export function noteSteerText(notes: readonly string[]): string {
   return `${mousseMessage({ from: 'owner', reply: 'required' }, notes.map((note) => `- ${note}`).join('\n'))}\n\nThe owner added this to your job while you work. Take it into account from here on. If it changes what you found so far, update it. When you report, lead with what changed because of it, in plain words.`
-}
-
-/** The one line work that waited too long to go on ends with. */
-function waitedTooLong(title: string): string {
-  return `"${title}" waited too long, so I stopped it. Ask me again if you still want it.`
 }
 
 /** What work that ran out of room says with its ask: that it stopped short and goes on when allowed, then what it had. */

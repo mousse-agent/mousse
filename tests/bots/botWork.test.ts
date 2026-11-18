@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
+import { EFFECT_KIND_SPEC } from '../../src/mms/run/types'
 import { BOT_FAILURE_PAUSE_STREAK, BOT_JOURNAL_ERROR, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomText, sayOnce, stoppedShortText } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
@@ -436,6 +437,8 @@ describe('long work', () => {
     })
 
     it('a turn that reaches the end of its window goes on in a fresh turn, and nobody is asked', async () => {
+      // The window ends before the run engine cuts a turn (six hours), so a long turn goes on instead of failing there.
+      expect(BOT_TURN_WINDOW_MS).toBeLessThan(EFFECT_KIND_SPEC['turn.start'].timeoutMs)
       const { workId, message } = await asked()
       const first = await start(f, workId)
       first.prepared.authority.check(call)
@@ -444,7 +447,9 @@ describe('long work', () => {
       await finish(f, first.payload, 'interrupted', { text: 'Two picks so far.', outcome: { interruptedBy: 'bot_wall' } })
       expect(f.store.openAsks(botId)).toEqual([])
       const next = f.store.dispatch(workId, 2)!
-      expect(next).toMatchObject({ kind: 'continue', threadId: first.payload.threadId, send: { turnCap: true } })
+      expect(next).toMatchObject({ kind: 'continue', threadId: first.payload.threadId })
+      // It was working, not stuck: it does not count toward the cap on step-cap continuations.
+      expect(next.send.turnCap).toBeUndefined()
       expect(next.prompt.text).toBe('[Mousse] Your turn ran as long as one turn may; what you did so far is kept. Continue.')
       await runDispatch(f, workId, 2, { text: 'The Roborock Q7 is the pick.' })
       expect(f.store.activation(workId)).toMatchObject({ status: 'done' })
@@ -927,17 +932,14 @@ describe('long work', () => {
       expect(f.store.activation(spend.workId)).toMatchObject({ status: 'running' })
     })
 
-    it('work that waited more than a day is not carried on by an Allow: it ends with one line and can be asked again', async () => {
-      const { workId, message } = await outOfRoom()
+    it('an Allow carries on work however long it waited for room', async () => {
+      const { workId } = await outOfRoom()
       const askId = chatOf(f, botId).at(-1)!.ask!.askId
-      f.clock.now += 25 * 60 * MIN
+      f.clock.now += 10 * 24 * 60 * MIN
       await f.bots.service.answer(botId, askId, 'allow')
       await flush()
-      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'waited_too_long' })
-      expect(f.store.dispatches(workId)).toHaveLength(1)
-      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: '"Vacuums" waited too long, so I stopped it. Ask me again if you still want it.', replyTo: { id: message.id } })
-      // The wider limit stays for later work.
-      expect(f.store.activeGrant(botId)!.manifest.budget.maxTurns).toBe(6)
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      expect(f.store.dispatches(workId)).toHaveLength(2)
     })
 
     it('work that waits keeps waiting, however long, until something wakes, answers or stops it', async () => {
